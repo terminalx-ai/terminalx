@@ -200,7 +200,7 @@ pub(crate) fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut Ses
             let verified_checkout = recovered_checkout.as_deref().map(|root| (root, Path::new(&entry.cwd)));
             match crate::checkpoints::turn_end(&src.id, &tab.id, end_seq, verified_checkout) {
                 Err(error) => Some(format!("The new worktree has the branch's latest files: {error:#}")),
-                Ok((tree, index)) => allocation.checkpoint(&tree, &index, || crate::checkpoints::check_out_turn(&entry.cwd, &tree, &index))
+                Ok((end, index)) => allocation.checkpoint(&end.tree, &index, || crate::checkpoints::check_out_turn(&entry.cwd, &end, &index))
                     .err().map(|error| format!("The turn's files could not be fully restored in the new worktree: {error:#}")),
             }
         } else {

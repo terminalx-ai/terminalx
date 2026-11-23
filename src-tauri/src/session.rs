@@ -3305,6 +3305,7 @@ impl SessionManager {
 
     /// Runs `f` while another thread holds the tab's lock, as a tab mid-launch or wedged would.
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn while_tab_locked_for_test<T>(&self, session_id: &str, tab_id: &str, f: impl FnOnce() -> T) -> T {
         let runtime = self.runtime(session_id, tab_id).unwrap();
         let (held, release) = (std::sync::mpsc::channel::<()>(), std::sync::mpsc::channel::<()>());
@@ -6089,7 +6090,7 @@ impl SessionManager {
         let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
         let agent = crate::agent_keys::Agent::of(&tab.harness).ok_or_else(|| anyhow!("This agent has no accounts to switch between."))?;
         let accounts = crate::agent_keys::store()?.entry(agent)?;
-        anyhow::ensure!(crate::agent_accounts::exists(&accounts, &account), "That account is not one of {}'s on this Mac.", agent.label());
+        anyhow::ensure!(crate::agent_accounts::exists(&accounts, &account), "{}", crate::platform_profile::localize(&format!("That account is not one of {}'s on this Mac.", agent.label())));
         if let Some(rt_arc) = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned() {
             let rt = rt_arc.lock().unwrap();
             if let Some(refusal) = Self::by_hand_refusal(&rt, "its account") { bail!(refusal); }
@@ -6672,6 +6673,13 @@ impl SessionManager {
         rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(claude::background::Watch::new(tail.clone()))));
         env.retain(|(key, _)| !matches!(key.as_str(), "TERMINALX_PORT" | "TERMINALX_PORTS"));
         env.extend(index::workspace_ports::environment(&entry.cwd)?);
+        // No login shell runs first on Windows to `env -u` these: the pane leaves them out itself.
+        #[cfg(windows)]
+        for name in &unset {
+            if !env.iter().any(|(key, _)| key.eq_ignore_ascii_case(name)) {
+                env.push((name.clone(), pty::REMOVE_FROM_ENV.to_string()));
+            }
+        }
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: Some(&spawned), env: &env };
         #[cfg(test)]
         let refused = crate::bots::items::FAIL_LAUNCHES_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst);
@@ -9602,7 +9610,7 @@ mod watch_tests;
 mod mobile_admission_tests;
 
 // Their agents are stand-in `#!/bin/sh` CLIs.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "session_mobile_controls_tests.rs"]
 mod mobile_controls_tests;
 
@@ -9614,19 +9622,19 @@ mod follow_tests;
 #[path = "session_unsent_tests.rs"]
 mod unsent_tests;
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "session_idle_tests.rs"]
 mod idle_tests;
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "session_send_tests.rs"]
 mod send_tests;
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "session_agent_key_tests.rs"]
 mod agent_key_tests;
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "account_launch_tests.rs"]
 mod account_launch_tests;
 

@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { isMac } from "@/lib/shortcuts";
+import { isMac, joinKeycaps } from "@/lib/shortcuts";
 import { useShortcut, useShortcutKeycaps } from "@/lib/hotkeys";
 import { BRANCH_ACTIONS, BRANCH_STATES, branchError, branchStep, useBranchStep, type BranchAction, type BranchRequest } from "@/lib/branchStep";
 import type { SessionEntry } from "@/types/session";
@@ -169,7 +169,7 @@ export function BranchGitButton({ session, tabId }: { session: SessionEntry; tab
           <DropdownMenuContent align="end">
             {(Object.entries(BRANCH_ACTIONS) as [BranchAction, typeof BRANCH_ACTIONS[BranchAction]][]).map(([action, definition]) => (
               <DropdownMenuItem key={action} disabled={!enabled(action) || !!pending} onSelect={() => void prepare(action)}>
-                {action === "resolveConflicts" && snapshot?.state === "diverged" ? BRANCH_STATES.diverged.label : definition.label}{definition.shortcut && <span className="ml-auto pl-4 text-xs text-muted-foreground">{keycaps(definition.shortcut).join("")}</span>}
+                {action === "resolveConflicts" && snapshot?.state === "diverged" ? BRANCH_STATES.diverged.label : definition.label}{definition.shortcut && <span className="ml-auto pl-4 text-xs text-muted-foreground">{joinKeycaps(keycaps(definition.shortcut))}</span>}
               </DropdownMenuItem>
             ))}
             <DropdownMenuSeparator />

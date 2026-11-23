@@ -1,4 +1,5 @@
 import { PresenceFaces, OwnerProfile, useTeamOverview } from "./TeamOverview";
+import { ThisComputer } from "@/lib/platform";
 import { useCloudCatalog } from "@/lib/cloudCatalog";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown, Cloud, Laptop, Monitor, X } from "@/icons";
@@ -228,7 +229,7 @@ export function AgentDashboard() {
       status: statusText(sessionStatus(session.rowStatus ?? session)),
       name: session.title,
       project: projectName(session.projectPath),
-      ...(showWhere ? { where: isMachineDashboardSession(session) ? session.machineName : at.kind === "cloud" ? "Cloud" : "This Mac", place: at } : {}),
+      ...(showWhere ? { where: isMachineDashboardSession(session) ? session.machineName : at.kind === "cloud" ? "Cloud" : ThisComputer, place: at } : {}),
       branch: session.worktreeRemoved ? session.removedWorkspace?.branch ?? null : session.branch ?? null,
       agent: [...new Set(session.tabs.map((tab) => harnessNames.get(tab.harness) ?? tab.harness))].join(", "),
       agentId: session.tabs[0]?.harness ?? null,
@@ -316,7 +317,7 @@ export function AgentDashboard() {
           <DropdownMenuContent align="end" className="w-56">
             <PlaceItem label="All machines" icon={<Monitor />} count={placeCounts.get("all") ?? 0} selected={place === "all"} onSelect={() => setPlace("all")} />
             <DropdownMenuSeparator />
-            <PlaceItem label="This Mac" icon={<Laptop />} count={placeCounts.get("local") ?? 0} selected={place === "local"} onSelect={() => setPlace("local")} />
+            <PlaceItem label={ThisComputer} icon={<Laptop />} count={placeCounts.get("local") ?? 0} selected={place === "local"} onSelect={() => setPlace("local")} />
             {pairedMachines.map((machine) => {
               const key = machineSectionKey(machine.machineId);
               return (
@@ -473,7 +474,7 @@ function cloudLastActive(at: number | null | undefined): string | null {
 /** The All machines button's label: the choice, by name. */
 function placeLabel(place: Place, machines: ReadonlyMap<string, { name: string }>): string {
   if (place === "all") return "All machines";
-  if (place === "local") return "This Mac";
+  if (place === "local") return ThisComputer;
   if (place === "cloud") return "Cloud";
   return machines.get(place.slice("machine:".length))?.name ?? "All machines";
 }

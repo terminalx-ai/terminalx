@@ -521,6 +521,7 @@ async fn a_handoff_opens_one_tab_with_its_first_prompt_and_reads_the_context_it_
     assert!(events.iter().any(|event| matches!(&event.payload, crate::events::Payload::Status { text } if text == message)));
 }
 
+#[cfg(unix)]
 fn code(result: Result<Value, (String, String)>) -> String {
     result.expect_err("refused").0
 }

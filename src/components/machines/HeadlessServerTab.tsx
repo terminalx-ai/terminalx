@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { ThisComputer } from "@/lib/platform";
 import { BookOpen, Check, CheckCircle2, Copy, LoaderCircle, Terminal } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { minutesSeconds } from "@/components/pairing/pairingText";
@@ -107,7 +108,7 @@ function OnTheServer({ pairing, thisMac }: { pairing: MachinePairing; thisMac: s
         <div className="flex gap-[1ch]">
           <span className="text-add" aria-hidden>✓</span>
           <span className="min-w-0 break-words">
-            {thisMac ?? "This Mac"} asks to operate this server. Fingerprint{" "}
+            {thisMac ?? ThisComputer} asks to operate this server. Fingerprint{" "}
             <span className="whitespace-nowrap">{inspected ? <span className="text-foreground">{inspected.fingerprint}</span> : <Placeholder>{"<fingerprint>"}</Placeholder>}.</span>
           </span>
         </div>
@@ -133,7 +134,7 @@ export function HeadlessServerTab({ pairing, onClose, onDone }: { pairing: Machi
     <>
       <div className="grid grid-cols-[minmax(0,1fr)_330px] gap-5 px-5 pb-5 pt-4 max-[799px]:grid-cols-1" data-testid="headless-server">
         <div className="grid min-w-0 content-start gap-4">
-          <p className={soft}>A server runs TerminalX without a window. This Mac connects to it directly, on this network or over Tailscale, so its TCP port 6768 must be reachable from here.</p>
+          <p className={soft}>A server runs TerminalX without a window. {ThisComputer} connects to it directly, on this network or over Tailscale, so its TCP port 6768 must be reachable from here.</p>
           <ol className="grid gap-4">
             <StepRow n={1} title="Install TerminalX on the server">
               <CommandBox command={INSTALL_COMMAND} label="install command" />
@@ -207,7 +208,7 @@ function CodeStatus({ pairing, name, failure }: { pairing: MachinePairing; name:
       {inspected && step.kind !== "paired" && (
         <p className={soft} aria-live="polite">
           From <span className="text-foreground">{inspected.machine.name}</span>. {expiry}
-          {inspected.alreadyPaired && ` This Mac is already paired with ${name}. Pairing again replaces its credential.`}
+          {inspected.alreadyPaired && ` ${ThisComputer} is already paired with ${name}. Pairing again replaces its credential.`}
         </p>
       )}
       {step.kind === "ready" && remaining > 0 && <p className={soft}>Continue, then compare the fingerprint on the server and answer y there.</p>}

@@ -35,6 +35,7 @@ import { LayeredConfiguration } from "./LayeredConfiguration";
 import { openStartupDiagnostics } from "@/lib/startupDiagnostics";
 import { QuickChatSettings } from "./FloatingWindowSettings";
 import { CopyAgentConfigsRow } from "./AgentConfigsDialog";
+import { SnippetManager } from "./SnippetManager";
 
 export function GeneralTab() {
   const prefs = usePrefs();
@@ -219,6 +220,10 @@ export function GeneralTab() {
       <RegisteredSetting setting="general.autocorrect"
         control={<Switch aria-label="Autocorrect" checked={prefs.autocorrect} onCheckedChange={(v) => setPrefs({ autocorrect: v })} />}
       />
+      <RegisteredSetting setting="general.aiEditor"
+        control={<Switch aria-label="AI Editor" checked={prefs.aiEditor} onCheckedChange={(v) => setPrefs({ aiEditor: v })} />}
+      />
+      <SnippetManager />
       <RegisteredSetting setting="general.useWorktree"
         control={<Switch checked={prefs.useWorktree} onCheckedChange={(v) => setPrefs({ useWorktree: v })} />}
       />

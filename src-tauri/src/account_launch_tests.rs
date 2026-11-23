@@ -11,8 +11,8 @@
 //! given, as in `session_agent_key_tests`. One rig per test, each with its
 //! own session id: an agent from one test exiting late must not write into
 //! the next one's store.
-#[cfg(unix)]
 use crate::paths::Canonical;
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
 use std::time::Duration;
 
@@ -41,8 +41,10 @@ impl Drop for Rig {
 }
 
 fn executable(path: &Path, text: &str) {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     std::fs::write(path, text).unwrap();
+    #[cfg(unix)]
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
@@ -62,7 +64,9 @@ impl Rig {
                 (Some(claude::pty::claude_program_for_tests(program.clone())), None)
             }
             _ => {
-                executable(&program, &format!(r#"#!/bin/sh
+                #[cfg(unix)]
+                let launcher = {
+                    executable(&program, &format!(r#"#!/bin/sh
 case "$1" in
   --help) printf '  --no-daemon  Run without the daemon\n'; exit 0;;
   app-server) exit 0;;
@@ -71,7 +75,29 @@ esac
 stty raw -echo
 exec cat
 "#));
-                (None, Some(codex::pty::codex_program_for_tests(program.clone())))
+                    program.clone()
+                };
+                // Codex is asked things directly as well as launched in a pane: on
+                // Windows the stand-in has the shape npm installs, a `.cmd` starting node.
+                #[cfg(windows)]
+                let launcher = {
+                    std::fs::write(program.with_extension("js"), r#"
+const fs = require("fs");
+const args = process.argv.slice(2);
+if (args[0] === "--help") { console.log("  --no-daemon  Run without the daemon"); process.exit(0); }
+if (args[0] === "app-server") process.exit(0);
+const names = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "CLAUDE_SECURESTORAGE_CONFIG_DIR"];
+const record = process.argv[1].replace(/\.js$/, ".env");
+fs.writeFileSync(record + ".tmp", [`ARGS=${args.join(" ")}`, ...names.map((name) => `${name}=${process.env[name] ?? ""}`)].join("\n") + "\n");
+fs.renameSync(record + ".tmp", record);
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+process.stdin.on("data", (data) => process.stdout.write(data));
+"#).unwrap();
+                    let launcher = program.with_extension("cmd");
+                    std::fs::write(&launcher, "@ECHO off\r\nSET dp0=%~dp0\r\nnode \"%dp0%\\codex.js\" %*\r\n").unwrap();
+                    launcher
+                };
+                (None, Some(codex::pty::codex_program_for_tests(launcher)))
             }
         };
         let manager = SessionManager::new(
@@ -288,7 +314,15 @@ fn terminal_tabs_of_a_session_carry_its_accounts_variables() {
     let codex_home = codex::home::account_paths(&store::root().unwrap(), &codex).1;
 
     let out = rig.dir.path().join("terminal.env");
-    let command = format!("/bin/sh -c 'printf \"%s\\n%s\\n\" \"$CLAUDE_CONFIG_DIR\" \"$CODEX_HOME\" > {}.tmp && mv {0}.tmp {0}'", out.display());
+    // A terminal runs the reader's shell: on Windows PowerShell, or the Git Bash it was started from.
+    let shell = crate::pty::shell().to_lowercase();
+    let command = if cfg!(windows) && (shell.contains("powershell") || shell.contains("pwsh")) {
+        format!("Set-Content -LiteralPath '{0}.tmp' -Value @($env:CLAUDE_CONFIG_DIR, $env:CODEX_HOME); Move-Item -LiteralPath '{0}.tmp' -Destination '{0}'", out.display())
+    } else if cfg!(windows) {
+        format!("printf '%s\\n%s\\n' \"$CLAUDE_CONFIG_DIR\" \"$CODEX_HOME\" > '{0}.tmp' && mv '{0}.tmp' '{0}'", out.display())
+    } else {
+        format!("/bin/sh -c 'printf \"%s\\n%s\\n\" \"$CLAUDE_CONFIG_DIR\" \"$CODEX_HOME\" > {}.tmp && mv {0}.tmp {0}'", out.display())
+    };
     let sink = rig.manager.sink();
     crate::local_runtime::calls::execute(&rig.manager, sink, "runtime.pty.spawn", json!({
         "id": format!("{}:shell-1", rig.session), "cwd": rig.checkout(), "cols": 80, "rows": 24, "command": command,
@@ -299,6 +333,7 @@ fn terminal_tabs_of_a_session_carry_its_accounts_variables() {
     assert_eq!(lines, [claude_dir.to_str().unwrap(), codex_home.to_str().unwrap()], "a hand-typed claude or codex signs in as the session's tabs do");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_tab_that_asks_for_no_account_starts_on_this_macs_login_as_before() {
     let rig = Rig::new("account-none", "claude");
@@ -325,6 +360,8 @@ fn a_tab_that_asks_for_no_account_starts_on_this_macs_login_as_before() {
     rig.stop();
 }
 
+// The control socket is a Unix socket here; Windows has its own pipe, tested with it.
+#[cfg(unix)]
 /// An owner on `socket` that answers each request with `answer`.
 fn owner(socket: &Path, answer: impl Fn(&crate::control::ControlRequest) -> crate::control::ControlResponse + Send + Sync + 'static) -> Arc<Mutex<Vec<Value>>> {
     let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
@@ -345,10 +382,12 @@ fn owner(socket: &Path, answer: impl Fn(&crate::control::ControlRequest) -> crat
 }
 
 /// A desktop's session adapter for the owner at `dir/unused.sock`.
+#[cfg(unix)]
 fn desktop(dir: &Path) -> crate::local_runtime::sessions::Sessions {
     crate::local_runtime::sessions::Sessions::new(crate::local_runtime::client::Client::for_stream(dir.join("events.sock"), "token", "epoch"))
 }
 
+#[cfg(unix)]
 fn new_session(checkout: &Path) -> crate::session_ops::NewSession {
     crate::session_ops::NewSession {
         parent: None, section_id: None, project_path: checkout.to_string_lossy().into_owned(), title: None, use_worktree: false,
@@ -358,6 +397,7 @@ fn new_session(checkout: &Path) -> crate::session_ops::NewSession {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn an_older_runtime_starts_the_tab_on_this_macs_login_and_the_desktop_says_so() {
     let _home = store::temp_home();
@@ -387,7 +427,7 @@ fn an_older_runtime_starts_the_tab_on_this_macs_login_and_the_desktop_says_so() 
     let saved = index::get(&entry.id).unwrap();
     assert!(saved.tabs[0].unknown.is_empty(), "an older runtime saves the tab as it always did, so it starts on This Mac's login");
     let error = sessions.switch_account(&entry.id, &tab.id, &account).unwrap_err();
-    assert_eq!(error.to_string(), crate::local_runtime::sessions::OLDER_RUNTIME);
+    assert_eq!(error.to_string(), crate::platform_profile::localize(crate::local_runtime::sessions::OLDER_RUNTIME));
     assert!(asked.lock().unwrap().iter().all(|request| request["params"]["req"].get("account").is_none()), "nothing it would misread is sent");
 
     // This runtime knows accounts: the request carries it to the tab.
@@ -470,7 +510,7 @@ fn the_cli_names_an_account_by_id_or_label_and_never_guesses() {
     // The default label is "email · plan"; case does not matter.
     assert_eq!(resolve("GRACE@example.com · Max").unwrap(), grace);
     assert_eq!(resolve("local").unwrap(), crate::agent_accounts::LOCAL);
-    assert_eq!(resolve("this mac's login").unwrap(), crate::agent_accounts::LOCAL);
+    assert_eq!(resolve(&crate::platform_profile::localize("this Mac's login")).unwrap(), crate::agent_accounts::LOCAL);
     let unknown = resolve("nobody").unwrap_err();
     assert!(unknown.message.contains(&ada) && unknown.message.contains(&grace), "the accounts are listed by id and label: {}", unknown.message);
     assert!(resolve("  ").is_err());

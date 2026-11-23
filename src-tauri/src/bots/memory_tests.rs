@@ -32,6 +32,7 @@ fn with_works_in(sink: &BroadcastSink, bot: &Bot, places: &[&str]) -> Bot {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_learned_note_is_logged_with_its_source_and_undo_removes_it() {
     let (_home, sink, bot) = hired();
     let mut events = sink.subscribe();
@@ -66,6 +67,7 @@ fn a_learned_note_is_logged_with_its_source_and_undo_removes_it() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn undo_holds_when_other_notes_came_after_and_refuses_when_the_line_is_gone() {
     let (_home, sink, bot) = hired();
     let first = add(sink.as_ref(), &bot, &Place::Bot, "First fact", OWNER, Source::of("app")).unwrap().remove(0);
@@ -83,6 +85,7 @@ fn undo_holds_when_other_notes_came_after_and_refuses_when_the_line_is_gone() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn forgetting_names_one_note_and_its_undo_puts_it_back_where_it_was() {
     let (_home, sink, bot) = hired();
     for note in ["Deploys are on Fridays", "Main stays green", "Merges wait for checks"] {
@@ -100,6 +103,7 @@ fn forgetting_names_one_note_and_its_undo_puts_it_back_where_it_was() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_note_is_one_line_never_a_secret_and_never_twice() {
     let (_home, sink, bot) = hired();
     for refused in ["", "   ", "two\nlines", &"x".repeat(401), "The key is sk-ant-api03-abcdefghijklmnop", "token ghp_abcdefghijklmnopqrstuvwxyz0123", "-----BEGIN OPENSSH PRIVATE KEY-----", "AKIAABCDEFGHIJKLMNOP"] {
@@ -111,6 +115,7 @@ fn a_note_is_one_line_never_a_secret_and_never_twice() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn edits_made_outside_the_app_are_found_logged_and_undone() {
     let (_home, sink, bot) = hired();
     // Nothing changed since hiring: the first look finds nothing.
@@ -160,6 +165,7 @@ fn edits_made_outside_the_app_are_found_logged_and_undone() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_budget_moves_the_oldest_notes_to_the_archive() {
     let (_home, sink, bot) = hired();
     view(sink.as_ref(), &bot).unwrap();
@@ -196,6 +202,7 @@ fn the_budget_moves_the_oldest_notes_to_the_archive() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_budget_counts_the_bots_notes_with_its_places() {
     let (_home, sink, bot) = hired();
     let bot = with_works_in(sink.as_ref(), &bot, &["Acme", PERSONAL]);
@@ -233,6 +240,7 @@ fn the_budget_counts_the_bots_notes_with_its_places() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bot_with_no_organisation_keeps_its_own_and_personal_notes() {
     let (_home, sink, bot) = hired();
     assert_eq!(working_place(&bot), Place::Personal);
@@ -241,6 +249,7 @@ fn a_bot_with_no_organisation_keeps_its_own_and_personal_notes() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_conversation_reads_the_bots_notes_and_its_places_within_limits() {
     let (_home, sink, bot) = hired();
     add(sink.as_ref(), &bot, &Place::Bot, "Own note", OWNER, Source::of("app")).unwrap();
@@ -284,6 +293,7 @@ fn files_are_read_with_limits() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_role_keeps_its_versions_and_each_can_be_put_back() {
     let (_home, sink, bot) = hired();
     let template = super::super::role_text(&super::super::templates::find("cto").unwrap());
@@ -322,6 +332,7 @@ fn the_role_keeps_its_versions_and_each_can_be_put_back() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_log_line_this_build_cannot_read_is_kept_and_counted() {
     let (_home, sink, bot) = hired();
     let learned = add(sink.as_ref(), &bot, &Place::Bot, "Kept", OWNER, Source::of("app")).unwrap().remove(0);
@@ -354,6 +365,7 @@ fn an_edit_never_leaves_the_home() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_app_calls_answer_for_the_owner_and_refuse_while_off() {
     let (_home, sink, bot) = hired();
     let ask = |operation: &str, params: Value| super::super::call(sink.as_ref(), operation, &params);
@@ -373,6 +385,25 @@ fn the_app_calls_answer_for_the_owner_and_refuse_while_off() {
     for operation in ["memoryView", "memoryLook", "memoryAdd", "memoryForget", "memoryUndo", "memoryText", "roleRestore", "roleDiff"] {
         assert_eq!(ask(operation, json!({"id": bot.id, "text": "x", "line": "x", "change": "x", "hash": "x"})).unwrap_err().to_string(), super::super::OFF_MESSAGE, "{operation}");
     }
+}
+
+/// A memory file replaced by a link is refused, never read through. Creating
+/// a file link on Windows needs Developer Mode or the symlink privilege.
+#[cfg(windows)]
+#[test]
+fn a_file_link_is_not_read_through_on_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("outside.md");
+    std::fs::write(&target, "Not the bot's").unwrap();
+    let link = dir.path().join("MEMORY.md");
+    if std::os::windows::fs::symlink_file(&target, &link).is_err() {
+        return;
+    }
+    let refused = crate::bots::changes::open_no_follow(&link).unwrap_err();
+    assert!(crate::bots::changes::is_link_refusal(&refused), "{refused}");
+    assert!(crate::bots::changes::read_file(&link).is_err());
+    assert!(!matches!(crate::bots::chat::read_capped_tail(&link, 1024), crate::bots::chat::Read::Missing));
+    assert_eq!(crate::bots::changes::read_file(&target).unwrap().as_deref(), Some("Not the bot's"));
 }
 
 /// A bot with full access can replace a file or folder of its home with a
@@ -410,6 +441,7 @@ fn a_link_in_the_home_takes_no_read_or_write_out_of_it() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn an_edit_made_before_the_first_look_is_recorded_not_taken_as_the_start() {
     let (_home, sink, bot) = hired();
     // Hiring started the history from the files it wrote.
@@ -431,6 +463,7 @@ fn an_edit_made_before_the_first_look_is_recorded_not_taken_as_the_start() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_role_has_one_limit_and_the_editor_saves_only_over_what_it_started_from() {
     let (_home, sink, bot) = hired();
     // Writing past the limit a conversation reads is refused, with a message.
@@ -473,6 +506,7 @@ fn a_role_has_one_limit_and_the_editor_saves_only_over_what_it_started_from() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_view_leaves_texts_out_and_fetches_them_by_hash() {
     let (_home, sink, bot) = hired();
     super::super::role_write(sink.as_ref(), &bot.id, "A role with words in it.\n", None).unwrap();
@@ -491,6 +525,7 @@ fn the_view_leaves_texts_out_and_fetches_them_by_hash() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_log_is_rotated_by_size_keeping_the_newest_and_its_texts() {
     let (_home, sink, bot) = hired();
     let first = add(sink.as_ref(), &bot, &Place::Bot, "The first note", OWNER, Source::of("app")).unwrap().remove(0);
@@ -520,6 +555,7 @@ fn the_log_is_rotated_by_size_keeping_the_newest_and_its_texts() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_state_already_logged_is_never_logged_again_and_a_quiet_look_writes_nothing() {
     let (_home, sink, bot) = hired();
     let known = crate::store::root().unwrap().join("bot-changes").join(&bot.id).join(changes::KNOWN_FILE);
@@ -538,6 +574,7 @@ fn a_state_already_logged_is_never_logged_again_and_a_quiet_look_writes_nothing(
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn opening_the_bots_page_looks_at_every_bot() {
     let (_home, sink, bot) = hired();
     let other = super::super::create(sink.as_ref(), "watcher", "Argus").unwrap();
@@ -550,6 +587,7 @@ fn opening_the_bots_page_looks_at_every_bot() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn forgetting_names_one_of_two_equal_notes_by_its_line() {
     let (_home, sink, bot) = hired();
     let memory = home_of(&bot).join("MEMORY.md");
@@ -562,6 +600,7 @@ fn forgetting_names_one_of_two_equal_notes_by_its_line() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn an_undo_puts_a_line_back_under_its_old_neighbour_or_at_the_end() {
     let (_home, sink, bot) = hired();
     for note in ["Alpha", "Bravo", "Charlie"] {
@@ -584,6 +623,7 @@ fn an_undo_puts_a_line_back_under_its_old_neighbour_or_at_the_end() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn secrets_are_refused_flagged_and_taken_out_of_the_history_when_forgotten() {
     let (_home, sink, bot) = hired();
     for refused in ["sk_live_abcdefghijklmnop1234", "glpat-abcdefghijklmnopqrstu", "npm_abcdefghijklmnopqrstuvwxyz0123456789", "hf_abcdefghijklmnopqrstuvwxyzABCDEF", "the password=hunter2hunter2"] {
@@ -617,6 +657,7 @@ fn secrets_are_refused_flagged_and_taken_out_of_the_history_when_forgotten() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_conversation_reads_the_newest_lines_and_undated_notes_are_archived_first() {
     let (_home, sink, bot) = hired();
     let memory = home_of(&bot).join("MEMORY.md");
@@ -637,6 +678,7 @@ fn a_conversation_reads_the_newest_lines_and_undated_notes_are_archived_first() 
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_full_archive_is_rolled_to_a_dated_file() {
     let (_home, sink, bot) = hired();
     let archive = home_of(&bot).join("memory").join(ARCHIVE_FILE);
@@ -654,6 +696,7 @@ fn a_full_archive_is_rolled_to_a_dated_file() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_deleted_bot_takes_its_history_to_the_trash() {
     let (_home, sink, bot) = hired();
     add(sink.as_ref(), &bot, &Place::Bot, "Kept with it", OWNER, Source::of("app")).unwrap();
@@ -687,6 +730,7 @@ fn pad_log(bot: &Bot, size: u64) {
 /// the log stays small, nothing rotates, and the role change is listed with
 /// Undo, all through the app's own operations.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn one_large_outside_edit_keeps_the_role_change_and_the_rest_of_the_history() {
     let (_home, sink, bot) = hired();
     let note = super::super::call(sink.as_ref(), "memoryAdd", &json!({"id": bot.id, "place": "bot", "text": "Written before"})).unwrap();
@@ -728,6 +772,7 @@ fn one_large_outside_edit_keeps_the_role_change_and_the_rest_of_the_history() {
 /// PRO-491: an edit of lines in the middle of `MEMORY.md` whose line edits
 /// would pass the cap by a little is kept as whole texts; one line fewer is kept as lines.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_middle_edit_of_the_memory_just_over_the_cap_is_kept_as_whole_texts() {
     let (_home, sink, bot) = hired();
     let lines: Vec<String> = (0..600).map(|n| format!("- 2026-10-01 Note {n:03}: {}", "m".repeat(80))).collect();
@@ -751,6 +796,7 @@ fn a_middle_edit_of_the_memory_just_over_the_cap_is_kept_as_whole_texts() {
 /// PRO-491: the app's own move to the archive is capped too: a memory grown
 /// large outside the app moves many lines as whole texts, in one small log entry, and an undo puts them back.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_large_archive_move_is_kept_as_whole_texts() {
     let (_home, sink, bot) = hired();
     let lines: Vec<String> = (0..3000).map(|n| format!("- 2026-10-{:02} Grown outside, note {n:04}", 1 + n % 28)).collect();
@@ -772,6 +818,7 @@ fn a_large_archive_move_is_kept_as_whole_texts() {
 /// A rotation keeps what the commit just wrote and the newest role change,
 /// with the text it replaced, however old it is.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_rotation_keeps_the_newest_role_change_and_its_text() {
     let (_home, sink, bot) = hired();
     super::super::call(sink.as_ref(), "memoryAdd", &json!({"id": bot.id, "place": "bot", "text": "The first note"})).unwrap();
@@ -806,6 +853,7 @@ fn a_rotation_keeps_the_newest_role_change_and_its_text() {
 /// A memory past the read limit is read from its end: the newest notes are
 /// the ones a conversation and the page are given.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_memory_past_the_read_limit_is_read_from_its_end() {
     let (_home, sink, bot) = hired();
     let lines: Vec<String> = (0..3000).map(|n| format!("- 2026-11-01 Note number {n:04}, written long enough to pass the limit")).collect();
@@ -822,6 +870,7 @@ fn a_memory_past_the_read_limit_is_read_from_its_end() {
 
 /// Inert with Bots off: the look over every bot as the Bots page opens, too.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_look_over_every_bot_needs_the_switch() {
     let (_home, sink, bot) = hired();
     std::fs::write(home_of(&bot).join("MEMORY.md"), "- 2026-11-01 Edited while off\n").unwrap();
@@ -840,13 +889,28 @@ fn an_archive_move_writes_the_archive_first() {
     let (_home, sink, bot) = hired();
     let notes: Vec<String> = (0..BUDGET).map(|n| format!("- 2026-10-{:02} Note {n}", 1 + n % 28)).collect();
     std::fs::write(home_of(&bot).join("MEMORY.md"), format!("{}\n", notes.join("\n"))).unwrap();
-    // The memory file made read-only: the archive is written first, and the failed memory write leaves the note in both, not in neither.
-    use std::os::unix::fs::PermissionsExt;
+    // The memory file can't be replaced: the archive is written first, and the failed memory write leaves the note in both, not in neither.
     std::fs::create_dir_all(home_of(&bot).join("memory")).unwrap();
     let memory = home_of(&bot).join("MEMORY.md");
-    std::fs::set_permissions(home_of(&bot), std::fs::Permissions::from_mode(0o500)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(home_of(&bot), std::fs::Permissions::from_mode(0o500)).unwrap();
+    }
+    // Open for reading only by others: it can be read, but not replaced.
+    #[cfg(windows)]
+    let held = {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().read(true).share_mode(1).open(&memory).unwrap()
+    };
     let failed = super::super::call(sink.as_ref(), "memoryAdd", &json!({"id": bot.id, "place": "bot", "text": "One too many"}));
-    std::fs::set_permissions(home_of(&bot), std::fs::Permissions::from_mode(0o700)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(home_of(&bot), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    #[cfg(windows)]
+    drop(held);
     assert!(failed.is_err());
     assert!(file(&bot, "memory/archive.md").contains("Note 0"), "the archive was written first");
     assert!(std::fs::read_to_string(&memory).unwrap().contains("Note 0"), "and the note is still in the memory");
@@ -880,6 +944,7 @@ fn undoing_an_archive_move_writes_the_memory_first() {
 /// PRO-491: a tidy and a forget by line number count from the first line
 /// the list shows, which for a memory past the read limit is not the file's first.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn line_numbers_past_the_read_limit_count_as_the_list_shows_them() {
     let (_home, sink, bot) = hired();
     let lines: Vec<String> = (0..3000).map(|n| format!("- 2026-11-01 Note number {n:04}, written long enough to pass the limit")).collect();
@@ -903,6 +968,7 @@ fn line_numbers_past_the_read_limit_count_as_the_list_shows_them() {
 /// PRO-491: the kept texts of past changes are held within a limit: past it
 /// the log rotates, keeping the newest changes and their texts.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_kept_texts_stay_within_their_limit() {
     let (_home, sink, bot) = hired();
     let topic = home_of(&bot).join("memory/big.md");
@@ -926,6 +992,7 @@ fn the_kept_texts_stay_within_their_limit() {
 
 /// PRO-491: a topic file named with spaces or letters past ASCII is listed and followed.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn topic_files_with_spaces_and_accents_are_listed_and_followed() {
     let (_home, sink, bot) = hired();
     let name = "Release notes – été 2026.md";
@@ -945,6 +1012,7 @@ fn topic_files_with_spaces_and_accents_are_listed_and_followed() {
 
 /// PRO-491: a look (every chat launch) reads again only the files that changed, however many topic files there are.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_look_reads_only_the_files_that_changed() {
     let (_home, sink, bot) = hired();
     for n in 0..300 {
@@ -965,6 +1033,7 @@ fn a_look_reads_only_the_files_that_changed() {
 /// PRO-491: an unreadable `known.json` is set aside and rebuilt from the
 /// log: the owner's writes go on, and an edit made since is still found.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn an_unreadable_known_file_does_not_block_writes() {
     let (_home, sink, bot) = hired();
     add(sink.as_ref(), &bot, &Place::Bot, "Before it broke", OWNER, Source::of("app")).unwrap();
@@ -983,6 +1052,7 @@ fn an_unreadable_known_file_does_not_block_writes() {
 /// PRO-491: organisation ids that differ only in case keep their notes apart,
 /// and a folder an earlier build kept by an id with capitals moves to where it is kept now, with no outside edit.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn organisation_ids_that_differ_only_in_case_keep_their_notes_apart() {
     let (_home, sink, bot) = hired();
     let bot = with_works_in(sink.as_ref(), &bot, &["Kestrel", "kestrel", PERSONAL]);
@@ -1013,6 +1083,7 @@ fn organisation_ids_that_differ_only_in_case_keep_their_notes_apart() {
 /// made where its notes are kept now. The old `orgs/<Id>` folder, which no
 /// place reads, is not made again, and the note is back on the page.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn undoing_a_change_logged_before_the_folder_moved_lands_where_the_notes_are_now() {
     let (_home, sink, bot) = hired();
     let bot = with_works_in(sink.as_ref(), &bot, &["Acme", PERSONAL]);
@@ -1074,6 +1145,7 @@ fn folds_case(dir: &std::path::Path) -> bool {
 /// stay there; the place left reading an empty folder says so to the owner,
 /// until it has notes of its own.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_owner_is_told_of_notes_left_in_a_folder_two_organisations_shared() {
     let (_home, sink, bot) = hired();
     let home = home_of(&bot);
@@ -1123,6 +1195,7 @@ fn the_owner_is_told_of_notes_left_in_a_folder_two_organisations_shared() {
 /// own bytes. A memory past the read limit that is not UTF-8 decodes to more
 /// bytes than it holds, and counting in the decoded text named a line further down.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_line_number_holds_in_a_memory_that_is_not_utf8() {
     let (_home, sink, bot) = hired();
     // Every note reads the same, so only the line number says which is meant.
@@ -1167,6 +1240,7 @@ fn a_line_number_holds_in_a_memory_that_is_not_utf8() {
 /// look, so an edit of the same size made in the same tick of a filesystem
 /// with coarse times is still found; once its times are older than any tick it is read no more.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_same_size_edit_in_the_same_tick_is_found_on_a_filesystem_with_coarse_times() {
     let (_home, sink, bot) = hired();
     let topic = home_of(&bot).join("memory/rota.md");

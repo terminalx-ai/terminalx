@@ -23,7 +23,10 @@ fn bind_address(address: SocketAddr) -> io::Result<TcpListener> {
     let socket = TcpSocket::new_v4()?;
     // Keep exclusive binding. On macOS SO_REUSEADDR would let this wildcard
     // listener coexist with another program's interface-specific listener,
-    // so an advertised address could still reach the other program.
+    // so an advertised address could still reach the other program. Windows
+    // allows that coexistence by default, so there it is refused explicitly.
+    #[cfg(windows)]
+    crate::win::net::bind_exclusively(&socket)?;
     socket.bind(address)?;
     socket.listen(1024)
 }
@@ -132,13 +135,13 @@ pub(super) async fn prepare(
                 log::debug!("nearby pairing unavailable; continuing through Relay: {error}");
                 return Ok(false);
             }
-            Err(error) if error.kind() == io::ErrorKind::AddrInUse && attempt < BIND_ATTEMPTS => {
+            Err(error) if crate::listen::port_taken(&error) && attempt < BIND_ATTEMPTS => {
                 tokio::time::sleep(RETRY_DELAY).await;
             }
             Err(error) => {
                 log::warn!("LAN pairing listener failed: {error}");
                 let message = match error.kind() {
-                    io::ErrorKind::AddrInUse => format!(
+                    _ if crate::listen::port_taken(&error) => format!(
                         "Another program, or another copy of TerminalX, is using port {PORT}. Close it and retry."
                     ),
                     io::ErrorKind::PermissionDenied => format!(

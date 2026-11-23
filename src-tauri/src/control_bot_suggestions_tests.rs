@@ -82,6 +82,7 @@ fn shell(command: &str) -> Value {
 
 /// Done when (PRO-477): a look around that tries to write is refused by the hook and still ends with suggestions.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_look_around_that_tries_to_write_is_refused_and_still_ends_with_suggestions() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -139,6 +140,7 @@ fn a_look_around_that_tries_to_write_is_refused_and_still_ends_with_suggestions(
 
 /// Done when (PRO-477): Start on a suggestion creates the item and the bot begins.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn start_makes_the_item_and_sends_it_as_the_owners_message_and_dismiss_only_closes() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -183,6 +185,7 @@ fn start_makes_the_item_and_sends_it_as_the_owners_message_and_dismiss_only_clos
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn only_a_bot_suggests_from_its_own_session_while_not_paused_and_a_look_makes_a_few() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -213,6 +216,7 @@ fn only_a_bot_suggests_from_its_own_session_while_not_paused_and_a_look_makes_a_
 
 /// The tidy is one change: a run of Tidy memory tidies once, and only its own notes' places.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_tidy_run_makes_one_change_and_only_reads_and_tidies() {
     let _home = crate::store::temp_home();
     let rig = Rig::new();

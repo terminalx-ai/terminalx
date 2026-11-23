@@ -3,6 +3,7 @@ import { useTabRead } from "@/lib/useTabRead";
 import { HeldQueueTray } from "@/components/chat/HeldQueueTray";
 import { followUpRoute, heldQueueFrom, heldQueueFromFollowUps, type HeldQueueChange } from "@/lib/heldQueue";
 import { usePrefs } from "@/lib/prefs";
+import { localAiEditor } from "@/lib/aiEdit";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { agent as agentApi, errorMessage, pty, type FileInput, type ImageInput } from "@/lib/api";
 import { noteComposerTyping } from "@/lib/typingNote";
@@ -1060,6 +1061,8 @@ export function TabView({
           unavailable={local ? undefined : { move: backend.unavailable?.moveHeld, pause: backend.unavailable?.pauseHeld }} row={local ? undefined : heldRow} /></div>}
         <Composer
           beforeSend={local && session.bot?.home && typeof session.bot.id === "string" ? <AlsoSendsTo botId={session.bot.id} /> : undefined}
+          aiEditor={local && tab.harness === "claude" ? localAiEditor(session.id, tab.id) : null}
+          aiEditorUnavailable={local ? "The AI Editor works in Claude Code tabs for now" : "The AI Editor works in local tabs for now"}
           setupRunning={setup?.status === "running" || setup?.status === "pending" || setup?.status === "stopping"}
           followUps={backend.changeHeldQueue ? followUps : undefined}
           sendScope={sendScope}

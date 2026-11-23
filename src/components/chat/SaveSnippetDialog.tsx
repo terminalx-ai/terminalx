@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { usePromptTextProps } from "@/lib/autocorrect";
-import { getPrefs, setPrefs } from "@/lib/prefs";
+import { getPrefs, setPrefs, type PromptSnippet } from "@/lib/prefs";
 
 /** A snippet's name as it is typed after "/": lower case, words joined by dashes. */
 export function snippetName(text: string): string {
@@ -18,16 +18,16 @@ function suggestedName(text: string): string {
  * Keep a turn's prompt as a snippet (PRO-379): named, and offered as
  * `/name` in the composer, where choosing it puts the text in.
  */
-export function SaveSnippetDialog({ prompt, onClose }: { prompt: string; onClose: () => void }) {
-  const [name, setName] = useState(() => suggestedName(prompt));
+export function SaveSnippetDialog({ prompt, editing, onClose }: { prompt: string; /** The saved snippet being changed, which may be renamed. */ editing?: PromptSnippet; onClose: () => void }) {
+  const [name, setName] = useState(() => editing?.name ?? (prompt ? suggestedName(prompt) : ""));
   const [text, setText] = useState(prompt);
   const textProps = usePromptTextProps();
   const key = snippetName(name);
-  const taken = getPrefs().promptSnippets.find((snippet) => snippet.name === key);
+  const taken = getPrefs().promptSnippets.find((snippet) => snippet.name === key && snippet.id !== editing?.id);
   const save = () => {
     if (!key || !text.trim()) return;
-    const others = getPrefs().promptSnippets.filter((snippet) => snippet.name !== key);
-    setPrefs({ promptSnippets: [...others, { id: taken?.id ?? crypto.randomUUID(), name: key, text: text.trim() }] });
+    const others = getPrefs().promptSnippets.filter((snippet) => snippet.name !== key && snippet.id !== editing?.id);
+    setPrefs({ promptSnippets: [...others, { id: editing?.id ?? taken?.id ?? crypto.randomUUID(), name: key, text: text.trim() }] });
     onClose();
   };
   return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>

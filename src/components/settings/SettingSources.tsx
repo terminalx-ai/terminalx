@@ -2,6 +2,8 @@
 // row menu of a setting kept in the user file, Open settings.json, the Can't
 // save toast and the badges legend. The words come from src/lib/settingSources.
 import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
+import { thisComputer } from "@/lib/platform";
+import { bindingText, isMac } from "@/lib/shortcuts";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { configuration, type SettingsEditor } from "@/lib/configuration";
 import { AlertCircle, Check, ChevronDown, Code, Copy, FileJson, FileText, Folder, FolderGit2, Lock, MousePointer2, UserRound, UserRoundPen, X, Zap } from "@/icons";
@@ -141,7 +143,7 @@ export function OpenSettingsFileButton({ projectPath }: { projectPath?: string |
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-[18rem]" onKeyDown={(event) => {
         const digit = /^[1-4]$/.test(event.key) && !event.metaKey && !event.ctrlKey && !event.altKey;
-        const copyKeys = event.metaKey && event.shiftKey && event.key.toLowerCase() === "c";
+        const copyKeys = (isMac ? event.metaKey : event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "c";
         if (!digit && !copyKeys) return;
         event.preventDefault();
         event.stopPropagation();
@@ -167,7 +169,7 @@ export function OpenSettingsFileButton({ projectPath }: { projectPath?: string |
           </DropdownMenuItem>;
         })}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={copy}><Copy />Copy path<kbd aria-hidden className="ml-auto rounded border border-hairline px-1 font-sans text-[10px] text-faint">⇧⌘C</kbd></DropdownMenuItem>
+        <DropdownMenuItem onSelect={copy}><Copy />Copy path<kbd aria-hidden className="ml-auto rounded border border-hairline px-1 font-sans text-[10px] text-faint">{bindingText("mod+shift+c")}</kbd></DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   </div>;
@@ -235,7 +237,7 @@ export function CantSaveToast({ settingTitle }: {
 }
 
 const LEGEND: Record<SourceBadgeKind, ReactNode> = {
-  managed: "set by a managed policy on this Mac; read-only",
+  managed: `set by a managed policy on ${thisComputer}; read-only`,
   project: <>committed in the repository’s <span className="font-mono">.terminalx/settings.json</span></>,
   overridesProject: <>your <span className="font-mono">.terminalx/settings.local.json</span>, over the project’s value</>,
   yours: "your own settings",

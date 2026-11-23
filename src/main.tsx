@@ -8,6 +8,7 @@ import { keepShellUnscrolled } from "./lib/shellScroll";
 import { installAppContextMenu } from "./lib/contextMenu";
 import { bootSettingsFile } from "./lib/settingsFile";
 import { followReduceTransparency } from "./lib/glass";
+import { startDraftPersistence } from "./lib/draftPersistence";
 
 window.addEventListener("error", (e) => {
   void invoke("frontend_log", { level: "error", message: `${e.message} @ ${e.filename}:${e.lineno}` }).catch(() => {});
@@ -22,6 +23,7 @@ installAppContextMenu();
 // Finish the migration before controls can save a new choice, so its reply
 // cannot replace a choice made while the old localStorage copy was in flight.
 void bootDataPrivacy().then(() => bootSettingsFile()).then(() => {
+  void startDraftPersistence();
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
       <App />

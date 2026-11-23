@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ThisComputer, thisComputer } from "@/lib/platform";
 import { ChevronDown } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
@@ -29,7 +30,7 @@ export function ProjectAgentAccounts({ projectPath }: { projectPath: string }) {
   return (
     <section aria-labelledby="project-agent-accounts" className="border-b border-hairline py-4">
       <h4 id="project-agent-accounts" className="text-sm font-medium">Agent accounts</h4>
-      <p className="text-xs text-muted-foreground">New sessions of this project start on these accounts. You can still choose another when you start one. Kept on this Mac only.</p>
+      <p className="text-xs text-muted-foreground">New sessions of this project start on these accounts. You can still choose another when you start one. Kept on {thisComputer} only.</p>
       <div className="mt-3 flex flex-col gap-2">
         {rows.map((agent) => (
           <ProjectAccountRow key={agent} agent={agent} agentName={harnesses.find((harness) => harness.id === agent)?.name ?? (agent === "claude" ? "Claude Code" : "Codex")}
@@ -46,7 +47,7 @@ function ProjectAccountRow({ agent, agentName, view, projectPath }: { agent: Age
   const [error, setError] = useState<string | null>(null);
   const own = view.projectDefaults[projectPath] ?? null;
   const ownLabel = accountLabel(view, own);
-  const agentDefault = accountLabel(view, view.defaultAccount) ?? "This Mac's login";
+  const agentDefault = accountLabel(view, view.defaultAccount) ?? `${ThisComputer}'s login`;
   const never = view.autoSwitch?.setting.neverProjects.includes(projectPath) ?? false;
   const neverSwitch = async (next: boolean) => {
     setBusy(true);

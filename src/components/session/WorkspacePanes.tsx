@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { joinKeycaps } from "@/lib/shortcuts";
 import { cn } from "@/lib/cn";
 import { useShortcut } from "@/lib/hotkeys";
 import { openRowTab, peerEditor, tabNodeId, tabPanelId, useTabRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
@@ -49,7 +50,7 @@ export function TerminalViewSwitch({ session, tab, onToggle }: { session: Sessio
       className={cn("flex h-7 items-center gap-1.5 whitespace-nowrap rounded-md px-1.5 text-[12px] text-faint outline-none hover:bg-veil-strong hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60")}>
       {/* A narrow strip keeps its room for the tabs: the switch is then its keys, or an icon, alone. */}
       {on ? <><MessageSquare className="size-3.5 @[560px]/strip:hidden" aria-hidden /><span className="hidden @[560px]/strip:inline">{agent} · same process</span></>
-        : <>{keys.length ? <Kbd>{keys.join("")}</Kbd> : <SquareTerminal className="size-3.5 @[560px]/strip:hidden" aria-hidden />}<span className="hidden @[560px]/strip:inline">terminal view</span></>}
+        : <>{keys.length ? <Kbd>{joinKeycaps(keys)}</Kbd> : <SquareTerminal className="size-3.5 @[560px]/strip:hidden" aria-hidden />}<span className="hidden @[560px]/strip:inline">terminal view</span></>}
     </button>
   );
 }

@@ -39,7 +39,7 @@ describe("known cloud issue authors", () => {
       expect(workToWarnAbout(found)).toHaveLength(1);
       expect(found![0]).toMatchObject({ sessionId: null, cloudSession: { key, tabId: "a" } });
     }
-    expect(unavailableText({ ...answer, available: false }, true)).toContain("this Mac and your known cloud sessions");
+    expect(unavailableText({ ...answer, available: false }, true)).toContain("this computer and your known cloud sessions");
   });
 
   it.each(["cloud:ws:author", key])("keeps live account evidence and cloud navigation when deduplicating %s", (sessionId) => {

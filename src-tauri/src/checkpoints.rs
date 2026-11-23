@@ -1,7 +1,7 @@
 //! Durable turn checkpoints, review decisions and one-shot revert context.
 use crate::{
     events::Payload,
-    git::{self, checkpoints as trees},
+    git::{self, checkpoints::{self as trees, bytes::Snapshot}},
     store::{self, index},
 };
 use anyhow::{bail, Context, Result};
@@ -85,6 +85,21 @@ pub struct Checkpoint {
     /// files are not this chat's own when a later reset plans what to restore.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     abandoned: bool,
+    /// The exact bytes beside `start` and `end` (see [`Snapshot`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    start_kept: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    end_kept: Option<String>,
+}
+
+impl Checkpoint {
+    fn start_snapshot(&self) -> Snapshot {
+        Snapshot::new(self.start.clone(), self.start_kept.clone())
+    }
+
+    fn end_snapshot(&self) -> Option<Snapshot> {
+        self.end.clone().map(|end| Snapshot::new(end, self.end_kept.clone()))
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -92,6 +107,8 @@ struct Backup {
     tree: String,
     index: String,
     note_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kept: Option<String>,
 }
 
 pub struct Completed {
@@ -264,26 +281,38 @@ fn remember_concurrent(session: &str, tab: &str, turn: &mut Checkpoint) -> Resul
     Ok(())
 }
 
+/// A file whose line endings alone changed is in no tree diff, but it is one
+/// of the turn's changes: listed so it can be reviewed and undone.
+fn add_ending_only_changes(turn: &mut Checkpoint, end: &Snapshot) -> Result<()> {
+    let listed = file_paths(turn);
+    for path in trees::bytes::changed_paths(Path::new(&turn.cwd), &turn.start_snapshot(), end)? {
+        if !listed.contains(&path) {
+            turn.files.push(git::ChangedFile { path, old_path: None, blob_hash: None, status: git::ChangeStatus::Modified, additions: 0, deletions: 0 });
+        }
+    }
+    Ok(())
+}
+
 fn finish(session: &str, tab: &str, turn: &mut Checkpoint) -> Result<()> {
-    let cwd = Path::new(&turn.cwd);
-    let end = git::snapshot_tree(cwd)?;
+    let checkout = PathBuf::from(&turn.cwd);
+    let cwd = checkout.as_path();
+    let end = git::exact_snapshot(cwd)?;
     let end_index = index_tree(cwd).ok();
     let id = format!("{tab}-{}", turn.seq);
     if trees::exists(cwd, session, &id, "start")? {
-        turn.files = git::changes_between(cwd, &turn.start, Some(&end))?;
-        let mut snapshots = vec![("end", end.as_str())];
-        if let Some(index) = &end_index {
-            snapshots.push(("end-index", index));
-        }
-        trees::pin_many(cwd, session, &id, &snapshots)?;
+        turn.files = git::changes_between(cwd, &turn.start, Some(&end.tree))?;
+        add_ending_only_changes(turn, &end)?;
+        let staging: Vec<(&str, &str)> = end_index.iter().map(|index| ("end-index", index.as_str())).collect();
+        trees::pin_exact(cwd, session, &id, &[("end", &end)], &staging)?;
     } else {
         // An old version or external cleanup may have removed the ref. Keep a
         // best-effort summary, but propagate uncertainty even if the diff works.
-        turn.files = git::changes_between(cwd, &turn.start, Some(&end)).unwrap_or_default();
+        turn.files = git::changes_between(cwd, &turn.start, Some(&end.tree)).unwrap_or_default();
         turn.unavailable_reason
             .get_or_insert_with(|| "This checkpoint has expired under the workspace retention limit.".into());
     }
-    turn.end = Some(end);
+    turn.end_kept = end.kept;
+    turn.end = Some(end.tree);
     turn.end_index = end_index;
     turn.ended_at = Some(chrono::Utc::now().timestamp_micros());
     remember_concurrent(session, tab, turn)?;
@@ -325,14 +354,12 @@ pub fn observe(session: &str, tab: &str, seq: u64, payload: &mut Payload) -> Res
             // A prepared composer baseline can precede another tab's edits. Capture
             // here so the recorded interval covers precisely this checkout snapshot.
             let started_at = Some(chrono::Utc::now().timestamp_micros());
-            let start = git::snapshot_tree(Path::new(&cwd))?;
+            let snapshot = git::exact_snapshot(Path::new(&cwd))?;
             let index = index_tree(Path::new(&cwd)).ok();
             let id = format!("{tab}-{seq}");
-            let mut snapshots = vec![("start", start.as_str())];
-            if let Some(index) = &index {
-                snapshots.push(("index", index));
-            }
-            trees::pin_many(Path::new(&cwd), session, &id, &snapshots)?;
+            let staging: Vec<(&str, &str)> = index.iter().map(|index| ("index", index.as_str())).collect();
+            trees::pin_exact(Path::new(&cwd), session, &id, &[("start", &snapshot)], &staging)?;
+            let Snapshot { tree: start, kept: start_kept } = snapshot;
             if let Payload::UserMessage { baseline, .. } = payload {
                 *baseline = Some(start.clone());
             }
@@ -356,6 +383,8 @@ pub fn observe(session: &str, tab: &str, seq: u64, payload: &mut Payload) -> Res
                 backup_ref: None,
                 unavailable_reason: None,
                 abandoned: false,
+                start_kept,
+                end_kept: None,
             });
         } else if let Payload::TurnCompleted { head, .. } = payload {
             if let Some(turn) = state.turns.last_mut().filter(|t| t.end.is_none()) {
@@ -469,11 +498,12 @@ pub fn undo(session: &str, tab: &str, seq: u64, confirmed: Option<&str>) -> Resu
                 "This turn started with unresolved Git conflicts. Its checkpoint is retained, but automatic Undo cannot restore the conflicted index."
             )
         })?;
-        let paths = trees::paths(cwd, &turn.start, turn.end.as_deref().unwrap())?;
+        let (start, end) = (turn.start_snapshot(), turn.end_snapshot().unwrap());
+        let paths = trees::exact_paths(cwd, &start, &end)?;
         let now = trees::current(cwd, &paths)?;
         let now_index = index_tree(cwd)?;
-        let token = format!("{now}:{now_index}");
-        let mut changed = trees::paths(cwd, turn.end.as_deref().unwrap(), &now)?;
+        let token = format!("{}:{now_index}", now.identity());
+        let mut changed = trees::exact_paths(cwd, &end, &now)?;
         changed.extend(trees::paths(cwd, turn.end_index.as_deref().unwrap_or(start_index), &now_index)?);
         changed.extend(turn.concurrent_paths.iter().cloned());
         if turn.concurrent_unknown {
@@ -510,17 +540,18 @@ pub fn undo(session: &str, tab: &str, seq: u64, confirmed: Option<&str>) -> Resu
         }
         // Retain the current contents too, so an I/O error never makes them unreachable.
         let id = format!("{tab}-{seq}");
-        trees::pin_many(cwd, session, &id, &[("before-undo", &now), ("before-undo-index", &now_index)])?;
-        trees::restore_with_backup(cwd, &turn.start, start_index, &paths, &now, &now_index)?;
+        trees::pin_exact(cwd, session, &id, &[("before-undo", &now)], &[("before-undo-index", &now_index)])?;
+        trees::restore_with_backup(cwd, &start, start_index, &paths, &now, &now_index)?;
         let number = turn.number;
         let revert_note = note(&paths, Some(number));
         let backup_ref = trees::reference(session, &id, "before-undo")?;
         state.turns[at].reviewed = true;
         state.turns[at].undone = true;
         state.turns[at].backup = Some(Backup {
-            tree: now,
+            tree: now.tree,
             index: now_index,
             note_id: revert_note.id.clone(),
+            kept: now.kept,
         });
         state.turns[at].backup_ref = Some(backup_ref.clone());
         state.notes.push(revert_note);
@@ -559,7 +590,7 @@ pub fn discard(cwd: &str, path: &str, base: Option<&str>, old_path: Option<&str>
                 for turn in state.turns.iter().rev().filter(|t| t.cwd == cwd) {
                     let changed = if turn.end.is_none() && trees::exists(p, &session.id, &format!("{}-{}", tab.id, turn.seq), "start")? {
                         // Waiting turns have not populated their final file list yet.
-                        trees::paths(p, &turn.start, &before)?.into_iter().collect()
+                        trees::exact_paths(p, &turn.start_snapshot(), &before)?.into_iter().collect()
                     } else {
                         file_paths(turn)
                     };
@@ -576,9 +607,10 @@ pub fn discard(cwd: &str, path: &str, base: Option<&str>, old_path: Option<&str>
         if let Some(session) = &backup_owner {
             // One bounded recovery slot, rather than an unbounded ref pair per discard.
             let id = "discard-backup";
-            trees::pin_many(p, session, id, &[("start", &before), ("index", &before_index)])?;
+            trees::pin_exact(p, session, id, &[("start", &before)], &[("index", &before_index)])?;
         }
-        trees::restore_with_backup(p, &base, &base, &paths, &before, &before_index)?;
+        // A displayed base is a tree alone: its files are what a checkout of it writes.
+        trees::restore_with_backup(p, &Snapshot::as_git_writes(base.clone()), &base, &paths, &before, &before_index)?;
         if let Some(session) = &backup_owner {
             trees::prune_turn(p, session, "discard-backup")?;
         }
@@ -619,6 +651,7 @@ pub fn restore_undo(session: &str, tab: &str, seq: u64, confirmed: Option<&str>)
                         .trim()
                         .into(),
                     note_id: state.notes.iter().find(|n| n.text == expected).map(|n| n.id.clone()).unwrap_or_default(),
+                    kept: trees::pinned_kept(Path::new(&turn.cwd), session, &id, "before-undo"),
                 }
             }
         };
@@ -631,8 +664,8 @@ pub fn restore_undo(session: &str, tab: &str, seq: u64, confirmed: Option<&str>)
         let index = turn.index.as_deref().ok_or_else(|| anyhow::anyhow!("The original index is unavailable."))?;
         let now = trees::current(cwd, &paths)?;
         let now_index = index_tree(cwd)?;
-        let token = format!("restore:{now}:{now_index}");
-        let mut changed = trees::paths(cwd, &turn.start, &now)?;
+        let token = format!("restore:{}:{now_index}", now.identity());
+        let mut changed = trees::exact_paths(cwd, &turn.start_snapshot(), &now)?;
         changed.extend(trees::paths(cwd, index, &now_index)?);
         let overlap: Vec<_> = paths.iter().filter(|p| changed.contains(p)).cloned().collect();
         if !overlap.is_empty() && confirmed != Some(token.as_str()) {
@@ -643,8 +676,8 @@ pub fn restore_undo(session: &str, tab: &str, seq: u64, confirmed: Option<&str>)
                 backup_ref: None,
             });
         }
-        trees::pin_many(cwd, session, &id, &[("before-restore", &now), ("before-restore-index", &now_index)])?;
-        trees::restore_with_backup(cwd, &backup.tree, &backup.index, &paths, &now, &now_index)?;
+        trees::pin_exact(cwd, session, &id, &[("before-restore", &now)], &[("before-restore-index", &now_index)])?;
+        trees::restore_with_backup(cwd, &Snapshot::new(backup.tree.clone(), backup.kept.clone()), &backup.index, &paths, &now, &now_index)?;
         let number = turn.number;
         state.turns[at].undone = false;
         state.turns[at].restored = true;
@@ -683,6 +716,11 @@ struct ResetBackup {
     /// What the reset wrote, so Undo can tell later edits apart.
     restored_tree: String,
     restored_index: String,
+    /// The exact bytes beside `tree` and `restored_tree` (see [`Snapshot`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kept: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restored_kept: Option<String>,
 }
 
 /// What restoring files for a chat reset (or its Undo) will change. Read-only.
@@ -693,7 +731,7 @@ pub struct ResetPlan {
     /// other tabs or sessions in the checkout, or edits by hand.
     pub overlap: Vec<String>,
     token: String,
-    tree: String,
+    target: Snapshot,
     index: String,
     undo: bool,
 }
@@ -702,9 +740,9 @@ pub struct ResetPlan {
 pub struct ResetApplied {
     cwd: String,
     pub paths: Vec<String>,
-    tree: String,
+    target: Snapshot,
     index: String,
-    before: String,
+    before: Snapshot,
     before_index: String,
     previous: Option<ResetBackup>,
 }
@@ -738,7 +776,7 @@ pub fn plan_reset(session: &str, tab: &str, end_seq: u64) -> Result<ResetPlan> {
         let missing = "This turn has no saved file checkpoint. Reset the chat without files.";
         let at = state.turns.iter().rposition(|t| t.seq <= end_seq && !t.abandoned).ok_or_else(|| anyhow::anyhow!(missing))?;
         let turn = &state.turns[at];
-        let Some(end) = turn.end.clone() else { bail!(missing) };
+        let Some(end) = turn.end_snapshot() else { bail!(missing) };
         if let Some(reason) = &turn.unavailable_reason {
             bail!("{reason} Reset the chat without files.");
         }
@@ -753,9 +791,9 @@ pub fn plan_reset(session: &str, tab: &str, end_seq: u64) -> Result<ResetPlan> {
         let end_index = turn.end_index.clone().ok_or_else(|| {
             anyhow::anyhow!("This turn ended with unresolved Git conflicts, so its files can't be reset automatically. Reset the chat without files.")
         })?;
-        let snapshot = git::snapshot_tree(cwd)?;
+        let snapshot = git::exact_snapshot(cwd)?;
         let now_index = index_tree(cwd)?;
-        let mut paths: BTreeSet<String> = trees::paths(cwd, &end, &snapshot)?.into_iter().collect();
+        let mut paths: BTreeSet<String> = trees::exact_paths(cwd, &end, &snapshot)?.into_iter().collect();
         paths.extend(trees::paths(cwd, &end_index, &now_index)?);
         let paths: Vec<String> = paths.into_iter().collect();
         let now = trees::current(cwd, &paths)?;
@@ -764,25 +802,25 @@ pub fn plan_reset(session: &str, tab: &str, end_seq: u64) -> Result<ResetPlan> {
         // turns an earlier reset cut off, edits by hand, including edits to a
         // file after the last turn that touched it) needs confirmation.
         let mut own = BTreeSet::new();
-        let mut last_end: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
+        let mut last_end: BTreeMap<String, (Option<Snapshot>, Option<String>)> = BTreeMap::new();
         let mut others = BTreeSet::new();
         let mut unknown = false;
         for later in state.turns[at + 1..].iter().filter(|t| !t.abandoned) {
             for path in file_paths(later) {
-                last_end.insert(path.clone(), (later.end.clone(), later.end_index.clone()));
+                last_end.insert(path.clone(), (later.end_snapshot(), later.end_index.clone()));
                 own.insert(path);
             }
             others.extend(later.concurrent_paths.iter().cloned());
             unknown |= later.concurrent_unknown || uncertain(session, tab, later)?;
         }
-        let mut by_end: BTreeMap<(Option<String>, Option<String>), Vec<&String>> = BTreeMap::new();
+        let mut by_end: BTreeMap<(Option<Snapshot>, Option<String>), Vec<&String>> = BTreeMap::new();
         for path in paths.iter().filter(|p| own.contains(*p)) {
             by_end.entry(last_end[path].clone()).or_default().push(path);
         }
         let mut drifted = BTreeSet::new();
         for ((end, end_index), group) in by_end {
             let changed = match (end, end_index) {
-                (Some(end), Some(end_index)) => trees::paths(cwd, &end, &now)
+                (Some(end), Some(end_index)) => trees::exact_paths(cwd, &end, &now)
                     .and_then(|mut changed| { changed.extend(trees::paths(cwd, &end_index, &now_index)?); Ok(changed) })
                     .ok()
                     .map(|changed| changed.into_iter().collect::<BTreeSet<_>>()),
@@ -803,10 +841,10 @@ pub fn plan_reset(session: &str, tab: &str, end_seq: u64) -> Result<ResetPlan> {
         let overlap = paths.iter().filter(|p| unknown || others.contains(*p) || !own.contains(*p) || drifted.contains(*p)).cloned().collect();
         Ok(ResetPlan {
             cwd: turn.cwd.clone(),
-            token: format!("reset:{end}:{end_index}:{now}:{now_index}"),
+            token: format!("reset:{}:{end_index}:{}:{now_index}", end.identity(), now.identity()),
             paths,
             overlap,
-            tree: end,
+            target: end,
             index: end_index,
             undo: false,
         })
@@ -864,12 +902,12 @@ pub(crate) fn legacy_fork_workspace(
 
 /// The checkout's files and staging at the end of the turn a fork starts from
 /// (PRO-379), as tree ids in the session's repository, while they are kept.
-pub fn turn_end(session: &str, tab: &str, end_seq: u64, verified_checkout: Option<(&Path, &Path)>) -> Result<(String, String)> {
+pub fn turn_end(session: &str, tab: &str, end_seq: u64, verified_checkout: Option<(&Path, &Path)>) -> Result<(Snapshot, String)> {
     let read = || {
         let state = load(session, tab)?;
         let missing = "This turn has no saved file checkpoint.";
         let turn = state.turns.iter().rev().find(|t| t.seq <= end_seq && !t.abandoned).ok_or_else(|| anyhow::anyhow!(missing))?;
-        let end = turn.end.clone().ok_or_else(|| anyhow::anyhow!(missing))?;
+        let end = turn.end_snapshot().ok_or_else(|| anyhow::anyhow!(missing))?;
         if let Some(reason) = &turn.unavailable_reason {
             bail!("{reason}");
         }
@@ -883,10 +921,12 @@ pub fn turn_end(session: &str, tab: &str, end_seq: u64, verified_checkout: Optio
                 bail!("This turn's file checkpoint could not be verified in the source repository.");
             }
             let end_index = turn.end_index.clone().ok_or_else(|| anyhow::anyhow!("This turn ended with unresolved Git conflicts."))?;
-            for (edge, expected) in [("end", &end), ("end-index", &end_index)] {
+            let mut pins = vec![("end", end.tree.as_str()), ("end-index", end_index.as_str())];
+            pins.extend(end.kept_bytes().map(|kept| ("end-bytes", kept)));
+            for (edge, expected) in pins {
                 let reference = trees::reference(session, &id, edge)?;
                 let pinned = git::run(destination, &["rev-parse", "--verify", "--quiet", &reference]).ok();
-                if pinned.as_deref().map(str::trim) != Some(expected.as_str()) {
+                if pinned.as_deref().map(str::trim) != Some(expected) {
                     bail!("This turn's saved file checkpoint is unavailable in the source repository.");
                 }
             }
@@ -907,9 +947,10 @@ pub fn turn_end(session: &str, tab: &str, end_seq: u64, verified_checkout: Optio
 
 /// Put a fresh checkout's files and staging at a turn's end (see [`turn_end`]).
 /// Only for a worktree made for the fork: whatever it held is replaced.
-pub fn check_out_turn(cwd: &str, tree: &str, index: &str) -> Result<()> {
+pub fn check_out_turn(cwd: &str, end: &Snapshot, index: &str) -> Result<()> {
     let cwd = Path::new(cwd);
-    git::run(cwd, &["read-tree", "--reset", "-u", tree])?;
+    git::run(cwd, &["read-tree", "--reset", "-u", &end.tree])?;
+    trees::bytes::put_back_all(cwd, end)?;
     git::run(cwd, &["read-tree", index])?;
     Ok(())
 }
@@ -937,15 +978,17 @@ pub fn plan_reset_undo(session: &str, tab: &str, generation: &str) -> Result<Opt
         }
         let now = trees::current(cwd, &backup.paths)?;
         let now_index = index_tree(cwd)?;
-        let mut changed: BTreeSet<String> = trees::paths(cwd, &backup.restored_tree, &now)?.into_iter().collect();
+        let restored = Snapshot::new(backup.restored_tree.clone(), backup.restored_kept.clone());
+        let mut changed: BTreeSet<String> = trees::exact_paths(cwd, &restored, &now)?.into_iter().collect();
         changed.extend(trees::paths(cwd, &backup.restored_index, &now_index)?);
         let overlap = backup.paths.iter().filter(|p| changed.contains(*p)).cloned().collect();
+        let target = Snapshot::new(backup.tree, backup.kept);
         Ok(Some(ResetPlan {
-            token: format!("undo-reset:{}:{}:{now}:{now_index}", backup.tree, backup.index),
+            token: format!("undo-reset:{}:{}:{}:{now_index}", target.identity(), backup.index, now.identity()),
             cwd: backup.cwd,
             paths: backup.paths,
             overlap,
-            tree: backup.tree,
+            target,
             index: backup.index,
             undo: true,
         }))
@@ -989,35 +1032,37 @@ pub fn apply_reset(session: &str, tab: &str, plan: &ResetPlan, generation: &str)
         let cwd = Path::new(&plan.cwd);
         let now = trees::current(cwd, &plan.paths)?;
         let now_index = index_tree(cwd)?;
-        if !plan.token.ends_with(&format!(":{now}:{now_index}")) {
+        if !plan.token.ends_with(&format!(":{}:{now_index}", now.identity())) {
             bail!("Files changed during reset. Nothing was reset; try again.");
         }
         let mut state = load(session, tab)?;
         let previous = state.reset.clone();
         let edges = if plan.undo { ["before-undo", "before-undo-index"] } else { ["before-reset", "before-reset-index"] };
         // Retain the current contents first, so an I/O error never makes them unreachable.
-        trees::pin_many(cwd, session, &reset_group(tab), &[(edges[0], &now), (edges[1], &now_index)])?;
-        trees::restore_with_backup(cwd, &plan.tree, &plan.index, &plan.paths, &now, &now_index)?;
+        trees::pin_exact(cwd, session, &reset_group(tab), &[(edges[0], &now)], &[(edges[1], &now_index)])?;
+        trees::restore_with_backup(cwd, &plan.target, &plan.index, &plan.paths, &now, &now_index)?;
         state.reset = (!plan.undo).then(|| ResetBackup {
             generation: generation.into(),
             cwd: plan.cwd.clone(),
             paths: plan.paths.clone(),
-            tree: now.clone(),
+            tree: now.tree.clone(),
             index: now_index.clone(),
-            restored_tree: plan.tree.clone(),
+            restored_tree: plan.target.tree.clone(),
             restored_index: plan.index.clone(),
+            kept: now.kept.clone(),
+            restored_kept: plan.target.kept.clone(),
         });
         let applied = ResetApplied {
             cwd: plan.cwd.clone(),
             paths: plan.paths.clone(),
-            tree: plan.tree.clone(),
+            target: plan.target.clone(),
             index: plan.index.clone(),
             before: now,
             before_index: now_index,
             previous,
         };
         if let Err(error) = save(session, tab, &state) {
-            trees::restore_with_backup(cwd, &applied.before, &applied.before_index, &applied.paths, &applied.tree, &applied.index)?;
+            trees::restore_with_backup(cwd, &applied.before, &applied.before_index, &applied.paths, &applied.target, &applied.index)?;
             return Err(error);
         }
         Ok(applied)
@@ -1028,7 +1073,7 @@ pub fn apply_reset(session: &str, tab: &str, plan: &ResetPlan, generation: &str)
 pub fn revert_reset(session: &str, tab: &str, applied: &ResetApplied) -> Result<()> {
     locked(session, || {
         let cwd = Path::new(&applied.cwd);
-        trees::restore_with_backup(cwd, &applied.before, &applied.before_index, &applied.paths, &applied.tree, &applied.index)?;
+        trees::restore_with_backup(cwd, &applied.before, &applied.before_index, &applied.paths, &applied.target, &applied.index)?;
         let mut state = load(session, tab)?;
         state.reset = applied.previous.clone();
         save(session, tab, &state)
@@ -1148,6 +1193,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
         git::run(p, &["init", "-q", "-b", "main"]).unwrap();
+        git::run(p, &["config", "core.autocrlf", "false"]).unwrap();
         git::run(p, &["config", "user.email", "test@example.com"]).unwrap();
         git::run(p, &["config", "user.name", "Test"]).unwrap();
         std::fs::write(p.join("a.txt"), "initial\n").unwrap();

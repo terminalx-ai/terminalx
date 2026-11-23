@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ThisComputer, thisComputer } from "@/lib/platform";
 import { ExternalLink, Loader2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -175,23 +176,23 @@ export function agentLoginMessage(error: unknown, agent?: AgentLoginProvider): s
     case "cloud_workspace_request_invalid":
       return "That is not a login this agent can use. Nothing was changed.";
     case "cloud_agent_local_login_not_found":
-      return "No login for this agent was found on this Mac. Sign in with the agent's own CLI first, or use an API key.";
+      return `No login for this agent was found on ${thisComputer}. Sign in with the agent's own CLI first, or use an API key.`;
     case "cloud_agent_local_login_invalid":
-      return "The login found on this Mac is not one the service can use. Sign in again with the agent's own CLI, or use an API key.";
+      return `The login found on ${thisComputer} is not one the service can use. Sign in again with the agent's own CLI, or use an API key.`;
     case "cloud_agent_local_login_expired":
       return agent === "codex"
-        ? "The Codex sign-in on this Mac has expired or is about to. Run codex once so it renews, then try again."
-        : "The Claude Code sign-in on this Mac has expired or is about to. Run claude once so it renews, then try again.";
+        ? `The Codex sign-in on ${thisComputer} has expired or is about to. Run codex once so it renews, then try again.`
+        : `The Claude Code sign-in on ${thisComputer} has expired or is about to. Run claude once so it renews, then try again.`;
     case "cloud_agent_codex_cli_missing":
-      return "Codex is not installed on this Mac, so its sign-in cannot run here. Install Codex, or connect with an API key.";
+      return `Codex is not installed on ${thisComputer}, so its sign-in cannot run here. Install Codex, or connect with an API key.`;
     case "cloud_agent_codex_cli_untrusted":
-      return "The codex found on this Mac, or the node it runs on, could be changed by another account on it (it, or its folder, is writable by others), so it was not run. Fix the permissions, or connect with an API key.";
+      return `The codex found on ${thisComputer}, or the node it runs on, could be changed by another account on it (it, or its folder, is writable by others), so it was not run. Fix the permissions, or connect with an API key.`;
     case "cloud_agent_codex_login_unavailable":
       return "Codex could not start a sign-in just now; it needs to reach OpenAI. Nothing was stored; try again in a moment.";
     case "cloud_agent_local_login_cancelled":
       return "Canceled in the confirmation. Nothing was sent.";
     case "cloud_agent_login_flow_unavailable":
-      return "This server does not offer Log in with Claude yet. Use an API key, or lend this Mac's sign-in.";
+      return `This server does not offer Log in with Claude yet. Use an API key, or lend ${thisComputer}'s sign-in.`;
     case "cloud_agent_login_attempt_gone":
       return "That sign-in is no longer open. Nothing was stored; start it again.";
     case "cloud_workspace_rate_limited":
@@ -199,7 +200,7 @@ export function agentLoginMessage(error: unknown, agent?: AgentLoginProvider): s
     case "cloud_agent_login_replace_unconfirmed":
       return "A login is already stored for this agent. Choose to replace it, then try again. Nothing was changed.";
     case "cloud_agent_local_login_denied":
-      return "This Mac's login was not read: access to it was not allowed. Nothing was sent.";
+      return `${ThisComputer}'s login was not read: access to it was not allowed. Nothing was sent.`;
     case "cloud_provider_entry_cancelled":
       return "Key entry canceled. Nothing was changed.";
     case "cloud_provider_credential_required":
@@ -319,7 +320,7 @@ export function CodexSignInDialog({
           <DialogDescription>
             {waiting
               ? `Open OpenAI's page, sign in to ChatGPT and enter this code. It works for ${Math.round(signIn.expiresInSeconds / 60)} minutes. Enter it only because you started this sign-in here; if someone else gave you a code, cancel.`
-              : `Codex's own sign-in, run on this Mac for the cloud workspaces of ${organization}.`}
+              : `Codex's own sign-in, run on ${thisComputer} for the cloud workspaces of ${organization}.`}
           </DialogDescription>
         </DialogHeader>
         {waiting && (
@@ -798,7 +799,7 @@ export function OrganizationAgentLogins({
                       </Button>
                       {agent.local && (
                         <Button size="xs" variant="outline" disabled={busy || !!signIn || !!codex} onClick={() => choose({ agent: agent.id, source: "local-login" })}>
-                          {stored ? `Replace with this Mac's ${agent.local} sign-in (temporary)` : `Lend this Mac's ${agent.local} sign-in (temporary)`}
+                          {stored ? `Replace with ${thisComputer}'s ${agent.local} sign-in (temporary)` : `Lend ${thisComputer}'s ${agent.local} sign-in (temporary)`}
                         </Button>
                       )}
                       {stored && (
@@ -848,11 +849,11 @@ export function OrganizationAgentLogins({
                     <div className="mt-2 space-y-2 rounded-md border border-hairline bg-background p-2" data-testid="agent-login-consent">
                       <p>
                         {open.source === "sign-in" && agent.id === "codex"
-                          ? `Codex's own sign-in runs on this Mac in a separate, temporary home, so the Codex login you use here is not touched. TerminalX shows a one-time code; you sign in to ChatGPT in your browser, enter the code and approve access for ${organization}. The login Codex receives goes to the account service, which stores it encrypted and keeps it working, and the temporary home is deleted. It is your own subscription: usage in these workspaces counts against it. If you later leave the organization, the login stays until an owner or admin disconnects it.`
+                          ? `Codex's own sign-in runs on ${thisComputer} in a separate, temporary home, so the Codex login you use here is not touched. TerminalX shows a one-time code; you sign in to ChatGPT in your browser, enter the code and approve access for ${organization}. The login Codex receives goes to the account service, which stores it encrypted and keeps it working, and the temporary home is deleted. It is your own subscription: usage in these workspaces counts against it. If you later leave the organization, the login stays until an owner or admin disconnects it.`
                           : open.source === "sign-in"
-                          ? `You sign in to Claude in your browser and approve access for ${organization}. The account service receives a login it can renew, stores it encrypted and keeps it working; nothing is read from this Mac. It is your own subscription: usage in these workspaces counts against it. If you later leave the organization, the login stays until an owner or admin disconnects it.`
+                          ? `You sign in to Claude in your browser and approve access for ${organization}. The account service receives a login it can renew, stores it encrypted and keeps it working; nothing is read from ${thisComputer}. It is your own subscription: usage in these workspaces counts against it. If you later leave the organization, the login stays until an owner or admin disconnects it.`
                           : open.source === "local-login"
-                          ? `TerminalX will read the ${agent.name} sign-in on this Mac and lend its short-lived access token to ${organization}. The refresh token stays on this Mac, so what is uploaded cannot be renewed: it stops working when it expires, usually within hours, and has to be lent again. Before anything is sent, a confirmation from the app names the organization, the account and the expiry. It is your own subscription: usage in these workspaces counts against it.`
+                          ? `TerminalX will read the ${agent.name} sign-in on ${thisComputer} and lend its short-lived access token to ${organization}. The refresh token stays on ${thisComputer}, so what is uploaded cannot be renewed: it stops working when it expires, usually within hours, and has to be lent again. Before anything is sent, a confirmation from the app names the organization, the account and the expiry. It is your own subscription: usage in these workspaces counts against it.`
                           : `A secure dialog will ask for the ${agent.name} API key for ${organization}. It is sent to the account service, which checks it with the provider and stores it encrypted.`}
                       </p>
                       {stored && (
@@ -910,7 +911,7 @@ export function OrganizationAgentLogins({
                           }
                         >
                           {busy && <Loader2 className="animate-spin" />}
-                          {open.source === "sign-in" ? (agent.id === "codex" ? "Get a code to sign in with ChatGPT" : "Open Claude to sign in") : open.source === "local-login" ? "Read this Mac's sign-in and confirm" : "Enter the key"}
+                          {open.source === "sign-in" ? (agent.id === "codex" ? "Get a code to sign in with ChatGPT" : "Open Claude to sign in") : open.source === "local-login" ? `Read ${thisComputer}'s sign-in and confirm` : "Enter the key"}
                         </Button>
                         <Button size="xs" variant="ghost" disabled={busy} onClick={() => choose(null)}>
                           Cancel

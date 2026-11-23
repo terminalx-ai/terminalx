@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { joinKeycaps } from "@/lib/shortcuts";
+import { useShortcutKeys } from "@/lib/hotkeys";
 import { ChevronDown, ChevronUp, Plus, Smartphone, X } from "@/icons";
 import { ConnectedDevices, useConnectedDevices } from "@/components/pairing/ConnectedDevices";
 import { Button } from "@/components/ui/button";
@@ -254,10 +256,11 @@ export function TerminalDock({ sessionId, cwd }: { sessionId: string; cwd: strin
  * Show brings forward.
  */
 function DockRun({ sessionId, cwd, actions, runs }: { sessionId: string; cwd: string; actions: RepositoryAction[]; runs: Map<string, ActionRun> }) {
+  const runKeys = joinKeycaps(useShortcutKeys("session.runAction"));
   if (!actions.length) {
     return <div className="flex h-full flex-col gap-2 overflow-auto px-3 py-2.5" data-testid="run-empty">
       <h3 className="text-[10.5px] font-medium tracking-[0.08em] text-faint uppercase">Run</h3>
-      <p className="text-xs text-muted-foreground">No run script yet. Add one in <span className="text-foreground">{RUN_ACTIONS_PLACE}</span>: it starts the project's dev server or app, and ⌘R runs it.</p>
+      <p className="text-xs text-muted-foreground">No run script yet. Add one in <span className="text-foreground">{RUN_ACTIONS_PLACE}</span>: it starts the project's dev server or app{runKeys ? <>, and {runKeys} runs it</> : null}.</p>
     </div>;
   }
   return <div className="flex h-full flex-col gap-2 overflow-auto px-3 py-2.5" data-testid="run-pane">

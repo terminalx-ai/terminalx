@@ -380,7 +380,6 @@ fn nothing_to_launch_without_an_intent() {
     assert!(starter.starts.lock().unwrap().is_empty());
 }
 
-#[cfg(unix)]
 #[test]
 fn branch_names_follow_git_rules() {
     for good in ["main", "feature/fast-launch", "terminalx/fix-login-3f9a2c1b7d4e", "release-1.2"] {
@@ -390,8 +389,12 @@ fn branch_names_follow_git_rules() {
         assert!(!valid_branch(bad), "{bad}");
     }
     assert!(!valid_repository_path("relative/path"));
-    assert!(!valid_repository_path("/home/repos/../etc"));
-    assert!(valid_repository_path("/home/repos/acme/app"));
+    // Rooted paths are the cloud host's (Unix) spelling.
+    #[cfg(unix)]
+    {
+        assert!(!valid_repository_path("/home/repos/../etc"));
+        assert!(valid_repository_path("/home/repos/acme/app"));
+    }
 }
 
 #[test]

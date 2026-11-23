@@ -768,6 +768,7 @@ mod tests {
             git::run(path, &["config", "user.name", "Test"]).unwrap();
             git::run(path, &["config", "user.email", "test@example.com"]).unwrap();
             git::run(path, &["config", "commit.gpgsign", "false"]).unwrap();
+            git::run(path, &["config", "core.autocrlf", "false"]).unwrap();
         };
         configure(&cwd);
         std::fs::write(cwd.join("file"), "base\n").unwrap();
@@ -793,7 +794,7 @@ mod tests {
         assert!(git::work_status(&cwd).upstream.is_none());
         assert_eq!(resolve(&read_work(&cwd).unwrap(), Some(&pr), false), Step::Ready);
         git::run(&cwd, &["branch", "-D", "origin/feature"]).unwrap();
-        git::run(root.path(), &["clone", "--branch", "feature", remote.to_str().unwrap(), other.to_str().unwrap()]).unwrap();
+        git::run(root.path(), &["clone", "-c", "core.autocrlf=false", "--branch", "feature", remote.to_str().unwrap(), other.to_str().unwrap()]).unwrap();
         configure(&other);
         // GitHub's BEHIND can mean the PR base advanced even though our
         // tracking branch has no incoming commits. Exercise the actual action.

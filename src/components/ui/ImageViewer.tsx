@@ -5,6 +5,7 @@ import { Dialog as DialogPrimitive } from "radix-ui";
 import { ChevronLeft, ChevronRight, Copy, ExternalLink, Expand, Minus, Plus, RotateCw, X } from "@/icons";
 import { fs } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { familyNow } from "@/lib/platform";
 import { closeImageViewer, stepImageViewer, useImageViewer } from "@/lib/imageViewer";
 
 const MIN = 0.05;
@@ -154,7 +155,7 @@ function Viewer({ images, index }: { images: { src: string; name: string; path?:
   const keys = useRef({ zoomAt, fit, rotate, actual: () => actual(), copy: () => void copy(), many: images.length > 1 });
   keys.current = { zoomAt, fit, rotate, actual: () => actual(), copy: () => void copy(), many: images.length > 1 };
   useEffect(() => {
-    const mac = navigator.platform.toLowerCase().includes("mac");
+    const mac = familyNow() === "macos";
     const onKey = (event: KeyboardEvent) => {
       const k = keys.current;
       if ((mac ? event.metaKey : event.ctrlKey) && event.key.toLowerCase() === "c") { k.copy(); event.preventDefault(); return; }

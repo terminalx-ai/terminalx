@@ -70,7 +70,7 @@ describe("Pair a phone dialog", () => {
     act(() => pairing.openPairPhone());
 
     const dialog = await screen.findByRole("dialog", { name: "Pair a phone" });
-    expect(within(dialog).getByText("Drive this Mac's sessions and your cloud workspaces from TerminalX for iPhone")).toBeTruthy();
+    expect(within(dialog).getByText("Drive this computer's sessions and your cloud workspaces from TerminalX for iPhone")).toBeTruthy();
     await within(dialog).findByAltText("TerminalX phone pairing QR code");
     expect(mocks.invoke).toHaveBeenCalledWith("pairing_generate", { connectionMode: "automatic" });
     expect(mocks.qr).toHaveBeenCalledWith("terminalx://pair?code=relay-code", expect.objectContaining({ margin: 4, scale: 8 }));
@@ -83,16 +83,16 @@ describe("Pair a phone dialog", () => {
       "Pair a phone",
       "Expires in",
       "Generate a new code",
-      "How the phone reaches this Mac",
+      "How the phone reaches this computer",
       "Relay and nearby",
       "Only this network",
-      "Phone can be on cellular or any Wi-Fi. Nearby, it tries this Mac directly first, then falls back to Relay. Every path is end-to-end encrypted.",
+      "Phone can be on cellular or any Wi-Fi. Nearby, it tries this computer directly first, then falls back to Relay. Every path is end-to-end encrypted.",
       "Relay is ready",
       "On the phone",
       "Open TerminalX and tap Pair a Mac",
       "Scan this code, then compare the fingerprint",
       "Approve here when the phone asks",
-      "Keep this Mac awake while a phone is connected",
+      "Keep this computer awake while a phone is connected",
       "Paired devices",
     ];
     const at = order.map((label) => text.indexOf(label));
@@ -138,7 +138,7 @@ describe("Pair a phone dialog", () => {
     await waitFor(() => expect(mocks.qr).toHaveBeenLastCalledWith("terminalx://pair?code=local-code", expect.any(Object)));
     expect(mocks.invoke).toHaveBeenLastCalledWith("pairing_generate", { connectionMode: "local-only" });
     expect(screen.getByRole("radio", { name: "Only this network" }).getAttribute("aria-checked")).toBe("true");
-    expect(screen.getByText(/Phone must be on this Wi-Fi or reach this Mac through Tailscale/)).toBeTruthy();
+    expect(screen.getByText(/Phone must be on this Wi-Fi or reach this computer through Tailscale/)).toBeTruthy();
     expect(screen.queryByTestId("relay-status")).toBeNull();
   });
 
@@ -229,7 +229,7 @@ describe("Pair a phone dialog", () => {
     });
     act(() => pairing.openPairPhone());
     render(<PairPhoneDialogHost />);
-    const toggle = await screen.findByRole("switch", { name: "Keep this Mac awake while a phone is connected" });
+    const toggle = await screen.findByRole("switch", { name: "Keep this computer awake while a phone is connected" });
     expect(toggle.getAttribute("aria-checked")).toBe("true");
     fireEvent.click(toggle);
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("pairing_set_keep_awake", { enabled: false }));

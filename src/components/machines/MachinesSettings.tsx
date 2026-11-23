@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ThisComputer, thisComputer } from "@/lib/platform";
 import { Check, ChevronRight, Copy, Ellipsis, Info, LoaderCircle, Plus, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
@@ -50,7 +51,7 @@ function MachinesPrivacyState() {
   return (
     <div role="status" className="grid gap-1 px-2 py-4 text-[12.5px] text-muted-foreground" data-testid="machines-privacy">
       <p className="text-foreground">{PRIVACY_MESSAGE}</p>
-      <p>This Mac neither operates other computers nor lets them operate it. Nothing listens for them, and no connection to a machine is made. Paired machines and computers stay paired for when it is off.</p>
+      <p>{ThisComputer} neither operates other computers nor lets them operate it. Nothing listens for them, and no connection to a machine is made. Paired machines and computers stay paired for when it is off.</p>
     </div>
   );
 }
@@ -100,7 +101,7 @@ function MachinesList({ onOpen, showIntroduction }: { onOpen: (machineId: string
           setting="machines.allowOperating"
           control={
             <Switch
-              aria-label="Let other computers operate this Mac"
+              aria-label={`Let other computers operate ${thisComputer}`}
               checked={allow}
               disabled={!host.ready || host.busy || !view}
               onCheckedChange={(on) => void setAllowOperating(on)}
@@ -118,7 +119,7 @@ function MachinesList({ onOpen, showIntroduction }: { onOpen: (machineId: string
             onFailed={setMachineHostError}
           />
         )}
-        {host.ready && view && !view.status && <p className="pb-2 text-[12.5px] text-muted-foreground">The TerminalX runtime cannot be reached, so this Mac cannot be operated right now.</p>}
+        {host.ready && view && !view.status && <p className="pb-2 text-[12.5px] text-muted-foreground">The TerminalX runtime cannot be reached, so {thisComputer} cannot be operated right now.</p>}
         {view?.status?.error && <p role="alert" className="pb-2 text-[12.5px] text-destructive">{view.status.error}</p>}
       </div>
       {/* Where this Mac listens for computers and phones (PRO-487). Shown with the switch off too: the phone listener follows it. */}
@@ -139,7 +140,7 @@ function MachinesList({ onOpen, showIntroduction }: { onOpen: (machineId: string
       </RegisteredSetting>
       <RegisteredSetting setting="machines.computers">
         <section className="mt-6">
-          <h3 className={heading}>Computers that can operate this Mac</h3>
+          <h3 className={heading}>Computers that can operate {thisComputer}</h3>
           <p className={cn(soft, "mt-0.5")}>Each has its own credential. Revoking one closes its connection at once.</p>
           {/* A code is how a computer joins this list, so it is made here: nothing sits between This Mac and Your machines (21.02, PRO-398). */}
           {allow && (
@@ -199,7 +200,7 @@ function ThisMac({ machineId }: { machineId: string | null }) {
         Shown to other computers as <span className="text-foreground">{name?.name ?? "…"}</span>
         {label && (
           <>
-            {" "}· fingerprint <span className="font-mono text-[12px]" title="A label for this Mac’s key. Pairing compares a separate four-group fingerprint.">{label}</span>
+            {" "}· fingerprint <span className="font-mono text-[12px]" title={`A label for ${thisComputer}’s key. Pairing compares a separate four-group fingerprint.`}>{label}</span>
           </>
         )}
       </span>
@@ -213,7 +214,7 @@ function ThisMac({ machineId }: { machineId: string | null }) {
       >
         <input
           autoFocus
-          aria-label="This Mac’s name"
+          aria-label={`${ThisComputer}’s name`}
           value={draft}
           maxLength={80}
           spellCheck={false}
@@ -329,7 +330,7 @@ function YourMachines({ onOpen }: { onOpen: (machineId: string) => void }) {
       <div className="flex items-end gap-3">
         <div className="min-w-0 flex-1">
           <h3 className={heading}>Your machines</h3>
-          <p className={cn(soft, "mt-0.5")}>Computers this Mac can operate. Each one appears as a section in the sidebar.</p>
+          <p className={cn(soft, "mt-0.5")}>Computers {thisComputer} can operate. Each one appears as a section in the sidebar.</p>
         </div>
         <Button className="shrink-0" onClick={() => setAdding(true)}>
           <Plus /> Add a machine
@@ -360,10 +361,10 @@ function MachinesFirstRun() {
   return (
     <div className="mt-2.5 rounded-lg border border-hairline px-4 py-3.5" data-testid="machines-first-run">
       <p className="text-[13px] font-medium">No machines yet</p>
-      <p className={cn(soft, "mt-0.5")}>Add a Mac, a Mac mini or a Linux server that runs TerminalX. Its sessions run there, and this Mac shows them in the sidebar.</p>
+      <p className={cn(soft, "mt-0.5")}>Add a Mac, a Windows PC or a Linux server that runs TerminalX. Its sessions run there, and {thisComputer} shows them in the sidebar.</p>
       <ol className="mt-3 grid gap-3" aria-label="How to add a machine">
         <StepRow n={1} title="Get the other computer ready">
-          <p className={step}>On a Mac, open Settings → Machines there and turn on “Let other computers operate this Mac”. On a server, install TerminalX and run terminalx-serve pair.</p>
+          <p className={step}>On a Mac or a Windows PC, open Settings → Machines there and turn on letting other computers operate it. On a Linux server, install TerminalX and run terminalx-serve pair.</p>
         </StepRow>
         <StepRow n={2} title="Add it here">
           <p className={step}>Choose Add a machine: from your account, with a pairing code, or as a headless server. Check that both screens show the same fingerprint, then choose Allow on the other computer.</p>
@@ -417,9 +418,9 @@ function cardLine(machine: PairedMachine, state: MachineConnectionState, running
       return seen ? `${system} · last seen ${seenText(seen)}` : `${system} · not reached yet`;
     }
     case "accessRemoved":
-      return `${machine.name} no longer lets this Mac operate it. Remove it here, or pair again.`;
+      return `${machine.name} no longer lets ${thisComputer} operate it. Remove it here, or pair again.`;
     case "disconnected":
-      return `${machine.name} disconnected this Mac. Try again once it lets this Mac back.`;
+      return `${machine.name} disconnected ${thisComputer}. Try again once it lets ${thisComputer} back.`;
     case "direct":
     case "relay":
       return [system, `TerminalX ${machine.version}`, routeLabel(state.route.kind), running === null ? null : runningText(running)].filter(Boolean).join(" · ");
@@ -484,7 +485,7 @@ export function MachineCard({ machine, onOpen, onRemove }: { machine: PairedMach
             <Info /> Version and updates…
           </DropdownMenuItem>
           <DropdownMenuItem className="text-destructive" onSelect={onRemove}>
-            <Trash2 /> Remove from this Mac…
+            <Trash2 /> Remove from {thisComputer}…
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -493,9 +494,9 @@ export function MachineCard({ machine, onOpen, onRemove }: { machine: PairedMach
 }
 
 function ComputerList({ computers, busy }: { computers: PairedComputer[]; busy: boolean }) {
-  if (computers.length === 0) return <p className="mt-3 text-[12.5px] text-faint">No computer can operate this Mac.</p>;
+  if (computers.length === 0) return <p className="mt-3 text-[12.5px] text-faint">No computer can operate {thisComputer}.</p>;
   return (
-    <ul className="mt-2.5 grid grid-cols-1 gap-2" aria-label="Computers that can operate this Mac">
+    <ul className="mt-2.5 grid grid-cols-1 gap-2" aria-label={`Computers that can operate ${thisComputer}`}>
       {computers.map((computer) => (
         <ComputerRow key={computer.id} computer={computer} busy={busy} />
       ))}
@@ -553,7 +554,7 @@ function ComputerRow({ computer, busy }: { computer: PairedComputer; busy: boole
       {confirming ? (
         <div className="flex w-full flex-wrap items-center gap-2 pb-1 pl-11" role="group" aria-label={`Revoke ${computer.label}`}>
           <span className="mr-auto min-w-0 text-[12.5px] text-muted-foreground">
-            Ends {computer.label}’s credential and closes its connection. It does not undo what it already did on this Mac.
+            Ends {computer.label}’s credential and closes its connection. It does not undo what it already did on {thisComputer}.
           </span>
           <Button size="sm" variant="outline" onClick={() => setConfirming(false)}>Keep</Button>
           <Button size="sm" variant="destructive" disabled={busy} onClick={() => void revokeComputer(computer.id).then(() => setConfirming(false))}>
@@ -590,7 +591,7 @@ export function activityText(entry: MachineActivityEntry): string {
   const detail = entry.detail ?? null;
   switch (entry.kind) {
     case "paired":
-      return `${who} was allowed to operate this Mac`;
+      return `${who} was allowed to operate ${thisComputer}`;
     case "connected":
       return [`${who} connected`, detail ? ROUTE_WORDS[detail] ?? null : null].filter(Boolean).join(" ");
     case "disconnected":
@@ -652,7 +653,7 @@ function ActivityLog() {
       {error && <p role="alert" className="mt-2 text-[12.5px] text-destructive">{error}</p>}
       {entries && entries.length === 0 && !error && <p className="mt-2 text-[12.5px] text-faint">Nothing yet.</p>}
       {entries && entries.length > 0 && (
-        <ul className="mt-2 max-h-72 overflow-y-auto rounded-lg border border-hairline" aria-label="Activity on this Mac">
+        <ul className="mt-2 max-h-72 overflow-y-auto rounded-lg border border-hairline" aria-label={`Activity on ${thisComputer}`}>
           {entries.map((entry, index) => (
             <li key={`${entry.at}-${index}`} className="flex items-baseline gap-3 border-b border-hairline px-3 py-1.5 text-[12.5px] last:border-b-0" data-kind={entry.kind}>
               <span className="min-w-0 flex-1 truncate">{activityText(entry)}</span>

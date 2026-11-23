@@ -386,7 +386,7 @@ if os.name != 'nt':
     assert stat.S_IMODE(p.stat().st_mode) == 0o600
     assert stat.S_IMODE(p.parent.stat().st_mode) == 0o700
 assert len(sys.argv) == 2
-op = json.loads(p.read_text())
+op = json.loads(p.read_text(encoding='utf-8'))
 print(json.dumps({'ok': True, 'text': op['text']}))
 "#,
             Duration::from_secs(5),

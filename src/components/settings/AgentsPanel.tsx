@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { secretStoreShort, secretStoreWord } from "@/lib/platform";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Check, ChevronRight, CircleAlert, CircleCheck, ExternalLink, Eye, EyeOff, KeyRound, Loader2, RefreshCw, ServerCog, SquareTerminal, Terminal, Trash2 } from "@/icons";
@@ -240,7 +241,7 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
     const stale = await tabsKeepingOlderLogin(harness.id);
     showAgentLoginNotice({
       harness: harness.id, kind: "saved", stale,
-      title: "API key saved to the Keychain",
+      title: `API key saved to ${secretStoreShort}`,
       body: [`New ${harness.name} tabs use it.`, keepLine(stale.length)].filter(Boolean).join(" "),
     });
     // Readiness counts a key in use (PRO-306): every view that asks it hears the change.
@@ -276,8 +277,8 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
       harness: harness.id, kind: "removed", stale: [],
       title: signedIn ? `API key removed · ${harness.name} uses ${subscription.again} again` : `API key removed · ${harness.name} needs a sign-in`,
       body: [signedIn
-        ? `Deleted from the Keychain. New tabs sign in with ${[name, after?.account].filter(Boolean).length === 2 ? `${name} (${after?.account})` : name ?? subscription.again}.`
-        : `Deleted from the Keychain. Sign in to ${harness.name} below to start new tabs.`,
+        ? `Deleted from ${secretStoreShort}. New tabs sign in with ${[name, after?.account].filter(Boolean).length === 2 ? `${name} (${after?.account})` : name ?? subscription.again}.`
+        : `Deleted from ${secretStoreShort}. Sign in to ${harness.name} below to start new tabs.`,
         keepLine(stale.length),
         stale.length ? "Usage in these tabs may still be billed to their current login." : "",
         "This does not revoke the key with your provider.",
@@ -298,14 +299,14 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
 
   const keyField = <KeyField harness={harness} status={status} busy={busy} onSave={saveKey} onRemove={() => void removeKey()} />;
   const shellNote = saved?.fromShell ? <ShellNote>
-    Found in your login shell{saved.fromShell.file ? <> (<span className="font-mono text-[12px]">{saved.fromShell.file}</span>)</> : null}. A copy is now in the Keychain, so it works without {saved.fromShell.file ? "that file" : "it"}.
+    Found in your login shell{saved.fromShell.file ? <> (<span className="font-mono text-[12px]">{saved.fromShell.file}</span>)</> : null}. A copy is now in {secretStoreShort}, so it works without {saved.fromShell.file ? "that file" : "it"}.
   </ShellNote> : null;
   const offerNote = offer && !saved ? <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-faint">
     <ShellBadge />
-    <span className="min-w-0">Found <span className="font-mono text-[12px]">{offer.variable}</span> in your login shell{offer.file ? <> (<span className="font-mono text-[12px]">{offer.file}</span>)</> : null}. Copy it to the Keychain so new tabs use it without that file?</span>
+    <span className="min-w-0">Found <span className="font-mono text-[12px]">{offer.variable}</span> in your login shell{offer.file ? <> (<span className="font-mono text-[12px]">{offer.file}</span>)</> : null}. Copy it to {secretStoreShort} so new tabs use it without that file?</span>
     <span className="flex gap-1.5">
       <Button size="xs" variant="outline" className="shrink-0 whitespace-nowrap text-xs" disabled={!!busy} onClick={() => void importKey()}>
-        {busy === "import" ? <Loader2 className="animate-spin" /> : null} Import to the Keychain
+        {busy === "import" ? <Loader2 className="animate-spin" /> : null} Import to {secretStoreShort}
       </Button>
       <Button size="xs" variant="ghost" className="shrink-0 whitespace-nowrap text-xs" disabled={!!busy} onClick={() => void dismissOffer()}>Don&apos;t import</Button>
     </span>
@@ -319,7 +320,7 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
     ? (status?.problem || status?.verified?.ok === false ? "bad" : status?.verified?.ok ? "ok" : "busy")
     : own?.state === "ready" ? "ok" : checking ? "busy" : "off";
   const loginRow = usingKey
-    ? <>API key · {status!.variable} <span className="text-faint">· Keychain{status?.baseUrl ? ` · ${hostOf(status.baseUrl)}` : ""}</span></>
+    ? <>API key · {status!.variable} <span className="text-faint">· {secretStoreWord}{status?.baseUrl ? ` · ${hostOf(status.baseUrl)}` : ""}</span></>
     : own?.state === "ready" ? [subscriptionName(harness.id, own), own.account].filter(Boolean).join(" · ") || "Local login found"
     : own?.state === "signed_out" ? "None · sign in required" : null;
   const needsSetup = !usingKey && (own?.state === "missing" || own?.state === "signed_out" || own?.state === "unknown" || setupActive(flow));
@@ -340,7 +341,7 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
             <GetKey harness={harness.id} label="Get a key" />
           </div>
           {keyField}
-          {!saved?.fromShell && <p className="mt-1 text-[12px] text-faint">Kept in the Keychain. TerminalX passes it to {harness.name} when a tab starts, in place of {status?.variable ?? "ANTHROPIC_API_KEY"}.</p>}
+          {!saved?.fromShell && <p className="mt-1 text-[12px] text-faint">Kept in {secretStoreShort}. TerminalX passes it to {harness.name} when a tab starts, in place of {status?.variable ?? "ANTHROPIC_API_KEY"}.</p>}
           {shellNote}
         </div>}
       </>}
@@ -479,7 +480,7 @@ function CodexChoice({ harness, status, readiness, chosen, usingKey, onChoose, b
       <div className="ml-[26px] grid gap-1.5">
         {keyArea}
         {/* An imported key has its shell note above, which says this already (PRO-377). */}
-        {!status?.saved?.fromShell && <p className="text-[12px] text-faint">Kept in the Keychain. TerminalX passes it to Codex when a tab starts, in place of {status?.variable ?? "OPENAI_API_KEY"}.</p>}
+        {!status?.saved?.fromShell && <p className="text-[12px] text-faint">Kept in {secretStoreShort}. TerminalX passes it to Codex when a tab starts, in place of {status?.variable ?? "OPENAI_API_KEY"}.</p>}
       </div>
     </div>}
     <button type="button" aria-expanded={custom} onClick={() => setCustom(!custom)}

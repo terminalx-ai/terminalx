@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { thisComputer } from "@/lib/platform";
 import { ChevronDown, Folder, FolderGit2, Plus, RotateCw, ShieldX, WifiOff } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -189,7 +190,7 @@ export function MachineAwayCard({ machine, state }: { machine: PairedMachine; st
   const removed = state.state === "accessRemoved";
   const seen = state.state === "offline" && state.lastSeenAt ? state.lastSeenAt : machine.lastSeenAt;
   const Icon = removed ? ShieldX : WifiOff;
-  const title = removed ? `${machine.name} no longer allows this Mac` : `${machine.name} isn’t reachable`;
+  const title = removed ? `${machine.name} no longer allows ${thisComputer}` : `${machine.name} isn’t reachable`;
   const detail = removed
     ? "It was revoked on that Mac. Sessions there keep running; pair again to see them here."
     : [seen ? lastSeenSentence(seen) : null, "Sessions there keep running, and this list catches up when it reconnects."].filter(Boolean).join(" ");

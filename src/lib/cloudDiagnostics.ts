@@ -1,4 +1,5 @@
 import { formatDuration as formatElapsed } from "@/lib/time";
+import { thisComputer } from "@/lib/platform";
 
 // Cloud diagnostics (PRO-38): the organization's recent cloud operations,
 // create/resume stage timings and relay close reasons, for owners and
@@ -164,7 +165,7 @@ export function exportErrorMessage(error: unknown): string {
   const code = typeof error === "string" ? error : "";
   switch (code) {
     case "cloud_diagnostics_export_path_invalid":
-      return "Choose a location on this Mac for the export.";
+      return `Choose a location on ${thisComputer} for the export.`;
     case "cloud_diagnostics_export_write_failed":
       return "The file could not be written there. Choose another location.";
     default:

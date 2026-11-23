@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
+import { ThisComputer, thisComputer } from "@/lib/platform";
 import { CheckCircle2, Check, LoaderCircle, Monitor, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
@@ -21,7 +22,7 @@ const ROUTE_OPTIONS = [
 /** Owner decision 4 (2026-11-15): nearby routes first; the relay once both are signed in to the same account. */
 export function routeHint(route: MachineRoute, name: string): string {
   return route === "relayAndNearby"
-    ? `Tries ${name} directly on this network or Tailscale first. TerminalX Relay is used once this Mac and ${name} are signed in to the same account. Every path is end-to-end encrypted.`
+    ? `Tries ${name} directly on this network or Tailscale first. TerminalX Relay is used once ${thisComputer} and ${name} are signed in to the same account. Every path is end-to-end encrypted.`
     : `Reaches ${name} only on this network or through Tailscale. The connection is end-to-end encrypted.`;
 }
 
@@ -191,10 +192,10 @@ function PairingCodeTab({ pairing, onClose, onDone }: { pairing: MachinePairing;
               </div>
             )}
             {inspected?.alreadyPaired && step.kind !== "paired" && (
-              <p className={soft}>This Mac is already paired with {name}. Pairing again replaces its credential.</p>
+              <p className={soft}>{ThisComputer} is already paired with {name}. Pairing again replaces its credential.</p>
             )}
-            <div className={cn(sectionLabel, "mt-1")}>How this Mac reaches it</div>
-            <Segmented aria-label="How this Mac reaches it" value={route} onChange={setRoute} options={ROUTE_OPTIONS} className="justify-self-start" disabled={step.kind === "paired"} />
+            <div className={cn(sectionLabel, "mt-1")}>How {thisComputer} reaches it</div>
+            <Segmented aria-label={`How ${thisComputer} reaches it`} value={route} onChange={setRoute} options={ROUTE_OPTIONS} className="justify-self-start" disabled={step.kind === "paired"} />
             <p className={soft}>{routeHint(route, inspected ? name : "the machine")}</p>
             {routeError && <p role="alert" className="text-[12.5px] text-destructive">Paired, but the route was not saved: {routeError}</p>}
           </div>

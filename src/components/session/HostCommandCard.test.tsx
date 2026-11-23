@@ -29,7 +29,7 @@ describe("HostCommandCard isolated presentation foundation", () => {
     render(<HostCommandCard request={request} state="pending" onIntent={vi.fn()} />);
     for (const [label, value] of [
       ["Request", request.requestId], ["Executable", request.executable],
-      ["Working directory on this Mac", request.cwd], ["Requesting agent", request.agent],
+      ["Working directory on this computer", request.cwd], ["Requesting agent", request.agent],
       ["Turn", request.turn], ["Origin account (display only)", request.originAccount],
       ["Origin device (display only)", request.originDevice],
     ]) expect(detail(label).textContent).toBe(JSON.stringify(value));
@@ -79,7 +79,7 @@ describe("HostCommandCard isolated presentation foundation", () => {
 
   it("has an accessible region, heading, live status and disclosure descriptions", () => {
     render(<HostCommandCard request={request} state="pending" />);
-    const region = screen.getByRole("region", { name: "Run this command on your Mac?" });
+    const region = screen.getByRole("region", { name: "Run this command on your computer?" });
     const heading = screen.getByRole("heading", { level: 3 });
     expect(region.getAttribute("aria-labelledby")).toBe(heading.id);
     const descriptions = region.getAttribute("aria-describedby")!.split(" ")

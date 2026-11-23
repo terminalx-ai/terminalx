@@ -123,7 +123,7 @@ try {
         return { box, buttons, percent, options: !!document.querySelector('[aria-label="More options"]'), overflow: document.documentElement.scrollWidth - innerWidth };
       });
       const names = row.buttons.map((b) => b.name);
-      assert.deepEqual(names, ["model-picker", "permission-mode", "Context 12% used", "Mention a file", "Attach files", "Dictate", "Send"].filter((n) => n !== "Dictate" || names.includes("Dictate")), `${scheme}: toolbar order ${JSON.stringify(names)}`);
+      assert.deepEqual(names, ["model-picker", "permission-mode", "Context 12% used", "Mention a file", "Attach files", "ai-editor", "Dictate", "Send"].filter((n) => n !== "Dictate" || names.includes("Dictate")), `${scheme}: toolbar order ${JSON.stringify(names)}`);
       assert.ok(!row.options, `${scheme}: no More options menu`);
       const [modelChip, modeChip] = row.buttons;
       assert.equal(modelChip.text, "Opus 5.5High", `${scheme}: model chip reads 'Opus 5.5 High'`);

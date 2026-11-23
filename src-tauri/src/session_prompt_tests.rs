@@ -1094,7 +1094,6 @@ fn a_continuations_receipt_is_waited_for_until_well_after_its_last_enter() {
 
 /// A handoff's nudges are its waiter's to write as they fall due, and the
 /// wait runs on from the last of them.
-#[cfg(unix)]
 #[test]
 fn a_continuations_waiter_writes_its_nudges_and_waits_on_from_the_last() {
     let rig = Rig::of(CliKind::Claude, "").with_pane();

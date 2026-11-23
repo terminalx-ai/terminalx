@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ThisComputer } from "@/lib/platform";
 import { UserPlus } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { agentAccounts, LOCAL_ACCOUNT, SAVED_KEY_ACCOUNT, type AgentAccount, type AgentAccountAgent, type AgentAccounts } from "@/lib/agentAccounts";
@@ -75,7 +76,7 @@ export function AgentAccountsSection({ harness, agentName, accounts, localReadin
   const changed = ({ kind, account, view: next }: { kind: "default" | "removed"; account: AgentAccount; view: AgentAccounts }) => {
     onChanged();
     if (kind === "default") void announce(`New ${agentName} tabs use ${account.label}`, "It is the default account now.");
-    else void announce(`Removed ${account.label}`, account.isDefault ? `New ${agentName} tabs use ${next.accounts.find((other) => other.isDefault)?.label ?? "This Mac's login"}.` : "");
+    else void announce(`Removed ${account.label}`, account.isDefault ? `New ${agentName} tabs use ${next.accounts.find((other) => other.isDefault)?.label ?? `${ThisComputer}'s login`}.` : "");
   };
 
   const add = <AgentAccountAdd harness={harness} agentName={agentName} onClose={() => setAdding(false)} onAdded={(account, next) => void added(account, next)} />;

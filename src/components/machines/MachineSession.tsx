@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { thisComputer } from "@/lib/platform";
 import { ChevronDown, ChevronUp, LoaderCircle, Plus, RotateCw, Unplug, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
@@ -210,7 +211,7 @@ export function MachineConnectionNotice({ machineId, name, state }: { machineId:
     return (
       <div className="flex shrink-0 items-center gap-2.5 border-b border-hairline px-4 py-2 text-[12.5px]" role="status" data-testid="machine-session-unreachable" data-state="disconnected">
         <Unplug className="size-3.5 shrink-0 text-warning" aria-hidden />
-        <span className="min-w-0 flex-1 text-foreground">{name} disconnected this Mac. Try again once it lets this Mac back.</span>
+        <span className="min-w-0 flex-1 text-foreground">{name} disconnected {thisComputer}. Try again once it lets {thisComputer} back.</span>
         <Button size="xs" variant="outline" onClick={() => void reconnectMachine(machineId)}>
           <RotateCw /> Try again
         </Button>

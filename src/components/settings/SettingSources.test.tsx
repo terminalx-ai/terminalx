@@ -91,7 +91,7 @@ it("Open personal settings.json opens the user file, names its broken line, and 
 
   openMenu(screen.getByRole("button", { name: "More ways to open personal settings.json" }));
   const menu = await screen.findByRole("menu");
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Your settings~/.raccoon/settings.json", "Finder1", "Cursor2", "VS Code3", "Zed4", "Copy path⇧⌘C"]);
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Your settings~/.raccoon/settings.json", "Finder1", "Cursor2", "VS Code3", "Zed4", "Copy pathCtrl+Shift+C"]);
   fireEvent.click(within(menu).getByRole("menuitem", { name: "VS Code" }));
   await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("open_settings_file", { path: "/Users/me/.raccoon/settings.json", editor: "vscode" }));
 

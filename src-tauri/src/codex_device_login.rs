@@ -61,6 +61,10 @@ const MAX_AUTH_BYTES: u64 = 64 * 1024;
 const DOCUMENTED_PAGE: &str = "https://auth.openai.com/codex/device";
 /// What the CLI is given besides its throwaway home: where programs are, and how to reach the network.
 const PASSED_ENV: &[&str] = &["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "LANG", "USER", "LOGNAME"];
+/// What a program needs from Windows itself to start and to run a `.cmd`
+/// launcher: an environment without these breaks system libraries.
+#[cfg(windows)]
+pub(crate) const WINDOWS_ENV: &[&str] = &["SystemRoot", "windir", "ComSpec", "PATHEXT"];
 /// Runs the CLI (`"$@"`) and kills its whole process group once stdin, the
 /// app's end of the lifeline, closes: when the app lets go of it, or dies.
 /// The CLI's own stdin is /dev/null; its exit status is the watchdog's.
@@ -206,7 +210,13 @@ impl DeviceLogin {
 
     /// Let go of the lifeline without killing anything, as the app dying would.
     pub(crate) fn drop_lifeline_for_test(&self) {
-        self.inner.lock().unwrap().lifeline = None;
+        let mut inner = self.inner.lock().unwrap();
+        inner.lifeline = None;
+        // On Windows the lifeline is the job the CLI runs in.
+        #[cfg(windows)]
+        if let Some(child) = &inner.child {
+            crate::win::process::release_job(child.id());
+        }
     }
 }
 
@@ -376,6 +386,42 @@ fn wipe_dir(home: &Path) {
             let _ = file.sync_all();
         }
     }
+    remove_home(home);
+}
+
+/// Homes this process could not remove yet, for the next sweep to finish:
+/// their owner is this running app, so age alone would keep them for minutes.
+#[cfg(windows)]
+fn unremoved() -> &'static Mutex<std::collections::HashSet<PathBuf>> {
+    static HOMES: std::sync::OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = std::sync::OnceLock::new();
+    HOMES.get_or_init(Default::default)
+}
+
+/// Remove a home. Windows refuses while anything still has a file in it open,
+/// which a scanner or a process just ended may for a moment, so it is tried
+/// again before being left for the next sweep.
+#[cfg(windows)]
+fn remove_home(home: &Path) {
+    const ATTEMPTS: usize = 100;
+    for attempt in 0..ATTEMPTS {
+        match std::fs::remove_dir_all(home) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                if attempt + 1 < ATTEMPTS {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            _ => {
+                unremoved().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(home);
+                return;
+            }
+        }
+    }
+    log::warn!("a Codex sign-in home is still in use; it will be removed at the next sweep");
+    unremoved().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(home.to_path_buf());
+}
+
+#[cfg(not(windows))]
+fn remove_home(home: &Path) {
     let _ = std::fs::remove_dir_all(home);
 }
 
@@ -388,7 +434,12 @@ fn process_alive(pid: i32) -> bool {
     pid > 0 && (unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn process_alive(pid: i32) -> bool {
+    u32::try_from(pid).is_ok_and(|pid| pid > 0 && crate::win::process::is_running(pid))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn process_alive(_pid: i32) -> bool {
     true
 }
@@ -398,6 +449,13 @@ fn process_alive(_pid: i32) -> bool {
 /// are older than a code lives. Their CLI already died with that app (the
 /// watchdog). Run at every start, and before each sign-in.
 pub fn sweep_stale(parent: &Path) {
+    #[cfg(windows)]
+    {
+        let left: Vec<PathBuf> = unremoved().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().filter(|home| home.starts_with(parent)).cloned().collect();
+        for home in left {
+            wipe_dir(&home);
+        }
+    }
     let Ok(entries) = std::fs::read_dir(parent) else { return };
     for entry in entries.flatten() {
         if !entry.file_name().to_string_lossy().starts_with(HOME_PREFIX) || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
@@ -537,7 +595,15 @@ fn start_with(program: &Path, extra_args: &[String], path_env: &str, parent: &Pa
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
     #[cfg(windows)]
-    std::os::windows::process::CommandExt::creation_flags(&mut command, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    {
+        for name in WINDOWS_ENV {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        command.env("USERPROFILE", home.path()).env("TEMP", home.path()).env("TMP", home.path());
+        std::os::windows::process::CommandExt::creation_flags(&mut command, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
     let mut child = command.spawn().map_err(|error| if error.kind() == std::io::ErrorKind::NotFound { DeviceLoginError::CliMissing } else { DeviceLoginError::Unavailable })?;
     #[cfg(windows)]
     if crate::win::process::tie_to_this_process(&child).is_err() {
@@ -781,6 +847,45 @@ mod tests {
     /// A stand-in for `codex` that prints the real prompt and, unless told
     /// otherwise, writes a login where the real one does. It also records
     /// what it was given, to check the throwaway home.
+    #[cfg(windows)]
+    fn fake_cli(dir: &Path, behaviour: &str) -> PathBuf {
+        const SCRIPT: &str = r#"
+$config = (Get-Content -LiteralPath "$env:CODEX_HOME\config.toml") -join ';'
+$from = if ($env:TERMINALX_P79_FROM_THE_APP) { $env:TERMINALX_P79_FROM_THE_APP } else { 'none' }
+$fields = ($args -join ' '), $env:HOME, $env:CODEX_HOME, $from, $config, 'private', $PID
+[IO.File]::WriteAllText('@RECORD@', ($fields -join '|') + "`n")
+$prompt = [IO.File]::ReadAllBytes('@PROMPT@')
+$out = [Console]::OpenStandardOutput()
+$out.Write($prompt, 0, $prompt.Length)
+$out.Flush()
+switch ('@BEHAVIOUR@') {
+  'expire' { [Console]::Error.WriteLine('Error logging in with device code: device auth timed out after 15 minutes'); exit 1 }
+  'fail' { [Console]::Error.WriteLine('Error logging in with device code: device auth failed with status 500'); exit 1 }
+  'wait' { Start-Sleep -Seconds 30; exit 1 }
+}
+Start-Sleep -Seconds 1
+[IO.File]::WriteAllText("$env:CODEX_HOME\auth.json", '{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"id_token":"@ID@","access_token":"at-1","refresh_token":"rt-1","account_id":"acct_1"},"last_refresh":"2026-10-15T10:00:00Z"}')
+[Console]::Error.WriteLine('Successfully logged in')
+exit 0
+"#;
+        let prompt = dir.join("prompt");
+        std::fs::write(&prompt, PROMPT).unwrap();
+        let id = jwt(json!({ "email": "ada@example.com" }));
+        let body = SCRIPT
+            .replace("@RECORD@", &dir.join("record").display().to_string())
+            .replace("@PROMPT@", &prompt.display().to_string())
+            .replace("@BEHAVIOUR@", behaviour)
+            .replace("@ID@", &id);
+        std::fs::write(dir.join("codex.ps1"), body).unwrap();
+        let launcher = dir.join("codex.cmd");
+        std::fs::write(&launcher, "@\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0codex.ps1\" %*\r\n@exit /b %ERRORLEVEL%\r\n").unwrap();
+        launcher
+    }
+
+    /// A stand-in for `codex` that prints the real prompt and, unless told
+    /// otherwise, writes a login where the real one does. It also records
+    /// what it was given, to check the throwaway home.
+    #[cfg(unix)]
     fn fake_cli(dir: &Path, behaviour: &str) -> PathBuf {
         let script = dir.join("codex");
         let prompt = PROMPT.replace('\u{1b}', "\\033").replace('\n', "\\n").replace('\'', "'\\''");
@@ -841,6 +946,7 @@ echo 'Successfully logged in' >&2
         assert_eq!(Path::new(fields[2]), home.join(".codex"));
         assert_eq!(fields[3], "none", "the app's own environment does not reach the CLI");
         assert!(fields[4].contains("cli_auth_credentials_store = \"file\""));
+        #[cfg(unix)]
         assert_eq!(fields[5], "700", "the throwaway home is private to this user");
         // Canceling after the fact drops what was held.
         login.shutdown();
@@ -918,8 +1024,13 @@ echo 'Successfully logged in' >&2
         let parent = tempfile::tempdir().unwrap();
         assert_eq!(start(Path::new("/nonexistent/codex"), &[], "/usr/bin:/bin", parent.path()).err(), Some(DeviceLoginError::CliMissing));
         let bin = tempfile::tempdir().unwrap();
-        let script = bin.path().join("codex");
-        std::fs::write(&script, "#!/bin/sh\necho 'Error logging in with device code: device code login is not enabled for this Codex server.' >&2\nexit 1\n").unwrap();
+        let script = bin.path().join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+        let body = if cfg!(windows) {
+            "@echo Error logging in with device code: device code login is not enabled for this Codex server. 1>&2\r\n@exit /b 1\r\n"
+        } else {
+            "#!/bin/sh\necho 'Error logging in with device code: device code login is not enabled for this Codex server.' >&2\nexit 1\n"
+        };
+        std::fs::write(&script, body).unwrap();
         #[cfg(unix)]
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         assert_eq!(start(&script, &[], "/usr/bin:/bin", parent.path()).err(), Some(DeviceLoginError::Unavailable));
@@ -934,7 +1045,13 @@ echo 'Successfully logged in' >&2
         std::fs::create_dir(&other).unwrap();
         let old = std::time::SystemTime::now() - CODE_LIFETIME - GRACE - Duration::from_secs(60);
         for dir in [&stale, &other] {
-            std::fs::File::open(dir).unwrap().set_modified(old).unwrap();
+            let mut open = std::fs::OpenOptions::new();
+            #[cfg(unix)]
+            open.read(true);
+            // A folder opens on Windows only with backup semantics; its time needs write-attributes access.
+            #[cfg(windows)]
+            std::os::windows::fs::OpenOptionsExt::custom_flags(std::os::windows::fs::OpenOptionsExt::access_mode(&mut open, 0x100), 0x0200_0000);
+            open.open(dir).unwrap().set_modified(old).unwrap();
         }
         let fresh = parent.path().join(format!("{HOME_PREFIX}new"));
         std::fs::create_dir(&fresh).unwrap();
@@ -1160,7 +1277,10 @@ echo 'Successfully logged in' >&2
     #[test]
     fn a_home_whose_app_is_gone_is_swept_at_once_and_a_live_ones_is_kept() {
         let parent = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
         let mut ended = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        #[cfg(windows)]
+        let mut ended = std::process::Command::new("cmd").args(["/c", "exit"]).spawn().unwrap();
         let dead = ended.id();
         ended.wait().unwrap();
         let orphan = parent.path().join(format!("{HOME_PREFIX}orphan"));

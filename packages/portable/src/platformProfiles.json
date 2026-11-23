@@ -1,0 +1,47 @@
+{
+  "macos": {
+    "osName": "macOS",
+    "icon": "monitor",
+    "computerWord": "Mac",
+    "thisComputer": "this Mac",
+    "ThisComputer": "This Mac",
+    "yourComputer": "your Mac",
+    "secretStore": "macOS Keychain",
+    "secretStoreThe": "the macOS Keychain",
+    "secretStoreShort": "the Keychain",
+    "secretStoreWord": "Keychain",
+    "aboutSettingsPath": "System Settings → General → About",
+    "keyStyle": "symbols",
+    "keyJoiner": ""
+  },
+  "windows": {
+    "osName": "Windows",
+    "icon": "monitor",
+    "computerWord": "PC",
+    "thisComputer": "this PC",
+    "ThisComputer": "This PC",
+    "yourComputer": "your PC",
+    "secretStore": "Windows encrypted store",
+    "secretStoreThe": "the Windows encrypted store",
+    "secretStoreShort": "the Windows encrypted store",
+    "secretStoreWord": "Encrypted store",
+    "aboutSettingsPath": "Settings → System → About",
+    "keyStyle": "words",
+    "keyJoiner": "+"
+  },
+  "linux": {
+    "osName": "Linux",
+    "icon": "server",
+    "computerWord": "computer",
+    "thisComputer": "this computer",
+    "ThisComputer": "This computer",
+    "yourComputer": "your computer",
+    "secretStore": null,
+    "secretStoreThe": "the secret store",
+    "secretStoreShort": "the secret store",
+    "secretStoreWord": "Secret store",
+    "aboutSettingsPath": null,
+    "keyStyle": "words",
+    "keyJoiner": "+"
+  }
+}

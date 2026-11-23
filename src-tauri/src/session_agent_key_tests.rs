@@ -42,6 +42,7 @@ impl Rig {
         // What it ran with, written beside it: its arguments, the saved key's
         // variable and whatever ANTHROPIC_API_KEY it was left.
         std::fs::write(&program, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.ran\"\nprintenv TERMINALX_AGENT_API_KEY > \"$0.key\"\nprintenv ANTHROPIC_API_KEY > \"$0.anthropic\"\nprintf 'ready\\n'\nstty -icanon\nexec cat\n").unwrap();
+        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -106,7 +107,9 @@ fn a_claude_tab_starts_with_the_saved_key_and_keeps_it_until_restarted() {
     assert_eq!(rig.wrote("anthropic").unwrap().trim(), "");
     let argv = rig.wrote("ran").unwrap();
     let settings = argv.lines().skip_while(|line| *line != "--settings").nth(1).expect("--settings is passed");
-    let settings: serde_json::Value = serde_json::from_str(settings).unwrap();
+    // The stand-in's POSIX shell reads a doubled backslash in its arguments as one.
+    let settings = if cfg!(windows) { settings.replace('\\', "\\\\") } else { settings.to_string() };
+    let settings: serde_json::Value = serde_json::from_str(&settings).unwrap();
     assert_eq!(settings["apiKeyHelper"], "/usr/bin/printenv TERMINALX_AGENT_API_KEY");
     assert_eq!(settings["env"]["ANTHROPIC_BASE_URL"], "https://api.anthropic.com");
     assert!(!argv.contains(KEY) && !argv.contains(&KEY[13..40]), "the command line, which other processes can read, holds the key");

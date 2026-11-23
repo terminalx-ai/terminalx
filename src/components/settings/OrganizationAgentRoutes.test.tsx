@@ -132,7 +132,7 @@ describe("your model access in Settings (PRO-18)", () => {
       enterCredential: true,
       saveUnchecked: false,
     });
-    expect(screen.getByTestId("agent-route-notice").textContent).toBe("Reached from this Mac with the credential. It lists gw-opus, gw-sonnet.");
+    expect(screen.getByTestId("agent-route-notice").textContent).toBe("Reached from this computer with the credential. It lists gw-opus, gw-sonnet.");
     expect(within(row("claude")).getByTestId("agent-route-status").textContent).toBe("Saved · not checked from a workspace yet");
     expect(screen.queryByTestId("agent-route-edit")).toBeNull();
   });
@@ -144,14 +144,14 @@ describe("your model access in Settings (PRO-18)", () => {
     fill("codex", "model", "team-model");
     vi.mocked(api.cloudAgentRouteSave).mockResolvedValueOnce({ saved: false, check: { outcome: "failed", code: "unauthorized", httpStatus: 401 }, routes: null });
     fireEvent.click(within(row("codex")).getByTestId("agent-route-save"));
-    await waitFor(() => expect(screen.getByTestId("agent-route-notice").textContent).toBe("Checked from this Mac: the endpoint refused the credential (401). Nothing was saved."));
+    await waitFor(() => expect(screen.getByTestId("agent-route-notice").textContent).toBe("Checked from this computer: the endpoint refused the credential (401). Nothing was saved."));
     expect(screen.getByTestId("agent-route-edit")).toBeTruthy();
-    fireEvent.click(within(row("codex")).getByRole("checkbox", { name: /Save even if this Mac's check fails/ }));
+    fireEvent.click(within(row("codex")).getByRole("checkbox", { name: /Save even if this computer's check fails/ }));
     vi.mocked(api.cloudAgentRouteSave).mockResolvedValueOnce({ saved: true, check: { outcome: "failed", code: "unreachable" }, routes: view() });
     fireEvent.click(within(row("codex")).getByTestId("agent-route-save"));
     await waitFor(() => expect(screen.queryByTestId("agent-route-edit")).toBeNull());
     expect(vi.mocked(api.cloudAgentRouteSave).mock.calls[1]![0]).toMatchObject({ agent: "codex", saveUnchecked: true, enterCredential: true });
-    expect(screen.getByTestId("agent-route-notice").textContent).toBe("Checked from this Mac: the endpoint could not be reached. Saved anyway, as you chose.");
+    expect(screen.getByTestId("agent-route-notice").textContent).toBe("Checked from this computer: the endpoint could not be reached. Saved anyway, as you chose.");
   });
 
   it("keeps the stored credential for a change on the same endpoint, and asks again for another one", async () => {

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use super::*;
@@ -27,12 +28,15 @@ fn launch(entry: &SessionEntry) -> crate::cloud_config::AppendedPrompt {
     crate::session::cli_prompt(entry, &entry.tabs[0], None, None).unwrap()
 }
 
-/// The text that launch hands the agent, in the variable its arguments name.
+/// The text that launch hands the agent: in the variable its arguments name,
+/// or, on Windows, quoted in the arguments themselves.
 fn launch_args(entry: &SessionEntry) -> String {
-    launch(entry).value.unwrap_or_default()
+    let prompt = launch(entry);
+    prompt.value.unwrap_or(prompt.args)
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_hire_makes_the_home_chat_in_the_bot_home_folder() {
     let (_home, sink) = bots_on();
     let mut events = sink.subscribe();
@@ -43,7 +47,7 @@ fn a_hire_makes_the_home_chat_in_the_bot_home_folder() {
     assert!(chat.is_quick(), "a bot's chat belongs to no project");
     assert_eq!(session_bot(chat), Some(BotRef { id: bot.id.clone(), home: true }));
     assert_eq!(chat.title, HOME_CHAT_TITLE);
-    let folder = std::fs::canonicalize(super::super::home(&bot).unwrap()).unwrap();
+    let folder = crate::paths::canonicalize(super::super::home(&bot).unwrap()).unwrap();
     assert_eq!(chat.cwd, folder.to_string_lossy());
     let tab = &chat.tabs[0];
     assert_eq!((tab.harness.as_str(), tab.permission_mode.as_str()), ("claude", "bypassPermissions"));
@@ -65,6 +69,7 @@ fn a_hire_makes_the_home_chat_in_the_bot_home_folder() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_runtime_call_answers_home_chat_and_new_chat_and_hires_with_a_home_chat() {
     let (_home, sink) = bots_on();
     let bot: Bot = serde_json::from_value(super::super::call(sink.as_ref(), "create", &serde_json::json!({"roleTemplateId": "watcher", "name": "Argus"})).unwrap()).unwrap();
@@ -78,6 +83,7 @@ fn the_runtime_call_answers_home_chat_and_new_chat_and_hires_with_a_home_chat() 
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn claude_and_codex_launches_are_given_the_role_the_memory_and_the_rules() {
     let (_home, sink) = bots_on();
     let bot = hire(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -87,7 +93,10 @@ fn claude_and_codex_launches_are_given_the_role_the_memory_and_the_rules() {
 
     let chat = home_chat(sink.as_ref(), &bot.id).unwrap();
     let prompt = launch(&chat);
-    assert_eq!(prompt.args, format!(" --append-system-prompt \"${}\"", crate::cloud_config::APPENDED_PROMPT_ENV), "the text is never on the command line");
+    // A Windows launch goes through PowerShell, which takes no variable before the command: there the text stays quoted on it (`cloud_config::prompt_args_for`).
+    if cfg!(unix) {
+        assert_eq!(prompt.args, format!(" --append-system-prompt \"${}\"", crate::cloud_config::APPENDED_PROMPT_ENV), "the text is never on the command line");
+    }
     let claude = launch_args(&chat);
     for said in ["Plan the work and split it into runs.", "The owner prefers pnpm.", "You are Atlas, a bot with the role CTO", "words count as approval", "# First conversation", "greet them in one sentence, ask at most one question"] {
         assert!(claude.contains(said), "{said:?} is not in {claude}");
@@ -98,9 +107,14 @@ fn claude_and_codex_launches_are_given_the_role_the_memory_and_the_rules() {
     let codex_chat = new_chat(sink.as_ref(), &bot.id).unwrap();
     assert_eq!(codex_chat.tabs[0].harness, "codex");
     let prompt = launch(&codex_chat);
-    assert_eq!(prompt.args, format!(" -c \"developer_instructions=${}\"", crate::cloud_config::APPENDED_PROMPT_ENV));
-    let table: toml::Table = toml::from_str(&format!("developer_instructions={}", prompt.value.unwrap())).unwrap();
-    let text = table["developer_instructions"].as_str().unwrap();
+    let text = if cfg!(unix) {
+        assert_eq!(prompt.args, format!(" -c \"developer_instructions=${}\"", crate::cloud_config::APPENDED_PROMPT_ENV));
+        let table: toml::Table = toml::from_str(&format!("developer_instructions={}", prompt.value.unwrap())).unwrap();
+        table["developer_instructions"].as_str().unwrap().to_owned()
+    } else {
+        // On Windows the instructions are quoted in the arguments themselves.
+        prompt.args
+    };
     assert!(text.contains("Plan the work and split it into runs.") && text.contains("The owner prefers pnpm."), "{text}");
     assert!(!text.contains("# First conversation"), "only the home chat's first conversation is a first run");
 
@@ -111,6 +125,7 @@ fn claude_and_codex_launches_are_given_the_role_the_memory_and_the_rules() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn an_edited_role_reaches_the_next_conversation() {
     let (_home, sink) = bots_on();
     let bot = hire(sink.as_ref(), "watcher", "Argus").unwrap();
@@ -125,6 +140,7 @@ fn an_edited_role_reaches_the_next_conversation() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn only_the_newest_two_hundred_lines_of_memory_are_given() {
     let (_home, sink) = bots_on();
     let bot = hire(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -151,6 +167,7 @@ fn only_the_newest_two_hundred_lines_of_memory_are_given() {
 /// agent is told is in the bot's history; and with memory off it is given
 /// no notes and told to keep none.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_launch_records_outside_edits_and_honours_memory_off() {
     let (_home, sink) = bots_on();
     let bot = hire(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -176,6 +193,7 @@ fn a_launch_records_outside_edits_and_honours_memory_off() {
 /// the files hold and however long the bot's names are, and so every launch,
 /// Claude Code's or Codex's, fits in one Linux argument (PRO-489).
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn role_memory_and_rules_fit_one_argument_whatever_the_files_hold() {
     let (_home, sink) = bots_on();
     let mut bot = hire(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -218,6 +236,7 @@ fn role_memory_and_rules_fit_one_argument_whatever_the_files_hold() {
 /// and never as a rule: no closing tag ends the block, the fixed rules come
 /// after it, and nothing in it can make a launch fail or hang.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn memory_is_framed_capped_and_read_safely() {
     let (_home, sink) = bots_on();
     let bot = hire(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -277,6 +296,7 @@ fn memory_is_framed_capped_and_read_safely() {
 /// The limit a session working for a bot is held to: its access, plan while
 /// paused or gone, and a session it started is held the same.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bots_access_limits_its_sessions_modes() {
     let (_home, sink) = bots_on();
     let bot = hire(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -330,6 +350,7 @@ fn a_bots_access_limits_its_sessions_modes() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn access_maps_to_the_permission_mode_and_the_rules() {
     assert_eq!(permission_mode(&BotAccess::Full), "bypassPermissions");
     assert_eq!(permission_mode(&BotAccess::AskOutward), "manual");
@@ -357,6 +378,7 @@ fn access_maps_to_the_permission_mode_and_the_rules() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_paused_bot_still_answers_and_is_told_it_is_paused() {
     let (_home, sink) = bots_on();
     let bot = hire(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -369,6 +391,7 @@ fn a_paused_bot_still_answers_and_is_told_it_is_paused() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn nothing_is_added_outside_a_bot_chat_or_while_bots_are_off() {
     let (_home, sink) = bots_on();
     let bot = hire(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -431,6 +454,7 @@ fn a_reference_this_build_cannot_read_is_none() {
 /// bot's rules (ACP, OpenCode), is refused at launch as a chat on that agent
 /// is; once its bot is gone it is an ordinary session (PRO-468 review 5).
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bots_session_on_an_agent_it_cannot_reach_is_refused_at_launch() {
     let (_home, sink) = bots_on();
     let bot = hire(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -475,6 +499,7 @@ fn a_launch_note_leaves_out_a_section_that_would_not_fit() {
 /// prompts, and so is a bot's chat whose workspace prompts were already too
 /// long without the bot's note; a bot's note that takes it past the limit is refused.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn only_what_bots_adds_is_held_to_the_launch_limit() {
     let (_home, sink) = bots_on();
     let bot = hire(sink.as_ref(), "cto", "Atlas").unwrap();

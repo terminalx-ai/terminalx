@@ -1,5 +1,6 @@
 import { Monitor, Server } from "@/icons";
 import { cn } from "@/lib/cn";
+import { platformFamily, profileFor } from "@/lib/platform";
 import type { MachineOs } from "@/types/machines";
 
 export const sectionLabel = "text-[12px] font-medium uppercase tracking-[.08em] text-faint";
@@ -28,11 +29,9 @@ export function FingerprintBox({ fingerprint, caption, className }: { fingerprin
   );
 }
 
-const OS_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux", windows: "Windows" };
-
-/** "macOS 26.1". */
+/** "macOS 26.1". A family this app does not know is shown by its own name. */
 export function osLabel(os: MachineOs): string {
-  const name = OS_NAMES[os.family] ?? os.family;
+  const name = platformFamily(os.family) ? profileFor(os.family).osName : os.family;
   return os.version ? `${name} ${os.version}` : name;
 }
 
@@ -42,13 +41,14 @@ export function machineSummary(os: MachineOs, version: string): string {
 }
 
 /**
- * A server for Linux, a monitor for a Mac: the one icon a computer has in
- * Settings, the dialogs, the sidebar and the machine's view (21.01, 21.02).
+ * The icon each system's profile names (a server for Linux, a monitor for a
+ * Mac or a PC): the one icon a computer has in Settings, the dialogs, the
+ * sidebar and the machine's view (21.01, 21.02).
  */
 export function PlatformIcon({ platform, className }: { platform: string | null; className?: string }) {
-  const linux = platform === "linux";
-  const Icon = linux ? Server : Monitor;
-  return <Icon className={className} aria-hidden data-icon={linux ? "server" : "monitor"} />;
+  const icon = platformFamily(platform) ? profileFor(platform).icon : "monitor";
+  const Icon = icon === "server" ? Server : Monitor;
+  return <Icon className={className} aria-hidden data-icon={icon} />;
 }
 
 /** "14:02": the 24-hour clock the screens use (21.02, 21.09), whatever the reader's locale. */

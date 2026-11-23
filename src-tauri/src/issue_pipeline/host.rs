@@ -827,6 +827,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "core.autocrlf", "false"]);
         std::fs::write(root.join("README.md"), "one\n").unwrap();
         git(root, &["add", "."]);
         git(root, &["commit", "-q", "-m", "first"]);

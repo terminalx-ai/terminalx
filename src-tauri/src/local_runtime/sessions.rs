@@ -58,7 +58,7 @@ impl Sessions {
     pub fn switch_account(&self, session: &str, tab: &str, account: &str) -> Result<bool> {
         match self.tab::<bool>("switchAccount", session, tab, json!({"account": account})) {
             Ok(restarted) => Ok(restarted),
-            Err(error) if unsupported(&error) => anyhow::bail!("{OLDER_RUNTIME}"),
+            Err(error) if unsupported(&error) => anyhow::bail!("{}", crate::platform_profile::localize(OLDER_RUNTIME)),
             Err(error) => Err(error),
         }
     }

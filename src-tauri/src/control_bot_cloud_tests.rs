@@ -146,6 +146,7 @@ impl Fixture {
 /// Done when: a full-access bot session creates a cloud session, prompts it
 /// and resumes it; the cloud agent runs in `bypassPermissions`.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_full_access_bot_creates_prompts_and_resumes_a_cloud_session_in_bypass() {
     let f = Fixture::new();
     let (atlas, who) = f.hire("Atlas", BotAccess::Full);
@@ -182,6 +183,7 @@ fn a_full_access_bot_creates_prompts_and_resumes_a_cloud_session_in_bypass() {
 /// Done when: a bot with ask-outward or read-and-report access gets a cloud
 /// session no wider than its local limit; asking for a wider mode does not widen it.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bot_with_less_access_gets_a_cloud_session_no_wider_than_its_local_limit() {
     let f = Fixture::new();
     for (name, access, limit) in [("Iris", BotAccess::AskOutward, "manual"), ("Argus", BotAccess::ReadReport, "plan")] {
@@ -233,6 +235,7 @@ fn a_bot_with_less_access_gets_a_cloud_session_no_wider_than_its_local_limit() {
 /// A new workspace answers before its first session exists: that session is
 /// the bot's by the workspace's launch, which the window names.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_first_session_of_a_workspace_a_bot_created_is_the_bots() {
     let f = Fixture::new();
     let (iris, who) = f.hire("Iris", BotAccess::AskOutward);
@@ -258,6 +261,7 @@ fn the_first_session_of_a_workspace_a_bot_created_is_the_bots() {
 
 /// Done when: a paused bot is still refused `cloud.*` with `forbidden`.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_paused_bot_is_refused_cloud_work_with_forbidden() {
     let f = Fixture::new();
     let (atlas, who) = f.hire("Atlas", BotAccess::Full);
@@ -283,6 +287,7 @@ fn a_paused_bot_is_refused_cloud_work_with_forbidden() {
 
 /// Done when: lowering a bot's access narrows the mode its existing cloud session resumes in.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn lowering_a_bots_access_narrows_the_mode_its_cloud_session_resumes_in() {
     let f = Fixture::new();
     let (atlas, who) = f.hire("Atlas", BotAccess::Full);
@@ -313,6 +318,7 @@ fn lowering_a_bots_access_narrows_the_mode_its_cloud_session_resumes_in() {
 
 /// What stays refused, and what Bots being off leaves alone.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn another_computer_and_an_issue_pipeline_stay_refused_and_bots_off_changes_nothing() {
     let f = Fixture::new();
     let (atlas, who) = f.hire("Atlas", BotAccess::Full);

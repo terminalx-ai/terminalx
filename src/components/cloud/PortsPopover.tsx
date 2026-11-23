@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { thisComputer } from "@/lib/platform";
 import { ChevronsRight, PlugZap, Plus } from "@/icons";
 import { Switch } from "@/components/ui/controls";
 import { AUTO_FORWARD_SKIPPED } from "@/lib/api";
@@ -25,7 +26,7 @@ export function PortsPopover(props: PortsInputs) {
       <div className="flex h-11 items-center gap-2.5 border-b border-hairline px-3.5">
         <PlugZap className="size-[15px] shrink-0 text-add" aria-hidden />
         <span className="font-medium text-foreground">Forward ports</span>
-        <span className="text-xs text-faint">to this Mac</span>
+        <span className="text-xs text-faint">to {thisComputer}</span>
         {switches && (
           <span className="ml-auto flex items-center">
             <Switch aria-label="Forwarding" checked={model.settings.enabled} onCheckedChange={(enabled) => model.setSettings({ enabled })} />

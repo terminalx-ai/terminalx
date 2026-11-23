@@ -62,7 +62,7 @@
       "additionalProperties": false,
       "properties": {
         "recoveryIncidents": {
-          "description": "When a session warns that it needs attention, TerminalX notes on this Mac when the warning was raised, how long it was on screen, what you pressed and what became of the turn, so a false warning can be reported with evidence. Only labels, counts and times are kept: never a message, code, a command's output or a file path. Export it to attach to a report; sessions are named by codes that change with every export.",
+          "description": "When a session warns that it needs attention, TerminalX notes on this computer when the warning was raised, how long it was on screen, what you pressed and what became of the turn, so a false warning can be reported with evidence. Only labels, counts and times are kept: never a message, code, a command's output or a file path. Export it to attach to a report; sessions are named by codes that change with every export.",
           "type": "boolean"
         }
       },
@@ -467,6 +467,10 @@
     "preferences": {
       "additionalProperties": false,
       "properties": {
+        "aiEditor": {
+          "description": "A button in the composer that fixes, restyles or translates your draft with your Claude Code login. Your text is sent only when you ask, and nothing changes until you apply it.",
+          "type": "boolean"
+        },
         "animations": {
           "description": "The raccoon forages in an empty session and runs along the composer while an agent is working. Off hides the raccoon only; working marks keep moving unless your system's Reduce motion is on.",
           "type": "boolean"
@@ -692,7 +696,7 @@
       "additionalProperties": false,
       "properties": {
         "shareWithTeam": {
-          "description": "Teammates in an organization that connected a repository see which of its issues you have a session on: your name, the session’s title and branch, and whether an agent is working. Your other machines always see it, with this Mac’s name. Prompts, transcripts, paths and code never leave this Mac.",
+          "description": "Teammates in an organization that connected a repository see which of its issues you have a session on: your name, the session’s title and branch, and whether an agent is working. Your other machines always see it, with this computer’s name. Prompts, transcripts, paths and code never leave this computer.",
           "type": "boolean"
         }
       },

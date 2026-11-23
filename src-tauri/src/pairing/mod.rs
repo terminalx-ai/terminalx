@@ -917,7 +917,7 @@ impl PairingManager {
                 .await;
         if !matches!(bind, Ok(Ok(()))) || !self.is_epoch(epoch) {
             if let Ok(Err(error)) = bind {
-                self.set_error(format!("Could not bind this Mac: {error:#}"));
+                self.set_error(crate::platform_profile::localize(&format!("Could not bind this Mac: {error:#}")));
             }
             return;
         }
@@ -1087,7 +1087,7 @@ impl PairingManager {
                         manager.emit();
                         break;
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+                    Err(error) if crate::listen::port_taken(&error) => continue,
                     Err(error) => {
                         log::debug!("nearby pairing listener retry failed: {error}");
                         break;
@@ -1170,7 +1170,7 @@ impl PairingManager {
             return;
         }
         if let Err(error) = self.ensure_direct_listener() {
-            if error.kind() == std::io::ErrorKind::AddrInUse {
+            if crate::listen::port_taken(&error) {
                 self.retry_direct_listener();
             } else {
                 log::debug!("the phone listener is closed: {error}");
@@ -1414,7 +1414,7 @@ impl PairingManager {
             let _ = send_encrypted_text(&mut socket, &mut session, &pairing_refused(reason).to_string()).await;
             let _ = socket.close(None).await;
             return Err(anyhow!(diagnostics::Category::Authentication)
-                .context(format!("the pairing was refused on this Mac ({reason})")));
+                .context(crate::platform_profile::localize(&format!("the pairing was refused on this Mac ({reason})"))));
         }
         self.registry
             .touch(&device.id, &session.client_public_key_b64, &fingerprint, transport)?;
@@ -1989,7 +1989,7 @@ impl PairingManager {
     /// first, so it stops reconnecting until the person reconnects it.
     pub fn disconnect_device(&self, device_id: &str) -> Result<PairingStatus> {
         if !self.registry.list()?.iter().any(|device| device.id == device_id) {
-            bail!("That device is not paired with this Mac.");
+            bail!("{}", crate::platform_profile::localize("That device is not paired with this Mac."));
         }
         let removed = self.connections.lock().unwrap().remove(device_id);
         for connection in removed.into_iter().flatten() {

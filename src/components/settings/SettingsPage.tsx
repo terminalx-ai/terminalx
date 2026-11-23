@@ -1,4 +1,5 @@
 import { SettingsDescription } from "./SettingsDescription";
+import { bindingText } from "@/lib/shortcuts";
 import { SettingsLeaveBoundaryContext, SettingsLeaveGuardContext, useSettingsLeaveBoundary } from "./settingsLeaveGuard";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { settingsSectionOffered } from "@/lib/settingsSections";
@@ -431,7 +432,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
             }}
             className="h-7 min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-faint"
           />
-          {!query && <kbd className="shrink-0 rounded border border-hairline px-1 font-sans text-[12px] leading-4 text-faint">⌘F</kbd>}
+          {!query && <kbd className="shrink-0 rounded border border-hairline px-1 font-sans text-[12px] leading-4 text-faint">{bindingText("mod+f")}</kbd>}
           {query && <Button variant="ghost" size="icon-sm" aria-label="Clear settings search" className="-mr-1.5 size-6" onClick={() => { changeQuery(""); inputRef.current?.focus(); }}><X /></Button>}
           </div>
         <nav aria-label="Settings sections" className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-2 pb-3 pt-2 scrollbar-thin">

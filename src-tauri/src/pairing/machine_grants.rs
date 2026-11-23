@@ -155,7 +155,7 @@ impl PairingManager {
     /// restarted for it: Settings → Machines offers the restart (PRO-486).
     fn runtime_offer(&self, grant: &AccountPairingGrant, generation: u64) -> Result<AccountPairingEnvelope> {
         if !self.machine_operating() {
-            bail!("other computers may not operate this Mac now");
+            bail!("{}", crate::platform_profile::localize("other computers may not operate this Mac now"));
         }
         let runtime = self.runtime.lock().unwrap().clone().context("the local runtime is unavailable")?;
         let created = runtime.machine_host_unattended(wire::CREATE_CODE, json!({ "grantRequestId": grant.grant_request_id }))?;
@@ -229,7 +229,7 @@ pub(super) fn machine_code_envelope(
 ) -> Result<AccountPairingEnvelope> {
     let decoded = MachineCode::decode(code).context("the runtime's code")?;
     if general_purpose::STANDARD.decode(&decoded.public_key_b64).ok().as_deref() != Some(host_public.as_slice()) {
-        bail!("the runtime's code is for another host key than this Mac's");
+        bail!("{}", crate::platform_profile::localize("the runtime's code is for another host key than this Mac's"));
     }
     let body = code.trim().strip_prefix(wire::CODE_PREFIX).context("the runtime's code has no prefix")?;
     let plaintext = general_purpose::URL_SAFE_NO_PAD.decode(body)?;

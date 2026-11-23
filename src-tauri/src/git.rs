@@ -34,8 +34,14 @@ pub(crate) fn git() -> Command {
     // Paths past Windows' 260-character limit: a checkpoint's ref under
     // `.git/refs` alone is about 130 of them, so a repository a little deep
     // in the disk could not be checkpointed or reset without this.
+    // Added after any configuration this process was itself given that way.
     #[cfg(windows)]
-    c.env("GIT_CONFIG_COUNT", "1").env("GIT_CONFIG_KEY_0", "core.longpaths").env("GIT_CONFIG_VALUE_0", "true");
+    {
+        let given = std::env::var("GIT_CONFIG_COUNT").ok().and_then(|count| count.parse::<usize>().ok()).unwrap_or(0);
+        c.env("GIT_CONFIG_COUNT", (given + 1).to_string())
+            .env(format!("GIT_CONFIG_KEY_{given}"), "core.longpaths")
+            .env(format!("GIT_CONFIG_VALUE_{given}"), "true");
+    }
     c
 }
 
@@ -62,6 +68,7 @@ pub(crate) const HOOKLESS: &[&str] = &[
 ];
 
 /// The subcommand of `args`, past the options before it.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn subcommand<'a>(args: &[&'a str]) -> Option<&'a str> {
     let mut args = args.iter().copied();
     while let Some(arg) = args.next() {
@@ -158,6 +165,8 @@ fn bound_at(cwd: &Path) -> Option<(std::os::unix::io::RawFd, PathBuf)> {
 /// A local Git command in `cwd`, for a command whose arguments are `args`:
 /// started in a bound checkout when `cwd` names one (see `bind`).
 pub(crate) fn git_in(cwd: &Path, args: &[&str]) -> Command {
+    #[cfg(not(unix))]
+    let _ = args;
     let mut command = git();
     #[cfg(unix)]
     if let Some((directory, git_dir)) = bound_at(cwd) {
@@ -335,7 +344,24 @@ pub(crate) fn transfer_output(cwd: &Path, args: &[&str], timeout: std::time::Dur
 /// at expiry its whole process group is killed, even if the direct child has
 /// already exited. For a call whose complete answer is needed.
 pub(crate) fn output_within(command: Command, timeout: std::time::Duration) -> std::result::Result<String, RunError> {
-    let out = capture_within(command, timeout).map_err(|error| match error.kind() {
+    answer_of(capture_within(command, timeout))
+}
+
+/// [`output_within`] for a one-shot program given `input` on stdin, so long or
+/// private text is never on a command line. On Windows it runs without a
+/// console, and everything it started ends with it.
+pub(crate) fn output_feeding(command: Command, input: Vec<u8>, timeout: std::time::Duration) -> std::result::Result<String, RunError> {
+    answer_of(capture(command, Some(input), None, timeout))
+}
+
+/// [`output_feeding`] that also ends, with `ErrorKind::Interrupted`, once `cancel` is set.
+#[cfg(feature = "desktop")]
+pub(crate) fn output_feeding_until(command: Command, input: Vec<u8>, timeout: std::time::Duration, cancel: &std::sync::atomic::AtomicBool) -> std::result::Result<String, RunError> {
+    answer_of(capture(command, Some(input), Some(cancel), timeout))
+}
+
+fn answer_of(captured: std::io::Result<std::process::Output>) -> std::result::Result<String, RunError> {
+    let out = captured.map_err(|error| match error.kind() {
         std::io::ErrorKind::TimedOut => RunError::TimedOut,
         _ => RunError::Spawn(error),
     })?;
@@ -352,13 +378,34 @@ pub(crate) fn output_within(command: Command, timeout: std::time::Duration) -> s
 /// runs, so an answer larger than the pipe buffer never blocks it. A deadline
 /// that passes, draining included, is an `ErrorKind::TimedOut` error, and the
 /// whole process group has been killed.
-pub(crate) fn capture_within(mut command: Command, timeout: std::time::Duration) -> std::io::Result<std::process::Output> {
-    use std::io::Read;
+pub(crate) fn capture_within(command: Command, timeout: std::time::Duration) -> std::io::Result<std::process::Output> {
+    capture(command, None, None, timeout)
+}
+
+fn capture(mut command: Command, input: Option<Vec<u8>>, cancel: Option<&std::sync::atomic::AtomicBool>, timeout: std::time::Duration) -> std::io::Result<std::process::Output> {
+    use std::io::{Read, Write};
+    let cancelled = || cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst));
     use std::process::Stdio;
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    #[cfg(windows)]
+    if input.is_some() {
+        std::os::windows::process::CommandExt::creation_flags(&mut command, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
     let mut child = command.spawn()?;
+    // Only a one-shot program: a job would also end a daemon git left running.
+    #[cfg(windows)]
+    let tied = input.is_some() && crate::win::process::tie_to_this_process(&child).is_ok();
+    if let Some(bytes) = input {
+        let stdin = child.stdin.take();
+        // Beside the reads: the program may answer before it has read all of this.
+        std::thread::spawn(move || {
+            if let Some(mut stdin) = stdin {
+                let _ = stdin.write_all(&bytes);
+            }
+        });
+    }
     // Read as it comes, so a full pipe never blocks the child.
     let drain = |pipe: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
@@ -376,23 +423,32 @@ pub(crate) fn capture_within(mut command: Command, timeout: std::time::Duration)
         match child.try_wait() {
             // A wrapper can exit while a background child retains its pipes.
             // Do not join a reader until EOF, or accept output after expiry.
-            Ok(Some(status)) if stdout.is_finished() && stderr.is_finished() && std::time::Instant::now() < deadline => break status,
-            Ok(_) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Ok(Some(status)) if stdout.is_finished() && stderr.is_finished() && std::time::Instant::now() < deadline && !cancelled() => break status,
+            Ok(_) if std::time::Instant::now() < deadline && !cancelled() => std::thread::sleep(std::time::Duration::from_millis(20)),
             ended => {
                 #[cfg(unix)]
                 // SAFETY: signals the process group this function just created.
                 unsafe {
                     libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
                 }
+                #[cfg(windows)]
+                if tied {
+                    crate::win::process::kill_tree(child.id());
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(match ended {
                     Err(error) => error,
+                    _ if cancelled() => std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"),
                     _ => std::io::Error::new(std::io::ErrorKind::TimedOut, format!("no answer within {} ms", timeout.as_millis())),
                 });
             }
         }
     };
+    #[cfg(windows)]
+    if tied {
+        crate::win::process::kill_tree(child.id());
+    }
     Ok(std::process::Output { status, stdout: stdout.join().unwrap_or_default(), stderr: stderr.join().unwrap_or_default() })
 }
 
@@ -566,7 +622,18 @@ pub fn list_branches(cwd: &Path) -> Result<Vec<BranchInfo>> {
 /// empty keeps this fast: the copy carries git's stat cache. Only paths under
 /// cwd are refreshed; checkpoint callers explicitly pass the checkout root.
 pub fn snapshot_tree(cwd: &Path) -> Result<String> {
-    snapshot_tree_including(cwd, &[])
+    Ok(snapshot_files(cwd, &[], false)?.tree)
+}
+
+/// A checkpoint's snapshot: the tree, and the exact bytes of files it cannot
+/// give back. Keeping them is best effort: without them it is still a snapshot,
+/// restored as git writes it.
+pub fn exact_snapshot(cwd: &Path) -> Result<checkpoints::bytes::Snapshot> {
+    snapshot_files(cwd, &[], true)
+}
+
+fn snapshot_tree_including(cwd: &Path, paths: &[String]) -> Result<checkpoints::bytes::Snapshot> {
+    snapshot_files(cwd, paths, true)
 }
 
 /// Return staged and unstaged changes. During a conflict, keep the checkout
@@ -602,7 +669,7 @@ pub fn working_change_sets(
 }
 
 /// Include a checkpoint's paths even if later edits added them to .gitignore.
-fn snapshot_tree_including(cwd: &Path, paths: &[String]) -> Result<String> {
+fn snapshot_files(cwd: &Path, paths: &[String], keep_bytes: bool) -> Result<checkpoints::bytes::Snapshot> {
     let index = path_line(&run(cwd, &["rev-parse", "--git-path", "index"])?).to_string();
     let index_path = if Path::new(&index).is_absolute() { PathBuf::from(&index) } else { cwd.join(&index) };
     let tmp = std::env::temp_dir().join(format!("raccoon-index-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
@@ -640,7 +707,16 @@ fn snapshot_tree_including(cwd: &Path, paths: &[String]) -> Result<String> {
         if !o.status.success() {
             bail!("write-tree: {}", String::from_utf8_lossy(&o.stderr));
         }
-        Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
+        let tree = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        let kept = if keep_bytes {
+            checkpoints::bytes::record(cwd, &tmp).unwrap_or_else(|error| {
+                log::warn!("keep exact line endings for a checkpoint: {error:#}");
+                None
+            })
+        } else {
+            None
+        };
+        Ok(checkpoints::bytes::Snapshot::new(tree, kept))
     })();
     let _ = std::fs::remove_file(&tmp);
     result
@@ -2286,6 +2362,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
         run(p, &["init", "-q", "-b", "main"]).unwrap();
+        run(p, &["config", "core.autocrlf", "false"]).unwrap();
         run(p, &["config", "user.email", "t@example.com"]).unwrap();
         run(p, &["config", "user.name", "T"]).unwrap();
         std::fs::write(p.join("a.txt"), "hello\n").unwrap();

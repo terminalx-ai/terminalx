@@ -540,7 +540,7 @@ impl MobileRuntime {
                     Some(failure) => (NoticeKind::Failed, text.unwrap_or_else(|| failure.message().to_string()), None, None),
                     // Ended well, or stopped by a person: finished, as every
                     // turn's end was before notices had kinds.
-                    None => (NoticeKind::Finished, text.unwrap_or_else(|| "An agent turn finished on your Mac.".into()), None, None),
+                    None => (NoticeKind::Finished, text.unwrap_or_else(|| crate::platform_profile::localize("An agent turn finished on your Mac.")), None, None),
                 }
             }
             // An error mid-turn is no notice of its own: the turn it ends says
@@ -1167,7 +1167,7 @@ pub(crate) const OUTDATED: &str = "TerminalX on your Mac needs updating or resta
 fn outdated(error: anyhow::Error) -> anyhow::Error {
     let unknown = error.chain().any(|cause| cause.downcast_ref::<crate::local_runtime::client::Refused>()
         .is_some_and(|refused| refused.message == crate::local_runtime::mobile::UNSUPPORTED));
-    if unknown { anyhow!(OUTDATED) } else { error }
+    if unknown { anyhow!("{}", crate::platform_profile::localize(OUTDATED)) } else { error }
 }
 
 /// One tab, for a control that takes nothing else.
@@ -1189,7 +1189,7 @@ const MAX_PROMPT_IMAGE_BYTES: usize = 7 * 1024 * 1024;
 fn prompt_image(params: &PromptImageParams) -> Result<Value> {
     validate_session_tab(&params.session_id, &params.tab_id)?;
     let folder = store::attachments_dir(&params.session_id)?.canonical()?;
-    let path = Path::new(&params.path).canonical().map_err(|_| anyhow!("The image is no longer on the Mac."))?;
+    let path = Path::new(&params.path).canonical().map_err(|_| anyhow!("{}", crate::platform_profile::localize("The image is no longer on the Mac.")))?;
     if !path.starts_with(&folder) {
         bail!("That image is not one of this session's attachments.");
     }
@@ -1203,7 +1203,7 @@ fn prompt_image(params: &PromptImageParams) -> Result<Value> {
     };
     let size = std::fs::metadata(&path)?.len() as usize;
     if size > MAX_PROMPT_IMAGE_BYTES {
-        bail!("The image is {}, too large to show on the phone. Open it on your Mac.", megabytes(size));
+        bail!("{}", crate::platform_profile::localize(&format!("The image is {}, too large to show on the phone. Open it on your Mac.", megabytes(size))));
     }
     Ok(json!({ "mediaType": media_type, "data": general_purpose::STANDARD.encode(std::fs::read(&path)?) }))
 }
@@ -2104,7 +2104,7 @@ fn settle(sent: OwnerSend) -> Result<Reply> {
     // The first copy is being typed to the agent right now. The draft keeps
     // its id, so the next try learns whether it arrived.
     if sent.repeat == Some(Repeat::Delivering) {
-        bail!(STILL_SENDING);
+        bail!("{}", crate::platform_profile::localize(STILL_SENDING));
     }
     let reply = json!({ "status": "sent", "queued": sent.outcome.queued });
     // A queued copy is dropped if the connection it came over closes before
@@ -2277,7 +2277,7 @@ fn create_session(manager: &PhoneHost, connection: &MobileConnection, params: Se
     let account = crate::session_ops::requested_account(params.account.as_deref()).map_err(|error| anyhow::anyhow!(error))?;
     // A runtime that does not start sessions on an account would start this one on the defaults instead.
     if account.is_some() && !serves_accounts(connection.owner.build()) {
-        bail!(OUTDATED);
+        bail!("{}", crate::platform_profile::localize(OUTDATED));
     }
     let mut request = json!({"quick": params.quick, "projectId": params.project_id, "useWorktree": params.use_worktree,
         "agent": params.agent, "model": params.model, "effort": params.effort, "mode": params.mode,
@@ -2473,7 +2473,7 @@ fn posted_before<'a>(notes: &'a [ChatNote], note: &ChatNote) -> Result<Option<&'
         return Ok(None);
     };
     if earlier.body != note.body {
-        bail!(ID_REUSED);
+        bail!("{}", crate::platform_profile::localize(ID_REUSED));
     }
     Ok(Some(earlier))
 }
@@ -4157,8 +4157,8 @@ mod tests {
     fn a_runtime_refusing_an_unknown_operation_says_the_mac_needs_updating() {
         use crate::local_runtime::client::Refused;
         let refused = |message: &str| anyhow::Error::from(Refused { code: "internal".into(), message: message.into() });
-        assert_eq!(outdated(refused(crate::local_runtime::mobile::UNSUPPORTED)).to_string(), OUTDATED);
-        assert_eq!(outdated(refused(crate::local_runtime::mobile::UNSUPPORTED).context("open the terminal")).to_string(), OUTDATED);
+        assert_eq!(outdated(refused(crate::local_runtime::mobile::UNSUPPORTED)).to_string(), crate::platform_profile::localize(OUTDATED));
+        assert_eq!(outdated(refused(crate::local_runtime::mobile::UNSUPPORTED).context("open the terminal")).to_string(), crate::platform_profile::localize(OUTDATED));
         assert_eq!(outdated(refused("The tab is not running.")).to_string(), "internal: The tab is not running.", "any other refusal is left as it is");
         assert_eq!(outdated(anyhow!("timed out")).to_string(), "timed out");
     }
@@ -4258,7 +4258,7 @@ mod tests {
         assert_eq!(create_once(&ids, Some("draft-0001"), "request".into(), create).unwrap(), first);
         assert_eq!(made.get(), 1);
         // The id with another request is refused, and makes nothing.
-        assert_eq!(create_once(&ids, Some("draft-0001"), "another request".into(), create).unwrap_err().to_string(), ID_REUSED);
+        assert_eq!(create_once(&ids, Some("draft-0001"), "another request".into(), create).unwrap_err().to_string(), crate::platform_profile::localize(ID_REUSED));
         assert_eq!(made.get(), 1);
         // A create that failed made nothing to answer with: the next try makes one.
         assert!(create_once(&ids, Some("draft-0002"), "request".into(), || bail!("Codex is not installed on this Mac.")).is_err());
@@ -4307,7 +4307,7 @@ mod tests {
         assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": false, "events": [] })).unwrap(), sent);
         assert_eq!(*calls.borrow(), vec![("tab".into(), "Ship it".into(), 1, Some("draft-0001".into()))]);
         // The same id with another message is refused before the runtime sees it.
-        assert_eq!(sends(&ids, &calls, "Ship it now", Some("draft-0001"), json!({ "queued": false, "events": [] })).unwrap_err().to_string(), ID_REUSED);
+        assert_eq!(sends(&ids, &calls, "Ship it now", Some("draft-0001"), json!({ "queued": false, "events": [] })).unwrap_err().to_string(), crate::platform_profile::localize(ID_REUSED));
         // Without an id (an older phone) every send goes through.
         sends(&ids, &calls, "Ship it", None, json!({ "queued": false, "events": [] })).unwrap();
         sends(&ids, &calls, "Ship it", None, json!({ "queued": false, "events": [] })).unwrap();
@@ -4329,7 +4329,7 @@ mod tests {
         // before #675, never lost.
         assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": true, "events": [] })).unwrap(), queued);
         // Being typed to the agent right now: not known yet, so not sent.
-        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": true, "events": [], "repeat": "delivering" })).unwrap_err().to_string(), STILL_SENDING);
+        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": true, "events": [], "repeat": "delivering" })).unwrap_err().to_string(), crate::platform_profile::localize(STILL_SENDING));
         // Delivered: that settles it, and later repeats are answered here.
         let sent = json!({ "status": "sent", "queued": false });
         assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": false, "events": [], "repeat": "delivered" })).unwrap(), sent);
@@ -4365,7 +4365,7 @@ mod tests {
         assert!(add_note(&lock, "worktree", note("note-5", "Deploying at 5", None)).unwrap().1);
         assert!(add_note(&lock, "elsewhere", note("note-6", "Deploying at 5", Some("draft-1"))).unwrap().1);
         // The id with other text: refused, and nothing written.
-        assert_eq!(add_note(&lock, "worktree", note("note-7", "Deploying at 6", Some("draft-1"))).unwrap_err().to_string(), ID_REUSED);
+        assert_eq!(add_note(&lock, "worktree", note("note-7", "Deploying at 6", Some("draft-1"))).unwrap_err().to_string(), crate::platform_profile::localize(ID_REUSED));
         assert_eq!(saved(), vec!["note-1", "note-3", "note-4", "note-5"]);
     }
 
@@ -4393,7 +4393,7 @@ mod tests {
         assert!(posted_before(&notes, &note("note-4", "Deploying at 5", None)).unwrap().is_none());
         // The same id with other text is refused, not answered with this note.
         let error = posted_before(&notes, &note("note-5", "Deploying at 6", Some("draft-1"))).unwrap_err();
-        assert_eq!(error.to_string(), ID_REUSED);
+        assert_eq!(error.to_string(), crate::platform_profile::localize(ID_REUSED));
 
         // Older phones list notes too; one posted without an id carries no new key.
         assert_eq!(serde_json::to_value(&notes[0]).unwrap().get("clientMessageId"), None);
@@ -4522,7 +4522,7 @@ mod tests {
         let aborted_signed_out = notice(&runtime, ended(TurnStatus::Aborted, None, true)).unwrap();
         assert_eq!(aborted_signed_out.kind, NoticeKind::Failed, "aborted by an error");
         let stopped = notice(&runtime, ended(TurnStatus::Aborted, None, false)).unwrap();
-        assert_eq!((stopped.kind, stopped.body.as_str()), (NoticeKind::Finished, "An agent turn finished on your Mac."), "stopped by the person: a turn's end, as an old phone was always told");
+        assert_eq!((stopped.kind, stopped.body.as_str()), (NoticeKind::Finished, crate::platform_profile::localize("An agent turn finished on your Mac.").as_str()), "stopped by the person: a turn's end, as an old phone was always told");
         // An error mid-turn is told by the turn it ends, which an abort is down to.
         assert!(notice(&runtime, Payload::Error { message: "Connection write failed: broken pipe".into(), fatal: false, detail: None }).is_none());
         let errored = notice(&runtime, ended(TurnStatus::Aborted, None, false)).unwrap();
@@ -4827,6 +4827,7 @@ mod tests {
 
     /// PRO-479: one notice per question asked since the app started, with what the phone answers it by.
     #[test]
+    #[cfg_attr(windows, ignore = "Bots are off on Windows")]
     fn each_new_bot_question_is_noticed_once() {
         let _home = crate::store::temp_home();
         let mut settings = crate::store::settings::load();

@@ -814,9 +814,9 @@ pub async fn cloud_agent_login_connect(
             // account, and nothing is uploaded unless its own button is pressed. Every time.
             let expires = local_time(login.expires_at_ms);
             let agent = agent_label(provider);
-            let account = login.account.clone().unwrap_or_else(|| format!("the {agent} account signed in on this Mac (its name is not recorded here)"));
+            let account = login.account.clone().unwrap_or_else(|| crate::platform_profile::localize(&format!("the {agent} account signed in on this Mac (its name is not recorded here)")));
             let text = local_login_confirmation(provider, &organization, &account, &expires, replaces, &authorization.reach(AgentLoginKind::LoginDocument));
-            let title = format!("Lend this Mac's {agent} sign-in?");
+            let title = crate::platform_profile::localize(&format!("Lend this Mac's {agent} sign-in?"));
             let (sender, receiver) = std::sync::mpsc::sync_channel(1);
             app.run_on_main_thread(move || {
                 let _ = sender.send(native_confirm(&title, &text, "Upload access token"));
@@ -933,14 +933,14 @@ fn local_login_confirmation(
         ),
         None => String::new(),
     };
-    format!(
+    crate::platform_profile::localize(&format!(
         "Organization: {organization}\nAccount (as {agent} on this Mac records it): {account}\n\n{replacing}\
          TerminalX will upload {what} to the account service, for agents in the cloud workspaces of {organization}. \
          The refresh token stays on this Mac, so this Mac's sign-in keeps working and the uploaded token cannot be renewed: it stops working on {expires}.\n\n\
          Until then agents run on your {subscription} subscription. {reach} \
          Anyone who can drive one of those workspaces can read the token off its machine.\n\n\
          To end it sooner, disconnect it in Settings: that reaches every workspace of the organization, running ones included."
-    )
+    ))
 }
 
 /// A yes-or-no question asked by the app itself, outside the webview.
@@ -1336,10 +1336,10 @@ pub async fn cloud_agent_route_save(
         let agent = save.agent.label();
         let host = change.host().map(|host| dialog_text(&host)).unwrap_or_else(|| "your endpoint".into());
         let title = format!("{agent} endpoint credential");
-        let text = format!(
+        let text = crate::platform_profile::localize(&format!(
             "Enter the credential for {host} ({}). It is checked from this Mac, then sent to the account service, which encrypts it and hands it only to the cloud workspaces you create in organization {organization}, never to other members. It is not shown again.",
             dialog_text(&change.template.label)
-        );
+        ));
         let unavailable = || CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false);
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         app.run_on_main_thread(move || {
@@ -3649,11 +3649,12 @@ pub async fn generate_commit_message(cwd: String, agent: String) -> CmdResult<St
         // the only repository content provided to the model is the staged diff.
         command.env("PATH", crate::binpath::login_path()).current_dir(std::env::temp_dir());
         if agent == "claude" {
-            command.args(["-p", "--model", "haiku", "--output-format", "text", "--safe-mode", "--tools", ""]).arg(prompt);
+            command.args(["-p", "--model", "haiku", "--output-format", "text", "--safe-mode", "--tools", ""]);
         } else {
-            command.args(["exec", "--model", "gpt-5-mini", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config"]).arg(prompt);
+            command.args(["exec", "--model", "gpt-5-mini", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "-"]);
         }
-        let output = crate::git::output_within(command, std::time::Duration::from_secs(90))
+        // On stdin: a diff is too long for a command line, above all through a `.cmd` launcher.
+        let output = crate::git::output_feeding(command, prompt.into_bytes(), std::time::Duration::from_secs(90))
             .map_err(|error| match error {
                 crate::git::RunError::TimedOut => format!("{label} took too long. Try again.", label = if agent == "claude" { "Claude Code" } else { "Codex" }),
                 crate::git::RunError::Failed(message) if is_agent_sign_in_error(&message) => format!("{} is signed out. Sign in to the agent, then try again.", if agent == "claude" { "Claude Code" } else { "Codex" }),
@@ -5409,7 +5410,7 @@ mod command_tests {
         use crate::cloud_workspaces::{AgentLoginKind, AgentLoginProvider, AgentLoginReach};
         let new = AgentLoginReach::ServiceDefault;
         let text = super::local_login_confirmation(AgentLoginProvider::Claude, "Acme Robotics", "ada@example.com", "3 Oct 2026, 21:40", None, &new);
-        assert!(text.starts_with("Organization: Acme Robotics\nAccount (as Claude Code on this Mac records it): ada@example.com\n"));
+        assert!(text.starts_with(&crate::platform_profile::localize("Organization: Acme Robotics\nAccount (as Claude Code on this Mac records it): ada@example.com\n")));
         assert!(!text.contains("REPLACES") && !text.contains("sign out of Claude Code"));
         // Review of #293: replacing a stored login is said, in the dialog too.
         let replacing = super::local_login_confirmation(AgentLoginProvider::Claude, "Acme Robotics", "ada@example.com", "3 Oct 2026, 21:40", Some(AgentLoginKind::ApiKey), &new);
@@ -5424,7 +5425,7 @@ mod command_tests {
         assert_eq!(super::lent_identity(AgentLoginProvider::Claude, Some("ada@example.com"), 1_790_000_000_000), "ada@example.com · lent until 2026-09-21T14:13:20Z");
         assert_eq!(super::dialog_text(" Acme\u{202E}\n Robotics "), "Acme Robotics");
         assert!(text.contains("stops working on 3 Oct 2026, 21:40"));
-        assert!(text.contains("The refresh token stays on this Mac"));
+        assert!(text.contains(&crate::platform_profile::localize("The refresh token stays on this Mac")));
         // A new login: every member's workspaces, said as the service's default.
         assert!(text.contains("By default, agents in every member's cloud workspaces of the organization may run on it"));
         // Review of #429: a login narrowed to managers keeps that scope when it is replaced, and no dialog says otherwise.
@@ -5450,10 +5451,10 @@ mod command_tests {
         use crate::cloud_workspaces::{AgentLoginKind, AgentLoginProvider, AgentLoginReach};
         let claude = super::local_login_confirmation(AgentLoginProvider::Claude, "Acme", "ada@example.com", "3 Oct 2026, 21:40", Some(AgentLoginKind::ApiKey), &AgentLoginReach::ServiceDefault);
         let codex = super::local_login_confirmation(AgentLoginProvider::Codex, "Acme", "ada@example.com", "3 Oct 2026, 21:40", Some(AgentLoginKind::ApiKey), &AgentLoginReach::ServiceDefault);
-        assert!(codex.starts_with("Organization: Acme\nAccount (as Codex on this Mac records it): ada@example.com\n"));
+        assert!(codex.starts_with(&crate::platform_profile::localize("Organization: Acme\nAccount (as Codex on this Mac records it): ada@example.com\n")));
         assert!(codex.contains("THIS REPLACES the API key now stored for Codex in Acme. The key is removed; when the lent sign-in expires, Codex agents in every workspace"));
         assert!(codex.contains("short-lived access token, with its ID token (which names the account and plan), to the account service"));
-        assert!(codex.contains("The refresh token stays on this Mac") && codex.contains("stops working on 3 Oct 2026, 21:40"));
+        assert!(codex.contains(&crate::platform_profile::localize("The refresh token stays on this Mac")) && codex.contains("stops working on 3 Oct 2026, 21:40"));
         assert!(codex.contains("Until then agents run on your ChatGPT subscription."));
         assert!(!codex.contains("Claude"));
         // Everything else is word for word the Claude Code dialog.
@@ -5693,7 +5694,7 @@ mod command_tests {
         assert!(renamed.sessions.iter().any(|session| session.id == first.id));
         assert!(renamed.sessions.iter().any(|session| session.id == second.id));
         for session in &renamed.sessions {
-            assert!(session.cwd.ends_with("/.raccoon/worktrees/better-workspace"));
+            assert!(std::path::Path::new(&session.cwd).ends_with(".raccoon/worktrees/better-workspace"), "{}", session.cwd);
             assert_eq!(session.worktree_name.as_deref(), Some("better-workspace"));
             assert_eq!(session.branch.as_deref(), Some("raccoon/better-workspace"));
         }

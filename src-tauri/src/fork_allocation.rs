@@ -215,7 +215,7 @@ mod tests {
             assert_eq!(std::fs::read_to_string(path.join(".env")).unwrap(), "private source");
             let mut allocation = ForkAllocation::default();
             allocation.worktree(repo.path(), wt, commit);
-            allocation.checkpoint(&tree, &tree, || crate::checkpoints::check_out_turn(path.to_str().unwrap(), &tree, &tree)).unwrap();
+            allocation.checkpoint(&tree, &tree, || crate::checkpoints::check_out_turn(path.to_str().unwrap(), &crate::git::checkpoints::bytes::Snapshot::new(tree.clone(), None), &tree)).unwrap();
             assert_eq!(std::fs::read_to_string(path.join("source")).unwrap(), "checkpoint");
             let mut writes = 0;
             let native = state.path().join("native");
@@ -357,7 +357,7 @@ mod tests {
             let mut allocation = ForkAllocation::default();
             allocation.worktree(repo.path(), wt, commit);
             let index = if later { &base_tree } else { &tree };
-            allocation.checkpoint(&tree, index, || crate::checkpoints::check_out_turn(path.to_str().unwrap(), &tree, index)).unwrap();
+            allocation.checkpoint(&tree, index, || crate::checkpoints::check_out_turn(path.to_str().unwrap(), &crate::git::checkpoints::bytes::Snapshot::new(tree.clone(), None), index)).unwrap();
             if later { std::fs::write(path.join("source"), "later work").unwrap(); }
             let error = allocation.rollback("index failed".into());
             assert_eq!(path.exists(), later, "{error}");

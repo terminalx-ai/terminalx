@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { thisComputer } from "@/lib/platform";
 import { ChevronDown, ChevronUp } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
@@ -159,7 +160,7 @@ export function SwitchLog({ harness }: { harness: AgentAccountAgent }) {
   const shown = entries ? (all ? entries : entries.slice(0, SHOWN)) : [];
   return <div className="py-2">
     <div className="text-[13px] font-medium" id={`${harness}-switch-log`}>Switch log</div>
-    <p className="text-xs text-muted-foreground">The last 30 days, on this Mac.</p>
+    <p className="text-xs text-muted-foreground">The last 30 days, on {thisComputer}.</p>
     {error && <p role="alert" className="mt-1 text-xs text-destructive">{error}</p>}
     {entries && !entries.length && <p className="mt-1 text-xs text-faint">No switches yet.</p>}
     {shown.length > 0 && <ol aria-labelledby={`${harness}-switch-log`} className="mt-2 flex flex-col gap-1.5 text-xs">

@@ -61,6 +61,7 @@ impl Rig {
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("claude");
         std::fs::write(&program, format!("#!/bin/sh\n{LISTENS}")).unwrap();
+        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();

@@ -604,6 +604,7 @@ thread_local! {
 
 /// The next `launch` on this thread resolves to `values` (tests only).
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn set_test_launch(values: BTreeMap<String, String>) {
     TEST_LAUNCH.with(|slot| *slot.borrow_mut() = Some(Launch { values, stamp: Stamp::default() }));
 }

@@ -1,4 +1,5 @@
 import { useSettingsFile } from "@/lib/settingsFile";
+import { thisComputer } from "@/lib/platform";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
@@ -126,7 +127,7 @@ export function TranscriptionTab() {
     <div className="flex flex-col gap-5">
       <div>
         <div className="text-sm font-medium">Model</div>
-        <p className="mt-0.5 text-xs text-muted-foreground">Transcription runs on this Mac. Audio never leaves it.</p>
+        <p className="mt-0.5 text-xs text-muted-foreground">Transcription runs on {thisComputer}. Audio never leaves it.</p>
         {error && <div className="mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
       </div>
 

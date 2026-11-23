@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ThisComputer, thisComputer } from "@/lib/platform";
 import { Loader2, Package } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -52,7 +53,7 @@ export function thisMacUpdateText(state: UpdateState): string | null {
     case "checking":
       return "Checking for an update…";
     case "none":
-      return "This Mac runs the newest TerminalX it can get.";
+      return `${ThisComputer} runs the newest TerminalX it can get.`;
     case "installing":
       return `Installing TerminalX ${state.version}${state.pct ? ` · ${state.pct}%` : ""}`;
     case "choosing":
@@ -93,7 +94,7 @@ export function useUpdateAction(machineId: string, view: MachineVersionView, opt
   if (side === "thisMac") {
     const busy = thisMac.kind === "checking" || thisMac.kind === "installing";
     return {
-      label: "Update this Mac",
+      label: `Update ${thisComputer}`,
       available: true,
       busy,
       note: thisMacUpdateText(thisMac),
@@ -111,7 +112,7 @@ export function useUpdateAction(machineId: string, view: MachineVersionView, opt
   const running = status ? progressText(status.progress) : null;
   const label = options.long ? `Update ${name}` : "Update";
   if (!view.client || !granted) {
-    return { label, available: false, busy: false, note: `${name} runs a TerminalX this Mac cannot update. Update it on ${name}.`, dialog: null, run: () => undefined };
+    return { label, available: false, busy: false, note: `${name} runs a TerminalX ${thisComputer} cannot update. Update it on ${name}.`, dialog: null, run: () => undefined };
   }
   if (status?.method === "unmanaged") {
     return { label, available: false, busy: false, note: `TerminalX on ${name} was not installed by TerminalX. Update it the way it was installed.`, dialog: null, run: () => undefined };
@@ -234,12 +235,12 @@ export function MachineUpdateConfirm({
 /** "Port forwarding and orchestration runs are hidden for this machine until it is updated." */
 function bannerText(view: MachineVersionView): string {
   const gap = view.gap;
-  if (!gap) return "Nothing is hidden. Update this Mac to use what is new there.";
+  if (!gap) return `Nothing is hidden. Update ${thisComputer} to use what is new there.`;
   if (gap.hidden.length) {
-    const hidden = `${featureList(gap.hidden)} ${gap.hidden.length === 1 ? "is" : "are"} hidden for this machine until ${gap.side === "thisMac" ? "this Mac" : "it"} is updated.`;
+    const hidden = `${featureList(gap.hidden)} ${gap.hidden.length === 1 ? "is" : "are"} hidden for this machine until ${gap.side === "thisMac" ? thisComputer : "it"} is updated.`;
     return gap.side === "thisMac" ? hidden : `${hidden} Running sessions keep going through the update.`;
   }
-  return gap.side === "thisMac" ? "This Mac is too old to operate it. Update this Mac to connect." : "It is too old to be operated from this Mac. Running sessions keep going through the update.";
+  return gap.side === "thisMac" ? `${ThisComputer} is too old to operate it. Update ${thisComputer} to connect.` : `It is too old to be operated from ${thisComputer}. Running sessions keep going through the update.`;
 }
 
 /** "TerminalX 0.2.29 there, 0.2.33 here". */

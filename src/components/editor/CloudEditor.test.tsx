@@ -231,7 +231,7 @@ describe("a cloud workspace file in the editor", () => {
 
     // Moved in Settings: the old key no longer saves, the new one does.
     act(() => setPrefs({ shortcuts: { "files.save": ["mod+alt+s"], "files.find": ["mod+shift+y"] } }));
-    expect(screen.getByRole("button", { name: "Save" }).textContent).toContain("CtrlAltS");
+    expect(screen.getByRole("button", { name: "Save" }).textContent).toContain("Ctrl+Alt+S");
     type(container, "// more\n");
     act(() => content.focus());
     fireEvent.keyDown(content, { key: "s", code: "KeyS", ctrlKey: true });

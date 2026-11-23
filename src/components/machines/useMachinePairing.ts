@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ThisComputer, thisComputer } from "@/lib/platform";
 import { useSecondsLeft } from "@/components/pairing/pairingText";
 import { errorMessage } from "@/lib/api";
 import { machinesApi } from "@/lib/machines";
@@ -9,7 +10,7 @@ import { MACHINE_CODE_PREFIX, type InspectedMachineCode, type MachinePairingFail
 export function failureCopy(reason: MachinePairingFailure, name: string): { title: string; detail: string; retry: boolean } {
   switch (reason) {
     case "not-approved":
-      return { title: `${name} did not allow this Mac`, detail: `Don’t allow was chosen there, or no one answered within two minutes. Create a new code on ${name} to try again.`, retry: false };
+      return { title: `${name} did not allow ${thisComputer}`, detail: `Don’t allow was chosen there, or no one answered within two minutes. Create a new code on ${name} to try again.`, retry: false };
     case "code-inactive":
       return { title: "This code no longer works", detail: `It expired, was used, or a newer code replaced it. Create a new code on ${name} and paste it here.`, retry: false };
     case "another-computer":
@@ -17,9 +18,9 @@ export function failureCopy(reason: MachinePairingFailure, name: string): { titl
     case "pairing-paused":
       return { title: `Pairing is paused on ${name}`, detail: "Too many wrong codes were tried there. Try again in a minute.", retry: true };
     case "unreachable":
-      return { title: `This Mac could not reach ${name}`, detail: `Check that ${name} is awake and on this network or Tailscale, then try again.`, retry: true };
+      return { title: `${ThisComputer} could not reach ${name}`, detail: `Check that ${name} is awake and on this network or Tailscale, then try again.`, retry: true };
     case "sign-in-required":
-      return { title: `Sign in to pair with ${name}`, detail: `${name} opens no port: it is reached through the TerminalX relay, which needs this Mac signed in to your account. Sign in under Settings → Account, then paste the code again.`, retry: true };
+      return { title: `Sign in to pair with ${name}`, detail: `${name} opens no port: it is reached through the TerminalX relay, which needs ${thisComputer} signed in to your account. Sign in under Settings → Account, then paste the code again.`, retry: true };
     case "invalid-code":
       return { title: "This is not a machine pairing code", detail: "Copy it again from Settings → Machines on the other computer.", retry: false };
     case "cancelled":

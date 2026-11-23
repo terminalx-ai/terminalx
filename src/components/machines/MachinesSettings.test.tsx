@@ -104,7 +104,7 @@ describe("Settings → Machines with no machine paired (PRO-360)", () => {
     expect(within(firstRun).getByText("No machines yet")).toBeTruthy();
     const steps = within(within(firstRun).getByRole("list", { name: "How to add a machine" })).getAllByRole("listitem");
     expect(steps.map((step) => step.querySelector(".font-medium")?.textContent)).toEqual(["Get the other computer ready", "Add it here", "Start a session there"]);
-    expect(steps[0].textContent).toContain("“Let other computers operate this Mac”");
+    expect(steps[0].textContent).toContain("On a Mac or a Windows PC, open Settings → Machines there and turn on letting other computers operate it.");
     expect(steps[0].textContent).toContain("terminalx-serve pair");
     // Add a machine stays the page's one primary button.
     expect(screen.getAllByRole("button", { name: "Add a machine" })).toHaveLength(1);
@@ -127,7 +127,7 @@ describe("Settings → Machines with no machine paired (PRO-360)", () => {
 describe("Settings → Machines (screen 21.02)", () => {
   it("shows the switch, This Mac with its name and key label, your machines and the computers that can operate this Mac", async () => {
     render(<MachinesSettings />);
-    const operate = await screen.findByRole("switch", { name: "Let other computers operate this Mac" });
+    const operate = await screen.findByRole("switch", { name: "Let other computers operate this computer" });
     await waitFor(() => expect(operate.hasAttribute("disabled")).toBe(false));
     expect(operate.getAttribute("aria-checked")).toBe("false");
     expect(screen.getByText(/Connections are end-to-end encrypted; the relay only passes sealed messages\./)).toBeTruthy();
@@ -135,12 +135,12 @@ describe("Settings → Machines (screen 21.02)", () => {
     await waitFor(() => expect(thisMac.textContent).toBe("Shown to other computers as Paresh’s MacBook Pro · fingerprint 72CD·6E84"));
     expect(screen.getByRole("button", { name: "Rename" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /pairing code/ })).toBeNull();
-    expect(screen.getByText("Computers this Mac can operate. Each one appears as a section in the sidebar.")).toBeTruthy();
+    expect(screen.getByText("Computers this computer can operate. Each one appears as a section in the sidebar.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Add a machine" })).toBeTruthy();
-    const computers = screen.getByRole("list", { name: "Computers that can operate this Mac" });
+    const computers = screen.getByRole("list", { name: "Computers that can operate this computer" });
     expect(computers.textContent).toContain("Paresh’s MacBook Air");
     expect(computers.textContent).toContain("Connected now");
-    expect(computers.textContent).toContain("macOS · Direct on this network · approved Nov 3");
+    expect(computers.textContent).toMatch(/macOS · Direct on this network · approved (Nov 3|3 Nov)/);
     expect(computers.textContent).toContain("7587·7BB4");
     // A Mac has the icon the sidebar and the machine's view give it, and Add a machine is the page's primary button (PRO-398).
     expect(computers.querySelector("[data-icon]")!.getAttribute("data-icon")).toBe("monitor");
@@ -174,7 +174,7 @@ describe("Settings → Machines (screen 21.02)", () => {
     render(<MachinesSettings />);
     const studio = await card("Studio");
     openMenu(within(studio).getByRole("button", { name: "More for Studio" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Remove from this Mac…" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Remove from this computer…" }));
     const dialog = await screen.findByRole("dialog", { name: "Remove Studio?" });
     expect(dialog.textContent).toContain("Sessions on Studio stay there and keep running. Nothing on Studio is changed or deleted.");
     expect(mocks.invoke).not.toHaveBeenCalledWith("machines_remove", expect.anything());
@@ -189,7 +189,7 @@ describe("Settings → Machines (screen 21.02)", () => {
     render(<MachinesSettings />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Rename" }).hasAttribute("disabled")).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Rename" }));
-    fireEvent.change(screen.getByLabelText("This Mac’s name"), { target: { value: "Studio desk" } });
+    fireEvent.change(screen.getByLabelText("This computer’s name"), { target: { value: "Studio desk" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("set_machine_name", { name: "Studio desk" }));
     expect((await screen.findByTestId("this-mac")).textContent).toContain("Shown to other computers as Studio desk");
@@ -218,7 +218,7 @@ describe("Settings → Machines (screen 21.02)", () => {
 
   it("turns operating on, then makes a pairing code that shows with its expiry", async () => {
     render(<MachinesSettings />);
-    const operate = await screen.findByRole("switch", { name: "Let other computers operate this Mac" });
+    const operate = await screen.findByRole("switch", { name: "Let other computers operate this computer" });
     await waitFor(() => expect(operate.hasAttribute("disabled")).toBe(false));
     fireEvent.click(operate);
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_set_allow_operating", { enabled: true }));
@@ -226,7 +226,7 @@ describe("Settings → Machines (screen 21.02)", () => {
     // The code is made with the computers that can operate this Mac: nothing sits between This Mac and Your machines (PRO-398).
     const yours = screen.getByRole("heading", { name: "Your machines" });
     expect(yours.compareDocumentPosition(create) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Computers that can operate this Mac" }).compareDocumentPosition(create) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Computers that can operate this computer" }).compareDocumentPosition(create) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     fireEvent.click(create);
     const code = await screen.findByTestId("machine-pairing-code");
     expect(code.textContent).toContain(CODE.code);
@@ -384,15 +384,15 @@ describe("Settings → Machines (screen 21.02)", () => {
 
   it("Revoke asks once, says it ends the credential and closes the connection without claiming more, then revokes by id", async () => {
     render(<MachinesSettings />);
-    const computers = await screen.findByRole("list", { name: "Computers that can operate this Mac" });
+    const computers = await screen.findByRole("list", { name: "Computers that can operate this computer" });
     fireEvent.click(within(computers).getByRole("button", { name: "Revoke" }));
     const confirm = within(computers).getByRole("group", { name: "Revoke Paresh’s MacBook Air" });
-    expect(confirm.textContent).toContain("Ends Paresh’s MacBook Air’s credential and closes its connection. It does not undo what it already did on this Mac.");
+    expect(confirm.textContent).toContain("Ends Paresh’s MacBook Air’s credential and closes its connection. It does not undo what it already did on this computer.");
     expect(screen.getByTestId("machines-settings").textContent).not.toMatch(/removes all access|all of its access/);
     expect(mocks.invoke).not.toHaveBeenCalledWith("machines_revoke", expect.anything());
     fireEvent.click(within(confirm).getByRole("button", { name: "Revoke" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_revoke", { id: "computer-1" }));
-    expect(await screen.findByText("No computer can operate this Mac.")).toBeTruthy();
+    expect(await screen.findByText("No computer can operate this computer.")).toBeTruthy();
   });
 
   it("opens Add a machine on the account tab and lists a machine paired there", async () => {
@@ -410,7 +410,7 @@ describe("Settings → Machines (screen 21.02)", () => {
     render(<MachinesSettings />);
     const status = screen.getByRole("status");
     expect(status.textContent).toContain("Turned off by data privacy mode");
-    expect(status.textContent).toContain("This Mac neither operates other computers nor lets them operate it.");
+    expect(status.textContent).toContain("This computer neither operates other computers nor lets them operate it.");
     expect(status.textContent).toContain("no connection to a machine is made");
     expect(screen.queryByRole("switch")).toBeNull();
     expect(mocks.invoke).not.toHaveBeenCalledWith("machines_host_status");
@@ -424,7 +424,7 @@ describe("Settings → Machines (screen 21.02)", () => {
 
   it("Disconnect closes a connected computer at once and holds it off until Let back (PRO-357)", async () => {
     render(<MachinesSettings />);
-    const computers = await screen.findByRole("list", { name: "Computers that can operate this Mac" });
+    const computers = await screen.findByRole("list", { name: "Computers that can operate this computer" });
     expect(within(computers).getByTestId("computer-connected").textContent).toBe("Connected now");
     fireEvent.click(within(computers).getByRole("button", { name: "Disconnect" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_disconnect", { id: "computer-1" }));
@@ -440,7 +440,7 @@ describe("Settings → Machines (screen 21.02)", () => {
   it("shows no Disconnect for a computer that is not connected", async () => {
     view = hostView({ allowOperating: true }, { machineId: MINI, computers: [computer({ connected: false, route: null })] });
     render(<MachinesSettings />);
-    const computers = await screen.findByRole("list", { name: "Computers that can operate this Mac" });
+    const computers = await screen.findByRole("list", { name: "Computers that can operate this computer" });
     expect(within(computers).getByRole("button", { name: "Revoke" })).toBeTruthy();
     expect(within(computers).queryByRole("button", { name: "Disconnect" })).toBeNull();
   });
@@ -454,15 +454,15 @@ describe("Settings → Machines (screen 21.02)", () => {
       { at, kind: "paired", computerId: "computer-1", computer: "Paresh’s MacBook Air" },
     ];
     render(<MachinesSettings />);
-    const list = await screen.findByRole("list", { name: "Activity on this Mac" });
+    const list = await screen.findByRole("list", { name: "Activity on this computer" });
     const rows = within(list).getAllByRole("listitem").map((row) => row.textContent);
     expect(rows[0]).toContain("Paresh’s MacBook Air opened a terminal in raccoon");
     expect(rows[1]).toContain("Paresh’s MacBook Air started a session in raccoon");
     expect(rows[2]).toContain("Paresh’s MacBook Air connected through Relay");
-    expect(rows[3]).toContain("Paresh’s MacBook Air was allowed to operate this Mac");
+    expect(rows[3]).toContain("Paresh’s MacBook Air was allowed to operate this computer");
     expect(rows[0]).toMatch(/today at \d\d:\d\d/);
     // It sits in the computers' own section (21.02).
-    const section = screen.getByRole("list", { name: "Computers that can operate this Mac" }).closest("section")!;
+    const section = screen.getByRole("list", { name: "Computers that can operate this computer" }).closest("section")!;
     expect(section.contains(list)).toBe(true);
   });
 

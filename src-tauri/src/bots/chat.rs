@@ -374,15 +374,8 @@ pub fn read_capped_tail(path: &std::path::Path, limit: u64) -> Read {
 
 fn read_capped_part(path: &std::path::Path, limit: u64, tail: bool) -> Read {
     use std::io::{Read as _, Seek as _};
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // Opening a FIFO for reading waits for a writer; a link is not followed.
-        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
-    }
-    let mut file = match options.open(path) {
+    // Opening a FIFO for reading waits for a writer; a link is not followed.
+    let mut file = match crate::bots::changes::open_no_follow(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Read::Missing,
         Err(error) => return Read::Unreadable(format!("{error}")),

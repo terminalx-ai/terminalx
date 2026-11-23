@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ThisComputer, thisComputer } from "@/lib/platform";
 import { CheckCircle2, LoaderCircle, Lock, LogIn, Monitor, RotateCw, Server } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
@@ -22,13 +23,13 @@ export function requestFailure(message: string, name: string): string {
     case "machine_offline":
       return `${name} is not online. Open TerminalX on it, or wait until it is back, then try again.`;
     case "machine_not_available":
-      return `Remote operation is off on ${name}. Turn on “Let other computers operate this Mac” there in Settings → Machines.`;
+      return `Remote operation is off on ${name}. Turn on letting other computers operate it there, in Settings → Machines.`;
     case "grant_refused":
-      return `${name} did not give this Mac a pairing grant. Try again, or use a pairing code.`;
+      return `${name} did not give ${thisComputer} a pairing grant. Try again, or use a pairing code.`;
     case "grant_expired":
       return `${name} did not answer within five minutes. Check that TerminalX is open there, then try again.`;
     case "key_mismatch":
-      return `${name}’s answer did not match the key the account lists for it, so this Mac did not use it. Pair with a code from ${name} instead.`;
+      return `${name}’s answer did not match the key the account lists for it, so ${thisComputer} did not use it. Pair with a code from ${name} instead.`;
     case "not_signed_in":
       return "Sign in to your TerminalX account to connect through it.";
     default:
@@ -48,7 +49,7 @@ function MachineGlyph({ machine }: { machine: AccountMachine }) {
 function rowLine(machine: AccountMachine): string {
   const system = [machine.platform ? osLabel({ family: machine.platform, version: null }) : null, machine.environmentKind === "ssh" ? "headless" : null].filter(Boolean).join(" · ");
   const where = machine.platform === "macos" ? "that Mac" : "that computer";
-  if (machine.thisMac) return "This Mac";
+  if (machine.thisMac) return ThisComputer;
   if (machine.availability === "notAvailable") return `Remote operation is off on ${where}. Turn it on there in Settings → Machines.`;
   if (machine.availability === "offline") return machine.lastSeenAt ? `Offline · last seen ${seenText(machine.lastSeenAt)}` : "Offline";
   return [system, "online now"].filter(Boolean).join(" · ");
@@ -200,8 +201,8 @@ export function AccountTab({ pairing, onClose, onDone, onUseCode }: { pairing: M
     body = (
       <p role="status" className={cn(soft, "mt-3")}>
         {directory.installation === "approvalRequired"
-          ? "Your account has not approved this Mac yet. Approve it from a device that is already signed in, then reopen this tab."
-          : "Your account asks this Mac to sign in again. Sign out and in under Settings → Account, then reopen this tab."}
+          ? `Your account has not approved ${thisComputer} yet. Approve it from a device that is already signed in, then reopen this tab.`
+          : `Your account asks ${thisComputer} to sign in again. Sign out and in under Settings → Account, then reopen this tab.`}
       </p>
     );
   } else {
@@ -287,8 +288,8 @@ function AccountPairing({ pairing, name, onBack, onClose, onDone }: { pairing: M
               <span className="text-muted-foreground">{step.detail ?? "Pair with a code from that computer instead."}</span>
             </div>
           )}
-          <div className="mt-1 text-[12px] font-medium uppercase tracking-[.08em] text-faint">How this Mac reaches it</div>
-          <Segmented aria-label="How this Mac reaches it" value={route} onChange={setRoute} options={ROUTE_OPTIONS} className="justify-self-start" disabled={step.kind === "paired"} />
+          <div className="mt-1 text-[12px] font-medium uppercase tracking-[.08em] text-faint">How {thisComputer} reaches it</div>
+          <Segmented aria-label={`How ${thisComputer} reaches it`} value={route} onChange={setRoute} options={ROUTE_OPTIONS} className="justify-self-start" disabled={step.kind === "paired"} />
           {routeError && <p role="alert" className="text-[12.5px] text-destructive">Paired, but the route was not saved: {routeError}</p>}
         </div>
         <div className="grid min-w-0 content-start gap-3 border-l border-hairline p-5 max-[699px]:border-l-0 max-[699px]:border-t">

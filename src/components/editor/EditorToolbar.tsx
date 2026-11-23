@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { joinKeycaps } from "@/lib/shortcuts";
 import { Code, Copy, Download, EllipsisVertical, Eye, FolderOpen, Save } from "@/icons";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
@@ -132,7 +133,7 @@ export function EditorToolbar({ path, relativePath, change = null, markdown, vie
             />
           )}
           {/* The menu has both; the toolbar's own buttons give way first when it narrows. */}
-          <Button variant="ghost" size="icon-xs" aria-label="Copy file contents" title={`Copy file contents ${copyKeys.join("")}`.trim()} className="hidden @min-[400px]/editor-toolbar:inline-flex" disabled={contentsDisabled} onClick={onCopy}>
+          <Button variant="ghost" size="icon-xs" aria-label="Copy file contents" title={`Copy file contents ${joinKeycaps(copyKeys)}`.trim()} className="hidden @min-[400px]/editor-toolbar:inline-flex" disabled={contentsDisabled} onClick={onCopy}>
             <Copy />
           </Button>
           <Button variant="ghost" size="icon-xs" aria-label="Download" title="Download" className="hidden @min-[400px]/editor-toolbar:inline-flex" disabled={contentsDisabled} onClick={onDownload}>
@@ -144,10 +145,10 @@ export function EditorToolbar({ path, relativePath, change = null, markdown, vie
               <FolderOpen />
             </Button>
           )}
-          <Button variant="ghost" size="xs" onClick={onSave} disabled={saveDisabled} aria-label="Save" title={`Save ${saveKeys.join("")}`}>
+          <Button variant="ghost" size="xs" onClick={onSave} disabled={saveDisabled} aria-label="Save" title={`Save ${joinKeycaps(saveKeys)}`}>
             <Save className="size-3.5" />
             <span className="hidden @min-[440px]/editor-toolbar:inline">Save</span>
-            <kbd className="ml-1 hidden text-[10px] text-faint @min-[520px]/editor-toolbar:inline">{saveKeys.join("")}</kbd>
+            <kbd className="ml-1 hidden text-[10px] text-faint @min-[520px]/editor-toolbar:inline">{joinKeycaps(saveKeys)}</kbd>
           </Button>
         </span>
       </div>

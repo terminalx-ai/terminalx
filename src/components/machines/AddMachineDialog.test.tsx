@@ -61,7 +61,7 @@ describe("Add a machine (screen 21.04)", () => {
     expect(within(dialog).getByRole("radio", { name: "Relay and nearby" }).getAttribute("aria-checked")).toBe("true");
     const hint = dialog.textContent ?? "";
     expect(hint).toContain("directly on this network or Tailscale first");
-    expect(hint).toContain("TerminalX Relay is used once this Mac and the machine are signed in to the same account");
+    expect(hint).toContain("TerminalX Relay is used once this computer and the machine are signed in to the same account");
     expect(mocks.invoke.mock.calls.filter(([command]) => command !== "machines_account_list")).toEqual([]);
   });
 
@@ -125,11 +125,11 @@ describe("Add a machine (screen 21.04)", () => {
   });
 
   const refusals: [MachinePairingFailure, string, boolean][] = [
-    ["not-approved", "Mac mini did not allow this Mac", false],
+    ["not-approved", "Mac mini did not allow this computer", false],
     ["code-inactive", "This code no longer works", false],
     ["another-computer", "Another computer is waiting on Mac mini", true],
     ["pairing-paused", "Pairing is paused on Mac mini", true],
-    ["unreachable", "This Mac could not reach Mac mini", true],
+    ["unreachable", "This computer could not reach Mac mini", true],
     ["invalid-code", "This is not a machine pairing code", false],
   ];
   it.each(refusals)("says why for %s, and offers Try again only when the same code may work", async (reason, title, retry) => {

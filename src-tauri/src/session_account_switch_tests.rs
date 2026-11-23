@@ -40,8 +40,11 @@ impl Rig {
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("claude");
         std::fs::write(&program, "#!/bin/sh\nprintf 'CLAUDE_CONFIG_DIR=%s\\n' \"$(printenv CLAUDE_CONFIG_DIR)\" > \"$0.tmp\" && mv \"$0.tmp\" \"$0.env\"\nprintf 'ready\\n'\nstty -icanon\nexec cat\n").unwrap();
+        #[cfg(unix)]
         {
+            #[cfg(unix)]
             use std::os::unix::fs::PermissionsExt;
+            #[cfg(unix)]
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let claude = claude::pty::claude_program_for_tests(program.clone());

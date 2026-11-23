@@ -1,4 +1,5 @@
 import { useReviewComments } from "./ReviewComments";
+import { bindingText } from "@/lib/shortcuts";
 import { DiscardDialog, DiscardButton, workingDiscardTarget, type DiscardTarget } from "./DiscardDialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronRight, CloudDownload, Loader2, TriangleAlert } from "@/icons";
@@ -209,7 +210,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
                   }
                 }}
                 rows={2}
-                placeholder="Commit message (⌘⏎ to commit)"
+                placeholder={`Commit message (${bindingText("mod+enter")} to commit)`}
                 className="w-full resize-none bg-transparent px-1 text-[13px] outline-none placeholder:text-faint"
               />
               {source.generateCommitMessage && <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-[11px]">

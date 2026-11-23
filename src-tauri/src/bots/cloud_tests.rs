@@ -30,6 +30,7 @@ fn a_cloud_key_is_read_as_the_window_reads_it() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_cloud_session_is_recorded_as_one_bots_and_no_others() {
     let _home = bots_on();
     let sink = BroadcastSink::new(16);
@@ -69,6 +70,7 @@ fn a_cloud_session_is_recorded_as_one_bots_and_no_others() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_limit_the_window_is_told_is_the_one_local_sessions_are_held_to() {
     let _home = bots_on();
     let sink = BroadcastSink::new(16);
@@ -127,6 +129,7 @@ fn the_limit_the_window_is_told_is_the_one_local_sessions_are_held_to() {
 /// on the terminal engine. If that rule changes, this launch has to be held
 /// to plan instead.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_codex_launch_held_to_ask_never_runs_on_native_codex() {
     let _home = bots_on();
     let sink = BroadcastSink::new(16);

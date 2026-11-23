@@ -155,7 +155,7 @@ impl Failure {
     }
 
     pub fn message(self) -> &'static str {
-        match self.category {
+        crate::platform_profile::localize_static(match self.category {
             Category::ServiceUnavailable if self.stage == Stage::Authorization =>
                 "The account service cannot authorize Relay right now. Retrying automatically. You can use LAN meanwhile.",
             Category::ServiceUnavailable =>
@@ -198,7 +198,7 @@ impl Failure {
                 "A phone sent more requests than this Mac answers at once and was reconnected.",
             Category::Unknown =>
                 "Relay connection ended unexpectedly. Retrying automatically. You can use LAN meanwhile.",
-        }
+        })
     }
 }
 
@@ -323,8 +323,20 @@ impl DiagnosticLog {
         // the last complete snapshot on a failed write, without following a symlink.
         let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
         file.write_all(&bytes)?;
-        file.persist(path).map_err(|error| error.error)?;
-        Ok(())
+        // Windows refuses to replace a file while anything has it open, even
+        // for a moment to read it: try again briefly before calling it failed.
+        let mut refused = 0;
+        loop {
+            match file.persist(path) {
+                Ok(_) => return Ok(()),
+                Err(error) if cfg!(windows) && error.error.kind() == std::io::ErrorKind::PermissionDenied && refused < 20 => {
+                    refused += 1;
+                    file = error.file;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => return Err(error.error),
+            }
+        }
     }
 }
 

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { cn } from "@/lib/cn";
 import { currentMergeMethod, MERGE_METHODS, mergeMethodLabel, methodAllowed, repositoryDefault, type MergeMethod } from "@/lib/mergeMethods";
-import { keycaps, useKeymap } from "@/lib/shortcuts";
+import { keycaps, useKeymap, joinKeycaps } from "@/lib/shortcuts";
 
 /** What to do around the merge, chosen in the menu. */
 export interface MergeChoices {
@@ -71,7 +71,7 @@ export function MergeMenu({ url, base, methods, commits, disabled, working, size
                 <div className="mt-0.5 text-[11.5px] leading-4 text-faint">{description(method, methods, commits, base)}</div>
               </div>
               <span className="mt-0.5 ml-2 flex shrink-0 items-center gap-2">
-                {keys && shortcutMethod === method && allowed && <kbd className="rounded border border-hairline px-1 font-sans text-[10.5px] leading-4 text-faint">{keycaps(keys).join("")}</kbd>}
+                {keys && shortcutMethod === method && allowed && <kbd className="rounded border border-hairline px-1 font-sans text-[10.5px] leading-4 text-faint">{joinKeycaps(keycaps(keys))}</kbd>}
                 {method === current && <Check aria-label="Current choice" className="text-foreground!" />}
               </span>
             </DropdownMenuItem>

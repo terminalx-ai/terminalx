@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { thisComputer, yourComputer } from "@/lib/platform";
 import { ChevronDown, Cloud, Smartphone, Users } from "@/icons";
 import { api, errorMessage } from "@/lib/api";
 import { refreshAccount, useAccount } from "@/lib/account";
@@ -6,9 +7,9 @@ import { newSetup, type OrganizationSetupRecord } from "@/lib/organizationSetup"
 import { FieldLabel, PrimaryButton, StepActions, StepError, StepPage } from "./FlowLayout";
 
 const POINTS = [
-  { icon: Cloud, title: "Agents that keep going", text: "Sessions run in cloud workspaces on compute you own, even while your Mac sleeps." },
+  { icon: Cloud, title: "Agents that keep going", text: `Sessions run in cloud workspaces on compute you own, even while ${yourComputer} sleeps.` },
   { icon: Users, title: "Your team in the same sessions", text: "Watch an agent work, take over, or hand a session to a teammate." },
-  { icon: Smartphone, title: "Steer from anywhere", text: "From this Mac, your phone, or the terminalx command line." },
+  { icon: Smartphone, title: "Steer from anywhere", text: `From ${thisComputer}, your phone, or the terminalx command line.` },
 ];
 
 /** "Paresh Dudhat" → "PD"; an email's first letter when there is no name. */

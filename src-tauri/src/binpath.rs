@@ -228,7 +228,18 @@ pub fn login_path() -> String {
 
 #[cfg(windows)]
 fn resolve_uncached(name: &str) -> Option<PathBuf> {
-    which::which_in(name, Some(login_path()), std::env::current_dir().ok()?).ok()
+    let mut found = which::which_in_all(name, Some(login_path()), std::env::current_dir().ok()?).ok()?;
+    if std::path::Path::new(name).extension().is_some() {
+        return found.next();
+    }
+    // npm puts an extensionless shell script beside its `.cmd`: Windows cannot start it.
+    found.find(|path| windows_can_start(path))
+}
+
+/// Whether Windows itself can start `path`, by its extension.
+#[cfg(windows)]
+fn windows_can_start(path: &std::path::Path) -> bool {
+    path.extension().is_some_and(|ext| ["exe", "com", "cmd", "bat"].iter().any(|known| ext.eq_ignore_ascii_case(known)))
 }
 
 #[cfg(windows)]
@@ -278,6 +289,27 @@ pub fn python3_path() -> Option<PathBuf> {
 #[cfg(windows)]
 fn in_windows_apps(path: &std::path::Path) -> bool {
     path.components().any(|part| part.as_os_str().eq_ignore_ascii_case("WindowsApps"))
+}
+
+/// Make a test's stand-in POSIX script runnable as a program, and say what
+/// to run: the script itself, or on Windows a `.cmd` starting it with `sh`.
+#[cfg(test)]
+pub(crate) fn runnable_for_tests(script: impl AsRef<std::path::Path>) -> PathBuf {
+    let script = script.as_ref();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script.to_path_buf()
+    }
+    #[cfg(windows)]
+    {
+        let launcher = script.with_extension("cmd");
+        let sh = posix_sh().expect("Git for Windows' sh");
+        let name = script.file_name().unwrap().to_string_lossy();
+        std::fs::write(&launcher, format!("@\"{}\" \"%~dp0{name}\" %*\r\n", sh.display())).unwrap();
+        launcher
+    }
 }
 
 /// A command that runs Python 3, its own leading arguments included.

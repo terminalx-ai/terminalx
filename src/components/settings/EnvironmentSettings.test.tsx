@@ -84,7 +84,7 @@ describe("environment settings", () => {
     const lastSave = () => invoke.mock.calls.filter(([command]) => command === "environment_save").at(-1)![1].inputs;
     fireEvent.click(screen.getByRole("button", { name: "Edit EDITOR" }));
     let edit = within(await screen.findByRole("dialog"));
-    expect(edit.getByText(/kept in the Keychain/)).toBeTruthy();
+    expect(edit.getByText(/kept in the secret store/)).toBeTruthy();
     fireEvent.change(edit.getByLabelText("Value"), { target: { value: "nano" } });
     fireEvent.click(edit.getByRole("button", { name: "Save variable" }));
     await waitFor(() => expect(lastSave()).toEqual([{ name: "EDITOR", value: "nano", secret: true }]));
@@ -92,7 +92,7 @@ describe("environment settings", () => {
     // Turning the switch off on the sheet does move it out of the Keychain.
     fireEvent.click(screen.getByRole("button", { name: "Edit EDITOR" }));
     edit = within(await screen.findByRole("dialog"));
-    fireEvent.click(edit.getByLabelText("Keep values that look like secrets in the Keychain"));
+    fireEvent.click(edit.getByLabelText("Keep values that look like secrets in the secret store"));
     expect(edit.getByText(/stored in TerminalX's settings/)).toBeTruthy();
     fireEvent.click(edit.getByRole("button", { name: "Save variable" }));
     await waitFor(() => expect(lastSave()).toEqual([{ name: "EDITOR", value: "nano", secret: false }]));
@@ -133,7 +133,7 @@ describe("environment settings", () => {
     expect(screen.getByRole("cell", { name: "All projects" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Paste KEY=VALUE" }));
     let dialog = within(screen.getByRole("dialog"));
-    const keychain = dialog.getByRole("checkbox", { name: "Keep values that look like secrets in the Keychain" }) as HTMLInputElement;
+    const keychain = dialog.getByRole("checkbox", { name: "Keep values that look like secrets in the secret store" }) as HTMLInputElement;
     expect(keychain.checked).toBe(true);
     expect((dialog.getByRole("combobox", { name: "Applies to" }) as HTMLSelectElement).value).toBe("");
     fireEvent.change(dialog.getByLabelText("Variables"), { target: { value: "SENTRY_AUTH_TOKEN=sntrys_eyJpYXQiOjE3\nVITE_RELAY_URL=wss://relay.dev.example\n2FA_SEED=JBSWY3DPEHPK3PXP\nPOSTHOG_KEY=phc_8Qm2xR7tLw0" } });
@@ -152,7 +152,7 @@ describe("environment settings", () => {
     // Off: this save stores even a secret-looking value plainly.
     fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
     dialog = within(screen.getByRole("dialog"));
-    fireEvent.click(dialog.getByRole("checkbox", { name: "Keep values that look like secrets in the Keychain" }));
+    fireEvent.click(dialog.getByRole("checkbox", { name: "Keep values that look like secrets in the secret store" }));
     fireEvent.change(dialog.getByLabelText("Name"), { target: { value: "OTHER_TOKEN" } });
     fireEvent.change(dialog.getByLabelText("Value"), { target: { value: "visible" } });
     expect(dialog.getByText(/stored in TerminalX's settings/)).toBeTruthy();

@@ -77,6 +77,8 @@ export interface Prefs {
    * notes beside them (see `@/lib/autocorrect`). Off unless the reader turned it on.
    */
   autocorrect: boolean;
+  /** The composer's AI Editor button. A draft leaves only when the reader asks. */
+  aiEditor: boolean;
   followUps: "now" | "hold";
   lastProject: string | null;
   lastAgent: string;
@@ -202,6 +204,7 @@ const DEFAULTS: Prefs = {
   fixErrorsInstructions: "",
   promptSnippets: [],
   autocorrect: false,
+  aiEditor: true,
   followUps: "now",
   lastProject: null,
   lastAgent: "claude",
@@ -324,6 +327,7 @@ function load(legacyOnly = false): Prefs {
       if (!prefs[key] || typeof prefs[key] !== "object" || Array.isArray(prefs[key])) prefs[key] = {};
     }
     prefs.autocorrect = prefs.autocorrect === true;
+    prefs.aiEditor = prefs.aiEditor !== false;
     prefs.followUps = prefs.followUps === "hold" ? "hold" : "now";
     prefs.prActivityOrder = prefs.prActivityOrder === "oldest" ? "oldest" : "newest";
     prefs.diffMode = prefs.diffMode === "split" ? "split" : "unified";

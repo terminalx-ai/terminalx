@@ -1,5 +1,6 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { files as filesApi } from "@/lib/api";
+import { familyNow } from "@/lib/platform";
 
 /**
  * Files dragged in from outside reach the app through the Tauri window, not
@@ -35,7 +36,7 @@ function elementAt(position: Position | undefined): Element | null {
   if (!position || typeof document.elementFromPoint !== "function") return null;
   // Labelled physical everywhere, but only Windows reports device pixels:
   // macOS gives points and GTK logical pixels, which are CSS pixels already.
-  const scale = /Win/i.test(navigator.platform) ? window.devicePixelRatio || 1 : 1;
+  const scale = familyNow() === "windows" ? window.devicePixelRatio || 1 : 1;
   return document.elementFromPoint(position.x / scale, position.y / scale);
 }
 

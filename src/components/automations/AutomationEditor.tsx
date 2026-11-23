@@ -1,4 +1,5 @@
 import { usePipelineLaunch, pipelineSettings } from "@/lib/pipelineLaunch";
+import { thisComputer } from "@/lib/platform";
 import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft } from "@/icons";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
@@ -317,7 +318,7 @@ export function AutomationEditor({
         <div className="mx-1 h-5 w-px bg-hairline" />
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-base font-semibold">{automation ? "Edit automation" : "New automation"}</h1>
-          <p className="truncate text-xs text-muted-foreground">Save a prompt and run it manually or on this Mac while the app is open.</p>
+          <p className="truncate text-xs text-muted-foreground">Save a prompt and run it manually or on {thisComputer} while the app is open.</p>
         </div>
       </header>
 

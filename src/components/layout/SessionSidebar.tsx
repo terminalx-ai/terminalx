@@ -1,5 +1,6 @@
 import { ArchiveRowButton, DraftPreview, SessionRowExtras, useSessionDraft } from "./SessionRowExtras";
 import { BotsSidebarSection } from "@/components/bots/BotsSidebarSection";
+import { thisComputer } from "@/lib/platform";
 import { isUnread } from "@/lib/dashboard";
 import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
 import { GroupHeader, LocalSidebarSections, MoveToLocalSectionItems } from "./LocalSidebarSections";
@@ -403,7 +404,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
                 id="projects"
                 label={sectioned ? "Local" : "Projects"}
                 mark={sectioned ? <Laptop className="size-3.5 shrink-0 text-muted-foreground" /> : undefined}
-                note={sectioned ? "this Mac" : undefined}
+                note={sectioned ? thisComputer : undefined}
                 heading={sectioned || hasSections}
                 actions={sectioned ? addProjectMenu : undefined}
               >

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { thisComputer } from "@/lib/platform";
 import { Download, Loader2, RefreshCw } from "@/icons";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
@@ -270,9 +271,9 @@ export function OrganizationDiagnostics({
         </>
       )}
 
-      <div className="mt-3 text-xs font-medium text-muted-foreground">Connection closes on this Mac, in this organization</div>
+      <div className="mt-3 text-xs font-medium text-muted-foreground">Connection closes on {thisComputer}, in this organization</div>
       {closes.length ? (
-        <ul aria-label="Connection closes on this Mac" className="mt-1 flex flex-col gap-0.5 text-[11px]">
+        <ul aria-label={`Connection closes on ${thisComputer}`} className="mt-1 flex flex-col gap-0.5 text-[11px]">
           {[...closes].reverse().map((close, index) => (
             <li key={`${close.at}:${index}`} className="flex flex-wrap gap-x-2">
               <span className="font-mono tabular-nums">{close.code}</span>
@@ -289,7 +290,7 @@ export function OrganizationDiagnostics({
       <div className="mt-3 flex flex-col gap-1.5 rounded-md border border-hairline p-2">
         <p className="text-[11px] leading-relaxed text-muted-foreground">
           The export is written only to a file you choose and is never uploaded. It holds the app version, OS and architecture, the diagnostics above and
-          this Mac's connection closes in this organization, and nothing of any other organization. It leaves out API keys and provider credentials, access and refresh tokens, sign-in, device and pairing codes, relay
+          {thisComputer}'s connection closes in this organization, and nothing of any other organization. It leaves out API keys and provider credentials, access and refresh tokens, sign-in, device and pairing codes, relay
           tickets, runtime credentials, workspace and repository names, file contents, terminal output and prompts.
         </p>
         <div className="flex items-center gap-2">

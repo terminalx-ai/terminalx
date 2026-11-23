@@ -161,12 +161,12 @@ static TEST_PROGRAM: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(N
 /// they ask Codex's app server: a stand-in, whether or not a real CLI is
 /// installed where the tests run. Process-wide, so the tests that hold one
 /// take turns.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) struct TestProgram {
     _turn: std::sync::MutexGuard<'static, ()>,
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) fn codex_program_for_tests(program: PathBuf) -> TestProgram {
     static TURNS: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let turn = TURNS.lock().unwrap_or_else(|e| e.into_inner());
@@ -174,7 +174,7 @@ pub(crate) fn codex_program_for_tests(program: PathBuf) -> TestProgram {
     TestProgram { _turn: turn }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 impl Drop for TestProgram {
     fn drop(&mut self) {
         *TEST_PROGRAM.lock().unwrap_or_else(|e| e.into_inner()) = None;

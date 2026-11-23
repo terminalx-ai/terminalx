@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { thisComputer } from "@/lib/platform";
 import { FolderX, KeyRound, MonitorOff, ShieldX, WifiOff } from "@/icons";
 import { cn } from "@/lib/cn";
 
@@ -42,7 +43,7 @@ export function machineMessageText(kind: MachineMessageKind, words: { name: stri
     case "projectMissing":
       return `${words.project ?? "This project"} isn't a project on ${words.name} yet. Add it there first.`;
     case "accessRemoved":
-      return `${words.name} no longer allows this Mac. Pair again to reconnect.`;
+      return `${words.name} no longer allows ${thisComputer}. Pair again to reconnect.`;
     case "localOnly":
       return MACHINE_LOCAL_ONLY;
   }

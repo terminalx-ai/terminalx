@@ -6,6 +6,8 @@
 // the picker's models are OpenCode's own per-provider list in its config
 // file, so the CLI on its own and every TerminalX tab agree.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { thisComputer } from "@/lib/platform";
+import { bindingText } from "@/lib/shortcuts";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { BookOpen, Check, ChevronRight, CircleAlert, CircleCheck, Eye, EyeOff, FileText, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Search, Settings2, Trash2, X } from "@/icons";
@@ -38,7 +40,7 @@ const BLURBS: Record<string, string> = {
   anthropic: "Claude models, with your Anthropic API key",
   openai: "GPT models, with your OpenAI API key",
   openrouter: "One key for models from many labs, billed by OpenRouter.",
-  ollama: "Models running on this Mac · no key needed",
+  ollama: `Models running on ${thisComputer} · no key needed`,
   groq: "Fast hosted open-weight models. Connect it, then add the models you want in the picker.",
 };
 const blurb = (provider: { id: string; name: string }) => BLURBS[provider.id] ?? `Models from ${provider.name}. Connect it, then add the models you want in the picker.`;
@@ -273,7 +275,7 @@ function ConfigureProviders({ overview, take, initial, onClose }: {
         <div className="min-w-0 flex-1">
           <DialogTitle className="text-[15px] font-semibold">Configure providers</DialogTitle>
           <DialogDescription className="mt-0.5 text-[12.5px] text-muted-foreground">
-            Model providers for OpenCode on this Mac. Keys are saved in OpenCode’s <span className="font-mono text-[12px]">{overview.authPath}</span>, as <span className="font-mono text-[12px]">opencode auth login</span> saves them.
+            Model providers for OpenCode on {thisComputer}. Keys are saved in OpenCode’s <span className="font-mono text-[12px]">{overview.authPath}</span>, as <span className="font-mono text-[12px]">opencode auth login</span> saves them.
           </DialogDescription>
         </div>
         <button type="button" aria-label="Close" onClick={onClose} className="ml-auto text-faint hover:text-foreground"><X className="size-4" /></button>
@@ -335,7 +337,7 @@ function ProviderItem({ provider, selected, onSelect, trailing }: { provider: { 
 function FirstProvider({ catalog, total, onPick }: { catalog: Map<string, OpenCodeCatalogProvider>; total: number; onPick: (id: string) => void }) {
   return <div>
     <div className="text-[15px] font-semibold">Add your first provider</div>
-    <p className="mt-1 text-[12.5px] text-muted-foreground">OpenCode needs a model provider before it can run. Paste an API key, or point it at a server on this Mac such as Ollama.</p>
+    <p className="mt-1 text-[12.5px] text-muted-foreground">OpenCode needs a model provider before it can run. Paste an API key, or point it at a server on {thisComputer} such as Ollama.</p>
     <ListHead>Popular</ListHead>
     <div className="rounded-lg border border-hairline">
       {POPULAR.map((id) => catalog.get(id)).filter((provider): provider is OpenCodeCatalogProvider => !!provider).map((provider) =>
@@ -420,7 +422,7 @@ function ConnectForm({ provider, take, onCancel, onConnected, replacing }: {
           <span className="min-w-0">{replacing ? "Saving" : "Connecting"} removes the saved address <span className="break-all font-mono">{saved}</span>; the key then goes to {provider.name} directly.</span>
           <button type="button" onClick={() => setBaseUrl(saved ?? "")} className="shrink-0 underline underline-offset-2 hover:text-foreground">Keep it</button>
         </div>
-        : <p className="text-[12px] text-faint">{provider.local ? "Where Ollama answers on this Mac. TerminalX checks that it does before saving."
+        : <p className="text-[12px] text-faint">{provider.local ? `Where Ollama answers on ${thisComputer}. TerminalX checks that it does before saving.`
           : saved ? "Saved in OpenCode’s config, and kept. Empty it to send the key to the provider directly."
           : "Leave empty unless you go through a proxy or your own gateway."}</p>}
     </div>
@@ -429,7 +431,7 @@ function ConnectForm({ provider, take, onCancel, onConnected, replacing }: {
       <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy}>Cancel</Button>
       <Button size="sm" disabled={!ready || busy} onClick={() => void connect()}>
         {busy ? <Loader2 className="animate-spin" /> : null} {replacing ? "Save key" : `Connect ${provider.name}`}
-        <kbd aria-hidden className="ml-1 text-[11px] opacity-70">⌘↵</kbd>
+        <kbd aria-hidden className="ml-1 text-[11px] opacity-70">{bindingText("mod+enter")}</kbd>
       </Button>
     </div>
   </div>;

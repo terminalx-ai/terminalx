@@ -5,7 +5,7 @@ import { ChevronDown, ChevronUp, MessageSquarePlus, Search, X } from "@/icons";
 import { cn } from "@/lib/cn";
 import { useTheme } from "@/lib/theme";
 import { hasEscapeOverlay, useHotkey, useShortcut } from "@/lib/hotkeys";
-import { isMac } from "@/lib/shortcuts";
+import { ariaKeyShortcut, bindingText } from "@/lib/shortcuts";
 import { peekInstance } from "@/lib/terminal";
 import { TerminalChatContext } from "./TerminalChat";
 
@@ -25,10 +25,14 @@ const lightDecorations = {
  * same keys (the command palette, Pull, Copy contents), which still has them
  * everywhere else.
  */
+function terminalKey(chord: string) {
+  return { chord, label: bindingText(chord), aria: ariaKeyShortcut(chord) ?? "" };
+}
+
 export const TERMINAL_KEYS = {
-  clear: { chord: "mod+k", label: isMac ? "⌘K" : "Ctrl+K", aria: isMac ? "Meta+K" : "Control+K" },
-  addToChat: { chord: "mod+shift+l", label: isMac ? "⇧⌘L" : "Ctrl+Shift+L", aria: isMac ? "Meta+Shift+L" : "Control+Shift+L" },
-  matchCase: { chord: "mod+alt+c", label: isMac ? "⌥⌘C" : "Ctrl+Alt+C", aria: isMac ? "Alt+Meta+C" : "Control+Alt+C" },
+  clear: terminalKey("mod+k"),
+  addToChat: terminalKey("mod+shift+l"),
+  matchCase: terminalKey("mod+alt+c"),
 } as const;
 
 /** Run `action` for a terminal key only while the focus is inside `frame`; otherwise the key falls through. */
