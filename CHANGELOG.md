@@ -1,6 +1,6 @@
 # TerminalX changelog
 
-## Unreleased
+## 0.2.39
 
 - Bots (experimental): a bot whose session is running no longer reads
   "Quiet". Its sidebar row and the Bots page's **Doing now** say
@@ -15,7 +15,6 @@
   Linux. Elsewhere light and dark stays Ctrl+Alt+Shift+L, since Ctrl+Alt+T
   opens a terminal on GNOME and Ubuntu. Keys you set yourself for either are
   kept (#1131).
-
 - Bots (experimental): a bot works in cloud workspaces with the access it has
   on this Mac. A session that works for a bot may start a cloud session,
   prompt it and resume its workspace, where before every one was refused. A
@@ -25,6 +24,58 @@
   reaches its cloud sessions at their next prompt or resume. A paused bot is
   still refused, and so are another computer and starting an issue pipeline
   (PRO-514).
+
+- Bots (experimental): a bot's chat rows ("Chats with", "Started by", "Duty
+  runs") have the sidebar's session actions: right-click or ⋯ to rename,
+  pin, archive or delete, and double-click to rename. A renamed chat shows its
+  new title everywhere, and closing a chat leaves you on the bot's page.
+  Deleting the chat a hand-off was being worked on now tells its sender
+  instead of leaving it "working" for ever (PRO-521, #1484).
+- Bots (experimental): fixes from the role and memory review. The window's
+  cached key is read again from Keychain after 60 s and wiped when dropped;
+  undoing an old memory change lands where the notes are kept now; two
+  organisations whose ids differ only in case are told where earlier notes
+  were left; `forget --line` counts lines in the file's own bytes (PRO-512,
+  #1486).
+- Bots (experimental): window consent fixes. With Bots off no Restart runtime
+  offer is made; a registration without the window's proof is validated
+  before it changes anything and cannot unseat a window a handover carried
+  over; an unanswered proven registration fails after two tries (PRO-508,
+  #1488).
+- Phone: turning off public callers now closes connections already open
+  from public addresses, including ones still pairing or serving a shared
+  session; phones on private addresses stay connected (PRO-495, #1485).
+- Phone: a failed resume no longer shows a spurious "Connection lost" or
+  starts a second connect loop, and a cloud tab's layout is pruned only once
+  the runtime's own agent list has arrived (#1375, #1379, #1480). A cloud
+  session whose history is reset during its first subscription replays the
+  new history, and the phone's open list replaces the 45 s recently-read
+  rule when prefetching (#1398, #1381, #1492).
+- Machines: Machine Files keep literal backslashes in relative Unix paths
+  (#1263, #1481). A machine's pull request push goes to exactly the
+  destination that was checked: the push runs from a private copy of the
+  config, while the checkout's pre-push hook still runs in the checkout
+  (#1393, #1394, #1491). Checkouts whose names end in a space are verified
+  and served correctly (#1264, #1262, #1267, #1494), and every place that
+  reads a path Git prints now strips only the line ending (#1495, #1497).
+- Sessions: a `!command` echo matches only a whole shell record, a resent
+  prompt retires its lapsed echo, and a lapsed card a resend retired is
+  marked delivery unconfirmed (#1383, #1385, #1386, #1377, #1483).
+- Sessions: Undo's checkpoint RPC is tested end to end, leftover cleanup
+  waits for a pending pull request, and forking a session whose worktree is
+  gone recovers from the recorded checkout identity (#1399, #1382, #1228,
+  #1493).
+- OpenCode: editing its key no longer rewrites `auth.json` when nothing
+  changed, and the final check runs just before the rename (#1374, #1373,
+  #1391, #1482).
+- Agent configs: a refused linked skill folder names the resolved folder or
+  why its link can't be read, and a failed copy removes the empty folders it
+  made and names any left (#1376, #1396, #1490).
+- GitHub connect polls for its own 30-minute budget instead of an assumed
+  server lifetime (#1370, #1371, #1407, #1479).
+- Tests: flaky send-cost and Codex stand-in tests fixed, and a layout check
+  waits for the link dialog's entrance (PRO-334, PRO-488, #1487, #1489).
+- Mobile app 0.1.3 (build 4) (#1476).
 
 ## 0.2.38
 
