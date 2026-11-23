@@ -17,7 +17,7 @@
 //   scrolls as a whole, so the buttons are reached by scrolling, never cut off.
 //
 //   pnpm build && npx playwright install webkit && node scripts/webkit/dialog-lists.mjs [screenshot-dir]
-import { launch, open, report, serve, sidebar } from "./harness.mjs";
+import { launch, open, report, serve, sidebar, FOCUS_NEXT } from "./harness.mjs";
 
 const shots = process.argv[2];
 const server = await serve();
@@ -181,10 +181,10 @@ for (const size of windows) {
     await page.waitForFunction(() => { const area = document.querySelector("[data-dialog-scroll-area]"); return area.scrollTop + area.clientHeight >= area.scrollHeight - 1; });
     const scrolled = await measure(page);
     if (shots) await page.screenshot({ path: `${shots}/leftovers-${slug}-end.png` });
-    // WebKit moves between buttons with Option+Tab unless macOS has keyboard navigation turned on.
-    await page.keyboard.press("Alt+Tab");
+    // WebKit on macOS moves between buttons with Option+Tab unless macOS has keyboard navigation turned on (FOCUS_NEXT).
+    await page.keyboard.press(FOCUS_NEXT);
     const onCancel = await measure(page);
-    await page.keyboard.press("Alt+Tab");
+    await page.keyboard.press(FOCUS_NEXT);
     const onDelete = await measure(page);
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "detached" });

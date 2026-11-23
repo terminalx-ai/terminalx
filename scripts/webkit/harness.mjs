@@ -37,19 +37,50 @@ const muteAudio = `(() => {
   window.webkitAudioContext = Muted;
 })();`;
 
-/** WebKit with every page and context it opens muted. Takes webkit.launch's options. */
+// Every page is the Mac app's, whatever the host. The app picks ⌘ or Ctrl, the Mac's glass and other Mac-only
+// behaviour from navigator.platform (src/lib/shortcuts.ts `isMac`, src/lib/glass.ts), and the checks press ⌘ and
+// read ⌘ in labels: on a Linux runner Playwright's WebKit says "Linux x86_64" and every one of them would differ.
+// So the page sees macOS's platform and a Mac user agent; the requests say the same. On a Mac both are what WebKit
+// says already. What the engine itself does (its focus order, its scrollbars, its fonts) stays the host's.
+export const MAC_PLATFORM = "MacIntel";
+const MAC_OS = "Macintosh; Intel Mac OS X 10_15_7";
+const macUserAgent = (agent) => agent.replace(/\([^)]*\)/, `(${MAC_OS})`);
+const forceMac = `(() => {
+  const agent = navigator.userAgent.replace(/\\([^)]*\\)/, ${JSON.stringify(`(${MAC_OS})`)});
+  const version = navigator.appVersion.replace(/\\([^)]*\\)/, ${JSON.stringify(`(${MAC_OS})`)});
+  for (const [name, value] of [["platform", ${JSON.stringify(MAC_PLATFORM)}], ["userAgent", agent], ["appVersion", version]]) {
+    Object.defineProperty(Navigator.prototype, name, { get: () => value, configurable: true });
+  }
+})();`;
+
+/**
+ * The key that moves focus to the next button. That is the engine's, so the host's: WebKit on macOS skips buttons on
+ * Tab unless macOS has keyboard navigation turned on, and reaches them with Option+Tab; on Linux Tab reaches them.
+ */
+export const FOCUS_NEXT = process.platform === "darwin" ? "Alt+Tab" : "Tab";
+
+/** WebKit with every page and context it opens muted and on macOS (above). Takes webkit.launch's options. */
 export async function launch(options) {
   const browser = await webkit.launch(options);
+  const userAgent = macUserAgent(await browser.newContext().then(async (context) => {
+    const page = await context.newPage();
+    const agent = await page.evaluate(() => navigator.userAgent);
+    await context.close();
+    return agent;
+  }));
+  const mac = (args) => [{ userAgent, ...args[0] }, ...args.slice(1)];
   const newContext = browser.newContext.bind(browser);
   browser.newContext = async (...args) => {
-    const context = await newContext(...args);
+    const context = await newContext(...mac(args));
     await context.addInitScript(muteAudio);
+    await context.addInitScript(forceMac);
     return context;
   };
   const newPage = browser.newPage.bind(browser);
   browser.newPage = async (...args) => {
-    const page = await newPage(...args);
+    const page = await newPage(...mac(args));
     await page.addInitScript(muteAudio);
+    await page.addInitScript(forceMac);
     return page;
   };
   return browser;
