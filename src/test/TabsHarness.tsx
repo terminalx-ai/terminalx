@@ -19,7 +19,7 @@ import { resolveSessionTab, setVisibleSessionTab } from "@/lib/visibleTab";
  * terminal to type in. The tab on screen is worked out the way the session
  * view does it, from the same stores.
  */
-export function TabsHarness({ readOnlyReason, hideSingle, reviews = false }: { readOnlyReason?: string; hideSingle?: boolean; reviews?: boolean }) {
+export function TabsHarness({ readOnlyReason, hideSingle, reviews = false, newTabs = true }: { readOnlyReason?: string; hideSingle?: boolean; reviews?: boolean; newTabs?: boolean }) {
   const store = useSessionStore();
   const terminals = useTerminals();
   const editors = useEditors();
@@ -47,7 +47,7 @@ export function TabsHarness({ readOnlyReason, hideSingle, reviews = false }: { r
   const harnessNames = new Map(store.harnesses.map((harness) => [harness.id, harness.name]));
   return (
     <TooltipProvider>
-      <WorkspaceTabStrip session={session} selected={selected} readOnlyReason={readOnlyReason} hideSingle={hideSingle} trailing={<TabActions key={session.id} session={session} selected={selected} />} />
+      <WorkspaceTabStrip session={session} selected={selected} readOnlyReason={readOnlyReason} hideSingle={hideSingle} trailing={<TabActions key={session.id} session={session} selected={selected} newTabs={newTabs} />} />
       <div role="tree" aria-label="Sidebar">
         {workspaceSessions(store.sessions, session, store.chatsPath, store.workspaces).map((member) => (
           <SessionNode key={member.id} session={member} selected={member.id === session.id} expanded onToggle={() => undefined} tabViews={{}} mobileDriven={new Set()} harnessNames={harnessNames} />

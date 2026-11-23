@@ -1198,6 +1198,26 @@ fn start(manager: &SessionManager, number: u64) -> bool {
                 return Ok(Claim::Refused(Box::new(closed)));
             }
         }
+        // The work is for the place it was handed from (PRO-483): the receiver works on it there, or not at all.
+        let place = match work_place(handoff, &from) {
+            Some(key) if super::memory::place_of(&to, Some(&key)) != super::memory::Place::Bot => Ok(key),
+            Some(key) => Err(format!("{} does not work in {}, where this work is for, so it would be worked on with another place's notes.", to.name, place_name(&key))),
+            None => Err(format!("it was handed from a conversation in a place {} no longer works in.", from.name)),
+        };
+        let place = match place {
+            Ok(place) => place,
+            Err(why) => {
+                handoff.state = HandoffState::Failed;
+                handoff.answer = Some(Reply { at: now.clone(), text: format!("It did not start: {why}"), failed: true, by: "terminalx".into(), unknown: BTreeMap::new() });
+                handoff.closed = Some(now.clone());
+                handoff.modified = now;
+                let closed = handoff.clone();
+                store.messages.retain(|message| !(message.pending && message.handoff == Some(number) && message.kind == "handoff"));
+                let text = format!("Hand-off {number} (\"{}\") did not start: {why} Do it another way, or ask your owner.", closed.title);
+                tell_sender(store, &closed, "failed", text);
+                return Ok(Claim::Refused(Box::new(closed)));
+            }
+        };
         // At most MAX_RUNNING_WORK at once: the rest wait, and start as those are answered.
         let handoff_to = handoff.to.clone();
         if working_for(store, &handoff_to) >= MAX_RUNNING_WORK {
@@ -1207,14 +1227,15 @@ fn start(manager: &SessionManager, number: u64) -> bool {
         handoff.state = HandoffState::Working;
         handoff.started = Some(now.clone());
         handoff.modified = now;
-        Ok(Claim::Claimed(Box::new((handoff.clone(), from, to))))
+        Ok(Claim::Claimed(Box::new((handoff.clone(), from, to, place))))
     });
-    let (handoff, from, to) = match claimed {
+    let (handoff, from, to, place) = match claimed {
         Ok(Claim::Claimed(claimed)) => *claimed,
         Ok(Claim::Not) => return false,
         Ok(Claim::Refused(closed)) => {
             drop(one);
-            status_lines(manager, &closed, &format!("Hand-off {number} did not start: the line or Who can ask changed"));
+            let why = closed.answer.as_ref().map_or("the line or Who can ask changed", |answer| answer.text.trim_start_matches("It did not start: "));
+            status_lines(manager, &closed, &format!("Hand-off {number} did not start: {why}"));
             deliver(manager, &closed.from);
             return false;
         }
@@ -1224,18 +1245,12 @@ fn start(manager: &SessionManager, number: u64) -> bool {
         }
     };
     let chat_title = if handoff.by == OWNER { format!("From your item hand-off: {}", handoff.title) } else { format!("Hand-off from {}: {}", from.name, handoff.title) };
-    let made = chat::work_chat(sink.as_ref(), &to, chat_title.chars().take(120).collect()).and_then(|entry| {
+    let made = chat::work_chat(sink.as_ref(), &to, chat_title.chars().take(120).collect(), &place).and_then(|entry| {
         // Who asked and who added it: the sender (or the owner, for an item they handed on), not the receiver.
         let (asked_by, added_by) = if handoff.by == OWNER { (OWNER.to_string(), OWNER.to_string()) } else { (from.id.clone(), from.id.clone()) };
         let summary = if handoff.by == OWNER { handoff.note.clone() } else { handoff.scope.clone() };
-        let item = super::items::add(sink.as_ref(), &to, &super::items::By::Bot { session: Some(entry.id.clone()) }, super::items::NewItem {
-            title: handoff.title.clone(),
-            summary,
-            done_means: Vec::new(),
-            start: true,
-            asked_by: Some(asked_by),
-            added_by: Some(added_by),
-        });
+        let new = super::items::NewItem { title: handoff.title.clone(), summary, done_means: Vec::new(), start: true, asked_by: Some(asked_by), added_by: Some(added_by) };
+        let item = super::items::add_in(sink.as_ref(), &to, &super::items::By::Bot { session: Some(entry.id.clone()) }, new, Some(place.clone()));
         match item {
             Ok(item) => Ok((entry, item.number)),
             Err(error) => {
@@ -1328,11 +1343,33 @@ fn start(manager: &SessionManager, number: u64) -> bool {
 }
 
 /// What a start's claim found.
+/// The place the work of `handoff` is for (PRO-483), as `personal` or an organisation's id: that of the sender's
+/// conversation it was handed from, or, for an item the owner handed on, the item's. A hand-off from no known session
+/// is for the sender's first place. `None` when that conversation or item is in a place the sender no longer works in,
+/// or its conversation is gone.
+fn work_place(handoff: &Handoff, from: &Bot) -> Option<String> {
+    use super::memory::{place_of, working_place, Place};
+    let place = match (handoff.from_item, handoff.from_session.as_deref()) {
+        (Some(number), _) => {
+            let org = super::items::read(&from.id).ok().and_then(|list| list.items.into_iter().find(|item| item.number == number)).and_then(|item| item.org);
+            place_of(from, org.as_deref())
+        }
+        (None, Some(session)) => index::get(session).map_or(Place::Bot, |entry| chat::session_place(from, &entry)),
+        (None, None) => working_place(from),
+    };
+    (place != Place::Bot).then(|| place.key().to_owned())
+}
+
+/// A place as a sentence names it.
+fn place_name(key: &str) -> String {
+    if key == super::PERSONAL { "its owner's personal work".into() } else { format!("organisation {key}") }
+}
+
 enum Claim {
     /// Not waiting, its bot paused or gone, or its bot works on as many as it may.
     Not,
-    /// Claimed: it is working from now, with no chat yet.
-    Claimed(Box<(Handoff, Bot, Bot)>),
+    /// Claimed: it is working from now, with no chat yet, in the place its work is for.
+    Claimed(Box<(Handoff, Bot, Bot, String)>),
     /// Closed instead: the owner changed the line or Who can ask since it was handed.
     Refused(Box<Handoff>),
 }

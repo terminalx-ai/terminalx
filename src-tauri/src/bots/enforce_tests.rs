@@ -96,7 +96,7 @@ fn a_running_chat_is_held_to_a_pause_and_stopped_by_a_delete_or_the_switch() {
     let (manager, terminals, sink) = manager();
     let bot = chat::hire(sink.as_ref(), "cto", "Atlas").unwrap();
     let home = chat::home_chat(sink.as_ref(), &bot.id).unwrap();
-    let other = chat::new_chat(sink.as_ref(), &bot.id).unwrap();
+    let other = chat::new_chat(sink.as_ref(), &bot.id, None).unwrap();
 
     // Switched off: its running chats stop.
     let pane = running(&manager, &terminals, &sink, &home);
@@ -187,7 +187,7 @@ fn a_resume_reaches_a_finished_tab_and_one_in_a_turn() {
     let (manager, terminals, sink) = manager();
     let bot = chat::hire(sink.as_ref(), "cto", "Atlas").unwrap();
     let finished = chat::home_chat(sink.as_ref(), &bot.id).unwrap();
-    let busy = chat::new_chat(sink.as_ref(), &bot.id).unwrap();
+    let busy = chat::new_chat(sink.as_ref(), &bot.id, None).unwrap();
     call(&manager, "pause", &serde_json::json!({"id": bot.id})).unwrap();
 
     set_status(&finished, TabStatus::Completed);

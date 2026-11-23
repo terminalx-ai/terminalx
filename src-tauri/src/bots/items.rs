@@ -332,8 +332,20 @@ pub struct Item {
     pub runs: Vec<ItemRun>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_back: Option<CheckBack>,
+    /// The place the work is for (PRO-483): `personal` or an organisation's id, as the bot's `works_in` has it; the
+    /// place of the conversation that added it, or the bot's first place when the owner gave it in the app. Absent
+    /// only on an item an earlier build kept: that one follows the bot's first place. A conversation reads and changes
+    /// only its own place's items ([`in_place`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<String>,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, Value>,
+}
+
+/// Whether `item` is one of the items of a conversation of `bot` that works in `place` (PRO-483). A conversation
+/// in a place the bot no longer works in ([`Place::Bot`]) has none.
+pub fn in_place(bot: &Bot, item: &Item, place: &super::memory::Place) -> bool {
+    *place != super::memory::Place::Bot && super::memory::place_of(bot, item.org.as_deref()) == *place
 }
 
 fn owner() -> String {
@@ -735,6 +747,13 @@ fn link_label(kind: &str) -> &str {
 }
 
 pub fn add(sink: &dyn EventSink, bot: &Bot, by: &By, new: NewItem) -> Result<Item> {
+    add_in(sink, bot, by, new, None)
+}
+
+/// [`add`], for the work of `org` (PRO-483): `personal` or an organisation's id; `None` for the bot's first place as it
+/// is now. The place is recorded on the item either way, so reordering Works in later never moves it.
+pub fn add_in(sink: &dyn EventSink, bot: &Bot, by: &By, new: NewItem, org: Option<String>) -> Result<Item> {
+    let org = Some(org.unwrap_or_else(|| super::memory::working_place(bot).key().to_owned()));
     let title = one_line("An item's title", &new.title, TITLE_CHARS)?;
     let summary = text("An item's summary", &new.summary, TEXT_CHARS)?;
     if new.done_means.len() > MAX_DONE_MEANS {
@@ -769,6 +788,7 @@ pub fn add(sink: &dyn EventSink, bot: &Bot, by: &By, new: NewItem) -> Result<Ite
             undelivered: Vec::new(),
             runs: Vec::new(),
             check_back: None,
+            org,
             unknown: BTreeMap::new(),
         };
         *next += 1;
@@ -1264,9 +1284,10 @@ pub fn needs_you(manager: &crate::session::SessionManager) -> Result<Value> {
 }
 
 /// What a launch of the bot's chat is told of its list: its open items, as its own notes.
-pub fn launch_note(id: &str) -> Option<String> {
-    let list = read(id).ok()?;
-    let mut open: Vec<&Item> = list.items.iter().filter(|item| !item.state.closed()).collect();
+pub fn launch_note(bot: &Bot, place: &super::memory::Place) -> Option<String> {
+    let list = read(&bot.id).ok()?;
+    // The items of the place the conversation works in only (PRO-483).
+    let mut open: Vec<&Item> = list.items.iter().filter(|item| !item.state.closed() && in_place(bot, item, place)).collect();
     if open.is_empty() {
         return None;
     }
@@ -1393,37 +1414,66 @@ fn unrated(bot: &Bot, at: std::time::Instant) {
 }
 
 /// `terminalx bots items …` for bot `bot`, from its session `session` (`control::Caller` placed it).
-pub fn cli(sink: &dyn EventSink, bot: &Bot, session: Option<String>, command: &str, params: &Value) -> Result<Value> {
+/// `place`: where the bot's conversation that sent the command works (PRO-483), `None` for the owner's read. A
+/// conversation lists, reads and changes only its own place's items, and what it adds is that place's work; an item
+/// of another place is "not on your list" to it, as one that is not there.
+pub fn cli(sink: &dyn EventSink, bot: &Bot, session: Option<String>, place: Option<&super::memory::Place>, command: &str, params: &Value) -> Result<Value> {
+    if let Some(place) = place {
+        if !params["item"].is_null() {
+            let number = number(params, "item")?;
+            let list = read(&bot.id)?;
+            if !list.items.iter().any(|item| item.number == number && in_place(bot, item, place)) {
+                return Err(refused(format!("No item #{number} on your list here: this conversation works in {}, and sees only that place's work.", place_label(place))));
+            }
+        }
+    }
     let reserved = within_rate(bot, command, params)?;
-    let result = cli_command(sink, bot, session, command, params);
+    let result = cli_command(sink, bot, session, place, command, params);
     if let (Some(at), Err(_)) = (reserved, &result) {
         unrated(bot, at);
     }
     result
 }
 
-fn cli_command(sink: &dyn EventSink, bot: &Bot, session: Option<String>, command: &str, params: &Value) -> Result<Value> {
+fn place_label(place: &super::memory::Place) -> String {
+    match place {
+        super::memory::Place::Bot => "a place you no longer work in".into(),
+        super::memory::Place::Personal => "your owner's personal work".into(),
+        super::memory::Place::Org(id) => format!("organisation {id}"),
+    }
+}
+
+fn cli_command(sink: &dyn EventSink, bot: &Bot, session: Option<String>, place: Option<&super::memory::Place>, command: &str, params: &Value) -> Result<Value> {
     let by = By::Bot { session };
     let item = |value: Item| -> Result<Value> { Ok(json!({"botId": bot.id, "item": full(&value, &sessions())})) };
     match command {
         "list" => {
             let mut listing = listing(&bot.id)?;
-            if !params["all"].as_bool().unwrap_or(false) {
-                if let Some(items) = listing["items"].as_array_mut() {
-                    items.retain(|item| !ItemState::parse(item["state"].as_str().unwrap_or_default()).closed());
-                }
+            let all = params["all"].as_bool().unwrap_or(false);
+            if let Some(items) = listing["items"].as_array_mut() {
+                items.retain(|item| {
+                    let open = all || !ItemState::parse(item["state"].as_str().unwrap_or_default()).closed();
+                    let here = place.is_none_or(|place| *place != super::memory::Place::Bot && super::memory::place_of(bot, item["org"].as_str()) == *place);
+                    open && here
+                });
             }
             Ok(listing)
         }
         "show" => Ok(json!({"botId": bot.id, "item": shown(&bot.id, number(params, "item")?)?})),
-        "add" => item(add(sink, bot, &by, NewItem {
-            added_by: None,
-            title: optional(params, "title").unwrap_or_default().into(),
-            summary: optional(params, "summary").unwrap_or_default().into(),
-            done_means: strings(params, "done"),
-            start: params["start"].as_bool().unwrap_or(false),
-            asked_by: optional(params, "askedBy").map(str::to_owned),
-        })?),
+        "add" => {
+            if place == Some(&super::memory::Place::Bot) {
+                return Err(refused("This conversation was started in a place you no longer work in, so it takes on no work. Tell your owner."));
+            }
+            let new = NewItem {
+                added_by: None,
+                title: optional(params, "title").unwrap_or_default().into(),
+                summary: optional(params, "summary").unwrap_or_default().into(),
+                done_means: strings(params, "done"),
+                start: params["start"].as_bool().unwrap_or(false),
+                asked_by: optional(params, "askedBy").map(str::to_owned),
+            };
+            item(add_in(sink, bot, &by, new, place.map(|place| place.key().to_owned()))?)
+        }
         "set" => item(set(sink, bot, number(params, "item")?, ItemPatch {
             title: optional(params, "title").map(str::to_owned),
             summary: optional(params, "summary").map(str::to_owned),
@@ -1477,10 +1527,12 @@ pub static FAIL_LAUNCHES_FOR_TESTS: std::sync::atomic::AtomicBool = std::sync::a
 #[cfg(test)]
 pub static REAL_SENDS_FOR_TESTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Send `text` to bot `id`'s home chat as the owner's message, and say where.
-fn to_home_chat(manager: &crate::session::SessionManager, id: &str, text: String) -> Result<String> {
+/// Send `text` to the chat of bot `id` in `place` as the owner's message (its home chat, or its standing chat of the
+/// place the item's work is for; PRO-483), and say where.
+fn to_home_chat(manager: &crate::session::SessionManager, id: &str, place: &super::memory::Place, text: String) -> Result<String> {
     let sink = manager.sink();
-    let home = super::chat::home_chat(sink.as_ref(), id)?;
+    let bot = super::get(id)?;
+    let home = super::chat::place_chat(sink.as_ref(), &bot, place)?;
     let tab = home.tabs.iter().find(|tab| !tab.is_terminal()).with_context(|| "the home chat has no agent tab")?;
     #[cfg(test)]
     if !REAL_SENDS_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1508,10 +1560,19 @@ fn deliver(manager: &crate::session::SessionManager, id: &str, newest: Option<&s
         Ok(None) => return json!({"sent": false, "error": "This bot is no longer here."}),
         Err(error) => return json!({"sent": false, "kept": true, "error": format!("The bot could not be read, so this waits: {error:#}")}),
     }
-    let waiting: Vec<(String, u64, String, String)> = match read(id) {
+    let Ok(Some(bot)) = crate::store::bots::get(id) else { return json!({"sent": false, "kept": true, "error": "The bot could not be read, so this waits."}) };
+    // Each message goes to a chat in its item's place (PRO-483).
+    let waiting: Vec<(String, u64, String, String, super::memory::Place)> = match read(id) {
         Ok(list) => {
-            let mut waiting: Vec<_> = list.items.iter().flat_map(|item| item.undelivered.iter().map(|message| (message.at.clone(), item.number, message.id.clone(), message.text.clone()))).collect();
-            waiting.sort();
+            let mut waiting: Vec<_> = list
+                .items
+                .iter()
+                .flat_map(|item| {
+                    let place = super::memory::place_of(&bot, item.org.as_deref());
+                    item.undelivered.iter().map(move |message| (message.at.clone(), item.number, message.id.clone(), message.text.clone(), place.clone()))
+                })
+                .collect();
+            waiting.sort_by(|a, b| (&a.0, a.1, &a.2).cmp(&(&b.0, b.1, &b.2)));
             waiting
         }
         Err(error) => return json!({"sent": false, "error": format!("{error:#}")}),
@@ -1521,9 +1582,15 @@ fn deliver(manager: &crate::session::SessionManager, id: &str, newest: Option<&s
     }
     let mut sent: Vec<String> = Vec::new();
     let mut failure: Option<String> = None;
+    // Messages about the work of a place the bot no longer works in wait, each with why, and hold up no other.
+    let mut held: BTreeMap<String, String> = BTreeMap::new();
     let mut session = None;
-    for (_, _, message, text) in &waiting {
-        match to_home_chat(manager, id, text.clone()) {
+    for (_, _, message, text, place) in &waiting {
+        if *place == super::memory::Place::Bot {
+            held.insert(message.clone(), format!("{} no longer works in the place this item is for: it gets this once it works there again.", bot.name));
+            continue;
+        }
+        match to_home_chat(manager, id, place, text.clone()) {
             Ok(home) => {
                 session = Some(home);
                 sent.push(message.clone());
@@ -1539,8 +1606,10 @@ fn deliver(manager: &crate::session::SessionManager, id: &str, newest: Option<&s
     let marked = change_within(Some(sink.as_ref()), id, usize::MAX, |items, _| {
         for item in items.iter_mut() {
             item.undelivered.retain(|message| !sent.contains(&message.id));
-            if let Some(error) = &failure {
-                for message in &mut item.undelivered {
+            for message in &mut item.undelivered {
+                if let Some(why) = held.get(&message.id) {
+                    message.error = why.clone();
+                } else if let Some(error) = &failure {
                     message.error = error.clone();
                 }
             }
@@ -1552,6 +1621,7 @@ fn deliver(manager: &crate::session::SessionManager, id: &str, newest: Option<&s
         log::warn!("mark bot {id}'s messages delivered: {error:#}");
     }
     match newest {
+        Some(newest) if held.contains_key(newest) => json!({"sent": false, "kept": true, "error": held[newest]}),
         Some(newest) if !sent.iter().any(|message| message == newest) => json!({"sent": false, "error": failure.unwrap_or_else(|| "not sent yet".into())}),
         _ => match session {
             Some(session) => json!({"sent": true, "sessionId": session}),

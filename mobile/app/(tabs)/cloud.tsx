@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, RefreshControl, SectionList, Settings, StyleSheet, Text, View } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
-import { ChevronDown, ChevronRight } from "lucide-react-native";
+import { ChevronDown, ChevronRight, Plus } from "lucide-react-native";
 import type { CloudOrganization, CloudWorkspaceItem } from "@mobile/cloud/api";
 import { workspaceTitle } from "@mobile/cloud/catalog";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
@@ -12,7 +12,8 @@ import { useApp } from "@mobile/state/AppProvider";
 import { useMacPins } from "@mobile/state/mac-pins";
 import { Button, EmptyState } from "@mobile/ui/primitives";
 import { CloudWorkspaceRow } from "@mobile/ui/CloudWorkspaceRow";
-import { LargeTitle } from "@mobile/ui/glass";
+import { GlassIconButton, LargeTitle } from "@mobile/ui/glass";
+import { workspaceActions } from "@mobile/ui/workspace-actions";
 import { usePullRefresh } from "@mobile/ui/pull-refresh";
 import { TopBar, useTopBar } from "@mobile/ui/top-bar";
 import { useTabBarInset } from "@mobile/ui/tab-bar-inset";
@@ -69,7 +70,13 @@ export default function CloudScreen() {
 
   // Nothing read yet and nothing kept: rows stand in for the list, under the title, until it comes.
   const firstLoad = !snapshot.refreshedAt && !snapshot.saved && !snapshot.organizations.length && !snapshot.error;
-  const pinActions = (item: CloudWorkspaceItem) => macPins.cloudActions(item.workspace.orgId, workspaceProject(item.workspace), workspaceTitle(snapshot, item.workspace));
+  // Pin project, then Stop or Start and Delete for someone who may manage the workspace (25.06).
+  const pinActions = (item: CloudWorkspaceItem) => [
+    ...macPins.cloudActions(item.workspace.orgId, workspaceProject(item.workspace), workspaceTitle(snapshot, item.workspace)),
+    ...workspaceActions({ catalog, item, openDelete: () => router.push({ pathname: "/cloud/delete", params: { orgId: item.workspace.orgId, workspaceId: item.workspace.id } }) }),
+  ];
+  // + launches a workspace (25.05), once there is an organization to launch it in.
+  const launch = snapshot.organizations.length ? <GlassIconButton testID="launch-workspace" label="New workspace" icon={<Plus size={22} color={palette.ink} strokeWidth={2} />} onPress={() => router.push("/cloud/new")} /> : null;
   const open = (item: CloudWorkspaceItem) => router.push({ pathname: "/cloud/[workspaceId]", params: { workspaceId: item.workspace.id, orgId: item.workspace.orgId, title: workspaceTitle(snapshot, item.workspace) } });
 
   // The list scrolls under its own top bar, never over the status bar (#984).
@@ -77,7 +84,7 @@ export default function CloudScreen() {
   return <View style={[styles.screen, { backgroundColor: palette.page }]}><SectionList sections={sections} keyExtractor={(item) => item.workspace.id} automaticallyAdjustContentInsets={false} contentInsetAdjustmentBehavior="never" contentInset={contentInset} contentOffset={contentOffset} scrollIndicatorInsets={scrollIndicatorInsets} onScroll={top.onScroll} scrollEventThrottle={16} stickySectionHeadersEnabled={false} style={{ backgroundColor: palette.page }}
     contentContainerStyle={[styles.content, { paddingTop: paddingTop + styles.content.paddingTop, paddingBottom: bar + 24 }]}
     refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} tintColor={palette.accent} progressViewOffset={paddingTop} />}
-    ListHeaderComponent={<><LargeTitle title="Cloud" onLayout={(event) => top.onTitleLayout(event, paddingTop + styles.content.paddingTop)} />{snapshot.error ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.warning }]}>{codeText(snapshot.error)}</Text> : null}</>}
+    ListHeaderComponent={<><LargeTitle title="Cloud" onLayout={(event) => top.onTitleLayout(event, paddingTop + styles.content.paddingTop)}>{launch}</LargeTitle>{snapshot.error ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.warning }]}>{codeText(snapshot.error)}</Text> : null}</>}
     renderSectionHeader={({ section }) => <View style={styles.sectionHeader}><Text accessibilityRole="header" numberOfLines={1} style={[styles.sectionTitle, { color: palette.muted }]}>{section.title}</Text>{section.error ? <Text style={[styles.notice, { color: palette.warning }]}>{codeText(section.error)}</Text> : null}</View>}
     renderItem={({ item, index, section }) => <CloudWorkspaceRow item={item} title={workspaceTitle(snapshot, item.workspace)} first={index === 0} last={index === section.data.length - 1} onPress={() => open(item)} actions={pinActions(item)} />}
     ListEmptyComponent={firstLoad ? <Placeholders />

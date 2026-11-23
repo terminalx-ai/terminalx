@@ -47,7 +47,7 @@ fn a_moved_bot_takes_its_role_memory_items_and_duties_and_rests_where_it_left() 
     // Here it is marked moved: it stays listed, and its duties and chats do nothing.
     let moved = move_out(&sink(), &bot.id, "cloud:org-1:ws-1").unwrap();
     assert_eq!(moved.runs_on, BotRunsOn::Cloud("cloud:org-1:ws-1".into()));
-    assert!(super::super::chat::new_chat(&sink(), &bot.id).unwrap_err().to_string().contains("runs on a cloud workspace now"));
+    assert!(super::super::chat::new_chat(&sink(), &bot.id, None).unwrap_err().to_string().contains("runs on a cloud workspace now"));
     assert!(duties::held(&duties_here[0]).unwrap().contains("its duties run there"));
     assert!(export(&bot.id).is_err(), "a bot that lives elsewhere is not moved from here");
 
@@ -95,7 +95,7 @@ fn a_bot_brought_back_replaces_the_copy_it_left_and_works_here_again() {
     // The copy it left is in the trash, not deleted.
     let replaced = crate::store::root().unwrap().join("trash").join("bots-replaced");
     assert_eq!(std::fs::read_dir(replaced).unwrap().count(), 1);
-    assert!(super::super::chat::new_chat(&sink(), &bot.id).is_ok() || duties::held(&duties::duties_of(&bot.id).unwrap()[0]).is_none());
+    assert!(super::super::chat::new_chat(&sink(), &bot.id, None).is_ok() || duties::held(&duties::duties_of(&bot.id).unwrap()[0]).is_none());
     assert!(duties::held(&duties::duties_of(&bot.id).unwrap()[0]).is_none());
 }
 

@@ -94,6 +94,28 @@ describe("the new-tab button", () => {
   });
 });
 
+describe("a bot's chat (PRO-533)", () => {
+  it("has no + and no new-tab keys, and still switches, closes and reopens its tabs by key", async () => {
+    render(<TabsHarness newTabs={false} />);
+    expect(screen.queryByRole("button", { name: "New tab" })).toBeNull();
+    composer().focus();
+    press(composer(), { key: "t", code: "KeyT" });
+    press(composer(), { key: "B", code: "KeyB", shiftKey: true });
+    await flush();
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(backend.callsOf("browser_open_tab")).toEqual([]);
+
+    press(composer(), digit(3));
+    expect(shown()).toBe("Review");
+    press(composer(), { key: "w", code: "KeyW" });
+    await flush();
+    expect(backend.callsOf("remove_tab")).toEqual([{ sessionId: "a", tabId: "a3" }]);
+    press(composer(), { key: "T", code: "KeyT", altKey: true, shiftKey: true });
+    await flush();
+    expect(backend.callsOf("reopen_tab")).toEqual([{ sessionId: "a", tabId: "a3" }]);
+  });
+});
+
 describe("the tab shortcuts", () => {
   it("are nine remappable actions for a place in the row, reserving unshifted mod+1 for Overview", () => {
     const places = SHORTCUT_ACTIONS.filter((action) => /^session\.(tab\d|lastTab)$/.test(action.id));
