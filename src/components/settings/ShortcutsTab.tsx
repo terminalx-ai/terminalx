@@ -295,8 +295,9 @@ function ShortcutEditor({
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
-    // Tab leaves the box; every other key is the shortcut.
-    if (e.key === "Tab" && !e.metaKey && !e.ctrlKey && !e.altKey) return;
+    // Tab leaves the box; every other key is the shortcut. The plan-mode toggle's own key is Shift+Tab, so there only Tab leaves.
+    const shiftTabIsShortcut = e.shiftKey && action.id === "composer.togglePlanMode";
+    if (e.key === "Tab" && !e.metaKey && !e.ctrlKey && !e.altKey && !shiftTabIsShortcut) return;
     e.preventDefault();
     e.stopPropagation();
     if (e.repeat) return;
@@ -320,7 +321,9 @@ function ShortcutEditor({
 
   const hint = action.hold
     ? `Press the keys together, or press and release one modifier key on its own (such as ${isMac ? "Right ⌥" : "Right Ctrl"}) to hold it to talk. Tab leaves the box.`
-    : "Press the keys together. Tab leaves the box.";
+    : action.id === "composer.togglePlanMode"
+      ? "Press the keys together; Shift+Tab can be the shortcut here. Tab leaves the box."
+      : "Press the keys together. Tab leaves the box.";
 
   return (
     <div className="mb-2 flex flex-col items-end gap-1.5 rounded-md bg-well p-2" role="group" aria-label={`Change the shortcut for ${action.label}`} data-testid="shortcut-editor">

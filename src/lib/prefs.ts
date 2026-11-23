@@ -18,6 +18,16 @@ export interface PromptSnippet {
   text: string;
 }
 
+/** The agent, model and effort a review runs with (PRO-242); `effort` is null for a model with none to choose. */
+export interface ReviewModel {
+  agent: string;
+  model: string;
+  effort: string | null;
+}
+
+/** The longest "Open in" recents list kept. */
+export const OPEN_IN_RECENT_LIMIT = 8;
+
 export interface Prefs {
   dashboard: DashboardPreferences;
   linkBrowser: "terminalx" | "system" | "ask";
@@ -71,6 +81,12 @@ export interface Prefs {
   fixErrorsInstructions: string;
   /** Prompts saved from a turn's menu (PRO-379), offered by name under / in the composer. */
   promptSnippets: PromptSnippet[];
+  /** What a review runs with (PRO-242); null reviews with the tab's own agent, model and effort. */
+  reviewModel: ReviewModel | null;
+  /** The app "Open in" opens a file or folder in without asking (PRO-247), by app id; null asks. */
+  openInDefaultApp: string | null;
+  /** The apps last opened in (PRO-247), by app id, most recent first. */
+  openInRecent: string[];
   /**
    * The system's spelling correction, smart quotes and dashes, and text
    * replacements in the fields where the reader writes to an agent, and in the
@@ -201,6 +217,9 @@ const DEFAULTS: Prefs = {
   resetFiles: false,
   fixErrorsInstructions: "",
   promptSnippets: [],
+  reviewModel: null,
+  openInDefaultApp: null,
+  openInRecent: [],
   autocorrect: false,
   followUps: "now",
   lastProject: null,
@@ -300,6 +319,14 @@ function cleanCloudSections(value: unknown): Prefs["cloudSections"] {
 let preferenceFileValues: Partial<Prefs> = {};
 let hasSidebarSortChoice = false;
 
+/** A saved review model worth trusting: an agent and a model that are text, an effort that is text or none. */
+function reviewModelOf(raw: unknown): ReviewModel | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const { agent, model, effort } = raw as Record<string, unknown>;
+  if (typeof agent !== "string" || !agent.trim() || typeof model !== "string" || !model.trim()) return null;
+  return { agent, model, effort: typeof effort === "string" && effort.trim() ? effort : null };
+}
+
 function load(legacyOnly = false): Prefs {
   try {
     const raw = localStorage.getItem(KEY);
@@ -344,6 +371,10 @@ function load(legacyOnly = false): Prefs {
     prefs.fixErrorsInstructions = prefs.fixErrorsInstructions.slice(0, 8000);
     prefs.promptSnippets = Array.isArray(prefs.promptSnippets) ? prefs.promptSnippets.filter((snippet: Partial<PromptSnippet> | null): snippet is PromptSnippet =>
       !!snippet && typeof snippet.id === "string" && typeof snippet.name === "string" && typeof snippet.text === "string") : [];
+    prefs.reviewModel = reviewModelOf(prefs.reviewModel);
+    prefs.openInDefaultApp = typeof prefs.openInDefaultApp === "string" && prefs.openInDefaultApp.trim() ? prefs.openInDefaultApp : null;
+    prefs.openInRecent = Array.isArray(prefs.openInRecent)
+      ? [...new Set(prefs.openInRecent.filter((id: unknown): id is string => typeof id === "string" && !!id.trim()))].slice(0, OPEN_IN_RECENT_LIMIT) : [];
     let migrated = false;
     // Older versions saved the whole object, including the TerminalX default,
     // without recording whether it was chosen. Migrate unmarked values once;
