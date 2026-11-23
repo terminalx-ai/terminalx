@@ -711,7 +711,7 @@ fn home_chat_tab(bot_id: &str) -> Option<(String, String)> {
 fn note_in_home_chat(app: &impl AutomationHost, bot_id: &str, text: &str) -> Option<String> {
     let (session, tab) = home_chat_tab(bot_id)?;
     let manager = app.sessions().ok()?;
-    match manager.publish_external(&session, &tab, crate::events::Payload::Status { text: text.to_owned() }) {
+    match manager.publish_external(&session, &tab, crate::events::Payload::Status { text: text.to_owned(), handoff: None }) {
         Ok(_) => Some(session),
         Err(error) => {
             log::warn!("note a duty's report in bot {bot_id}'s home chat: {error:#}");

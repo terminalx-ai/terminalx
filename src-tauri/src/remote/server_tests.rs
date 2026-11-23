@@ -2231,7 +2231,7 @@ async fn closing_a_session_leaves_its_idle_tabs_alone() {
     call(&f.rpc, &peer, "session.close", json!({ "sessionId": session.id, "tabId": tab_id, "clientRequestId": "close-idle" })).await.unwrap();
     assert_eq!(manager.status_for_test(&session.id, &tab_id), crate::store::index::TabStatus::Completed, "an unread reply stays unread");
     let closed = manager.load_events(&session.id, &tab_id).unwrap().into_iter()
-        .any(|event| matches!(&event.payload, crate::events::Payload::Status { text } if text == crate::recovery::SESSION_CLOSED_MESSAGE));
+        .any(|event| matches!(&event.payload, crate::events::Payload::Status { text, .. } if text == crate::recovery::SESSION_CLOSED_MESSAGE));
     assert!(!closed, "nothing was stopped, so nothing says the session closed");
 }
 

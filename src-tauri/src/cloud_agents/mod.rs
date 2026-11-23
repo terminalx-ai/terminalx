@@ -455,7 +455,7 @@ impl AgentOps for ManagerOps {
     }
 
     fn note(&self, session_id: &str, tab_id: &str, text: &str) {
-        if let Err(error) = self.manager.publish_external(session_id, tab_id, Payload::Status { text: text.to_string() }) {
+        if let Err(error) = self.manager.publish_external(session_id, tab_id, Payload::Status { text: text.to_string(), handoff: None }) {
             log::warn!("note in {tab_id}: {error:#}");
         }
     }

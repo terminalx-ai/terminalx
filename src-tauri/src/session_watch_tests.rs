@@ -1387,7 +1387,7 @@ fn a_prompt_sent_to_an_idle_cli_counts_as_activity_before_the_pane_draws() {
         let old = Instant::now() - PATIENCE.stall - MOMENT;
         rig.rt.lock().unwrap().last_activity = old;
         rig.drew.set(Some(old));
-        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
+        let prompt = PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
         // The production send path, up to dispatching the input thread. Do
         // not use `stamp`: the send itself must refresh the activity clock.
         let (_, queued) = rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
@@ -1662,7 +1662,7 @@ fn a_queued_compact_echo_preserves_command_classification() {
     for completed in [false, true] {
         let rig = Rig::new();
         rig.start_turn();
-        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
+        let prompt = PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
         let (sent, queued) = rig.manager.record_composer_prompt(
             &mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None,
         );
@@ -2229,7 +2229,7 @@ impl Rig {
     }
 
     fn notices(&self) -> Vec<String> {
-        self.events().into_iter().filter_map(|e| match e.payload { Payload::Status { text } => Some(text), _ => None }).collect()
+        self.events().into_iter().filter_map(|e| match e.payload { Payload::Status { text, .. } => Some(text), _ => None }).collect()
     }
 
     fn status_line(&self, model: &str, effort: &str) {
@@ -3866,7 +3866,7 @@ fn a_prompt_shaped_like_a_shell_record_is_a_prompt() {
 fn a_shell_command_from_the_composer_settles_at_its_output() {
     for combined in [false, true] {
         let rig = Rig::new();
-        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "!git status".into(), display: "!git status".into() };
+        let prompt = PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "!git status".into(), display: "!git status".into() };
         let (_, queued) = rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
         assert!(!queued);
         assert!(rig.turn_open());
@@ -3892,7 +3892,7 @@ fn a_shell_command_from_the_composer_settles_at_its_output() {
 #[test]
 fn a_prompt_with_the_pending_commands_input_tags_is_not_its_echo() {
     let rig = Rig::new();
-    let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "!git status".into(), display: "!git status".into() };
+    let prompt = PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "!git status".into(), display: "!git status".into() };
     rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
     let prose = format!("{SHELL_INPUT} please explain");
     rig.append(&shell_record("prose", &prose));
@@ -3906,7 +3906,7 @@ fn a_prompt_with_the_pending_commands_input_tags_is_not_its_echo() {
 #[test]
 fn a_shell_command_the_agent_answers_ends_with_the_agents_turn() {
     let rig = Rig::new();
-    let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "!git status".into(), display: "!git status".into() };
+    let prompt = PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "!git status".into(), display: "!git status".into() };
     rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
     rig.append(&shell_record("shell-in", SHELL_INPUT));
     rig.append(&shell_record("shell-out", SHELL_OUTPUT));

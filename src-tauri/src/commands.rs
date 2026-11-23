@@ -4651,7 +4651,7 @@ mod command_tests {
         src.project_path = root.to_str().unwrap().into();
         store::index::update_session(&src.id, |session| { *session = src.clone(); Ok(()) }).unwrap();
         let tab = src.tabs[0].clone();
-        let mut prompt = Payload::UserMessage { author: None, text: "Change it".into(), images: vec![], files: vec![], baseline: None, queued: false, cwd: None };
+        let mut prompt = Payload::UserMessage { author: None, bot: None, text: "Change it".into(), images: vec![], files: vec![], baseline: None, queued: false, cwd: None };
         crate::checkpoints::observe(&src.id, &tab.id, 1, &mut prompt).unwrap();
         std::fs::write(root.join("kept/file"), "turn end\n").unwrap();
         let mut done = Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None };
@@ -4731,7 +4731,7 @@ mod command_tests {
             let tab = src.tabs[0].clone();
             store::index::update_session(&src.id, |session| { *session = src.clone(); Ok(()) }).unwrap();
             let cwd = std::path::Path::new(&src.cwd);
-            let mut prompt = Payload::UserMessage { author: None, text: "Change it".into(), images: vec![], files: vec![], baseline: None, queued: false, cwd: None };
+            let mut prompt = Payload::UserMessage { author: None, bot: None, text: "Change it".into(), images: vec![], files: vec![], baseline: None, queued: false, cwd: None };
             crate::checkpoints::observe(&src.id, &tab.id, 1, &mut prompt).unwrap();
             std::fs::write(cwd.join("a.txt"), "staged\n").unwrap();
             git::run(cwd, &["add", "a.txt"]).unwrap();
@@ -4980,7 +4980,7 @@ mod command_tests {
         src.bind_checkout_root(&wt.path);
         assert!(src.checkout_identity().is_some());
         let tab = &src.tabs[0];
-        let mut prompt = Payload::UserMessage { author: None, text: "Change it".into(), images: vec![], files: vec![], baseline: None, queued: false, cwd: None };
+        let mut prompt = Payload::UserMessage { author: None, bot: None, text: "Change it".into(), images: vec![], files: vec![], baseline: None, queued: false, cwd: None };
         crate::checkpoints::observe(&src.id, &tab.id, 1, &mut prompt).unwrap();
         std::fs::write(sub.join("file"), "turn end").unwrap();
         let mut done = Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None };

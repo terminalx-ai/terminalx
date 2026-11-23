@@ -44,6 +44,7 @@ const checks = [
   "bot-items",
   "bot-duties",
   "bot-handoffs",
+  "bot-message-cards",
   "bot-calendar",
   "bot-runs",
   "bot-suggestions",

@@ -877,6 +877,28 @@ pub fn transcript_label(message: &Inbound) -> String {
     format!("TerminalX · {} on {service} ({}) · a request, not an approval", message.by, if message.direct { "direct chat".into() } else { place(message) })
 }
 
+/// A chat app message's card (PRO-539): who wrote it, on which service and where, with their words. Sent beside
+/// [`agent_text`], which it never changes. A chat app gives no address for a message, so the card has none.
+pub fn card(bot: &Bot, message: &Inbound) -> crate::events::BotMessage {
+    crate::events::BotMessage {
+        kind: "mention".into(),
+        from: "person".into(),
+        to: bot.id.clone(),
+        to_name: bot.name.clone(),
+        body: message.text.clone(),
+        mention: Some(crate::events::MentionSource {
+            service: message.service.clone(),
+            by: message.by.clone(),
+            owner: message.from == OWNER,
+            place: if message.direct { String::new() } else { place(message) },
+            direct: message.direct,
+            url: String::new(),
+            title: String::new(),
+        }),
+        ..Default::default()
+    }
+}
+
 // ------------------------------------------------------------------ replies
 
 /// Whitespace taken out, for knowing the transcript's copy of a message by its start.
@@ -1238,7 +1260,7 @@ fn deliver(manager: &SessionManager) {
         let result = chat_for(manager, &bot, &message).and_then(|entry| {
             let tab = entry.tabs.iter().find(|tab| !tab.is_terminal()).context("the chat has no agent tab")?.id.clone();
             let author = crate::local_sharing::Person { user_id: APP_AUTHOR.into(), display_name: transcript_label(&message), email: String::new(), email_verified: false, organization_ids: Vec::new() };
-            let outcome = manager.send_from_bot(&entry.id, &tab, text.clone(), author)?;
+            let outcome = manager.send_from_bot(&entry.id, &tab, text.clone(), author, Some(card(&bot, &message)))?;
             let after = outcome.events.iter().filter(|event| matches!(event.payload, Payload::UserMessage { .. })).map(|event| event.seq).min().or_else(|| outcome.events.iter().map(|event| event.seq).min()).unwrap_or(0);
             Ok((entry.id, tab, after))
         });

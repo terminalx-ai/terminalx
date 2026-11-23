@@ -65,6 +65,9 @@ export interface HandoffList {
   /** To or from the bot, and not delivered after at least one try. */
   undelivered?: UndeliveredMessage[];
   unreadable: number;
+  /** How deep a chain of hand-offs may go, and how many tries one gets: "2 of 3 in its chain", "try 2 of 3". Absent from an older runtime. */
+  maxDepth?: number;
+  maxTries?: number;
 }
 
 export interface TeamBrief {

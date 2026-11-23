@@ -4876,7 +4876,7 @@ mod tests {
         assert!(!crate::store::automations::get(&mine.id).unwrap().enabled);
         // Its home chat says the bot did it, in TerminalX's words (PRO-490 review); switched off again, it says nothing more.
         let notes = |session: &str, tab: &str| service.manager.load_events(session, tab).unwrap().into_iter().filter_map(|event| match event.payload {
-            crate::events::Payload::Status { text } if text.contains("switched off its duty") => Some(text),
+            crate::events::Payload::Status { text, .. } if text.contains("switched off its duty") => Some(text),
             _ => None,
         }).collect::<Vec<_>>();
         assert_eq!(notes(&chat.id, &chat.tabs[0].id), [format!("TerminalX · Atlas switched off its duty \"{}\". It wakes nobody until you switch it on again on Atlas's Duties tab.", mine.name)]);

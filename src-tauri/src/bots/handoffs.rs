@@ -47,6 +47,7 @@ use serde_json::{json, Value};
 
 use super::items::{one_line, text};
 use super::{chat, refused, Bot, BotAccess, OWNER};
+use crate::events::{BotMessage, HandoffNote};
 use crate::session::SessionManager;
 use crate::sink::EventSink;
 use crate::store::index::{self, SessionEntry};
@@ -266,6 +267,10 @@ pub struct Message {
     /// How the transcript names its author.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub label: String,
+    /// What it is, for the window to draw as a card (PRO-539): made with `text`, sent beside it, never read back
+    /// out of it. One an older build kept has none, and is sent with what its other fields say ([`card_of`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<BotMessage>,
     /// The chat it goes to; the receiving bot's home chat when there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
@@ -556,6 +561,79 @@ pub fn agent_message(kind: &str, from: &Bot, to: &Bot, body: &str, footer: &str)
     text
 }
 
+/// What `from` is to `to`, as a card's field: the same four cases as [`relation`], never its words.
+fn relation_id(from: &Bot, to: &Bot) -> &'static str {
+    if to.reports_to == from.id {
+        "lead"
+    } else if from.reports_to == to.id {
+        "report"
+    } else if listed_to_hand_off(from, to) {
+        "listed"
+    } else {
+        "pointed"
+    }
+}
+
+/// The fields every card of a message from one bot to another carries (PRO-539): who, to whom, what each is to the
+/// other and may do, as they are now. They say what [`agent_message`] says in words, and are sent beside its text.
+fn bot_card(kind: &str, from: &Bot, to: &Bot) -> BotMessage {
+    BotMessage {
+        kind: kind.into(),
+        from: from.id.clone(),
+        to: to.id.clone(),
+        from_name: from.name.clone(),
+        to_name: to.name.clone(),
+        status: kind == "tell" && from.reports_to == to.id,
+        relation: relation_id(from, to).into(),
+        from_access: from.access.as_str().into(),
+        to_access: to.access.as_str().into(),
+        ..BotMessage::default()
+    }
+}
+
+/// A hand-off's card, for the chat of the bot it went to: its title and scope in the sender's words, its number,
+/// its place in its chain and the receiving bot's item. When the owner handed an item on, it is theirs: `from` is
+/// [`OWNER`], `note` their own words, and the title and scope are `words_of` the bot whose item it was.
+fn handoff_card(handoff: &Handoff, from: &Bot, to: &Bot) -> BotMessage {
+    let mut card = bot_card("handoff", from, to);
+    card.handoff = Some(handoff.number);
+    card.depth = Some(handoff.depth.max(1));
+    card.max_depth = Some(MAX_DEPTH);
+    card.title = handoff.title.clone();
+    card.body = handoff.scope.clone();
+    card.due = handoff.due.clone();
+    card.item = handoff.item;
+    if handoff.by == OWNER {
+        card.from = OWNER.into();
+        card.from_name = String::new();
+        card.words_of = from.id.clone();
+        card.from_item = handoff.from_item;
+        card.note = handoff.note.clone();
+        card.relation = String::new();
+        card.from_access = String::new();
+    }
+    card
+}
+
+/// The card of a stored message that has none: one of TerminalX's own notes, the owner's Stop, or a message an
+/// older build kept. Only what the record's own fields say: who, to whom, what kind and about which hand-off.
+fn card_of(message: &Message) -> BotMessage {
+    if let Some(card) = &message.card {
+        return card.clone();
+    }
+    let name = |id: &str| crate::store::bots::get(id).ok().flatten().map(|bot| bot.name).unwrap_or_default();
+    let from_bot = message.from != OWNER && message.from != "terminalx";
+    BotMessage {
+        kind: message.kind.clone(),
+        from: message.from.clone(),
+        to: message.to.clone(),
+        from_name: if from_bot { name(&message.from) } else { String::new() },
+        to_name: name(&message.to),
+        handoff: message.handoff,
+        ..BotMessage::default()
+    }
+}
+
 /// The open hand-offs given to `bot`, by number.
 fn open_to<'a>(store: &'a Store, bot: &'a str) -> impl Iterator<Item = &'a Handoff> + 'a {
     store.handoffs.iter().filter(move |handoff| handoff.to == bot && !handoff.state.closed())
@@ -622,6 +700,7 @@ fn new_message(from: &str, to: &str, kind: &str, handoff: Option<u64>, text: Str
         handoff,
         text,
         label,
+        card: None,
         session,
         pending: true,
         delivered: None,
@@ -950,11 +1029,13 @@ pub fn tell(manager: &SessionManager, from: &Bot, to: &Bot, body: &str, about: O
                 format!("This is {}'s answer to hand-off {number}. Carry on with your work; it is not your owner's approval.", from.name)
             };
             let message = agent_message("answer", from, to, &body, &footer);
-            store.messages.push(new_message(&from.id, &to.id, "answer", Some(number), message, bot_label("answer", from, to), handoff.from_session.clone()));
+            let mut message = new_message(&from.id, &to.id, "answer", Some(number), message, bot_label("answer", from, to), handoff.from_session.clone());
+            message.card = Some(BotMessage { handoff: Some(number), body: body.clone(), failed, ..bot_card("answer", from, to) });
+            store.messages.push(message);
             Ok(handoff)
         })?;
         let said = if failed { format!("{} could not do it and told {}", from.name, to.name) } else { format!("{} answered {}", from.name, to.name) };
-        status_lines(manager, &answered, &said);
+        status_lines(manager, &answered, if failed { "couldNot" } else { "answered" }, &said);
         let delivery = deliver(manager, &to.id);
         closed_now(manager, std::slice::from_ref(&answered));
         return Ok(json!({"handoff": answered, "delivery": delivery}));
@@ -968,7 +1049,8 @@ pub fn tell(manager: &SessionManager, from: &Bot, to: &Bot, body: &str, about: O
         }
         refuse_full_inbox(store, to)?;
         let text = agent_message("tell", from, to, &body, "");
-        let message = new_message(&from.id, &to.id, "tell", None, text, bot_label("tell", from, to), None);
+        let mut message = new_message(&from.id, &to.id, "tell", None, text, bot_label("tell", from, to), None);
+        message.card = Some(BotMessage { body: body.clone(), ..bot_card("tell", from, to) });
         store.messages.push(message.clone());
         Ok(message)
     })?;
@@ -1102,7 +1184,7 @@ pub fn stop(manager: &SessionManager, number: u64) -> Result<Handoff> {
         }
     }
     let name = crate::store::bots::get(&stopped.to).ok().flatten().map(|bot| bot.name).unwrap_or_else(|| "the bot".into());
-    status_lines(manager, &stopped, &format!("You stopped {name}'s work on hand-off {number}"));
+    status_lines(manager, &stopped, "stopped", &format!("You stopped {name}'s work on hand-off {number}"));
     deliver(manager, &stopped.from);
     // Its work is stopped above; what waited for room may start.
     if start_waiting(manager, &stopped.to) {
@@ -1157,7 +1239,7 @@ pub fn work_sessions(handoff: &Handoff) -> Vec<SessionEntry> {
 fn start_and_deliver(manager: &SessionManager, number: u64, line: &str) -> Option<Handoff> {
     let started = start(manager, number);
     let handoff = read().ok()?.handoffs.into_iter().find(|handoff| handoff.number == number)?;
-    status_lines(manager, &handoff, line);
+    status_lines(manager, &handoff, "handed", line);
     if started {
         deliver(manager, &handoff.to);
     }
@@ -1214,7 +1296,7 @@ fn start(manager: &SessionManager, number: u64) -> bool {
         Ok(Claim::Not) => return false,
         Ok(Claim::Refused(closed)) => {
             drop(one);
-            status_lines(manager, &closed, &format!("Hand-off {number} did not start: the line or Who can ask changed"));
+            status_lines(manager, &closed, "notStarted", &format!("Hand-off {number} did not start: the line or Who can ask changed"));
             deliver(manager, &closed.from);
             return false;
         }
@@ -1259,8 +1341,10 @@ fn start(manager: &SessionManager, number: u64) -> bool {
                 record.modified = now;
                 let record = record.clone();
                 let text = if record.by == OWNER { owner_hand_message(&record, &from) } else { agent_message("handoff", &from, &to, &handoff_body(&record), &handoff_footer(&record, &from)) };
+                let card = handoff_card(&record, &from, &to);
                 for message in store.messages.iter_mut().filter(|message| message.pending && message.handoff == Some(number) && message.kind == "handoff") {
                     message.text = text.clone();
+                    message.card = Some(card.clone());
                     message.session = Some(entry.id.clone());
                 }
                 Ok(true)
@@ -1424,6 +1508,9 @@ pub type SentForTests = (String, String, String, Option<String>);
 /// from `chat::launched`'s thread is seen; tests that use it hold their temp home's lock, one at a time.
 #[cfg(test)]
 pub static SENT_FOR_TESTS: Mutex<Vec<SentForTests>> = Mutex::new(Vec::new());
+/// The cards sent in tests, by [`send`], in the order of [`SENT_FOR_TESTS`]: (the text sent, its card).
+#[cfg(test)]
+pub static SENT_CARDS_FOR_TESTS: Mutex<Vec<(String, BotMessage)>> = Mutex::new(Vec::new());
 /// Set in a test to make the next sends fail.
 #[cfg(test)]
 pub static FAIL_SENDS_FOR_TESTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1477,14 +1564,16 @@ fn author_of(message: &Message) -> (String, String) {
 fn send(manager: &SessionManager, message: &Message) -> Result<String> {
     let (session, tab) = target(manager, message)?;
     let (user, label) = author_of(message);
+    let card = card_of(message);
     #[cfg(test)]
     if !REAL_SENDS_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
         anyhow::ensure!(!FAIL_SENDS_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst), "the chat could not take the message");
         SENT_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).push((session.clone(), tab, message.text.clone(), Some(label)));
+        SENT_CARDS_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).push((message.text.clone(), card));
         return Ok(session);
     }
     let author = crate::local_sharing::Person { user_id: user, display_name: label, email: String::new(), email_verified: false, organization_ids: Vec::new() };
-    manager.send_from_bot(&session, &tab, message.text.clone(), author)?;
+    manager.send_from_bot(&session, &tab, message.text.clone(), author, Some(card))?;
     Ok(session)
 }
 
@@ -1577,6 +1666,7 @@ fn deliver_as(manager: &SessionManager, id: &str, with_held: bool) -> Value {
                 message.error.clear();
                 // Its words are in the chat's transcript now; the store keeps that it was sent, not the text.
                 message.text.clear();
+                message.card = None;
             }
         }
         if let Some((failed, error)) = &failure {
@@ -1624,7 +1714,7 @@ fn deliver_as(manager: &SessionManager, id: &str, with_held: bool) -> Value {
     }
     closed_now(manager, &gave_up);
     for handoff in gave_up {
-        status_lines(manager, &handoff, &format!("Hand-off {} failed: TerminalX could not reach its bot", handoff.number));
+        status_lines(manager, &handoff, "failed", &format!("Hand-off {} failed: TerminalX could not reach its bot", handoff.number));
         if handoff.by != OWNER {
             let from = handoff.from.clone();
             std::thread::spawn({
@@ -1669,21 +1759,24 @@ pub fn deliver_waiting(manager: &SessionManager, id: &str) {
     }
 }
 
-/// A plain line in the sender's and the receiver's chats: shown, never sent to an agent.
-fn status_lines(manager: &SessionManager, handoff: &Handoff, line: &str) {
-    let mut sessions: Vec<(String, String)> = Vec::new();
-    for (session, bot) in [(handoff.from_session.as_ref(), &handoff.from), (handoff.to_session.as_ref(), &handoff.to)] {
+/// A plain line in the sender's and the receiver's chats: shown, never sent to an agent. Each carries which
+/// hand-off it is about, what happened to it (`event`) and whose chat it is in (PRO-539), so the window draws the
+/// "Handed to" card and TerminalX's own lines from those fields; `line` stays for a reader that knows none of them.
+fn status_lines(manager: &SessionManager, handoff: &Handoff, event: &str, line: &str) {
+    let mut sessions: Vec<(String, String, &str)> = Vec::new();
+    for (session, bot, side) in [(handoff.from_session.as_ref(), &handoff.from, "from"), (handoff.to_session.as_ref(), &handoff.to, "to")] {
         let entry = session.and_then(|session| index::get(session).ok()).filter(|entry| chat::acting_bot(entry).as_deref() == Some(bot.as_str()));
         let entry = entry.or_else(|| index::load().ok()?.into_iter().filter(|entry| !entry.archived && chat::session_bot(entry).is_some_and(|reference| reference.id == *bot && reference.home)).max_by(|a, b| a.created.cmp(&b.created)));
         let Some(entry) = entry else { continue };
         if let Some(tab) = entry.tabs.iter().find(|tab| !tab.is_terminal()) {
-            if !sessions.iter().any(|(session, _)| *session == entry.id) {
-                sessions.push((entry.id.clone(), tab.id.clone()));
+            if !sessions.iter().any(|(session, _, _)| *session == entry.id) {
+                sessions.push((entry.id.clone(), tab.id.clone(), side));
             }
         }
     }
-    for (session, tab) in sessions {
-        if let Err(error) = manager.publish_external(&session, &tab, crate::events::Payload::Status { text: line.to_owned() }) {
+    for (session, tab, side) in sessions {
+        let note = HandoffNote { number: handoff.number, event: event.into(), side: side.into(), from: handoff.from.clone(), to: handoff.to.clone(), by: handoff.by.clone(), title: handoff.title.clone() };
+        if let Err(error) = manager.publish_external(&session, &tab, crate::events::Payload::Status { text: line.to_owned(), handoff: Some(note) }) {
             log::warn!("note hand-off {} in session {session}: {error:#}", handoff.number);
         }
     }
@@ -1862,6 +1955,9 @@ pub fn listing(id: Option<&str>) -> Result<Value> {
         "waitingMessages": waiting,
         "undelivered": undelivered,
         "unreadable": store.unreadable,
+        // The bounds a card names: "2 of 3 in its chain", "try 2 of 3".
+        "maxDepth": MAX_DEPTH,
+        "maxTries": MAX_RETRIES + 1,
     }))
 }
 

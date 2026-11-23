@@ -890,22 +890,44 @@ pub fn label(mention: &Mention) -> String {
     format!("TerminalX · {} mentioned you on {} ({}) · a request, not an approval", mention.by, mention.thread.service(), mention.thread.label())
 }
 
+/// A mention's card (PRO-539): who wrote it, on which service and where, with their words. Sent beside
+/// [`message`]'s text, which it never changes.
+pub fn card(bot: &Bot, mention: &Mention) -> crate::events::BotMessage {
+    crate::events::BotMessage {
+        kind: "mention".into(),
+        from: "person".into(),
+        to: bot.id.clone(),
+        to_name: bot.name.clone(),
+        body: mention.text.clone(),
+        mention: Some(crate::events::MentionSource {
+            service: mention.thread.kind.clone(),
+            by: mention.by.clone(),
+            owner: mention.from == OWNER,
+            place: mention.thread.label(),
+            direct: false,
+            url: mention.thread.url.clone(),
+            title: mention.thread.title.clone(),
+        }),
+        ..Default::default()
+    }
+}
+
 /// What was sent in tests, by [`send`]: (session, text, label).
 #[cfg(test)]
 pub static SENT_FOR_TESTS: Mutex<Vec<(String, String, String)>> = Mutex::new(Vec::new());
 
-fn send(manager: &SessionManager, session: &SessionEntry, text: String, label: String) -> Result<()> {
+fn send(manager: &SessionManager, session: &SessionEntry, text: String, label: String, card: crate::events::BotMessage) -> Result<()> {
     let tab = session.tabs.iter().find(|tab| !tab.is_terminal()).context("the chat has no agent tab")?;
     #[cfg(test)]
     {
-        let _ = (manager, tab);
+        let _ = (manager, tab, card);
         SENT_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).push((session.id.clone(), text, label));
         Ok(())
     }
     #[cfg(not(test))]
     {
         let author = crate::local_sharing::Person { user_id: "terminalx".into(), display_name: label, email: String::new(), email_verified: false, organization_ids: Vec::new() };
-        manager.send_from_bot(&session.id, &tab.id, text, author).map(|_| ())
+        manager.send_from_bot(&session.id, &tab.id, text, author, Some(card)).map(|_| ())
     }
 }
 
@@ -958,7 +980,7 @@ pub fn deliver(manager: &SessionManager) -> usize {
             Some(entry) => Ok(entry),
             None => new_chat(manager, &bot, &mention.thread),
         };
-        let result = made.and_then(|entry| send(manager, &entry, message(&bot, &mention), label(&mention)).map(|()| entry.id));
+        let result = made.and_then(|entry| send(manager, &entry, message(&bot, &mention), label(&mention), card(&bot, &mention)).map(|()| entry.id));
         let outcome = change(|store| {
             let Some(kept) = store.mentions.iter_mut().filter_map(Kept::known_mut).find(|kept| kept.id == mention.id && kept.bot == mention.bot && kept.state == WAITING) else { return Ok(()) };
             match &result {
