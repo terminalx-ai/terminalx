@@ -278,7 +278,7 @@ describe("accepted automation inputs and cost projection", () => {
   });
 
   it("does not invent a one-machine-month ceiling or add creation a second time", () => {
-    const lines = automationCostLines(estimate({ createPerRunMinutes: 20, perRunMaxMinutes: 105, monthlyRuns: 720, monthlyMaxMicros: 62_208_000_000, keepsMachineRunning: true }), 60, true, true).join(" ");
+    const lines = automationCostLines(estimate({ createPerRunMinutes: 20, perRunMaxMinutes: 105, monthlyRuns: 720, monthlyMaxMicros: 62_208_000_000, keepsMachineRunning: true }), 60, true, "github").join(" ");
     expect(lines).toContain("105 minutes, including 20 minutes");
     expect(lines).toContain("already included");
     expect(lines).toContain("$62,208.00");
@@ -288,4 +288,23 @@ describe("accepted automation inputs and cost projection", () => {
     expect(lines).not.toContain("wakes this workspace");
     expect(runText({ state: "creating-workspace" })).toBe("Creating workspace");
   });
+});
+
+it("sends exactly the empty webhook trigger without validating hidden timer or GitHub fields", () => {
+  const form: AutomationForm = {
+    ...blankAutomationForm(),
+    name: "Webhook report",
+    prompt: "Report on {{payload.ref}}.",
+    triggerKind: "webhook",
+    time: "invalid",
+    preset: "weekly",
+    weekdays: [],
+  };
+  const estimate = { workspaceId: "template", completionPolicy: "suspend", maxRunMinutes: 60, webhookTrigger: {} };
+  expect(automationEstimateInput(form, "template", [])).toEqual(estimate);
+  expect(automationInput(form, "template", [])).toEqual({
+    ...estimate, name: form.name, prompt: form.prompt, agent: form.agent, mode: form.mode,
+    workspaceMode: "existing", missedRunPolicy: "skip",
+  });
+  expect(automationInput({ ...form, prompt: "" }, "template", [])).toBeNull();
 });

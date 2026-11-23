@@ -565,7 +565,9 @@ export const api = {
   cloudAutomationEstimate: (input: CloudAutomationEstimateInput, orgId?: string | null) =>
     invoke<CloudScheduleQuote>("cloud_schedule_estimate", { input, orgId: orgId ?? null }),
   cloudAutomationCreate: (input: CloudAutomationCreateInput, orgId?: string | null) =>
-    invoke<CloudAutomationDto>("cloud_schedule_create", { input, orgId: orgId ?? null }),
+    invoke<CloudAutomationMutationDto>("cloud_schedule_create", { input, orgId: orgId ?? null }),
+  cloudAutomationRotateWebhookSecret: (scheduleId: string, orgId: string) =>
+    invoke<CloudAutomationMutationDto>("cloud_schedule_webhook_rotate", { scheduleId, orgId }),
   cloudAutomationSetActive: (scheduleId: string, active: boolean, orgId?: string | null) =>
     invoke<CloudAutomationDto>("cloud_schedule_set_active", { scheduleId, active, orgId: orgId ?? null }),
   cloudScheduleDelete: (scheduleId: string, orgId?: string | null) => invoke<void>("cloud_schedule_delete", { scheduleId, orgId: orgId ?? null }),
@@ -1604,15 +1606,26 @@ export interface CloudScheduleGithubTrigger {
   allowForkPullRequests?: boolean;
 }
 
-/** Raw native response. GitHub timers are absent/null, never fabricated. */
+export interface CloudScheduleWebhookTrigger {
+  url: string;
+  secretUpdatedAt: number | null;
+}
+
+/** Raw native response. Event-based automations have no timer. */
 export interface CloudAutomationDto extends Omit<CloudSchedule, "schedule" | "nextRunAt" | "lastRun"> {
   schedule?: CloudScheduleTiming | null;
   githubTrigger?: CloudScheduleGithubTrigger | null;
+  webhookTrigger?: CloudScheduleWebhookTrigger | null;
   workspaceMode?: "existing" | "fresh" | null;
   archiveAfterDays?: number | null;
   archiveOnPrMerge?: boolean | null;
   nextRunAt?: number | null;
   lastRun?: CloudScheduleRun | null;
+}
+
+export interface CloudAutomationMutationDto extends CloudAutomationDto {
+  /** Only returned at creation or rotation. */
+  webhookSecret?: string;
 }
 
 export interface CloudAutomationDetailDto {
@@ -1621,8 +1634,9 @@ export interface CloudAutomationDetailDto {
 }
 
 export type CloudAutomationTriggerInput =
-  | { schedule: CloudScheduleTiming; githubTrigger?: never }
-  | { schedule?: never; githubTrigger: CloudScheduleGithubTrigger };
+  | { schedule: CloudScheduleTiming; githubTrigger?: never; webhookTrigger?: never }
+  | { schedule?: never; githubTrigger: CloudScheduleGithubTrigger; webhookTrigger?: never }
+  | { schedule?: never; githubTrigger?: never; webhookTrigger: Record<string, never> };
 
 export type CloudAutomationWorkspaceInput =
   | { workspaceMode?: "existing"; archiveAfterDays?: never; archiveOnPrMerge?: false }
@@ -1635,7 +1649,7 @@ export type CloudAutomationCreateInput = Omit<CloudScheduleCreateInput, "schedul
 
 /** Existing timer UI only. No fabricated timer or fresh workspace identity. */
 function projectLegacyCloudSchedule(value: CloudAutomationDto): CloudSchedule | null {
-  if (value.schedule == null || value.githubTrigger != null || (value.workspaceMode != null && value.workspaceMode !== "existing")) return null;
+  if (value.schedule == null || value.githubTrigger != null || value.webhookTrigger != null || (value.workspaceMode != null && value.workspaceMode !== "existing")) return null;
   return { ...value, schedule: value.schedule, nextRunAt: value.nextRunAt ?? undefined, lastRun: value.lastRun ?? undefined };
 }
 
