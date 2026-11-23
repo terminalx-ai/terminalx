@@ -37,13 +37,14 @@ function pdfAssets(): Plugin {
 // in jsdom with src/test/setup.ts, so each file is in exactly one project.
 //
 // `node` holds every mobile, package and script test, and the src tests below: each is a
-// .test.ts that names no DOM API itself (window, document, localStorage, navigator, a DOM
+// .test.ts that uses no DOM API itself (window, document, localStorage, navigator, a DOM
 // event or observer, requestAnimationFrame, render or Testing Library), carries no
 // `@vitest-environment jsdom` comment, and passed run by path in node with the same tests
 // passing as in jsdom. A src test whose imports reach for the DOM stays in `dom` even when its
 // own text does not: agentEvents.late, agentEvents.lifecycle, agentEvents.timestamps,
-// cloudSetupLayout, cloudWorkClaims, settingsLinks and terminalMemory. A new src test is `dom`
-// until it is listed here.
+// cloudSetupLayout, cloudWorkClaims, settingsLinks, terminalColor and terminalMemory. A new src
+// test is `dom` until it is listed here. A `@vitest-environment` comment still wins over the
+// project's environment, so a file keeps the one it names in either project.
 const TEST_FILES = ["src/**/*.test.{ts,tsx}", "mobile/src/**/*.test.ts", "packages/**/*.test.ts", "scripts/*.test.mjs"];
 const NODE_SRC_TESTS = [
   "src/components/bots/BotItemAskedBy.test.ts",
@@ -182,6 +183,7 @@ const NODE_SRC_TESTS = [
   "src/lib/workspaceFiles.test.ts",
   "src/lib/worktreeCleanup.test.ts",
   "src/lib/worktreeNames.test.ts",
+  "src/styles/glass.test.ts",
   "src/styles/inkContrast.test.ts",
   "src/styles/statusContrast.test.ts",
   "src/types/pairing.test.ts",
