@@ -13,8 +13,13 @@
 //   node scripts/webkit/run-all.mjs --shard 2/4             the second of four parts (one CI job each)
 //   node scripts/webkit/run-all.mjs --shard 2/4 --list      the names that part runs, one per line; nothing runs
 //
+//   node scripts/webkit/run-all.mjs --only mac-only        the checks in `macOnly` below and no other, on any host
+//
 // On Linux the checks in `macOnly` below are left out, and the output says so;
 // WEBKIT_MAC_ONLY_TOO=1 runs them there as well (to see whether they still hold).
+// `--only mac-only` is what a macOS job runs beside Linux jobs that leave them out:
+// between them every check runs once. It reads the same list, so a check added to
+// `macOnly` moves from the one to the other with no other change.
 //
 // Every check runs even when an earlier one fails. A check's output is printed
 // in one piece when it ends; what failed is printed again at the end, and the
@@ -203,12 +208,12 @@ export async function pool(names, jobs, start) {
 /** The command line: run the checks it names, or list them. */
 async function main() {
   const usage = (message) => {
-    console.error(`${message}\nUsage: node scripts/webkit/run-all.mjs [--jobs <number>] [--shard <i>/<n>] [--list] [check ...]`);
+    console.error(`${message}\nUsage: node scripts/webkit/run-all.mjs [--jobs <number>] [--shard <i>/<n>] [--list] [--only mac-only | check ...]`);
     process.exit(2);
   };
   let parsed;
   try {
-    parsed = parseArgs({ options: { jobs: { type: "string" }, shard: { type: "string" }, list: { type: "boolean" } }, allowPositionals: true });
+    parsed = parseArgs({ options: { jobs: { type: "string" }, shard: { type: "string" }, list: { type: "boolean" }, only: { type: "string" } }, allowPositionals: true });
   } catch (error) {
     usage(error.message);
   }
@@ -221,7 +226,12 @@ async function main() {
   const unknown = args.filter((arg) => !names(arg).length);
   if (unknown.length) usage(`Not a check of this suite: ${unknown.join(", ")}.`);
   const wanted = new Set(args.flatMap(names));
-  const named = args.length ? checks.filter((name) => wanted.has(name)) : checks;
+  const only = parsed.values.only;
+  if (only !== undefined && only !== "mac-only") usage(`--only takes mac-only, not ${JSON.stringify(only)}.`);
+  if (only && args.length) usage(`--only mac-only names its own checks (${[...macOnly.keys()].join(", ")}); it cannot be given others: ${args.join(", ")}.`);
+  const strangers = [...macOnly.keys()].filter((name) => !checks.includes(name));
+  if (strangers.length) usage(`In macOnly but not a check of this suite: ${strangers.join(", ")}.`);
+  const named = only ? checks.filter((name) => macOnly.has(name)) : args.length ? checks.filter((name) => wanted.has(name)) : checks;
 
   let selected = named;
   if (parsed.values.shard !== undefined) {
@@ -230,7 +240,8 @@ async function main() {
     if (!match || count < 1 || index < 1 || index > count) usage(`--shard takes <i>/<n> with 1 ≤ i ≤ n, not ${JSON.stringify(parsed.values.shard)}.`);
     selected = shard(named, index, count);
   }
-  const leftOut = process.platform === "linux" && process.env.WEBKIT_MAC_ONLY_TOO !== "1" ? selected.filter((name) => macOnly.has(name)) : [];
+  // Asked for by name with --only, they run wherever this is.
+  const leftOut = !only && process.platform === "linux" && process.env.WEBKIT_MAC_ONLY_TOO !== "1" ? selected.filter((name) => macOnly.has(name)) : [];
   // Said on stderr, so that --list's stdout is the names alone.
   for (const name of leftOut) console.error(`left out on Linux: ${name}: ${macOnly.get(name)}`);
   selected = selected.filter((name) => !leftOut.includes(name));
@@ -243,7 +254,7 @@ async function main() {
   const results = [];
   const failedSetup = [];
   const started = Date.now();
-  console.log(`${selected.length} WebKit checks${parsed.values.shard ? ` (part ${parsed.values.shard})` : ""}, ${jobs} at once${leftOut.length ? `; ${leftOut.length} left out on Linux: ${leftOut.join(", ")}` : ""}`);
+  console.log(`${selected.length} WebKit checks${only ? " (only the Mac-only ones)" : ""}${parsed.values.shard ? ` (part ${parsed.values.shard})` : ""}, ${jobs} at once${leftOut.length ? `; ${leftOut.length} left out on Linux: ${leftOut.join(", ")}` : ""}`);
   if (selected.some((name) => machineScreens.includes(name))) {
     mkdirSync(join(output, "machines-screens"), { recursive: true });
     // As each machine script does for its own default folder: pictures are not part of the repository.
