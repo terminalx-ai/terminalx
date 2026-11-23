@@ -110,21 +110,27 @@ function NewTabTrigger({ trigger }: { trigger: ReturnType<typeof useRowMenu>["tr
  * previous, by position (1 to 8 and the last), move left or right, and
  * reopen. They act on the workspace's row of tabs, which the title bar strip
  * and the sidebar both draw.
+ *
+ * With `newTabs` false there is no "+" and no new-tab or new-browser-tab key,
+ * and the keys that switch, move, close and reopen tabs stay (a bot's chat,
+ * PRO-533: a new chat with the bot starts from its list of chats).
  */
 export function TabActions({
   session,
   selected,
   cloud,
   onShowPorts,
+  newTabs = true,
 }: {
   session: SessionEntry;
   selected: SelectedSessionTab | null;
   cloud?: CloudSessionModel;
   /** A cloud session's "Ports and previews" (PRO-28); absent for anyone who may not use previews. */
   onShowPorts?: () => void;
+  newTabs?: boolean;
 }) {
-  if (cloud) return <CloudTabActions session={session} selected={selected} cloud={cloud} onShowPorts={onShowPorts} />;
-  return <LocalTabActions session={session} selected={selected} />;
+  if (cloud) return <CloudTabActions session={session} selected={selected} cloud={cloud} onShowPorts={onShowPorts} newTabs={newTabs} />;
+  return <LocalTabActions session={session} selected={selected} newTabs={newTabs} />;
 }
 
 /** The tab shortcuts by position: 1 to 8, and the last tab. */
@@ -136,7 +142,7 @@ function TabPositionShortcut({ action, open }: { action: ShortcutId; open: () =>
   return null;
 }
 
-function LocalTabActions({ session, selected }: { session: SessionEntry; selected: SelectedSessionTab | null }) {
+function LocalTabActions({ session, selected, newTabs }: { session: SessionEntry; selected: SelectedSessionTab | null; newTabs: boolean }) {
   // Tab shortcuts act within the pane that contains this window's selected tab.
   const row = paneRow(useTabRow(session), selected ? `${selected.kind}:${selected.id}` : null);
   const editors = useEditors();
@@ -171,7 +177,7 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
   const moveRight = useCallback(() => move("right"), [move]);
   const reopen = useCallback(() => void reopenClosedTab(now.current.row).catch((error) => console.error("reopening the tab failed", error)), []);
   const positions = useMemo(() => TAB_POSITION_SHORTCUTS.map((action, index) => ({ action, open: () => void openTabAt(now.current.row, index + 1) })), []);
-  useShortcut("session.newTab", openMenu);
+  useShortcut("session.newTab", openMenu, { enabled: newTabs });
   useShortcut("session.closeTab", closeActive);
   useShortcut("session.nextTab", next);
   useShortcut("session.previousTab", previous);
@@ -179,15 +185,17 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
   useShortcut("session.moveTabLeft", moveLeft);
   useShortcut("session.moveTabRight", moveRight);
   useShortcut("session.reopenTab", reopen);
-  useShortcut("session.newBrowserTab", useCallback(() => void openLocalTab(now.current.row.session, "browser"), []));
+  useShortcut("session.newBrowserTab", useCallback(() => void openLocalTab(now.current.row.session, "browser"), []), { enabled: newTabs });
   useShortcut("session.forkTab", useCallback(() => {
     const active = shown();
     if (active?.kind === "agent" && !isShellPeer(active)) void forkSession(sessionOfPeer(now.current.row.session.id, active), active.id).catch((error) => console.error("forking the conversation failed", error));
   }, []));
 
+  const positionKeys = positions.map(({ action, open }) => <TabPositionShortcut key={action} action={action} open={open} />);
+  if (!newTabs) return <>{positionKeys}</>;
   return (
     <DropdownMenu {...picker.root}>
-      {positions.map(({ action, open }) => <TabPositionShortcut key={action} action={action} open={open} />)}
+      {positionKeys}
       <NewTabTrigger trigger={picker.trigger} />
       <DropdownMenuContent align="start" className="w-[290px] max-w-[calc(100vw-1rem)]">
         <LocalNewTabItems session={session} />
@@ -287,7 +295,7 @@ export function NewTabHint({ children }: { children: ReactNode }) {
   return <DropdownMenuLabel className="max-w-64 whitespace-normal normal-case tracking-normal text-[12px] font-normal text-muted-foreground" role="note">{children}</DropdownMenuLabel>;
 }
 
-function CloudTabActions({ session, selected, cloud, onShowPorts }: { session: SessionEntry; selected: SelectedSessionTab | null; cloud: CloudSessionModel; onShowPorts?: () => void }) {
+function CloudTabActions({ session, selected, cloud, onShowPorts, newTabs }: { session: SessionEntry; selected: SelectedSessionTab | null; cloud: CloudSessionModel; onShowPorts?: () => void; newTabs: boolean }) {
   const { models, refresh } = usePickerModels(useModels(), true, cloud.asleep ? null : cloud.client);
   const picker = useRowMenu({ onOpenChange: (open) => open && void refresh() });
   const [error, setError] = useState<string | null>(null);
@@ -320,7 +328,7 @@ function CloudTabActions({ session, selected, cloud, onShowPorts }: { session: S
   }, [session.id]);
   const positions = useMemo(() => TAB_POSITION_SHORTCUTS.map((action, index) => ({ action, open: () => openAt(index + 1) })), [openAt]);
   const openLast = useCallback(() => openAt(now.current.length), [openAt]);
-  useShortcut("session.newTab", () => picker.setOpen(true));
+  useShortcut("session.newTab", () => picker.setOpen(true), { enabled: newTabs });
   useShortcut("session.nextTab", () => step(1));
   useShortcut("session.previousTab", () => step(-1));
   useShortcut("session.lastTab", openLast);
@@ -342,9 +350,11 @@ function CloudTabActions({ session, selected, cloud, onShowPorts }: { session: S
     void action().catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
   };
   const prefs = getPrefs();
+  const positionKeys = positions.map(({ action, open }) => <TabPositionShortcut key={action} action={action} open={open} />);
+  if (!newTabs) return <>{positionKeys}</>;
   return (
     <DropdownMenu {...picker.root}>
-      {positions.map(({ action, open }) => <TabPositionShortcut key={action} action={action} open={open} />)}
+      {positionKeys}
       <NewTabTrigger trigger={picker.trigger} />
       <DropdownMenuContent align="end">
         {(blocked || error) && <NewTabHint>{error ?? blocked}</NewTabHint>}

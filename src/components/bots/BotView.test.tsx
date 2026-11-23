@@ -34,7 +34,7 @@ vi.mock("@/lib/api", async (original) => ({
   botsApi: { homeChat: mocks.homeChat, newChat: mocks.newChat, dismissResume: mocks.dismissResume, spentToday: mocks.spentToday },
   errorMessage: (error: unknown) => String(error),
 }));
-vi.mock("@/components/session/SessionView", () => ({ SessionView: ({ session }: { session: SessionEntry }) => <div data-testid="session-view">{session.id}</div> }));
+vi.mock("@/components/session/SessionView", () => ({ SessionView: ({ session, chrome }: { session: SessionEntry; chrome?: { noNewTab?: boolean } }) => <div data-testid="session-view" data-no-new-tab={String(!!chrome?.noNewTab)}>{session.id}</div> }));
 vi.mock("@/components/bots/BotDuties", () => ({ BotDuties: ({ bot }: { bot: Bot }) => <div data-testid="bot-duties">{bot.name}'s duties</div> }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 // The settings page and the header's menu have their own tests (BotSettings.test.tsx): here, only that they are mounted.
@@ -115,6 +115,12 @@ describe("a bot's view (PRO-468)", () => {
     expect(within(screen.getByRole("region", { name: "Started by Atlas" })).getByText("Fix the relay log")).toBeTruthy();
     expect(screen.getByTestId("session-view").textContent).toContain("home");
     expect(mocks.homeChat).not.toHaveBeenCalled();
+  });
+
+  it("draws the open chat with no + in its header: a new chat starts from the list (PRO-533)", () => {
+    view();
+    expect(screen.getByTestId("session-view").dataset.noNewTab).toBe("true");
+    expect(within(screen.getByRole("region", { name: "Chats with Atlas" })).getByRole("button", { name: /New chat/ })).toBeTruthy();
   });
 
   it("lists a chat a mention started under Chats with the bot, with where it came from (PRO-480)", () => {
