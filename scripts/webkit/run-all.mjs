@@ -24,9 +24,9 @@
 // Every check runs even when an earlier one fails. A check's output is printed
 // in one piece when it ends; what failed is printed again at the end, and the
 // exit status is 1.
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { availableParallelism } from "node:os";
+import { availableParallelism, freemem, loadavg } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -129,12 +129,32 @@ const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
 // is hung, and two hung in a row still end inside the job's own limit.
 const limit = 10 * 60_000;
 
+/**
+ * The host's state, said at each check's start, so that a run that gets slower says what grew: the load average, free
+ * memory (and on macOS the swap in use, since "free" is small there whatever the pressure), and how many WebKit and
+ * node processes exist. On #1515's second run the same checks took 2.8 times as long from the eleventh minute on and
+ * nothing in the log said why.
+ */
+function host() {
+  const said = [`load ${loadavg()[0].toFixed(1)}`, `free ${Math.round(freemem() / 2 ** 20)} MB`];
+  try {
+    if (process.platform === "darwin") said.push(`swap ${/used = (\S+)/.exec(execFileSync("sysctl", ["-n", "vm.swapusage"], { encoding: "utf8" }))?.[1] ?? "?"}`);
+    const names = execFileSync("ps", ["-axo", "comm="], { encoding: "utf8" }).split("\n");
+    const count = (pattern) => names.filter((name) => pattern.test(name)).length;
+    said.push(`${count(/WebKit|pw_run|MiniBrowser|Playwright/)} WebKit`, `${count(/(^|\/)node$/)} node`);
+  } catch (error) {
+    // The numbers are for the reader of a slow run; a host that cannot give them still runs the checks.
+    said.push(`no process list: ${error.code ?? error.message}`);
+  }
+  return said.join(", ");
+}
+
 /** Run one check to its end. Its output is kept and printed in one piece. */
 function run(name) {
   return new Promise((resolve) => {
     const started = Date.now();
     // Said at once, so a log that stops short shows which checks never ended.
-    console.log(`start ${name}`);
+    console.log(`start ${name} (${host()})`);
     const child = spawn(process.execPath, [script(name), ...(entryArguments.get(name) ?? [])], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...environment(name) } });
     const output = [];
     child.stdout?.on("data", (chunk) => output.push(chunk));
@@ -177,29 +197,36 @@ export function shard(names, index, count) {
 /**
  * Run `start(name)` for every name, `jobs` at once, and at most `viteAtOnce` of the Vite checks at once. A free worker
  * takes the first name in the list's order that may start now, so none idles while a check that serves dist/ waits;
- * one that finds only Vite checks left, with `viteAtOnce` of them running, waits for one of those to end.
+ * one that finds only Vite checks left, with `viteAtOnce` of them running, waits for one of those to end. The parts
+ * of one split check (`name:part`) run one at a time.
  */
 export async function pool(names, jobs, start) {
   const queue = [...names];
   let viteRunning = 0;
+  // The scripts with a part running now. The parts of one split check take turns: each of agent-dashboard's opens
+  // pages of 72 sessions a column (about 1.1 GB of WebKit processes at its peak, measured on a Mac), and the run
+  // that got slower had all three going at once on a 7 GB runner for five minutes before it did.
+  const partsRunning = new Set();
+  const mayStart = (name) => (!startsVite(name) || viteRunning < viteAtOnce) && !(name.includes(":") && partsRunning.has(name.split(":")[0]));
   const waiting = [];
   await Promise.all(Array.from({ length: jobs }, async () => {
     while (queue.length) {
-      const index = queue.findIndex((name) => !startsVite(name) || viteRunning < viteAtOnce);
+      const index = queue.findIndex(mayStart);
       if (index < 0) {
         await new Promise((resolve) => waiting.push(resolve));
         continue;
       }
       const [name] = queue.splice(index, 1);
       const vite = startsVite(name);
+      const part = name.includes(":") ? name.split(":")[0] : undefined;
       if (vite) viteRunning++;
+      if (part) partsRunning.add(part);
       try {
         await start(name);
       } finally {
-        if (vite) {
-          viteRunning--;
-          for (const wake of waiting.splice(0)) wake();
-        }
+        if (vite) viteRunning--;
+        if (part) partsRunning.delete(part);
+        if (vite || part) for (const wake of waiting.splice(0)) wake();
       }
     }
   }));
