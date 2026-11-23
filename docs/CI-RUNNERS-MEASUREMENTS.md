@@ -355,7 +355,7 @@ Measured on the development Mac (arm64, busy, load average 8 to 100):
 | 85 tests by name under nextest: the privacy tests that run the test binary again, `github_process`, `session::codex_stdio`, `machine_host::security_tests`, `control::issue_tests` and others | 85 passed, none retried; 297 s, all of it one test |
 | The slowest of them, `github_process::tests::privacy_covers_identity_and_issue_entry_points` | 297 s in a process of its own under that load |
 | macOS filters (`macos-rust.py --filters`) against the binary's list | 51 filters, 1,889 of 5,871 tests |
-| The selector over the last 400 first-parent commits | none of the selected jobs 8; frontend alone 94; Rust alone 44; phone alone 18; Rust and frontend 64; macOS 118 |
+| The selector over the last 400 first-parent commits | none of the selected jobs 8; frontend alone 94; Rust alone 44; phone alone 2; Rust and frontend 64; macOS 118 |
 | WebKit parts (`run-all.mjs --shard N/4 --list`) | 32 + 31 + 31 + 31 = 125 |
 
 Not measured, and to read from the first runs: each `linux-rust-tests` part's

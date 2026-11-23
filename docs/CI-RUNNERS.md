@@ -66,7 +66,7 @@ answer "true" to all four.
 | Answer | True when the change touches | Jobs |
 | --- | --- | --- |
 | `rust` | `src-tauri/`, `native/`, the toolchain, and each path outside them that a Rust test or build script reads (`packages/portable/src/`, the shared fixtures under `src/lib/`, `scripts/remote-runtime/`, `skill-guides/`, `schemas/` and others) | `linux-rust`, `linux-rust-tests`, `headless-serve`, `serve-tests` |
-| `frontend` | `src/`, `packages/`, `scripts/`, the package and Vite files, and each Rust or other file a frontend test reads by path (`src-tauri/src/remote/protocol.rs`, `src-tauri/src/fixtures/` and others) | `tsc` and the build in `frontend`, `vitest`, `webkit-layout` |
+| `frontend` | `src/`, `packages/`, `scripts/`, `mobile/src/` (a desktop test imports from it, and the root Vitest run includes its tests), the package and Vite files, and each Rust or other file a frontend test reads by path (`src-tauri/src/remote/protocol.rs`, `src-tauri/src/fixtures/` and others) | `tsc` and the build in `frontend`, `vitest`, `webkit-layout` |
 | `phone` | `mobile/`, `packages/`, the package files, the desktop types the phone app imports | `phone-app` |
 | `required` | the macOS rules ("macOS Rust coverage" below) | `macos-native` |
 
@@ -83,7 +83,7 @@ with an Apple `cfg` is missing from the macOS rules. A path built at run time
 from parts (`root.join("..")` and then a name) is not found by that check;
 `schemas/` is such a one and is listed. Of the last 400 commits on `main`, 8
 would have run none of the selected jobs, 94 the frontend jobs alone, 44 the
-Rust jobs alone, 18 the phone app alone, and 118 the macOS job.
+Rust jobs alone, 2 the phone app alone, and 118 the macOS job.
 
 **What a skipped job leaves to `main`:** a pull request that changes no Rust
 input runs no Rust job before merge, and one that changes no frontend input
@@ -332,8 +332,8 @@ merge base and its head, when it changes:
 
 Deletions and renames are checked at their old paths too. Before 23 November
 2026 any change to a file with an Apple `cfg` anywhere in it, or to a file
-beside one, selected the job: 87 files have one, and of the last 400 commits
-on `main` that rule selected far more than the 118 this one does.
+in the same folder as one, selected the job; 87 files have one. Of the last
+400 commits on `main` this rule selects 118.
 
 A selected pull request runs the Swift tests, the icon checks, the helper
 build, one build of the library's tests (so every Apple-only line compiles)
