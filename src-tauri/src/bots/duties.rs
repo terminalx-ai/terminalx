@@ -774,6 +774,14 @@ pub fn ended(app: &impl AutomationHost, run: &AutomationRun) {
     // A built-in's report is kept in the home chat and tells no one unless it is urgent: its suggestions are on the Home tab.
     // A failure reaches the owner, wherever the report goes, outside quiet hours.
     let notify = if failed { !quiet } else { urgent || (lead.is_none() && !quiet && builtin.is_none()) };
+    // The notification goes out before the run's record says it did: whoever
+    // reads "notified" on the run (the window, a test) finds it already sent.
+    if notify {
+        app.sink().emit(REPORT_EVENT, &json!({
+            "botId": bot.id, "botName": bot.name, "dutyId": automation.id, "dutyName": automation.name,
+            "runId": run.run_id, "sessionId": run.session_id, "tabId": run.tab_id, "text": body, "urgent": urgent, "failed": failed,
+        }));
+    }
     let record = json!({"reportedTo": to, "urgent": urgent, "quiet": quiet, "notified": notify, "note": noted});
     if let Err(error) = automations::amend_run(app, &automation.id, &run.run_id, |run| {
         run.unknown.insert(RUN_KEY.into(), record);
@@ -784,12 +792,6 @@ pub fn ended(app: &impl AutomationHost, run: &AutomationRun) {
     // sound in quiet hours unless urgent; a built-in's, as its notification, only when urgent.
     if lead.is_none() && (failed || urgent || builtin.is_none()) {
         super::chat_apps::report(&bot, &what, &body, quiet && !urgent);
-    }
-    if notify {
-        app.sink().emit(REPORT_EVENT, &json!({
-            "botId": bot.id, "botName": bot.name, "dutyId": automation.id, "dutyName": automation.name,
-            "runId": run.run_id, "sessionId": run.session_id, "tabId": run.tab_id, "text": body, "urgent": urgent, "failed": failed,
-        }));
     }
 }
 
