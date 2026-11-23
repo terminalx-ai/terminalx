@@ -393,3 +393,54 @@ describe("Overview versus the first session tab", () => {
     expect(overview).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("Shift+Tab, the plan-mode toggle's key", () => {
+  const shiftTab = { key: "Tab", code: "Tab", shiftKey: true };
+
+  it("runs the toggle where the composer is typed in, and Tab keeps moving the focus", () => {
+    const field = document.createElement("textarea");
+    document.body.append(field);
+    cleanups.push(() => field.remove());
+    const handler = vi.fn();
+    cleanups.push(registerShortcut("composer.togglePlanMode", handler, { global: true }));
+    const event = press(shiftTab, field);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(event.defaultPrevented).toBe(true);
+    const plain = press({ key: "Tab", code: "Tab" }, field);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(plain.defaultPrevented).toBe(false);
+  });
+
+  it("leaves Shift+Tab to the browser when the handler is not where the focus is", () => {
+    const outside = vi.fn(() => false);
+    cleanups.push(registerShortcut("composer.togglePlanMode", outside, { global: true }));
+    const event = press(shiftTab);
+    expect(outside).toHaveBeenCalledTimes(1);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("does nothing in another field unless the binder asked for global", () => {
+    const field = document.createElement("input");
+    document.body.append(field);
+    cleanups.push(() => field.remove());
+    const handler = vi.fn();
+    cleanups.push(registerShortcut("composer.togglePlanMode", handler));
+    expect(press(shiftTab, field).defaultPrevented).toBe(false);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("follows the reader's key for it, and the review's ↑ and ↓ run beside the composer's", () => {
+    const composer = document.createElement("textarea");
+    document.body.append(composer);
+    cleanups.push(() => composer.remove());
+    const recall = vi.fn();
+    const previousFile = vi.fn();
+    cleanups.push(registerShortcut("composer.historyPrevious", recall, { global: true }));
+    cleanups.push(registerShortcut("review.previousFile", previousFile));
+    press({ key: "ArrowUp", code: "ArrowUp" }, composer);
+    expect(recall).toHaveBeenCalledTimes(1);
+    expect(previousFile).not.toHaveBeenCalled();
+    press({ key: "ArrowUp", code: "ArrowUp" });
+    expect(previousFile).toHaveBeenCalledTimes(1);
+  });
+});

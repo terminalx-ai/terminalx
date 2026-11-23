@@ -9,6 +9,9 @@
 // - a shortcut changed in the tab is the shortcut at the next keypress, its old
 //   keys do nothing, and the command palette shows the new keys;
 // - the Run view is listed on keys of its own (⇧⌘O), with Automations kept on ⇧⌘R;
+// - the Phase 3 batch's rows are listed on the screens' keys (09-14, 09-15, 09-16): a Review group between
+//   Files and Issues, ⌘/ and ⇧⌘/ for the model picker and effort, ⇧Tab for plan mode (recordable there and
+//   nowhere else), ⌃V and ⌥⌘R for the review on macOS, and no conflict between the composer's ↑ and the review's;
 // - holding Right Option in the composer opens the microphone and releasing it
 //   closes it; Left Option and a Right Option combination never do.
 //
@@ -79,6 +82,49 @@ const fits = (layout) => ({
   const runView = await keysOf("app.runView");
   const automations = await keysOf("app.automations");
   failed += report("the Run view's keys in the Shortcuts tab", { "Run view is listed, on ⇧⌘O": runView.join(" | ") === "⇧⌘O", "Automations keeps ⇧⌘R": automations.join(" | ") === "⇧⌘R" }, { runView, automations });
+
+  // The batch's rows (PRO-208, 216, 232, 236, 242, 247).
+  const groups = await page.locator('[data-testid="shortcuts-tab"] section[aria-label$=" shortcuts"]').evaluateAll((sections) => sections.map((section) => section.getAttribute("aria-label")));
+  const batch = {
+    "composer.openModelPicker": "⌘/", "composer.cycleEffort": "⇧⌘/", "composer.togglePlanMode": "⇧Tab", "composer.toggleFast": "⇧⌘E",
+    "review.previousFile": "↑", "review.nextFile": "↓", "review.previousComment": "⌥⌘K", "review.nextComment": "⌥⌘J",
+    "review.toggleViewed": "⌃V", "review.start": "⌥⌘R", "git.showUncommitted": "⌥⌘U", "session.forkTab": "⌥⌘⏎", "composer.historyPrevious": "↑",
+  };
+  const shownKeys = {};
+  for (const id of Object.keys(batch)) shownKeys[id] = (await keysOf(id)).join(" | ");
+  const forkLabel = await page.locator('[data-shortcut="session.forkTab"] > div > span').first().textContent();
+  failed += report(
+    "the Phase 3 batch's rows in the Shortcuts tab",
+    {
+      "a Review group sits between Files and Issues": groups.indexOf("Review shortcuts") === groups.indexOf("Files shortcuts") + 1 && groups.indexOf("Review shortcuts") + 1 === groups.indexOf("Issues shortcuts"),
+      "each row shows the screen's keys": Object.entries(batch).every(([id, keys]) => shownKeys[id] === keys),
+      "the fork row reads Fork to new tab": forkLabel === "Fork to new tab",
+      "the unbound rows offer Not set": (await page.locator('[data-shortcut="files.openInDefault"]').textContent()).includes("Not set"),
+    },
+    { groups, shownKeys, forkLabel },
+  );
+  layout = await measure(page);
+  failed += report("shortcuts tab at 960 px with the batch's rows", fits(layout), layout);
+
+  // Shift+Tab is a key the plan-mode toggle may record; Tab alone still leaves the recorder.
+  await page.locator('[data-shortcut="composer.togglePlanMode"] button[data-binding]').click();
+  const recorderBox = page.getByTestId("shortcut-editor").getByRole("button", { name: /^New keys for/ });
+  await page.keyboard.press("Shift+Tab");
+  const recorded = await recorderBox.textContent();
+  const planEditor = await page.getByTestId("shortcut-editor").getByRole("alert").count();
+  await page.getByTestId("shortcut-editor").getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.locator('[data-shortcut="composer.openModelPicker"] button[data-binding]').click();
+  await page.keyboard.press("Shift+Tab");
+  const refused = await page.getByTestId("shortcut-editor").locator("button", { hasText: /^Save$/ }).isDisabled().catch(() => null);
+  failed += report(
+    "recording Shift+Tab",
+    {
+      "the plan-mode toggle records ⇧Tab with no complaint": recorded?.includes("⇧") && recorded.includes("Tab") && planEditor === 0,
+      "another action does not take it: the recorder is left and Save stays off": refused === true,
+    },
+    { recorded, planEditor, refused },
+  );
+  await page.keyboard.press("Escape");
 
   // The longest label, with keys another action has: the recorder and its longest message.
   const long = page.locator('[data-shortcut="session.toggleTerminalView"]');

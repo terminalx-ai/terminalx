@@ -450,6 +450,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.bots" },
   }),
   defineSetting({
+    id: "experimental.forkChatToTab", section: "experimental", title: "Fork chat to a new tab",
+    description: "Fork a whole chat into a new tab of the same session, even while it is working, and show where it was forked from. Off, Fork to new tab is not offered; forking a turn into a new session is not affected.",
+    searchTerms: ["experimental", "fork", "chat", "tab", "branch off", "copy conversation", "new tab", "session"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.forkChatToTab" },
+  }),
+  defineSetting({
     id: "orchestrator.requireApproval", section: "orchestrator", title: "Ask before a run starts",
     description: "Show the plan and wait for Approve. Off, the workers start at once.",
     searchTerms: ["orchestrator", "run", "approve", "approval", "plan", "ask", "lead", "workers"], scope: "user",

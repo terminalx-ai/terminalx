@@ -237,3 +237,62 @@ describe("Settings → Shortcuts", () => {
     expect(within(editor()).getByRole("alert").textContent).toContain("only works for dictation");
   });
 });
+
+describe("Settings → Shortcuts, the Phase 3 batch's rows", () => {
+  it("lists a Review group between Files and Issues, with the review's keys", () => {
+    render(<ShortcutsTab />);
+    const groups = screen.getAllByRole("region").map((group) => group.getAttribute("aria-label"));
+    expect(groups.indexOf("Review shortcuts")).toBeGreaterThan(groups.indexOf("Files shortcuts"));
+    expect(groups.indexOf("Review shortcuts")).toBeLessThan(groups.indexOf("Issues shortcuts"));
+    const review = within(screen.getByRole("region", { name: "Review shortcuts" }));
+    for (const label of ["Previous file in the diff", "Next file in the diff", "Previous comment", "Next comment", "Mark file as viewed", "Start a review"]) expect(review.getByText(label)).toBeTruthy();
+    expect(within(row("review.previousFile")).getByRole("button", { name: "Previous file in the diff: ↑. Change" })).toBeTruthy();
+    expect(within(row("review.previousComment")).getByRole("button", { name: "Previous comment: Ctrl+Alt+K. Change" })).toBeTruthy();
+    // jsdom is not a Mac: Ctrl+V pastes and Ctrl+Alt+R runs the project's action, so neither has review keys here.
+    expect(within(row("review.toggleViewed")).getByRole("button", { name: "Mark file as viewed: no shortcut. Set one" })).toBeTruthy();
+    expect(within(row("review.start")).getByRole("button", { name: "Start a review: no shortcut. Set one" })).toBeTruthy();
+  });
+
+  it("lists the composer's new actions and the relabelled fork", () => {
+    render(<ShortcutsTab />);
+    expect(within(row("composer.openModelPicker")).getByRole("button", { name: "Open model picker: Ctrl+/. Change" })).toBeTruthy();
+    expect(within(row("composer.cycleEffort")).getByRole("button", { name: "Cycle effort: Ctrl+Shift+/. Change" })).toBeTruthy();
+    expect(within(row("composer.toggleFast")).getByRole("button", { name: "Toggle fast mode: Ctrl+Shift+E. Change" })).toBeTruthy();
+    expect(within(row("composer.togglePlanMode")).getByRole("button", { name: "Toggle plan mode: Shift+Tab. Change" })).toBeTruthy();
+    expect(row("session.forkTab").textContent).toContain("Fork to new tab");
+    for (const id of ["chat.expandAllToolCalls", "session.copyConciseTranscript", "git.showUncommitted", "files.openInDefault", "files.openInMenu"]) expect(row(id)).toBeTruthy();
+  });
+
+  it("shows ↑ for the review and the composer at once, with no conflict", () => {
+    render(<ShortcutsTab />);
+    expect(within(row("composer.historyPrevious")).getByRole("button", { name: /↑\. Change$/ })).toBeTruthy();
+    record("review.nextFile", { key: "ArrowUp", code: "ArrowUp" });
+    expect(within(editor()).getByRole("button", { name: "Replace" })).toBeTruthy();
+    expect(editor().textContent).toContain("Previous file in the diff");
+    // The composer's ↑ is not named: it is another surface's key.
+    expect(editor().textContent).not.toContain("Recall the previous message");
+    cleanup();
+    render(<ShortcutsTab />);
+    record("composer.historyPrevious", { key: "ArrowDown", code: "ArrowDown" });
+    expect(editor().textContent).toContain("Recall the next message, then the draft");
+    expect(editor().textContent).not.toContain("Next file in the diff");
+  });
+
+  it("records Shift+Tab for the plan-mode toggle, where Tab alone still leaves the recorder", () => {
+    render(<ShortcutsTab />);
+    fireEvent.click(chip("composer.togglePlanMode"));
+    const keys = recorder();
+    expect(fireEvent.keyDown(keys, { key: "Tab", code: "Tab" })).toBe(true);
+    expect(within(editor()).getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+    expect(fireEvent.keyDown(keys, { key: "Tab", code: "Tab", shiftKey: true })).toBe(false);
+    expect(editor().textContent).toContain("Shift+Tab");
+    expect(within(editor()).queryByRole("alert")).toBeNull();
+  });
+
+  it("refuses Shift+Tab for every other action: Tab moves the focus", () => {
+    render(<ShortcutsTab />);
+    fireEvent.click(chip("composer.openModelPicker"));
+    expect(fireEvent.keyDown(recorder(), { key: "Tab", code: "Tab", shiftKey: true })).toBe(true);
+    expect(within(editor()).getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+  });
+});

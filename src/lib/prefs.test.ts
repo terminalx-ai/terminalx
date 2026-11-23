@@ -489,3 +489,44 @@ describe("reset chat file choice (PRO-261)", () => {
     expect((await import("./prefs")).getPrefs().resetFiles).toBe(false);
   });
 });
+
+describe("review model and Open in preferences (PRO-242, PRO-247)", () => {
+  it("start unset: a review uses the tab's own model, Open in asks and has no recents", async () => {
+    const { getPrefs } = await import("./prefs");
+    expect(getPrefs()).toMatchObject({ reviewModel: null, openInDefaultApp: null, openInRecent: [] });
+  });
+
+  it("keep what was chosen across a restart, in localStorage and not in the settings file", async () => {
+    const { setPrefs } = await import("./prefs");
+    setPrefs({ reviewModel: { agent: "claude", model: "opus", effort: "high" }, openInDefaultApp: "com.microsoft.VSCode", openInRecent: ["com.microsoft.VSCode", "com.apple.dt.Xcode"] });
+    vi.resetModules();
+    const { getPrefs } = await import("./prefs");
+    expect(getPrefs()).toMatchObject({
+      reviewModel: { agent: "claude", model: "opus", effort: "high" },
+      openInDefaultApp: "com.microsoft.VSCode",
+      openInRecent: ["com.microsoft.VSCode", "com.apple.dt.Xcode"],
+    });
+    const defaults = (await import("./userPreferenceDefaults.json")).default as Record<string, unknown>;
+    for (const key of ["reviewModel", "openInDefaultApp", "openInRecent"]) expect(key in defaults).toBe(false);
+  });
+
+  it("read a review model without an effort as having none, and a broken one as unset", async () => {
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ reviewModel: { agent: "codex", model: "gpt-5" } }));
+    expect((await import("./prefs")).getPrefs().reviewModel).toEqual({ agent: "codex", model: "gpt-5", effort: null });
+    for (const broken of [{ agent: "claude" }, { agent: "", model: "opus" }, "opus", [], 3]) {
+      localStorage.setItem("raccoon.prefs", JSON.stringify({ reviewModel: broken }));
+      vi.resetModules();
+      expect((await import("./prefs")).getPrefs().reviewModel).toBeNull();
+    }
+  });
+
+  it("read anything but text as no default app, and keep only distinct app ids as recents, at most eight", async () => {
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ openInDefaultApp: 4, openInRecent: ["a", "a", "", 3, "b", "c", "d", "e", "f", "g", "h", "i"] }));
+    const { getPrefs } = await import("./prefs");
+    expect(getPrefs().openInDefaultApp).toBeNull();
+    expect(getPrefs().openInRecent).toEqual(["a", "b", "c", "d", "e", "f", "g", "h"]);
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ openInRecent: "a" }));
+    vi.resetModules();
+    expect((await import("./prefs")).getPrefs().openInRecent).toEqual([]);
+  });
+});

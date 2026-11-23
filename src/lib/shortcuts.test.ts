@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "./prefs";
 import {
   SHORTCUT_ACTIONS,
+  SHORTCUT_GROUPS,
   ariaKeyShortcut,
   bindingKind,
   bindingProblem,
@@ -21,6 +22,7 @@ import {
   resolveKeymap,
   saveShortcut,
   sendShortcut,
+  shortcutAction,
 } from "./shortcuts";
 
 // jsdom is not a Mac, so `mod` is Ctrl here unless a test says otherwise.
@@ -35,9 +37,14 @@ describe("the shortcut registry", () => {
   it("lists every action once, each default binding owned by one action", () => {
     const ids = SHORTCUT_ACTIONS.map((action) => action.id);
     expect(new Set(ids).size).toBe(ids.length);
+    // A key may be on two actions only when they are on different surfaces of the window (↑ in the composer and in the review).
     for (const mac of [true, false]) {
-      const all = SHORTCUT_ACTIONS.flatMap((action) => defaultBindings(action.id, mac));
-      expect(new Set(all).size).toBe(all.length);
+      const owners = new Map<string, string[]>();
+      for (const action of SHORTCUT_ACTIONS) for (const binding of defaultBindings(action.id, mac)) owners.set(binding, [...(owners.get(binding) ?? []), action.id]);
+      for (const [binding, ids] of owners) {
+        const surfaces = ids.map((id) => SHORTCUT_ACTIONS.find((action) => action.id === id)!.surface);
+        if (ids.length > 1) expect(surfaces.every(Boolean) && new Set(surfaces).size === ids.length, `${binding}: ${ids.join(", ")}`).toBe(true);
+      }
     }
   });
 
@@ -247,7 +254,8 @@ describe("the mapping store", () => {
     expect(saveShortcut("app.toggleSidebar", ["mod+k"], { replace: true })).toEqual({ ok: true });
     expect(bindingsOf("app.toggleSidebar")).toEqual(["mod+k"]);
     expect(bindingsOf("app.commandPalette")).toEqual([]);
-    const all = Object.values(currentKeymap()).flat();
+    // ↑ and ↓ are the composer's and the review's; every other key has one owner.
+    const all = Object.entries(currentKeymap()).filter(([id]) => !shortcutAction(id as never).surface).flatMap(([, bindings]) => bindings);
     expect(new Set(all).size).toBe(all.length);
   });
 
@@ -404,5 +412,126 @@ describe("Overview navigation defaults", () => {
     expect(custom["app.agentDashboard"]).toEqual(["mod+shift+a"]);
     expect(custom["session.tab1"]).toEqual(["mod+1"]);
     expect(resolveKeymap({ "app.agentDashboard": [] }, mac)["app.agentDashboard"]).toEqual([]);
+  });
+});
+
+// PRO-208, 216, 232, 236, 242, 247: the actions the batch's screens draw. The later pieces bind handlers by these ids.
+describe("the Phase 3 batch's shortcut actions", () => {
+  const ids = [
+    "composer.openModelPicker", "composer.cycleEffort", "composer.togglePlanMode", "composer.toggleFast",
+    "chat.expandAllToolCalls", "session.copyConciseTranscript",
+    "review.previousFile", "review.nextFile", "review.previousComment", "review.nextComment", "review.toggleViewed", "review.start",
+    "git.showUncommitted", "files.openInDefault", "files.openInMenu",
+  ] as const;
+
+  it("lists every one, in a group the Shortcuts tab shows", () => {
+    for (const id of ids) {
+      const action = SHORTCUT_ACTIONS.find((candidate) => candidate.id === id);
+      expect(action, id).toBeDefined();
+      expect(SHORTCUT_GROUPS).toContain(action!.group);
+      expect(action!.label.trim()).not.toBe("");
+    }
+    expect(SHORTCUT_GROUPS).toEqual(["App", "Session", "Panel", "Files", "Review", "Issues", "Composer"]);
+    expect(SHORTCUT_ACTIONS.filter((action) => action.group === "Review").map((action) => action.id)).toEqual([
+      "review.previousFile", "review.nextFile", "review.previousComment", "review.nextComment", "review.toggleViewed", "review.start",
+    ]);
+  });
+
+  it("keeps the screens' keys on macOS", () => {
+    const keymap = resolveKeymap({}, true);
+    expect(keymap["composer.openModelPicker"]).toEqual(["mod+/"]);
+    expect(keymap["composer.cycleEffort"]).toEqual(["mod+shift+/"]);
+    expect(keymap["composer.togglePlanMode"]).toEqual(["shift+tab"]);
+    expect(keymap["composer.toggleFast"]).toEqual(["mod+shift+e"]);
+    expect(keymap["review.previousFile"]).toEqual(["up"]);
+    expect(keymap["review.nextFile"]).toEqual(["down"]);
+    expect(keymap["review.previousComment"]).toEqual(["mod+alt+k"]);
+    expect(keymap["review.nextComment"]).toEqual(["mod+alt+j"]);
+    expect(keymap["review.toggleViewed"]).toEqual(["ctrl+v"]);
+    expect(keymap["review.start"]).toEqual(["mod+alt+r"]);
+    expect(keymap["git.showUncommitted"]).toEqual(["mod+alt+u"]);
+    expect(keymap["session.forkTab"]).toEqual(["mod+alt+enter"]);
+    expect(shortcutAction("session.forkTab").label).toBe("Fork to new tab");
+  });
+
+  it("gives ⌃V and ⌥⌘R to the review on macOS only, where Ctrl+V pastes and Ctrl+Alt+R runs the project's action", () => {
+    const keymap = resolveKeymap({}, false);
+    expect(keymap["review.toggleViewed"]).toEqual([]);
+    expect(keymap["review.start"]).toEqual([]);
+    expect(keymap["session.runAction"]).toEqual(["mod+alt+r"]);
+    expect(resolveKeymap({}, true)["session.runAction"]).toEqual(["mod+r"]);
+    // Paste stays paste: no default of any action is ⌘V or Ctrl+V.
+    for (const mac of [true, false]) expect(Object.values(resolveKeymap({}, mac)).flat()).not.toContain(mac ? "mod+v" : "ctrl+v");
+  });
+
+  it("takes none of the keys main already uses", () => {
+    for (const mac of [true, false]) {
+      const keymap = resolveKeymap({}, mac);
+      expect(keymap["session.focusOtherPane"]).toEqual(["mod+alt+o"]);
+      expect(keymap["app.addProject"]).toEqual(["mod+o"]);
+      expect(keymap["app.runView"]).toEqual(["mod+shift+o"]);
+      expect(keymap["files.copyContents"]).toEqual(["mod+alt+c"]);
+      expect(keymap["app.bots"]).toEqual(["mod+shift+j"]);
+      expect(keymap["composer.historyPrevious"]).toEqual(["up"]);
+      expect(keymap["composer.historyNext"]).toEqual(["down"]);
+      expect(keymap["composer.dictate"]).toContain("mod+shift+d");
+    }
+  });
+
+  it("lets ↑ and ↓ be the composer's and the review's at once, but nothing else's", () => {
+    expect(conflictOf("up", "review.previousFile")).toBeNull();
+    expect(conflictOf("down", "composer.historyNext")).toBeNull();
+    // A window-wide action cannot take a key a surface has.
+    expect(conflictOf("up", "app.toggleSidebar")?.surface).toBeDefined();
+    // Two actions of the same surface still conflict.
+    expect(conflictOf("up", "review.nextFile")?.id).toBe("review.previousFile");
+    // The reader's own keys keep the same rule: a custom ↑ for a window-wide action wins it from both surfaces.
+    const keymap = resolveKeymap({ "app.toggleSidebar": ["up"] }, true);
+    expect(keymap["app.toggleSidebar"]).toEqual(["up"]);
+    expect(keymap["composer.historyPrevious"]).toEqual([]);
+    expect(keymap["review.previousFile"]).toEqual([]);
+  });
+
+  it("lets the review's keys be recorded, and moved apart from the composer's", () => {
+    expect(saveShortcut("review.previousFile", ["pageup"], { mac: true })).toEqual({ ok: true });
+    expect(bindingsOf("review.previousFile")).toEqual(["pageup"]);
+    expect(bindingsOf("composer.historyPrevious")).toEqual(["up"]);
+    expect(saveShortcut("review.toggleViewed", ["mod+alt+v"], { mac: true })).toEqual({ ok: true });
+    expect(saveShortcut("review.start", ["mod+alt+s"], { mac: false })).toEqual({ ok: true });
+    expect(bindingsOf("review.start")).toEqual(["mod+alt+s"]);
+  });
+
+  it("allows Shift+Tab for the plan-mode toggle in the composer only, and Tab nowhere", () => {
+    for (const mac of [true, false]) {
+      expect(bindingProblem("composer.togglePlanMode", "shift+tab", mac)).toBeNull();
+      expect(bindingProblem("composer.togglePlanMode", "tab", mac)).toMatch(/Tab moves the focus/);
+      for (const other of ["composer.send", "composer.openModelPicker", "app.toggleSidebar", "review.nextFile", "session.interrupt"] as const) {
+        expect(bindingProblem(other, "shift+tab", mac), other).toMatch(/Tab moves the focus/);
+        expect(bindingProblem(other, "tab", mac), other).toMatch(/Tab moves the focus/);
+      }
+    }
+    expect(saveShortcut("composer.togglePlanMode", ["shift+tab"])).toEqual({ ok: true });
+    expect(saveShortcut("composer.send", ["shift+tab"])).toMatchObject({ ok: false });
+    expect(chordOf(key({ key: "Tab", code: "Tab", shiftKey: true }))).toBe("shift+tab");
+    expect(matchesShortcut(key({ key: "Tab", code: "Tab", shiftKey: true }), "composer.togglePlanMode")).toBe(true);
+    expect(matchesShortcut(key({ key: "Tab", code: "Tab" }), "composer.togglePlanMode")).toBe(false);
+  });
+
+  it("reads ⌘/ and ⇧⌘/ off the physical slash key", () => {
+    expect(chordOf(key({ key: "?", code: "Slash", metaKey: true, shiftKey: true }), true)).toBe("mod+shift+/");
+    expect(chordOf(key({ key: "/", code: "Slash", metaKey: true }), true)).toBe("mod+/");
+    expect(keycaps("mod+shift+/", true)).toEqual(["⇧", "⌘", "/"]);
+    expect(keycaps("shift+tab", true)).toEqual(["⇧", "Tab"]);
+    expect(keycaps("ctrl+v", true)).toEqual(["⌃", "V"]);
+  });
+
+  it("leaves the keys of the actions with no screen key empty, or free", () => {
+    for (const mac of [true, false]) {
+      const keymap = resolveKeymap({}, mac);
+      expect(keymap["session.copyConciseTranscript"]).toEqual([]);
+      expect(keymap["files.openInDefault"]).toEqual([]);
+      expect(keymap["files.openInMenu"]).toEqual([]);
+      expect(keymap["chat.expandAllToolCalls"]).toEqual(["mod+alt+e"]);
+    }
   });
 });

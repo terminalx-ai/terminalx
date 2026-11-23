@@ -20,7 +20,10 @@ import { getExperimentalSettings } from "@/lib/experimentalSettings";
 
 export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 
-export type ShortcutGroup = "App" | "Session" | "Panel" | "Files" | "Issues" | "Composer";
+export type ShortcutGroup = "App" | "Session" | "Panel" | "Files" | "Review" | "Issues" | "Composer";
+
+/** A place in the window that has its own keys: the same plain key may mean one thing in the composer and another in the review. */
+export type ShortcutSurface = "composer" | "review";
 
 export type NativeMenuSection = "app" | "file" | "view" | "go" | "help";
 
@@ -40,6 +43,12 @@ interface ActionDef {
    * needs a modifier, or it would be typed into the field that has the focus.
    */
   scope?: "context";
+  /**
+   * The part of the window that handles the action. Two actions with different
+   * surfaces may have the same key (↑ recalls a message in the composer and moves
+   * to the previous file in the review); every other pair keeps one owner per key.
+   */
+  surface?: ShortcutSurface;
   /** May be bound to a held modifier key. */
   hold?: boolean;
   /** A character typed in the composer, not a key that can be moved. */
@@ -102,8 +111,8 @@ const ACTIONS = [
   { id: "session.newTab", label: "New tab", group: "Session", keys: ["mod+t"] },
   // PRO-381: the new-tab menu's Browser. ⌘B is the sidebar; with Shift it is free.
   { id: "session.newBrowserTab", label: "New browser tab", group: "Session", keys: ["mod+shift+b"] },
-  // PRO-381: fork the on-screen tab's conversation into a new session.
-  { id: "session.forkTab", label: "Fork the conversation to a new session", group: "Session", keys: ["mod+alt+enter"] },
+  // PRO-381 / PRO-236: fork the on-screen tab's conversation. The label is the screens' (03-06, 03-27); the key stays ⌥⌘↵.
+  { id: "session.forkTab", label: "Fork to new tab", group: "Session", keys: ["mod+alt+enter"] },
   // PRO-363: the Run menu's first visible action, or the menu itself as a picker when there are several. ⌘R is free in the
   // terminal and the editor on macOS; elsewhere Ctrl+R is the shell's history search, so the default adds Alt.
   { id: "session.runAction", label: "Run the project's action", group: "Session", keys: ["mod+alt+r"], macKeys: ["mod+r"] },
@@ -114,6 +123,8 @@ const ACTIONS = [
   { id: "git.fixChecks", label: "Fix checks", group: "Session", keys: [] },
   { id: "git.merge", label: "Merge pull request", group: "Session", keys: ["mod+shift+m"] },
   { id: "git.createPr", label: "Create pull request", group: "Session", keys: ["mod+shift+c"] },
+  // PRO-242: the Changes scope picker's "Uncommitted changes" (screen 09-16: ⌥⌘U).
+  { id: "git.showUncommitted", label: "Show uncommitted changes", group: "Session", keys: ["mod+alt+u"] },
   { id: "session.fixErrors", label: "Fix failing CI checks", group: "Session", keys: ["mod+shift+x"] },
   { id: "session.closeTab", label: "Close tab or file", group: "Session", keys: ["mod+w"], menu: { section: "file", order: 4, label: "Close Tab", target: "focused", separator: true } },
   { id: "session.nextTab", label: "Next tab", group: "Session", keys: ["mod+shift+]"] },
@@ -142,6 +153,11 @@ const ACTIONS = [
   { id: "session.interrupt", label: "Interrupt the running turn", group: "Session", keys: ["escape"], scope: "context" },
   // No keys by default: it ends the agent's process, so it is never a key pressed out of habit.
   { id: "session.stop", label: "Stop the session (ends the agent's process)", group: "Session", keys: [] },
+  // PRO-232: open or close every tool call in the chat. No screen draws a key for it; ⌥⌘E is free on every platform
+  // (⌘E is the right panel, ⌥⌘1–4 the panels).
+  { id: "chat.expandAllToolCalls", label: "Expand all tool calls", group: "Session", keys: ["mod+alt+e"] },
+  // PRO-232: the tab menu's Copy concise transcript. No keys by default: a copy nobody presses by habit.
+  { id: "session.copyConciseTranscript", label: "Copy concise transcript", group: "Session", keys: [] },
   { id: "panel.changes", label: "Changes", group: "Panel", keys: ["mod+alt+1"] },
   { id: "panel.repository", label: "Branch", group: "Panel", keys: ["mod+alt+2"] },
   { id: "panel.pullRequests", label: "Pull request", group: "Panel", keys: ["mod+alt+3"] },
@@ -154,6 +170,18 @@ const ACTIONS = [
   { id: "files.copyContents", label: "Copy the open file's contents", group: "Files", keys: ["mod+alt+c"] },
   { id: "files.togglePreview", label: "Preview or source for a markdown file", group: "Files", keys: ["mod+shift+p"] },
   { id: "files.closeAll", label: "Close all open files", group: "Files", keys: ["mod+alt+w"] },
+  // PRO-247: Open in. ⌘O, ⌥⌘O, ⌥⌘C and ⇧⌘J are taken; no key by default rather than one nothing else would expect.
+  { id: "files.openInDefault", label: "Open in the default app", group: "Files", keys: [] },
+  { id: "files.openInMenu", label: "Choose an app to open in", group: "Files", keys: [] },
+  // PRO-242 review (screens 09-15, 09-16). ↑ ↓ are the review's own where it has the focus, the composer's elsewhere (`surface`).
+  { id: "review.previousFile", label: "Previous file in the diff", group: "Review", keys: ["up"], scope: "context", surface: "review" },
+  { id: "review.nextFile", label: "Next file in the diff", group: "Review", keys: ["down"], scope: "context", surface: "review" },
+  { id: "review.previousComment", label: "Previous comment", group: "Review", keys: ["mod+alt+k"] },
+  { id: "review.nextComment", label: "Next comment", group: "Review", keys: ["mod+alt+j"] },
+  // ⌃V is a Mac-only default: Ctrl+V is paste elsewhere.
+  { id: "review.toggleViewed", label: "Mark file as viewed", group: "Review", keys: [], macKeys: ["ctrl+v"] },
+  // ⌥⌘R on macOS only: elsewhere Ctrl+Alt+R is the project's action (`session.runAction`).
+  { id: "review.start", label: "Start a review", group: "Review", keys: [], macKeys: ["mod+alt+r"] },
   // Handled by the Issues view, while the focus is in it and not in a text field.
   { id: "issues.status", label: "Change the open issue's status", group: "Issues", keys: ["s", "mod+shift+s"], scope: "context" },
   { id: "issues.assignee", label: "Change the open issue's assignees", group: "Issues", keys: ["a"], scope: "context" },
@@ -164,10 +192,15 @@ const ACTIONS = [
   { id: "composer.send", label: "Send", group: "Composer", keys: ["enter"], scope: "context" },
   { id: "composer.sendAlternate", label: "Send the other way (hold or interrupt)", group: "Composer", keys: ["mod+enter"], scope: "context" },
   { id: "composer.newLine", label: "New line", group: "Composer", keys: ["shift+enter"], scope: "context" },
-  { id: "composer.historyPrevious", label: "Recall the previous message", group: "Composer", keys: ["up"], scope: "context" },
-  { id: "composer.historyNext", label: "Recall the next message, then the draft", group: "Composer", keys: ["down"], scope: "context" },
+  { id: "composer.historyPrevious", label: "Recall the previous message", group: "Composer", keys: ["up"], scope: "context", surface: "composer" },
+  { id: "composer.historyNext", label: "Recall the next message, then the draft", group: "Composer", keys: ["down"], scope: "context", surface: "composer" },
   { id: "composer.mention", label: "Mention a file", group: "Composer", keys: ["@"], scope: "context", fixed: true },
   { id: "composer.slashCommand", label: "Slash command", group: "Composer", keys: ["/"], scope: "context", fixed: true },
+  // PRO-216 (screen 09-14). Shift+Tab is the one Tab chord a shortcut may have, and only here (`bindingProblem`).
+  { id: "composer.togglePlanMode", label: "Toggle plan mode", group: "Composer", keys: ["shift+tab"], scope: "context", surface: "composer" },
+  { id: "composer.openModelPicker", label: "Open model picker", group: "Composer", keys: ["mod+/"] },
+  { id: "composer.cycleEffort", label: "Cycle effort", group: "Composer", keys: ["mod+shift+/"] },
+  { id: "composer.toggleFast", label: "Toggle fast mode", group: "Composer", keys: ["mod+shift+e"] },
 ] as const satisfies readonly ActionDef[];
 
 export type ShortcutId = (typeof ACTIONS)[number]["id"];
@@ -176,7 +209,7 @@ export interface ShortcutAction extends ActionDef {
 }
 
 export const SHORTCUT_ACTIONS: readonly ShortcutAction[] = ACTIONS;
-export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = ["App", "Session", "Panel", "Files", "Issues", "Composer"];
+export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = ["App", "Session", "Panel", "Files", "Review", "Issues", "Composer"];
 const BY_ID = new Map<string, ShortcutAction>(SHORTCUT_ACTIONS.map((action) => [action.id, action]));
 
 export function shortcutAction(id: ShortcutId): ShortcutAction {
@@ -185,6 +218,11 @@ export function shortcutAction(id: ShortcutId): ShortcutAction {
 
 export function isShortcutId(id: string): id is ShortcutId {
   return BY_ID.has(id);
+}
+
+/** Two actions may have the same key only when each belongs to a different surface of the window. */
+function coexist(a: ShortcutAction, b: ShortcutAction): boolean {
+  return !!a.surface && !!b.surface && a.surface !== b.surface;
 }
 
 export function defaultBindings(id: ShortcutId, mac = isMac): string[] {
@@ -416,6 +454,8 @@ export function bindingProblem(id: ShortcutId, binding: string, mac = isMac): st
   if (id === "session.stop" && key === "escape" && !mods.length) return `${text} goes to the agent, which interrupts its turn. Stopping the session needs ${mac ? "⌘ or ⌃" : "Ctrl or Alt"} (or a function key).`;
   const command = mods.includes("mod") || mods.includes("ctrl") || mods.includes("meta");
   const plain = !command && !mods.includes("alt");
+  // Shift+Tab is how the keyboard leaves a field backwards; the composer's plan-mode toggle is the one shortcut that may take it.
+  if (key === "tab" && id === "composer.togglePlanMode" && mods.length === 1 && mods[0] === "shift") return null;
   if (key === "tab" && plain) return "Tab moves the focus, so it cannot be a shortcut on its own.";
   const named = NAMED_KEYS.has(key) || isFunctionKey(key);
   if (!named && plain) return `${text} types a character, so it cannot be a shortcut on its own. Add ${mac ? "⌘ or ⌃" : "Ctrl or Alt"}.`;
@@ -443,25 +483,27 @@ export function readOverrides(raw: unknown): ShortcutOverrides {
 
 /**
  * The keys in force: the reader's where they set them, the defaults elsewhere.
- * No binding ever belongs to two actions. The reader's choice wins over a
+ * No binding ever belongs to two actions, except one on two different surfaces
+ * (`ActionDef.surface`). The reader's choice wins over a
  * default (a later version can add a default that someone already uses for
  * something else), and between two stored overrides the first action keeps it.
  */
 export function resolveKeymap(raw: unknown, mac = isMac): Keymap {
   const overrides = readOverrides(raw);
   const keymap = {} as Keymap;
-  const taken = new Set<string>();
-  const claim = (bindings: string[]) =>
+  const owners = new Map<string, ShortcutAction[]>();
+  const claim = (action: ShortcutAction, bindings: string[]) =>
     bindings.filter((binding) => {
-      if (taken.has(binding)) return false;
-      taken.add(binding);
+      const held = owners.get(binding) ?? [];
+      if (held.some((owner) => !coexist(owner, action))) return false;
+      owners.set(binding, [...held, action]);
       return true;
     });
-  for (const action of SHORTCUT_ACTIONS) if (action.fixed) keymap[action.id] = claim(defaultBindings(action.id, mac));
-  for (const action of SHORTCUT_ACTIONS) if (overrides[action.id]) keymap[action.id] = claim(overrides[action.id]!);
+  for (const action of SHORTCUT_ACTIONS) if (action.fixed) keymap[action.id] = claim(action, defaultBindings(action.id, mac));
+  for (const action of SHORTCUT_ACTIONS) if (overrides[action.id]) keymap[action.id] = claim(action, overrides[action.id]!);
   // An action behind an Experimental switch takes its default keys last: whatever else uses them keeps them.
-  for (const action of SHORTCUT_ACTIONS) if (!keymap[action.id] && !gated(action)) keymap[action.id] = claim(defaultBindings(action.id, mac).map(normalizeBinding));
-  for (const action of SHORTCUT_ACTIONS) if (!keymap[action.id]) keymap[action.id] = claim(defaultBindings(action.id, mac).map(normalizeBinding));
+  for (const action of SHORTCUT_ACTIONS) if (!keymap[action.id] && !gated(action)) keymap[action.id] = claim(action, defaultBindings(action.id, mac).map(normalizeBinding));
+  for (const action of SHORTCUT_ACTIONS) if (!keymap[action.id]) keymap[action.id] = claim(action, defaultBindings(action.id, mac).map(normalizeBinding));
   return keymap;
 }
 
@@ -497,7 +539,8 @@ export function bindingsOf(id: ShortcutId): string[] {
 /** The other action that has `binding`, if any. */
 export function conflictOf(binding: string, id: ShortcutId, keymap: Keymap = currentKeymap()): ShortcutAction | null {
   const wanted = normalizeBinding(binding);
-  return SHORTCUT_ACTIONS.find((action) => action.id !== id && shortcutOffered(action) && keymap[action.id].includes(wanted)) ?? null;
+  const mine = shortcutAction(id);
+  return SHORTCUT_ACTIONS.find((action) => action.id !== id && shortcutOffered(action) && keymap[action.id].includes(wanted) && !coexist(action, mine)) ?? null;
 }
 
 const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((binding, i) => binding === b[i]);
