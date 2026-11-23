@@ -20,6 +20,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
+import tomllib
 
 
 APPLE_CFG = re.compile(rb'target_(?:os\s*=\s*"macos"|vendor\s*=\s*"apple")')
@@ -56,7 +57,14 @@ MACOS = EVERYTHING + APPLE_ONLY + (
     # The crate roots declare every module, the Apple-only ones among them.
     "src-tauri/src/lib.rs", "src-tauri/src/main.rs",
     "rust-toolchain.toml", "rust-toolchain", ".cargo/", "src-tauri/.cargo/",
+    # The scripts the job runs and the ones those import, and the Node version it installs. test_macos_rust.py
+    # fails when the job runs a script that is not here.
     "scripts/build-computer-macos.mjs", "scripts/test_icons.py", "scripts/test_packaged_icons.py", "scripts/test_compiled_icons.py",
+    "scripts/verify_packaged_icons.py", ".nvmrc",
+    "src-tauri/capabilities/",
+    # Path dependencies Cargo builds for an Apple target alone (a build.rs and C++ that Linux never compiles).
+    # test_macos_rust.py fails when Cargo.toml has one that is not here.
+    "src-tauri/src/transcription/native-detector",
     # Approval wrappers depend on shell and loader behaviour on both operating systems.
     "src-tauri/src/harness/read_only",
 )
@@ -106,12 +114,16 @@ FRONTEND = EVERYTHING + (
     "src-tauri/src/control.rs", "src-tauri/src/fixtures/", "src-tauri/src/pairing/mod.rs",
     "src-tauri/src/pairing/wire.rs", "src-tauri/src/phone/mod.rs", "src-tauri/src/remote/protocol.rs",
     "src-tauri/src/session_names.rs", "src-tauri/src/session_ops.rs", "src-tauri/src/store/settings/schema.rs",
+    # What the desktop's own sources import from outside src/ and packages/. test_macos_rust.py fails when a
+    # source file imports one that is not here.
+    "CHANGELOG.md", "src-tauri/icons/", "src-tauri/src/store/environment_reserved.json",
 )
 
 # The phone app, the package it shares with the desktop, and the desktop types it imports.
 PHONE = EVERYTHING + (
     "mobile/", "packages/", "patches/", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".nvmrc",
-    "src/types/bots", "src/types/botItems",
+    # Every desktop file a phone source imports. test_macos_rust.py fails when one is not here.
+    "src/types/bots", "src/types/botItems", "src/types/configuration",
 )
 
 RULES = {"required": MACOS, "rust": RUST, "frontend": FRONTEND, "phone": PHONE}
@@ -137,40 +149,37 @@ def changed_files(base, head):
     return base, [path for path in changed if path]
 
 
-def near_an_apple_cfg(base, head, paths):
-    """The Rust files changed in, or within eight lines of, an item behind an Apple cfg.
+def holds_an_apple_cfg(base, head, paths):
+    """The changed Rust files that hold an Apple cfg, before or after the change.
 
-    A line Linux never compiles has no other check before merge. Git shows each
-    change with the whole function around it, so a change deep inside an Apple
-    function still shows that function's cfg. A cfg that is added or removed is
-    in the change itself.
+    A line Linux never compiles has no other check before merge, and a change
+    anywhere in a file can break its Apple branch (an import, a type, a helper
+    the branch calls), so the whole file counts, not the lines near the cfg.
+    The names are git's own (`--name-only -z`), so one with a space or a
+    non-ASCII character is read as it is. A file that cannot be read on either
+    side selects macOS: what cannot be placed is not left out.
     """
-    paths = [path for path in paths if path.startswith("src-tauri/") and path.endswith(".rs")]
-    if not paths:
-        return []
     found = []
-    diff = git("diff", "--no-renames", "-U8", "--function-context", base, head, "--", *paths)
-    for section in diff.split(b"\ndiff --git "):
-        header, _, body = section.partition(b"\n@@")
-        if not APPLE_CFG.search(body):
+    for path in paths:
+        if not (path.startswith("src-tauri/") and path.endswith(".rs")):
             continue
-        for line in header.split(b"\n"):
-            if line.startswith((b"--- a/", b"+++ b/")):
-                found.append(line[6:].decode())
-    return sorted(set(found) & set(paths))
+        sides = [subprocess.run(["git", "show", f"{rev}:{path}"], capture_output=True) for rev in (base, head)]
+        if all(side.returncode for side in sides) or any(not side.returncode and APPLE_CFG.search(side.stdout) for side in sides):
+            found.append(path)
+    return sorted(found)
 
 
 def select(base, head):
     """The changed paths that need the macOS job."""
     base, changed = changed_files(base, head)
-    return sorted({path for path in changed if matches(path, MACOS)} | set(near_an_apple_cfg(base, head, changed)))
+    return sorted({path for path in changed if matches(path, MACOS)} | set(holds_an_apple_cfg(base, head, changed)))
 
 
 def answers(base, head):
     """Each output with the changed paths that asked for it."""
     merge_base, changed = changed_files(base, head)
     found = {name: sorted(path for path in changed if matches(path, rules)) for name, rules in RULES.items()}
-    found["required"] = sorted(set(found["required"]) | set(near_an_apple_cfg(merge_base, head, changed)))
+    found["required"] = sorted(set(found["required"]) | set(holds_an_apple_cfg(merge_base, head, changed)))
     return found
 
 
@@ -279,6 +288,73 @@ def frontend_reads(root):
     return found
 
 
+IMPORT = re.compile(r"""(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*|\bimport\s+)["'](\.{1,2}/[^"'\n]+)["']""")
+SOURCE = (".ts", ".tsx", ".mts", ".mjs", ".js", ".jsx", ".cjs")
+
+
+def leaving_imports(root, inside, own):
+    """The tracked files outside `own` that a source file under `inside` imports by a relative path.
+
+    Every source file, not only tests: a type or a JSON file imported from
+    another tree changes what this tree compiles to.
+    """
+    files, known = tracked(root)
+    found = {}
+    for filename in files:
+        if not filename.startswith(inside) or not filename.endswith(SOURCE):
+            continue
+        folder = str(PurePosixPath(filename).parent)
+        for literal in IMPORT.findall((Path(root) / filename).read_text(errors="replace")):
+            path = normal(f"{folder}/{literal.split('?')[0]}")
+            if not path or path.startswith(own):
+                continue
+            for candidate in (path, *(path + ext for ext in (".ts", ".tsx", ".d.ts", ".mjs", ".js", ".json")), *(f"{path}/index{ext}" for ext in (".ts", ".tsx", ".js"))):
+                if candidate in known and candidate in files:
+                    found.setdefault(candidate, filename)
+                    break
+    return found
+
+
+def apple_path_dependencies(root):
+    """The folders of the path dependencies Cargo builds only for an Apple target."""
+    found = []
+    for manifest in ("src-tauri/Cargo.toml", "src-tauri/serve/Cargo.toml"):
+        file = Path(root) / manifest
+        if not file.exists():
+            continue
+        for target, tables in tomllib.loads(file.read_text()).get("target", {}).items():
+            if not APPLE_CFG.search(target.encode()):
+                continue
+            for kind in ("dependencies", "dev-dependencies", "build-dependencies"):
+                for dependency in tables.get(kind, {}).values():
+                    if isinstance(dependency, dict) and "path" in dependency:
+                        found.append(normal(f"{PurePosixPath(manifest).parent}/{dependency['path']}"))
+    return sorted(set(found))
+
+
+def macos_job_scripts(root):
+    """The scripts the macOS job's steps run, and the scripts beside them that those import."""
+    workflow = Path(root) / ".github/workflows/ci.yml"
+    if not workflow.exists():
+        return []
+    text = workflow.read_text()
+    start = text.index("\n  macos-native:")
+    job = re.split(r"\n  [\w-]+:\n", text[start + 1:], maxsplit=1)[0]
+    files, _ = tracked(root)
+    found = {path for path in re.findall(r"\bscripts/[\w./-]+", job) if path in files}
+    pending = list(found)
+    while pending:
+        script = pending.pop()
+        if not script.endswith(".py"):
+            continue
+        for module in re.findall(r"^\s*(?:from|import)\s+([\w.]+)", (Path(root) / script).read_text(errors="replace"), re.M):
+            beside = f"{PurePosixPath(script).parent}/{module.split('.')[0]}.py"
+            if beside in files and beside not in found:
+                found.add(beside)
+                pending.append(beside)
+    return sorted(found)
+
+
 def gaps(root):
     """What the rules above miss in the tree under `root`: empty when they are whole."""
     filters = [filter_path(name) for name in MACOS_FILTERS]
@@ -289,6 +365,12 @@ def gaps(root):
         ],
         "paths a Rust source reads that RUST does not name": sorted(p for p in rust_reads(root) if not covered(p, RUST)),
         "paths a frontend test reads that FRONTEND does not name": sorted(p for p in frontend_reads(root) if not covered(p, FRONTEND)),
+        "files the desktop frontend imports that FRONTEND does not name": sorted(
+            p for inside in ("src/", "packages/") for p in leaving_imports(root, inside, ("src/", "packages/")) if not covered(p, FRONTEND)
+        ),
+        "files the phone app imports that PHONE does not name": sorted(p for p in leaving_imports(root, "mobile/", ("mobile/",)) if not covered(p, PHONE)),
+        "Apple-only path dependencies that MACOS does not name": [p for p in apple_path_dependencies(root) if not covered(p, MACOS)],
+        "scripts the macOS job runs that MACOS does not name": [p for p in macos_job_scripts(root) if not covered(p, MACOS)],
     }
 
 

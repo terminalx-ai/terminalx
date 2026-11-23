@@ -85,12 +85,26 @@ class MacosRustSelection(Fixture):
         self.write(path, (LONG_APPLE_FUNCTION + "\n" + LONG_SHARED_FUNCTION).replace("    step(30);\n}\n\nfn shared", "    other(30);\n}\n\nfn shared", 1).replace("step(30);", "other(30);", 1))
         self.assertEqual(self.selected(), [path])
 
-    def test_change_far_from_any_apple_cfg_does_not_select(self):
+    def test_change_far_from_the_apple_cfg_in_the_same_file_selects(self):
+        # A change anywhere in a file can break its Apple branch: the whole file counts, not the lines near the cfg.
         path = "src-tauri/src/long.rs"
         text = LONG_APPLE_FUNCTION + "\n" + LONG_SHARED_FUNCTION
         head, _, tail = text.rpartition("step(30);")
         self.write(path, head + "other(30);" + tail)
-        self.assertEqual(self.selected(), [])
+        self.assertEqual(self.selected(), [path])
+
+    def test_a_name_git_would_quote_still_selects(self):
+        for path in ("src-tauri/src/with space.rs", "src-tauri/src/caf\u00e9.rs"):
+            self.write(path, '#[cfg(target_os = "macos")]\nfn apple() {}\nfn shared() {}\n')
+        self.commit()
+        for path in ("src-tauri/src/with space.rs", "src-tauri/src/caf\u00e9.rs"):
+            self.write(path, '#[cfg(target_os = "macos")]\nfn apple() {}\nfn shared() { changed(); }\n')
+        self.assertEqual(self.selected(), ["src-tauri/src/caf\u00e9.rs", "src-tauri/src/with space.rs"])
+
+    def test_restored_macos_inputs_select(self):
+        for path in ("scripts/verify_packaged_icons.py", ".nvmrc", "src-tauri/capabilities/default.json", "src-tauri/src/transcription/native-detector/build.rs"):
+            self.write(path, "changed\n")
+        self.assertEqual(len(self.selected()), 4)
 
     def test_native_and_build_inputs_select(self):
         for path in ("native/helper.swift", "src-tauri/Cargo.lock", "rust-toolchain.toml"):
@@ -236,6 +250,30 @@ class RulesAgainstAGrowingTree(Fixture):
         # The phone app's tests are not the frontend jobs'.
         self.write("mobile/src/wire.test.ts", 'read("../../docs/KEYS.md");\n')
         self.assertEqual(self.gaps()["paths a frontend test reads that FRONTEND does not name"], ["docs/KEYS.md", "src-tauri/src/wire.rs"])
+
+    def test_a_file_the_desktop_frontend_imports_from_outside_is_found(self):
+        self.write("src-tauri/src/store/reserved.json", "{}\n")
+        self.write("src-tauri/icons/64.png", "png\n")
+        self.write("src/lib/reserved.ts", 'import reserved from "../../src-tauri/src/store/reserved.json";\nimport other from "./other";\n')
+        self.write("src/components/Start.tsx", 'import icon from "../../src-tauri/icons/64.png?url";\n')
+        self.assertEqual(self.gaps()["files the desktop frontend imports that FRONTEND does not name"], ["src-tauri/src/store/reserved.json"])
+
+    def test_a_desktop_file_the_phone_app_imports_is_found(self):
+        self.write("src/types/sessions.ts", "export type S = 1;\n")
+        self.write("src/types/bots.ts", "export type B = 1;\n")
+        self.write("mobile/src/data/api.ts", 'import type { S } from "../../../src/types/sessions";\nexport type T = import("../../../src/types/bots").B;\n')
+        self.assertEqual(self.gaps()["files the phone app imports that PHONE does not name"], ["src/types/sessions.ts"])
+
+    def test_an_apple_only_path_dependency_is_found(self):
+        self.write("src-tauri/Cargo.toml", '[package]\nname = "x"\n[target.\'cfg(target_os = "macos")\'.dependencies]\nmetal = { path = "src/metal" }\nobjc = "1"\n[target.\'cfg(unix)\'.dependencies]\nposix = { path = "src/posix" }\n')
+        self.assertEqual(self.gaps()["Apple-only path dependencies that MACOS does not name"], ["src-tauri/src/metal"])
+
+    def test_a_script_the_macos_job_runs_is_found(self):
+        self.write("scripts/sign.py", "import sign_lib\nimport os\n")
+        self.write("scripts/sign_lib.py", "")
+        self.write("scripts/lint.py", "")
+        self.write(".github/workflows/ci.yml", "jobs:\n  frontend:\n    steps:\n      - run: python3 scripts/lint.py\n  macos-native:\n    steps:\n      - run: python3 scripts/sign.py\n  check:\n    steps: []\n")
+        self.assertEqual(self.gaps()["scripts the macOS job runs that MACOS does not name"], ["scripts/sign.py", "scripts/sign_lib.py"])
 
 
 if __name__ == "__main__":
