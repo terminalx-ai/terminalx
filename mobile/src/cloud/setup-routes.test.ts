@@ -18,10 +18,7 @@ const hasPage = (path: string) => [`${path}.tsx`, `${path}/index.tsx`].some((fil
  * request that adds each at this path. Take an entry out when its page lands:
  * the test below fails until that is done, and from then on checks the path.
  */
-const AWAITED: Partial<Record<keyof typeof SETUP_PATHS, string>> = {
-  compute: "#1509 (PRO-528) mobile/app/cloud/compute.tsx",
-  agents: "#1510 (PRO-529) mobile/app/agent-logins/index.tsx",
-};
+const AWAITED: Partial<Record<keyof typeof SETUP_PATHS, string>> = {};
 
 describe("the pages the setup opens", () => {
   for (const [name, path] of Object.entries(SETUP_PATHS) as [keyof typeof SETUP_PATHS, string][]) {
