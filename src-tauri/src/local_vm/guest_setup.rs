@@ -31,7 +31,7 @@ const MAX_OUTPUT: usize = 32 * 1024 * 1024;
 // receives literal argv, never interpolated guest/host data. Its watcher kills
 // only this helper group if the guest owner crashes. LaunchServices' Driver
 // app is outside this group and is never killed by this component.
-// Once the helper has ended, the shell's own stderr is closed for good before
+// Once the helper has ended, the shell's own stderr goes to /dev/null before
 // the watcher is killed. bash (macOS /bin/sh) reports a background job killed
 // by a signal ("line 8: 123 Terminated: 15 ( IFS= read …") at the next command
 // boundary: when the watcher dies before `wait` starts, that notice is not

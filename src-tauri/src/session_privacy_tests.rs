@@ -686,7 +686,7 @@ stty raw -echo
 exec cat
 "#);
         let _program = codex::pty::codex_program_for_tests(program.clone());
-        let rpc =crate::remote::server::WorkspaceRpc::new(rig._dir.path(), 1, rig.manager.sink.clone(), rig.manager.terminals.clone(), Some(rig.manager.clone())).unwrap();
+        let rpc = crate::remote::server::WorkspaceRpc::new(rig._dir.path(), 1, rig.manager.sink.clone(), rig.manager.terminals.clone(), Some(rig.manager.clone())).unwrap();
         let policy = rpc.collab.clone();
         let dir = tempfile::tempdir().unwrap(); policy.runtime_policy.bind(dir.path(), 1).unwrap();
         let snapshot = |revision: &str, role: &str, approve: bool, source: &str| -> Snapshot {
