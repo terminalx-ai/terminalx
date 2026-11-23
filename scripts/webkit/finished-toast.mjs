@@ -49,14 +49,21 @@ try {
       await page.getByTestId("turn-footer").first().waitFor();
       const composer = page.locator('[role="tabpanel"]:not([aria-hidden="true"]) [data-composer-box]');
       await composer.waitFor();
-      // Another session's turn ends while the reader is here.
-      await page.evaluate(() => {
-        window.dispatchEvent(new Event("focus"));
-        window.__PW_STUB__.emit("tab_status", { sessionId: "ft-other", tabId: "ft-other-t", status: "in_progress" });
-      });
+      // Another session's turn ends while the reader is here. The backend says the tab's new status in the event
+      // and in every list of sessions it gives from then on, as the real one does: the window's focus below makes
+      // the app read that list again, and a list that still said "idle" put the tab back to idle before the turn
+      // ended whenever the read landed first, so nothing was seen to finish (on a loaded runner; with 300 ms
+      // between the two events it failed every time).
+      const turn = (status) => page.evaluate((status) => {
+        const backend = window.__PW_STUB__;
+        backend.answers.list_sessions.find((session) => session.id === "ft-other").tabs[0].status = status;
+        backend.emit("tab_status", { sessionId: "ft-other", tabId: "ft-other-t", status });
+      }, status);
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await turn("in_progress");
       // The turn is seen running before it ends: "finished" is said of a turn that was in progress.
       await painted(page);
-      await page.evaluate(() => window.__PW_STUB__.emit("tab_status", { sessionId: "ft-other", tabId: "ft-other-t", status: "completed" }));
+      await turn("completed");
       const notice = page.locator('[data-notice-column] [role="status"]').filter({ hasText: /finished/ });
       await notice.first().waitFor();
       await page.evaluate(() => Promise.all(document.getAnimations().map((a) => a.finished.catch(() => {}))));
