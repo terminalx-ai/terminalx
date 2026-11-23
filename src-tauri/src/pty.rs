@@ -50,13 +50,7 @@ const TERMINATE_GRACE: Duration = Duration::from_secs(2);
 /// about 1 KB, and a write past that would otherwise wait for ever, holding
 /// every lock its caller holds (#661). Matches how long a prompt's paste is
 /// given to be read.
-#[cfg(not(test))]
 pub(crate) const INPUT_STALL: Duration = Duration::from_secs(10);
-/// Under test a write gives up sooner on a program that takes none of it, so
-/// the test that waits a stall out waits less. A fixture that is slow to read
-/// on purpose stays silent for a fraction of it (local_runtime/typing.rs).
-#[cfg(test)]
-pub(crate) const INPUT_STALL: Duration = Duration::from_secs(6);
 /// The longest one write may wait for room in all, however little at a time
 /// the program reads. Some writes are made under a lock other work shares (a
 /// tab's, or a shared prompt's sharing lock), and this is what bounds them.
@@ -3075,7 +3069,10 @@ time.sleep(60)
         let terminals=Terminals::new();
         let sink:Arc<dyn EventSink>=Arc::new(crate::sink::BroadcastSink::new(16));
         let dir=tempfile::tempdir().unwrap();
-        pane(&terminals,&sink,&dir,"proof-group","exec /bin/sleep 30");
+        // `spawn` puts its own `exec` before the command. Written here too it made `exec exec /bin/sleep 30`,
+        // which bash and sh refuse: under those the group's process was gone before the stop below, and the
+        // test passed with nothing left to stop (0.17 s under bash against 0.6 s under zsh).
+        pane(&terminals,&sink,&dir,"proof-group","/bin/sleep 30");
         let proof=terminals.group_handle("proof-group").unwrap();
         assert!(proof.pid().is_some());
         let stopping=terminals.begin_stop("proof-group").unwrap();
