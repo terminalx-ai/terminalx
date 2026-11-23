@@ -9,7 +9,7 @@ beforeEach(() => {
   vi.stubGlobal("innerWidth", 1440);
   vi.stubGlobal("innerHeight", 900);
 });
-afterEach(() => { cleanup(); document.body.innerHTML = ""; vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); document.body.innerHTML = ""; vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 function composer(box: Box) {
   const element = document.createElement("div");
@@ -32,12 +32,35 @@ it("puts the toasts top right, with the notices that wait, when a composer reach
   expect(columnOf("Notifications are off")).toBe("top");
 });
 
-it("stops the top column above the composer, so a tall stack scrolls instead of covering Send", () => {
+// The notices that wait sit above the toasts: at 1440×900 the toasts start at y 204.
+function stackAt(top: number) {
+  const own = HTMLElement.prototype.getBoundingClientRect;
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    return this.hasAttribute("data-notice-stack") ? rect({ left: 1044, right: 1424, top, bottom: top + 60 }) : own.call(this);
+  });
+}
+
+it("stops the toasts above the composer, so a tall stack scrolls instead of covering Send", () => {
   composer({ left: 494, right: 1214, top: 775, bottom: 860 });
+  stackAt(204);
   mount();
-  const top = screen.getByText("Claude Code finished").closest<HTMLElement>("[data-notice-column]")!;
-  expect(top.style.maxHeight).toBe(`${775 - 88 - 8}px`);
-  expect(top.className).toContain("overflow-y-auto");
+  const toasts = screen.getByText("Claude Code finished").parentElement!;
+  expect(toasts.style.maxHeight).toBe(`${775 - 204 - 8}px`);
+  expect(toasts.className).toContain("overflow-y-auto");
+});
+
+// #1502 CI: at 640×480 an approval card reaches up to y 120; the 116px notifications card above the toasts was cut short.
+it("never cuts the waiting notices short, however high a card over the composer reaches", () => {
+  vi.stubGlobal("innerWidth", 640);
+  vi.stubGlobal("innerHeight", 480);
+  composer({ left: 292, right: 606, top: 120, bottom: 299 });
+  composer({ left: 292, right: 606, top: 335, bottom: 442 });
+  stackAt(212);
+  mount();
+  const waiting = screen.getByText("Notifications are off").closest<HTMLElement>("[data-notice-column]")!;
+  expect(waiting.style.maxHeight).toBe("");
+  expect(waiting.className).not.toContain("overflow-y-auto");
+  expect(screen.getByText("Claude Code finished").parentElement!.style.maxHeight).toBe("72px");
 });
 
 // A settings or issues page: its own controls are up top, so the toasts keep the bottom corner.

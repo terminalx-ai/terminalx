@@ -11,9 +11,9 @@ const AVOID = "[data-composer-box], [data-toast-avoid], [data-held-tray]";
 /** How tall a stack in the bottom corner is taken to be when deciding where it goes. */
 const BAND = 160;
 
-/** The top column's top edge (`top-22`), and what it keeps above the composer it stops at. */
-const TOP_EDGE = 88;
+/** What the toasts keep above the composer they stop at, and the least of them that stays on show. */
 const CLEARANCE = 8;
+const MIN_STACK = 72;
 
 const COLUMN = "pointer-events-none fixed z-(--z-notice) flex max-w-[calc(100vw-2rem)] flex-col gap-2";
 
@@ -52,17 +52,34 @@ export function NoticeColumn({ waiting, children, window: kind = "main" }: { wai
     setStack(node);
     setElement(node);
   }, []);
-  const toasts = <div ref={ref} data-notice-stack="" className="flex min-h-0 flex-col gap-2">{children}</div>;
+  useFitAbove(element, floor);
+  const toasts = <div ref={ref} data-notice-stack="" className={cn("flex min-h-0 flex-col gap-2", up && "overflow-y-auto overscroll-contain")}>{children}</div>;
   return (
     <>
-      {/* With the toasts up here a tall stack stops above the composer and scrolls within itself, never over Send. */}
-      <div data-notice-column="top" className={cn(COLUMN, place.top, place.width, up && "overflow-y-auto overscroll-contain")} style={up ? { maxHeight: Math.max(floor - TOP_EDGE - CLEARANCE, 96) } : undefined}>
+      <div data-notice-column="top" className={cn(COLUMN, place.top, place.width)}>
         {waiting}
         {up && toasts}
       </div>
       <div data-notice-column="bottom" className={cn(COLUMN, place.bottom, place.width)}>{!up && toasts}</div>
     </>
   );
+}
+
+/**
+ * Up top, the toasts stop above the composer (and the cards over it) and scroll within themselves, never
+ * over Send (#1499 review). Only they do: the notices that wait above them are never cut short, however
+ * high an approval card reaches in a short window. Fitted again every second as those notices come and go.
+ */
+function useFitAbove(toasts: HTMLElement | null, floor: number | null) {
+  useLayoutEffect(() => {
+    if (!toasts) return;
+    const fit = () => {
+      toasts.style.maxHeight = floor === null ? "" : `${Math.max(Math.round(floor - toasts.getBoundingClientRect().top - CLEARANCE), MIN_STACK)}px`;
+    };
+    fit();
+    const timer = window.setInterval(fit, 1000);
+    return () => window.clearInterval(timer);
+  }, [toasts, floor]);
 }
 
 /**

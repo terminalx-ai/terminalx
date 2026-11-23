@@ -96,6 +96,10 @@ try {
         "stop session": "text:Stop session",
         tabs: '[role="tablist"]',
       };
+      // The notice column reads where the composer is once a second (#1499): measure after it has, as a slow CI run
+      // does, or a column cut short by it (#1502) passes here and fails there.
+      await page.waitForTimeout(1100);
+      await painted(page);
       const geometry = await placed(page, "[data-notifications-off]", others);
       // At 760x600 zoom 1.5 (about 500x400 of layout) no floating notice fits beside the approval: the card may cover
       // its "Stop session", never Allow, Deny, the composer or its send button, and it has Not now and close.
