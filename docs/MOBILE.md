@@ -424,6 +424,17 @@ then makes best-effort installation logout and cloud logout requests. Explicit
 QR/code pairings survive. A network outage leaves visible retryable cleanup
 state rather than silently declaring remote credentials revoked.
 
+Setting up cloud workspaces (PRO-527) keeps one thing in AsyncStorage: which
+organization the signed-in person chose to set up
+(`terminalx:cloud-setup-organization:v1`, an organization id beside the user
+id). It is dropped when nobody is signed in or another account signs in. How
+far that organization's setup is, is never kept: the Cloud tab reads the
+organization list, the provider list and the agent logins from the account
+service each time it is shown (`mobile/src/cloud/setup.ts`). The setup's steps
+open by path with the organization's id as `orgId`
+(`mobile/src/cloud/setup-routes.ts`): `/cloud/compute`, `/cloud/agent-logins`
+and `/cloud/launch`.
+
 The phone stores only bounded local transcript/terminal cache needed for the UI
 and clears it with its paired host. The host, not the phone or cloud, writes
 owner-only multiplayer activity to

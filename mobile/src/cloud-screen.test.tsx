@@ -227,11 +227,13 @@ describe("the Cloud tab", () => {
     expect(mocks.push).toHaveBeenCalledWith({ pathname: "/cloud/[workspaceId]", params: { workspaceId: "ws-9", orgId: "org-1", title: "Checkout redesign" } });
   });
 
-  it("says when there is nothing to see, and asks a signed-out person to sign in", async () => {
+  it("shows the setup steps when there is nothing to see, and asks a signed-out person to sign in", async () => {
     world({ state: null });
     await show(<CloudScreen />);
-    expect(text()).toContain("No cloud workspaces you can see.");
-    expect(text()).toContain("1 organization with no workspaces");
+    // An account with nothing set up is told what is missing (25.01; its states are in cloud-setup-screen.test.tsx).
+    expect(text()).not.toContain("No cloud workspaces you can see.");
+    expect(text()).toContain("Four steps set one up.");
+    expect(text()).not.toContain("1 organization with no workspaces");
     mocks.app = { session: null, signIn: vi.fn() };
     await show(<CloudScreen />);
     await click("Sign in");

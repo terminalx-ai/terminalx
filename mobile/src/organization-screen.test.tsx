@@ -7,15 +7,21 @@ import { organizationDeletionError } from "@terminalx/portable/organizationDelet
 import { OrganizationDelete } from "./ui/OrganizationDelete";
 
 // #1292: an owner deletes an organization from the phone, with the desktop's wording and rule.
-const mocks = vi.hoisted(() => ({ copy: vi.fn(async (_text: string) => true), back: vi.fn(), params: { orgId: "org-team" }, catalog: null as any, snapshot: { organizations: [] as any[], saved: false, deletesOrganizations: true } as any }));
+const mocks = vi.hoisted(() => ({ copy: vi.fn(async (_text: string) => true), back: vi.fn(), push: vi.fn(), params: { orgId: "org-team" }, catalog: null as any, snapshot: { organizations: [] as any[], saved: false, deletesOrganizations: true } as any }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: mocks.copy }));
-vi.mock("expo-router", () => ({ Stack: { Screen: () => null }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ back: mocks.back }) }));
+vi.mock("expo-router", async () => {
+  const { useEffect } = await import("react");
+  // The screen comes into view once, when it is drawn.
+  return { Stack: { Screen: () => null }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ back: mocks.back, push: mocks.push }), useFocusEffect: (run: () => void) => useEffect(run, [run]) };
+});
 vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => mocks.catalog, useCatalogSnapshot: () => mocks.snapshot }));
 vi.mock("@mobile/ui/theme", async (actual) => ({ ...(await actual<typeof import("@mobile/ui/theme")>()), useTheme: () => ({ palette: { danger: "#db695f", border: "#333" } }) }));
 vi.mock("react-native", () => {
   const View = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
     View, ScrollView: View,
+    // A row that opens a page; the buttons of this screen are its Button's.
+    Pressable: ({ children, onPress, accessibilityLabel }: any) => <div role="link" aria-label={accessibilityLabel} onClick={onPress}>{children}</div>,
     Text: ({ children, selectable, testID, accessibilityRole }: any) => <span data-testid={testID} data-selectable={selectable ? "true" : undefined} role={accessibilityRole}>{children}</span>,
     TextInput: ({ accessibilityLabel, value, onChangeText, editable }: any) => <input aria-label={accessibilityLabel} value={value} disabled={editable === false} onChange={(event) => onChangeText(event.currentTarget.value)} />,
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
@@ -25,6 +31,7 @@ vi.mock("@mobile/ui/primitives", () => ({
   Button: ({ label, onPress, disabled, accessibilityLabel }: any) => <button aria-label={accessibilityLabel ?? label} disabled={!!disabled} onClick={onPress}>{label}</button>,
   Card: ({ children }: any) => <div>{children}</div>,
   EmptyState: ({ title, detail }: any) => <div>{title}{detail}</div>,
+  SectionTitle: ({ children }: any) => <h2>{children}</h2>,
 }));
 
 const team = { orgId: "org-team", name: "Test organization", role: "owner", isPersonal: false };
@@ -46,7 +53,8 @@ beforeEach(() => {
   mocks.copy.mockReset().mockResolvedValue(true);
   mocks.back.mockReset();
   mocks.params = { orgId: "org-team" };
-  mocks.catalog = { deleteOrganization: vi.fn(async () => {}) };
+  mocks.push.mockReset();
+  mocks.catalog = { deleteOrganization: vi.fn(async () => {}), api: { providers: vi.fn(async () => []), credentials: vi.fn(async () => []) } };
   mocks.snapshot = { organizations: [{ organization: team }], saved: false, deletesOrganizations: true };
   container = document.createElement("div");
   document.body.append(container);
@@ -150,4 +158,48 @@ it("says the organization is gone when it is no longer listed", async () => {
   mocks.snapshot = { organizations: [], saved: false, deletesOrganizations: true };
   await show(<OrganizationScreen />);
   expect(container.textContent).toContain("Organization unavailable");
+});
+
+// 25.02: the organization's compute and agent logins, read from the server; each row opens its page for whoever manages them.
+const provider = (displayName: string, fields: Record<string, unknown> = {}) => ({ id: displayName.toLowerCase(), displayName, availability: "available", canManage: true, connection: { state: "connected", connectedAt: 1 }, descriptor: { label: displayName, credentialSource: "organization" }, ...fields });
+const login = (name: string, state = "connected") => ({ id: `c-${name}`, provider: name, state });
+const row = (name: string) => container.querySelector(`[role='link'][aria-label^='${name}']`) as HTMLElement | null;
+
+it("shows what compute and which agent logins the organization has, and opens each for its owner", async () => {
+  mocks.catalog.api.providers.mockResolvedValue([provider("Boat"), provider("TerminalX Cloud", { descriptor: { label: "TerminalX Cloud", credentialSource: "platform" } })]);
+  mocks.catalog.api.credentials.mockResolvedValue([login("codex"), login("claude"), login("cursor", "revoked"), login("github")]);
+  await show(<OrganizationScreen />);
+  expect(mocks.catalog.api.providers).toHaveBeenCalledExactlyOnceWith("org-team");
+  expect(container.textContent).toContain("Cloud workspaces");
+  // Compute TerminalX holds the key for is not something this organization connected.
+  expect(row("Compute")!.getAttribute("aria-label")).toBe("Compute, Boat · connected");
+  expect(row("Agent logins")!.getAttribute("aria-label")).toBe("Agent logins, Codex, Claude Code · connected");
+  expect(container.textContent).toContain("Owners and admins manage these. Members use them when they launch a workspace.");
+  await act(async () => row("Compute")!.click());
+  expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/compute", params: { orgId: "org-team" } });
+  await act(async () => row("Agent logins")!.click());
+  expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/agent-logins", params: { orgId: "org-team" } });
+});
+
+it("says when nothing is connected", async () => {
+  await show(<OrganizationScreen />);
+  expect(row("Compute")!.getAttribute("aria-label")).toBe("Compute, Not connected");
+  expect(row("Agent logins")!.getAttribute("aria-label")).toBe("Agent logins, Not connected");
+});
+
+it("says a key needs attention and that a list could not be read, never a guess", async () => {
+  mocks.catalog.api.providers.mockResolvedValue([provider("Boat", { availability: "attention-required", connection: { state: "attention-required", connectedAt: 1 } })]);
+  mocks.catalog.api.credentials.mockRejectedValue(new Error("offline"));
+  await show(<OrganizationScreen />);
+  expect(row("Compute")!.getAttribute("aria-label")).toBe("Compute, Boat · needs attention");
+  expect(row("Agent logins")!.getAttribute("aria-label")).toBe("Agent logins, Could not be read.");
+});
+
+it("shows a member the rows without a way in", async () => {
+  mocks.snapshot = { organizations: [{ organization: { ...team, role: "member" } }], saved: false, deletesOrganizations: true };
+  mocks.catalog.api.providers.mockResolvedValue([provider("Boat", { canManage: false })]);
+  await show(<OrganizationScreen />);
+  expect(container.textContent).toContain("Boat · connected");
+  expect(row("Compute")).toBeNull();
+  expect(row("Agent logins")).toBeNull();
 });
