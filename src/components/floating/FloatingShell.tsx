@@ -150,8 +150,8 @@ export function FloatingShell() {
 
   return (
     <div data-app-shell data-floating-shell className="flex h-full w-full flex-col">
-      {/* The main window's place for notices, off this window's composer too (#1499). */}
-      <NoticeColumn className="w-[320px]">
+      {/* The main window's rule for notices: off this window's composer too (#1499). */}
+      <NoticeColumn window="floating">
         <CloseUndoNotices />
         <Toasts />
       </NoticeColumn>

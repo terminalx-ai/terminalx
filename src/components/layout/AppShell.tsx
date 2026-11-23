@@ -57,7 +57,6 @@ import { subscribeTabPty } from "@/lib/tabViews";
 import { MergedCleanupNotices } from "@/components/ui/MergedCleanupNotices";
 import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
 import { Toasts } from "@/components/ui/Toasts";
-import { ToastCorner } from "@/components/ui/ToastCorner";
 import { NoticeColumn } from "@/components/ui/NoticeColumn";
 import { ArchiveNotices } from "@/components/ui/ArchiveNotices";
 import { archiveWithUndo } from "@/lib/archiveNotices";
@@ -406,13 +405,16 @@ export function AppShell() {
     <SettingsLeaveBoundaryContext.Provider value={settingsBoundary}>
     <div data-app-shell className="flex h-full w-full flex-col">
       <SelfUiAccess />
-      {/* Every notice top right, under the tabs, in one column (#1499): in the bottom corner a stack of them covered
-          the composer, its send button and the last turn's footer, and an "agent finished" toast came just as the
-          reader went back to type. What waits on the reader goes first; the toasts follow. */}
-      <NoticeColumn>
-        {/* It stays until notifications are allowed, so it is up here with the other notices that wait (PRO-327). */}
-        <NotificationsOffCard />
-        <MergedCleanupNotices />
+      {/* Merged-workspace notices wait top right, under the tabs: a stack of them in the bottom corner covered the
+          composer and its send button. The toasts take the bottom corner unless a composer reaches under it, and then
+          join them up there (#1499). The clean-up indicator is last, so the toasts stack above it. */}
+      <NoticeColumn
+        waiting={<>
+          {/* It stays until notifications are allowed, so it is up here with the other notices that wait (PRO-327). */}
+          <NotificationsOffCard />
+          <MergedCleanupNotices />
+        </>}
+      >
         <CloseUndoNotices />
         <ArchiveNotices />
         <Toasts />
@@ -420,11 +422,8 @@ export function AppShell() {
         <ProjectAddedNotice />
         <WorktreeCopyNotices />
         <WorkspaceReassignedNotices />
-      </NoticeColumn>
-      {/* The clean-up indicator keeps the bottom corner: it shows work going on, not news, and rises clear of a composer under it. */}
-      <ToastCorner className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[380px] max-w-[calc(100vw-2rem)] flex-col gap-2">
         <CleanupIndicator onOpenStorage={openStorageSettings} />
-      </ToastCorner>
+      </NoticeColumn>
       <BypassDialog />
       <LinkSessionDialog />
       <ImageViewerHost />
