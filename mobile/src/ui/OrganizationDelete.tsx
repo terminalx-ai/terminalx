@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { StyleSheet, Text, TextInput, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import {
   organizationDeletionError,
@@ -9,6 +9,7 @@ import {
 } from "@terminalx/portable/organizationDeletion";
 import type { CloudOrganization } from "@mobile/cloud/api";
 import { Button, Card } from "@mobile/ui/primitives";
+import { TextField } from "@mobile/ui/TextField";
 import { useTheme } from "@mobile/ui/theme";
 
 /**
@@ -88,11 +89,11 @@ function Confirmation({ organization, remove, onDeleted }: Props) {
           <Text selectable testID="organization-delete-name" style={[styles.name, { color: palette.ink, backgroundColor: palette.raised }]}>{confirming}</Text>
           <Button label={copied ? text.copied : text.copy} accessibilityLabel={text.copy} kind="secondary" size="small" disabled={busy} onPress={() => copy(confirming)} />
         </View>
-        <TextInput
+        <TextField
           accessibilityLabel={text.inputLabel}
           value={typed}
           onChangeText={setTyped}
-          editable={!busy}
+          disabled={busy}
           autoCapitalize="none"
           autoCorrect={false}
           autoComplete="off"
@@ -100,8 +101,7 @@ function Confirmation({ organization, remove, onDeleted }: Props) {
           returnKeyType="done"
           onSubmitEditing={() => void submit()}
           placeholder={confirming}
-          placeholderTextColor={palette.faint}
-          style={[styles.input, { color: palette.ink, borderColor: palette.border, backgroundColor: palette.raised }]}
+          steady
         />
         <Button label={text.confirm(confirming)} kind="danger" disabled={busy || !confirmed} onPress={() => void submit()} />
         <Button label={text.cancel} kind="secondary" disabled={busy} onPress={() => { setConfirming(null); setTyped(""); setCopied(false); setError(null); }} />
@@ -116,5 +116,4 @@ const styles = StyleSheet.create({
   detail: { fontSize: 15, lineHeight: 21 },
   nameRow: { flexDirection: "row", alignItems: "center", gap: 10 },
   name: { flexShrink: 1, fontSize: 16, fontWeight: "600", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, overflow: "hidden" },
-  input: { minHeight: 44, borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, paddingHorizontal: 12, fontSize: 16 },
 });
