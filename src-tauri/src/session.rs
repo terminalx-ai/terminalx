@@ -1858,7 +1858,13 @@ impl Drop for Ticket {
 }
 
 /// How long a restart waits for the outgoing CLI to let go of its conversation.
+#[cfg(not(test))]
 const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(6);
+/// Under test, still past `host::terminate`'s and a pane's 2 s TERM-to-KILL
+/// grace with room for a loaded runner, so a fixture that ignores TERM is
+/// confirmed as in production; the tests that wait it out wait less.
+#[cfg(test)]
+const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(4);
 /// How long a stop waits, from its signal, for the agent's exit to be
 /// confirmed: what a tab's close tells the reader it waited (PRO-291).
 const STOP_CONFIRM_WAIT: Duration = Duration::from_secs(recovery::CLOSE_WAIT_SECS);
