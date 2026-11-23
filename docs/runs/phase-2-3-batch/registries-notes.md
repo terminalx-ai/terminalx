@@ -63,3 +63,28 @@ the whole expected file on failure) and regenerate the schema with `TERMINALX_WR
 `composer.openModelPicker`, `composer.toggleFast`, `composer.togglePlanMode`, `files.openInDefault`, `files.openInMenu`,
 `git.showUncommitted`, `review.nextComment`, `review.nextFile`, `review.previousComment`, `review.previousFile`, `review.start`,
 `review.toggleViewed`, `session.copyConciseTranscript`. Every other test in `pnpm test` passes (679 files).
+
+The exact lines, each placed in key order (the file is sorted by key; nothing is removed). Try 3 applied them to a scratch copy of the
+file and `pnpm exec vitest run src/lib/settingsSchemaDescriptions.test.ts` passed (1 test), then restored the file:
+
+```json
+  "experimental.forkChatToTab": "Fork a whole chat into a new tab of the same session, even while it is working, and show where it was forked from. Off, Fork to new tab is not offered; forking a turn into a new session is not affected.",
+  "preferences.shortcuts.chat.expandAllToolCalls": "Session keyboard shortcut.",
+  "preferences.shortcuts.composer.cycleEffort": "Composer keyboard shortcut.",
+  "preferences.shortcuts.composer.openModelPicker": "Composer keyboard shortcut.",
+  "preferences.shortcuts.composer.toggleFast": "Composer keyboard shortcut.",
+  "preferences.shortcuts.composer.togglePlanMode": "Composer keyboard shortcut.",
+  "preferences.shortcuts.files.openInDefault": "Files keyboard shortcut.",
+  "preferences.shortcuts.files.openInMenu": "Files keyboard shortcut.",
+  "preferences.shortcuts.git.showUncommitted": "Session keyboard shortcut.",
+  "preferences.shortcuts.review.nextComment": "Review keyboard shortcut.",
+  "preferences.shortcuts.review.nextFile": "Review keyboard shortcut.",
+  "preferences.shortcuts.review.previousComment": "Review keyboard shortcut.",
+  "preferences.shortcuts.review.previousFile": "Review keyboard shortcut.",
+  "preferences.shortcuts.review.start": "Review keyboard shortcut.",
+  "preferences.shortcuts.review.toggleViewed": "Review keyboard shortcut.",
+  "preferences.shortcuts.session.copyConciseTranscript": "Session keyboard shortcut.",
+```
+
+`experimental.forkChatToTab` also needs the Rust setting itself (the backend piece adds it to the experimental settings and the
+TEMPLATE in `src-tauri/src/store/settings/file.rs`) before the schema regeneration describes a real key.
