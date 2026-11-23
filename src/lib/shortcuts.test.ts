@@ -109,10 +109,11 @@ describe("the shortcut registry", () => {
     expect(keymap["session.reopenTab"]).toEqual([reopen]);
     expect(keymap["session.toggleTerminalView"]).toEqual(["mod+shift+t"]);
     const modifiers = mac ? { metaKey: true } : { ctrlKey: true };
+    const toggleEvent = mac
+      ? key({ ...modifiers, altKey: true, key: "†", code: "KeyT" })
+      : key({ ...modifiers, altKey: true, shiftKey: true, key: "L", code: "KeyL" });
     for (const [event, owner] of [
-      mac
-        ? [key({ ...modifiers, altKey: true, key: "†", code: "KeyT" }), "app.toggleMode"]
-        : [key({ ...modifiers, altKey: true, shiftKey: true, key: "L", code: "KeyL" }), "app.toggleMode"],
+      [toggleEvent, "app.toggleMode"],
       [key({ ...modifiers, altKey: true, shiftKey: true, key: mac ? "ˇ" : "T", code: "KeyT" }), "session.reopenTab"],
     ] as const) {
       const chord = chordOf(event, mac);
