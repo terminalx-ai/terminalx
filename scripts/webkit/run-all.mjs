@@ -253,8 +253,10 @@ async function main() {
     // Made here, once, so that the Vite checks starting at once only read it (vite-page.mjs).
     const warming = Date.now();
     try {
-      const { warmViteDeps } = await import("./vite-page.mjs");
+      const { warmViteDeps, WARMED } = await import("./vite-page.mjs");
       await warmViteDeps();
+      // From here a Vite check that makes the cache again has a different idea of it from the others, and fails.
+      process.env[WARMED] = "1";
       console.log(`Vite's dependency cache is ready (${seconds(Date.now() - warming)}).`);
     } catch (error) {
       // The Vite checks then make it themselves, at once; whatever that breaks fails them, and this run fails too.
