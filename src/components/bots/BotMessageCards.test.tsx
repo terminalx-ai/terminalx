@@ -379,6 +379,10 @@ describe("a hand-off's lines in its two chats", () => {
     await within(line).findByTestId("bot-answered-show");
     expect(line.textContent).toContain("Sentry answered hand-off 2");
     expect(line.textContent).not.toContain("it reached");
+    // It says why, with a Resend (23.17).
+    expect(within(line).getByTestId("bot-handed-undelivered").textContent).toContain("An answer from Sentry to Atlas is not delivered · it goes when that bot's chat starts: the tab is gone");
+    fireEvent.click(within(line).getByTestId("bot-handed-resend"));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_handoff_resend", { message: "m1" }));
   });
 
   it("draws TerminalX's own lines in the owner's words (23.17)", () => {

@@ -588,7 +588,8 @@ function UndeliveredRow({ message }: { message: UndeliveredMessage }) {
 
 /**
  * In the receiving bot's chat, once it answered (23.14): one line that says so and, when the answer is not among what
- * waits undelivered, that it reached the sender's chat. "Show the answer" opens the answer's words.
+ * waits undelivered, that it reached the sender's chat; while it waits, why, with a Resend (23.17). "Show the answer"
+ * opens the answer's words.
  */
 function AnsweredLine({ note, text, ts, name, className }: { note: HandoffNote; text: string; ts?: string; name: string; className?: string }) {
   const from = useBot(note.from);
@@ -597,7 +598,9 @@ function AnsweredLine({ note, text, ts, name, className }: { note: HandoffNote; 
   const toName = to?.name ?? GONE;
   const { list } = useSharedBotHandoffs(note.to);
   const handoff = list?.handoffs.find((value) => value.number === note.number) ?? null;
-  const reached = !!list && !(list.undelivered ?? []).some((message) => message.kind === "answer" && message.handoff === note.number);
+  // The answer, while it has not reached the sender's chat: said here too, with its Resend.
+  const held = (list?.undelivered ?? []).filter((message) => message.kind === "answer" && message.handoff === note.number);
+  const reached = !!list && held.length === 0;
   const [open, setOpen] = useDisclosure(`answer:${name}`);
   const answer = handoff?.answer;
   return (
@@ -622,6 +625,7 @@ function AnsweredLine({ note, text, ts, name, className }: { note: HandoffNote; 
           <At ts={ts} />
         </div>
         {open && answer && <p className="select-text whitespace-pre-wrap break-words border-t border-hairline px-3 py-2 text-[12.5px] leading-[19px] text-foreground" data-testid="bot-answered-text">{answer.text}</p>}
+        {held.length > 0 && <div className="border-t border-hairline px-3 pb-2">{held.map((message) => <UndeliveredRow key={message.id} message={message} />)}</div>}
       </div>
     </div>
   );
