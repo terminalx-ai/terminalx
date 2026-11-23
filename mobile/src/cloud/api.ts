@@ -29,6 +29,14 @@ const DO_NOT_WAKE_CAPABILITY = "cloud.workspaces.agent-command-wake.v1";
  * tokens only, so the phone does not offer deletion.
  */
 export const ORGANIZATION_DELETE_CAPABILITY = "organizations.delete.mobile.v1";
+/**
+ * The capability flag of a server that says its organization create route
+ * takes a phone's token (terminalx-saas `organizationCreation`, PRO-526).
+ * Without it the phone does not offer creating one.
+ */
+export const ORGANIZATION_CREATE_CAPABILITY = "organizations.create.mobile.v1";
+/** An organization's name as the server takes it, after trimming (`inputValidation.ORGANIZATION_NAME`). */
+export const ORGANIZATION_NAME = { min: 2, max: 60 } as const;
 
 // Ask for every registered provider. The names are for servers that predate
 // the described-provider contract (PRO-415).
@@ -161,6 +169,9 @@ const REFUSALS: Readonly<Record<string, CloudRefusal>> = {
   cloud_workspace_quote_expired: "quote-expired",
   cloud_environment_changed: "quote-expired",
   idempotency_key_reused: "idempotency-key-reused",
+  organization_idempotency_key_reused: "idempotency-key-reused",
+  organization_idempotency_key_invalid: "invalid-request",
+  organization_name_invalid: "invalid-request",
   cloud_workspace_operation_in_progress: "workspace-busy",
   cloud_workspace_active_work: "workspace-busy",
   cloud_workspace_archived: "workspace-archived",
@@ -226,6 +237,8 @@ export type CloudRole = z.infer<typeof ROLE>;
 
 const organizationSchema = z.object({ orgId: z.string().min(1), name: z.string(), role: z.string(), isPersonal: z.boolean().optional() }).passthrough();
 export type CloudOrganization = z.infer<typeof organizationSchema>;
+/** The create route's answer (`desktopCreateOrganization`): the new organization and this person's role in it. */
+const createdOrganizationSchema = z.object({ id: z.string().min(1), name: z.string(), role: z.string() });
 
 const attachTicketSchema = z.object({ v: z.literal(1), token: z.string().min(1), expiresAt: z.number(), runtimeGeneration: z.number().int().nonnegative(), protocol: z.literal("terminalx-workspace-rpc/1") });
 const attachmentSchema = z
@@ -510,6 +523,9 @@ export class CloudApi {
   /** Whether the server takes this phone's token for deleting an organization, from the last capabilities read. */
   private phoneDeletion = false;
 
+  /** Whether the server takes this phone's token for creating an organization, from the last capabilities read. */
+  private phoneCreation = false;
+
   constructor(private readonly options: CloudApiOptions) {
     this.fetcher = options.fetch ?? fetch;
     // An answer in a shape this app does not know is one thing to every caller: `cloud_workspace_invalid_response`.
@@ -536,6 +552,7 @@ export class CloudApi {
     const parsed = z.object({ organizations: z.array(organizationSchema), capabilities: z.object({ flags: z.record(z.string(), z.unknown()) }).passthrough().nullish() }).passthrough().parse(body);
     this.doNotWakeKnown = parsed.capabilities?.flags[DO_NOT_WAKE_CAPABILITY] === true;
     this.phoneDeletion = parsed.capabilities?.flags[ORGANIZATION_DELETE_CAPABILITY] === true;
+    this.phoneCreation = parsed.capabilities?.flags[ORGANIZATION_CREATE_CAPABILITY] === true;
     return parsed.organizations;
   }
 
@@ -575,6 +592,28 @@ export class CloudApi {
   /** Whether this server deletes organizations for a phone, as of the last organizations read. */
   deletesOrganizations(): boolean {
     return this.phoneDeletion;
+  }
+
+  /** Whether this server creates organizations for a phone, as of the last organizations read. */
+  createsOrganizations(): boolean {
+    return this.phoneCreation;
+  }
+
+  /**
+   * Create an organization, of which this person becomes the owner (PRO-526).
+   * The server asks for a name only. One `idempotencyKey` names one attempt
+   * at one name: sent again after a lost answer it returns the organization
+   * the first request made, never a second one; with another name the server
+   * refuses it (`organization_idempotency_key_reused`).
+   */
+  async createOrganization(name: string, idempotencyKey: string): Promise<CloudOrganization> {
+    const trimmed = name.trim();
+    // Refused here as the server would refuse it, so nothing is sent that cannot be taken.
+    if (trimmed.length < ORGANIZATION_NAME.min || trimmed.length > ORGANIZATION_NAME.max) throw new CloudApiError("organization_name_invalid", 400);
+    if (!IDEMPOTENCY_KEY.test(idempotencyKey)) throw new CloudApiError("organization_idempotency_key_invalid", 400);
+    const created = read(createdOrganizationSchema, await this.request("POST", "/v1/desktop/orgs", { name: trimmed }, { "Idempotency-Key": idempotencyKey }));
+    // A team organization: the server makes a personal one only at sign-up.
+    return { orgId: created.id, name: created.name, role: created.role, isPersonal: false };
   }
 
   /** An organization's workspaces as this person may see them. Reading the list never starts compute. */
