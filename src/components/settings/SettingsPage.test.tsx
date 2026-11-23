@@ -588,9 +588,11 @@ describe("consolidated page introductions (#1152)", () => {
   });
 });
 
-// #1131: hints must follow the bound action, never the conflicting design chord.
+// #1131: hints follow the bound action: ⌥⌘T on macOS, Ctrl+Alt+Shift+L elsewhere, or what the reader saved.
 describe("light/dark shortcut hints", () => {
   it("keeps Appearance and Shortcuts in sync through customization, removal and reset", () => {
+    const shipped = isMac ? "mod+alt+t" : "mod+alt+shift+l";
+    const other = isMac ? "mod+alt+shift+l" : "mod+alt+t";
     setTheme("den");
     setPrefs({ shortcuts: {} });
     render(<><AppearanceTab /><ShortcutsTab /></>);
@@ -599,16 +601,16 @@ describe("light/dark shortcut hints", () => {
       expect(screen.getByText(`${text} switches light and dark`)).toBeTruthy();
       expect(screen.getByRole("button", { name: `Switch light and dark: ${text}. Change` })).toBeTruthy();
     };
-    assertHint("mod+alt+shift+l");
-    expect(screen.queryByText(`${bindingText("mod+alt+t")} switches light and dark`)).toBeNull();
+    assertHint(shipped);
+    expect(screen.queryByText(`${bindingText(other)} switches light and dark`)).toBeNull();
     act(() => { expect(saveShortcut("app.toggleMode", ["mod+alt+shift+f6"])).toEqual({ ok: true }); });
     assertHint("mod+alt+shift+f6");
-    expect(screen.queryByText(`${bindingText("mod+alt+shift+l")} switches light and dark`)).toBeNull();
+    expect(screen.queryByText(`${bindingText(shipped)} switches light and dark`)).toBeNull();
     act(() => { expect(saveShortcut("app.toggleMode", [])).toEqual({ ok: true }); });
     expect(screen.queryByText(/switches light and dark/)).toBeNull();
     expect(screen.queryByRole("button", { name: /^Switch light and dark: .*Change$/ })).toBeNull();
     act(() => { expect(resetShortcut("app.toggleMode")).toEqual({ ok: true }); });
-    assertHint("mod+alt+shift+l");
+    assertHint(shipped);
   });
 });
 

@@ -104,7 +104,7 @@ async function click(row: HTMLElement) {
   await flush();
 }
 
-/** ⌥⌘T, remapped to keys jsdom can press the same way on every platform. */
+/** ⌥⇧⌘T, remapped to keys jsdom can press the same way on every platform. */
 function pressReopen() {
   fireEvent.keyDown(document.body, { key: "y", code: "KeyY", shiftKey: true, metaKey: isMac, ctrlKey: !isMac });
 }
@@ -254,7 +254,7 @@ describe("the page of a session with no tabs", () => {
     expect(store().selectedSessionId).toBe("empty");
   });
 
-  it("reopens this session's last closed tab on ⌥⌘T while the page is shown", async () => {
+  it("reopens this session's last closed tab on ⌥⇧⌘T while the page is shown", async () => {
     render(<Main />);
     await click(sessionRow("Github preparation"));
     act(pressReopen);

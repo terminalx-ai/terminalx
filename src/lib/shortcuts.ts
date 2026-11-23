@@ -86,12 +86,10 @@ const ACTIONS = [
   { id: "app.skills", label: "Skills", group: "App", keys: ["mod+shift+k"] },
   { id: "app.settings", label: "Settings", group: "App", keys: ["mod+,"], menu: { section: "app", order: 1, label: "Settings…" } },
   { id: "app.toggleSidebar", label: "Toggle sidebar", group: "App", keys: ["mod+b"], menu: { section: "view", order: 0, label: "Toggle Sidebar" } },
-  // #1131 design disposition (pending design sign-off): retain the shipped defaults.
-  // PRO-377's ⌥⌘T proposal conflicts with Reopen closed tab on macOS; keep that
-  // established action and use ⌥⇧⌘L (Ctrl+Alt+Shift+L elsewhere) for light/dark.
-  // Appearance and Shortcuts must show the active keymap, including edits/unbinding.
-  // Context: https://github.com/terminalx-ai/terminalx/pull/1073#issuecomment-6929470119
-  { id: "app.toggleMode", label: "Switch light and dark", group: "App", keys: ["mod+alt+shift+l"] },
+  // #1131 owner decision (https://github.com/terminalx-ai/terminalx/issues/1131): match the design. Light/dark is
+  // ⌥⌘T on macOS (⇧⌘T is Switch chat / terminal view, so Reopen closed tab moves to ⌥⇧⌘T); elsewhere it keeps
+  // Ctrl+Alt+Shift+L, since Ctrl+Alt+T opens a terminal on GNOME/Ubuntu. A saved binding still wins over either default.
+  { id: "app.toggleMode", label: "Switch light and dark", group: "App", keys: ["mod+alt+shift+l"], macKeys: ["mod+alt+t"] },
   { id: "app.togglePanel", label: "Toggle right panel", group: "App", keys: ["mod+e"], menu: { section: "view", order: 1, label: "Toggle Right Panel" } },
   // No keys inside the window by default: the floating window has a system-wide shortcut of its own (Settings → Shortcuts).
   { id: "app.quickChat", label: "Open the floating chat window", group: "App", keys: [] },
@@ -135,7 +133,7 @@ const ACTIONS = [
   { id: "session.moveTabLeft", label: "Move tab left", group: "Session", keys: ["mod+alt+shift+["] },
   { id: "session.moveTabRight", label: "Move tab right", group: "Session", keys: ["mod+alt+shift+]"] },
   // The browser's own keys for this (mod+shift+t) switch the tab to its terminal view here; Ctrl+Alt+T opens a terminal on most Linux desktops.
-  { id: "session.reopenTab", label: "Reopen closed tab", group: "Session", keys: ["mod+alt+shift+t"], macKeys: ["mod+alt+t"] },
+  { id: "session.reopenTab", label: "Reopen closed tab", group: "Session", keys: ["mod+alt+shift+t"] },
   { id: "session.latestShell", label: "Activate latest shell tab", group: "Session", keys: ["mod+j"], menu: { section: "view", order: 2, label: "Terminal", target: "focused" } },
   { id: "session.toggleTerminalView", label: "Switch the tab between chat and terminal view", group: "Session", keys: ["mod+shift+t"], menu: { section: "view", order: 3, label: "Switch Chat / Terminal", target: "focused" } },
   // Escape in the chat is Escape in the agent: the turn is interrupted and the agent's process stays (#427).
