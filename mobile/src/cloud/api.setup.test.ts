@@ -160,7 +160,7 @@ describe("compute providers", () => {
 
   it("connects with the key and the accepted disclosure, in exactly the keys the server's parser takes", async () => {
     const { client, calls } = api(() => ({ body: connected }));
-    expect(await client.connectProvider("org-1", "hetzner", { credential: "hcloud-key-1" }, ACCEPTED)).toEqual(connected);
+    expect(await client.connectProvider("org-1", "hetzner", "hcloud-key-1", ACCEPTED)).toEqual(connected);
     expect(calls).toEqual([
       expect.objectContaining({
         method: "POST",
@@ -171,14 +171,18 @@ describe("compute providers", () => {
     expect(PROVIDER_DISCLOSURE_VERSION).toBe("cloud-provider-connections-2026-08-13");
   });
 
-  it("sends several credential fields as one JSON object, and nothing at all for an empty one", async () => {
-    const { client, calls } = api(() => ({ body: { ...connected, provider: "agent37" } }));
-    await client.connectProvider("org-1", "agent37", { apiKey: "k-1", accountId: "acct-7" }, ACCEPTED);
-    expect(JSON.parse((calls[0].body as { credential: string }).credential)).toEqual({ apiKey: "k-1", accountId: "acct-7" });
-    for (const fields of [{}, { credential: "" }] as Record<string, string>[]) {
-      await expect(client.connectProvider("org-1", "agent37", fields, ACCEPTED)).rejects.toMatchObject({ code: "cloud_workspace_request_invalid", refusal: "invalid-request" });
+  it("sends nothing for an empty key", async () => {
+    const { client, calls } = api(() => ({ body: connected }));
+    await expect(client.connectProvider("org-1", "hetzner", "", ACCEPTED)).rejects.toMatchObject({ code: "cloud_workspace_request_invalid", refusal: "invalid-request" });
+    expect(calls).toEqual([]);
+  });
+
+  it("drops a credential field's help address that is not https, and still asks for the field", async () => {
+    const field = (helpUrl: unknown) => ({ ...connectedProvider, descriptor: { ...hetznerDescriptor, credentialFields: [{ name: "credential", kind: "secret", label: "Hetzner API token", helpUrl }] } });
+    for (const helpUrl of ["javascript:alert(1)", "http://docs.hetzner.com/token", "terminalx://open", "file:///etc/passwd", 42, null]) {
+      const [provider] = await api(() => ({ body: { providers: [field(helpUrl)] } })).client.providers("org-1");
+      expect(provider.descriptor.credentialFields).toEqual([{ name: "credential", kind: "secret", label: "Hetzner API token" }]);
     }
-    expect(calls).toHaveLength(1);
   });
 
   it("disconnects with an empty body, and is told when the provider still holds machines", async () => {
@@ -191,7 +195,7 @@ describe("compute providers", () => {
 
   it("does not take an answer about another provider", async () => {
     const { client } = api(() => ({ body: { ...connected, provider: "box" } }));
-    await expect(client.connectProvider("org-1", "hetzner", { credential: "k" }, ACCEPTED)).rejects.toMatchObject({ code: "cloud_workspace_invalid_response", refusal: "invalid-response" });
+    await expect(client.connectProvider("org-1", "hetzner", "k", ACCEPTED)).rejects.toMatchObject({ code: "cloud_workspace_invalid_response", refusal: "invalid-response" });
     await expect(client.disconnectProvider("org-1", "hetzner")).rejects.toMatchObject({ code: "cloud_workspace_invalid_response" });
   });
 });
@@ -499,9 +503,21 @@ describe("refusals, as kinds a screen has words for", () => {
     await expect(api(() => ({ status: 422, body: { error: "<b>bad</b>" } })).client.providers("org-1")).rejects.toMatchObject({ code: "cloud_workspace_unavailable", refusal: "unreachable" });
   });
 
+  // A name or a label is not a secret: a code that happens to contain one is still the server's code.
+  it("keeps a refusal whose code contains a word the request carried", async () => {
+    const named = { name: "workspace", quoteId: "quote_5b1e", confirmProviderSpend: true as const };
+    await expect(refused("cloud_workspace_quota_exceeded", 409).client.createWorkspace("org-1", named, "launch-7f3a")).rejects.toMatchObject({ code: "cloud_workspace_quota_exceeded", status: 409, reason: null, refusal: "limit-reached" });
+    await expect(refused("cloud_workspace_quote_expired", 410).client.createWorkspace("org-1", named, "launch-7f3a")).rejects.toMatchObject({ code: "cloud_workspace_quote_expired", refusal: "quote-expired" });
+    await expect(refused("machine0_connection_required", 409).client.quote("org-1", { provider: "machine0", ...selection, networkPolicy: "relay-only" })).rejects.toMatchObject({ code: "machine0_connection_required", refusal: "provider-not-connected" });
+    await expect(refused("cloud_workspace_credential_invalid", 422).client.saveCredential("org-1", "claude", { authKind: "api-key", secret: "sk-ant-1", displayIdentity: "credential" }, CONSENT)).rejects.toMatchObject({ code: "cloud_workspace_credential_invalid", refusal: "login-invalid" });
+    // An existing call: an organization named with a word of the refusal.
+    const blocked = api(() => ({ status: 409, body: { error: "organization_delete_blocked", blockers: [{ code: "github_disconnect_required" }] } }));
+    await expect(blocked.client.deleteOrganization("org-1", "organization")).rejects.toMatchObject({ code: "organization_delete_blocked", status: 409, blockers: ["github_disconnect_required"] });
+  });
+
   it("sends nothing while signed out", async () => {
     const { client, calls } = api(() => ({ body: {} }), null);
-    await expect(client.connectProvider("org-1", "hetzner", { credential: "k" }, ACCEPTED)).rejects.toMatchObject({ code: "account_signed_out", refusal: "signed-out" });
+    await expect(client.connectProvider("org-1", "hetzner", "k", ACCEPTED)).rejects.toMatchObject({ code: "account_signed_out", refusal: "signed-out" });
     await expect(client.saveCredential("org-1", "claude", { authKind: "api-key", secret: "s" }, CONSENT)).rejects.toMatchObject({ refusal: "signed-out" });
     expect(calls).toEqual([]);
   });
@@ -511,7 +527,7 @@ describe("timeouts and answers it cannot read", () => {
   const login = { attemptId: "attempt_0b6f2c1e-7a54-4d0a-9f11-2c3d4e5f6a7b", deviceAuthId: "dev-auth-3c", userCode: "ABCD-1234" };
   const CALLS: [string, (client: CloudApi) => Promise<unknown>][] = [
     ["providers", (client) => client.providers("org-1")],
-    ["connectProvider", (client) => client.connectProvider("org-1", "hetzner", { credential: "k" }, ACCEPTED)],
+    ["connectProvider", (client) => client.connectProvider("org-1", "hetzner", "k", ACCEPTED)],
     ["disconnectProvider", (client) => client.disconnectProvider("org-1", "hetzner")],
     ["providerSetup", (client) => client.providerSetup("org-1", "hetzner")],
     ["quote", (client) => client.quote("org-1", { provider: "hetzner", ...selection, networkPolicy: "relay-only" })],
@@ -594,13 +610,12 @@ describe("a key or token is sent once and never kept", () => {
     // The secret this request carried, in a form that passes for a code (a poll carries none).
     function plainSecretOf(call: Call): string {
       const body = call.body as { credential?: string; secret?: string };
-      if (body.credential) return PROVIDER_KEY;
+      if (body.credential) return body.credential;
       if (body.secret) return body.secret === OAUTH_JSON ? "oauth-SECRET-access-77c1" : body.secret;
       return "cloud_workspace_request_invalid";
     }
     const sends: ((client: CloudApi) => Promise<unknown>)[] = [
-      (client) => client.connectProvider("org-1", "hetzner", { credential: PROVIDER_KEY }, ACCEPTED),
-      (client) => client.connectProvider("org-1", "hetzner", { apiKey: PROVIDER_KEY, accountId: "acct-7" }, ACCEPTED),
+      (client) => client.connectProvider("org-1", "hetzner", PROVIDER_KEY, ACCEPTED),
       (client) => client.saveCredential("org-1", "claude", { authKind: "api-key", secret: AGENT_KEY }, CONSENT),
       (client) => client.saveCredential("org-1", "codex", { authKind: "oauth-credentials-json", secret: OAUTH_JSON, displayIdentity: "dev@example.com" }, CONSENT),
       (client) => client.pollCodexLogin("org-1", login, CONSENT),
@@ -637,7 +652,7 @@ describe("a key or token is sent once and never kept", () => {
 
   it("keeps the secret out of the request line and headers: it travels in the body only", async () => {
     const { client, calls } = api((call) => ({ body: call.url.includes("cloud-providers") ? connected : claudeKey }));
-    await client.connectProvider("org-1", "hetzner", { credential: PROVIDER_KEY }, ACCEPTED);
+    await client.connectProvider("org-1", "hetzner", PROVIDER_KEY, ACCEPTED);
     await client.saveCredential("org-1", "claude", { authKind: "api-key", secret: AGENT_KEY }, CONSENT);
     for (const call of calls) {
       expect(call.url).not.toMatch(/SECRET/);

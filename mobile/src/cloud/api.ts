@@ -276,14 +276,19 @@ export type CloudMember = z.infer<typeof memberSchema>;
 
 // ── Cloud setup: compute providers, agent logins, launching a workspace ──
 //
-// None of these schemas pass unknown keys through: what the server did not
-// promise never reaches the app's state.
+// The schemas written for these calls drop unknown keys: what the server
+// did not promise about a provider, a connection, a login or an operation
+// never reaches the app's state. The one exception is the workspace inside a
+// lifecycle answer, which is the list's `workspaceSchema` and passes its keys
+// through as the list does.
 
 /** The disclosure a person accepts when connecting compute (terminalx-saas `cloudProviderConnection.DISCLOSURE_VERSION`). */
 export const PROVIDER_DISCLOSURE_VERSION = "cloud-provider-connections-2026-08-13";
 /** What the server takes as an `Idempotency-Key` (`IDEMPOTENCY_KEY_PATTERN`). */
 const IDEMPOTENCY_KEY = /^[\x20-\x7e]{1,128}$/;
 
+/** The only kind of address a screen is ever handed to open. */
+const HTTPS_URL = z.string().refine((value) => /^https:\/\/[^\s]+$/.test(value));
 const millis = z.number();
 const micros = z.number();
 
@@ -292,7 +297,8 @@ const credentialFieldSchema = z.object({
   // A kind this app does not know is treated as a secret: never shown, never kept.
   kind: z.enum(["secret", "text"]).catch("secret"),
   label: z.string(),
-  helpUrl: z.string().nullish(),
+  // Anything but an https address is dropped, not shown: the field is still asked for.
+  helpUrl: HTTPS_URL.optional().catch(undefined),
 });
 const providerDescriptorSchema = z.object({
   id: z.string().min(1),
@@ -468,7 +474,6 @@ export interface CredentialConsent {
   machineInstallation: true;
 }
 
-const HTTPS_URL = z.string().refine((value) => /^https:\/\/[^\s]+$/.test(value));
 const deviceLoginSchema = z.object({ attemptId: z.string().min(1), deviceAuthId: z.string().min(1), userCode: z.string().min(1), verificationUri: HTTPS_URL, intervalSeconds: z.number().positive(), expiresInSeconds: z.number().positive() });
 /** A Codex device login in progress. `userCode` is shown to the person; the rest only names the attempt to the server. */
 export type CodexDeviceLogin = z.infer<typeof deviceLoginSchema>;
@@ -682,21 +687,21 @@ export class CloudApi {
   }
 
   /**
-   * Connect a provider with the organization's own key. `fields` holds what
-   * the provider's `credentialFields` asked for, by field name: one value is
-   * sent as it is, several as a JSON object of them. The key goes to the
-   * server in this one request and nowhere else: this client keeps no copy,
-   * and the answer describes the connection by fingerprint only.
+   * Connect a provider with the organization's own key: the value of the one
+   * field its `credentialFields` asks for, sent as it is. Every provider the
+   * server registers asks for one; a provider that asks for several is not
+   * connected from here until the server says how they are sent. The key
+   * goes to the server in this one request and nowhere else: this client
+   * keeps no copy, and the answer describes the connection by fingerprint only.
    */
-  async connectProvider(orgId: string, providerId: string, fields: Readonly<Record<string, string>>, accepted: { providerBilling: true; organizationUse: true }): Promise<CloudProviderConnection> {
-    const values = Object.values(fields);
+  async connectProvider(orgId: string, providerId: string, credential: string, accepted: { providerBilling: true; organizationUse: true }): Promise<CloudProviderConnection> {
     // Refused here as the server would, before anything is sent.
-    if (!values.length || values.some((value) => typeof value !== "string" || !value)) throw new CloudApiError("cloud_workspace_request_invalid", 422);
+    if (typeof credential !== "string" || !credential) throw new CloudApiError("cloud_workspace_request_invalid", 422);
     const body = {
-      credential: values.length === 1 ? values[0]! : JSON.stringify(fields),
+      credential,
       disclosure: { version: PROVIDER_DISCLOSURE_VERSION, providerBillingAccepted: accepted.providerBilling, organizationUseAccepted: accepted.organizationUse },
     };
-    return connectionFor(providerId, await this.request("POST", `${base(orgId)}/cloud-providers/${id(providerId)}/connect`, body));
+    return connectionFor(providerId, await this.request("POST", `${base(orgId)}/cloud-providers/${id(providerId)}/connect`, body, {}, [credential]));
   }
 
   /**
@@ -798,7 +803,7 @@ export class CloudApi {
       confirmOrganizationSharing: consent.organizationSharing,
       confirmMachineInstallation: consent.machineInstallation,
     };
-    return credentialFor(provider, await this.request("PUT", `${base(orgId)}/cloud-workspace-credentials/${id(provider)}`, body));
+    return credentialFor(provider, await this.request("PUT", `${base(orgId)}/cloud-workspace-credentials/${id(provider)}`, body, {}, [input.secret]));
   }
 
   /** Remove a stored login. Refused while a workspace was set up with it (`login-in-use`). */
@@ -834,7 +839,7 @@ export class CloudApi {
     return read(deviceLoginCancelSchema, await this.request("POST", `${base(orgId)}/cloud-workspace-credentials/codex/device-cancel`, body)).status;
   }
 
-  private async request(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown, headers: Record<string, string> = {}): Promise<unknown> {
+  private async request(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown, headers: Record<string, string> = {}, secrets: readonly string[] = []): Promise<unknown> {
     const token = await this.options.accessToken();
     if (!token) throw new CloudApiError("account_signed_out", 401);
     const controller = new AbortController();
@@ -869,8 +874,8 @@ export class CloudApi {
     if (!response.ok) {
       const code = parsed && typeof parsed === "object" && typeof (parsed as { error?: unknown }).error === "string" ? (parsed as { error: string }).error : null;
       // Only a plain token crosses to the UI as a code.
-      // Nor does anything this request sent: a key echoed back as the "code" is not kept as one.
-      if (code === null || !/^[a-z0-9_.-]{1,96}$/i.test(code) || echoes(body, code)) throw new CloudApiError("cloud_workspace_unavailable", response.status, "unreadable");
+      // Nor does a key or token this request sent: one echoed back as the "code" is not kept as one.
+      if (code === null || !/^[a-z0-9_.-]{1,96}$/i.test(code) || secrets.some((secret) => echoes(secret, code))) throw new CloudApiError("cloud_workspace_unavailable", response.status, "unreadable");
       throw new CloudApiError(code, response.status, null, code === "organization_delete_blocked" ? organizationDeletionBlockers(parsed) : []);
     }
     if (parsed === null && response.status !== 204) throw new CloudApiError("cloud_workspace_invalid_response", response.status);
@@ -881,19 +886,23 @@ export class CloudApi {
 const base = (orgId: string) => `/v1/mobile/orgs/${id(orgId)}`;
 const mailbox = (orgId: string, workspaceId: string) => `${base(orgId)}/cloud-workspaces/${id(workspaceId)}/agent-commands`;
 
-/** Whether `code` repeats a value the request carried: the whole of it, or any part long enough to be a key. */
-function echoes(sent: unknown, code: string): boolean {
-  if (typeof sent === "string") {
-    if (sent.includes(code) || (sent.length >= 8 && code.includes(sent))) return true;
-    // Several credential fields, or an agent's login file, travel as JSON in one string: its values count too.
-    if (!sent.startsWith("{")) return false;
+/**
+ * Whether `code` repeats a secret the request carried, whole or in a part
+ * long enough to be a key. Only the secret is compared: a workspace or an
+ * organization may be named with a word the server's codes use.
+ */
+function echoes(secret: unknown, code: string): boolean {
+  if (typeof secret === "string") {
+    if (secret === code || (code.length >= 8 && secret.includes(code)) || (secret.length >= 8 && code.includes(secret))) return true;
+    // An agent's login file travels as JSON in one string: its values are the tokens.
+    if (!secret.startsWith("{")) return false;
     try {
-      return echoes(JSON.parse(sent) as unknown, code);
+      return echoes(JSON.parse(secret) as unknown, code);
     } catch {
       return false;
     }
   }
-  if (sent && typeof sent === "object") return Object.values(sent).some((value) => echoes(value, code));
+  if (secret && typeof secret === "object") return Object.values(secret).some((value) => echoes(value, code));
   return false;
 }
 
