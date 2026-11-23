@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { useRowMenu } from "@/components/ui/useRowMenu";
+import { NoticeColumn } from "@/components/ui/NoticeColumn";
 import { Toasts } from "@/components/ui/Toasts";
 import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -149,10 +150,11 @@ export function FloatingShell() {
 
   return (
     <div data-app-shell data-floating-shell className="flex h-full w-full flex-col">
-      <div className="pointer-events-none fixed bottom-3 right-3 z-(--z-toast) flex max-h-[calc(100dvh-1.5rem)] w-[320px] max-w-[calc(100vw-1.5rem)] flex-col gap-2">
+      {/* The main window's place for notices, off this window's composer too (#1499). */}
+      <NoticeColumn className="w-[320px]">
         <CloseUndoNotices />
         <Toasts />
-      </div>
+      </NoticeColumn>
       <BypassDialog />
       <SessionDialogs />
       {/* A hidden window shows nothing to anyone: its session view is not kept on screen for it, so a

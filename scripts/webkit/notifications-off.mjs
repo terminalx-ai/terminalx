@@ -19,8 +19,8 @@ const extra = `
     setTimeout(() => stub.emit("dictation", { kind: "error", settings: "microphone", message: "Dictation needs it. Turn TerminalX on in System Settings › Privacy & Security › Microphone, then press the dictation shortcut again." }), 0);
   };
 `;
-/** The in-app notices in the bottom-right stack. */
-const toast = '[data-app-shell] > .fixed.bottom-8 [role="status"]';
+/** The in-app notices in the window's notice column, top right (#1499). */
+const toast = '[data-notice-column] [role="status"]';
 const painted = (page) => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 /** A tab of `sessionId` starts waiting for the reader. */
 const waits = (page, sessionId, tabId) => page.evaluate(({ sessionId, tabId }) => {

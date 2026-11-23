@@ -17,7 +17,7 @@ import { createRoot } from 'react-dom/client';
 import '/src/styles/app.css';
 import { Composer } from '/src/components/chat/Composer.tsx';
 import { Toasts } from '/src/components/ui/Toasts.tsx';
-import { ToastCorner } from '/src/components/ui/ToastCorner.tsx';
+import { NoticeColumn } from '/src/components/ui/NoticeColumn.tsx';
 import { TooltipProvider } from '/src/components/ui/tooltip.tsx';
 const tab = { id: 'tab-1', harness: 'claude', model: 'default', permissionMode: 'default', status: 'idle', created: '', modified: '' };
 const noop = () => {};
@@ -30,7 +30,7 @@ function App() {
         onSend={(text, images, alternate, files) => { window.__sent.push({ text, images: images.map(i => i.name), files: (files ?? []).map(f => f.name) }); }}
         onStop={noop} onSetModel={noop} onSetEffort={noop} onSetMode={noop}/>
     </div>
-    <ToastCorner className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[380px] max-w-[calc(100vw-2rem)] flex-col gap-2"><Toasts/></ToastCorner>
+    <NoticeColumn><Toasts/></NoticeColumn>
   </TooltipProvider>;
 }
 createRoot(document.getElementById('root')).render(<App/>);
@@ -88,7 +88,7 @@ try {
     await page.waitForFunction(() => document.querySelector('[data-kind="image"] img')?.naturalWidth > 0, null, { timeout: 3000 });
     await page.locator("[data-attachment-notice]").nth(1).waitFor();
     await page.evaluate(() => document.fonts.ready);
-    // The toasts rise clear of the composer that raised them (measured twice a second), and their fade-in ends.
+    // The toasts sit in the notice column, top right, clear of the composer that raised them (#1499), and their fade-in ends.
     await page.waitForFunction(() => {
       const frame = document.querySelector("[data-composer-box]").getBoundingClientRect();
       return [...document.querySelectorAll("[data-attachment-notice]")].every((n) => n.getBoundingClientRect().bottom <= frame.top + 0.5);
