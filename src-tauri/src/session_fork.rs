@@ -157,7 +157,7 @@ pub(crate) fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut Ses
                 return Err("The source worktree belongs to a different repository.".into());
             }
             let source_root = git::run(&source_cwd, &["rev-parse", "--show-toplevel"]).map_err(err)?;
-            let source_root = crate::paths::canonicalize(source_root.trim()).map_err(err)?;
+            let source_root = crate::paths::canonicalize(crate::git::path_line(&source_root)).map_err(err)?;
             relative_cwd = Some(source_cwd.strip_prefix(source_root).map_err(err)?.to_path_buf());
         }
         let taken = index::load().map(|s| index::claimed_worktree_names(&s)).unwrap_or_default();

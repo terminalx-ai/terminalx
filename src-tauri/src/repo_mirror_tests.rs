@@ -360,3 +360,12 @@ fn submodules_are_refused_before_creating_a_recovery_record() {
     assert!(start(&r.root, &r.source, true).unwrap_err().to_string().contains("submodules"));
     r.clean();
 }
+
+#[test]
+fn a_main_checkout_whose_name_ends_in_a_space_can_be_mirrored() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work ");
+    crate::git::run(dir.path(), &["init", "-q", work.to_str().unwrap()]).unwrap();
+    let (root, common) = repository(&work).unwrap();
+    assert_eq!((root, common), (crate::paths::canonicalize(&work).unwrap(), crate::paths::canonicalize(work.join(".git")).unwrap()));
+}

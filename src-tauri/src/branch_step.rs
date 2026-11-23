@@ -126,7 +126,7 @@ fn read_work(cwd: &Path) -> Result<WorkStatus> {
     if work.branch.is_none() && work.operation.as_deref() == Some("rebase") {
         let dir = git::run(cwd, &["rev-parse", "--absolute-git-dir"])?;
         for marker in ["rebase-merge/head-name", "rebase-apply/head-name"] {
-            if let Ok(name) = std::fs::read_to_string(Path::new(dir.trim()).join(marker)) {
+            if let Ok(name) = std::fs::read_to_string(Path::new(crate::git::path_line(&dir)).join(marker)) {
                 if let Some(branch) = name.trim().strip_prefix("refs/heads/") {
                     if git::run(cwd, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok() {
                         work.branch = Some(branch.to_string());

@@ -51,7 +51,7 @@ fn disk_bytes(cwd: &Path, ledger: &Ledger) -> Result<u64> {
 
 fn ledger_path(cwd: &Path) -> Result<PathBuf> {
     let dir = run(cwd, &["rev-parse", "--absolute-git-dir"])?;
-    Ok(Path::new(dir.trim()).join("raccoon-checkpoint-retention.json"))
+    Ok(Path::new(crate::git::path_line(&dir)).join("raccoon-checkpoint-retention.json"))
 }
 
 fn load(path: &Path) -> Result<Ledger> {
@@ -88,7 +88,7 @@ pub fn pin(cwd: &Path, updates: &[(String, &str)]) -> Result<()> {
         !group.refs.is_empty()
     });
     let root = run(cwd, &["rev-parse", "--show-toplevel"])?;
-    let state = crate::checkpoints::retention_state(root.trim())?;
+    let state = crate::checkpoints::retention_state(crate::git::path_line(&root))?;
     let mut owned = state.owned.clone();
     let current: BTreeSet<_> = updates.iter().map(|(name, _)| name.rsplit_once('/').unwrap().0.to_string()).collect();
     owned.extend(current.iter().cloned());
@@ -160,7 +160,7 @@ pub fn enforce_for_test(cwd: &Path, max_groups: usize, max_bytes: u64) -> Result
     let path = ledger_path(cwd)?;
     let mut ledger = load(&path)?;
     let root = run(cwd, &["rev-parse", "--show-toplevel"])?;
-    let state = crate::checkpoints::retention_state(root.trim())?;
+    let state = crate::checkpoints::retention_state(crate::git::path_line(&root))?;
     let protected = protected_groups(&ledger, &state);
     trim(cwd, &mut ledger, &protected, max_groups, max_bytes)?;
     crate::store::write_json(&path, &ledger)
@@ -244,5 +244,14 @@ mod tests {
         trim(cwd, &mut ledger, &protected, 3, 0).unwrap();
         assert_eq!(ledger.groups.len(), 1, "even an undersized budget cannot evict the protected current group");
         assert!(run_ok(cwd, &["show-ref", "--verify", &format!("{current}/start")]));
+    }
+
+    #[test]
+    fn the_ledger_lives_in_a_git_dir_whose_name_ends_in_a_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let (work, git_dir) = (dir.path().join("work "), dir.path().join("git dir "));
+        crate::git::run(dir.path(), &["init", "-q", "--separate-git-dir", git_dir.to_str().unwrap(), work.to_str().unwrap()]).unwrap();
+        let ledger = ledger_path(&work).unwrap();
+        assert_eq!(crate::paths::canonicalize(ledger.parent().unwrap()).unwrap(), crate::paths::canonicalize(&git_dir).unwrap());
     }
 }

@@ -65,7 +65,124 @@ export class CloudApiError extends Error {
   get unreachable(): boolean {
     return this.status === null || this.status >= 500 || this.status === 408 || this.status === 429;
   }
+
+  /**
+   * What went wrong, as one of the kinds a screen has words for. A code the
+   * server added since this app was built is `unreachable` when its status
+   * says the service could not answer, and `unknown` otherwise; the code
+   * itself stays on the error.
+   */
+  get refusal(): CloudRefusal {
+    if (this.status === null || this.reason !== null) return "unreachable";
+    return REFUSALS[this.code] ?? (this.unreachable ? "unreachable" : "unknown");
+  }
 }
+
+/**
+ * The kinds of refusal the cloud setup screens tell apart (connecting
+ * compute, agent logins, launching a workspace). Each code the account
+ * service answers these routes with is one of them (`REFUSALS`).
+ */
+export type CloudRefusal =
+  | "signed-out"
+  | "admin-required"
+  | "manager-required"
+  | "not-found"
+  | "provider-not-connected"
+  | "provider-needs-attention"
+  | "provider-key-invalid"
+  | "provider-key-other-account"
+  | "provider-permission-denied"
+  | "provider-billing-required"
+  | "provider-not-offered"
+  | "provider-has-machines"
+  | "provider-busy"
+  | "provider-rate-limited"
+  | "provider-unavailable"
+  | "plan-required"
+  | "limit-reached"
+  | "provisioning-paused"
+  | "policy-denied"
+  | "quote-expired"
+  | "idempotency-key-reused"
+  | "workspace-busy"
+  | "workspace-archived"
+  | "operation-not-found"
+  | "login-missing"
+  | "login-invalid"
+  | "login-in-use"
+  | "login-check-unavailable"
+  | "repository-login-required"
+  | "repository-not-accessible"
+  | "repository-check-unavailable"
+  | "device-login-unavailable"
+  | "device-login-not-found"
+  | "rate-limited"
+  | "invalid-request"
+  | "invalid-response"
+  | "unreachable"
+  | "unknown";
+
+/** The account service's codes for these routes (terminalx-saas `CloudWorkspaceErrorCode`, the auth middleware's `unauthorized`) and this client's own. */
+const REFUSALS: Readonly<Record<string, CloudRefusal>> = {
+  account_signed_out: "signed-out",
+  unauthorized: "signed-out",
+  invalid_access_token: "signed-out",
+  organization_admin_required: "admin-required",
+  active_organization_required: "admin-required",
+  cloud_workspace_manager_required: "manager-required",
+  cloud_workspace_not_found: "not-found",
+  cloud_provider_not_found: "not-found",
+  cloud_provider_connection_required: "provider-not-connected",
+  machine0_connection_required: "provider-not-connected",
+  cloud_provider_connection_attention_required: "provider-needs-attention",
+  cloud_provider_credential_invalid: "provider-key-invalid",
+  cloud_provider_account_mismatch: "provider-key-other-account",
+  cloud_provider_permission_denied: "provider-permission-denied",
+  cloud_provider_billing_required: "provider-billing-required",
+  cloud_provider_disabled: "provider-not-offered",
+  cloud_provider_creation_disabled: "provider-not-offered",
+  cloud_workspace_provider_unsupported: "provider-not-offered",
+  cloud_provider_disposition_required: "provider-has-machines",
+  cloud_provider_operation_in_progress: "provider-busy",
+  cloud_provider_rate_limited: "provider-rate-limited",
+  cloud_provider_unavailable: "provider-unavailable",
+  cloud_provider_invalid_response: "provider-unavailable",
+  machine0_unavailable: "provider-unavailable",
+  machine0_invalid_response: "provider-unavailable",
+  cloud_workspace_runtime_not_ready: "provider-unavailable",
+  terminalx_pro_required: "plan-required",
+  cloud_workspace_quota_exceeded: "limit-reached",
+  cloud_workspace_concurrency_exceeded: "limit-reached",
+  cloud_workspace_member_concurrency_exceeded: "limit-reached",
+  cloud_workspace_create_budget_exceeded: "limit-reached",
+  cloud_provisioning_paused: "provisioning-paused",
+  cloud_workspace_policy_denied: "policy-denied",
+  cloud_workspace_quote_expired: "quote-expired",
+  cloud_environment_changed: "quote-expired",
+  idempotency_key_reused: "idempotency-key-reused",
+  cloud_workspace_operation_in_progress: "workspace-busy",
+  cloud_workspace_active_work: "workspace-busy",
+  cloud_workspace_archived: "workspace-archived",
+  cloud_workspace_operation_not_found: "operation-not-found",
+  cloud_workspace_credential_required: "login-missing",
+  cloud_workspace_agent_credential_required: "login-missing",
+  cloud_workspace_credential_invalid: "login-invalid",
+  cloud_agent_credential_reauth_required: "login-invalid",
+  cloud_workspace_credential_in_use: "login-in-use",
+  cloud_workspace_credential_verification_unavailable: "login-check-unavailable",
+  cloud_workspace_repository_credential_required: "repository-login-required",
+  cloud_workspace_repository_not_accessible: "repository-not-accessible",
+  cloud_workspace_repository_ref_not_found: "repository-not-accessible",
+  cloud_workspace_github_installation_unavailable: "repository-not-accessible",
+  cloud_workspace_repository_verification_unavailable: "repository-check-unavailable",
+  cloud_workspace_device_auth_unavailable: "device-login-unavailable",
+  cloud_workspace_device_auth_not_found: "device-login-not-found",
+  cloud_workspace_rate_limited: "rate-limited",
+  cloud_workspace_request_invalid: "invalid-request",
+  cloud_workspace_invalid_response: "invalid-response",
+  cloud_workspace_unavailable: "unreachable",
+};
 
 const ROLE = z.enum(["manager", "driver", "viewer", "none"]);
 const youSchema = z.object({ role: ROLE, canApprove: z.boolean(), canManageShares: z.boolean().optional() }).passthrough();
@@ -156,6 +273,219 @@ export type CloudShares = z.infer<typeof sharesSchema>;
 
 const memberSchema = z.object({ userId: z.string().min(1), email: z.string(), displayName: z.string().nullish(), role: z.string() }).passthrough();
 export type CloudMember = z.infer<typeof memberSchema>;
+
+// ── Cloud setup: compute providers, agent logins, launching a workspace ──
+//
+// The schemas written for these calls drop unknown keys: what the server
+// did not promise about a provider, a connection, a login or an operation
+// never reaches the app's state. The one exception is the workspace inside a
+// lifecycle answer, which is the list's `workspaceSchema` and passes its keys
+// through as the list does.
+
+/** The disclosure a person accepts when connecting compute (terminalx-saas `cloudProviderConnection.DISCLOSURE_VERSION`). */
+export const PROVIDER_DISCLOSURE_VERSION = "cloud-provider-connections-2026-08-13";
+/** What the server takes as an `Idempotency-Key` (`IDEMPOTENCY_KEY_PATTERN`). */
+const IDEMPOTENCY_KEY = /^[\x20-\x7e]{1,128}$/;
+
+/** The only kind of address a screen is ever handed to open. */
+const HTTPS_URL = z.string().refine((value) => /^https:\/\/[^\s]+$/.test(value));
+const millis = z.number();
+const micros = z.number();
+
+const credentialFieldSchema = z.object({
+  name: z.string().min(1),
+  // A kind this app does not know is treated as a secret: never shown, never kept.
+  kind: z.enum(["secret", "text"]).catch("secret"),
+  label: z.string(),
+  // Anything but an https address is dropped, not shown: the field is still asked for.
+  helpUrl: HTTPS_URL.optional().catch(undefined),
+});
+const providerDescriptorSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().trim().min(1),
+  icon: z.string(),
+  order: z.number(),
+  description: z.string(),
+  billing: z.string(),
+  billedByProvider: z.boolean(),
+  listed: z.boolean(),
+  credentialSource: z.enum(["organization", "platform"]),
+  credentialFields: z.array(credentialFieldSchema),
+  capabilities: z.object({ pauseResumeWithMemory: z.boolean(), stopStart: z.boolean(), snapshots: z.boolean(), exec: z.boolean(), computeRunsUntilStopped: z.boolean() }),
+  offering: z.object({ locations: z.string(), sources: z.string(), machineClasses: z.string(), pricingSource: z.string(), suspendedBilling: z.string() }),
+  allowedIdleSuspendMinutes: z.array(z.number()),
+  allowedRetentionDays: z.array(z.number()),
+});
+const providerSchema = z.object({
+  id: z.string().min(1),
+  displayName: z.string(),
+  /** `available`, `not-connected`, `attention-required` or `disabled-for-create`. */
+  availability: z.string(),
+  canManage: z.boolean(),
+  connection: z.object({ state: z.string(), connectedAt: millis, lastValidatedAt: millis.optional(), credentialFingerprint: z.string().optional() }).optional(),
+  descriptor: providerDescriptorSchema,
+});
+export type CloudProvider = z.infer<typeof providerSchema>;
+export type CloudProviderDescriptor = z.infer<typeof providerDescriptorSchema>;
+export type CloudProviderCredentialField = z.infer<typeof credentialFieldSchema>;
+
+const providerResourceSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  state: z.string(),
+  kind: z.string(),
+  cleanupRequired: z.boolean(),
+  currency: z.string(),
+  activeHourlyMicros: micros.nullable(),
+  suspendedMonthlyMicros: micros.nullable(),
+  releaseDisposition: z.string().nullable(),
+  operationState: z.string().nullable(),
+  deleteAfter: millis.optional(),
+});
+const providerConnectionSchema = z.object({
+  provider: z.string().min(1),
+  state: z.enum(["not-connected", "connected", "attention-required"]),
+  canManage: z.boolean(),
+  credentialVersion: z.number().optional(),
+  providerAccount: z.string().optional(),
+  operationsBlocked: z.boolean().optional(),
+  disconnectDisposition: z.string().optional(),
+  disconnectRetention: z.string().optional(),
+  retentionDeadline: millis.optional(),
+  resources: z.array(providerResourceSchema).optional(),
+  credentialFingerprint: z.string().optional(),
+  connectedAt: millis.optional(),
+  lastValidatedAt: millis.optional(),
+});
+export type CloudProviderConnection = z.infer<typeof providerConnectionSchema>;
+
+const NETWORK_POLICY = z.enum(["relay-only", "provider-public-network"]);
+const selectionSchema = z.object({ sourceId: z.string(), locationId: z.string(), machineClassId: z.string(), idleSuspendMinutes: z.number(), retentionDays: z.number(), networkPolicy: NETWORK_POLICY });
+const providerSetupSchema = z.object({
+  provider: z.string().min(1),
+  credentialFingerprint: z.string(),
+  currency: z.string(),
+  pricing: z.string(),
+  pricingObservedAt: millis,
+  sources: z.array(z.object({ id: z.string(), kind: z.string(), label: z.string(), description: z.string().optional() })),
+  locations: z.array(z.object({ id: z.string(), label: z.string(), placement: z.string() })),
+  machineClasses: z.array(z.object({ id: z.string(), label: z.string(), vcpu: z.number(), memoryMiB: z.number(), diskGiB: z.number(), activeHourlyMicros: micros.optional() })),
+  defaults: selectionSchema,
+  allowedIdleSuspendMinutes: z.array(z.number()),
+  allowedRetentionDays: z.array(z.number()),
+  maxIdleSuspendMinutes: z.number().nullish(),
+});
+export type CloudProviderSetup = z.infer<typeof providerSetupSchema>;
+
+const quoteSchema = z.object({
+  id: z.string().min(1),
+  provider: z.string().min(1),
+  expiresAt: millis,
+  currency: z.string(),
+  pricing: z.string(),
+  pricingObservedAt: millis,
+  activeHourlyMicros: micros,
+  alwaysOnThirtyDayMicros: micros,
+  estimatedSuspendedMonthlyMicros: micros.optional(),
+  configuration: selectionSchema.extend({ sourceLabel: z.string(), locationLabel: z.string(), machineClassLabel: z.string(), vcpu: z.number(), memoryMiB: z.number(), diskGiB: z.number(), architecture: z.string() }),
+});
+export type CloudQuote = z.infer<typeof quoteSchema>;
+/** What a quote is asked for: one choice of each thing the provider's setup offers. */
+export type CloudQuoteInput = z.infer<typeof selectionSchema> & { provider: string };
+
+const CHECK_STATUS = z.enum(["verified", "failed"]);
+const preflightCheckSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("repository"), cloneUrl: z.string().optional(), status: CHECK_STATUS, errorCode: z.string().optional(), retryable: z.boolean().optional() }),
+  z.object({ kind: z.literal("credential"), provider: z.string(), credentialId: z.string(), status: CHECK_STATUS, errorCode: z.string().optional(), retryable: z.boolean().optional() }),
+  z.object({ kind: z.literal("agent-credential"), agent: z.string().optional(), provider: z.string().optional(), status: CHECK_STATUS, errorCode: z.string().optional(), reason: z.string().optional(), retryable: z.boolean().optional() }),
+]);
+const preflightSchema = z.object({ version: z.literal(1), ready: z.boolean(), checks: z.array(preflightCheckSchema) });
+export type CloudPreflight = z.infer<typeof preflightSchema>;
+export type CloudPreflightCheck = z.infer<typeof preflightCheckSchema>;
+
+/** What a new workspace starts with: the repositories to clone and the stored logins to install. */
+export interface CloudFirstRunSetup {
+  /** At most five, each a GitHub clone URL; none for an empty workspace. */
+  repositories?: readonly { cloneUrl: string; ref?: string }[];
+  /** Ids from `credentials()`, at most four. */
+  credentialIds: readonly string[];
+}
+
+// An operation as the lifecycle routes answer it. Its raw provisioning `logs` are left out.
+const lifecycleOperationSchema = z.object({
+  id: z.string().min(1),
+  workspaceId: z.string().min(1),
+  type: z.string(),
+  action: z.string().optional(),
+  state: z.string(),
+  stage: z.string().nullable(),
+  cancelable: z.boolean(),
+  createdAt: millis,
+  updatedAt: millis,
+  lastProviderContactAt: millis.optional(),
+  nextAttemptAt: millis.optional(),
+  retryReason: z.string().optional(),
+  errorCode: z.string().optional(),
+  providerErrorCode: z.string().optional(),
+  detailCode: z.string().optional(),
+  reason: z.string().optional(),
+  reasonDetail: z.string().optional(),
+  progress: z.object({ phase: z.string(), retryAt: millis.optional() }).optional(),
+  events: z.array(z.object({ code: z.string(), occurredAt: millis })).optional(),
+  checkpoint: z.string().optional(),
+  checkpointAt: millis.optional(),
+  cleanup: z.object({ complete: z.boolean(), items: z.array(z.object({ kind: z.string(), state: z.string(), providerStage: z.string().optional(), expectedBy: millis.optional() })) }).optional(),
+});
+const lifecycleSchema = z.object({ workspace: workspaceSchema, operation: lifecycleOperationSchema });
+export type CloudOperation = z.infer<typeof lifecycleOperationSchema>;
+/** A workspace and the operation acting on it: the answer to create, suspend, delete, and to reading or cancelling an operation. */
+export type CloudLifecycle = z.infer<typeof lifecycleSchema>;
+
+/** The agents and services an organization stores a login for. */
+export type CloudCredentialProvider = "github" | "codex" | "claude" | "cursor";
+export type CloudCredentialAuthKind = "personal-access-token" | "api-key" | "oauth-credentials-json";
+const credentialSchema = z.object({
+  id: z.string().min(1),
+  provider: z.string().min(1),
+  authKind: z.string(),
+  fingerprint: z.string(),
+  displayIdentity: z.string().optional(),
+  version: z.number(),
+  updatedAt: millis,
+  /** `connected`, `revoked`, `disconnected` or `sign-in-required`. */
+  state: z.string(),
+  stateReason: z.string().optional(),
+  stateChangedAt: millis.optional(),
+  sharedUse: z.string(),
+  epoch: z.number(),
+  configurerLeft: z.boolean().optional(),
+});
+/** A stored login as the server describes it: who it is and its state, never the secret. */
+export type CloudCredential = z.infer<typeof credentialSchema>;
+
+/**
+ * The two things a person agrees to before a login is stored: that the
+ * organization's workspaces use it, and that it is installed on their
+ * machines. The server refuses a save without both, so the screen that asked
+ * passes them; this client never fills them in.
+ */
+export interface CredentialConsent {
+  organizationSharing: true;
+  machineInstallation: true;
+}
+
+const deviceLoginSchema = z.object({ attemptId: z.string().min(1), deviceAuthId: z.string().min(1), userCode: z.string().min(1), verificationUri: HTTPS_URL, intervalSeconds: z.number().positive(), expiresInSeconds: z.number().positive() });
+/** A Codex device login in progress. `userCode` is shown to the person; the rest only names the attempt to the server. */
+export type CodexDeviceLogin = z.infer<typeof deviceLoginSchema>;
+type DeviceLoginReference = Pick<CodexDeviceLogin, "attemptId" | "deviceAuthId" | "userCode">;
+const deviceLoginPollSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("pending") }),
+  z.object({ status: z.enum(["failed", "expired", "canceled"]) }),
+  z.object({ status: z.literal("complete"), credential: credentialSchema }),
+]);
+export type CodexDeviceLoginPoll = z.infer<typeof deviceLoginPollSchema>;
+const deviceLoginCancelSchema = z.object({ status: z.enum(["waiting", "connected", "expired", "canceled", "failed"]) });
+export type CodexDeviceLoginState = z.infer<typeof deviceLoginCancelSchema>["status"];
 
 export interface CloudApiOptions {
   /** `https://login.terminalx.ai`. */
@@ -349,7 +679,167 @@ export class CloudApi {
     await this.request("DELETE", `${base(orgId)}/cloud-workspaces/${id(workspaceId)}/shares/${id(userId)}`);
   }
 
-  private async request(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown): Promise<unknown> {
+  // ── Compute providers ──
+
+  /** The compute providers this organization may use, in the server's order, with each one's connection as this person may see it. */
+  async providers(orgId: string): Promise<CloudProvider[]> {
+    return read(z.object({ providers: z.array(providerSchema) }), await this.request("GET", `${base(orgId)}/cloud-providers`)).providers;
+  }
+
+  /**
+   * Connect a provider with the organization's own key: the value of the one
+   * field its `credentialFields` asks for, sent as it is. Every provider the
+   * server registers asks for one; a provider that asks for several is not
+   * connected from here until the server says how they are sent. The key
+   * goes to the server in this one request and nowhere else: this client
+   * keeps no copy, and the answer describes the connection by fingerprint only.
+   */
+  async connectProvider(orgId: string, providerId: string, credential: string, accepted: { providerBilling: true; organizationUse: true }): Promise<CloudProviderConnection> {
+    // Refused here as the server would, before anything is sent.
+    if (typeof credential !== "string" || !credential) throw new CloudApiError("cloud_workspace_request_invalid", 422);
+    const body = {
+      credential,
+      disclosure: { version: PROVIDER_DISCLOSURE_VERSION, providerBillingAccepted: accepted.providerBilling, organizationUseAccepted: accepted.organizationUse },
+    };
+    return connectionFor(providerId, await this.request("POST", `${base(orgId)}/cloud-providers/${id(providerId)}/connect`, body, {}, [credential]));
+  }
+
+  /**
+   * Disconnect a provider. While it still holds machines the server refuses
+   * (`provider-has-machines`): what happens to them is decided on the
+   * desktop or the web console, not here.
+   */
+  async disconnectProvider(orgId: string, providerId: string): Promise<CloudProviderConnection> {
+    return connectionFor(providerId, await this.request("POST", `${base(orgId)}/cloud-providers/${id(providerId)}/disconnect`, {}));
+  }
+
+  // ── Launching a workspace ──
+
+  /** What a connected provider offers right now: images, locations, machine sizes and its defaults. */
+  async providerSetup(orgId: string, providerId: string): Promise<CloudProviderSetup> {
+    const setup = read(providerSetupSchema, await this.request("GET", `${base(orgId)}/cloud-workspaces/setup?provider=${id(providerId)}`));
+    if (setup.provider !== providerId) throw invalidResponse();
+    return setup;
+  }
+
+  /** Price one choice. The quote is what `createWorkspace` launches, and it expires (`expiresAt`, by `serverNow()`). */
+  async quote(orgId: string, input: CloudQuoteInput): Promise<CloudQuote> {
+    const body = { provider: input.provider, sourceId: input.sourceId, locationId: input.locationId, machineClassId: input.machineClassId, idleSuspendMinutes: input.idleSuspendMinutes, retentionDays: input.retentionDays, networkPolicy: input.networkPolicy };
+    const quote = read(quoteSchema, await this.request("POST", `${base(orgId)}/cloud-workspaces/quote`, body));
+    if (quote.provider !== input.provider) throw invalidResponse();
+    return quote;
+  }
+
+  /** Check a setup before paying for a machine: that each repository can be cloned and each login still works. Nothing is created. */
+  async preflight(orgId: string, setup: CloudFirstRunSetup): Promise<CloudPreflight> {
+    return read(preflightSchema, await this.request("POST", `${base(orgId)}/cloud-workspaces/preflight`, { setup: firstRun(setup) }));
+  }
+
+  /**
+   * Launch a workspace from a quote. `confirmProviderSpend` is the person's
+   * own yes to the quoted price. `idempotencyKey` names this one launch:
+   * make it once when the person confirms and send the same key on every
+   * retry. After a timeout the server may already have started the machine;
+   * the same key with the same input then answers with that first launch
+   * instead of starting a second, and with a different input it is refused
+   * (`idempotency-key-reused`).
+   */
+  async createWorkspace(orgId: string, input: { name: string; quoteId: string; confirmProviderSpend: true; setup?: CloudFirstRunSetup }, idempotencyKey: string): Promise<CloudLifecycle> {
+    // Refused here as the server would, before anything is sent.
+    if (!IDEMPOTENCY_KEY.test(idempotencyKey)) throw new CloudApiError("cloud_workspace_request_invalid", 422);
+    const body = { name: input.name, quoteId: input.quoteId, confirmProviderSpend: input.confirmProviderSpend, ...(input.setup ? { setup: firstRun(input.setup) } : {}) };
+    const answer = read(lifecycleSchema, await this.request("POST", `${base(orgId)}/cloud-workspaces`, body, { "Idempotency-Key": idempotencyKey }));
+    if (answer.workspace.orgId !== orgId || answer.operation.workspaceId !== answer.workspace.id) throw invalidResponse();
+    return answer;
+  }
+
+  /** Stop a running workspace, as its managers may. */
+  suspend(orgId: string, workspaceId: string): Promise<CloudLifecycle> {
+    return this.lifecycle(orgId, workspaceId, "suspend");
+  }
+
+  /** Delete a workspace and release its machine, as its managers may. The answer's operation reports the cleanup. */
+  deleteWorkspace(orgId: string, workspaceId: string): Promise<CloudLifecycle> {
+    return this.lifecycle(orgId, workspaceId, "delete");
+  }
+
+  private async lifecycle(orgId: string, workspaceId: string, action: "suspend" | "delete"): Promise<CloudLifecycle> {
+    const answer = read(lifecycleSchema, await this.request("POST", `${base(orgId)}/cloud-workspaces/${id(workspaceId)}/${action}`, {}));
+    // An answer about another workspace is not the answer to this request.
+    if (answer.workspace.id !== workspaceId || answer.workspace.orgId !== orgId || answer.operation.workspaceId !== workspaceId) throw invalidResponse();
+    return answer;
+  }
+
+  // ── Operations ──
+
+  /** How far an operation is: its state, stage and progress, with the workspace as it now stands. */
+  async operation(orgId: string, operationId: string): Promise<CloudLifecycle> {
+    return operationFor(orgId, operationId, await this.request("GET", `${base(orgId)}/cloud-workspace-operations/${id(operationId)}`));
+  }
+
+  /** Ask a running operation to stop (only while it is `cancelable`). The answer says whether it has yet. */
+  async cancelOperation(orgId: string, operationId: string): Promise<CloudLifecycle> {
+    return operationFor(orgId, operationId, await this.request("POST", `${base(orgId)}/cloud-workspace-operations/${id(operationId)}/cancel`, {}));
+  }
+
+  // ── Agent logins ──
+
+  /** The logins the organization stores for its workspaces, for its owners and admins. */
+  async credentials(orgId: string): Promise<CloudCredential[]> {
+    return read(z.object({ credentials: z.array(credentialSchema) }), await this.request("GET", `${base(orgId)}/cloud-workspace-credentials`)).credentials;
+  }
+
+  /**
+   * Store or replace the organization's login for one agent or service. The
+   * secret goes to the server in this one request and nowhere else: this
+   * client keeps no copy, and the answer names the login by fingerprint only.
+   */
+  async saveCredential(orgId: string, provider: CloudCredentialProvider, input: { authKind: CloudCredentialAuthKind; secret: string; displayIdentity?: string | null; sharedUse?: "organization" | "managers" }, consent: CredentialConsent): Promise<CloudCredential> {
+    const body = {
+      authKind: input.authKind,
+      secret: input.secret,
+      displayIdentity: input.displayIdentity ?? null,
+      ...(input.sharedUse ? { sharedUse: input.sharedUse } : {}),
+      confirmOrganizationSharing: consent.organizationSharing,
+      confirmMachineInstallation: consent.machineInstallation,
+    };
+    return credentialFor(provider, await this.request("PUT", `${base(orgId)}/cloud-workspace-credentials/${id(provider)}`, body, {}, [input.secret]));
+  }
+
+  /** Remove a stored login. Refused while a workspace was set up with it (`login-in-use`). */
+  async deleteCredential(orgId: string, provider: CloudCredentialProvider): Promise<void> {
+    await this.request("DELETE", `${base(orgId)}/cloud-workspace-credentials/${id(provider)}`);
+  }
+
+  /** Stop workspaces from being handed a login, without removing it. Saving it again makes it usable. */
+  async revokeCredential(orgId: string, provider: CloudCredentialProvider): Promise<CloudCredential> {
+    return credentialFor(provider, await this.request("POST", `${base(orgId)}/cloud-workspace-credentials/${id(provider)}/revoke`, {}));
+  }
+
+  /** Begin "Sign in with ChatGPT" for Codex: the code to show and where the person enters it. */
+  async startCodexLogin(orgId: string): Promise<CodexDeviceLogin> {
+    return read(deviceLoginSchema, await this.request("POST", `${base(orgId)}/cloud-workspace-credentials/codex/device-start`, {}));
+  }
+
+  /**
+   * Ask whether the person finished signing in; no sooner than every
+   * `intervalSeconds`. `complete` carries the login the server stored: the
+   * tokens themselves never come to the phone.
+   */
+  async pollCodexLogin(orgId: string, login: DeviceLoginReference, consent: CredentialConsent): Promise<CodexDeviceLoginPoll> {
+    const body = { attemptId: login.attemptId, deviceAuthId: login.deviceAuthId, userCode: login.userCode, confirmOrganizationSharing: consent.organizationSharing, confirmMachineInstallation: consent.machineInstallation };
+    const answer = read(deviceLoginPollSchema, await this.request("POST", `${base(orgId)}/cloud-workspace-credentials/codex/device-poll`, body));
+    if (answer.status === "complete" && answer.credential.provider !== "codex") throw invalidResponse();
+    return answer;
+  }
+
+  /** Give up a device login. The answer is where the attempt ended, which is `connected` when the sign-in won the race. */
+  async cancelCodexLogin(orgId: string, login: DeviceLoginReference): Promise<CodexDeviceLoginState> {
+    const body = { attemptId: login.attemptId, deviceAuthId: login.deviceAuthId, userCode: login.userCode };
+    return read(deviceLoginCancelSchema, await this.request("POST", `${base(orgId)}/cloud-workspace-credentials/codex/device-cancel`, body)).status;
+  }
+
+  private async request(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown, headers: Record<string, string> = {}, secrets: readonly string[] = []): Promise<unknown> {
     const token = await this.options.accessToken();
     if (!token) throw new CloudApiError("account_signed_out", 401);
     const controller = new AbortController();
@@ -362,7 +852,7 @@ export class CloudApi {
     try {
       response = await this.fetcher(`${this.options.origin}${path}`, {
         method,
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...CONTRACT_HEADERS },
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...CONTRACT_HEADERS, ...headers },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: controller.signal,
       });
@@ -384,7 +874,8 @@ export class CloudApi {
     if (!response.ok) {
       const code = parsed && typeof parsed === "object" && typeof (parsed as { error?: unknown }).error === "string" ? (parsed as { error: string }).error : null;
       // Only a plain token crosses to the UI as a code.
-      if (code === null || !/^[a-z0-9_.-]{1,96}$/i.test(code)) throw new CloudApiError("cloud_workspace_unavailable", response.status, "unreadable");
+      // Nor does a key or token this request sent: one echoed back as the "code" is not kept as one.
+      if (code === null || !/^[a-z0-9_.-]{1,96}$/i.test(code) || secrets.some((secret) => echoes(secret, code))) throw new CloudApiError("cloud_workspace_unavailable", response.status, "unreadable");
       throw new CloudApiError(code, response.status, null, code === "organization_delete_blocked" ? organizationDeletionBlockers(parsed) : []);
     }
     if (parsed === null && response.status !== 204) throw new CloudApiError("cloud_workspace_invalid_response", response.status);
@@ -394,3 +885,57 @@ export class CloudApi {
 
 const base = (orgId: string) => `/v1/mobile/orgs/${id(orgId)}`;
 const mailbox = (orgId: string, workspaceId: string) => `${base(orgId)}/cloud-workspaces/${id(workspaceId)}/agent-commands`;
+
+/**
+ * Whether `code` repeats a secret the request carried, whole or in a part
+ * long enough to be a key. Only the secret is compared: a workspace or an
+ * organization may be named with a word the server's codes use.
+ */
+function echoes(secret: unknown, code: string): boolean {
+  if (typeof secret === "string") {
+    if (secret === code || (code.length >= 8 && secret.includes(code)) || (secret.length >= 8 && code.includes(secret))) return true;
+    // An agent's login file travels as JSON in one string: its values are the tokens.
+    if (!secret.startsWith("{")) return false;
+    try {
+      return echoes(JSON.parse(secret) as unknown, code);
+    } catch {
+      return false;
+    }
+  }
+  if (secret && typeof secret === "object") return Object.values(secret).some((value) => echoes(value, code));
+  return false;
+}
+
+const invalidResponse = () => new CloudApiError("cloud_workspace_invalid_response", 200);
+
+/** Parse an answer; one this app cannot read is `cloud_workspace_invalid_response`, and nothing of it is kept. */
+function read<T>(schema: z.ZodType<T>, body: unknown): T {
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) throw invalidResponse();
+  return parsed.data;
+}
+
+// An answer about another provider, operation or login is not the answer to this request.
+function connectionFor(providerId: string, body: unknown): CloudProviderConnection {
+  const connection = read(providerConnectionSchema, body);
+  if (connection.provider !== providerId) throw invalidResponse();
+  return connection;
+}
+
+function operationFor(orgId: string, operationId: string, body: unknown): CloudLifecycle {
+  const answer = read(lifecycleSchema, body);
+  if (answer.operation.id !== operationId || answer.workspace.orgId !== orgId || answer.operation.workspaceId !== answer.workspace.id) throw invalidResponse();
+  return answer;
+}
+
+function credentialFor(provider: CloudCredentialProvider, body: unknown): CloudCredential {
+  const credential = read(credentialSchema, body);
+  if (credential.provider !== provider) throw invalidResponse();
+  return credential;
+}
+
+/** A setup as the server's parser takes it: exactly these keys, and no `repositories` when there are none. */
+function firstRun(setup: CloudFirstRunSetup) {
+  const repositories = (setup.repositories ?? []).map((repository) => ({ sourceProvider: "github" as const, cloneUrl: repository.cloneUrl, ...(repository.ref ? { ref: repository.ref } : {}) }));
+  return { version: 1 as const, credentialIds: [...setup.credentialIds], ...(repositories.length ? { repositories } : {}) };
+}

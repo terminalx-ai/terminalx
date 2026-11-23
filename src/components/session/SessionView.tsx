@@ -106,6 +106,11 @@ export interface SessionChrome {
   leading?: ReactNode;
   /** At the right of the header, after the session's own actions. */
   trailing?: ReactNode;
+  /**
+   * No "+" and no new-tab keys, for a bot's chat (PRO-533): a new chat with
+   * the bot starts from its list of chats. Its tabs still switch and close by key.
+   */
+  noNewTab?: boolean;
 }
 
 function managedWorkspaceFor(session: SessionEntry) {
@@ -980,7 +985,7 @@ export function SessionView({
               </WithTooltip>
             )}
             {/* The "+" that opens a tab, where no row of tabs ends with it (the floating window's row comes and goes). Keyed by session: a menu left open never carries over to another session. */}
-            {(!stripRow || compact) && !cloud?.locked && !(machine && !compact) && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} onShowPorts={showPorts} />}
+            {(!stripRow || compact) && !cloud?.locked && !(machine && !compact) && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} onShowPorts={showPorts} newTabs={!chrome?.noNewTab} />}
             {/* With the row of tabs, the switch is at the right end of each pane's strip (PRO-381, 03.14). */}
             {activeTab && switchInHeader && (
               <WithTooltip label={activeInTerminal ? viewSwitch.toChat : viewSwitch.toTerminal} shortcut="session.toggleTerminalView">

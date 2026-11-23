@@ -106,7 +106,7 @@ fn run(cwd: &Path, args: &[&str]) -> Result<String> {
 /// it cannot: a grafts file or a shallow clone rewrites parents.
 fn rewritten_history(cwd: &Path) -> Result<Option<String>> {
     let grafts = run(cwd, &["rev-parse", "--path-format=absolute", "--git-path", "info/grafts"])?;
-    if Path::new(grafts.trim()).exists() {
+    if Path::new(crate::git::path_line(&grafts)).exists() {
         return Ok(Some("this checkout has a grafts file, which changes commits' parents".into()));
     }
     if run(cwd, &["rev-parse", "--is-shallow-repository"])?.trim() == "true" {
@@ -126,7 +126,7 @@ fn custom_merge_rules(cwd: &Path) -> Result<Option<String>> {
         _ => anyhow::bail!("git config failed: {}", String::from_utf8_lossy(&drivers.stderr).trim()),
     }
     let local = run(cwd, &["rev-parse", "--path-format=absolute", "--git-path", "info/attributes"])?;
-    let rules = std::fs::read_to_string(local.trim()).unwrap_or_default();
+    let rules = std::fs::read_to_string(crate::git::path_line(&local)).unwrap_or_default();
     if rules.lines().map(str::trim).any(|line| !line.is_empty() && !line.starts_with('#')) {
         return Ok(Some("this checkout has attributes of its own in .git/info/attributes, which can change what a merge gives".into()));
     }
@@ -600,5 +600,15 @@ mod tests {
         let (before, status) = (objects(), repo.git(&["status", "--porcelain"]));
         classify(repo.path(), &base, &reviewed, &repo.head()).unwrap();
         assert_eq!((objects(), repo.git(&["status", "--porcelain"])), (before, status));
+    }
+
+    #[test]
+    fn grafts_are_found_in_a_git_dir_whose_name_ends_in_a_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let (work, git_dir) = (dir.path().join("work "), dir.path().join("git dir "));
+        crate::git::run(dir.path(), &["init", "-q", "--separate-git-dir", git_dir.to_str().unwrap(), work.to_str().unwrap()]).unwrap();
+        std::fs::create_dir_all(git_dir.join("info")).unwrap();
+        std::fs::write(git_dir.join("info/grafts"), "").unwrap();
+        assert!(rewritten_history(&work).unwrap().is_some_and(|why| why.contains("grafts")));
     }
 }
