@@ -45,7 +45,7 @@ vi.mock("@/lib/cloudDashboard", () => ({ openCloudSession: mocks.openRun }));
 
 vi.mock("@/lib/models", async (original) => ({ ...(await original<typeof import("@/lib/models")>()), useModels: () => [] }));
 
-import { CloudSchedulesDialog, CloudSchedulesDialogHost, openSchedulesDialog } from "./CloudSchedulesDialog";
+import { CloudSchedulesDialog, CloudSchedulesDialogHost, ESTIMATE_DELAY_MS, openSchedulesDialog } from "./CloudSchedulesDialog";
 
 const ID = "schedule_0b9d6b1e-3f5a-4c1d-9f2e-7a1b2c3d4e5f";
 const schedule = (fields: Partial<CloudSchedule> = {}): CloudSchedule => ({
@@ -77,10 +77,9 @@ let listed: CloudAutomationDto[];
 const open = () => render(<CloudSchedulesDialog orgId="org-1" workspaceId="ws-1" name="Docs site" onClose={() => undefined} />);
 const row = () => screen.findByTestId(`cloud-schedule-${ID}`);
 
-// The form asks for its cost once it has rested this long (CloudSchedulesDialog's ESTIMATE_DELAY_MS).
+// The form asks for its cost once it has rested for the dialog's own ESTIMATE_DELAY_MS.
 // The clock is fake but still moves with real time, so Testing Library's own waits run as before;
 // a test that waits for a cost lets the rest pass at once instead of waiting it out.
-const ESTIMATE_DELAY_MS = 400;
 const rest = () => act(async () => { await vi.advanceTimersByTimeAsync(ESTIMATE_DELAY_MS); });
 
 /** Open the form and fill what a task needs; the cost arrives after the form has rested. */
