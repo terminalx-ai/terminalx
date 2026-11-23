@@ -78,3 +78,25 @@ notifications are headed "Phone fixture", the copy's own app name.
    Each screenshot is saved under `<output directory>/<run>/<flow name>/takeScreenshot/`.
    For the boards' look, set the simulator to dark appearance and the status bar to 10:25:
    `xcrun simctl status_bar $SIMULATOR_UDID override --time 10:25`.
+
+## Cloud setup (25.01–25.06)
+
+The setup screens ask the service for providers, agent logins, quotes and
+operations. Each area answers its own requests in `setup/<area>.ts`
+(`organization`, `compute`, `logins`, `launch`, `workspace`); `fixture-cloud.tsx`
+asks them in turn before its own answers, so an area can also answer the
+organization list or the workspace list for one of its states. A state is
+chosen by a launch argument the area reads with `request.argument(name)`.
+Their flows are `flow-25.0N*.yaml`.
+
+`capture.sh` also takes:
+
+- `SIMULATOR_BUILD`: the path of a `TerminalX.app` built for the simulator in
+  another checkout. Only the JavaScript is bundled here, so several worktrees
+  share one native build.
+- `APPEARANCE=dark` or `light`: the simulator's appearance for the capture,
+  with the status bar at 10:25. The light boards use the Den theme, the dark
+  ones Ember; a flow picks the theme in Settings as `flow-22.00-setup.yaml` does.
+
+One capture runs on a simulator at a time: a second one waits for the first
+(`/tmp/terminalx-phone-fixture-<device>.lock`).

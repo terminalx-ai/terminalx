@@ -7,7 +7,8 @@ shift
 mkdir -p "$out" && out=${out:A}
 here=${0:A:h}
 mobile=${here:h:h}
-built="$mobile/dist/simulator-build/Build/Products/Release-iphonesimulator/TerminalX.app"
+# SIMULATOR_BUILD: a simulator app built elsewhere (another worktree), used as it is; only the JavaScript is bundled here.
+built=${SIMULATOR_BUILD:-"$mobile/dist/simulator-build/Build/Products/Release-iphonesimulator/TerminalX.app"}
 work="$mobile/dist/phone-fixture"
 app="$work/TerminalX.app"
 device=${SIMULATOR_UDID:-booted}
@@ -25,10 +26,20 @@ if [[ -z ${SKIP_BUNDLE:-} ]]; then
   # Its own bundle id: an installed TerminalX app and its pairing are left alone.
   /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.terminalx.phone.fixture" -c "Set :CFBundleDisplayName Phone fixture" "$app/Info.plist"
   codesign --force --sign - --timestamp=none "$app"
-  xcrun simctl install "$device" "$app"
 fi
 flows=("$@")
 (( ${#flows} )) || flows=("$here"/flow-*.yaml)
+# One capture at a time on a simulator: sessions in other worktrees share it, each installing
+# its own bundle under the same id. The bundle above is made outside the lock.
+if [[ -z ${CAPTURE_LOCKED:-} ]]; then
+  CAPTURE_LOCKED=1 SKIP_BUNDLE=1 exec lockf -k "/tmp/terminalx-phone-fixture-${device}.lock" "${0:A}" "$out" $flows
+fi
+xcrun simctl install "$device" "$app"
+# APPEARANCE=dark|light: the simulator's appearance for this capture, with the boards' clock.
+if [[ -n ${APPEARANCE:-} ]]; then
+  xcrun simctl ui "$device" appearance "$APPEARANCE"
+  xcrun simctl status_bar "$device" override --time 10:25
+fi
 for flow in $flows; do
   "${MAESTRO:-maestro}" ${SIMULATOR_UDID:+--device} ${SIMULATOR_UDID:-} test --test-output-dir "$out" "${flow:A}"
 done

@@ -20,6 +20,15 @@ import { CloudCatalog, type CatalogSnapshot, type CatalogStorage } from "../../s
 import { b64, CHECKPOINT_SCHEMA, checkpointAad, seal, sha256Hex, unb64 } from "../../src/cloud/crypto";
 import { keyItemName, type SecretStorage } from "../../src/cloud/keys";
 import { useApp } from "../../src/state/AppProvider";
+import { handle as compute } from "./setup/compute";
+import { handle as launch } from "./setup/launch";
+import { handle as logins } from "./setup/logins";
+import { handle as organization } from "./setup/organization";
+import type { SetupHandler } from "./setup/types";
+import { handle as workspaceSetup } from "./setup/workspace";
+
+/** The cloud setup areas (25.01–25.06), asked in this order before the answers below. */
+const SETUP: readonly SetupHandler[] = [workspaceSetup, launch, logins, compute, organization];
 
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
@@ -103,6 +112,14 @@ function server(holdList: boolean): typeof fetch {
   return async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     const path = url.pathname;
+    const argument = (name: string) => { const value: unknown = Settings.get(name); return typeof value === "string" ? value : typeof value === "number" || typeof value === "boolean" ? String(value) : undefined; };
+    const sent = typeof init?.body === "string" ? init.body : null;
+    let body: unknown = null;
+    try { body = sent ? JSON.parse(sent) : null; } catch { body = null; }
+    for (const area of SETUP) {
+      const answer = await area({ method: (init?.method ?? "GET").toUpperCase(), path, query: url.searchParams, headers: new Headers(init?.headers), body, argument, json });
+      if (answer) return answer;
+    }
     if (path === "/v1/desktop/auth/capabilities") {
       if (holdList) await never;
       return json(200, { organizations: ORGS, capabilities: { flags: {} } });
