@@ -248,7 +248,20 @@ try {
       await textarea.fill("Set up this computer for development. Install what each repository needs, then check that tests and the app run in api and web. Write what you changed to SETUP.md.");
       const card = page.getByTestId("setup-check-coach");
       await card.waitFor();
-      await page.waitForTimeout(300);
+      // The composer box grows to fit the message, and the coach follows its top edge an animation frame later
+      // (updatePositionStrategy "always"). Read them once neither has moved for three frames in a row, not after a
+      // fixed wait: 300 ms was too short on a runner running four checks at once (run 45344630294). At most 10 s.
+      await page.evaluate(async () => {
+        const rects = () => [document.querySelector('[data-testid="setup-check-coach"]'), document.querySelector("main [data-composer-box]")].map((element) => JSON.stringify(element.getBoundingClientRect())).join();
+        const end = performance.now() + 10_000;
+        let last = rects();
+        for (let still = 0; still < 3 && performance.now() < end; ) {
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+          const now = rects();
+          still = now === last ? still + 1 : 0;
+          last = now;
+        }
+      });
       const cardBox = await box(card);
       const composerBox = await box(page.locator("main [data-composer-box]"));
       const count = card.getByText("1 of 1", { exact: true });

@@ -27,6 +27,16 @@ const screenshots = process.env.WEBKIT_LAYOUT_SCREENSHOTS;
 if (screenshots) await mkdir(screenshots, {recursive:true});
 const server = await serve();
 let browser;
+// Radix finishes opening and closing a layer a step after the event: an open modal layer takes pointer events only
+// once it has re-rendered after its effect turned them off on <body>, and focus goes back to the trigger from a
+// timeout after a close. On a busy runner a reading taken at once was that step early (the viewer's points hit the
+// overlay under it; the trigger was not yet focused), so these readings first wait for that step, for at most 5 s,
+// and are then asserted as they stand.
+const until = `window.__until = async (holds, ms = 5000) => {
+  const end = performance.now() + ms;
+  while (!holds() && performance.now() < end) await new Promise((resolve) => setTimeout(resolve, 16));
+  return holds();
+};`;
 async function menuGeometry(page, trigger, label, keyboard=false) {
  await trigger.scrollIntoViewIfNeeded();
 
@@ -58,7 +68,7 @@ try {
  browser = await launch({ headless: !process.env.WEBKIT_CONTROLS_HEADED });
  for (const floating of [false,true]) {
   const extra = `localStorage.setItem("raccoon.prefs", JSON.stringify({linkBrowser:"system",linkBrowserChosen:true})); window.__PW_STUB__.answers.load_tab_events = ({tabId}) => [{id:'controls',seq:1,sessionId:'local-s1',tabId,harness:'claude',ts:'2026-10-24T00:00:00Z',payload:{type:'assistant_text',text:${JSON.stringify(text)}}}];
-   window.__copies = []; const nativeClipboard = navigator.clipboard;
+   ${until} window.__copies = []; const nativeClipboard = navigator.clipboard;
    Object.defineProperty(navigator, 'clipboard', {value:{write:async items => { if (${clipboard}) await nativeClipboard.write(items); window.__copies.push(await (await items[0].getType('text/plain')).text()); },writeText:async text=>{if (${clipboard}) await nativeClipboard.writeText(text); window.__copies.push(text);}}});`;
   const page = await open(browser, server.url, {cloud:false,localProjects:1,localSession:true,floating}, {width:1100,height:800}, {extra});
   if (!floating) { await openConversation(page, 'Local long session'); await tab(page,'gemini tab').click(); }
@@ -83,14 +93,16 @@ try {
     await menuGeometry(page,dl,label,cycle===1);
     if (screenshots && cycle===0) await page.screenshot({path:`${screenshots}/${label}-menu.png`});
     // The menu is non-modal: opening the viewer directly must dismiss it.
-    if (cycle===1) { await page.keyboard.press('Escape'); assert.ok(await dl.evaluate(el=>el===document.activeElement)); }
+    if (cycle===1) { await page.keyboard.press('Escape'); assert.ok(await dl.evaluate(el=>window.__until(()=>el===document.activeElement))); }
     await expand.click();
     const viewer = page.getByRole('dialog',{name:'Table fullscreen'});
     await viewer.waitFor();
     assert.equal(await page.getByRole('menu').count(),0,`${label}: inline menu dismissed`);
-    const bounds = await viewer.evaluate(el=> {
+    const bounds = await viewer.evaluate(async el=> {
+     const covers=()=>[[4,100],[innerWidth/2,innerHeight/2],[innerWidth-4,innerHeight-4]].every(([x,y])=>el.contains(document.elementFromPoint(x,y)));
+     await window.__until(()=>getComputedStyle(el).pointerEvents!=='none' && el.contains(document.activeElement));
      const r=el.getBoundingClientRect();
-     return {x:r.x,y:r.y,width:r.width,height:r.height,viewport:[innerWidth,innerHeight],focus:el.contains(document.activeElement),covers:[[4,100],[innerWidth/2,innerHeight/2],[innerWidth-4,innerHeight-4]].every(([x,y])=>el.contains(document.elementFromPoint(x,y)))};
+     return {x:r.x,y:r.y,width:r.width,height:r.height,viewport:[innerWidth,innerHeight],focus:el.contains(document.activeElement),covers:covers()};
     });
     assert.ok(Math.abs(bounds.x)<1 && Math.abs(bounds.y)<1 && Math.abs(bounds.width-bounds.viewport[0])<2 && Math.abs(bounds.height-bounds.viewport[1])<2 && bounds.focus && bounds.covers,`${label}: fullscreen covers viewport ${JSON.stringify(bounds)}`);
     assert.equal(await viewer.locator('table').innerText(),await wrapper.locator('table').innerText());
@@ -103,7 +115,7 @@ try {
     if (screenshots && cycle===0) await page.screenshot({path:`${screenshots}/${label}-fullscreen.png`});
     if (cycle===0) await viewer.getByRole('button',{name:'Exit fullscreen'}).click(); else await page.keyboard.press('Escape');
     await viewer.waitFor({state:'detached'});
-    assert.ok(await expand.evaluate(el=>el===document.activeElement),`${label}: focus restored`);
+    assert.ok(await expand.evaluate(el=>window.__until(()=>el===document.activeElement)),`${label}: focus restored`);
    }
    assert.ok(await wrapper.locator('table').evaluate(table => [...table.querySelectorAll('th,td')].every(cell => {
     const box=cell.getBoundingClientRect(); const range=document.createRange(); range.selectNodeContents(cell);
