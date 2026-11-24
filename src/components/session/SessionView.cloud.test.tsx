@@ -12,10 +12,12 @@ import { guardedApi } from "@/test/guardedApi";
 const mocks = vi.hoisted(() => ({
   guard: null as unknown as ReturnType<typeof import("@/test/guardedApi").guardedApi>,
   workspaceConnection: vi.fn(),
-  catalog: { owner: "me", revision: "r", loaded: true, orgs: {} as Record<string, unknown>, createMemory: {}, notices: [] },
+  catalog: { owner: "a@b.c", revision: "r", loaded: true, orgs: {} as Record<string, unknown>, createMemory: {}, notices: [] },
   prefs: { panelOpen: true, panelWidth: 360, sidebarOpen: true, lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", useWorktree: true },
   /** This account's role in the session's organization. */
   role: "member",
+  readiness: {} as Record<string, string[]>,
+  memberWorkspaces: false,
   /** Lists of the organization asked for by the session (never an attach or a resume). */
   refreshCatalog: vi.fn(async (_orgId?: string | null) => undefined),
 }));
@@ -30,7 +32,7 @@ vi.mock("@/lib/cloudCatalog", async (importOriginal) => ({
   refreshCloudCatalog: mocks.refreshCatalog,
 }));
 vi.mock("@/lib/account", () => {
-  const account = { status: { state: "signed-in", identity: { name: null, email: "a@b.c", organization: "Acme", organizationId: "org-1" }, expiresAt: null, lastError: null, organizations: [{ id: "org-1", name: "Acme", get role() { return mocks.role; } }] } };
+  const account = { status: { state: "signed-in", identity: { name: null, email: "a@b.c", organization: "Acme", organizationId: "org-1" }, expiresAt: null, lastError: null, get phase2Readiness() { return mocks.readiness; }, get memberWorkspaces() { return mocks.memberWorkspaces; }, organizations: [{ id: "org-1", name: "Acme", cloud: { enabled: true, flags: {} }, get role() { return mocks.role; } }] } };
   return { useAccount: () => account, getAccount: () => account, subscribeAccount: () => () => undefined, refreshAccount: vi.fn() };
 });
 vi.mock("@/lib/theme", () => ({ useTheme: () => ({ resolvedMode: "dark" }) }));
@@ -434,6 +436,8 @@ beforeEach(() => {
   mocks.prefs.panelOpen = true;
   mocks.refreshCatalog.mockClear();
   mocks.role = "member";
+  mocks.readiness = {};
+  mocks.memberWorkspaces = false;
   setCatalog(workspaceItem("ready"));
   // Tab selection is per session key and outlives a render.
   selectSessionTab(KEY, { kind: "agent", id: "t-1" });
@@ -1132,6 +1136,117 @@ describe("the session header's location and connection chips", () => {
     await act(async () => runtime.connect("participate"));
     expect(chip()).toBe("Live");
     expect(activate).not.toHaveBeenCalled();
+  });
+
+  describe("Phase 2 in-session start progress", () => {
+    const feature = "cloud.workspaces.start-progress.v1";
+    const starting = (phase: string = "booting", authority: "manage" | "participate" = "manage") => {
+      const item = workspaceItem("provisioning", authority);
+      item.workspace.launch = {
+        launchId: "launch-1", phase, state: "pending", sessionId: null, tabId: null, agent: "claude",
+        hasPrompt: true, workBranch: "tx/login-fix", model: null, effort: null, mode: null, category: null,
+        timings: { requestedAt: 1000, bootingAt: 4000, authenticatingAt: null, syncingAt: null, startingAgentAt: null, runningAt: null, failedAt: null },
+      };
+      item.latestOperation = {
+        id: "op-1", workspaceId: WS, action: null, type: "create", state: "running",
+        stage: "bootstrapping", cancelable: true, createdAt: 1000, updatedAt: 4000,
+        lastProviderContactAt: null, nextAttemptAt: null, retryReason: null, errorCode: null, progress: null, events: null,
+      };
+      return item;
+    };
+
+    it("keeps the old session and panel when held, including when another org is ready", async () => {
+      mocks.readiness = { "other-org": [feature] };
+      setCatalog(starting());
+      render(wrap(<CloudHarness />));
+      await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+      await act(async () => runtime.emit({ state: "waitingForRuntime" }));
+      expect(screen.getByTestId("cloud-session-loading").textContent).toBe("Loading the session…");
+      expect(screen.getByTestId("cloud-panel-offline").textContent).toContain("Changes, Files and Git appear once the workspace is connected.");
+      expect(screen.queryByTestId("cloud-start-progress")).toBeNull();
+      expect(screen.queryByTestId("cloud-start-log")).toBeNull();
+      expect(guard.calls.some(({ command }) => command.startsWith("cloud_workspace_operation"))).toBe(false);
+    });
+
+    it("tracks reported phases and durations and returns to live chat when the launch completes", async () => {
+      mocks.readiness = { [ORG]: [feature] };
+      const item = starting("allocating", "participate");
+      setCatalog(item);
+      const view = render(wrap(<CloudHarness />));
+      await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+      await act(async () => runtime.emit({ state: "waitingForRuntime" }));
+      const card = screen.getByTestId("cloud-start-progress");
+      expect(card.querySelector('[aria-current="step"]')?.textContent).toContain("Allocate the cloud machine");
+      expect(screen.getByText("Nothing to show yet")).toBeTruthy();
+      expect(screen.getByText("Waiting for the workspace runtime…")).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+      expect(card.textContent).not.toContain("setup script");
+      expect(screen.queryByTestId("composer")).toBeNull();
+      for (const [phase, label] of [
+        ["booting", "Start the machine"],
+        ["authenticating-runtime", "Connect the runtime"],
+        ["syncing-repository", "Sync the repositories"],
+        ["starting-agent", "Start the agent and send your first message"],
+      ]) {
+        setCatalog({ ...item, workspace: { ...item.workspace, launch: { ...item.workspace.launch!, phase } } });
+        view.rerender(wrap(<CloudHarness />));
+        expect(card.querySelector('[aria-current="step"]')?.textContent).toContain(label);
+        expect(within(card).getByText("3s")).toBeTruthy();
+        expect(card.querySelectorAll('[data-state="done"]')).toHaveLength(
+          ["booting", "authenticating-runtime", "syncing-repository", "starting-agent"].indexOf(phase) + 1,
+        );
+      }
+      setCatalog({
+        ...item,
+        workspace: { ...item.workspace, state: "ready", launch: { ...item.workspace.launch!, phase: "running", state: "started", sessionId: "s-1" } },
+        latestOperation: { ...item.latestOperation!, state: "succeeded", cancelable: false },
+      });
+      view.rerender(wrap(<CloudHarness />));
+      await act(async () => runtime.connect("participate"));
+      await screen.findByTestId("composer");
+      expect(screen.queryByTestId("cloud-start-progress")).toBeNull();
+      expect(screen.queryByTestId("cloud-start-panel")).toBeNull();
+    });
+
+    it("waits for confirmed cancellation and keeps raw operation logs off the member's dock", async () => {
+      mocks.readiness = { [ORG]: [feature] };
+      mocks.memberWorkspaces = true;
+      const item = starting();
+      const snapshot = (state: "cancel-requested" | "canceled") => ({
+        workspace: { ...item.workspace, launch: { ...item.workspace.launch!, phase: "canceled" } },
+        operation: { ...item.latestOperation!, state, cancelable: false, logs: [{ content: "Manager output", source: "fixture", occurredAt: 5000 }] },
+      });
+      guard.handlers.cloud_workspace_operation_cancel = () => snapshot("cancel-requested");
+      let confirmCancel = (_: ReturnType<typeof snapshot>) => {};
+      guard.handlers.cloud_workspace_operation = () => new Promise((resolve) => { confirmCancel = resolve; });
+      setCatalog(item);
+      render(wrap(<CloudHarness />));
+      fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(guard.calls).toContainEqual({ command: "cloud_workspace_operation", args: { operationId: "op-1", orgId: null } }));
+      expect(guard.calls).toContainEqual({ command: "cloud_workspace_operation_cancel", args: { operationId: "op-1", orgId: null } });
+      expect(screen.getByText("Waiting for the workspace to finish canceling.")).toBeTruthy();
+      expect(screen.queryByText(/The compute was released/)).toBeNull();
+      expect(screen.queryByText("Manager output")).toBeNull();
+      await act(async () => confirmCancel(snapshot("canceled")));
+      expect(screen.getByText("The compute was released. The first message was not sent.")).toBeTruthy();
+    });
+
+    it("updates the log from the supported operation endpoint and hides it when readiness is removed", async () => {
+      mocks.role = "owner";
+      mocks.readiness = { [ORG]: [feature] };
+      const item = starting();
+      guard.handlers.cloud_workspace_operation = () => ({
+        workspace: item.workspace,
+        operation: { ...item.latestOperation, logs: [{ source: "runtime", content: "Runtime installing", occurredAt: 4000 }] },
+      });
+      setCatalog(item);
+      const view = render(wrap(<CloudHarness />));
+      expect(await within(screen.getByTestId("cloud-start-log")).findByText(/Runtime installing/)).toBeTruthy();
+      mocks.readiness = {};
+      view.rerender(wrap(<CloudHarness />));
+      expect(screen.queryByText(/Runtime installing/)).toBeNull();
+      expect(screen.getByTestId("cloud-session-loading")).toBeTruthy();
+    });
   });
 
   it("says Starting only while the workspace is being provisioned or resumed", async () => {
