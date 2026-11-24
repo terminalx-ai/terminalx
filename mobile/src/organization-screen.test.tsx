@@ -7,15 +7,17 @@ import { organizationDeletionError } from "@terminalx/portable/organizationDelet
 import { OrganizationDelete } from "./ui/OrganizationDelete";
 
 // #1292: an owner deletes an organization from the phone, with the desktop's wording and rule.
-const mocks = vi.hoisted(() => ({ copy: vi.fn(async (_text: string) => true), back: vi.fn(), params: { orgId: "org-team" }, catalog: null as any, snapshot: { organizations: [] as any[], saved: false, deletesOrganizations: true } as any }));
+const mocks = vi.hoisted(() => ({ copy: vi.fn(async (_text: string) => true), back: vi.fn(), push: vi.fn(), params: { orgId: "org-team" }, catalog: null as any, snapshot: { organizations: [] as any[], saved: false, deletesOrganizations: true } as any }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: mocks.copy }));
-vi.mock("expo-router", () => ({ Stack: { Screen: () => null }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ back: mocks.back }) }));
+vi.mock("expo-router", () => ({ Stack: { Screen: () => null }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ back: mocks.back, push: mocks.push }), useFocusEffect: () => undefined }));
 vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => mocks.catalog, useCatalogSnapshot: () => mocks.snapshot }));
 vi.mock("@mobile/ui/theme", async (actual) => ({ ...(await actual<typeof import("@mobile/ui/theme")>()), useTheme: () => ({ palette: { danger: "#db695f", border: "#333" } }) }));
 vi.mock("react-native", () => {
   const View = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
-    View, ScrollView: View,
+    View, ScrollView: View, RefreshControl: () => null,
+    // A row that opens a page, not one of the delete card's buttons.
+    Pressable: ({ children, onPress, accessibilityLabel, testID }: any) => <div role="button" aria-label={accessibilityLabel} data-testid={testID} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</div>,
     Text: ({ children, selectable, testID, accessibilityRole }: any) => <span data-testid={testID} data-selectable={selectable ? "true" : undefined} role={accessibilityRole}>{children}</span>,
     TextInput: ({ accessibilityLabel, value, onChangeText, editable }: any) => <input aria-label={accessibilityLabel} value={value} disabled={editable === false} onChange={(event) => onChangeText(event.currentTarget.value)} />,
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
@@ -25,6 +27,7 @@ vi.mock("@mobile/ui/primitives", () => ({
   Button: ({ label, onPress, disabled, accessibilityLabel }: any) => <button aria-label={accessibilityLabel ?? label} disabled={!!disabled} onClick={onPress}>{label}</button>,
   Card: ({ children }: any) => <div>{children}</div>,
   EmptyState: ({ title, detail }: any) => <div>{title}{detail}</div>,
+  SectionTitle: ({ children }: any) => <h2>{children}</h2>,
 }));
 
 const team = { orgId: "org-team", name: "Test organization", role: "owner", isPersonal: false };
@@ -150,4 +153,36 @@ it("says the organization is gone when it is no longer listed", async () => {
   mocks.snapshot = { organizations: [], saved: false, deletesOrganizations: true };
   await show(<OrganizationScreen />);
   expect(container.textContent).toContain("Organization unavailable");
+});
+
+// 25.02, "The organization's page": its compute and agent logins, read from the server, each opening its own page.
+it("shows the organization's compute and agent logins, which open their pages", async () => {
+  const boat = { id: "box", displayName: "Boat", availability: "available", canManage: true, descriptor: { credentialFields: [{ name: "credential", kind: "secret", label: "API token" }] } };
+  const login = (provider: string) => ({ id: `cred-${provider}`, provider, authKind: "api-key", fingerprint: "sha256:1", version: 1, updatedAt: 1, state: "connected", sharedUse: "organization", epoch: 1 });
+  mocks.catalog = { deleteOrganization: vi.fn(async () => {}), api: { providers: vi.fn(async () => [boat]), credentials: vi.fn(async () => [login("codex"), login("claude")]) } };
+  await show(<OrganizationScreen />);
+  await act(async () => { for (let index = 0; index < 6; index += 1) await Promise.resolve(); });
+  expect(container.textContent).toContain("Cloud workspaces");
+  const compute = container.querySelector("[data-testid='organization-compute']")!;
+  const logins = container.querySelector("[data-testid='organization-logins']")!;
+  expect(compute.getAttribute("aria-label")).toBe("Compute, Boat · connected");
+  expect(logins.getAttribute("aria-label")).toBe("Agent logins, Codex, Claude Code · connected");
+  expect(container.textContent).toContain("Owners and admins manage these. Members use them when they launch a workspace.");
+  // Today's delete card stays, under the new section.
+  expect(button("Delete organization…")).not.toBeNull();
+  await act(async () => { (compute as HTMLElement).click(); });
+  expect(mocks.push).toHaveBeenLastCalledWith("/cloud/compute?orgId=org-team");
+  await act(async () => { (logins as HTMLElement).click(); });
+  expect(mocks.push).toHaveBeenLastCalledWith("/cloud/logins?orgId=org-team");
+});
+
+it("says a list that could not be read, and not connected only when the server said so", async () => {
+  mocks.snapshot = { organizations: [{ organization: { ...team, role: "member" } }], saved: false, deletesOrganizations: true };
+  mocks.catalog = { deleteOrganization: vi.fn(async () => {}), api: { providers: vi.fn(async () => { throw new Error("offline"); }), credentials: vi.fn(async () => []) } };
+  await show(<OrganizationScreen />);
+  await act(async () => { for (let index = 0; index < 6; index += 1) await Promise.resolve(); });
+  expect(container.querySelector("[data-testid='organization-compute']")!.getAttribute("aria-label")).toBe("Compute, Could not be read. Pull down to try again.");
+  // A member is not asked for the organization's logins, so nothing is said of them.
+  expect(mocks.catalog.api.credentials).not.toHaveBeenCalled();
+  expect(container.querySelector("[data-testid='organization-logins']")!.getAttribute("aria-label")).toBe("Agent logins");
 });

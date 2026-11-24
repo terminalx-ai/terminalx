@@ -3,6 +3,8 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CloudScreen from "../app/(tabs)/cloud";
+import { CloudApiError } from "@mobile/cloud/api";
+import { workspaceRowActions } from "@mobile/cloud/setup/workspace/actions";
 
 const mocks = vi.hoisted(() => ({
   params: { workspaceId: "ws-1", orgId: "org-1" } as Record<string, string>,
@@ -21,6 +23,11 @@ vi.mock("expo-router", () => ({
   useFocusEffect: (run: () => void | (() => void)) => { mocks.focus.push(run); },
 }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
+// The real row actions (25.06), watched: a long press offers them beside Pin project.
+vi.mock("@mobile/cloud/setup/workspace/actions", async (actual) => {
+  const real = await actual<typeof import("@mobile/cloud/setup/workspace/actions")>();
+  return { ...real, workspaceRowActions: vi.fn(real.workspaceRowActions) };
+});
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 47, bottom: 34, left: 0, right: 0 }) }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
@@ -222,9 +229,13 @@ describe("the Cloud tab", () => {
 
   it("says when there is nothing to see, and asks a signed-out person to sign in", async () => {
     world({ state: null });
+    // 25.01 replaces "No cloud workspaces you can see.": a member of an organization with no compute is told why.
+    Object.assign(mocks.catalog.api, { providers: vi.fn(async () => []), credentials: vi.fn(async () => []) });
     await show(<CloudScreen />);
-    expect(text()).toContain("No cloud workspaces you can see.");
-    expect(text()).toContain("1 organization with no workspaces");
+    expect(text()).toContain("Acme has no compute yet");
+    expect(text()).toContain("An organization owner or admin must connect compute. You can launch a workspace once they have.");
+    // A member is not asked for the organization's agent logins.
+    expect(mocks.catalog.api.credentials).not.toHaveBeenCalled();
     mocks.app = { session: null, signIn: vi.fn() };
     await show(<CloudScreen />);
     await click("Sign in");
@@ -235,5 +246,190 @@ describe("the Cloud tab", () => {
     mocks.app = { session: null, signIn: vi.fn(), error: "The sign-in page could not open: error 2." };
     await show(<CloudScreen />);
     expect(text()).toContain("The sign-in page could not open: error 2.");
+  });
+});
+
+describe("the first run on the Cloud tab (25.01)", () => {
+  const personal = { orgId: "org-personal", name: "Personal (alex@example.com)", role: "owner", isPersonal: true };
+  const northwind = { orgId: "org-northwind", name: "Northwind", role: "member" };
+  const entry = (organization: object, workspaces: unknown[] = []) => ({ organization, workspaces, error: null, loaded: true });
+  const descriptor = (keyed: boolean) => ({ credentialFields: keyed ? [{ name: "credential", kind: "secret", label: "API token" }] : [] });
+  const boat = (availability: string) => ({ id: "box", displayName: "Boat", availability, canManage: true, descriptor: descriptor(true) });
+  const login = (provider: string, state = "connected") => ({ id: `cred-${provider}`, provider, authKind: "api-key", fingerprint: "sha256:1", version: 1, updatedAt: 1, state, sharedUse: "organization", epoch: 1 });
+  const unreachable = () => new CloudApiError("cloud_workspace_unavailable", null, "network");
+
+  /** The account as the server answers it: its organizations, and each one's providers and agent logins. */
+  function account(organizations: unknown[], answers: { providers?: () => Promise<unknown[]>; credentials?: () => Promise<unknown[]>; snapshot?: Record<string, unknown> } = {}) {
+    world();
+    mocks.catalog.getSnapshot = () => ({ loading: false, error: null, refreshedAt: 1, saved: false, titles: {}, deletesOrganizations: false, createsOrganizations: true, organizations, ...answers.snapshot });
+    Object.assign(mocks.catalog.api, { providers: vi.fn(answers.providers ?? (async () => [])), credentials: vi.fn(answers.credentials ?? (async () => [])) });
+  }
+  const settle = () => act(async () => { for (let index = 0; index < 6; index += 1) await Promise.resolve(); });
+  const draw = async () => { await show(<CloudScreen />); await settle(); };
+  /** The steps as they are said aloud, in order: a step that opens a page is a button. */
+  const steps = () => [...container.querySelectorAll('[aria-label^="Step "]')].map((step) => step.getAttribute("aria-label"));
+  const card = () => container.querySelector('[aria-label^="Step 1 of 4"]');
+
+  it("signed out: as today, with no line about creating an account", async () => {
+    mocks.app = { session: null, signIn: vi.fn() };
+    await draw();
+    expect(text()).toContain("Sign in for cloud workspaces");
+    expect(text()).not.toContain("New to TerminalX?");
+    expect(button("Sign in").disabled).toBe(false);
+  });
+
+  it("reading the list: the title and placeholder rows, nothing else", async () => {
+    account([], { snapshot: { refreshedAt: null, loading: true } });
+    await draw();
+    expect(container.querySelector('[data-testid="cloud-placeholders"]')).not.toBeNull();
+    expect(text()).not.toContain("Four steps set one up.");
+  });
+
+  it("signed in, nothing set up: the intro and four steps, step 1 next, and Start setup", async () => {
+    account([entry(personal)]);
+    await draw();
+    expect(text()).toContain("A cloud workspace is a machine where your agents keep working while your phone is in your pocket. Four steps set one up.");
+    expect(steps()).toEqual([
+      "Step 1 of 4, next: Organization. Workspaces belong to an organization. Yours is Personal (alex@example.com).",
+      "Step 2 of 4, not started: Connect compute. The provider account your workspaces run on.",
+      "Step 3 of 4, not started: Sign your agents in. What Codex, Claude Code and Cursor sign in with there.",
+      "Step 4 of 4, not started: Launch a workspace. Pick a size, see the price, start working.",
+    ]);
+    // Each list is read once, and reading starts nothing.
+    expect(mocks.catalog.api.providers).toHaveBeenCalledWith("org-personal");
+    expect(mocks.catalog.api.credentials).toHaveBeenCalledWith("org-personal");
+    expect(mocks.catalog.start).not.toHaveBeenCalled();
+    expect(container.querySelector('[aria-label="Launch a workspace"]')).toBeNull();
+    await click("Start setup");
+    expect(mocks.push).toHaveBeenCalledWith("/cloud/setup/organization?orgId=org-personal");
+  });
+
+  it("came back half-way: finished steps say what they hold, and the button names the next step", async () => {
+    account([entry(personal)], { providers: async () => [boat("available")] });
+    await draw();
+    expect(text()).toContain("Personal (alex@example.com)Organization");
+    expect(text()).not.toContain("Four steps set one up.");
+    expect(steps()).toEqual([
+      "Step 1 of 4, done: Organization. Personal (alex@example.com)",
+      "Step 2 of 4, done: Connect compute. Boat · connected",
+      "Step 3 of 4, next: Sign your agents in. What Codex, Claude Code and Cursor sign in with there.",
+      "Step 4 of 4, not started: Launch a workspace. Pick a size, see the price, start working.",
+    ]);
+    await click("Step 2 of 4, done: Connect compute. Boat · connected");
+    expect(mocks.push).toHaveBeenLastCalledWith("/cloud/compute?orgId=org-personal");
+    await click("Continue: sign your agents in");
+    expect(mocks.push).toHaveBeenLastCalledWith("/cloud/logins?orgId=org-personal");
+  });
+
+  it("ready to launch: + appears in the title, and both launch for the organization", async () => {
+    account([entry(personal)], { providers: async () => [boat("available")], credentials: async () => [login("codex"), login("claude", "sign-in-required"), login("github")] });
+    await draw();
+    expect(steps()[2]).toBe("Step 3 of 4, done: Sign your agents in. Codex · connected");
+    expect(steps()[3]).toBe("Step 4 of 4, next: Launch a workspace. Pick a size, see the price, start working.");
+    const launches = [...container.querySelectorAll("button")].filter((entry) => entry.textContent === "Launch a workspace" || entry.getAttribute("aria-label") === "Launch a workspace");
+    expect(launches).toHaveLength(2);
+    for (const launch of launches) {
+      await act(async () => { launch.click(); });
+      expect(mocks.push).toHaveBeenLastCalledWith("/cloud/launch?orgId=org-personal");
+    }
+  });
+
+  it("with workspaces: the list, an organization being set up folded to one row, + and the long press's Stop and Delete", async () => {
+    const running = { ...item("ws-checkout", { orgId: "org-northwind", name: "Checkout redesign", you: { role: "manager", canApprove: true } }).workspace };
+    account([entry(northwind, [{ workspace: running, latestOperation: null }]), entry(personal)], { providers: async () => [boat("available")] });
+    await draw();
+    expect(text()).toContain("Northwind");
+    const fold = button("Set up cloud workspaces, 2 of 4 steps done");
+    expect(fold.getAttribute("aria-expanded")).toBe("false");
+    expect(text()).toContain("Personal (alex@example.com)Set up cloud workspaces2 of 4 steps done");
+    expect(card()).toBeNull();
+    await click("Set up cloud workspaces, 2 of 4 steps done");
+    expect(card()).not.toBeNull();
+    // Only the organization without workspaces is read for its setup.
+    expect(mocks.catalog.api.providers).toHaveBeenCalledTimes(1);
+    await click("Launch a workspace");
+    expect(mocks.push).toHaveBeenLastCalledWith("/cloud/launch?orgId=org-northwind");
+    const offered = vi.mocked(workspaceRowActions).mock.results.at(-1)!.value as { label: string }[];
+    expect(offered.map((action) => action.label)).toEqual(["Stop workspace", "Delete workspace…"]);
+  });
+
+  it("a member, not an admin: the console's sentence for an organization with no compute, and no chevron on an admin's steps", async () => {
+    account([entry(northwind), entry({ ...personal })], { providers: async () => [] });
+    await draw();
+    expect(text()).toContain("NorthwindNorthwind has no compute yetAn organization owner or admin must connect compute. You can launch a workspace once they have.");
+    // The personal organization is the one set up; the member's organization is read for its compute only.
+    expect(mocks.catalog.api.credentials).not.toHaveBeenCalledWith("org-northwind");
+    expect(mocks.catalog.api.providers).toHaveBeenCalledWith("org-northwind");
+    expect(steps()[0]).toBe("Step 1 of 4, next: Organization. Workspaces belong to an organization. Yours is Personal (alex@example.com).");
+  });
+
+  it("a member's own organization: steps 2 and 3 are not buttons for them", async () => {
+    account([entry(northwind)], { providers: async () => [{ ...boat("available"), canManage: false }] });
+    await draw();
+    expect(container.querySelector('button[aria-label^="Step 2 of 4"]')).toBeNull();
+    expect(container.querySelector('button[aria-label^="Step 3 of 4"]')).toBeNull();
+    expect(container.querySelector('[aria-label^="Step 2 of 4, done: Connect compute. Boat · connected"]')).not.toBeNull();
+    expect(text()).not.toContain("has no compute yet");
+    await click("Launch a workspace");
+    expect(mocks.push).toHaveBeenLastCalledWith("/cloud/launch?orgId=org-northwind");
+  });
+
+  it("a connected key stopped working: the step turns red and the button goes to the key", async () => {
+    account([entry(personal)], { providers: async () => [boat("attention-required")], credentials: async () => [login("codex")] });
+    await draw();
+    expect(steps()).toEqual([
+      "Step 1 of 4, done: Organization. Personal (alex@example.com)",
+      "Step 2 of 4, needs attention: Connect compute. Boat rejected the stored key on its last check.",
+      "Step 3 of 4, done: Sign your agents in. Codex · connected",
+      "Step 4 of 4, not started: Launch a workspace. Waits for compute.",
+    ]);
+    expect(container.querySelector('[aria-label="Launch a workspace"]')).toBeNull();
+    await click("Fix the provider key");
+    expect(mocks.push).toHaveBeenLastCalledWith("/cloud/compute/box?orgId=org-personal");
+  });
+
+  it("no network: the warning line, the steps read before, and the button off", async () => {
+    account([entry(personal)], { providers: async () => [boat("available")] });
+    await draw();
+    // The organization list could not be read again: what was read stays, and the steps with it.
+    mocks.catalog.getSnapshot = () => ({ loading: false, error: "cloud_workspace_unavailable", refreshedAt: 1, saved: false, titles: {}, createsOrganizations: true, organizations: [entry(personal)] });
+    mocks.catalog.api.providers.mockImplementation(async () => { throw unreachable(); });
+    mocks.catalog.api.credentials.mockImplementation(async () => { throw unreachable(); });
+    await show(<CloudScreen />);
+    await settle();
+    expect(container.querySelector('[role="alert"]')!.textContent).toBe("The service could not be reached. What is shown may be out of date.");
+    expect(steps()[1]).toBe("Step 2 of 4, done: Connect compute. Boat · connected");
+    expect(button("Continue: sign your agents in").disabled).toBe(true);
+    expect(text()).toContain("Setup carries on when the phone is back online. Nothing you finished is lost.");
+  });
+
+  it("a step could not be read: no step is done or missing on a guess, and there is no button", async () => {
+    account([entry(personal)], { providers: async () => { throw unreachable(); }, credentials: async () => { throw unreachable(); } });
+    await draw();
+    expect(steps()).toEqual([
+      "Step 1 of 4, next: Organization. Workspaces belong to an organization. Yours is Personal (alex@example.com).",
+      "Step 2 of 4, needs attention: Connect compute. Could not be read. Pull down to try again.",
+      "Step 3 of 4, needs attention: Sign your agents in. Could not be read. Pull down to try again.",
+      "Step 4 of 4, not started: Launch a workspace. Pick a size, see the price, start working.",
+    ]);
+    expect(text()).toContain("Pull down to read it again.");
+    expect(container.querySelector("button[aria-label=\"Start setup\"]")).toBeNull();
+    expect([...container.querySelectorAll("button")].some((entry) => entry.textContent === "Start setup")).toBe(false);
+  });
+
+  it("an account with no organization: step 1 creates one where the server takes it, and otherwise says where", async () => {
+    account([]);
+    await draw();
+    expect(steps()[0]).toBe("Step 1 of 4, next: Organization. Workspaces belong to an organization.");
+    // Never a personal organization the server did not list.
+    expect(text()).not.toContain("Personal");
+    await click("Start setup");
+    expect(mocks.push).toHaveBeenLastCalledWith("/cloud/setup/new-organization");
+
+    account([], { snapshot: { createsOrganizations: false } });
+    await draw();
+    expect(text()).toContain("To create an organization, use the TerminalX desktop app or the web console. Your account service does not take it from the phone yet.");
+    expect([...container.querySelectorAll("button")].some((entry) => entry.textContent === "Start setup")).toBe(false);
+    expect(container.querySelector('button[aria-label^="Step 1 of 4"]')).toBeNull();
   });
 });

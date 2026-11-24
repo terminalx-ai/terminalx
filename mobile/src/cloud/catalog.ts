@@ -60,6 +60,8 @@ export interface CatalogSnapshot {
   titles: Readonly<Record<string, string>>;
   /** The server takes this phone's request to delete an organization (read with the organizations). */
   deletesOrganizations: boolean;
+  /** The server takes this phone's request to create an organization (read with the organizations); absent before the first read. */
+  createsOrganizations?: boolean;
 }
 
 /** Where a workspace's generated title is found in `CatalogSnapshot.titles`. */
@@ -120,10 +122,11 @@ export class CloudCatalog {
   private refreshedAt: number | null = null;
   private saved = false;
   private deletesOrganizations = false;
+  private createsOrganizations = false;
   private titles: Record<string, string> = {};
   /** Organizations whose workspaces came from a successful read, in this run or the saved one: what is shown for them is a list, not a guess. */
   private everRead = new Set<string>();
-  private snapshot: CatalogSnapshot = { organizations: [], loading: false, error: null, refreshedAt: null, saved: false, titles: {}, deletesOrganizations: false };
+  private snapshot: CatalogSnapshot = { organizations: [], loading: false, error: null, refreshedAt: null, saved: false, titles: {}, deletesOrganizations: false, createsOrganizations: false };
   private readonly listeners = new Set<() => void>();
   private readonly sessions = new Map<string, CloudWorkspaceSession>();
   private readonly retained = new Map<string, number>();
@@ -231,6 +234,22 @@ export class CloudCatalog {
     // A read that started before the deletion may have listed it: let it finish, then read again.
     if (this.flight) await this.flight;
     await this.refresh();
+  }
+
+  /**
+   * Create an organization this person will own (PRO-526), then read the
+   * list again so it is listed as the server lists it. `idempotencyKey` is
+   * the one the page made for this name: a retry sends it again. A refusal
+   * throws and changes nothing here; the read that follows a creation is the
+   * list's own, and a failure of it is shown as any failed read is.
+   */
+  async createOrganization(name: string, idempotencyKey: string): Promise<CloudOrganization> {
+    const organization = await this.options.api.createOrganization(name, idempotencyKey);
+    if (this.closed) return organization;
+    // A read that started before the creation may not list it: let it finish, then read again.
+    if (this.flight) await this.flight;
+    await this.refresh();
+    return organization;
   }
 
   /** The session for a listed workspace, started on first use. */
@@ -446,6 +465,7 @@ export class CloudCatalog {
     this.loading = false;
     this.saved = false;
     this.deletesOrganizations = this.options.api.deletesOrganizations?.() === true;
+    this.createsOrganizations = this.options.api.createsOrganizations?.() === true;
     this.refreshedAt = (this.options.now ?? Date.now)();
     this.publish();
     this.noteResumes();
@@ -599,7 +619,7 @@ export class CloudCatalog {
   }
 
   private publish(): void {
-    this.snapshot = { organizations: this.organizations, loading: this.loading, error: this.error, refreshedAt: this.refreshedAt, saved: this.saved, titles: this.titles, deletesOrganizations: this.deletesOrganizations };
+    this.snapshot = { organizations: this.organizations, loading: this.loading, error: this.error, refreshedAt: this.refreshedAt, saved: this.saved, titles: this.titles, deletesOrganizations: this.deletesOrganizations, createsOrganizations: this.createsOrganizations };
     for (const listener of [...this.listeners]) listener();
   }
 }

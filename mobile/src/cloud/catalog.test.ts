@@ -188,6 +188,37 @@ describe("the phone's cloud catalog", () => {
     expect(h.catalog.getSnapshot().deletesOrganizations).toBe(true);
   });
 
+  it("says whether the server takes creation from this phone, as read with the organizations", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    expect(h.catalog.getSnapshot().createsOrganizations).toBe(false);
+    Object.assign(h.api, { createsOrganizations: () => true });
+    await h.catalog.refresh();
+    expect(h.catalog.getSnapshot().createsOrganizations).toBe(true);
+  });
+
+  it("creates an organization and reads the list again, so it is listed as the server lists it (PRO-526)", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    const createOrganization = vi.fn(async (name: string) => ({ orgId: "org-3", name, role: "owner", isPersonal: false }));
+    Object.assign(h.api, { createOrganization });
+    h.api.organizations.mockResolvedValue([{ orgId: "org-1", name: "Acme", role: "member" }, { orgId: "org-2", name: "Beta", role: "admin" }, { orgId: "org-3", name: "Northwind", role: "owner" }]);
+    await expect(h.catalog.createOrganization("Northwind", "key-1")).resolves.toMatchObject({ orgId: "org-3" });
+    expect(createOrganization).toHaveBeenCalledWith("Northwind", "key-1");
+    expect(h.catalog.getSnapshot().organizations.map((entry) => entry.organization.name)).toEqual(["Acme", "Beta", "Northwind"]);
+    // Only what the server listed: the creation's answer is not added by the phone.
+    expect(h.api.organizations).toHaveBeenCalledTimes(2);
+  });
+
+  it("changes nothing when the server refuses the creation", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    Object.assign(h.api, { createOrganization: vi.fn(async () => { throw new CloudApiError("organization_name_invalid", 400); }) });
+    await expect(h.catalog.createOrganization("N", "key-1")).rejects.toMatchObject({ code: "organization_name_invalid" });
+    expect(h.api.organizations).toHaveBeenCalledTimes(1);
+    expect(h.catalog.getSnapshot().organizations.map((entry) => entry.organization.orgId)).toEqual(["org-1", "org-2"]);
+  });
+
   it("changes nothing when the server refuses the deletion", async () => {
     const h = harness();
     await h.catalog.refresh();
