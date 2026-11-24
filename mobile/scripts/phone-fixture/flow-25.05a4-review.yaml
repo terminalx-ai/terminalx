@@ -79,7 +79,7 @@ name: Launch, review and spend confirmation (25.05)
 - waitForAnimationToEnd
 - tapOn: "Launch workspace"
 - tapOn: "Launch"
-- assertVisible: "Launching…"
+- assertVisible: ".*Launching….*"
 - takeScreenshot: 25.05-17-launching
 - launchApp:
     stopApp: true

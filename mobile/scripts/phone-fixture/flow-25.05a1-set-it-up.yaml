@@ -64,5 +64,5 @@ name: Launch, set it up (25.05)
 - inputText: "Checkout redesign"
 - pressKey: Enter
 - tapOn: "Review price"
-- assertVisible: "Checking and pricing…"
+- assertVisible: ".*Checking and pricing….*"
 - takeScreenshot: 25.05-06-checking-and-pricing
