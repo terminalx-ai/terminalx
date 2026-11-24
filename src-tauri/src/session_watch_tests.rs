@@ -22,6 +22,8 @@ use crate::recovery::Patience;
 const PATIENCE: Patience = Patience::DEFAULT;
 /// The smallest step the rig's clock is moved by.
 const MOMENT: Duration = Duration::from_millis(1);
+/// Where a [`Rig::reading`] pane keeps what it has read, in the rig's directory.
+const READ_BY_THE_PANE: &str = "read-by-the-pane";
 const SESSION: &str = "watched-session";
 const TAB: &str = "watched-tab";
 const FIXTURE: &str = include_str!("harness/claude/fixtures/interactive_session.jsonl");
@@ -264,22 +266,49 @@ impl Rig {
     /// A tab whose pane runs `command`, in place of the CLI.
     fn running(command: &str) -> Self {
         let rig = Self::new();
-        let sink = Arc::new(crate::sink::BroadcastSink::new(256));
-        let spec = pty::PaneSpec {
-            cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24,
-            command: Some(command), env: &[],
-        };
-        rig.manager.terminals.spawn(sink, &rig.pane, spec).unwrap();
+        rig.run(command);
         rig
     }
 
-    /// Wait until the pane's program has read everything written into it.
-    fn pane_has_read_it_all(&self) {
+    /// Start `command` in the tab's pane.
+    fn run(&self, command: &str) {
+        let sink = Arc::new(crate::sink::BroadcastSink::new(256));
+        let spec = pty::PaneSpec {
+            cwd: self._dir.path().to_str().unwrap(), cols: 80, rows: 24,
+            command: Some(command), env: &[],
+        };
+        self.manager.terminals.spawn(sink, &self.pane, spec).unwrap();
+    }
+
+    /// A tab whose pane's program takes in everything written into it, as a
+    /// CLI reading its input does, and keeps it in [`READ_BY_THE_PANE`], so
+    /// the test can see how much it has read.
+    fn reading() -> Self {
+        let rig = Self::new();
+        let kept = rig._dir.path().join(READ_BY_THE_PANE);
+        std::fs::write(&kept, "").unwrap();
+        rig.run(&format!("cat > '{}'", kept.display()));
+        rig
+    }
+
+    /// Wait until the pane's program (a [`Rig::reading`] one) has read the
+    /// `enters` Enters written into it so far, and nothing is left unread.
+    ///
+    /// An empty input queue alone does not say that: Linux finishes a write
+    /// into the master before its line discipline holds the byte, so right
+    /// after an Enter is written the queue can read empty with the Enter not
+    /// yet in it. A wait that stopped there let the next nudge find that
+    /// Enter unread a moment later and stand back as "stalled" (PRO-513).
+    fn pane_has_read(&self, enters: usize) {
+        let kept = self._dir.path().join(READ_BY_THE_PANE);
+        let read = || std::fs::read(&kept).expect("a pane that keeps what it reads").len();
         let deadline = Instant::now() + Duration::from_secs(60);
-        while self.manager.terminals.unread_input(&self.pane) != Some(0) {
-            assert!(Instant::now() < deadline, "the pane never read its input");
+        while read() < enters {
+            assert!(Instant::now() < deadline, "the pane read {} of {enters} Enter(s)", read());
             std::thread::sleep(MOMENT);
         }
+        assert_eq!(std::fs::read(&kept).unwrap(), b"\n".repeat(enters), "it read the Enters, each a line's end, and nothing else");
+        assert_eq!(self.manager.terminals.unread_input(&self.pane), Some(0), "nothing is left in its input");
     }
 
     /// From now on, each stage the tab tells a continuation's dialog.
@@ -2930,7 +2959,7 @@ fn delivery_stages(rig: &Rig) -> Vec<String> {
 #[cfg_attr(windows, ignore = "runs a POSIX command in a live pane")]
 #[test]
 fn an_enter_the_cli_let_go_by_is_written_again_before_the_reader_is_told() {
-    let rig = Rig::running("cat >/dev/null");
+    let rig = Rig::reading();
     enter_written_unacknowledged(&rig, 7);
     rig.tick();
     assert!(delivery_stages(&rig).is_empty(), "not at once: the CLI gets its moment");
@@ -2938,7 +2967,7 @@ fn an_enter_the_cli_let_go_by_is_written_again_before_the_reader_is_told() {
     rig.tick();
     assert_eq!(delivery_stages(&rig), ["nudged"]);
     assert_eq!(rig.recovery(), None, "a nudge is not a warning");
-    rig.pane_has_read_it_all();
+    rig.pane_has_read(1);
     rig.advance(Duration::from_secs(1));
     rig.tick();
     assert_eq!(delivery_stages(&rig), ["nudged"], "not again until it has had as long again");
@@ -2946,7 +2975,7 @@ fn an_enter_the_cli_let_go_by_is_written_again_before_the_reader_is_told() {
     rig.advance(tui::NUDGE_AFTER);
     rig.tick();
     assert_eq!(delivery_stages(&rig), ["nudged", "nudged"]);
-    rig.pane_has_read_it_all();
+    rig.pane_has_read(2);
     rig.advance(tui::NUDGE_AFTER);
     rig.tick();
     assert_eq!(delivery_stages(&rig), ["nudged", "nudged"], "twice only");
@@ -2965,12 +2994,12 @@ fn an_enter_the_cli_let_go_by_is_written_again_before_the_reader_is_told() {
 #[cfg_attr(windows, ignore = "runs a POSIX command in a live pane")]
 #[test]
 fn a_continuation_left_in_the_input_is_nudged_without_raising_the_banner() {
-    let rig = Rig::running("cat >/dev/null");
+    let rig = Rig::reading();
     let heard = rig.hear_deliveries();
     let receipt = continuation_entered_unacknowledged(&rig, 4);
     rig.advance(tui::NUDGE_AFTER);
     rig.tick();
-    rig.pane_has_read_it_all();
+    rig.pane_has_read(1);
     rig.advance(tui::NUDGE_AFTER);
     rig.tick();
     assert_eq!(delivery_stages(&rig), ["nudged", "nudged"]);
@@ -3025,12 +3054,12 @@ fn no_enter_is_written_into_a_cli_that_has_not_read_its_input() {
 #[cfg_attr(windows, ignore = "runs a POSIX command in a live pane")]
 #[test]
 fn the_readers_enter_goes_only_where_a_nudge_would() {
-    let rig = Rig::running("cat >/dev/null");
+    let rig = Rig::reading();
     let _receipt = continuation_entered_unacknowledged(&rig, 6);
     assert!(!rig.manager.submit_waiting(SESSION, TAB, 5).unwrap(), "not the prompt awaited");
     assert!(rig.manager.submit_waiting(SESSION, TAB, 6).unwrap());
     assert_eq!(delivery_stages(&rig), ["nudged"]);
-    rig.pane_has_read_it_all();
+    rig.pane_has_read(1);
     {
         let mut rt = rig.rt.lock().unwrap();
         rig.manager.apply(&mut rt, Payload::PermissionRequested {

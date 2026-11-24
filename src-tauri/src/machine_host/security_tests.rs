@@ -326,6 +326,52 @@ fn plan(choice: crate::listen::Listen, allow_public: bool) -> crate::listen::Pla
     crate::listen::Plan { choice, chosen: true, allow_public, public_unanswered: false }
 }
 
+/// The TCP listeners this process holds: each descriptor that listens, with
+/// the address it is bound to, read from the descriptor itself. Unlike a
+/// connection to a port number, which reaches whichever program on the
+/// computer holds that number now, this sees only what is open here.
+#[cfg(unix)]
+fn listeners_held() -> Vec<(i32, std::net::SocketAddr)> {
+    use std::os::fd::BorrowedFd;
+    let descriptors: Vec<i32> = std::fs::read_dir("/dev/fd").unwrap().filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok()).collect();
+    descriptors
+        .into_iter()
+        .filter(|fd| listens(*fd))
+        .filter_map(|fd| {
+            // SAFETY: borrowed for the one call below; nothing is closed here.
+            let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+            Some((fd, socket2::SockRef::from(&borrowed).local_addr().ok()?.as_socket()?))
+        })
+        .collect()
+}
+
+/// Whether descriptor `fd` is a TCP socket that listens. Linux says so in
+/// `SO_ACCEPTCONN`; macOS refuses that option (ENOPROTOOPT) and says it in
+/// the state `TCP_CONNECTION_INFO` reads instead. A descriptor closed, or
+/// one that is not a TCP socket, fails the call: not a listener.
+#[cfg(unix)]
+fn listens(fd: i32) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        /// `TCPS_LISTEN` in `<netinet/tcp_fsm.h>`.
+        const LISTEN: u8 = 1;
+        // SAFETY: an all-zero tcp_connection_info is valid.
+        let mut info: libc::tcp_connection_info = unsafe { std::mem::zeroed() };
+        let mut size = std::mem::size_of::<libc::tcp_connection_info>() as libc::socklen_t;
+        // SAFETY: the kernel writes at most `size` bytes into `info`, which
+        // outlives the call; nothing is closed.
+        let asked = unsafe { libc::getsockopt(fd, libc::IPPROTO_TCP, libc::TCP_CONNECTION_INFO, (&mut info as *mut libc::tcp_connection_info).cast(), &mut size) };
+        asked == 0 && info.tcpi_state == LISTEN
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let (mut listening, mut size): (libc::c_int, libc::socklen_t) = (0, std::mem::size_of::<libc::c_int>() as libc::socklen_t);
+        // SAFETY: one int written through a pointer that outlives the call; nothing is closed.
+        let asked = unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_ACCEPTCONN, (&mut listening as *mut libc::c_int).cast(), &mut size) };
+        asked == 0 && listening != 0
+    }
+}
+
 /// PRO-487: whatever the listener is bound to, a connection whose source is
 /// a public address is refused before anything is read from it, unless the
 /// person allowed public callers. Local, private and Tailscale sources are
@@ -358,8 +404,16 @@ async fn a_caller_from_a_public_address_is_refused_under_every_listen_choice_unl
     let status = rig.host.status();
     let listen = status.listen.expect("the status says where it listens");
     assert!(!listen.allow_public && listen.refused_public_at.is_some(), "{listen:?}");
-    let kept = eventually("the refusal is kept on disk", || std::fs::read(rig.host.data_dir.join(super::DIR).join(super::PUBLIC_CALLERS_FILE)).ok()).await;
-    let kept_at = serde_json::from_slice::<Value>(&kept).unwrap()["refusedAt"].as_i64().expect("when it was refused");
+    // Kept off this task (`MachineHost::answers`), by `std::fs::write`, which
+    // makes the file empty and then writes into it: a read in between finds
+    // the file there and no bytes in it (PRO-513: "EOF while parsing a value"
+    // at column 0). So what is waited for is the whole value, not the file.
+    let kept = eventually("the refusal is kept on disk", || {
+        let bytes = std::fs::read(rig.host.data_dir.join(super::DIR).join(super::PUBLIC_CALLERS_FILE)).ok()?;
+        serde_json::from_slice::<Value>(&bytes).ok()
+    })
+    .await;
+    let kept_at = kept["refusedAt"].as_i64().expect("when it was refused");
     assert!(kept_at <= listen.refused_public_at.unwrap(), "the first refusal of the hour is the one kept");
     assert!(super::read_refused_public(&rig.host.data_dir).is_some(), "read back at the next start");
 
@@ -556,6 +610,12 @@ async fn the_listen_choice_decides_what_is_bound_and_relay_only_opens_no_port() 
     let interfaces = crate::listen::interfaces();
     let mut computer = connected(&rig, "desk", [22; 32], "desk-token-0000000000000000", &["machine/1"]).await;
     let all_port = rig.port;
+    #[cfg(unix)]
+    {
+        let everywhere = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, all_port));
+        let held: Vec<i32> = listeners_held().into_iter().filter(|(_, address)| *address == everywhere).map(|(fd, _)| fd).collect();
+        assert_eq!(held.len(), 1, "the host's listener on every interface, one descriptor here: {held:?}");
+    }
 
     // Relay only: nothing listens, and the computer that came in directly is closed.
     rig.host.listen_for_test(plan(Listen::Relay, false), interfaces.clone()).unwrap();
@@ -564,6 +624,15 @@ async fn the_listen_choice_decides_what_is_bound_and_relay_only_opens_no_port() 
     assert!(status.listening.is_none(), "no listener: {:?}", status.listening);
     let listen = status.listen.unwrap();
     assert_eq!((listen.choice, listen.addresses.len()), (Listen::Relay, 0), "{listen:?}");
+    // The port is closed: this process holds no listener on its number, on
+    // any address and under any descriptor. Not a connection to the number,
+    // which asks every program on the computer; under nextest another test's
+    // process can be given it the moment it is free (PRO-513). `Listening::stop` aborts the accept
+    // task, and the runtime drops the listener when it next runs that task,
+    // so the close is waited for, not assumed at once.
+    #[cfg(unix)]
+    eventually("the port is closed", || listeners_held().iter().all(|(_, address)| address.port() != all_port).then_some(())).await;
+    #[cfg(not(unix))]
     assert!(std::net::TcpStream::connect(("127.0.0.1", all_port)).is_err(), "the port is closed");
     assert!(rig.host.direct_endpoints().is_empty(), "no address is advertised, not even loopback");
     // No listener and no relay registration: a code no computer could use is not made.
@@ -573,13 +642,30 @@ async fn the_listen_choice_decides_what_is_bound_and_relay_only_opens_no_port() 
     assert!(rig.host.status().code.is_none());
 
     // Local network: private and Tailscale addresses only.
+    #[cfg(unix)]
+    let before = listeners_held();
     rig.host.listen_for_test(plan(Listen::Lan, false), interfaces.clone()).unwrap();
     let wanted = crate::listen::bind_addresses(Listen::Lan, &interfaces);
     let bound: Vec<std::net::SocketAddr> = rig.host.status().listen.unwrap().addresses.iter().map(|address| address.parse().unwrap()).collect();
     assert_eq!(bound.iter().map(|address| address.ip()).collect::<Vec<_>>(), wanted.iter().map(|ip| std::net::IpAddr::V4(*ip)).collect::<Vec<_>>());
     assert!(bound.iter().all(|address| !address.ip().is_loopback() && !address.ip().is_unspecified() && !crate::listen::is_public(address.ip())), "{bound:?}");
-    if let Some(port) = bound.first().map(std::net::SocketAddr::port) {
-        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err(), "loopback is not a local-network address");
+    // Loopback is not a local-network address: what the switch opened here on
+    // those ports is the bound addresses and nothing else, loopback and every
+    // interface included. Read from this process's descriptors, as above: each
+    // listener was given its port on its own address, so another program, or
+    // another test's process, may hold 127.0.0.1 on the same number (PRO-513).
+    #[cfg(unix)]
+    {
+        let ports: Vec<u16> = bound.iter().map(std::net::SocketAddr::port).collect();
+        let mut opened: Vec<std::net::SocketAddr> = listeners_held().into_iter().filter(|held| !before.contains(held)).map(|(_, address)| address).filter(|address| ports.contains(&address.port())).collect();
+        let mut expected = bound.clone();
+        opened.sort();
+        expected.sort();
+        assert_eq!(opened, expected, "loopback is not a local-network address");
+    }
+    if !bound.is_empty() {
+        #[cfg(not(unix))]
+        assert!(std::net::TcpStream::connect(("127.0.0.1", bound[0].port())).is_err(), "loopback is not a local-network address");
         let endpoints = rig.host.direct_endpoints();
         assert!(endpoints.iter().all(|endpoint| !endpoint.contains("127.0.0.1")) && !endpoints.is_empty(), "{endpoints:?}");
     }

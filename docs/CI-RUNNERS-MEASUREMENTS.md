@@ -581,3 +581,56 @@ at 30 min 16 s) were the slow mirror. `macos-native` was cancelled at
 `macos-native` on that head (a pull request that selects it): Clippy took
 21 min 39 s for its two steps and the library's test build 32 min 54 s
 (07:31:38 to 08:04:32); the job was still running when this was written.
+
+## Step 2: the WebKit layout checks become required Linux jobs (2026-11-24)
+
+The Linux trial workflow (`webkit-linux.yml`, not required) on draft pull
+request #1530, whose two WebKit pieces fixed the checks that failed only on
+Linux. Times are each job's start to its end, from `gh run view`.
+
+| Run | Head | Part 1 | Part 2 | Part 3 | Part 4 |
+| --- | --- | --- | --- | --- | --- |
+| 45361220945 (pull request) | `0350c08a0` | 8 min 3 s, failed | 5 min 28 s, failed | 5 min 1 s, failed | 4 min 13 s, failed |
+| 45362750128 (by hand, next) | `0350c08a0` | 7 min 11 s, failed | 5 min 30 s, ok | 4 min 55 s, failed | 6 min 59 s, failed |
+| 45372204285 (pull request) | `880f19ca4` | 8 min 36 s, ok | 6 min 33 s, ok | 4 min 14 s, failed | 6 min 42 s, failed |
+| 45373848579 (by hand, next) | `880f19ca4` | 9 min 23 s, ok | 5 min 18 s, failed | 5 min 6 s, failed | 5 min 37 s, failed |
+
+The macOS `webkit-layout` job on the same runs: 33 min 28 s (job
+138331629037, CI run 45361221006) and 35 min 42 s (CI run 45372204348), each
+ending "126 of 129 checks passed".
+
+Every check the two pieces changed passed in both trial runs of its piece and
+on macOS (the pieces' reports: sidebar-order, sidebar-extras, file-tab,
+editor-toolbar, review-threads; command-palette, quick-open, chat-controls,
+dictation-edits, dialog-lists, machine-session, cloud-setup). What each
+failed part ended with, from its log (`FAILED:` and "N of M checks passed"):
+
+| Run | Part 1 | Part 2 | Part 3 | Part 4 |
+| --- | --- | --- | --- | --- |
+| 45361220945 | 31 of 32: `command-palette` | 29 of 30: `agent-dashboard:3` | 29 of 31: `repository-scripts`, `machine-session` | 26 of 31: `chat-controls`, `dictation-edits`, `quick-open`, `composer-controls`, `review-tab` |
+| 45362750128 | 31 of 32: `command-palette` | ok | 29 of 31: `repository-scripts`, `machine-session` | 26 of 31: `chat-controls`, `dictation-edits`, `quick-open`, `composer-controls`, `review-tab` |
+| 45372204285 | ok | ok | 30 of 31: `repository-scripts` | 28 of 31: `organization-roster`, `composer-controls`, `review-tab` |
+| 45373848579 | ok | 28 of 30: `agent-dashboard:3`, `sparse-checkout` | 30 of 31: `repository-scripts` | 29 of 31: `composer-controls`, `review-tab` |
+
+The parts ran 124 checks between them (30, 31, 31 and 32), the five then in
+`macOnly` left out. At `0350c08a0` the input piece's checks were not yet fixed:
+`command-palette`, `quick-open`, `chat-controls`, `dictation-edits` and
+`machine-session` failed there and passed at `880f19ca4`. The rest were not
+the pieces' checks:
+
+| Check | Where | Cause, as far as known |
+| --- | --- | --- |
+| `repository-scripts`, `review-tab`, `composer-controls` | every run above, and macOS | main's own at `45280a95` (run 45358840151, job 138324967922): #1529 merged before its CI had a result |
+| `agent-dashboard:3` | 45361220945 part 2, 45373848579 part 2 | not read here |
+| `organization-roster` | 45372204285 part 4 | not read here |
+| `sparse-checkout` | 45373848579 part 2: the "Check out only some folders" dialog's `src/` checkbox was not visible in time (sparse-checkout.mjs:141) | not read further here |
+
+So no run above had all four parts green, and the gate below is not yet shown
+green on Linux in CI.
+
+What changed in `ci.yml`: the four parts became `webkit-layout-linux`, counted
+in `check`; `webkit-layout` became a Linux job that passes only when every part
+did (its limit 10 minutes, down from 50); the macOS job became
+`webkit-mac-only`, six checks, run on main, nightly, by hand and on a pull
+request the selector's new `mac-webkit` answer picks. `run-all.mjs --list`
+lists 130 checks: 124 run in the Linux parts, 6 on macOS.

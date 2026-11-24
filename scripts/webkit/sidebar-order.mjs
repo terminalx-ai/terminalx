@@ -28,6 +28,15 @@ const toggle = async (page) => {
   await page.getByTestId("sidebar-filter").click();
   await page.getByRole("menuitemcheckbox", { name: "Custom order", exact: true }).click();
 };
+// Space on a handle picks it up, and the arrows and Space that follow go to dnd-kit's KeyboardSensor, which adds its
+// keydown listener in a setTimeout of its own (KeyboardSensor.attach, @dnd-kit/core 6.3.1 core.esm.js:1158). A key
+// sent before that timer has run reaches no sensor and is lost: the move is never made, the drop lands where the row
+// started. So after the pickup is announced this waits for one timer set now: timers of the same delay run in the
+// order they were set (HTML's timer initialisation steps), so when it runs the sensor's has run and is listening.
+const pickedUp = async (page, announcement) => {
+  await page.getByRole("status").filter({ hasText: announcement }).waitFor();
+  await page.evaluate(() => new Promise((resolve) => setTimeout(resolve)));
+};
 const projectNames = (page) => page.locator('[data-testid="conversation-list"] [role="group"][aria-label^="local-"]').evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")));
 const rows = (page, name) => page.getByRole("group", { name, exact: true }).locator("[data-row-sessions]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-row-sessions")));
 try {
@@ -63,13 +72,16 @@ try {
   const handle = page.getByRole("button", { name: "Reorder local-1", exact: true });
   await handle.focus();
   await page.keyboard.press("Space");
-  await page.getByRole("status").filter({ hasText: "Picked up local-1. Position 1 of 2." }).waitFor();
+  await pickedUp(page, "Picked up local-1. Position 1 of 2.");
   await page.keyboard.press("ArrowDown");
   await page.getByRole("status").filter({ hasText: "Moved local-1. Position 2 of 2." }).waitFor();
   await page.keyboard.press("Escape");
   assert.deepEqual(await projectNames(page), ["local-1", "local-0"]);
+  // Picked up again after the cancel: the same announcements, and this time Space drops it.
   await page.keyboard.press("Space");
+  await pickedUp(page, "Picked up local-1. Position 1 of 2.");
   await page.keyboard.press("ArrowDown");
+  await page.getByRole("status").filter({ hasText: "Moved local-1. Position 2 of 2." }).waitFor();
   await page.keyboard.press("Space");
   await page.waitForFunction(() => window.__PW_STUB__.answers.sidebar_order.projects[0] === "/repos/p0");
   assert.deepEqual(await projectNames(page), ["local-0", "local-1"]);
@@ -127,7 +139,7 @@ try {
   const statusHandle = backlog.getByRole("button", { name: "Reorder Chat 0", exact: true });
   await statusHandle.focus();
   await status.keyboard.press("Space");
-  await status.getByRole("status").filter({ hasText: "Picked up Chat 0. Position 2 of 3." }).waitFor();
+  await pickedUp(status, "Picked up Chat 0. Position 2 of 3.");
   await status.keyboard.press("ArrowDown");
   await status.keyboard.press("ArrowDown"); // Cannot move into the following Done group.
   await status.keyboard.press("Space");

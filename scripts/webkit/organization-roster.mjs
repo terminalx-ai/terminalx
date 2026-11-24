@@ -136,10 +136,14 @@ try {
       assert.notEqual(await profile.getByTestId("profile-presence").evaluate(node => getComputedStyle(node).backgroundColor), "rgba(0, 0, 0, 0)", "presence slot has a visible theme color");
       return { profile, avatar };
     };
+    // Radix gives focus back from a timer after the profile unmounts, so it is read once that has had its chance to
+    // run: until the avatar holds focus, at most 5 s (on a busy Linux runner the timer had not run when the profile
+    // was gone). The assertion is the same.
     const closeProfile = async ({ profile, avatar }) => {
       await page.keyboard.press("Escape");
       await profile.waitFor({ state: "detached" });
-      assert.ok(await avatar.evaluate(node => node === document.activeElement), "Escape restores avatar focus");
+      const restored = await page.waitForFunction((node) => node === document.activeElement, await avatar.elementHandle(), { timeout: 5_000 }).then(() => true, () => false);
+      assert.ok(restored, "Escape restores avatar focus");
     };
 
     // Start with Share so no other consumer can hide a duplicate read.
@@ -147,6 +151,9 @@ try {
       await page.getByRole("button", { name: "Share workspace", exact: true }).click();
       const share = page.getByRole("dialog", { name: "Share Team workspace", exact: true });
       await share.waitFor();
+      // The dialog moves focus into itself from an effect, which can run after it is drawn. Focus given to the avatar
+      // before that is taken back, and Enter goes elsewhere (a busy Linux runner: the profile never opened).
+      await page.waitForFunction((node) => node.contains(document.activeElement), await share.elementHandle());
       const opened = await openProfile(share);
       if (n === 0) await shot("share-profile");
       await closeProfile(opened);
