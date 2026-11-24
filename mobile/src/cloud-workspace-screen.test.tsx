@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CloudWorkspaceScreen from "../app/cloud/[workspaceId]";
 import CloudSharesScreen from "../app/cloud/shares";
+import DeleteWorkspaceScreen from "../app/cloud/delete";
 import { CloudApiError } from "./cloud/api";
 import { ResumeUnconfirmed } from "./cloud/resume";
 
@@ -13,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   catalog: null as any,
   listProps: {} as any,
   push: vi.fn(),
+  back: vi.fn(),
+  dismissTo: vi.fn(),
   alert: vi.fn(),
   focus: [] as (() => void | (() => void))[],
 }));
@@ -20,7 +23,7 @@ vi.mock("expo-router", () => ({
   // The header as the stack draws it: its title, or the screen's own title view, and what is on its right.
   Stack: { Screen: ({ options }: { options: { title: string; headerTitle?: () => ReactNode; headerRight?: () => ReactNode } }) => <div data-testid="screen-header"><div data-testid="screen-title">{options.title}</div>{options.headerTitle ? <div data-testid="header-title">{options.headerTitle()}</div> : null}{options.headerRight ? <div data-testid="header-right">{options.headerRight()}</div> : null}</div> },
   useLocalSearchParams: () => mocks.params,
-  useRouter: () => ({ push: mocks.push }),
+  useRouter: () => ({ push: mocks.push, back: mocks.back, dismissTo: mocks.dismissTo }),
   useFocusEffect: (run: () => void | (() => void)) => { mocks.focus.push(run); },
 }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
@@ -34,6 +37,7 @@ vi.mock("react-native", () => {
     View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box, RefreshControl: () => null, Keyboard: { addListener: () => ({ remove: () => undefined }), isVisible: () => false, dismiss: () => undefined },
     Animated: { View: Box, Value: class { constructor(public value: number) {} }, timing: () => ({ start: () => undefined, stop: () => undefined }) },
     Alert: { alert: mocks.alert },
+    AppState: { currentState: "active", addEventListener: () => ({ remove: () => undefined }) },
     Switch: ({ value, onValueChange, disabled, accessibilityLabel }: any) => <input type="checkbox" aria-label={accessibilityLabel} checked={value} disabled={disabled} onChange={(event) => onValueChange(event.currentTarget.checked)} />,
     Platform: { OS: "web", select: ({ default: fallback }: any) => fallback },
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
@@ -43,6 +47,7 @@ vi.mock("react-native", () => {
     SectionList: ({ sections, renderItem, renderSectionHeader, renderSectionFooter, ListHeaderComponent, ListEmptyComponent, ListFooterComponent, contentContainerStyle }: any) => (mocks.listProps = { sections, contentContainerStyle }) && <div>{ListHeaderComponent}{sections.length ? sections.map((section: any) => <div key={section.key} data-testid="cloud-section">{renderSectionHeader({ section })}{section.data.map((item: any, index: number) => <div key={item.workspace.id}>{renderItem({ item, index, section })}</div>)}{renderSectionFooter?.({ section })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>,
   };
 });
+vi.mock("@mobile/ui/Spinner", () => ({ Spinner: () => null }));
 vi.mock("@mobile/ui/primitives", () => ({
   Button: ({ label, onPress, disabled, accessibilityLabel }: any) => <button disabled={disabled} aria-label={accessibilityLabel} onClick={onPress}>{label}</button>,
   Card: ({ children }: any) => <div>{children}</div>,
@@ -58,6 +63,8 @@ const event = (seq: number, payload: Record<string, unknown>) => ({ id: `e${seq}
 const item = (id: string, fields: Record<string, unknown> = {}) => ({ workspace: { id, orgId: "org-1", name: id, provider: "box", state: "ready", you: { role: "driver", canApprove: false }, ...fields }, latestOperation: null });
 
 const NAMES: Record<string, string> = { "u-alice": "Alice", "u-bob": "Bob" };
+/** A provider as the server describes it (placeholder words, as the boards' example). */
+const BOAT = { id: "box", displayName: "Boat", availability: "available", canManage: false, descriptor: { id: "box", label: "Boat", icon: "box", order: 1, description: "", billing: "Per second, billed by Boat.", billedByProvider: true, listed: true, credentialSource: "organization", credentialFields: [], capabilities: { pauseResumeWithMemory: true, stopStart: true, snapshots: true, exec: true, computeRunsUntilStopped: true }, offering: { locations: "", sources: "", machineClasses: "", pricingSource: "", suspendedBilling: "" }, allowedIdleSuspendMinutes: [], allowedRetentionDays: [] } };
 
 function world(options: { state?: string | null; role?: string | null; canApprove?: boolean; hasKey?: boolean; events?: unknown[]; outbox?: unknown[]; connection?: string; noKey?: boolean; continuous?: boolean; tabs?: number; access?: string; problem?: unknown; collab?: Record<string, unknown>; interrupts?: boolean } = {}) {
   const state = options.state === undefined ? "ready" : options.state;
@@ -105,7 +112,15 @@ function world(options: { state?: string | null; role?: string | null; canApprov
     retain: vi.fn(() => release),
     opened: () => session,
     people: { subscribe: () => () => undefined, getVersion: () => 1, name: (userId: string | null | undefined) => NAMES[userId ?? ""] ?? "Someone", roster: vi.fn(async () => [{ userId: "u-me", email: "me@example.com", role: "admin" }, { userId: "u-alice", email: "alice@example.com", displayName: "Alice", role: "member" }, { userId: "u-bob", email: "bob@example.com", displayName: "Bob", role: "member" }]), remember: vi.fn() },
-    api: { shares: vi.fn(), putShare: vi.fn(async () => ({})), revokeShare: vi.fn(async () => undefined) },
+    fresh: vi.fn(async () => true),
+    api: {
+      shares: vi.fn(), putShare: vi.fn(async () => ({})), revokeShare: vi.fn(async () => undefined),
+      providers: vi.fn(async () => [BOAT]),
+      operation: vi.fn(async () => { throw new CloudApiError("cloud_workspace_operation_not_found", 404); }),
+      cancelOperation: vi.fn(async () => { throw new CloudApiError("cloud_workspace_operation_not_found", 404); }),
+      suspend: vi.fn(async () => { throw new CloudApiError("cloud_workspace_unavailable", 503); }),
+      deleteWorkspace: vi.fn(async () => { throw new CloudApiError("cloud_workspace_unavailable", 503); }),
+    },
   };
   return { session, release, snapshot };
 }
@@ -128,6 +143,8 @@ beforeEach(() => {
   mocks.params = { workspaceId: `ws-${++counter}`, orgId: "org-1" };
   mocks.app = { session: { user: { userId: "u-me" } }, signIn: vi.fn() };
   mocks.push.mockClear();
+  mocks.back.mockClear();
+  mocks.dismissTo.mockClear();
   mocks.alert.mockClear();
   mocks.focus.length = 0;
   container = document.createElement("div");
@@ -210,7 +227,7 @@ describe("a cloud workspace screen", () => {
     const { session } = world({ state: "suspended", role: "manager" });
     await show(<CloudWorkspaceScreen />);
     // The state and the role are one line of words under the title; nothing in it is a button.
-    expect(stateLine().textContent).toBe("Stopped · You are a manager");
+    expect(stateLine().textContent).toBe("Stopped · Manager");
     expect(container.querySelector('[data-testid="header-title"] button')).toBeNull();
     expect(text()).toContain("run the tests");
     expect(text()).not.toMatch(/Nothing saved|Showing the saved conversation/);
@@ -235,7 +252,7 @@ describe("a cloud workspace screen", () => {
   it("says no conversation was had in a stopped workspace with nothing saved, with the same Start, and nothing that contradicts it (#988)", async () => {
     world({ state: "suspended", role: "manager", tabs: 0 });
     await show(<CloudWorkspaceScreen />);
-    expect(stateLine().textContent).toBe("Stopped · You are a manager");
+    expect(stateLine().textContent).toBe("Stopped · Manager");
     expect(text()).toContain("No conversation yet Nothing was said in this workspace before it stopped.");
     expect(text()).not.toMatch(/saved conversation|Nothing saved/);
     expect(startBar().textContent).toBe("This workspace is stoppedStart it to send a message.Start");
@@ -282,7 +299,8 @@ describe("a cloud workspace screen", () => {
     expect(session.send).toHaveBeenCalledWith("t1", "continue");
   });
 
-  it.each([null, { state: "failed", action: "delete", errorCode: "cloud_provider_unavailable" }])("uses desktop recovery for other attention causes: %s", async (operation) => {
+  // A failed delete is 25.06's own page now (see "a failed delete" below).
+  it.each([null, { state: "failed", action: "archive", errorCode: "cloud_provider_unavailable" }])("uses desktop recovery for other attention causes: %s", async (operation) => {
     world({ state: "attention-required", role: "manager" });
     mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = operation;
     await show(<CloudWorkspaceScreen />);
@@ -295,7 +313,7 @@ describe("a cloud workspace screen", () => {
   it("shows a running workspace's composer, with or without a conversation, and no Start (#988)", async () => {
     world({ role: "manager" });
     await show(<CloudWorkspaceScreen />);
-    expect(stateLine().textContent).toBe("Live · You are a manager");
+    expect(stateLine().textContent).toBe("Live · Manager");
     expect(text()).toContain("run the tests");
     expect(container.querySelector('[data-testid="start-bar"]')).toBeNull();
     expect(container.querySelector("input")!.placeholder).toBe("Message the agent");
@@ -363,7 +381,7 @@ describe("a cloud workspace screen", () => {
     // The list says it is starting: the bar says so, and the composer is not back yet.
     world({ state: "resuming", role: "manager", connection: "waitingForRuntime" });
     await show(<CloudWorkspaceScreen />);
-    expect(stateLine().textContent).toBe("Starting… · You are a manager");
+    expect(stateLine().textContent).toBe("Starting… · Manager");
     expect(startBar().textContent).toBe("Starting the workspace…The composer appears when it is running.Starting…");
     expect(button("Starting…").disabled).toBe(true);
     expect(container.querySelector("input")).toBeNull();
@@ -799,7 +817,8 @@ describe("a shared cloud workspace on the phone", () => {
     await show(<CloudWorkspaceScreen />);
     expect(mocks.catalog.retain).toHaveBeenCalledTimes(1);
     // In front: watching. Another screen pushed over it ends the watch; the workspace stays open.
-    const leave = mocks.focus.at(-1)!();
+    // (The screen's own focus effect is its first; the reads under it register theirs after.)
+    const leave = mocks.focus[0]!();
     expect(mocks.catalog.watch).toHaveBeenCalledTimes(1);
     expect(leave).toBe(mocks.catalog.watch.mock.results[0].value);
     expect(release).not.toHaveBeenCalled();
@@ -963,5 +982,454 @@ describe("the sharing screen", () => {
     mocks.catalog.api.shares.mockResolvedValue({ shares: [], you: { role: "viewer", canApprove: false, canManageShares: false } });
     await click("Try again");
     expect(text()).toContain("This workspace is not shared with anyone yet.");
+  });
+});
+
+// ── Launch progress, Stop and Delete (25.05 rows 5 and 6, 25.06; PRO-530) ──
+
+/** An operation as the lifecycle routes answer it (placeholder values). */
+const operation = (fields: Record<string, unknown> = {}) => ({ id: "op-1", workspaceId: mocks.params.workspaceId, type: "create", state: "running", stage: "queued", cancelable: true, createdAt: 1, updatedAt: 2, ...fields });
+const lifecycle = (op: Record<string, unknown>, workspace: Record<string, unknown> = {}) => ({ workspace: { ...item(mocks.params.workspaceId, { name: "fix-login", state: "provisioning", you: { role: "manager", canApprove: true } }).workspace, ...workspace }, operation: op });
+const listedItem = () => mocks.catalog.getSnapshot().organizations[0].workspaces[0];
+const lastAlert = () => mocks.alert.mock.calls.at(-1) as [string, string | undefined, { text: string; style?: string; onPress?: () => void }[]];
+const pressInAlert = async (label: string) => { await act(async () => { lastAlert()[2].find((entry) => entry.text === label)!.onPress?.(); }); };
+const stage = (index: number) => container.querySelector(`[data-testid="operation-stage-${index}"]`)!.getAttribute("aria-label");
+/** Shows the page as everything registered for focus would on a real phone: in front, and active. */
+const focusAll = async () => { await act(async () => { for (const run of [...mocks.focus]) run(); }); };
+
+/** A workspace whose latest operation is its launch, as the list and the operation route answer it. */
+function launching(op: Record<string, unknown>, workspace: Record<string, unknown> = {}, role = "manager") {
+  const made = world({ state: (workspace.state as string | undefined) ?? "provisioning", role, connection: "waitingForRuntime" });
+  Object.assign(listedItem().workspace, { you: { role, canApprove: true }, ...workspace });
+  listedItem().latestOperation = { id: op.id, state: op.state, action: null, type: "create" };
+  mocks.catalog.api.operation.mockImplementation(async () => lifecycle(op, { you: { role, canApprove: true }, ...workspace }));
+  return made;
+}
+
+describe("a launch on the workspace page (25.05)", () => {
+  it("Queued: the stages from the start, Cancel launch, and that the person may leave", async () => {
+    launching(operation({ state: "queued", stage: "queued" }));
+    await show(<CloudWorkspaceScreen />);
+    expect(stateLine().textContent).toBe("Starting · You are a manager");
+    expect(text()).toContain("Launching…");
+    expect(stage(0)).toBe("Queued, in progress");
+    expect(stage(1)).toBe("Checking the provider, not started");
+    expect(text()).toContain("You can leave this page. The launch carries on, and the workspace shows in the Cloud tab.");
+    expect(button("Cancel launch").disabled).toBe(false);
+    expect(mocks.catalog.api.operation).toHaveBeenCalledWith("org-1", "op-1");
+    // The launch page, not the conversation or a composer.
+    expect(container.querySelector('input[type="text"]')).toBeNull();
+  });
+
+  it("Creating the machine: the stages passed are ticked", async () => {
+    launching(operation({ stage: "creating-machine" }));
+    await show(<CloudWorkspaceScreen />);
+    expect(stage(1)).toBe("Checking the provider, done");
+    expect(stage(2)).toBe("Creating the machine, in progress");
+    expect(button("Cancel launch").disabled).toBe(false);
+  });
+
+  it("Installing the runtime: the operation's event under its stage, and Cancel off once it can no longer be canceled", async () => {
+    launching(operation({ stage: "bootstrapping", cancelable: false, events: [{ code: "runtime-installation-started", occurredAt: 5 }, { code: "repository-cloning", occurredAt: 6 }] }));
+    await show(<CloudWorkspaceScreen />);
+    expect(stage(3)).toBe("Installing the runtime, in progress: Cloning the repository");
+    expect(text()).toContain("It can no longer be canceled. Once it is running you can stop or delete it.");
+    expect(button("Cancel launch").disabled).toBe(true);
+  });
+
+  it("Running: asks every 3 seconds only while shown, then says it is running, and opens the workspace page as it is", async () => {
+    vi.useFakeTimers();
+    try {
+      launching(operation({ stage: "connecting-relay", cancelable: false }));
+      await show(<CloudWorkspaceScreen />);
+      expect(mocks.catalog.api.operation).toHaveBeenCalledTimes(1);
+      // Not in front yet: nothing is asked.
+      await act(async () => { await vi.advanceTimersByTimeAsync(9_000); });
+      expect(mocks.catalog.api.operation).toHaveBeenCalledTimes(1);
+      await focusAll();
+      // Its first focus is not a coming back: the read on opening is not asked again.
+      expect(mocks.catalog.api.operation).toHaveBeenCalledTimes(1);
+      mocks.catalog.api.operation.mockImplementation(async () => lifecycle(operation({ state: "succeeded", stage: "ready", cancelable: false }), { state: "ready" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+      expect(text()).toContain("fix-login is running");
+      expect(stateLine().textContent).toBe("Live · You are a manager");
+      expect(stage(5)).toBe("Ready, done");
+      expect(text()).toContain("Opening it in a moment…");
+      expect(button("Open workspace").disabled).toBe(false);
+      // Ended: the list is read again, and nothing more is asked.
+      expect(mocks.catalog.refresh).toHaveBeenCalled();
+      const asked = mocks.catalog.api.operation.mock.calls.length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+      expect(mocks.catalog.api.operation.mock.calls.length).toBe(asked);
+      // In a moment it opens by itself: today's workspace page, and no way to make an agent tab.
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(text()).not.toContain("fix-login is running");
+      expect(text()).toContain("run the tests");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("asks at once on coming back into view while it runs, and not while it is out of view", async () => {
+    vi.useFakeTimers();
+    try {
+      launching(operation({ stage: "creating-machine" }));
+      await show(<CloudWorkspaceScreen />);
+      let leave: (void | (() => void))[] = [];
+      await act(async () => { leave = [...mocks.focus].map((run) => run()); });
+      expect(mocks.catalog.api.operation).toHaveBeenCalledTimes(1);
+      await act(async () => { for (const blur of leave) if (blur) blur(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(9_000); });
+      expect(mocks.catalog.api.operation).toHaveBeenCalledTimes(1);
+      await focusAll();
+      expect(mocks.catalog.api.operation).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Open workspace opens the workspace page at once", async () => {
+    vi.useFakeTimers();
+    try {
+      launching(operation({ stage: "connecting-relay", cancelable: false }));
+      await show(<CloudWorkspaceScreen />);
+      await focusAll();
+      mocks.catalog.api.operation.mockImplementation(async () => lifecycle(operation({ state: "succeeded", stage: "ready", cancelable: false }), { state: "ready" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+      await click("Open workspace");
+      expect(text()).toContain("run the tests");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Cancel asks first, in the owner's words with the provider's name, and only its Cancel launch cancels", async () => {
+    launching(operation({ stage: "creating-machine" }));
+    mocks.catalog.api.cancelOperation.mockImplementation(async () => lifecycle(operation({ state: "cancel-requested", stage: "cleanup", cancelable: false })));
+    await show(<CloudWorkspaceScreen />);
+    await click("Cancel launch");
+    expect(lastAlert()[0]).toBe("Cancel this launch?");
+    expect(lastAlert()[1]).toBe("The machine being created is removed. Boat may bill for the time it existed.");
+    expect(lastAlert()[2].map((entry) => entry.text)).toEqual(["Keep launching", "Cancel launch"]);
+    expect(mocks.catalog.api.cancelOperation).not.toHaveBeenCalled();
+    await pressInAlert("Keep launching");
+    expect(mocks.catalog.api.cancelOperation).not.toHaveBeenCalled();
+    await click("Cancel launch");
+    await pressInAlert("Cancel launch");
+    expect(mocks.catalog.api.cancelOperation).toHaveBeenCalledWith("org-1", "op-1");
+  });
+
+  it("Canceling: cleaning up under the stage it had reached, and Cancel locked", async () => {
+    launching(operation({ state: "cancel-requested", stage: "cleanup", cancelable: false, events: [{ code: "provider-preflight-started", occurredAt: 3 }, { code: "machine-allocation-started", occurredAt: 4 }, { code: "provider-cleanup-started", occurredAt: 5 }] }));
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Canceling…");
+    expect(stage(2)).toBe("Creating the machine, in progress: Cleaning up");
+    expect(text()).toContain("Removing what was created so far.");
+    expect(button("Cancel launch").disabled).toBe(true);
+  });
+
+  it("Canceled: what was removed, from the cleanup report, with Launch again and Back to Cloud", async () => {
+    launching(operation({ state: "canceled", stage: "cleanup", cancelable: false, events: [{ code: "machine-allocation-started", occurredAt: 4 }], cleanup: { complete: true, items: [{ kind: "provider-compute", state: "removed" }] } }), { state: "destroyed" });
+    await show(<CloudWorkspaceScreen />);
+    expect(stateLine().textContent).toBe("Unavailable");
+    expect(text()).toContain("Launch canceled");
+    expect(stage(2)).toBe("Creating the machine, failed: Canceled");
+    expect(text()).toContain("The machine was removed. Launching again asks for a new price.");
+    await click("Launch again");
+    expect(mocks.push).toHaveBeenCalledWith("/cloud/launch?orgId=org-1");
+    await click("Back to Cloud");
+    expect(mocks.dismissTo).toHaveBeenCalledWith("/cloud");
+  });
+
+  it("Failed part-way, runtime: the machine exists and was stopped, Retry setup asks first, Delete opens its page", async () => {
+    launching(operation({ state: "failed", stage: "bootstrapping", cancelable: false, errorCode: "cloud_workspace_runtime_bootstrap_failed", reason: "attention-stopped" }), { state: "attention-required" });
+    await show(<CloudWorkspaceScreen />);
+    expect(stateLine().textContent).toBe("Needs attention · You are a manager");
+    expect(text()).toContain("The launch failed");
+    expect(stage(3)).toBe("Installing the runtime, failed: Installing or starting the runtime on the machine failed.");
+    expect(container.querySelector('[data-testid="launch-note"]')!.getAttribute("role")).toBe("alert");
+    expect(text()).toContain("The machine exists and was stopped to avoid charges after a problem. Retry setup tries again on the same machine; delete it if you would rather start over.");
+    await click("Retry setup");
+    expect(mocks.catalog.start).not.toHaveBeenCalled();
+    await pressInAlert("Retry setup");
+    expect(mocks.catalog.start).toHaveBeenCalledWith("org-1", mocks.params.workspaceId);
+    await click("Delete workspace…");
+    expect(mocks.push).toHaveBeenCalledWith(`/cloud/delete?orgId=org-1&workspaceId=${mocks.params.workspaceId}`);
+  });
+
+  it("Failed at the provider, key: no machine was created, and Fix the provider key goes to the provider", async () => {
+    launching(operation({ state: "failed", stage: "preflight", cancelable: false, errorCode: "cloud_provider_credential_invalid" }), { state: "attention-required" });
+    await show(<CloudWorkspaceScreen />);
+    expect(stage(1)).toBe("Checking the provider, failed: The provider rejected the API key.");
+    expect(text()).toContain("No machine was created. Connect a working key, then launch again.");
+    expect(container.querySelector('[data-testid="launch-note"]')!.getAttribute("role")).toBeNull();
+    await click("Fix the provider key");
+    expect(mocks.push).toHaveBeenCalledWith("/cloud/compute/box?orgId=org-1");
+    expect(button("Delete workspace…").disabled).toBe(false);
+  });
+
+  it("Took too long: delete and launch again, and check the provider's dashboard", async () => {
+    launching(operation({ state: "failed", stage: "creating-machine", cancelable: false, errorCode: "cloud_workspace_provisioning_timeout" }), { state: "attention-required" });
+    await show(<CloudWorkspaceScreen />);
+    expect(stage(2)).toBe("Creating the machine, failed: The workspace’s machine took too long to start.");
+    expect(text()).toContain("Delete it and launch a new one. Check Boat’s dashboard if a machine is still listed there.");
+    expect(button("Delete workspace…").disabled).toBe(false);
+    await click("Back to Cloud");
+    expect(mocks.dismissTo).toHaveBeenCalledWith("/cloud");
+  });
+
+  it("never shows a failure's code: one the app has no words for reads as the launch not finishing", async () => {
+    launching(operation({ state: "failed", stage: "connecting-relay", cancelable: false, errorCode: "cloud_brand_new_failure" }), { state: "attention-required" });
+    await show(<CloudWorkspaceScreen />);
+    expect(stage(4)).toBe("Connecting to the relay, failed: The launch did not finish.");
+    expect(text()).not.toContain("cloud_brand_new_failure");
+  });
+
+  it("Network lost while it launches: says so, keeps the stages, and Cancel waits for the network", async () => {
+    vi.useFakeTimers();
+    try {
+      launching(operation({ stage: "creating-machine" }));
+      await show(<CloudWorkspaceScreen />);
+      await focusAll();
+      mocks.catalog.api.operation.mockImplementation(async () => { throw new CloudApiError("cloud_workspace_unavailable", null, "network"); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+      expect(stateLine().textContent).toBe("Offline");
+      expect(text()).toContain("Offline. The launch carries on without the phone; this page catches up when it is back online.");
+      expect(stage(2)).toBe("Creating the machine, in progress");
+      expect(button("Cancel launch").disabled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives someone who may not manage it no Cancel and no Delete", async () => {
+    launching(operation({ state: "failed", stage: "creating-machine", cancelable: false, errorCode: "cloud_workspace_provisioning_timeout" }), { state: "attention-required" }, "driver");
+    await show(<CloudWorkspaceScreen />);
+    expect(() => button("Delete workspace…")).toThrow();
+    expect(button("Back to Cloud").disabled).toBe(false);
+  });
+});
+
+/** The sheet the ••• opens: the system's alert in this test, with its buttons. */
+const sheet = async () => { await click("Workspace actions"); return lastAlert(); };
+
+describe("stopping a workspace from the phone (25.06)", () => {
+  it("gives a manager ••• beside Sharing with Stop workspace and Delete workspace…, and the role in one word", async () => {
+    world({ role: "manager" });
+    listedItem().workspace.you = { role: "manager", canApprove: true };
+    await show(<CloudWorkspaceScreen />);
+    expect(stateLine().textContent).toBe("Live · Manager");
+    expect(button("Sharing")).toBeTruthy();
+    const [title, , options] = await sheet();
+    expect(title).toBe("fix-login");
+    expect(options.map((entry) => entry.text)).toEqual(["Stop workspace", "Delete workspace…", "Cancel"]);
+    expect(options.find((entry) => entry.text === "Delete workspace…")!.style).toBe("destructive");
+  });
+
+  it("offers Start workspace in the sheet of a stopped one, beside today's Start bar", async () => {
+    world({ state: "suspended", role: "manager" });
+    await show(<CloudWorkspaceScreen />);
+    expect(stateLine().textContent).toBe("Stopped · Manager");
+    expect(startBar().textContent).toContain("This workspace is stopped");
+    const [, , options] = await sheet();
+    expect(options.map((entry) => entry.text)).toEqual(["Start workspace", "Delete workspace…", "Cancel"]);
+    await pressInAlert("Start workspace");
+    expect(lastAlert()[0]).toBe("Start this workspace?");
+    await pressInAlert("Start");
+    expect(mocks.catalog.start).toHaveBeenCalledWith("org-1", mocks.params.workspaceId);
+  });
+
+  it("gives someone who may not manage it no ••• and keeps today's phrase", async () => {
+    world({ role: "driver" });
+    await show(<CloudWorkspaceScreen />);
+    expect(stateLine().textContent).toBe("Live · You can send");
+    expect(() => button("Workspace actions")).toThrow();
+  });
+
+  it("Stop asks first: what it does, then the provider's own billing line; Cancel stops nothing", async () => {
+    const { snapshot } = world({ role: "manager" });
+    snapshot.tabs[0].status = "idle";
+    await show(<CloudWorkspaceScreen />);
+    await sheet();
+    await pressInAlert("Stop workspace");
+    expect(lastAlert()[0]).toBe("Stop this workspace?");
+    expect(lastAlert()[1]).toBe("Its agents stop until it is started again. Boat: per second, billed by Boat.");
+    expect(lastAlert()[2].map((entry) => entry.text)).toEqual(["Cancel", "Stop"]);
+    await pressInAlert("Cancel");
+    expect(mocks.catalog.api.suspend).not.toHaveBeenCalled();
+  });
+
+  it("…while an agent is working: names it, and the button says Stop anyway", async () => {
+    world({ role: "manager" });
+    await show(<CloudWorkspaceScreen />);
+    await sheet();
+    await pressInAlert("Stop workspace");
+    expect(lastAlert()[0]).toBe("Stop while an agent is working?");
+    expect(lastAlert()[1]).toBe("Claude Code is in the middle of a turn. Stopping interrupts it; what it has not saved may be lost. Boat: per second, billed by Boat.");
+    expect(lastAlert()[2].map((entry) => entry.text)).toEqual(["Cancel", "Stop anyway"]);
+  });
+
+  it("…while an agent is working, on a provider that warns about its disk: repeats that warning, as the board does", async () => {
+    world({ role: "manager" });
+    mocks.catalog.api.providers.mockImplementation(async () => [{ ...BOAT, descriptor: { ...BOAT.descriptor, description: "Fast-start sandboxes that sleep when idle. Part of the disk resets on resume." } }]);
+    await show(<CloudWorkspaceScreen />);
+    await sheet();
+    await pressInAlert("Stop workspace");
+    expect(lastAlert()[1]).toBe("Claude Code is in the middle of a turn. Stopping interrupts it; what it has not saved may be lost. Boat: part of the disk resets on resume.");
+  });
+
+  it("Stopping: the header line and the bar say so, and the composer is gone", async () => {
+    const { snapshot } = world({ role: "manager" });
+    snapshot.tabs[0].status = "idle";
+    const stopping = lifecycle(operation({ id: "op-stop", action: "suspend", stage: null, cancelable: false }), { state: "ready" });
+    mocks.catalog.api.suspend.mockImplementation(async () => stopping);
+    mocks.catalog.api.operation.mockImplementation(async () => stopping);
+    await show(<CloudWorkspaceScreen />);
+    await sheet();
+    await pressInAlert("Stop workspace");
+    await pressInAlert("Stop");
+    expect(mocks.catalog.api.suspend).toHaveBeenCalledWith("org-1", mocks.params.workspaceId);
+    expect(stateLine().textContent).toBe("Stopping… · Manager");
+    const bar = container.querySelector('[data-testid="stop-bar"]')!;
+    expect(bar.textContent).toContain("Stopping the workspace…");
+    expect(bar.textContent).toContain("Saving the workspace, then suspending the machine.");
+    expect(button("Stopping…").disabled).toBe(true);
+    expect(container.querySelector('input[type="text"]')).toBeNull();
+    // Stop is not offered again while it stops.
+    const [, , options] = await sheet();
+    expect(options.map((entry) => entry.text)).toEqual(["Delete workspace…", "Cancel"]);
+  });
+
+  it("Stopping, as the list says it from elsewhere: the same bar", async () => {
+    world({ state: "suspending", role: "manager", connection: "suspended" });
+    await show(<CloudWorkspaceScreen />);
+    expect(stateLine().textContent).toBe("Stopping… · Manager");
+    expect(container.querySelector('[data-testid="stop-bar"]')!.textContent).toContain("Stopping the workspace…");
+  });
+
+  it("It did not stop: may still be billing, with Retry stop, which asks again", async () => {
+    world({ state: "attention-required", role: "manager", connection: "connected" });
+    listedItem().latestOperation = { id: "op-stop", state: "failed", action: "suspend", errorCode: "cloud_provider_unavailable" };
+    await show(<CloudWorkspaceScreen />);
+    expect(stateLine().textContent).toBe("Needs attention · Manager");
+    expect(text()).toContain("This workspace needs attention.");
+    const bar = container.querySelector('[data-testid="stop-bar"]')!;
+    expect(bar.textContent).toContain("It did not stop");
+    expect(bar.textContent).toContain("The provider could not be reached. It may still be running, and billing.");
+    expect(container.querySelector('input[type="text"]')).toBeNull();
+    await click("Retry stop");
+    expect(lastAlert()[0]).toMatch(/^Stop/);
+    expect(mocks.catalog.api.suspend).not.toHaveBeenCalled();
+  });
+
+  it("Refused, something else is under way: Not right now, in words, and nothing changes", async () => {
+    const { snapshot } = world({ role: "manager" });
+    snapshot.tabs[0].status = "idle";
+    mocks.catalog.api.suspend.mockImplementation(async () => { throw new CloudApiError("cloud_workspace_operation_in_progress", 409); });
+    await show(<CloudWorkspaceScreen />);
+    await sheet();
+    await pressInAlert("Stop workspace");
+    await pressInAlert("Stop");
+    expect(lastAlert()[0]).toBe("Not right now");
+    expect(lastAlert()[1]).toBe("Something else is still under way on this workspace. Try again when it has finished.");
+    expect(lastAlert()[2].map((entry) => entry.text)).toEqual(["OK"]);
+    expect(stateLine().textContent).toBe("Live · Manager");
+    expect(container.querySelector('[data-testid="stop-bar"]')).toBeNull();
+  });
+});
+
+describe("deleting a workspace (25.06)", () => {
+  /** What a screen reader hears for each row of facts (FactRows reads each row whole). */
+  const facts = () => [...container.querySelectorAll("[aria-label]")].map((row) => row.getAttribute("aria-label"));
+
+  it("The confirmation: the console's facts with the provider's name, and Delete permanently off until the switch is on", async () => {
+    world({ role: "manager" });
+    await show(<DeleteWorkspaceScreen />);
+    expect(container.querySelector('[data-testid="screen-title"]')!.textContent).toBe("Delete workspace");
+    expect(text()).toContain("Delete fix-login permanently?");
+    expect(facts()).toEqual(expect.arrayContaining(["Compute: The machine is removed.", "Data: Its disk, snapshots and saved conversations are removed once Boat confirms.", "Charges: Stop once Boat confirms the removal.", "Undo: Not possible."]));
+    expect(text()).toContain("Push or copy out any work you want to keep before deleting.");
+    expect(button("Delete permanently").disabled).toBe(true);
+    await click("Delete permanently");
+    expect(mocks.catalog.api.deleteWorkspace).not.toHaveBeenCalled();
+    await click("Cancel");
+    expect(mocks.back).toHaveBeenCalled();
+  });
+
+  const acknowledge = async () => {
+    const toggle = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    expect(toggle.getAttribute("aria-label")).toBe("I understand this cannot be undone: the machine, its disk and snapshots, and the saved conversations are removed.");
+    await act(async () => { toggle.click(); });
+  };
+
+  it("Acknowledged, then Sending: both buttons lock, and on the server's yes the phone goes back to the Cloud tab", async () => {
+    world({ role: "manager" });
+    let answer!: (value: unknown) => void;
+    mocks.catalog.api.deleteWorkspace.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+    await show(<DeleteWorkspaceScreen />);
+    await acknowledge();
+    expect(button("Delete permanently").disabled).toBe(false);
+    await click("Delete permanently");
+    expect(mocks.catalog.api.deleteWorkspace).toHaveBeenCalledWith("org-1", mocks.params.workspaceId);
+    expect(button("Deleting…").disabled).toBe(true);
+    expect(button("Cancel").disabled).toBe(true);
+    await act(async () => { answer(lifecycle(operation({ action: "delete" }), { state: "deleting" })); });
+    expect(mocks.dismissTo).toHaveBeenCalledWith("/cloud");
+    expect(mocks.catalog.refresh).toHaveBeenCalled();
+  });
+
+  it.each([
+    ["An agent is working", new CloudApiError("cloud_workspace_active_work", 409), "An agent is working here, or is waiting for an answer. Stop it or answer it, then delete."],
+    ["Something else is under way", new CloudApiError("cloud_workspace_operation_in_progress", 409), "Something else is still under way on this workspace. Try again when it has finished."],
+    ["No network", new CloudApiError("cloud_workspace_unavailable", null, "network"), "No connection. Nothing was deleted. Try again when the phone is back online."],
+  ])("%s: the refusal above the buttons, in words, and nothing was deleted", async (_name, refusal, sentence) => {
+    world({ role: "manager" });
+    mocks.catalog.api.deleteWorkspace.mockImplementation(async () => { throw refusal; });
+    await show(<DeleteWorkspaceScreen />);
+    await acknowledge();
+    await click("Delete permanently");
+    expect(container.querySelector('[data-testid="delete-refusal"]')!.textContent).toBe(sentence);
+    expect(mocks.dismissTo).not.toHaveBeenCalled();
+    expect(button("Delete permanently").disabled).toBe(false);
+  });
+
+  it("No answer in time: the list says whether it is being deleted, and then it is done", async () => {
+    world({ role: "manager" });
+    mocks.catalog.api.deleteWorkspace.mockImplementation(async () => { throw new CloudApiError("cloud_workspace_unavailable", null, "timeout"); });
+    mocks.catalog.fresh.mockImplementation(async () => { listedItem().workspace.state = "deleting"; return true; });
+    await show(<DeleteWorkspaceScreen />);
+    await acknowledge();
+    await click("Delete permanently");
+    expect(mocks.catalog.fresh).toHaveBeenCalledWith("org-1");
+    expect(mocks.dismissTo).toHaveBeenCalledWith("/cloud");
+  });
+
+  it("Opened from an old link: the app's page for a deleted workspace", async () => {
+    world({ state: null, access: "deleted" });
+    await show(<CloudWorkspaceScreen />);
+    expect(container.querySelector('[data-testid="screen-title"]')!.textContent).toBe("Workspace");
+    expect(text()).toContain("This workspace was deleted Nothing of it is kept on this phone.");
+    await show(<DeleteWorkspaceScreen />);
+    expect(text()).toContain("This workspace was deleted");
+    expect(() => button("Delete permanently")).toThrow();
+  });
+
+  it("The provider refused: the console's sentence, the cleanup report in plain words, and Delete again opens the page", async () => {
+    world({ state: "attention-required", role: "manager" });
+    listedItem().workspace.you = { role: "manager", canApprove: true };
+    listedItem().latestOperation = { id: "op-delete", state: "failed", action: "delete", errorCode: "cloud_provider_permission_denied" };
+    mocks.catalog.api.operation.mockImplementation(async () => lifecycle(operation({ id: "op-delete", action: "delete", state: "failed", stage: "cleanup", cancelable: false, errorCode: "cloud_provider_permission_denied", providerErrorCode: "403", cleanup: { complete: false, items: [
+      { kind: "runtime-credentials", state: "removed" }, { kind: "client-attachments", state: "removed" }, { kind: "provider-compute", state: "unconfirmed" }, { kind: "provider-storage", state: "unconfirmed" }, { kind: "workspace-content", state: "pending" },
+    ] } }), { state: "attention-required" }));
+    await show(<CloudWorkspaceScreen />);
+    expect(stateLine().textContent).toBe("Needs attention · Manager");
+    expect(container.querySelector('[data-testid="delete-refused"]')!.textContent).toBe("Boat refused to delete this machine (403). Check it in your Boat dashboard; if it is still there, delete it there, then press Delete again to clear it here.");
+    const report = [...container.querySelectorAll("[aria-label]")].map((row) => row.getAttribute("aria-label")).filter((label) => /^(Runtime credentials|Phones and desktops|Machine|Disk and snapshots|Saved conversations):/.test(label ?? ""));
+    expect(report).toEqual(["Runtime credentials: Removed", "Phones and desktops: Disconnected", "Machine: Not confirmed", "Disk and snapshots: Not confirmed", "Saved conversations: Pending"]);
+    expect(text()).toContain("Until Boat confirms, the machine may still be billed.");
+    expect(button("Workspace actions")).toBeTruthy();
+    await click("Delete again");
+    expect(mocks.push).toHaveBeenCalledWith(`/cloud/delete?orgId=org-1&workspaceId=${mocks.params.workspaceId}`);
+    expect(mocks.catalog.api.deleteWorkspace).not.toHaveBeenCalled();
   });
 });
