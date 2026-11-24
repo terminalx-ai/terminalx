@@ -63,7 +63,9 @@ export function WorkspaceActionItems({
   const catalog = useCloudCatalog();
   const org = catalog.orgs[item.workspace.orgId];
   const current = org?.source === "live" && !org.error ? org.workspaces.find((row) => row.workspace.id === item.workspace.id) : undefined;
-  const reassign = preferencesAvailable && current && mayReassign(current, catalog.viewerUserId, status.organizations?.find((org) => org.id === item.workspace.orgId)?.role);
+  const reassign = preferencesAvailable && current && !current.workspace.archivedAt && !current.workspace.deletedAt
+    && current.workspace.state !== "archived" && current.workspace.state !== "destroyed"
+    && mayReassign(current, catalog.viewerUserId, status.organizations?.find((org) => org.id === item.workspace.orgId)?.role);
   const state = deriveCloudActivity(item);
   const actions = actionsFor(item);
   const busy = state.tone === "changing";

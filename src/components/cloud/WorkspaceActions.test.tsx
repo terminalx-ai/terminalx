@@ -161,7 +161,7 @@ it("reauthorizes committed retries without treating their receipt as current own
   const controller = new WorkspacePreferencesController(transport, () => "account:revision", refresh);
   const resource = { ...item, workspace: { ...item.workspace, createdBy: "old" } };
   const input = { targetUserId: "target", expectedOwnerId: "old", requestId: "01234567-89ab-4cde-8fab-0123456789ab", note: "Away Monday" };
-  expect(await controller.reassign(resource, input)).toBe(true);
+  expect(await controller.reassign(resource, input)).toEqual({ workspaceId: "ws-1", ownerId: "target", previousOwnerId: "old", reassigned: false });
   expect(transport.cloudWorkspaceReassign).toHaveBeenCalledWith("org-1", "ws-1", input);
   expect(refresh).toHaveBeenCalledWith("org-1");
   expect(resource.workspace.createdBy).toBe("old");
