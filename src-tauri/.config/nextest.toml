@@ -61,3 +61,8 @@ retries = 2
 [[profile.ci.overrides]]
 filter = 'test(=session::watch_tests::an_enter_the_cli_let_go_by_is_written_again_before_the_reader_is_told)'
 retries = 2
+
+# PRO-513
+[[profile.ci.overrides]]
+filter = 'test(=machine_host::security_tests::the_listen_choice_decides_what_is_bound_and_relay_only_opens_no_port)'
+retries = 2

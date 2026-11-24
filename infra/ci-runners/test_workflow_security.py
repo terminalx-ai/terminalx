@@ -123,6 +123,10 @@ def validate_common(workflow):
                 assert "cache" not in inputs, "implicit shared Node cache"
             assert "secrets." not in str(step), "secret expression"
             assert "continue-on-error" not in step, "required step failure ignored"
+            if re.search(r"apt-get\b.*\binstall\b|playwright install --with-deps", step.get("run", "")):
+                # A runner in an AWS region is pointed at a mirror that is slow for whole runs; apt never leaves a slow mirror.
+                assert step["run"].startswith("sudo infra/ci-runners/apt-mirrors.sh && "), "a package install that leaves the runner's mirror as it is"
+                assert any(s.get("uses", "").startswith("actions/checkout@") for s in job["steps"][: job["steps"].index(step)]), "the mirror script before the checkout"
             if re.search(r"apt-get\b.*\binstall\b", step.get("run", "")):
                 # A stalled download is no error to apt without a timeout, so retries alone never fire: every apt-get call has both.
                 calls = step["run"].count("apt-get ")
@@ -512,6 +516,8 @@ class WorkflowSecurity(unittest.TestCase):
         # The Linux Rust installs have no limit of their own (a slow mirror failed three parts at ten minutes), so
         # their job's must be there; the options that retry a stalled download stay.
         self.rejects(lambda w: w["jobs"]["linux-rust-tests"].pop("timeout-minutes"))
+        # Without the mirror script a runner in an AWS region takes 25 minutes over the same packages.
+        self.rejects(lambda w: self.step(w, "linux-rust", name="Install Linux build dependencies").update({"run": self.step(w, "linux-rust", name="Install Linux build dependencies")["run"].removeprefix("sudo infra/ci-runners/apt-mirrors.sh && ")}))
         self.rejects(lambda w: self.step(w, "linux-rust-tests", name="Install Linux build dependencies").update({"run": self.step(w, "linux-rust-tests", name="Install Linux build dependencies")["run"].replace(" -o Acquire::http::Timeout=30", "", 1)}))
 
     def test_missing_vitest_shell_is_rejected(self):
@@ -618,6 +624,9 @@ class WebKitOnLinux(unittest.TestCase):
     def test_branch_filter_is_rejected(self):
         # It must also run for a pull request based on another pull request's branch.
         self.rejects(lambda w: w["on"].update(pull_request={"branches": ["main"]}))
+
+    def test_browser_packages_from_the_runners_own_mirror_are_rejected(self):
+        self.rejects(lambda w: next(s for s in self.job(w)["steps"] if "playwright install" in s.get("run", "")).update({"run": "pnpm exec playwright install --with-deps webkit"}))
 
     def test_running_on_every_pull_request_is_rejected(self):
         # On every pull request it queues four jobs beside the required ones, for a result nobody is held to.

@@ -496,3 +496,88 @@ file, so the 30 s stall option never fired and nothing was retried; the same
 step took 24 to 26 s in other jobs of the same run. The step's own limit is
 gone (`main` never had one there); the job's limit bounds it, and the retry
 and stall options stay. A cache for the packages is a later piece.
+
+### The slow package installs are one mirror (24 November 2026)
+
+In #1523's run (45338978657) the same 91.3 MB of packages took:
+
+| Job | Runner region | Mirror | Fetch |
+| --- | --- | --- | --- |
+| `linux-rust` | `us-west-2` | `us-east-2.ec2.archive.ubuntu.com` | 23 min 34 s (64.6 kB/s) |
+| `linux-rust-tests (1)` | `us-west-2` | the same | 24 min 13 s (62.9 kB/s), then cut off at the job's 30 minutes |
+| `linux-rust-tests (2)` | `eastus` | `azure.archive.ubuntu.com` | 5 s (18.9 MB/s) |
+| `linux-rust-tests (4)` | `eastus` | `azure.archive.ubuntu.com` | 5 s (18.3 MB/s) |
+
+`serve-tests` in that run was on a `us-east-1` runner and the EC2 mirror too.
+The mirror comes from the image's `/etc/apt/apt-mirrors.txt`, which differs
+by where the runner is. `infra/ci-runners/apt-mirrors.sh` now writes that file
+before every install (Azure first, `archive.ubuntu.com` behind it) and prints
+what it replaced.
+
+What the file held, as the script printed it (#1525's run 45344630294):
+
+| Runner region | priority 1 | priority 2 | priority 3 |
+| --- | --- | --- | --- |
+| `westus3`, `centralus`, `westus2` (Azure) | `http://azure.archive.ubuntu.com/ubuntu/` | `https://archive.ubuntu.com/ubuntu/` | `https://security.ubuntu.com/ubuntu/` |
+| `us-west-2` (AWS) | `http://us-east-2.ec2.archive.ubuntu.com/ubuntu/` | the same | the same |
+
+With the script, in that run:
+
+- Jobs on AWS-region runners were fast from the Azure mirror:
+  `webkit-layout-linux (2)` on `us-west-2` fetched 140 MB in 20 s
+  (7,094 kB/s) and `vitest (1)` on `us-west-2` 4,988 kB in 1 s. The same
+  region got 64.6 kB/s from the EC2 mirror.
+- Every install took 9 to 43 s across `eastus`, `centralus`, `westus`,
+  `westus2`, `westus3`, `southcentralus` and `us-west-2`; the 91.3 MB set took
+  5 to 25 s.
+- Every Linux job was done 11 min 37 s after the push, with waits of up to
+  4 min for a runner.
+
+The case without it, the same morning: #1526's run at 07:28 UTC
+(45348218412) lost `linux-rust-tests (1)` and `(binaries)` to the 30 minute
+limit, with the install at 29 min 27 s and 26 min 56 s.
+
+A cache of the package files was tried and left out. apt does not check a
+file that is already in its archive folder: with apt 2.8.4 in an
+`ubuntu:24.04` container, a cached `.deb` with one byte changed and its size
+kept was "Need to get 0 B" and went to dpkg unread, and `--print-uris` gives
+only an MD5 for each file. A cache would need its own SHA-256 check of every
+file against `apt-cache show` before apt runs as root.
+
+### The first run of the new workflow with an empty queue
+
+A manual run on `main` at 06:09 UTC (45338347689); every job waited 2 s.
+
+| Job | Time |
+| --- | --- |
+| Every Linux job but `linux-rust` | done 12 min 14 s after the start |
+| `linux-rust` | 27 min 57 s: the install 25 min 34 s (30 s in the other jobs), Clippy 2 min 7 s, cargo cache a hit |
+| `linux-rust-tests`, four parts | 6 min 0 s to 9 min 48 s |
+| `linux-rust-tests (binaries)` | 8 min 43 s |
+| `serve-tests` | 12 min 14 s: tools 3 min 12 s, building the runtime 1 min 28 s, tests 7 min 14 s |
+| `vitest`, four parts | 2 min 45 s to 3 min 26 s |
+| `frontend` | 1 min 44 s |
+| `phone-app` | 57 s |
+| `webkit-layout` (macOS) | 33 min 33 s: 129 of 129, 3 at once, 1,906 s for 5,644 s of checks |
+| `macos-native` (full suite) | Clippy 11 min 46 s and 8 min 31 s; the test build still running at 38 min when this was written |
+
+### #1523's first run (45338978657)
+
+Pull request jobs: `frontend` 1 min 38 s, `vitest` 2 min 24 s to 3 min 22 s,
+`phone-app` 1 min 3 s, `serve-tests` 10 min 55 s, `headless-serve` 5 min 42 s,
+`machines-e2e` 3 min 56 s, `machine-compat` 4 min 27 s, `linux-rust-tests`
+parts 2 to 4 7 min 21 s to 7 min 57 s and the binaries 8 min 27 s,
+`webkit-layout` 29 min 38 s. `linux-rust` 27 min 19 s and part 1 (cancelled
+at 30 min 16 s) were the slow mirror. `macos-native` was cancelled at
+32 min 9 s. The Linux WebKit trial failed in all four parts.
+
+### Seen on #1525's run (45344630294, head `a51b839f`), neither from that change
+
+| Test or check | Where | What it said |
+| --- | --- | --- |
+| `machine_host::security_tests::the_listen_choice_decides_what_is_bound_and_relay_only_opens_no_port` | `linux-rust-tests (3)`, `src-tauri/src/machine_host/security_tests.rs:567` | "the port is closed": the test connects to the old port number after the listener closed and expects a refusal; under nextest another test's process can be given that port. On PRO-513, with a retry entry. |
+| `setup check coach (dark): the coach mark sits wholly above the composer` | `webkit-layout` on macOS | 128 of 129 in 538 s, on a runner that ran 4 at once. |
+
+`macos-native` on that head (a pull request that selects it): Clippy took
+21 min 39 s for its two steps and the library's test build 32 min 54 s
+(07:31:38 to 08:04:32); the job was still running when this was written.
