@@ -34,6 +34,7 @@ fn hire() -> Bot {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_moved_bot_takes_its_role_memory_items_and_duties_and_rests_where_it_left() {
     let _home = bots_on();
     let bot = hire();
@@ -76,6 +77,7 @@ fn a_moved_bot_takes_its_role_memory_items_and_duties_and_rests_where_it_left() 
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bot_brought_back_replaces_the_copy_it_left_and_works_here_again() {
     let _home = bots_on();
     let bot = hire();
@@ -100,6 +102,7 @@ fn a_bot_brought_back_replaces_the_copy_it_left_and_works_here_again() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_failed_move_is_undone_and_places_are_checked() {
     let _home = bots_on();
     let bot = hire();
@@ -115,6 +118,7 @@ fn a_failed_move_is_undone_and_places_are_checked() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bundle_cannot_write_outside_the_bots_folders() {
     let _home = bots_on();
     let bot = hire();
@@ -128,6 +132,7 @@ fn a_bundle_cannot_write_outside_the_bots_folders() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bundle_brings_only_its_own_bots_duties_once_each() {
     let _home = bots_on();
     let atlas = hire();
@@ -163,6 +168,7 @@ fn a_bundle_brings_only_its_own_bots_duties_once_each() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_refused_bundle_turns_nothing_on_and_moves_nothing_aside() {
     let _home = bots_on();
     let bot = hire();

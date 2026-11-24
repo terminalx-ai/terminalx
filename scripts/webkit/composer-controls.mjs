@@ -21,6 +21,7 @@ import { createRoot } from 'react-dom/client';
 import '/src/styles/app.css';
 import { Composer } from '/src/components/chat/Composer.tsx';
 import { TooltipProvider } from '/src/components/ui/tooltip.tsx';
+import { localAiEditor } from '/src/lib/aiEdit.ts';
 const empty = new URLSearchParams(location.search).get('case') === 'empty';
 const tab = empty
   ? { id: 'tab-empty', harness: 'codex', model: 'gpt-6.1-sol', effort: 'high', permissionMode: 'manual', status: 'idle', created: '', modified: '' }
@@ -35,6 +36,8 @@ function App() {
       <Composer tab={shownTab} busy={false} hasConversation={!empty} draft={draft} onDraftChange={setDraft}
         files={{ key: 'repo', search: async () => [] }}
         contextUsed={12000} contextMax={100000}
+        aiEditor={shownTab.harness === 'claude' ? localAiEditor('session', shownTab.id) : null}
+        aiEditorUnavailable="The AI Editor works in Claude Code tabs for now"
         agentHandoff={empty ? { id: 'claude', name: 'Claude Code', run: noop } : { id: 'codex', name: 'Codex', run: noop }}
         onSend={noop} onStop={noop} onSetModel={(id) => { window.__models.push(id); setShownTab((current) => ({ ...current, requestedModel: id })); }} onSetEffort={noop} onSetMode={noop}/>
     </div>

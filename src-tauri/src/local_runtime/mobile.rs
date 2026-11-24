@@ -924,7 +924,7 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
             let pinned = params["pinned"].as_bool().context("pinned must be true or false")?;
             let session = string("sessionId")?;
             if !crate::store::index::load()?.iter().any(|entry| entry.id == session) {
-                bail!("This session is no longer on this Mac.");
+                bail!("{}", crate::platform_profile::localize("This session is no longer on this Mac."));
             }
             let patch = crate::session_ops::SessionPatch { pinned: Some(pinned), ..Default::default() };
             let updated = crate::session_ops::update_session_meta(session, &patch).map_err(anyhow::Error::msg)?;

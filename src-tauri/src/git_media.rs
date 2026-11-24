@@ -64,16 +64,15 @@ pub fn read(
             std::fs::metadata(&resolved)?.is_file(),
             "Not a regular media file"
         );
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true);
+        // A replaced final link must not turn a checked path into an outside
+        // read, and on Unix a replacement FIFO must not block a preview task.
         #[cfg(unix)]
-        {
+        let file = {
             use std::os::unix::fs::OpenOptionsExt;
-            // A replacement FIFO must not block a preview task, and a replaced
-            // final symlink must not turn a checked path into an outside read.
-            options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
-        }
-        let file = options.open(&resolved)?;
+            std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(&resolved)?
+        };
+        #[cfg(windows)]
+        let file = crate::win::fs::open_plain(&resolved, false, false)?;
         let metadata = file.metadata()?;
         ensure!(metadata.is_file(), "Not a regular media file");
         ensure!(

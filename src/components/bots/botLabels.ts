@@ -1,3 +1,4 @@
+import { ThisComputer } from "@/lib/platform";
 import type { Bot, BotAccess, BotDutyWake, BotRunsOn } from "@/types/bots";
 import { effectiveAccess, runsOnPlace } from "@/types/bots";
 import { doingLine, type BotDoing } from "@/lib/botChats";
@@ -7,7 +8,7 @@ export function runsOnLabel(runsOn: BotRunsOn): string {
   const place = runsOnPlace(runsOn);
   switch (place.kind) {
     case "thisMac":
-      return "This Mac";
+      return ThisComputer;
     case "cloud":
       return "Cloud workspace";
     case "machine":

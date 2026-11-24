@@ -344,23 +344,18 @@ pub fn sign_in_from_raw(raw: &str) -> Option<SignIn> {
 /// Open a file that is a regular file at `path` itself, never through a
 /// link: not a symbolic one (`O_NOFOLLOW`), and not a hard link that shares
 /// its contents with a file elsewhere, which zeroing would reach.
+#[cfg(unix)]
 fn open_regular(path: &Path, write: bool) -> Option<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(!write).write(write);
-    #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW | libc::O_NONBLOCK);
     let file = options.open(path).ok()?;
-    file.metadata().ok().filter(|meta| meta.is_file() && single_link(meta)).map(|_| file)
+    file.metadata().ok().filter(|meta| meta.is_file() && std::os::unix::fs::MetadataExt::nlink(meta) == 1).map(|_| file)
 }
 
-#[cfg(unix)]
-fn single_link(meta: &std::fs::Metadata) -> bool {
-    std::os::unix::fs::MetadataExt::nlink(meta) == 1
-}
-
-#[cfg(not(unix))]
-fn single_link(_meta: &std::fs::Metadata) -> bool {
-    true
+#[cfg(windows)]
+fn open_regular(path: &Path, write: bool) -> Option<std::fs::File> {
+    crate::win::fs::open_plain(path, write, true).ok()
 }
 
 /// `<home>/.codex/auth.json`, when `.codex` is a real directory inside the home (not a link out of it).

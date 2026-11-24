@@ -1,3 +1,4 @@
+import { thisComputer } from "@/lib/platform";
 import { api, invoke } from "@/lib/api";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { wakeCloudConnection, waitCloudConnected } from "@/lib/cloudConnections";
@@ -53,7 +54,7 @@ const liveDeps: MoveDeps = {
       }
     }
     const { connection, machine } = machineConnection(getMachineConnections(), place.machineId);
-    if (!machine) throw new Error("That machine is no longer paired with this Mac.");
+    if (!machine) throw new Error(`That machine is no longer paired with ${thisComputer}.`);
     if (!connection) throw new Error(`${machine.name} is not connected. Connect to it in Machines, then try again.`);
     return { client: connection.client, release: () => undefined };
   },
@@ -116,7 +117,7 @@ export async function moveBot(bot: Bot, place: Exclude<BotPlace, { kind: "thisMa
         throw error;
       }
       if (landed === "unknown") {
-        throw new Error(`It is not known whether ${bot.name} reached ${place.kind === "cloud" ? "the workspace" : "the machine"}, so it rests on this Mac for now and runs nowhere twice. Bring it back once ${place.kind === "cloud" ? "the workspace" : "the machine"} can be reached: that finds it either way. (${error instanceof Error ? error.message : String(error)})`);
+        throw new Error(`It is not known whether ${bot.name} reached ${place.kind === "cloud" ? "the workspace" : "the machine"}, so it rests on ${thisComputer} for now and runs nowhere twice. Bring it back once ${place.kind === "cloud" ? "the workspace" : "the machine"} can be reached: that finds it either way. (${error instanceof Error ? error.message : String(error)})`);
       }
       imported = { bot: { ...bot, runsOn: "thisMac" } };
     }
@@ -152,7 +153,7 @@ export async function bringBotBack(bot: Bot, onStep: (step: MoveStep) => void = 
       // A move whose import never landed there: the bot was only ever here, so it simply works here again.
       if (notThere(error) && (await landedThere(client, bot.id)) === "no") {
         const back = (await deps.step("moveBack", { id: bot.id })) as Bot;
-        return { bot: back ?? { ...bot, runsOn: "thisMac" }, notes: [`${bot.name} had not reached it, so nothing came back: it works on this Mac again as it was.`] };
+        return { bot: back ?? { ...bot, runsOn: "thisMac" }, notes: [`${bot.name} had not reached it, so nothing came back: it works on ${thisComputer} again as it was.`] };
       }
       throw error;
     }
