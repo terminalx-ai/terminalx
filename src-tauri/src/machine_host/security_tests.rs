@@ -611,12 +611,11 @@ async fn the_listen_choice_decides_what_is_bound_and_relay_only_opens_no_port() 
     let mut computer = connected(&rig, "desk", [22; 32], "desk-token-0000000000000000", &["machine/1"]).await;
     let all_port = rig.port;
     #[cfg(unix)]
-    let listener = {
+    {
         let everywhere = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, all_port));
         let held: Vec<i32> = listeners_held().into_iter().filter(|(_, address)| *address == everywhere).map(|(fd, _)| fd).collect();
         assert_eq!(held.len(), 1, "the host's listener on every interface, one descriptor here: {held:?}");
-        (held[0], everywhere)
-    };
+    }
 
     // Relay only: nothing listens, and the computer that came in directly is closed.
     rig.host.listen_for_test(plan(Listen::Relay, false), interfaces.clone()).unwrap();
@@ -625,14 +624,14 @@ async fn the_listen_choice_decides_what_is_bound_and_relay_only_opens_no_port() 
     assert!(status.listening.is_none(), "no listener: {:?}", status.listening);
     let listen = status.listen.unwrap();
     assert_eq!((listen.choice, listen.addresses.len()), (Listen::Relay, 0), "{listen:?}");
-    // The port is closed: the descriptor that listened on it here no longer
-    // does. Not a connection to its number, which asks every program on the
-    // computer; under nextest another test's process can be given the number
-    // the moment it is free (PRO-513). `Listening::stop` aborts the accept
+    // The port is closed: this process holds no listener on its number, on
+    // any address and under any descriptor. Not a connection to the number,
+    // which asks every program on the computer; under nextest another test's
+    // process can be given it the moment it is free (PRO-513). `Listening::stop` aborts the accept
     // task, and the runtime drops the listener when it next runs that task,
     // so the close is waited for, not assumed at once.
     #[cfg(unix)]
-    eventually("the port is closed", || (!listeners_held().contains(&listener)).then_some(())).await;
+    eventually("the port is closed", || listeners_held().iter().all(|(_, address)| address.port() != all_port).then_some(())).await;
     #[cfg(not(unix))]
     assert!(std::net::TcpStream::connect(("127.0.0.1", all_port)).is_err(), "the port is closed");
     assert!(rig.host.direct_endpoints().is_empty(), "no address is advertised, not even loopback");
