@@ -54,6 +54,7 @@ import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
 import { AccessChip, NotSharedNotice, PresenceAvatars } from "@/components/cloud/CloudCollab";
 import { CloudResourceNotice } from "@/components/cloud/CloudResourceNotice";
 import { CloudHeaderActions } from "./CloudHeaderActions";
+import { CloudStartSession, useCloudStart } from "./CloudStartSession";
 import { presenceTab } from "@/lib/cloudCollab";
 import { resolveSessionTab, setVisibleSessionTab } from "@/lib/visibleTab";
 import { CloudWorkspaceDetails } from "@/components/cloud/CloudWorkspaceDetails";
@@ -389,14 +390,17 @@ function CloudLocation({
   cloud,
   yields = false,
   onShowPorts,
+  startLabel,
 }: {
   cloud: CloudSessionModel;
+  startLabel?: string;
   /** Left out of a tight header (see the order above). */
   yields?: boolean;
   /** Opens the side panel's Ports tab; absent for anyone who may not use previews, and in a window with no panel. */
   onShowPorts?: () => void;
 }) {
-  const { location, connection } = cloud;
+  const { location } = cloud;
+  const connection = startLabel ? { label: startLabel, tone: "pending" } : cloud.connection;
   const catalog = useCloudCatalog();
   const item = findCloudWorkspace(catalog, cloud.orgId, cloud.workspaceId);
   const menu = useRowMenu();
@@ -416,6 +420,7 @@ function CloudLocation({
   const diagnosticsOffered = offersCloudDiagnostics(status, cloud.orgId);
   const detailsRequest = request && ["restart", "details", "copy-machine", "copy-info"].includes(request.action);
   const detailsVisible = !cloud.locked && !!item && request?.item.workspace.id === cloud.workspaceId && request.item.workspace.orgId === cloud.orgId;
+  const mirrorOffered = !cloud.locked && (!startLabel || cloud.connected);
   useEffect(() => {
     if (detailsRequest && !detailsVisible) setRequest(null);
   }, [detailsRequest, detailsVisible]);
@@ -439,7 +444,7 @@ function CloudLocation({
             <DropdownMenuLabel className="truncate">Workspace · {cloud.workspaceName}</DropdownMenuLabel>
             {item && <WorkspaceActionItems item={item} detailsAllowed={!cloud.locked} onLifecycle={setRequest} run={run} archived={item.workspace.state === "archived"} />}
             {/* For anyone who can read the workspace's files; a locked session has none to copy. */}
-            {item && !cloud.locked && (
+            {item && mirrorOffered && (
               <>
                 <DropdownMenuSeparator />
                 <CloudMirrorMenuItem onSelect={() => setMirror(true)} />
@@ -474,8 +479,8 @@ function CloudLocation({
       )}
       {request && (!detailsRequest || detailsVisible) && <WorkspaceLifecycleDialog request={request} onClose={() => setRequest(null)} />}
       {diagnostics && <CloudDiagnosticsDialog request={{ orgId: cloud.orgId, workspaceId: cloud.workspaceId }} onClose={() => setDiagnostics(false)} />}
-      {mirror && <CloudMirrorDialog request={{ orgId: cloud.orgId, workspaceId: cloud.workspaceId, workspaceName: cloud.workspaceName }} onClose={() => setMirror(false)} />}
-      {!cloud.locked && <CloudMirrorChip orgId={cloud.orgId} workspaceId={cloud.workspaceId} onOpen={() => setMirror(true)} />}
+      {mirror && mirrorOffered && <CloudMirrorDialog request={{ orgId: cloud.orgId, workspaceId: cloud.workspaceId, workspaceName: cloud.workspaceName }} onClose={() => setMirror(false)} />}
+      {mirrorOffered && <CloudMirrorChip orgId={cloud.orgId} workspaceId={cloud.workspaceId} onOpen={() => setMirror(true)} />}
       {/* One connection chip (is it live) and one role chip (what this person may do); a locked session has no connection to report. */}
       {!cloud.locked && (
         <span
@@ -523,6 +528,7 @@ export function SessionView({
   const backend = cloud?.backend ?? localSessionBackend(session.id);
   // A session on a paired machine (PRO-347): the cloud views, with the machine's chip, strips and terminal dock.
   const machine = cloud?.machine;
+  const start = useCloudStart(cloud);
   const local = backend.caps.local;
   const isGit = useSessionIsGit(session, local);
   const quick = isQuickChat(session);
@@ -642,7 +648,7 @@ export function SessionView({
   const activeShell = selected?.kind === "terminal" ? shellPanes.find((pane) => pane.id === selected.id) : undefined;
   const tabViews = useTabViews();
   // The chat or terminal switch: every local tab has it; a cloud tab while its runtime serves the agent's terminal (PRO-86).
-  const terminalOffer = activeTab && !cloud?.locked ? terminalViewOf(backend, activeTab) : null;
+  const terminalOffer = activeTab && !cloud?.locked && !start ? terminalViewOf(backend, activeTab) : null;
   const activeInTerminal = !!activeTab && !!terminalOffer?.available && tabViewIn(tabViews.views, activeTab) === "terminal";
   // A tab that is a terminal (#437) has no live chat to go back to: its other face is the conversation it last held, when it held one.
   const activeIsTerminal = !!activeTab && local && isTerminalTab(activeTab);
@@ -734,7 +740,7 @@ export function SessionView({
       // The latest shell, not a script's run (PRO-403): those are under Setup and Run.
       selectCloudTerminal(cloud.workspaceKey, cloudTerminals.filter((terminal) => !terminal.run).at(-1)!.id);
       setPrefs({ panelOpen: true, panelTerminalOpen: true });
-    } else if (cloudTerminals.length) selectSessionTab(session.id, { kind: "terminal", id: cloudTerminals[cloudTerminals.length - 1].id });
+    } else if (!start && cloudTerminals.length) selectSessionTab(session.id, { kind: "terminal", id: cloudTerminals[cloudTerminals.length - 1].id });
   });
   // What the session's agents have used, at API list prices (PRO-273), beside
   // where it is; Settings → Experimental → Session cost.
@@ -938,7 +944,7 @@ export function SessionView({
                   : `Base ${session.worktreeBase.commit.slice(0, 7)}${session.worktreeBase.fetched ? " · fetched at creation" : ""}`}
               </span>
             )}
-            {cloud && !machine && <CloudLocation cloud={cloud} yields={switchInHeader} onShowPorts={showPorts} />}
+            {cloud && !machine && <CloudLocation cloud={cloud} yields={switchInHeader} onShowPorts={showPorts} startLabel={start?.label} />}
             {renameError && (
               <span role="alert" className="ml-1 max-w-64 truncate text-[11px] text-destructive" title={renameError}>
                 {renameError}
@@ -976,7 +982,7 @@ export function SessionView({
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
             {/* A cloud workspace session's Run, Git and Share, where a local session has them (#1289). */}
-            {cloud && !machine && !compact && <CloudHeaderActions cloud={cloud} runMenuReason={backend.unavailable?.runMenu ?? null} />}
+            {cloud && !start && !machine && !compact && <CloudHeaderActions cloud={cloud} runMenuReason={backend.unavailable?.runMenu ?? null} />}
             {continueTab && (
               <WithTooltip label={continueLabel}>
                 <Button variant="ghost" size="icon-sm" aria-label={continueLabel} onClick={continueTab}>
@@ -985,7 +991,7 @@ export function SessionView({
               </WithTooltip>
             )}
             {/* The "+" that opens a tab, where no row of tabs ends with it (the floating window's row comes and goes). Keyed by session: a menu left open never carries over to another session. */}
-            {(!stripRow || compact) && !cloud?.locked && !(machine && !compact) && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} onShowPorts={showPorts} newTabs={!chrome?.noNewTab} />}
+            {!start && (!stripRow || compact) && !cloud?.locked && !(machine && !compact) && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} onShowPorts={showPorts} newTabs={!chrome?.noNewTab} />}
             {/* With the row of tabs, the switch is at the right end of each pane's strip (PRO-381, 03.14). */}
             {activeTab && switchInHeader && (
               <WithTooltip label={activeInTerminal ? viewSwitch.toChat : viewSwitch.toTerminal} shortcut="session.toggleTerminalView">
@@ -1080,7 +1086,7 @@ export function SessionView({
               onPointerDownCapture={() => setLastFocused("chat")}
               onFocusCapture={() => setLastFocused("chat")}
             >
-              {tabsInPanes ? (
+              {start ? <CloudStartSession start={start} /> : tabsInPanes ? (
                 <WorkspacePanes
                   session={session}
                   selected={selected}
@@ -1175,7 +1181,7 @@ export function SessionView({
               {!session.tabs.length && !cloudTerminals.length && cloud && <CloudSessionEmpty cloud={cloud} />}
               </>}
             </div>
-            {hasEditors && <EditorSplit sessionId={session.id} active selectedTab={selected} />}
+            {!start && hasEditors && <EditorSplit sessionId={session.id} active selectedTab={selected} />}
           </div>
         </section>
       </div>
@@ -1183,7 +1189,15 @@ export function SessionView({
       {runShown && <div ref={setPieceColumn} data-testid="run-piece-column" className="flex h-full min-h-0 shrink-0 empty:hidden" />}
 
       <PanelPresence side="right" open={!compact && prefs.panelOpen}>
-      {!compact && prefs.panelOpen && cloud && <CloudPanelHost session={session} cloud={cloud} tab={activeTab} checkFix={canFixMachineChecks ? checkFix : undefined} />}
+      {!compact && prefs.panelOpen && cloud && (start ? (
+        <aside className="flex h-full w-(--panel-w) shrink-0 flex-col border-l border-hairline" data-testid="cloud-start-panel">
+          <div data-tauri-drag-region="deep" className="h-(--titlebar-h) shrink-0" />
+          <div className="flex flex-1 flex-col items-center justify-center gap-1 px-6 text-center">
+            <p className="text-sm">Nothing to show yet</p>
+            <p className="text-xs text-muted-foreground">Changes, checks and files appear once the workspace is connected.</p>
+          </div>
+        </aside>
+      ) : <CloudPanelHost session={session} cloud={cloud} tab={activeTab} checkFix={canFixMachineChecks ? checkFix : undefined} />)}
       {!compact && prefs.panelOpen && !cloud &&
         (panelTab ? (
           <PanelHost session={session} tab={panelTab} checkFix={checkFix} />
