@@ -1,0 +1,52 @@
+name: Probe, step 2's Linux WebKit parts
+
+# Probe only, never merged: the four parts of ci.yml's webkit-layout-linux
+# job, run alone so they can be run five times without ci.yml's macOS job.
+
+on:
+  push:
+    branches: [raccoon/probe-step2-webkit-linux]
+
+permissions:
+  contents: read
+
+jobs:
+  webkit-layout-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install npm dependencies
+        run: pnpm install --frozen-lockfile
+      # Layout checks that jsdom cannot make: the built app in WebKit, measured.
+      # `frontend` runs tsc; this needs only the built app.
+      - name: Build the frontend
+        run: pnpm exec vite build
+      - name: Install WebKit and the libraries it needs
+        timeout-minutes: 10
+        run: sudo infra/ci-runners/apt-mirrors.sh && pnpm exec playwright install --with-deps webkit
+      - name: WebKit layout checks, this part of four
+        run: node scripts/webkit/run-all.mjs --shard ${{ matrix.part }}/4
+        # The machine checks among them also keep their pictures (PRO-360).
+        env:
+          MACHINE_SIDEBAR_SHOTS: scripts/webkit/output/machines-screens/machine-sidebar
+          MACHINE_SESSION_SHOTS: scripts/webkit/output/machines-screens/machine-session
+          MACHINE_PORTS_SHOTS: scripts/webkit/output/machines-screens/machine-ports
+      # Each part keeps the machine screens of the checks it ran; webkit-layout
+      # puts them together as one artifact, and fails when there are none.
+      - name: Upload this part's machine screens
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: machine-screens-${{ matrix.part }}
+          path: scripts/webkit/output/machines-screens
+          if-no-files-found: ignore
