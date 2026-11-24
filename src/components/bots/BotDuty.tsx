@@ -1,3 +1,4 @@
+import { ThisComputer } from "@/lib/platform";
 import { useState, type ReactNode } from "react";
 import { AppWindow, CalendarClock, ChevronLeft, Copy, Loader2, Pause, Pencil, Play, Sparkles, Trash2, Zap } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -202,7 +203,7 @@ export function BotDuty({ bot, bots, duty, runs, state, spent, leadName, onBack,
             <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5">
               {/* Its runs use the bot's model as it is now (`duties::bind`), not the one stored with the duty (PRO-492). */}
               <Fact label="Model">{bot.model || "The agent's default"}</Fact>
-              <Fact label="Runs on">This Mac, in {bot.name}'s home</Fact>
+              <Fact label="Runs on">{ThisComputer}, in {bot.name}'s home</Fact>
               <Fact label="Conversation">New each time</Fact>
               <Fact label="Access">{accessLabel(bot.access)}</Fact>
               <Fact label="If it fails">You are told, outside quiet hours</Fact>

@@ -525,6 +525,8 @@ pub(crate) fn caller_pid() -> Option<i32> {
 pub(crate) struct Caller {
     #[cfg(unix)]
     stream: Option<std::sync::Arc<std::os::unix::net::UnixStream>>,
+    #[cfg(windows)]
+    pipe: Option<crate::pipe_transport::PipeClient>,
 }
 
 impl Caller {
@@ -537,7 +539,9 @@ impl Caller {
     pub(crate) fn current() -> Self {
         #[cfg(unix)]
         return Self { stream: CALLER.with(|caller| caller.borrow().clone()) };
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        return Self { pipe: crate::pipe_transport::current_client() };
+        #[cfg(not(any(unix, windows)))]
         Self::default()
     }
 
@@ -554,7 +558,10 @@ impl Caller {
             // disconnected caller's lifetime by keeping unread input queued.
             read < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock
         }
-        #[cfg(not(unix))]
+        // A hook that gave up on its pipe has left; one without a pipe is in-process.
+        #[cfg(windows)]
+        return self.pipe.as_ref().is_none_or(crate::pipe_transport::PipeClient::connected);
+        #[cfg(not(any(unix, windows)))]
         true
     }
 }

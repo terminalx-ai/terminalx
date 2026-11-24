@@ -1,3 +1,4 @@
+import { ThisComputer, thisComputer } from "@/lib/platform";
 import { useEffect, useRef, useState, type ComponentType, type KeyboardEvent, type ReactNode } from "react";
 import { AppWindow, Building2, ChevronDown, Cloud, Eye, Github, Laptop, Loader2, Plus, Send, Server, ShieldAlert, ShieldOff, Hash, SquareKanban, UserRound } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -191,8 +192,8 @@ function RunsOn({ bot }: { bot: Bot }) {
   return (
     <div className="flex min-w-0 flex-col gap-2">
       <div role="radiogroup" aria-label="Runs on" aria-busy={busy} onKeyDown={moveBetweenRadios} className="flex min-w-0 flex-wrap gap-2.5">
-        <ChoiceCard icon={Laptop} title="This Mac" note="Works while this Mac is awake. Uses your local agent logins. No compute cost." checked={place.kind === "thisMac"} busy={busy} disabled={place.kind === "other"} onSelect={() => setChoosing("back")} testId="bot-runs-on-this-mac" />
-        <ChoiceCard icon={Cloud} title="Cloud workspace" note="Always on. Keeps working when this Mac is off or asleep. Billed per hour of work." checked={place.kind === "cloud"} busy={busy} disabled={place.kind === "other" || place.kind === "machine"} badge={place.kind === "cloud" ? here : undefined} onSelect={() => setChoosing("cloud")} testId="bot-runs-on-cloud" />
+        <ChoiceCard icon={Laptop} title={ThisComputer} note={`Works while ${thisComputer} is awake. Uses your local agent logins. No compute cost.`} checked={place.kind === "thisMac"} busy={busy} disabled={place.kind === "other"} onSelect={() => setChoosing("back")} testId="bot-runs-on-this-mac" />
+        <ChoiceCard icon={Cloud} title="Cloud workspace" note={`Always on. Keeps working when ${thisComputer} is off or asleep. Billed per hour of work.`} checked={place.kind === "cloud"} busy={busy} disabled={place.kind === "other" || place.kind === "machine"} badge={place.kind === "cloud" ? here : undefined} onSelect={() => setChoosing("cloud")} testId="bot-runs-on-cloud" />
         <ChoiceCard icon={Server} title="Another machine" note="A paired Mac or a headless server you own." checked={place.kind === "machine"} busy={busy} disabled={place.kind === "other" || place.kind === "cloud"} badge={place.kind === "machine" ? here : undefined} onSelect={() => setChoosing("machine")} testId="bot-runs-on-machine" />
       </div>
       {place.kind === "other" && (
@@ -203,8 +204,8 @@ function RunsOn({ bot }: { bot: Bot }) {
       {elsewhere && !busy && (
         <p className="text-[12px] text-faint" data-testid="bot-runs-on-elsewhere">
           {place.kind === "cloud"
-            ? `${bot.name} lives on ${here}: its duties run there on the workspace's schedule, and the workspace sleeps after ${BOT_IDLE_SUSPEND_MINUTES} idle minutes. Its questions reach you on the phone. To move it to another place, bring it back to this Mac first.`
-            : `${bot.name} lives on ${here}: its duties run there. To move it to another place, bring it back to this Mac first.`}
+            ? `${bot.name} lives on ${here}: its duties run there on the workspace's schedule, and the workspace sleeps after ${BOT_IDLE_SUSPEND_MINUTES} idle minutes. Its questions reach you on the phone. To move it to another place, bring it back to ${thisComputer} first.`
+            : `${bot.name} lives on ${here}: its duties run there. To move it to another place, bring it back to ${thisComputer} first.`}
         </p>
       )}
       {busy && (
@@ -224,9 +225,9 @@ function RunsOn({ bot }: { bot: Bot }) {
       {choosing === "back" && elsewhere && (
         <Dialog open onOpenChange={(next) => { if (!next) setChoosing(null); }}>
           <DialogContent width="max-w-[26rem]" className="p-4" data-testid="bot-bring-back">
-            <DialogTitle className="mr-8 truncate text-sm font-semibold">Bring {bot.name} back to this Mac?</DialogTitle>
+            <DialogTitle className="mr-8 truncate text-sm font-semibold">Bring {bot.name} back to {thisComputer}?</DialogTitle>
             <DialogDescription className="mt-1 text-xs leading-[18px] text-muted-foreground">
-              {`Its role, memory, duties and items come back from ${here}, with what it learned there. Its duties then run only while this Mac is awake. Its chats there stay there.`}
+              {`Its role, memory, duties and items come back from ${here}, with what it learned there. Its duties then run only while ${thisComputer} is awake. Its chats there stay there.`}
             </DialogDescription>
             <div className="mt-3 flex justify-end gap-2">
               <Button type="button" variant="outline" size="sm" onClick={() => setChoosing(null)}>Cancel</Button>
@@ -252,12 +253,12 @@ function MoveDialog({ bot, kind, onClose, onMove }: { bot: Bot; kind: "cloud" | 
         <DialogTitle className="mr-8 truncate text-sm font-semibold">Move {bot.name} to a {what}</DialogTitle>
         <DialogDescription className="mt-1 text-xs leading-[18px] text-muted-foreground">
           {kind === "cloud"
-            ? `${bot.name} takes its role, memory, duties and items there and keeps working when this Mac is off. Its duties wake the workspace on their schedule; it sleeps after ${BOT_IDLE_SUSPEND_MINUTES} idle minutes, so you pay only while it works.`
+            ? `${bot.name} takes its role, memory, duties and items there and keeps working when ${thisComputer} is off. Its duties wake the workspace on their schedule; it sleeps after ${BOT_IDLE_SUSPEND_MINUTES} idle minutes, so you pay only while it works.`
             : `${bot.name} takes its role, memory, duties and items there and works while that machine is on.`}
         </DialogDescription>
         {choices.length === 0 ? (
           <p className="mt-3 text-xs text-muted-foreground" data-testid="bot-move-none">
-            {kind === "cloud" ? "You have no cloud workspace yet. Create one under Cloud in the sidebar, then move the bot." : "No machine is paired with this Mac. Pair one in Settings → Machines, then move the bot."}
+            {kind === "cloud" ? "You have no cloud workspace yet. Create one under Cloud in the sidebar, then move the bot." : `No machine is paired with ${thisComputer}. Pair one in Settings → Machines, then move the bot.`}
           </p>
         ) : (
           <div role="radiogroup" aria-label={`Choose a ${what}`} onKeyDown={moveBetweenRadios} className="mt-3 flex max-h-64 min-w-0 flex-col gap-1.5 overflow-y-auto">
@@ -370,7 +371,7 @@ function WorksIn({ bot, busy, onChange }: { bot: Bot; busy: boolean; onChange: (
   );
   return (
     <ListBox label="Works in">
-      <ListRow icon={UserRound} name="Personal" state={on("personal") ? "On" : "Off"} on={on("personal")} detail="No organisation · your own logins and this Mac" action={placeSwitch("personal", "Works for you personally")} testId="bot-works-in-personal" />
+      <ListRow icon={UserRound} name="Personal" state={on("personal") ? "On" : "Off"} on={on("personal")} detail={`No organisation · your own logins and ${thisComputer}`} action={placeSwitch("personal", "Works for you personally")} testId="bot-works-in-personal" />
       {orgs.map((org) => (
         <ListRow
           key={org.id}
