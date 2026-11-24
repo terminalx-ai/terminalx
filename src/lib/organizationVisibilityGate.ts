@@ -14,9 +14,9 @@ function subscribe(listener: () => void) {
   return () => { listeners.delete(listener); };
 }
 
-export function useOrganizationSwitchingEnabled() {
+export function useOrganizationSwitchingEnabled({ requestCapability = true } = {}) {
   useEffect(() => {
-    if (requested) return;
+    if (!requestCapability || requested) return;
     requested = true;
     // The native Phase 2 rollout intentionally keeps production off. Only an
     // affirmative capability response enables the switcher and its shortcuts.
@@ -25,6 +25,6 @@ export function useOrganizationSwitchingEnabled() {
       enabled = true;
       for (const listener of listeners) listener();
     }).catch(() => {});
-  }, []);
+  }, [requestCapability]);
   return useSyncExternalStore(subscribe, organizationSwitchingEnabled, () => false);
 }
