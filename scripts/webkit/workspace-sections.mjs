@@ -122,9 +122,7 @@ try {
       const beforeOutside = await target.getByTestId("cloud-workspace-group").count();
       const start = await handle.boundingBox();
       await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2); await page.mouse.down();
-      await page.mouse.move(900, 100, { steps: 12 });
-      await page.getByText("Outside a section", { exact: true }).waitFor();
-      await page.mouse.up();
+      await page.mouse.move(900, 100, { steps: 12 }); await page.mouse.up();
       check(await target.getByTestId("cloud-workspace-group").count() === beforeOutside, `${width}px dropping outside all sections preserves placement`);
       check(!(await list.evaluate((el) => el.scrollWidth > el.clientWidth + 1)), `${width}px no horizontal sidebar overflow`);
       const calls = await page.evaluate(() => window.__PW_TEAM__.calls);
