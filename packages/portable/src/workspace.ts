@@ -264,6 +264,12 @@ export interface WorkspaceYou {
   canApprove: boolean;
   /** False while the runtime has no member list yet (then `role` says nothing about sharing). */
   listed?: boolean;
+  /**
+   * Whether this connection may call `session.create` and `session.addTab`
+   * now (PRO-546, docs/CLOUD-SHARING.md). Absent from a runtime from before
+   * it, which refuses both to a `participate` connection.
+   */
+  canStart?: boolean;
 }
 
 export type WorkspaceConnectionState =
@@ -1733,9 +1739,11 @@ export class WorkspaceRpcClient {
   addSessionTab(
     sessionId: string,
     params: { agent: string; model?: string; effort?: string | null; mode?: string; nativeCodex?: boolean },
+    /** Kept by a caller that may ask again after no answer: the runtime then answers with the tab it already added. */
+    clientRequestId?: string,
   ): Promise<{ sessionId: string; tabId: string; session: RuntimeSession; tab?: AgentTabInfo | null }> {
     const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));
-    return this.mutate("session.addTab", { sessionId, ...defined });
+    return this.mutate("session.addTab", { sessionId, ...defined }, clientRequestId);
   }
 
   /** `session.usage` (`machine/8`): the session's usage, read again on the machine. */

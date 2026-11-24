@@ -20,7 +20,7 @@ import { Button, Card, EmptyState, SectionTitle } from "@mobile/ui/primitives";
 import { ScreenHeader } from "@mobile/ui/SessionChrome";
 import { TextField } from "@mobile/ui/TextField";
 import { useTheme } from "@mobile/ui/theme";
-import { keepConversationState, takeConversationState } from "@mobile/state/conversation-state";
+import { setConversationState, takeConversationState } from "@mobile/state/conversation-state";
 
 /** The longest name the server takes for a workspace. */
 const NAME_MAX = 80;
@@ -289,7 +289,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
       const answer = await attempt.current!.launch(orgId, { name: priced.name, quoteId: priced.quote.id, ...(priced.setup ? { setup: priced.setup } : {}), ...(priced.launch ? { launch: priced.launch } : {}) }, () => { if (alive.current) { setBusy("checking"); setNoAnswer(true); } });
       catalog.adopt(orgId, answer);
       // Kept on the phone until the agent has it: a canceled launch puts it back in the form.
-      if (priced.launch) keepConversationState(keptTaskKey(orgId, answer.workspace.id), { ...draft.task, agent: priced.launch.agent });
+      if (priced.launch) setConversationState(keptTaskKey(orgId, answer.workspace.id), { ...draft.task, agent: priced.launch.agent });
       // The workspace exists from here: its own page shows the launch until it runs.
       router.replace({ pathname: "/cloud/[workspaceId]", params: { workspaceId: answer.workspace.id, orgId, operationId: answer.operation.id, title: answer.workspace.name } });
     } catch (error) {

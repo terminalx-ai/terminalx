@@ -54,10 +54,10 @@ const pass = (ms = 0) => act(async () => { await vi.advanceTimersByTimeAsync(ms)
  * client and catalog. The workspace's live connection is not what is under
  * test here: the page is handed a conversation with nothing in it.
  */
-async function world(ws: Record<string, unknown>, op: Record<string, unknown> | null = null, more: { launch?: Partial<HeldLaunch>; tabs?: unknown[] } = {}) {
+async function world(ws: Record<string, unknown>, op: Record<string, unknown> | null = null, more: { launch?: Partial<HeldLaunch>; tabs?: unknown[]; startOffer?: string } = {}) {
   service = account({ workspaces: [{ workspace: workspace({ state: "ready", ...ws }), latestOperation: op ? operation(op) : null, ...(more.launch ? { launch: more.launch } : {}) }] });
   await service.catalog.refresh();
-  const snapshot = { connection: { state: ws.state === "suspended" ? "suspended" : "connected" }, problem: null, collab: { available: false, userId: "u-me", participants: [], leases: {}, notes: {} }, role: "manager", canApprove: true, hasKey: true, interrupts: false, tabs: more.tabs ?? [], outbox: [], error: null };
+  const snapshot = { connection: { state: ws.state === "suspended" ? "suspended" : "connected" }, problem: null, collab: { available: false, userId: "u-me", participants: [], leases: {}, notes: {} }, role: "manager", canApprove: true, hasKey: true, interrupts: false, ...(more.startOffer ? { startOffer: more.startOffer } : {}), tabs: more.tabs ?? [], outbox: [], error: null };
   const session = { subscribe: () => () => undefined, getSnapshot: () => snapshot, view: () => () => undefined, reconnect: () => undefined, typingIn: () => undefined, outbox: { isDeciding: () => false } };
   mocks.catalog = Object.assign(service.catalog, { retain: () => () => undefined, watch: () => () => undefined, opened: () => session });
   return service;
@@ -108,6 +108,22 @@ describe("the workspace's page", () => {
     await pass(1_200);
     expect(byId("launch-head")).toBeNull();
     expect([...container.querySelectorAll("[role='tab']")].map((entry) => [entry.textContent, entry.getAttribute("aria-selected")])).toEqual([["Shell", "false"], ["Fix checkout", "true"]]);
+  });
+
+  it("leads from a first task that did not start to New conversation (PRO-547 after PRO-548)", async () => {
+    await world({ state: "provisioning" }, { state: "running", stage: "creating-machine" }, { launch: { agent: "claude", promptBytes: 12, createdAt: Date.now() }, startOffer: "yes" });
+    mocks.params = { workspaceId: "ws-9", orgId: "org-1", operationId: "op-9", title: "Checkout redesign" };
+    await show(<CloudWorkspaceScreen />);
+    service.advance("op-9", { stage: "connecting-relay" });
+    service.advance("op-9", { state: "succeeded", stage: "ready", cancelable: false }, { state: "ready" });
+    service.advanceLaunch("ws-9", { state: "failed", category: "agent-sign-in-required", failedAt: Date.now() });
+    await pass(3_000);
+    expect(byId("launch-head")!.textContent).toBe("The first task did not start");
+    await act(async () => { byId("open-workspace")!.click(); });
+    await pass();
+    // The workspace runs with no conversation: the way on is New conversation.
+    expect(byId("launch-head")).toBeNull();
+    expect(byId("empty-start-button")).not.toBeNull();
   });
 
   it("shows a launch the list says is under way, without being told which operation", async () => {

@@ -26,17 +26,14 @@ export function useConversationState<T>(key: string, initial: T) {
   return [value, state.update] as const;
 }
 
-/**
- * Keep `value` under `key` for a screen that is not open yet (a launch's
- * first task, put back by Launch again), in the same memory as the drafts:
- * on the phone only, and gone on sign-out with them.
- */
-export function keepConversationState<T>(key: string, value: T): void {
-  if (retained.has(key)) (retained.get(key) as ReturnType<typeof createEntry<T>>).update(value);
+/** Set what a conversation's screen will show under `key`, from outside it (a first message given back to its tab's composer). */
+export function setConversationState<T>(key: string, value: T): void {
+  const entry = retained.get(key) as ReturnType<typeof createEntry<T>> | undefined;
+  if (entry) entry.update(value);
   else retained.set(key, createEntry(value));
 }
 
-/** What is kept under `key`, taken: it is no longer kept. */
+/** What is kept under `key`, taken: it is no longer kept (a launch's first task, put back once by Launch again). */
 export function takeConversationState<T>(key: string): T | undefined {
   const entry = retained.get(key) as ReturnType<typeof createEntry<T>> | undefined;
   retained.delete(key);

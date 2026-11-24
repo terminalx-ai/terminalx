@@ -52,6 +52,18 @@ does, through the app. The boards are drawn in Ember when dark and in Den when
 light: for the light run set the simulator's appearance to light and
 `MAESTRO_THEME=Den`.
 
+## A running workspace (25.10)
+
+"Search filters" in Acme runs: the app's real catalog, link, session and
+outbox connect to a workspace runtime that answers in `live-workspace.ts`,
+over the real encrypted handshake and frames of `src/cloud/fake-runtime.ts`.
+`fixtureStart: <state>` picks what that runtime says (the states are listed in
+that file: a manager, `tab`, `other`, `old`, `unread`, `no-answer`, `refused`,
+`prompt-failed`, `gone`). `fixtureResume: hold` keeps a start of a stopped
+workspace under way, and `fixtureResume: fail` has the provider not answering.
+`flow-25.10.yaml` shoots each state; it takes about two minutes longer than the
+others, because no answer is only said once the client stops waiting (30 s).
+
 `fixtureTabs: states` gives "Review and merge" four tabs, one for each state on
 the session screen (working, a question, a table, done).
 

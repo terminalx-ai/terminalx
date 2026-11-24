@@ -77,4 +77,8 @@ export const AccessibilityInfo = { isReduceMotionEnabled: async () => false, add
 
 export const ActionSheetIOS = { showActionSheetWithOptions: vi.fn() };
 export const Alert = { alert: vi.fn() };
-export const Keyboard = { dismiss: vi.fn(), addListener: () => ({ remove: () => undefined }), isVisible: () => false };
+
+// A sheet over the screen (25.10's start sheet): drawn in place while visible.
+export const Modal = (props: Props & { visible?: boolean }) => (props.visible === false ? null : <div data-modal="true">{props.children}</div>);
+export const KeyboardAvoidingView = View;
+export const Keyboard = { addListener: () => ({ remove: () => undefined }), dismiss: vi.fn(), isVisible: () => false };

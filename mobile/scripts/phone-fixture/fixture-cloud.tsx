@@ -20,6 +20,7 @@ import { CloudCatalog, type CatalogSnapshot, type CatalogStorage } from "../../s
 import { b64, CHECKPOINT_SCHEMA, checkpointAad, seal, sha256Hex, unb64 } from "../../src/cloud/crypto";
 import { keyItemName, type SecretStorage } from "../../src/cloud/keys";
 import { useApp } from "../../src/state/AppProvider";
+import { LIVE_ID, liveAnswer, liveNow, liveRole, liveSocket } from "./live-workspace";
 import { handle as launch } from "./setup/launch";
 import { handle as organization } from "./setup/organization";
 import type { SetupHandler } from "./setup/types";
@@ -64,6 +65,8 @@ const WORKSPACES: Record<string, ReturnType<typeof workspace>[]> = {
     // `fixtureCloudRole: driver` (a launch argument): its saved conversation with the composer a driver keeps, in place of Start.
     workspace(ACME, "ws-warm-up", "Warm-up run", "suspended", 2 * 24 * 60, "acme/app", "warm-up", Settings.get("fixtureCloudRole") === "driver" ? "driver" : "manager", {}, "fixture-compute"),
     workspace(ACME, "ws-warm-up-five", "Warm-up run, five issues", "suspended", 3 * 24 * 60, "acme/app", "warm-up-five", "manager"),
+    // 25.10: running, and connected to over the fixture's own runtime (`live-workspace.ts`).
+    workspace(ACME, LIVE_ID, "Search filters", "ready", 4, "acme/app", "search-filters", liveRole(), {}, "fixture-compute"),
   ],
   [NORTHWIND]: [workspace(NORTHWIND, "ws-billing", "Billing export", "ready", 6, "northwind/api", "billing-export", "driver", { pendingApprovals: 1 })],
 };
@@ -113,6 +116,11 @@ function server(holdList: boolean): typeof fetch {
     const sent = typeof init?.body === "string" ? init.body : null;
     let body: unknown = null;
     try { body = sent ? JSON.parse(sent) : null; } catch { body = null; }
+    const live = liveAnswer((init?.method ?? "GET").toUpperCase(), path, body, json);
+    if (live) return live;
+    // `fixtureResume: hold` keeps a start under way; `fail` has the provider not answering (25.10's "did not start").
+    if (/\/resume$/.test(path) && argument("fixtureResume") === "hold") await never;
+    if (/\/resume$/.test(path) && argument("fixtureResume") === "fail") return json(503, { error: "cloud_provider_unavailable" });
     for (const area of SETUP) {
       const answer = await area({ method: (init?.method ?? "GET").toUpperCase(), path, query: url.searchParams, headers: new Headers(init?.headers), body, argument, json });
       if (answer) return answer;
@@ -178,7 +186,9 @@ export function CloudProvider({ children }: PropsWithChildren) {
       await secrets.set(keyItemName({ organizationId: ACME, workspaceId: "ws-warm-up" }), JSON.stringify(held));
       if (!current) return;
       const api = new CloudApi({ origin: ORIGIN, accessToken: async () => "fixture", fetch: server(Settings.get("fixtureCloud") === "loading") });
-      made = new CloudCatalog({ api, secrets, storage: memory(), clientInstallationId: "mobile-fixture", appVersion: "fixture" });
+      // The phone has been connected to "Search filters" before too.
+      await secrets.set(keyItemName({ organizationId: ACME, workspaceId: LIVE_ID }), JSON.stringify(held));
+      made = new CloudCatalog({ api, secrets, storage: memory(), clientInstallationId: "mobile-fixture", appVersion: "fixture", link: { createSocket: liveSocket(KEY), now: liveNow } });
       setCatalog(made);
       void made.refresh();
     })();
