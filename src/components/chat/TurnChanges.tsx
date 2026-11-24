@@ -92,6 +92,7 @@ export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint, r
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => void review("undo")}><Undo2 /> Undo turn</Button>
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => void review("keep")}><Check /> Keep</Button>
       </div>}
+      {saved && changes.length > 0 && !saved.reviewed && !saved.unavailableReason && !checkpoint?.api?.readOnly && saved.expiresIn ? <p role="status" className="w-full text-xs text-muted-foreground">{expiryNote(saved.expiresIn)}</p> : null}
       {saved?.reviewed && <span role="status" className="text-xs text-muted-foreground">{saved.undone ? "Undone" : saved.restored ? "Restored" : "Kept"}</span>}
       {saved?.undone && saved.backupRef && !checkpoint?.api?.readOnly && <Button size="sm" variant="ghost" disabled={busy} title={`Backup: ${saved.backupRef}`} onClick={() => void review("restore")}>Restore what Undo removed</Button>}
       {saved?.unavailableReason && <p role="status" className="w-full text-xs text-muted-foreground">{saved.unavailableReason}</p>}
@@ -121,6 +122,13 @@ export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint, r
       )}
     </div>
   );
+}
+
+/** The workspace keeps the last turns' checkpoints only: say when this one's Undo is about to go. */
+export function expiryNote(turns: number): string {
+  return turns === 1
+    ? "Undo for this turn expires after the next turn in this workspace."
+    : `Undo for this turn expires after ${turns} more turns in this workspace.`;
 }
 
 function Chip({ icon, name, added, removed, deleted, title, onClick }: { title?: string; icon: React.ReactNode; name: string; added: number; removed: number; deleted?: boolean; onClick?: () => void }) {

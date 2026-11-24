@@ -90,7 +90,14 @@ pub struct Checkpoint {
     start_kept: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     end_kept: Option<String>,
+    /// Read, never saved: how many more turns in this checkout an unreviewed
+    /// turn's Undo lasts, when that is few (see [`get`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in: Option<usize>,
 }
+
+/// Within how many turns of expiring an unreviewed turn's card says so.
+const EXPIRY_WARNING_TURNS: usize = 5;
 
 impl Checkpoint {
     fn start_snapshot(&self) -> Snapshot {
@@ -407,6 +414,7 @@ pub fn observe(session: &str, tab: &str, seq: u64, payload: &mut Payload) -> Res
                 abandoned: false,
                 start_kept,
                 end_kept: None,
+                expires_in: None,
             });
         } else if let Payload::TurnCompleted { head, .. } = payload {
             if let Some(turn) = state.turns.last_mut().filter(|t| t.end.is_none()) {
@@ -437,6 +445,13 @@ pub fn get(session: &str, tab: &str, seq: u64) -> Result<Option<Checkpoint>> {
             turn.unavailable_reason
                 .get_or_insert_with(|| "This checkpoint has expired under the workspace retention limit.".into());
         }
+        // An unreviewed turn's Undo is about to go: say so while it can still be used.
+        // Not knowing only leaves the warning out; the card still reads.
+        turn.expires_in = if !turn.reviewed && !turn.undone && turn.unavailable_reason.is_none() {
+            trees::turns_left(Path::new(&turn.cwd), session, &id).ok().flatten().filter(|left| *left <= EXPIRY_WARNING_TURNS)
+        } else {
+            None
+        };
         turn.backup_ref = if turn.undone
             && trees::exists(Path::new(&turn.cwd), session, &id, "before-undo")?
             && trees::exists(Path::new(&turn.cwd), session, &id, "before-undo-index")?

@@ -17,6 +17,14 @@ pub fn reference(session: &str, turn: &str, edge: &str) -> Result<String> {
     Ok(format!("refs/raccoon-checkpoints/{session}/{turn}/{edge}"))
 }
 
+/// How many more turns in this checkout `turn`'s checkpoint lasts before the
+/// retention limit removes it (see `retention::remaining`).
+pub fn turns_left(cwd: &Path, session: &str, turn: &str) -> Result<Option<usize>> {
+    let start = reference(session, turn, "start")?;
+    let group = start.rsplit_once('/').map_or(start.as_str(), |(group, _)| group);
+    retention::remaining(cwd, group)
+}
+
 #[cfg(test)]
 pub fn pin(cwd: &Path, session: &str, turn: &str, edge: &str, tree: &str) -> Result<()> {
     pin_many(cwd, session, turn, &[(edge, tree)])

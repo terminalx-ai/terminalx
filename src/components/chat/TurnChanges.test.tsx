@@ -151,3 +151,21 @@ it("shows a viewer what a remote turn changed, with nothing to keep, undo or res
   expect(await screen.findByText("Undone")).toBeDefined();
   for (const name of ["Undo turn", "Keep", "Restore what Undo removed"]) expect(screen.queryByRole("button", { name })).toBeNull();
 });
+
+it("warns that Undo is about to expire for an unreviewed turn", async () => {
+  vi.mocked(api.turnCheckpoint).mockResolvedValue({ ...saved, expiresIn: 3 } as never);
+  card();
+  expect(await screen.findByText("Undo for this turn expires after 3 more turns in this workspace.")).toBeDefined();
+  expect(screen.getByRole("button", { name: "Undo turn" })).toBeDefined();
+});
+
+it("says the next turn when only one is left, and nothing once the turn is reviewed", async () => {
+  vi.mocked(api.turnCheckpoint).mockResolvedValue({ ...saved, expiresIn: 1 } as never);
+  card();
+  expect(await screen.findByText("Undo for this turn expires after the next turn in this workspace.")).toBeDefined();
+  cleanup();
+  vi.mocked(api.turnCheckpoint).mockResolvedValue({ ...saved, reviewed: true, expiresIn: 1 } as never);
+  card();
+  expect(await screen.findByText("Kept")).toBeDefined();
+  expect(screen.queryByText(/expires after/)).toBeNull();
+});
