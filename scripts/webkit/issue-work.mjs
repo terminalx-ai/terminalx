@@ -148,8 +148,22 @@ try {
           "the card is solid and no row in it is dimmed": shown.solid && shown.rows === (index ? 1 : 3) && !shown.dimmed && shown.quiet === (index === 1),
         }, shown);
         if (shots) await page.screenshot({ path: join(shots, `issue-work-card-${index ? "quiet" : "working"}-${mode}-${width}.png`) });
-        // In steps: the card stays open while the pointer is on its way to it.
+        // In steps: the card stays open while the pointer is on its way to it. Radix closes it on the first pointer
+        // move outside the way to the card, seen by a listener it adds to the document only in an effect after the
+        // pointer left the chip. On a busy runner all five moves came before that listener, the pointer stopped, and
+        // the card stayed open (16 of 16 on Linux with timers and scheduler tasks 30 ms late; one move more closed
+        // it). So the pointer moves once more, as a hand does, when Radix is listening or the card has closed.
+        await page.evaluate(() => {
+          if (window.__graceListeners !== undefined) return;
+          window.__graceListeners = 0;
+          const grace = (type, listener) => type === "pointermove" && listener?.name === "handleTrackPointerGrace";
+          const add = document.addEventListener, remove = document.removeEventListener;
+          document.addEventListener = function (type, listener, ...rest) { if (grace(type, listener)) window.__graceListeners++; return add.call(this, type, listener, ...rest); };
+          document.removeEventListener = function (type, listener, ...rest) { if (grace(type, listener)) window.__graceListeners--; return remove.call(this, type, listener, ...rest); };
+        });
         await page.mouse.move(width - 4, 696, { steps: 5 });
+        await page.waitForFunction(() => window.__graceListeners > 0 || !document.querySelector('[data-testid="issue-work-card"]'));
+        await page.mouse.move(width - 5, 696);
         await card.waitFor({ state: "hidden" });
       }
       await page.evaluate((glass) => document.documentElement.toggleAttribute("data-glass", glass), glass);
