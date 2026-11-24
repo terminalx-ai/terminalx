@@ -220,10 +220,10 @@ try {
       "description names where it is kept": editText.includes("Dev app · kept on this computer for this project."),
       "icon tile beside the name": Math.round((await edit.getByRole("button", { name: /Change icon/ }).boundingBox()).width) === 32,
       "line-numbered command": (await edit.locator("[data-script-line]").count()) === 3,
-      "command hint": editText.includes("Runs in the workspace folder with your and the project's variables. ⌘↵ saves."),
+      "command hint": editText.includes("Runs in the workspace folder with your and the project's variables. ⌘⏎ saves."),
       "switch descriptions": editText.includes("Starts once a new workspace finishes its setup script.") && editText.includes("Off stops the running one before starting again."),
       "Hide action in the footer": (await edit.getByRole("button", { name: "Hide action" }).count()) === 1,
-      "Save with its keycap": (await edit.getByRole("button", { name: "Save action" }).innerText()).replace(/\s+/g, "") === "Save⌘↵",
+      "Save with its keycap": (await edit.getByRole("button", { name: "Save action" }).innerText()).replace(/\s+/g, "") === "Save⌘⏎",
       "fits": editFits,
     }, editText);
     if (shots) await page.screenshot({ path: join(shots, `06-edit-action-${mode}.png`) });
