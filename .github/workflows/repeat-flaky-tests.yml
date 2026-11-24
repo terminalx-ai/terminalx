@@ -99,7 +99,7 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             src-tauri/target
-          key: ci-v4-linux-rust-tests-main-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ steps.toolchain.outputs.rustc }}
+          key: ci-v5-linux-rust-tests-main-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.rustc }}-${{ hashFiles('src-tauri/Cargo.lock') }}
       # Built once; every run below is the test binary itself.
       - name: Build the library's tests
         id: build
