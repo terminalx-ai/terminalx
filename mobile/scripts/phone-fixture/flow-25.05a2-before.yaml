@@ -1,0 +1,35 @@
+# 25.05 row 2, Before there is anything to set up: reading what the provider offers, no compute, launching paused, and no network.
+appId: com.terminalx.phone.fixture
+name: Launch, before there is anything to set up (25.05)
+---
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: reading, openRoute: "/cloud/launch?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "From Boat, for Northwind."
+    timeout: 15000
+- takeScreenshot: 25.05-07-reading
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: connect, openRoute: "/cloud/launch?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "Connect compute first"
+    timeout: 15000
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-08-compute-not-connected
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: paused, openRoute: "/cloud/launch?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "New workspaces are paused"
+    timeout: 15000
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-09-paused
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: offline, openRoute: "/cloud/launch?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "Sizes and prices could not be read"
+    timeout: 15000
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-10-no-network

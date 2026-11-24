@@ -1,0 +1,68 @@
+# 25.05 row 1, Set it up: the form on Boat and on Agent37, the Size and Stop when idle sheets, the empty repository, and checking and pricing.
+appId: com.terminalx.phone.fixture
+name: Launch, set it up (25.05)
+---
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: boat, openRoute: "/cloud/launch?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "Review price"
+    timeout: 15000
+- tapOn:
+    id: "launch-repository"
+- assertVisible: "Optional. The repository is cloned before the workspace becomes available."
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-05-repository-empty
+- inputText: "github.com/acme/app"
+- tapOn: "Use this repository"
+- tapOn:
+    id: "launch-name"
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- assertVisible: "Size: Small.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-01-form-boat
+- tapOn: "Size: .*"
+- assertVisible: "Boat · prices are estimates, in US dollars"
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-03-size
+- tapOn: "Small, .*"
+- tapOn: "Stop when idle: .*"
+- assertVisible: "A stopped workspace starts again when you send it a message."
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-04-stop-when-idle
+- tapOn: "15 minutes"
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: agent37, openRoute: "/cloud/launch?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "Review price"
+    timeout: 15000
+- tapOn:
+    id: "launch-repository"
+- inputText: "github.com/acme/app"
+- tapOn: "Use this repository"
+- tapOn:
+    id: "launch-name"
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- assertVisible: "Provider: Agent37"
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-02-form-agent37
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: checking, openRoute: "/cloud/launch?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "Review price"
+    timeout: 15000
+- tapOn:
+    id: "launch-repository"
+- inputText: "github.com/acme/app"
+- tapOn: "Use this repository"
+- tapOn:
+    id: "launch-name"
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- tapOn: "Review price"
+- assertVisible: ".*Checking and pricing….*"
+- takeScreenshot: 25.05-06-checking-and-pricing
