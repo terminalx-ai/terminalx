@@ -2,10 +2,14 @@ name: WebKit layout checks on Linux
 
 # The WebKit layout checks on Linux, in four parts on four runners. Not a
 # required status and not part of CI's `check`: the required run is still
-# `webkit-layout` on macOS (.github/workflows/ci.yml). This shows, on every
-# pull request, whether the checks pass on Linux and how long each part takes,
-# so the macOS runner can be given up once they do (docs/CI-RUNNERS.md "macOS
-# runner time").
+# `webkit-layout` on macOS (.github/workflows/ci.yml). This shows whether the
+# checks pass on Linux and how long each part takes, so the macOS runner can be
+# given up once they do (docs/CI-RUNNERS.md "macOS runner time").
+#
+# Nightly, by hand, and on a pull request that changes the checks or this
+# file. It ran on every pull request at first: four jobs each, which waited
+# in the same queue as the required ones (four runs of it among the 244 jobs
+# of one busy hour) for a result nobody is held to yet.
 #
 # `run-all.mjs --shard i/4` deals every check to exactly one part. On Linux it
 # leaves out the five it names in `macOnly`, each with its reason.
@@ -16,6 +20,11 @@ name: WebKit layout checks on Linux
 
 on:
   pull_request:
+    paths:
+      - scripts/webkit/**
+      - .github/workflows/webkit-linux.yml
+  schedule:
+    - cron: "47 3 * * *"
   workflow_dispatch:
 
 permissions:
