@@ -28,3 +28,12 @@ export function cloudSections(organizations: readonly CatalogOrganization[]): { 
 export function emptyOrganizationsLabel(count: number): string {
   return `${count} ${count === 1 ? "organization" : "organizations"} with no workspaces`;
 }
+
+/**
+ * The organizations whose setup the Cloud tab reads (25.01): those with no
+ * workspaces whose list was read. One whose list could not be read may have
+ * workspaces, so it is not taken for one being set up.
+ */
+export function setupCandidates(organizations: readonly CatalogOrganization[]): CloudOrganization[] {
+  return organizations.filter((entry) => entry.workspaces.length === 0 && !entry.error).map((entry) => entry.organization);
+}

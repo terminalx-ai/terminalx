@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CatalogOrganization } from "./catalog";
-import { cloudSections, emptyOrganizationsLabel } from "./list";
+import { cloudSections, emptyOrganizationsLabel, setupCandidates } from "./list";
 
 const org = (orgId: string, workspaces: string[], error: string | null = null): CatalogOrganization => ({
   organization: { orgId, name: orgId.toUpperCase(), role: "member" },
@@ -26,5 +26,10 @@ describe("the Cloud list's order (#988)", () => {
   it("counts the folded row in words", () => {
     expect(emptyOrganizationsLabel(5)).toBe("5 organizations with no workspaces");
     expect(emptyOrganizationsLabel(1)).toBe("1 organization with no workspaces");
+  });
+
+  it("reads the setup of the organizations with no workspaces, never one whose list could not be read (25.01)", () => {
+    const candidates = setupCandidates([org("personal", []), org("acme", ["a1"]), org("broken", [], "cloud_provider_unavailable"), org("e2e", [])]);
+    expect(candidates.map((organization) => organization.orgId)).toEqual(["personal", "e2e"]);
   });
 });
