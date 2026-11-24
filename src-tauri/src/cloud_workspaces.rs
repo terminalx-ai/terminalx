@@ -1775,6 +1775,8 @@ pub struct CloudSchedule {
     pub schedule: Option<CloudScheduleTiming>,
     #[serde(default)]
     pub github_trigger: Option<CloudScheduleGithubTrigger>,
+    #[serde(default)]
+    pub webhook_trigger: Option<CloudScheduleWebhookTrigger>,
     #[serde(default = "existing_workspace_mode", deserialize_with = "response_workspace_mode")]
     pub workspace_mode: String,
     #[serde(default)]
@@ -1815,6 +1817,100 @@ struct CloudScheduleAnswer {
     schedule: CloudSchedule,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudScheduleWebhookTrigger {
+    #[serde(skip_deserializing)]
+    pub url: String,
+    #[serde(skip_deserializing)]
+    pub secret_updated_at: Option<i64>,
+    #[serde(skip_serializing)]
+    path: String,
+}
+
+/// The request opts into a webhook without supplying any configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudScheduleWebhookInput;
+
+impl<'de> Deserialize<'de> for CloudScheduleWebhookInput {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let fields = std::collections::BTreeMap::<String, serde::de::IgnoredAny>::deserialize(deserializer)?;
+        if !fields.is_empty() {
+            return Err(serde::de::Error::custom("webhookTrigger must be an empty object"));
+        }
+        Ok(Self)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudScheduleSecretAnswer {
+    schedule: CloudScheduleSecretView,
+}
+
+// Read responses deserialize straight into CloudSchedule, which ignores secret fields.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudScheduleSecretView {
+    #[serde(flatten)]
+    view: CloudSchedule,
+    webhook_trigger: Option<CloudScheduleSecretTrigger>,
+}
+
+#[derive(Deserialize)]
+struct CloudScheduleSecretTrigger {
+    #[serde(flatten)]
+    metadata: CloudScheduleWebhookTrigger,
+    #[serde(default, deserialize_with = "deserialize_webhook_secret")]
+    secret: Option<zeroize::Zeroizing<String>>,
+}
+
+fn deserialize_webhook_secret<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<zeroize::Zeroizing<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(|secret| secret.map(zeroize::Zeroizing::new))
+}
+
+/// Only create and rotate can serialize the one-time secret to the webview.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudScheduleWriteResult {
+    #[serde(flatten)]
+    view: CloudSchedule,
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_webhook_secret")]
+    webhook_secret: Option<zeroize::Zeroizing<String>>,
+}
+
+fn serialize_webhook_secret<S: serde::Serializer>(
+    secret: &Option<zeroize::Zeroizing<String>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    secret.as_deref().serialize(serializer)
+}
+
+impl std::fmt::Debug for CloudScheduleWriteResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("CloudScheduleWriteResult")
+            .field("view", &self.view)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CloudScheduleSecretView {
+    fn into_write_result(mut self, client: &Client, webhook: bool) -> Result<CloudScheduleWriteResult, CloudWorkspaceClientError> {
+        let webhook_secret = match (self.webhook_trigger, webhook) {
+            (Some(trigger), true) if trigger.secret.as_ref().is_some_and(|secret| !secret.is_empty()) => {
+                self.view.webhook_trigger = Some(trigger.metadata);
+                trigger.secret
+            }
+            (None, false) => None,
+            _ => return Err(post_send_error(RequestRisk::Mutation)),
+        };
+        client.normalize_schedule(&mut self.view, &mut [], RequestRisk::Mutation)?;
+        Ok(CloudScheduleWriteResult { view: self.view, webhook_secret })
+    }
+}
+
 /// What a schedule would cost and when it would first run, before it is saved.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1844,6 +1940,8 @@ pub struct CloudScheduleEstimateInput {
     #[serde(default, deserialize_with = "present_automation_field")]
     pub github_trigger: Option<CloudScheduleGithubTrigger>,
     #[serde(default, deserialize_with = "present_automation_field")]
+    pub webhook_trigger: Option<CloudScheduleWebhookInput>,
+    #[serde(default, deserialize_with = "present_automation_field")]
     pub workspace_mode: Option<String>,
     pub completion_policy: String,
     pub max_run_minutes: u32,
@@ -1867,6 +1965,8 @@ pub struct CloudScheduleCreateInput {
     pub schedule: Option<CloudScheduleTiming>,
     #[serde(default, deserialize_with = "present_automation_field")]
     pub github_trigger: Option<CloudScheduleGithubTrigger>,
+    #[serde(default, deserialize_with = "present_automation_field")]
+    pub webhook_trigger: Option<CloudScheduleWebhookInput>,
     #[serde(default, deserialize_with = "present_automation_field")]
     pub workspace_mode: Option<String>,
     #[serde(default, deserialize_with = "present_automation_field")]
@@ -1949,7 +2049,7 @@ fn automation_run_identity(schedule: &mut CloudSchedule, runs: &mut [CloudSchedu
 
 /// Validate before consulting account/provider state or making HTTP requests.
 fn automation_body(
-    timing: Option<&CloudScheduleTiming>, github: Option<&CloudScheduleGithubTrigger>,
+    timing: Option<&CloudScheduleTiming>, github: Option<&CloudScheduleGithubTrigger>, webhook: bool,
     mode: Option<&str>, archive_days: Option<u32>, archive_merge: Option<bool>,
 ) -> Option<Value> {
     let fresh = mode == Some("fresh");
@@ -1958,9 +2058,10 @@ fn automation_body(
         || (archive_merge == Some(true) && !fresh)
     { return None; }
     let mut body = json!({});
-    match (timing, github) {
-        (Some(timing), None) => body["schedule"] = schedule_timing_body(timing)?,
-        (None, Some(trigger)) => {
+    match (timing, github, webhook) {
+        (None, None, true) => body["webhookTrigger"] = json!({}),
+        (Some(timing), None, false) => body["schedule"] = schedule_timing_body(timing)?,
+        (None, Some(trigger), false) => {
             if trigger.repository_id.is_empty() || trigger.repository_id.encode_utf16().count() > 255
                 || !matches!(trigger.event.as_str(), "opened" | "pushed" | "merged")
                 || trigger.filters.len() > 5
@@ -2211,6 +2312,26 @@ impl Client {
             base: Url::parse(base).unwrap(),
             timeout,
         }
+    }
+
+    fn normalize_schedule(
+        &self,
+        schedule: &mut CloudSchedule,
+        runs: &mut [CloudScheduleRun],
+        risk: RequestRisk,
+    ) -> Result<(), CloudWorkspaceClientError> {
+        if let Some(trigger) = &mut schedule.webhook_trigger {
+            let valid_path = trigger.path.strip_prefix("/v1/automation-webhooks/whk_")
+                .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| matches!(byte, b'a'..=b'z' | b'2'..=b'7')));
+            if !valid_path {
+                return Err(post_send_error(risk));
+            }
+            trigger.url = format!("{}{}", self.base.origin().ascii_serialization(), trigger.path);
+            // The API returns an hourly placeholder for event-driven schedules.
+            schedule.schedule = None;
+        }
+        automation_run_identity(schedule, runs);
+        Ok(())
     }
 
     fn request<T: DeserializeOwned>(
@@ -3758,7 +3879,9 @@ impl CloudWorkspaceService {
             if result.schedules.iter().any(|schedule| !valid_schedule_id(&schedule.id) || workspace_id.is_some_and(|id| schedule.workspace_id != id)) {
                 return Err(invalid_response());
             }
-            for schedule in &mut result.schedules { automation_run_identity(schedule, &mut []); }
+            for schedule in &mut result.schedules {
+                client.normalize_schedule(schedule, &mut [], RequestRisk::Read)?;
+            }
             Ok(result)
         })
     }
@@ -3773,7 +3896,7 @@ impl CloudWorkspaceService {
             if result.schedule.id != schedule_id {
                 return Err(invalid_response());
             }
-            automation_run_identity(&mut result.schedule, &mut result.runs);
+            client.normalize_schedule(&mut result.schedule, &mut result.runs, RequestRisk::Read)?;
             Ok(result)
         })
     }
@@ -3781,10 +3904,13 @@ impl CloudWorkspaceService {
     /// What a schedule would cost and when it would first run. It writes
     /// nothing on the server, so it is asked like a read.
     pub fn schedule_estimate(&self, org: Option<&str>, input: &CloudScheduleEstimateInput) -> Result<CloudScheduleQuote, CloudWorkspaceClientError> {
-        let timing = automation_body(input.schedule.as_ref(), input.github_trigger.as_ref(), input.workspace_mode.as_deref(), None, None);
+        let timing = automation_body(input.schedule.as_ref(), input.github_trigger.as_ref(), input.webhook_trigger.is_some(), input.workspace_mode.as_deref(), None, None);
         let (Some(timing), true) = (timing, valid_resource_id(&input.workspace_id) && valid_schedule_policies(None, &input.completion_policy, input.max_run_minutes)) else {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         };
+        if input.webhook_trigger.is_some() {
+            self.phase2_gate(false)?;
+        }
         if !self.phase2_enabled && (input.workspace_mode.as_deref() == Some("fresh") || input.github_trigger.is_some()) {
             return Err(CloudWorkspaceClientError::local("cloud_schedule_runtime_unsupported", false));
         }
@@ -3808,10 +3934,10 @@ impl CloudWorkspaceService {
     /// Make a scheduled task. It starts billed compute by itself, which the
     /// person confirmed before this was called; the request says so. A mode
     /// is always sent and is never bypass permissions.
-    pub fn schedule_create(&self, org: Option<&str>, input: &CloudScheduleCreateInput) -> Result<CloudSchedule, CloudWorkspaceClientError> {
+    pub fn schedule_create(&self, org: Option<&str>, input: &CloudScheduleCreateInput) -> Result<CloudScheduleWriteResult, CloudWorkspaceClientError> {
         let invalid = |code: &str| Err(CloudWorkspaceClientError::local(code, false));
         let name = input.name.trim();
-        let Some(trigger_body) = automation_body(input.schedule.as_ref(), input.github_trigger.as_ref(), input.workspace_mode.as_deref(), input.archive_after_days, input.archive_on_pr_merge) else { return invalid("cloud_workspace_request_invalid") };
+        let Some(trigger_body) = automation_body(input.schedule.as_ref(), input.github_trigger.as_ref(), input.webhook_trigger.is_some(), input.workspace_mode.as_deref(), input.archive_after_days, input.archive_on_pr_merge) else { return invalid("cloud_workspace_request_invalid") };
         // As the server reads it: printable ASCII, no space.
         let model_ok = input.model.as_deref().is_none_or(|model| (1..=100).contains(&model.len()) && model.bytes().all(|byte| (0x21..=0x7e).contains(&byte)));
         let effort_ok = input.effort.as_deref().is_none_or(|effort| (1..=16).contains(&effort.len()) && effort.bytes().all(|byte| byte.is_ascii_lowercase()));
@@ -3829,6 +3955,9 @@ impl CloudWorkspaceService {
         }
         if input.prompt.trim().is_empty() || input.prompt.len() > MAX_PROMPT_BYTES || input.prompt.contains('\0') {
             return invalid("cloud_workspace_prompt_too_long");
+        }
+        if input.webhook_trigger.is_some() {
+            self.phase2_gate(false)?;
         }
         if !self.phase2_enabled && (input.workspace_mode.as_deref() == Some("fresh") || input.github_trigger.is_some()) {
             return invalid("cloud_schedule_runtime_unsupported");
@@ -3852,12 +3981,28 @@ impl CloudWorkspaceService {
             body["effort"] = json!(effort);
         }
         self.run_in(org, RequestRisk::Mutation, |client, context| {
-            let mut result: CloudScheduleAnswer = client.request(context, &["cloud-schedules"], None, Some(body), None, RequestRisk::Mutation)?;
-            if result.schedule.workspace_id != input.workspace_id || !valid_schedule_id(&result.schedule.id) {
+            let result: CloudScheduleSecretAnswer = client.request(context, &["cloud-schedules"], None, Some(body), None, RequestRisk::Mutation)?;
+            if result.schedule.view.workspace_id != input.workspace_id || !valid_schedule_id(&result.schedule.view.id) {
                 return Err(post_send_error(RequestRisk::Mutation));
             }
-            automation_run_identity(&mut result.schedule, &mut []);
-            Ok(result.schedule)
+            result.schedule.into_write_result(client, input.webhook_trigger.is_some())
+        })
+    }
+
+    pub fn schedule_webhook_rotate(&self, org: Option<&str>, schedule_id: &str) -> Result<CloudScheduleWriteResult, CloudWorkspaceClientError> {
+        self.phase2_gate(false)?;
+        if !valid_schedule_id(schedule_id) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        self.run_in(org, RequestRisk::Mutation, |client, context| {
+            let result: CloudScheduleSecretAnswer = client.request(
+                context, &["cloud-schedules", schedule_id, "webhook", "rotate"],
+                None, Some(json!({})), None, RequestRisk::Mutation,
+            )?;
+            if result.schedule.view.id != schedule_id {
+                return Err(post_send_error(RequestRisk::Mutation));
+            }
+            result.schedule.into_write_result(client, true)
         })
     }
 
@@ -3878,7 +4023,7 @@ impl CloudWorkspaceService {
             }
             let saved = detail?.schedule;
             if saved.id != schedule_id { return Err(invalid_response()); }
-            if saved.workspace_mode != "existing" || saved.github_trigger.is_some() || saved.schedule.is_none() {
+            if saved.workspace_mode != "existing" || saved.github_trigger.is_some() || saved.webhook_trigger.is_some() || saved.schedule.is_none() {
                 return Err(CloudWorkspaceClientError::local("cloud_schedule_runtime_unsupported", false));
             }
         }
@@ -3893,7 +4038,7 @@ impl CloudWorkspaceService {
             if result.schedule.id != schedule_id {
                 return Err(post_send_error(RequestRisk::Mutation));
             }
-            automation_run_identity(&mut result.schedule, &mut []);
+            self.client.normalize_schedule(&mut result.schedule, &mut [], RequestRisk::Mutation)?;
             Ok(result.schedule)
         })();
         if !self.account.is_current_in(&context, access) {
@@ -3995,7 +4140,7 @@ fn decode_response<T: DeserializeOwned>(
 fn bounded_body(
     response: ureq::Response,
     risk: RequestRisk,
-) -> Result<Vec<u8>, CloudWorkspaceClientError> {
+) -> Result<zeroize::Zeroizing<Vec<u8>>, CloudWorkspaceClientError> {
     bounded_body_limited(response, risk, RESPONSE_LIMIT_BYTES)
 }
 
@@ -4003,8 +4148,8 @@ fn bounded_body_limited(
     response: ureq::Response,
     risk: RequestRisk,
     limit: u64,
-) -> Result<Vec<u8>, CloudWorkspaceClientError> {
-    let mut bytes = Vec::new();
+) -> Result<zeroize::Zeroizing<Vec<u8>>, CloudWorkspaceClientError> {
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
     response
         .into_reader()
         .take(limit + 1)
@@ -8451,6 +8596,142 @@ mod tests {
         view
     }
 
+    fn webhook_estimate_body() -> Value {
+        json!({
+            "workspaceId": "workspace-1", "webhookTrigger": {},
+            "completionPolicy": "suspend", "maxRunMinutes": 45
+        })
+    }
+
+    const WEBHOOK_ID: &str = "whk_abcdefghijklmnopqrstuvwxyz234567";
+    const WEBHOOK_PATH: &str = "/v1/automation-webhooks/whk_abcdefghijklmnopqrstuvwxyz234567";
+
+    fn webhook_schedule_view() -> Value {
+        let mut view = schedule_json(SCHEDULE, "workspace-1");
+        view["schedule"] = json!({
+            "preset": "hourly", "hour": 0, "minute": 0, "weekdays": [], "timezone": "UTC"
+        });
+        view.as_object_mut().unwrap().remove("nextRunAt");
+        view["lastRun"]["trigger"] = json!("webhook");
+        view["webhookTrigger"] = json!({
+            "webhookId": WEBHOOK_ID, "path": WEBHOOK_PATH
+        });
+        view
+    }
+
+    #[test]
+    fn cloud_schedule_webhook_estimate_posts_only_the_webhook_trigger() {
+        let view = webhook_schedule_view();
+        let quote = json!({"estimate": view["estimate"], "nextRunAt": null, "supported": true});
+        let (base, _, request) = serve_once(response("200 OK", &quote.to_string(), ""), Duration::ZERO);
+        let (_, service) = phase2_service(&base);
+        let input = serde_json::from_value(webhook_estimate_body()).unwrap();
+        let result = service.schedule_estimate(Some("org-1"), &input).unwrap();
+        assert!(result.supported && result.next_run_at.is_none());
+        assert_eq!(result.estimate.max_runs_per_day, 24);
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-schedules/estimate HTTP/1.1"));
+        assert_eq!(sent_body(&captured), webhook_estimate_body());
+        assert!(!captured.extra_request);
+    }
+
+    #[test]
+    fn cloud_schedule_webhook_create_and_rotate_return_a_flattened_one_time_secret() {
+        let mut input = schedule_input();
+        input.schedule = None;
+        input.webhook_trigger = Some(CloudScheduleWebhookInput);
+        for (rotate, secret) in [(false, "created-test-secret"), (true, "rotated-test-secret")] {
+            let mut view = webhook_schedule_view();
+            view["webhookTrigger"]["secret"] = json!(secret);
+            let answer = json!({"schedule": view});
+            let (base, _, request) = serve_once(response("200 OK", &answer.to_string(), ""), Duration::ZERO);
+            let (_, service) = phase2_service(&base);
+            let (result, path, body) = if rotate {
+                (service.schedule_webhook_rotate(Some("org-1"), SCHEDULE).unwrap(),
+                    format!("/v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/webhook/rotate"),
+                    json!({}))
+            } else {
+                (service.schedule_create(Some("org-1"), &input).unwrap(),
+                    "/v1/desktop/orgs/org-1/cloud-schedules".to_owned(),
+                    json!({
+                        "workspaceId": "workspace-1", "name": "Nightly triage", "agent": "claude",
+                        "model": "sonnet", "mode": "acceptEdits", "prompt": "Triage the new issues.",
+                        "webhookTrigger": {}, "missedRunPolicy": "skip", "completionPolicy": "suspend",
+                        "maxRunMinutes": 45, "confirmProviderSpend": true
+                    }))
+            };
+            let captured = request.join().unwrap();
+            assert!(captured.text.starts_with(&format!("POST {path} HTTP/1.1")));
+            assert_eq!(sent_body(&captured), body);
+            assert!(!captured.extra_request && !captured.text.contains(secret));
+            assert!(!format!("{result:?}").contains(secret));
+            let wire = serde_json::to_value(&result).unwrap();
+            assert_eq!(wire["id"], SCHEDULE);
+            assert_eq!(wire["schedule"], Value::Null);
+            assert_eq!(wire["webhookTrigger"], json!({
+                "url": format!("{base}{WEBHOOK_PATH}"), "secretUpdatedAt": null
+            }));
+            assert_eq!(wire["lastRun"]["trigger"], "webhook");
+            assert_eq!(wire["webhookSecret"], secret);
+        }
+    }
+
+    #[test]
+    fn cloud_schedule_webhook_secrets_do_not_escape_read_views_or_errors() {
+        let secret = "discard-test-secret";
+        let mut view = webhook_schedule_view();
+        view["webhookTrigger"]["secret"] = json!(secret);
+        let detail = json!({"schedule": view,
+            "runs": [view["lastRun"], {
+                "id": "manual-run", "scheduledFor": 1792713600000i64, "trigger": "manual", "state": "completed"
+            }]});
+        let answer = json!({"schedule": view});
+        let mut malformed = answer.clone();
+        malformed["schedule"]["webhookTrigger"]["secret"] = json!([secret]);
+        let (base, requests) = serve_each(vec![
+            response("200 OK", &answer.to_string(), ""),
+            response("200 OK", &detail.to_string(), ""),
+            response("200 OK", &json!({"schedules": [view]}).to_string(), ""),
+            response("403 Forbidden", &json!({"error": "organization_admin_required", "webhookSecret": secret}).to_string(), ""),
+            response("200 OK", &malformed.to_string(), ""),
+        ]);
+        let (_, service) = phase2_service(&base);
+        let rotated = service.schedule_webhook_rotate(Some("org-1"), SCHEDULE).unwrap();
+        assert_eq!(serde_json::to_value(rotated).unwrap()["webhookSecret"], secret);
+        let detail = service.schedule(Some("org-1"), SCHEDULE).unwrap();
+        assert_eq!(detail.runs[1].trigger, "manual");
+        let list = service.schedules(Some("org-1"), None).unwrap();
+        assert_eq!(list.schedules[0].webhook_trigger, detail.schedule.webhook_trigger);
+        assert!(!serde_json::to_string(&detail).unwrap().contains(secret));
+        assert!(!serde_json::to_string(&list).unwrap().contains(secret));
+        for code in ["organization_admin_required", "cloud_workspace_request_outcome_unknown"] {
+            let error = service.schedule_webhook_rotate(Some("org-1"), SCHEDULE).unwrap_err();
+            assert_eq!(error.code, code);
+            assert!(!error.retryable);
+            assert!(!format!("{error:?}").contains(secret));
+            assert!(!serde_json::to_string(&error).unwrap().contains(secret));
+        }
+        assert_eq!(requests.join().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn cloud_schedule_webhook_requires_an_empty_object_a_single_trigger_and_phase2() {
+        let mut estimate = webhook_estimate_body();
+        for invalid_trigger in [Value::Null, json!([]), json!({"secret": "unaccepted"})] {
+            estimate["webhookTrigger"] = invalid_trigger;
+            assert!(serde_json::from_value::<CloudScheduleEstimateInput>(estimate.clone()).is_err());
+        }
+        let (_, service) = test_service("http://127.0.0.1:1");
+        let mut input = schedule_input();
+        input.webhook_trigger = Some(CloudScheduleWebhookInput);
+        assert_eq!(service.schedule_create(None, &input).unwrap_err().code, "cloud_workspace_request_invalid");
+        input.schedule = None;
+        assert_eq!(service.schedule_create(None, &input).unwrap_err().code, "cloud_workspace_runtime_not_ready");
+        let estimate = serde_json::from_value(webhook_estimate_body()).unwrap();
+        assert_eq!(service.schedule_estimate(None, &estimate).unwrap_err().code, "cloud_workspace_runtime_not_ready");
+        assert_eq!(service.schedule_webhook_rotate(Some("org-1"), SCHEDULE).unwrap_err().code, "cloud_workspace_runtime_not_ready");
+    }
+
     #[test]
     fn phase2_automation_contract_held_paths_never_reach_an_old_server() {
         let (_, service) = test_service("http://127.0.0.1:1");
@@ -8469,7 +8750,7 @@ mod tests {
                 assert!(error.status.is_none() && !error.retryable);
                 let estimate = CloudScheduleEstimateInput {
                     workspace_id: input.workspace_id, schedule: input.schedule, github_trigger: input.github_trigger,
-                    workspace_mode: input.workspace_mode, completion_policy: input.completion_policy, max_run_minutes: input.max_run_minutes,
+                    webhook_trigger: None, workspace_mode: input.workspace_mode, completion_policy: input.completion_policy, max_run_minutes: input.max_run_minutes,
                 };
                 assert_eq!(service.schedule_estimate(None, &estimate).unwrap_err().code, "cloud_schedule_runtime_unsupported");
             }
@@ -8489,7 +8770,7 @@ mod tests {
             view["archiveOnPrMerge"] = json!(true);
             let (base, _, request) = serve_once(response("200 OK", &json!({"schedule": view}).to_string(), ""), Duration::ZERO);
             let (_, service) = phase2_service(&base);
-            let created = service.schedule_create(None, &input).unwrap();
+            let created = service.schedule_create(None, &input).unwrap().view;
             assert_eq!(created.workspace_mode, "fresh");
             assert_eq!(created.archive_after_days, Some(days));
             assert!(created.archive_on_pr_merge);
@@ -8508,7 +8789,7 @@ mod tests {
             view["githubTrigger"]["allowForkPullRequests"] = json!(fork.unwrap_or(false));
             let (base, _, request) = serve_once(response("200 OK", &json!({"schedule": view}).to_string(), ""), Duration::ZERO);
             let (_, service) = phase2_service(&base);
-            let created = service.schedule_create(None, &automation_input(fork)).unwrap();
+            let created = service.schedule_create(None, &automation_input(fork)).unwrap().view;
             assert!(created.schedule.is_none() && created.next_run_at.is_none());
             assert_eq!(created.github_trigger.unwrap().allow_fork_pull_requests, fork.unwrap_or(false));
             let captured = request.join().unwrap();
@@ -8544,7 +8825,7 @@ mod tests {
         let (_, service) = test_service(&base);
         let listed = service.schedules(None, Some("workspace-1")).unwrap();
         let detail = service.schedule(None, SCHEDULE).unwrap();
-        let created = service.schedule_create(None, &schedule_input()).unwrap();
+        let created = service.schedule_create(None, &schedule_input()).unwrap().view;
         let paused = service.schedule_set_active(None, SCHEDULE, false).unwrap();
         // The held resume preflight must also accept compatible null defaults.
         let resumed = service.schedule_set_active(None, SCHEDULE, true).unwrap();
@@ -8911,6 +9192,10 @@ mod tests {
         let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
         let created = service.schedule_create(None, &schedule_input()).unwrap();
+        let wire = serde_json::to_value(&created).unwrap();
+        assert_eq!(wire["webhookTrigger"], Value::Null);
+        assert!(wire.get("webhookSecret").is_none());
+        let created = created.view;
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-schedules HTTP/1.1"));
         assert_eq!(
