@@ -7,8 +7,8 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer as netServer } from 'node:net';
-import { createServer, transformWithEsbuild } from 'vite';
+import { transformWithEsbuild } from 'vite';
+import { createCheckServer } from './vite-page.mjs';
 import { launch } from './harness.mjs';
 
 const entry = `
@@ -72,10 +72,8 @@ window.draw = ({ fold = true, reset = false, failed = false } = {}) => {
 window.draw();
 `;
 
-// A free port of its own: other checks' vite servers may hold the default one.
-const port = await new Promise((resolve) => { const s = netServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); }); });
-const server = await createServer({ logLevel: 'error', server: { port, strictPort: true, host: '127.0.0.1', hmr: false }, plugins: [{
-  name: 'chat-transcript',
+// A free port of its own (createCheckServer): other checks' vite servers may hold the default one.
+const server = await createCheckServer({ logLevel: 'error', server: { host: '127.0.0.1', hmr: false }, plugins: [{
   resolveId(id) { if (id === '/chat-transcript-test.tsx') return '\0chat-transcript-test.tsx'; },
   async load(id) { if (id === '\0chat-transcript-test.tsx') return (await transformWithEsbuild(entry, 'chat-transcript-test.tsx', { loader: 'tsx', jsx: 'automatic' })).code; },
   configureServer(server) { server.middlewares.use('/chat-transcript', async (_req, res) => {

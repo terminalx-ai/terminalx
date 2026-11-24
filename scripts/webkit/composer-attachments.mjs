@@ -8,7 +8,8 @@
 // WEBKIT_LAYOUT_SCREENSHOTS=/tmp/shots node scripts/webkit/composer-attachments.mjs
 import assert from "node:assert/strict";
 import { mkdir, readFile } from "node:fs/promises";
-import { createServer, transformWithEsbuild } from "vite";
+import { transformWithEsbuild } from "vite";
+import { createCheckServer } from "./vite-page.mjs";
 import { launch } from "./harness.mjs";
 
 const entry = `
@@ -49,11 +50,10 @@ const files = names.map((name) => ({ name, mimeType: typeOf(name), buffer: name.
 const screenshots = process.env.WEBKIT_LAYOUT_SCREENSHOTS;
 if (screenshots) await mkdir(screenshots, { recursive: true });
 
-const server = await createServer({
+const server = await createCheckServer({
   logLevel: "error",
-  server: { port: 0, strictPort: false, host: "127.0.0.1" },
+  server: { host: "127.0.0.1" },
   plugins: [{
-    name: "composer-attachments-check",
     resolveId(id) { if (id === "/composer-attachments.tsx") return "\0composer-attachments.tsx"; },
     async load(id) {
       if (id === "\0composer-attachments.tsx") return (await transformWithEsbuild(entry, "composer-attachments.tsx", { loader: "tsx", jsx: "automatic" })).code;

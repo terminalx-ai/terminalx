@@ -221,7 +221,6 @@ for (const colorScheme of ["dark", "light"]) {
   await chip.screenshot({ path: join(shots, `chip-needs-update-${colorScheme}.png`) });
 
   chip = await chipOf("m-dev");
-  await page.locator('[data-testid="machine-chip"][data-state="relay"], [data-testid="machine-chip"][data-needs-update]').first().waitFor().catch(() => undefined);
   // Ports, which dev-server does not serve: one line naming it (21.09).
   await page.getByRole("tab", { name: "Ports", exact: true }).click().catch(() => page.getByRole("button", { name: "Ports", exact: true }).click());
   const notice = page.getByTestId("machine-feature-notice");

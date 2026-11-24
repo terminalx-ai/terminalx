@@ -7,7 +7,8 @@ import assert from "node:assert/strict";
 import { mkdir, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createServer, searchForWorkspaceRoot, transformWithEsbuild } from "vite";
+import { searchForWorkspaceRoot, transformWithEsbuild } from "vite";
+import { createCheckServer } from "./vite-page.mjs";
 import { launch } from "./harness.mjs";
 
 const entry = `
@@ -33,14 +34,12 @@ createRoot(document.getElementById('root')).render(<div style={{width: 1440}}>
   <div id="chat"><Markdown text={text} className="prose-chat-probe"/></div>
 </div>);
 `;
-const server = await createServer({
+const server = await createCheckServer({
   server: {
-    port: 0,
     host: '127.0.0.1',
     fs: { allow: [searchForWorkspaceRoot(process.cwd()), await realpath(fileURLToPath(new URL('../../node_modules', import.meta.url)))] },
   },
   plugins: [{
-    name: 'attachment-preview',
     resolveId(id) { if (id === '/attachment-preview.tsx') return '\0attachment-preview.tsx'; },
     async load(id) {
       if (id === '\0attachment-preview.tsx') return (await transformWithEsbuild(entry, 'attachment-preview.tsx', { loader: 'tsx', jsx: 'automatic' })).code;

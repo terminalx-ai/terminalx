@@ -4,12 +4,13 @@
 // Run: pnpm build && pnpm exec playwright install webkit && pnpm test:webkit-layout
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { launch, serve } from "./harness.mjs";
+import { parseArgs } from "node:util";
+import { FOCUS_NEXT, launch, serve } from "./harness.mjs";
 
 const stub = `${await readFile(new URL("./tauri-stub.js", import.meta.url), "utf8")}\n${await readFile(new URL("./dashboard-stub.js", import.meta.url), "utf8")}`;
 const labels = ["Needs you", "Working", "Done", "Not started"];
 const cards = (column) => column.locator('[role="button"]');
-const layouts = [
+const allLayouts = [
   { name: "wide", width: 1360, height: 760, stacked: false },
   { name: "wide, short", width: 1360, height: 420, stacked: false },
   { name: "stacked at four columns", width: 1100, height: 420, stacked: true },
@@ -21,6 +22,21 @@ const layouts = [
   { name: "200% zoom, stacked", width: 1600, height: 900, zoom: 2, stacked: true },
   { name: "150% text, short", width: 1360, height: 480, textScale: 1.5, stacked: false },
 ];
+// All seven by default. `--layouts i/n` runs part i of n: the layouts are dealt out in turn, so each is in exactly
+// one part whatever n is. run-all.mjs runs the check as three parts: the 21 pages together took 470 s on a slow
+// runner, against run-all's 600 s limit for one check.
+const { values: options } = parseArgs({ options: { layouts: { type: "string" } } });
+const part = /^(\d+)\/(\d+)$/.exec(options.layouts ?? "1/1");
+const [partIndex, partCount] = part ? [Number(part[1]), Number(part[2])] : [];
+if (!part || partCount < 1 || partIndex < 1 || partIndex > partCount) {
+  console.error(`--layouts takes <i>/<n> with 1 ≤ i ≤ n, not ${JSON.stringify(options.layouts)}.`);
+  process.exit(2);
+}
+const layouts = allLayouts.filter((_, index) => index % partCount === partIndex - 1);
+if (!layouts.length) {
+  console.error(`--layouts ${options.layouts} holds no layout: there are ${allLayouts.length}.`);
+  process.exit(2);
+}
 
 /** Include clipping by every scroll container, not just the viewport. */
 const visible = (locator) => locator.evaluate((element) => {
@@ -97,7 +113,7 @@ async function checkActions(page, column, context) {
   assert.notEqual(await last.evaluate((el) => getComputedStyle(el).boxShadow), idleShadow, `${context}: cursor is marked`);
   // WebKit on macOS uses Option-Tab to include buttons in focus traversal.
   await last.focus();
-  await page.keyboard.press(process.platform === "darwin" ? "Alt+Tab" : "Tab");
+  await page.keyboard.press(FOCUS_NEXT);
   const trigger = last.getByRole("button", { name: "Session menu" });
   assert.ok(await trigger.evaluate((el) => el === document.activeElement && el.matches(":focus-visible")), `${context}: Tab focuses the session menu`);
   await page.waitForFunction(() => getComputedStyle(document.activeElement).opacity === "1");
@@ -211,7 +227,7 @@ try {
         const local = columns[1].getByRole("button", { name: "Local working session 01, Claude, Codex", exact: true });
         await local.scrollIntoViewIfNeeded();
         await local.focus();
-        await page.keyboard.press(process.platform === "darwin" ? "Alt+Tab" : "Tab");
+        await page.keyboard.press(FOCUS_NEXT);
         await page.keyboard.press("Space");
         await page.getByRole("menuitem", { name: "Stop", exact: true }).focus();
         await page.keyboard.press("Enter");

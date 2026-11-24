@@ -98,6 +98,7 @@ const fixture = `(() => {
     ...(connectionId === "conn-" + ids.dev ? { cpu: { cores: 8, usage: (usage = Math.min(0.9, usage + 0.07)) } } : {}),
   });
   const status = { method: "installer", current: "0.2.33", available: null, checkedAt: Date.now(), blockers: [], otherComputers: [], kept: ["0.2.33"], progress: { phase: "idle" } };
+  window.__PW_RESOURCE_READS__ = [];
   window.__PW_SETUP_SENT__ = [];
   window.__PW_SETUP_BUSY__ = false;
   const reply = (connectionId, id, result) => setTimeout(() => emit("cloud_remote_event", { kind: "message", connectionId, message: { id, ok: true, result } }), 0);
@@ -145,7 +146,11 @@ const fixture = `(() => {
   answers.cloud_remote_send = ({ connectionId, frame }) => {
     const { method, id, params } = frame;
     if (method === "runtime.agents") reply(connectionId, id, agents[connectionId]);
-    else if (method === "lifecycle.resources") reply(connectionId, id, resources(connectionId));
+    else if (method === "lifecycle.resources") {
+      // When dev-server was asked, by the page's own clock: the check below reads the time between two askings here.
+      if (connectionId === "conn-" + ids.dev) window.__PW_RESOURCE_READS__.push(performance.now());
+      reply(connectionId, id, resources(connectionId));
+    }
     // PRO-487: dev-server says where it listens and who it runs as; old-box (an older runtime) says neither.
     else if (method === "machine.describe") reply(connectionId, id, connectionId === "conn-" + ids.dev ? { machineId: ids.dev, name: "dev-server", listen: hosting, runsAs: { user: "paresh", root: false, passwordlessSudo: false } } : { name: "old-box" });
     else if (method === "machine.setListen") {
@@ -262,9 +267,18 @@ failed += report("dev-server's page", {
 await shot(page, "machine-page");
 
 // Resources are asked again while the page is open.
-const before = await main.getByTestId("machine-resource").first().textContent();
-await page.waitForTimeout(5_500);
-failed += report("dev-server's resources", { "CPU is read again within 5 s": (await main.getByTestId("machine-resource").first().textContent()) !== before });
+// The next reading is waited for itself, however long this host takes to show it; "within 5 s" is then judged on the
+// page's own clock, from one asking to the next, with the half second the fixed 5.5 s wait allowed. So neither this
+// script's pace nor the time the page takes to draw is in the measure.
+const first = main.getByTestId("machine-resource").first();
+const before = await first.textContent();
+const shown = await page.waitForFunction((text) => document.querySelector('[data-testid="machine-page"] [data-testid="machine-resource"]')?.textContent !== text, before, { timeout: 30_000 }).then(() => true, () => false);
+const reads = await page.evaluate(() => window.__PW_RESOURCE_READS__);
+const gaps = reads.slice(1).map((at, index) => Math.round(at - reads[index]));
+failed += report("dev-server's resources", {
+  "a new CPU reading is shown": shown && (await first.textContent()) !== before,
+  "CPU is read again within 5 s": gaps.length > 0 && gaps.every((gap) => gap <= 5_500),
+}, { gaps });
 
 // Sign in to Codex: a terminal on the machine under its row.
 await row("codex").getByRole("button", { name: /Sign in/ }).click();

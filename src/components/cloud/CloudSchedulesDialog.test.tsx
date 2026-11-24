@@ -45,7 +45,7 @@ vi.mock("@/lib/cloudDashboard", () => ({ openCloudSession: mocks.openRun }));
 
 vi.mock("@/lib/models", async (original) => ({ ...(await original<typeof import("@/lib/models")>()), useModels: () => [] }));
 
-import { CloudSchedulesDialog, CloudSchedulesDialogHost, openSchedulesDialog } from "./CloudSchedulesDialog";
+import { CloudSchedulesDialog, CloudSchedulesDialogHost, ESTIMATE_DELAY_MS, openSchedulesDialog } from "./CloudSchedulesDialog";
 
 const ID = "schedule_0b9d6b1e-3f5a-4c1d-9f2e-7a1b2c3d4e5f";
 const schedule = (fields: Partial<CloudSchedule> = {}): CloudSchedule => ({
@@ -77,16 +77,23 @@ let listed: CloudAutomationDto[];
 const open = () => render(<CloudSchedulesDialog orgId="org-1" workspaceId="ws-1" name="Docs site" onClose={() => undefined} />);
 const row = () => screen.findByTestId(`cloud-schedule-${ID}`);
 
+// The form asks for its cost once it has rested for the dialog's own ESTIMATE_DELAY_MS.
+// The clock is fake but still moves with real time, so Testing Library's own waits run as before;
+// a test that waits for a cost lets the rest pass at once instead of waiting it out.
+const rest = () => act(async () => { await vi.advanceTimersByTimeAsync(ESTIMATE_DELAY_MS); });
+
 /** Open the form and fill what a task needs; the cost arrives after the form has rested. */
 async function fillForm() {
   fireEvent.click(await screen.findByRole("button", { name: /New scheduled task/ }));
   fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Morning report" } });
   fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "Summarise what changed." } });
   // The listed task states its cost too: wait for the form's own.
+  await rest();
   await waitFor(() => expect(screen.getByTestId("cloud-schedule-cost").textContent).toContain("Each run wakes this workspace"), { timeout: 3000 });
 }
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
   scope.status = { state: "signed-in", identity: { email: "a@example.com", organizationId: "org-1", name: "A", organization: "One" }, context: { account: "account-a", scope: "profile-a", revision: "rev-1" }, expiresAt: null, lastError: null };
   scope.privacy = { enabled: false, ready: true, managed: false };
   listed = [schedule()];
@@ -106,7 +113,7 @@ beforeEach(() => {
   });
   mocks.pauseAll.mockResolvedValue({ paused: 3 });
 });
-afterEach(() => { cleanup(); openSchedulesDialog(null); });
+afterEach(() => { cleanup(); openSchedulesDialog(null); vi.useRealTimers(); });
 
 describe("a workspace's scheduled tasks", () => {
   it("lists a task with when it runs, how its last run went and what it costs", async () => {
@@ -288,6 +295,7 @@ describe("a new scheduled task", () => {
     mocks.estimate.mockResolvedValue(quote({ estimate: { ...quote().estimate, keepsMachineRunning: true, monthlyMaxMicros: 86_400_000 } }));
     fireEvent.change(screen.getByLabelText("After a run"), { target: { value: "keep" } });
     expect(agree.checked).toBe(false);
+    await rest();
     await waitFor(() => expect(screen.getByTestId("cloud-schedule-cost").textContent).toContain("left running after a run"), { timeout: 3000 });
     expect(mocks.estimate).toHaveBeenLastCalledWith(expect.objectContaining({ completionPolicy: "keep" }), "org-1");
     expect(screen.getByTestId("cloud-schedule-cost").textContent).toContain("$86.40 a month");
@@ -320,7 +328,7 @@ describe("a new scheduled task", () => {
       fireEvent.submit(screen.getByTestId("cloud-schedule-form"));
     }
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 600));
+      await vi.advanceTimersByTimeAsync(600);
     });
     expect(cost.textContent).toContain("Reading the cost");
     expect(create.disabled).toBe(true);
@@ -361,6 +369,7 @@ describe("a new scheduled task", () => {
     mocks.estimate.mockRejectedValue({ code: "cloud_schedule_estimate_not_supported", status: 404 });
     open();
     fireEvent.click(await screen.findByRole("button", { name: /New scheduled task/ }));
+    await rest();
     const cost = await screen.findByText(/cannot say yet what a scheduled task costs/, undefined, { timeout: 3000 });
     expect(cost.textContent).not.toContain("could not be reached");
   });
@@ -378,6 +387,7 @@ describe("a new scheduled task", () => {
     mocks.estimate.mockRejectedValue({ code: "cloud_workspace_unavailable" });
     open();
     fireEvent.click(await screen.findByRole("button", { name: /New scheduled task/ }));
+    await rest();
     await screen.findByText(/The cost could not be read/, undefined, { timeout: 3000 });
     expect((screen.getByRole("button", { name: /Create scheduled task/ }) as HTMLButtonElement).disabled).toBe(true);
   });
@@ -428,12 +438,14 @@ describe("batched hosted automation target transitions", () => {
     mocks.estimate.mockReturnValueOnce(old.promise).mockResolvedValue(quote({ estimate: { ...quote().estimate, monthlyMaxMicros: 9_000_000 } }));
     await openHost();
     fireEvent.click(screen.getByRole("button", { name: /New scheduled task/ }));
+    await rest();
     await waitFor(() => expect(mocks.estimate).toHaveBeenCalledTimes(1), { timeout: 3000 });
     await act(async () => { openSchedulesDialog(b); openSchedulesDialog(a); old.resolve(quote()); await Promise.resolve(); });
     expect(screen.queryByTestId("cloud-schedule-form")).toBeNull();
     fireEvent.click(await screen.findByRole("button", { name: /New scheduled task/ }));
     expect(screen.getByTestId("cloud-schedule-cost").textContent).not.toContain("$5.10");
     expect(createButton().disabled).toBe(true);
+    await rest();
     await waitFor(() => expect(screen.getByTestId("cloud-schedule-cost").textContent).toContain("$9.00"), { timeout: 3000 });
   });
   it.each(["create", "resume"])("does not refresh from old %s completion after a batched target A-B-A switch", async (operation) => {
@@ -536,7 +548,7 @@ describe("accepted raw cloud automations", () => {
     cleanup();
     await githubForm();
     fireEvent.change(screen.getByLabelText("Workspace mode"), { target: { value: "fresh" } });
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 500)); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
     expect(screen.getByTestId("cloud-schedule-cost").textContent).toContain("not enabled yet");
     expect(createButton().disabled).toBe(true);
     fireEvent.submit(screen.getByTestId("cloud-schedule-form"));
@@ -559,6 +571,7 @@ describe("accepted raw cloud automations", () => {
     }
     expect((screen.getByRole("button", { name: "Add filter" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("checkbox", { name: "Allow pull requests from forks" }));
+    await rest();
     await waitFor(() => expect(screen.getByTestId("cloud-schedule-cost").textContent).toContain("720/month"), { timeout: 3000 });
     expect(screen.getByTestId("cloud-schedule-cost").textContent).not.toContain("First run");
     const githubTrigger = { repositoryId: "repository-row-7", event: "merged", filters: Array.from({ length: 5 }, (_, index) => ({ field: index === 0 ? "baseBranch" : "label", operator: "is-not", value: `value-${index + 1}` })), allowForkPullRequests: true };
@@ -575,6 +588,7 @@ describe("accepted raw cloud automations", () => {
     fireEvent.change(screen.getByLabelText("Workspace mode"), { target: { value: "fresh" } });
     fireEvent.change(screen.getByLabelText("Archive after days"), { target: { value: "365" } });
     fireEvent.click(screen.getByRole("checkbox", { name: "Archive when the PR merges" }));
+    await rest();
     await waitFor(() => expect(screen.getByTestId("cloud-schedule-cost").textContent).toContain("105 minutes, including 20 minutes"), { timeout: 3000 });
     const schedule = { preset: "daily", hour: 9, minute: 0, weekdays: [], timezone: "Europe/Berlin" };
     expect(mocks.estimate).toHaveBeenLastCalledWith({ workspaceId: "ws-1", workspaceMode: "fresh", schedule, completionPolicy: "suspend", maxRunMinutes: 60 }, "org-1");
@@ -583,6 +597,7 @@ describe("accepted raw cloud automations", () => {
     expect(screen.getByText(/whole number from 1 to 365/)).toBeTruthy();
     expect(createButton().disabled).toBe(true);
     fireEvent.change(screen.getByLabelText("Archive after days"), { target: { value: "365" } });
+    await rest();
     await waitFor(() => expect(screen.getByTestId("cloud-schedule-cost").textContent).toContain("Creation is already included"), { timeout: 3000 });
     agreeToCost(); fireEvent.click(createButton());
     await waitFor(() => expect(mocks.create).toHaveBeenCalledWith({ workspaceId: "ws-1", workspaceMode: "fresh", archiveAfterDays: 365, archiveOnPrMerge: true, schedule, name: "Morning report", prompt: "Summarise what changed.", agent: "claude", mode: "acceptEdits", missedRunPolicy: "skip", completionPolicy: "suspend", maxRunMinutes: 60 }, "org-1"));
@@ -625,6 +640,7 @@ describe("accepted raw cloud automations", () => {
     fireEvent.change(screen.getByLabelText("Workspace mode"), { target: { value: "existing" } });
     expect(createButton().disabled).toBe(true);
     expect(screen.getByTestId("cloud-schedule-cost").textContent).not.toContain("$");
+    await rest();
     await waitFor(() => expect(mocks.estimate).toHaveBeenCalledTimes(2), { timeout: 3000 });
     await act(async () => old.resolve(quote()));
     expect(createButton().disabled).toBe(true);
@@ -684,6 +700,7 @@ describe("automation React scope fences", () => {
     mocks.estimate.mockReturnValueOnce(old.promise).mockResolvedValue(quote({ estimate: { ...quote().estimate, monthlyMaxMicros: 9_000_000 } }));
     const view = open();
     fireEvent.click(await screen.findByRole("button", { name: /New scheduled task/ }));
+    await rest();
     await waitFor(() => expect(mocks.estimate).toHaveBeenCalledTimes(1), { timeout: 3000 });
     view.rerender(<CloudSchedulesDialog orgId="org-1" workspaceId="ws-2" name="Two" onClose={() => {}} />);
     expect(screen.queryByTestId("cloud-schedule-form")).toBeNull();
@@ -692,6 +709,7 @@ describe("automation React scope fences", () => {
     await act(async () => old.resolve(quote()));
     expect(screen.getByTestId("cloud-schedule-cost").textContent).not.toContain("$5.10");
     expect(createButton().disabled).toBe(true);
+    await rest();
     await waitFor(() => expect(screen.getByTestId("cloud-schedule-cost").textContent).toContain("$9.00"), { timeout: 3000 });
   });
 
@@ -743,7 +761,7 @@ describe("automation hold and selected repository refusals", () => {
     const option = await screen.findByRole("option", { name: "acme/app (repository ID unavailable)" });
     expect((option as HTMLOptionElement).disabled).toBe(true);
     expect(screen.getByRole("status").textContent).toContain("accessible repository with a repository ID");
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 500)); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
     expect(createButton().disabled).toBe(true);
     expect(mocks.estimate).not.toHaveBeenCalled();
     fireEvent.submit(screen.getByTestId("cloud-schedule-form"));
