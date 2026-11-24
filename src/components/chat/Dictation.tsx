@@ -6,7 +6,7 @@ import { ExternalLink, Mic, MicOff, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
-import { bindingKind, isMac, keycaps, useKeymap } from "@/lib/shortcuts";
+import { bindingKind, joinKeycaps, keycaps, useKeymap } from "@/lib/shortcuts";
 import { useHeldShortcut, useShortcut, useShortcutKeys } from "@/lib/hotkeys";
 import { clearDictationError, dictationAvailable, startDictation, stopDictation, useDictation, type DictationState } from "@/lib/dictation";
 import { anchorAt, insertSpoken, spokenSince, formattedSince, joinSpoken, correctedSegment, type DictationPart, type DictationAnchor } from "@/lib/dictationText";
@@ -355,7 +355,7 @@ export function DictationStatus({ dictation }: { dictation: Dictation }) {
   const { state, dictating } = dictation;
   // A key to press again, so the chord rather than a key held to talk.
   const chord = useKeymap()["composer.dictate"].find((binding) => bindingKind(binding) !== "hold");
-  const shortcut = chord ? keycaps(chord).join(isMac ? "" : "+") : "";
+  const shortcut = chord ? joinKeycaps(keycaps(chord)) : "";
   const message = state.error && shortcut ? state.error.replace(DICTATION_SHORTCUT, shortcut) : state.error;
   return (
     <>
