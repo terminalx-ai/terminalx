@@ -331,9 +331,7 @@ for (const colorScheme of ["light", "dark"]) {
     await page.evaluate(() => window.__PW_MACHINE__({ state: "reconnecting", lostAt: Date.now() - 12_000, attempt: 1, retryInMs: 2000, trying: ["lan", "relay"] }));
     const notice = page.locator('main [data-testid="machine-session-reconnecting"]');
     await notice.waitFor({ timeout: 5_000 }).catch(() => undefined);
-    await page.waitForTimeout(200);
-    await shoot(page, `21.09-reconnecting-${colorScheme}`);
-    const m = await page.evaluate(() => ({
+    const reading = () => ({
       notice: document.querySelector('main [data-testid="machine-session-reconnecting"]')?.textContent ?? null,
       chip: document.querySelector('main header [data-testid="machine-chip"]')?.textContent ?? null,
       // The composer says so as its placeholder, which textContent does not include.
@@ -344,7 +342,12 @@ for (const colorScheme of ["light", "dark"]) {
         return [...(main?.querySelectorAll("[placeholder], [data-placeholder], [aria-placeholder]") ?? [])].some((element) =>
           ["placeholder", "data-placeholder", "aria-placeholder"].some((name) => element.getAttribute(name)?.includes(reason)));
       })(),
-    }));
+    });
+    // The notice, the chip and the composer each follow the machine's state on their own render: on a busy runner the
+    // composer had not yet changed 200 ms after the notice showed. Read them once all three have, or after 5 s as they are.
+    await page.waitForFunction(`(() => { const m = (${reading})(); return /Reconnecting to Mac mini/.test(m.notice ?? "") && /Reconnecting/.test(m.chip ?? "") && m.blocked; })()`, null, { timeout: 5_000 }).catch(() => undefined);
+    await shoot(page, `21.09-reconnecting-${colorScheme}`);
+    const m = await page.evaluate(reading);
     failed += report(`reconnecting (${colorScheme})`, {
       "the session says it is reconnecting and the agent keeps working": /Reconnecting to Mac mini/.test(m.notice ?? "") && /The agent keeps working there/.test(m.notice ?? ""),
       "the chip says Reconnecting": /Reconnecting/.test(m.chip ?? ""),
