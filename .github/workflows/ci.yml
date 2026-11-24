@@ -1026,3 +1026,4 @@ jobs:
                           and $selected[$job] != null
                           and $selector.outputs[$selected[$job]] == "false")]
                    | all)'
+# Probe for the stop workflow; never merged.
