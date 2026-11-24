@@ -1,3 +1,4 @@
+import { ThisComputer } from "@/lib/platform";
 import { useCloudCatalog } from "@/lib/cloudCatalog";
 import { useMachineConnections } from "@/lib/machineConnections";
 import { cloudPlace, machinePlace, runsOnPlace, type BotPlace, type BotRunsOn } from "@/types/bots";
@@ -47,7 +48,7 @@ export function usePlaceName(runsOn: BotRunsOn): string {
   const place = runsOnPlace(runsOn);
   switch (place.kind) {
     case "thisMac":
-      return "This Mac";
+      return ThisComputer;
     case "cloud": {
       const workspace = catalog.orgs[place.orgId]?.workspaces.find((item) => item.workspace.id === place.workspaceId)?.workspace;
       return workspace ? workspace.name : "A cloud workspace";

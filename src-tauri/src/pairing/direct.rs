@@ -150,7 +150,7 @@ pub(super) async fn prepare(
                     io::ErrorKind::AddrNotAvailable => "This Mac opens no port for nearby pairing: Settings → Machines → \"Where this Mac listens\" is Relay only, or names an address this Mac does not have now. Choose Local network there, or use TerminalX Relay.".into(),
                     _ => "TerminalX could not start LAN pairing. Try again, or use TerminalX Relay.".into(),
                 };
-                anyhow::bail!(message);
+                anyhow::bail!(crate::platform_profile::localize(&message));
             }
         }
     }
