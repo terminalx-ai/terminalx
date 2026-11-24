@@ -154,8 +154,8 @@ describe("passive dictation surfaces", () => {
 
     const row = await screen.findByRole("alert");
     expect(row.textContent).toContain("Microphone access is off for TerminalX");
-    const { keycaps, isMac } = await import("@/lib/shortcuts");
-    const key = keycaps("mod+shift+d").join(isMac ? "" : "+");
+    const { joinKeycaps, keycaps } = await import("@/lib/shortcuts");
+    const key = joinKeycaps(keycaps("mod+shift+d"));
     expect(row.textContent).toContain(`Dictation needs it. Turn TerminalX on in System Settings › Privacy & Security › Microphone, then press ${key} again.`);
     fireEvent.click(screen.getByRole("button", { name: "Open System Settings" }));
     expect(openUrl).toHaveBeenCalledWith("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone");
