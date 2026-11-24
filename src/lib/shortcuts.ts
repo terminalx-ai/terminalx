@@ -1,5 +1,6 @@
 import { PLATFORM_PROFILES, isMac, profile, type PlatformProfile } from "@/lib/platform";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
+import { organizationSwitchingEnabled, useOrganizationSwitchingEnabled } from "@/lib/organizationVisibilityGate";
 import { getExperimentalSettings } from "@/lib/experimentalSettings";
 
 /**
@@ -21,7 +22,7 @@ import { getExperimentalSettings } from "@/lib/experimentalSettings";
 
 export { isMac };
 
-export type ShortcutGroup = "App" | "Session" | "Panel" | "Files" | "Issues" | "Composer";
+export type ShortcutGroup = "App" | "Session" | "Panel" | "Files" | "Issues" | "Composer" | "Organizations";
 
 export type NativeMenuSection = "app" | "file" | "view" | "go" | "help";
 
@@ -49,7 +50,16 @@ interface ActionDef {
   requires?: "bots";
 }
 
-const ACTIONS = [
+export const ORGANIZATION_SHORTCUTS = [1, 2, 3, 4, 5, 6, 7, 8, 9].map((position) => ({
+  id: `organization.switch${position}` as const,
+  label: `Switch to organization choice ${position}`,
+  group: "Organizations" as const,
+  // Ctrl is already Mod outside macOS. Keep Overview and session tab defaults.
+  macKeys: [`ctrl+${position}`],
+  keys: [`mod+alt+shift+${position}`],
+}));
+
+const STANDARD_ACTIONS = [
   { id: "app.about", label: "About TerminalX", group: "App", keys: [], menu: { section: "app", order: 0, label: "About TerminalX" } },
   { id: "app.checkUpdates", label: "Check for updates", group: "App", keys: [], menu: { section: "app", order: 2, label: "Check for Updates…" } },
   { id: "app.newWindow", label: "New chat window", group: "App", keys: [], menu: { section: "file", order: 1, label: "New Window" } },
@@ -172,14 +182,19 @@ const ACTIONS = [
   { id: "composer.slashCommand", label: "Slash command", group: "Composer", keys: ["/"], scope: "context", fixed: true },
 ] as const satisfies readonly ActionDef[];
 
+const ACTIONS = [...STANDARD_ACTIONS, ...ORGANIZATION_SHORTCUTS];
+
+export type StandardShortcutId = (typeof STANDARD_ACTIONS)[number]["id"];
 export type ShortcutId = (typeof ACTIONS)[number]["id"];
 export interface ShortcutAction extends ActionDef {
   id: ShortcutId;
 }
 
-export const SHORTCUT_ACTIONS: readonly ShortcutAction[] = ACTIONS;
-export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = ["App", "Session", "Panel", "Files", "Issues", "Composer"];
-const BY_ID = new Map<string, ShortcutAction>(SHORTCUT_ACTIONS.map((action) => [action.id, action]));
+// Static Settings search indexes these actions before native capabilities load.
+export const SHORTCUT_ACTIONS: readonly ShortcutAction[] = STANDARD_ACTIONS;
+const ALL_SHORTCUT_ACTIONS: readonly ShortcutAction[] = ACTIONS;
+export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = ["App", "Organizations", "Session", "Panel", "Files", "Issues", "Composer"];
+const BY_ID = new Map<string, ShortcutAction>(ALL_SHORTCUT_ACTIONS.map((action) => [action.id, action]));
 
 export function shortcutAction(id: ShortcutId): ShortcutAction {
   return BY_ID.get(id)!;
@@ -465,7 +480,7 @@ export function readOverrides(raw: unknown): ShortcutOverrides {
  * default (a later version can add a default that someone already uses for
  * something else), and between two stored overrides the first action keeps it.
  */
-export function resolveKeymap(raw: unknown, mac = isMac): Keymap {
+export function resolveKeymap(raw: unknown, mac = isMac, switchingEnabled = organizationSwitchingEnabled()): Keymap {
   const overrides = readOverrides(raw);
   const keymap = {} as Keymap;
   const taken = new Set<string>();
@@ -475,37 +490,42 @@ export function resolveKeymap(raw: unknown, mac = isMac): Keymap {
       taken.add(binding);
       return true;
     });
-  for (const action of SHORTCUT_ACTIONS) if (action.fixed) keymap[action.id] = claim(defaultBindings(action.id, mac));
-  for (const action of SHORTCUT_ACTIONS) if (overrides[action.id]) keymap[action.id] = claim(overrides[action.id]!);
-  // An action behind an Experimental switch takes its default keys last: whatever else uses them keeps them.
-  for (const action of SHORTCUT_ACTIONS) if (!keymap[action.id] && !gated(action)) keymap[action.id] = claim(defaultBindings(action.id, mac).map(normalizeBinding));
-  for (const action of SHORTCUT_ACTIONS) if (!keymap[action.id]) keymap[action.id] = claim(defaultBindings(action.id, mac).map(normalizeBinding));
+  for (const action of ORGANIZATION_SHORTCUTS) if (!switchingEnabled) keymap[action.id] = [];
+  for (const action of ALL_SHORTCUT_ACTIONS) if (action.fixed) keymap[action.id] = claim(defaultBindings(action.id, mac));
+  for (const action of ALL_SHORTCUT_ACTIONS) if (!keymap[action.id] && overrides[action.id]) keymap[action.id] = claim(overrides[action.id]!);
+  // Gated actions take default keys after ordinary actions.
+  for (const action of ALL_SHORTCUT_ACTIONS) if (!keymap[action.id] && !gated(action)) keymap[action.id] = claim(defaultBindings(action.id, mac).map(normalizeBinding));
+  for (const action of ALL_SHORTCUT_ACTIONS) if (!keymap[action.id]) keymap[action.id] = claim(defaultBindings(action.id, mac).map(normalizeBinding));
   return keymap;
 }
 
 function gated(action: ShortcutAction): boolean {
-  return !!action.requires;
+  return !!action.requires || action.group === "Organizations";
 }
 
-/** False while the Experimental switch the action is behind is off (or not read yet): its keys then belong to nothing. */
+/** Whether a gated action is available to edit on this client. */
 export function shortcutOffered(action: ShortcutAction): boolean {
+  if (action.group === "Organizations") return organizationSwitchingEnabled();
   return !action.requires || getExperimentalSettings()?.[action.requires] === true;
 }
 
-let cached: { raw: unknown; keymap: Keymap } | null = null;
+let cached: { raw: unknown; switchingEnabled: boolean; keymap: Keymap } | null = null;
+
+function cachedKeymap(raw: unknown, switchingEnabled: boolean): Keymap {
+  if (!cached || cached.raw !== raw || cached.switchingEnabled !== switchingEnabled) {
+    cached = { raw, switchingEnabled, keymap: resolveKeymap(raw, isMac, switchingEnabled) };
+  }
+  return cached.keymap;
+}
 
 /** The keys in force now. Read on every keydown, so it is kept until the preference changes. */
 export function currentKeymap(): Keymap {
-  const raw = getPrefs().shortcuts;
-  if (!cached || cached.raw !== raw) cached = { raw, keymap: resolveKeymap(raw) };
-  return cached.keymap;
+  return cachedKeymap(getPrefs().shortcuts, organizationSwitchingEnabled());
 }
 
 /** The keymap, re-read when the preference changes (in this window or another). */
 export function useKeymap(): Keymap {
-  const raw = usePrefs().shortcuts;
-  if (!cached || cached.raw !== raw) cached = { raw, keymap: resolveKeymap(raw) };
-  return cached.keymap;
+  return cachedKeymap(usePrefs().shortcuts, useOrganizationSwitchingEnabled({ requestCapability: false }));
 }
 
 export function bindingsOf(id: ShortcutId): string[] {
@@ -515,7 +535,7 @@ export function bindingsOf(id: ShortcutId): string[] {
 /** The other action that has `binding`, if any. */
 export function conflictOf(binding: string, id: ShortcutId, keymap: Keymap = currentKeymap()): ShortcutAction | null {
   const wanted = normalizeBinding(binding);
-  return SHORTCUT_ACTIONS.find((action) => action.id !== id && shortcutOffered(action) && keymap[action.id].includes(wanted)) ?? null;
+  return ALL_SHORTCUT_ACTIONS.find((action) => action.id !== id && shortcutOffered(action) && keymap[action.id].includes(wanted)) ?? null;
 }
 
 const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((binding, i) => binding === b[i]);
