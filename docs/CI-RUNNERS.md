@@ -324,11 +324,14 @@ part <i>/4`. It shows on the run's page and among the pull request's checks,
 and the API returns it without the log.
 
 **The list is read with `node scripts/webkit/rerun-tally.mjs`.** For the last
-completed CI runs (30 by default, `--runs N` up to 100, `--branch main` for
-one branch, `--json` for JSON), it reads those annotations for every attempt
-of every Linux part, through `gh api`, and prints each check that passed only
-when run again, with in how many runs and which (link, branch, commit, part).
-A run counts once for a check, however many of its attempts said so.
+completed CI runs (20 by default, `--runs N` up to 100, `--branch main` for
+one branch, `--json` for JSON, `--help` for these), it reads those annotations
+for every attempt of every Linux part, through `gh api`, and prints each check
+that passed only when run again, with in how many runs and which (link,
+branch, commit, part). A run counts once for a check, however many of its
+attempts said so. It sends four requests at once and says each run on stderr
+as it is read: 20 runs take about 20 seconds, 100 about 70. A request GitHub
+answers with a 5xx is sent again, up to four times, backing off.
 
 A rerun takes the check's own time again, after the part. A check that timed
 out (ten minutes) and is rerun can take the part past its 25-minute limit; the
