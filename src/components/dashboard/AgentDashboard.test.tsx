@@ -297,10 +297,10 @@ it("keeps Mine, Shared, Following and current Active predicates over the identic
       { workspace: { id: "visible", createdBy: "other", state: "ready" }, following: false },
     ] },
   } } as unknown as CloudCatalogState;
-  const rows = [{ id: "local", ownerId: "me" }, ...["mine", "shared", "visible"].map((workspaceId) => ({ id: workspaceId, orgId: "org", workspaceId }))];
+  const rows = [{ id: "local", ownerId: "me" }, { id: "machine", kind: "machine" }, ...["mine", "shared", "visible"].map((workspaceId) => ({ id: workspaceId, orgId: "org", workspaceId }))];
   const active = (_org: string, id: string) => id === "shared";
   const ids = (view: Parameters<typeof teamPredicate>[1]) => rows.filter((row) => teamPredicate(row, view, catalog, active)).map((row) => row.id);
-  expect(ids("everyone")).toEqual(["local", "mine", "shared", "visible"]);
+  expect(ids("everyone")).toEqual(["local", "machine", "mine", "shared", "visible"]);
   expect(ids("mine")).toEqual(["local", "mine"]);
   expect(ids("shared")).toEqual(["shared"]);
   expect(ids("following")).toEqual(["shared"]);
@@ -318,4 +318,13 @@ it("isolates this Mac's multi-person By preference by account and organization",
   expect(readOwners(ownerStorageKey("account-a", "other-org"))).toEqual([]);
   localStorage.setItem(a, "[]"); expect(readOwners(a)).toEqual([]);
   localStorage.removeItem(a);
+});
+
+it("offers one By picker and ignores a legacy unscoped owner preference", () => {
+  setPrefs({ dashboard: { ...DEFAULT_DASHBOARD_PREFERENCES, view: "table", owners: ["another-account"] } });
+  state.sessions = [session("Local task")];
+  render(<AgentDashboard />);
+  expect(screen.getAllByRole("button", { name: "By Anyone" })).toHaveLength(1);
+  expect(screen.queryByRole("button", { name: /^People:/ })).toBeNull();
+  expect(rowNames()).toEqual(["Local task"]);
 });

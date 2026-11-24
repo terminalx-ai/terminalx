@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_DASHBOARD_PREFERENCES } from "@terminalx/portable/dashboard";
 import { rememberPeople } from "@/lib/cloudPeople";
+import { thisComputer } from "@/lib/platform";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { AccountStatus, CloudWorkspaceListItem } from "@/lib/api";
 
@@ -126,7 +127,7 @@ beforeEach(async () => {
     identity: { name: "A", email: "a@example.com", organization: "Acme", organizationId: ORG },
     expiresAt: null,
     lastError: null,
-    context: { scope: "s", revision: "s:1" },
+    context: { account: "a", scope: "s", revision: "s:1" },
     multiOrg: true,
     organizations: [
       { id: ORG, name: "Acme", role: "admin", isPersonal: false, cloud: { enabled: true, flags: {} } },
@@ -405,16 +406,16 @@ it("filters table sessions by cloud owner and archive state and opens an archive
   fireEvent.click(await screen.findByRole("menuitemradio", { name: "Only archived" }));
   await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   // The people picker (02.05): Amy alone.
-  fireEvent.click(screen.getByRole("button", { name: /^People: Everyone/ }));
-  const picker = await screen.findByRole("dialog", { name: "Filter by people" });
-  expect(within(picker).getByRole("checkbox", { name: /Anyone/ }).getAttribute("aria-checked")).toBe("true");
+  fireEvent.pointerDown(screen.getByRole("button", { name: "By Anyone" }), { button: 0, ctrlKey: false });
+  const picker = await screen.findByRole("menu");
+  expect(within(picker).getByRole("menuitem", { name: "Anyone" })).toBeTruthy();
   fireEvent.change(within(picker).getByRole("textbox", { name: "Filter people" }), { target: { value: "am" } });
-  expect(within(picker).queryByRole("checkbox", { name: /Zoe/ })).toBeNull();
-  fireEvent.click(within(picker).getByRole("checkbox", { name: /Amy/ }));
-  expect(within(picker).getByText(/Owner filter is saved on this computer/)).toBeTruthy();
+  expect(within(picker).queryByRole("menuitemcheckbox", { name: /Zoe/ })).toBeNull();
+  fireEvent.click(within(picker).getByRole("menuitemcheckbox", { name: /Amy/ }));
+  expect(within(picker).getByText(`Owner filter is saved on ${thisComputer}. Local sessions count as yours.`)).toBeTruthy();
   fireEvent.keyDown(picker, { key: "Escape" });
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  expect(screen.getByRole("button", { name: "People: Amy" })).toBeTruthy();
+  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  expect(screen.getByRole("button", { name: "By Amy" })).toBeTruthy();
   const row = await screen.findByRole("row", { name: /Archived cloud work/ });
   // A cloud owner is the member's profile, named beside it (PRO-288).
   expect(within(row).getByRole("button", { name: "View profile: Amy" })).toBeTruthy();
