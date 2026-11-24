@@ -4,7 +4,10 @@ name: Fill the 25.04 key form
 ---
 - setClipboard: "placeholder-not-a-real-key-0000"
 - tapOn: "Paste .*"
-# iOS asks before an app reads what another app copied.
+# iOS asks before an app reads what another app copied (not every time, and not at once).
+- assertVisible:
+    text: "Allow Paste"
+    optional: true
 - runFlow:
     when:
       visible: "Allow Paste"
