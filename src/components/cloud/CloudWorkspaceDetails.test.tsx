@@ -27,11 +27,11 @@ it("renders original pinned metadata and unavailable CPU/disk, and safely falls 
   m.copy.mockRejectedValue(new Error("clipboard denied"));
   render(<CloudWorkspaceDetailsCard item={item} />);
   await screen.findByText("artifact-sha");
-  expect(screen.getByText("8")).toBeTruthy(); expect(screen.getAllByText("Unavailable").length).toBeGreaterThanOrEqual(2);
+  expect(screen.getByText("Version 3 · Toolchain 8")).toBeTruthy(); expect(screen.getAllByText("Unavailable").length).toBeGreaterThanOrEqual(2);
   expect(screen.queryByText("secret")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Copy machine ID" }));
   expect(await screen.findByLabelText("Text to copy")).toHaveProperty("value", "machine");
-  expect(screen.queryByText("Copied.")).toBeNull();
+  expect(screen.queryByText("Copied machine ID")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Copy workspace info" }));
   await waitFor(() => expect((screen.getByLabelText("Text to copy") as HTMLTextAreaElement).value).toContain("Runtime SHA256: artifact-sha"));
   expect(m.copy).toHaveBeenCalledTimes(2);
@@ -59,6 +59,39 @@ it("samples connected runtime at 10s only while mounted, drops readings on disco
   await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
   expect(m.resources).toHaveBeenCalledTimes(3);
 });
+it("renders CPU capacity and keeps first, zero, and stale usage distinct", async () => {
+  vi.useFakeTimers();
+  const resource = (usage: number | null) => ({ v: 1, cpu: { cores: 4, usage }, memory: null, storage: null, observedAt: Date.now() });
+  m.resources.mockImplementationOnce(async () => resource(null))
+    .mockImplementationOnce(async () => resource(0))
+    .mockImplementationOnce(async () => resource(0.375))
+    .mockImplementation(async () => new Promise(() => {}));
+  render(<CloudWorkspaceDetailsCard item={item} />);
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.getByText("4 cores · Usage unavailable")).toBeTruthy();
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+  expect(screen.getByText("4 cores · 0% used")).toBeTruthy();
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+  expect(screen.getByText("4 cores · 38% used")).toBeTruthy();
+  await act(async () => { await vi.advanceTimersByTimeAsync(20_001); });
+  expect(screen.queryByText(/4 cores/)).toBeNull();
+});
+
+it("shows Restarting only for an open restart when readiness is enabled", () => {
+  const operation = { action: "resume", transportAction: "restart", state: "running" } as NonNullable<CloudWorkspaceListItem["latestOperation"]>;
+  const row = { ...item, latestOperation: operation };
+  const view = render(<CloudWorkspaceDetails item={row} />);
+  expect(screen.queryByText("Restarting")).toBeNull();
+  m.status.phase2Readiness = { org: ["cloud.workspaces.restart-details.v1"] };
+  view.rerender(<CloudWorkspaceDetails item={row} />);
+  expect(screen.getByText("Restarting")).toBeTruthy();
+  view.rerender(<CloudWorkspaceDetails item={{ ...row, latestOperation: { ...operation, state: "succeeded" } }} />);
+  expect(screen.queryByText("Restarting")).toBeNull();
+  view.rerender(<CloudWorkspaceDetails item={{ ...row, latestOperation: { ...operation, transportAction: undefined } }} />);
+  expect(screen.queryByText("Restarting")).toBeNull();
+  expect(m.details).not.toHaveBeenCalled();
+});
+
 it("discards an outstanding old-generation reading after reconnect", async () => {
   let resolve!: (value: unknown) => void;
   m.resources.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
@@ -134,9 +167,9 @@ it.each([false, true])("uses the real native-first clipboard helper with browser
     expect(m.invoke).toHaveBeenCalledExactlyOnceWith("copy_text", { text: "machine" });
     if (browserFails) {
       expect(await screen.findByLabelText("Text to copy")).toHaveProperty("value", "machine");
-      expect(screen.queryByText("Copied.")).toBeNull();
+      expect(screen.queryByText("Copied machine ID")).toBeNull();
     } else {
-      expect(await screen.findByText("Copied.")).toBeTruthy();
+      expect(await screen.findByText("Copied machine ID")).toBeTruthy();
       expect(screen.queryByLabelText("Text to copy")).toBeNull();
     }
   } finally {

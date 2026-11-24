@@ -8,6 +8,21 @@ import { reconnectCloudWorkspace } from "@/lib/cloudConnections";
 import { workspaceAuthority } from "@/lib/cloudCollab";
 import { isArchived, isOpen, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 
+export function workspaceRestarting(item: CloudWorkspaceListItem): boolean {
+  return item.latestOperation?.transportAction === "restart" && isOpen(item.latestOperation);
+}
+
+export function provisioningLogUrl(details: CloudWorkspaceDetailsResponse["details"]): string | null {
+  const url = details.provisioningLog?.url;
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && !parsed.username && !parsed.password ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 // Structural adapter for the accepted shared worker's public API. This worktree
 // can compile before collection; absent methods keep entrypoints held. No native
 // invocation or transport/projection fallback is implemented here.
@@ -110,6 +125,8 @@ export function canRestartWorkspace(item: CloudWorkspaceListItem): boolean {
 }
 
 const restarts = new Set<string>();
+export class RestartOperationError extends Error {}
+
 /** Queued is pending. Keep held leases, then replace their transport using connect only. */
 export async function restartCloudWorkspace(item: CloudWorkspaceListItem): Promise<void> {
   if (!canRestartWorkspace(item)) throw new Error("Restart is unavailable for this workspace.");
@@ -163,7 +180,7 @@ export async function restartCloudWorkspace(item: CloudWorkspaceListItem): Promi
       }
       applyCloudSnapshot(project(snapshot), polledAt);
     }
-    if (snapshot.operation.state !== "succeeded") throw new Error(lifecycleErrorMessage(snapshot.operation.errorCode ?? "cloud_workspace_unknown_error"));
+    if (snapshot.operation.state !== "succeeded") throw new RestartOperationError(lifecycleErrorMessage(snapshot.operation.errorCode ?? "cloud_workspace_unknown_error"));
     reconnectCloudWorkspace({ orgId: w.orgId, workspaceId: w.id });
   } finally {
     restarts.delete(key);

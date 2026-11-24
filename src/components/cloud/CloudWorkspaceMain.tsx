@@ -1,6 +1,6 @@
 import { WorkspaceFollowButton } from "./WorkspaceFollowing";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Cloud, Loader2, PanelLeft, Play } from "@/icons";
+import { Cloud, Loader2, PanelLeft, Play, RotateCcw } from "@/icons";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -11,6 +11,9 @@ import { NotSharedNotice } from "./CloudCollab";
 import { DeletionProgress } from "./CloudWorkspaceLifecycle";
 import { CloudWorkspaceDetails } from "./CloudWorkspaceDetails";
 import { WorkspaceLifecycleDialog } from "./WorkspaceActions";
+import { WorkspaceRestartDialog } from "./WorkspaceActionsRestart";
+import { CloudDiagnosticsDialog, offersCloudDiagnostics } from "./CloudDiagnosticsDialog";
+import { canRestartWorkspace, detailsScope, useWorkspaceDetailsAvailable, workspaceRestarting } from "@/lib/cloudWorkspaceDetails";
 import { ExecutionLocation, WorkspaceView, describe, describeWorkspace, type OpenedWorkspace } from "./CloudWorkspaceView";
 import { workspaceTargetKey, type CloudWorkspaceListItem } from "@/lib/api";
 import { accessLostReason, clearCollabAccess } from "@/lib/cloudCollab";
@@ -54,6 +57,8 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   // Signed out, or no longer a member: nothing of the organization is shown or connected.
   const member = !!parsed && sections.live.has(parsed.orgId);
   const item = parsed && member ? findCloudWorkspace(catalog, parsed.orgId, parsed.workspaceId) : null;
+  const detailsAvailable = useWorkspaceDetailsAvailable(parsed?.orgId ?? "");
+  const restarting = detailsAvailable && !!item && workspaceRestarting(item);
   const org = parsed ? catalog.orgs[parsed.orgId] : undefined;
   // #497: the API refused `open` for access (a revoked share, a workspace made
   // private). The refusal is kept with its workspace. A list asked for after
@@ -73,7 +78,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   const sessionRequest = useAttentionSessionRequest();
   const requestedInspection = sessionRequest?.key === workspaceKey;
   const inspecting = inspection === workspaceKey || requestedInspection;
-  const canOpen = !!item && !locked && (openable(item)
+  const canOpen = !!item && !locked && (openable(item) || restarting
     || (inspecting && item.workspace.state === "attention-required" && !deletion(item) && !archiving(item)));
   // The lease, and through it the workspace's connection of now: the manager
   // replaces it when the workspace stops and comes back, and the view follows.
@@ -183,9 +188,16 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
     inspect();
     takeAttentionSessionRequest(sessionRequest);
   }, [sessionRequest, requestedInspection, inspect]);
-  const stopped = item?.workspace.state === "suspended";
+  const stopped = !restarting && item?.workspace.state === "suspended";
   const saved = item ? lastSavedText(item) : null;
   const deleting = item ? deletion(item) : null;
+  const [healthAction, setHealthAction] = useState<{ key: string; scope: string; action: "restart" | "diagnostics" } | null>(null);
+  const activeHealthAction = detailsAvailable && !locked && healthAction?.key === workspaceKey && healthAction.scope === detailsScope()
+    ? healthAction.action : null;
+  const unresponsive = detailsAvailable && !locked && !refusedNow && !restarting && item?.workspace.state === "ready"
+    && (state.state === "waitingForRuntime" || state.state === "reconnecting");
+  const diagnosticsOffered = !!item && offersCloudDiagnostics(accountStatus, item.workspace.orgId);
+  const health = (action: "restart" | "diagnostics") => setHealthAction({ key: workspaceKey, scope: detailsScope(), action });
 
   return (
     <main className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-clip" data-testid="cloud-workspace-main">
@@ -214,8 +226,8 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
         {item && !locked && <WorkspaceFollowButton key={`${item.workspace.orgId}:${item.workspace.id}`} item={item} />}
         {item && <ExecutionLocation provider={item.workspace.provider} name={item.workspace.name} />}
         <span className="ml-auto min-w-0 truncate text-xs text-muted-foreground" data-testid="cloud-connection-state" title={item ? describeWorkspace(item, Date.now(), agentRan) : undefined}>
-          {rowState?.label}
-          {opened && state.state !== "idle" && state.state !== "suspended" ? ` · ${describe(state)}` : ""}
+          {!restarting && rowState?.label}
+          {!restarting && opened && state.state !== "idle" && state.state !== "suspended" ? ` · ${describe(state)}` : ""}
         </span>
         {stopped && (
           <Button size="sm" variant="outline" className="shrink-0" disabled={resuming} onClick={() => void resume()}>
@@ -223,7 +235,18 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
           </Button>
         )}
       </header>
-      {item && attention && canOpen && !locked && <CloudWorkspaceAttention item={item} input={{ agentRan, connection: state.state }} onOpenSession={inspect} />}
+      {item && attention && canOpen && !locked && !restarting && <CloudWorkspaceAttention item={item} input={{ agentRan, connection: state.state }} onOpenSession={inspect} />}
+      {unresponsive && <section aria-label="Workspace health" className="shrink-0 border-b border-hairline bg-well px-4 py-3 text-xs">
+        <p className="font-medium">Cloud workspace unresponsive</p>
+        <p className="mt-1 text-muted-foreground">TerminalX is trying to reconnect to the runtime.</p>
+        <div className="mt-2 flex flex-wrap gap-2">
+          {canRestartWorkspace(item) && <Button size="xs" variant="outline" onClick={() => health("restart")}><RotateCcw /> Restart</Button>}
+          {diagnosticsOffered && <Button size="xs" variant="outline" onClick={() => health("diagnostics")}>Open diagnostics</Button>}
+        </div>
+      </section>}
+      {item && activeHealthAction === "restart" && <WorkspaceRestartDialog item={item} onClose={() => setHealthAction(null)} />}
+      {item && diagnosticsOffered && activeHealthAction === "diagnostics" &&
+        <CloudDiagnosticsDialog request={{ orgId: item.workspace.orgId, workspaceId: item.workspace.id }} onClose={() => setHealthAction(null)} />}
       {stopped && (
         <div className="shrink-0 border-b border-hairline bg-well px-4 py-1.5 text-xs text-muted-foreground" role="status" data-testid="cloud-stopped-banner">
           Stopped. Saved agent conversations are shown; nothing runs until you resume it.

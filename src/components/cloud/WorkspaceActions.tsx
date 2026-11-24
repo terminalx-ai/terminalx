@@ -2,11 +2,13 @@ import { mayReassign, useWorkspacePreferencesAvailable, WorkspaceReassignDialog 
 import { useAccount } from "@/lib/account";
 import { useCloudCatalog } from "@/lib/cloudCatalog";
 import { useState } from "react";
-import { Archive, ArchiveRestore, CalendarClock, Clock, Loader2, Copy, Info, Lock, RotateCcw, Pause, Play, Trash2, Users } from "@/icons";
-import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Archive, ArchiveRestore, CalendarClock, Clock, Loader2, Copy, ExternalLink, Info, Lock, RotateCcw, Pause, Play, Trash2, Users } from "@/icons";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { CloudWorkspaceDetailsCard } from "./CloudWorkspaceDetails";
-import { canRestartWorkspace, detailsScope, restartCloudWorkspace, useWorkspaceDetailsAvailable } from "@/lib/cloudWorkspaceDetails";
+import { WorkspaceRestartDialog } from "./WorkspaceActionsRestart";
+import { canRestartWorkspace, detailsScope, loadWorkspaceDetails, provisioningLogUrl, useWorkspaceDetailsAvailable } from "@/lib/cloudWorkspaceDetails";
+import { showError } from "@/lib/errorToasts";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -80,6 +82,17 @@ export function WorkspaceActionItems({
   const shareable = present && (authority.manageShares || (authority.viewShares && workspace.accessMode === "organization"));
   const sharedWith = workspace.sharedWith ?? 0;
   const lifecycle = authority.lifecycle;
+  const openProvisioningLog = async () => {
+    const scope = detailsScope();
+    try {
+      const { details } = await loadWorkspaceDetails(item);
+      const url = provisioningLogUrl(details);
+      if (!url) throw new Error("No provisioning log is available for this workspace.");
+      if (scope === detailsScope()) await openUrl(url);
+    } catch (error) {
+      if (scope === detailsScope()) showError("Couldn't open the provisioning log", error);
+    }
+  };
   // Sharing a private workspace means making it organization-visible first,
   // which takes managing it. Against a server from before PRO-73 a creator
   // who is a plain member manages shares only: they are told so here,
@@ -98,9 +111,10 @@ export function WorkspaceActionItems({
     <>
       {detailsAvailable && detailsAllowed && present && <>
         <DropdownMenuItem onSelect={() => onLifecycle({ item, action: "details" })}><Info /> Workspace details…</DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => onLifecycle({ item, action: "copy-machine" })}><Copy /> Copy machine ID</DropdownMenuItem>
         <DropdownMenuItem onSelect={() => onLifecycle({ item, action: "copy-info" })}><Copy /> Copy workspace info</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onLifecycle({ item, action: "copy-machine" })}><Copy /> Copy machine ID</DropdownMenuItem>
         {canRestartWorkspace(item) && <DropdownMenuItem onSelect={() => onLifecycle({ item, action: "restart" })}><RotateCcw /> Restart workspace…</DropdownMenuItem>}
+        {lifecycle && <DropdownMenuItem onSelect={() => void openProvisioningLog()}><ExternalLink /> Open provisioning log</DropdownMenuItem>}
         <DropdownMenuSeparator />
       </>}
       {present && reassign && current && <DropdownMenuItem onSelect={() => onLifecycle({ item: current, action: "reassign" })}><Users /> Reassign to…</DropdownMenuItem>}
@@ -250,11 +264,10 @@ function IdleSuspendItems({ item, run }: { item: CloudWorkspaceListItem; run: (w
 export function WorkspaceLifecycleDialog({ request, onClose }: { request: LifecycleRequest; onClose: () => void }) {
   if (request.action === "reassign") return <WorkspaceReassignDialog key={`${request.item.workspace.orgId}:${request.item.workspace.id}`} item={request.item} onClose={onClose} />;
   if (request.action === "restart") return <WorkspaceRestartDialog item={request.item} onClose={onClose} />;
-  if (request.action === "details" || request.action === "copy-machine" || request.action === "copy-info") return <Dialog open onOpenChange={(open) => !open && onClose()}>
-    <DialogContent><DialogHeader><DialogTitle>Workspace details</DialogTitle><DialogDescription>Original setup and current connected resources.</DialogDescription></DialogHeader>
-      <CloudWorkspaceDetailsCard item={request.item} initialCopy={request.action === "copy-machine" ? "machine" : request.action === "copy-info" ? "info" : undefined} />
-    </DialogContent>
-  </Dialog>;
+  if (request.action === "details" || request.action === "copy-machine" || request.action === "copy-info") {
+    return <WorkspaceDetailsDialog key={JSON.stringify([request.item.workspace.orgId, request.item.workspace.id, request.action])}
+      item={request.item} action={request.action} onClose={onClose} />;
+  }
   return (
     <CloudWorkspaceLifecycleDialog
       item={request.item}
@@ -294,26 +307,26 @@ export function useLifecycleRun(): [string | null, (work: () => Promise<void>) =
   return [error, run];
 }
 
-/** Separate from Stop/Archive/Delete: restart is queued and never accepts force. */
-function WorkspaceRestartDialog({ item, onClose }: { item: CloudWorkspaceListItem; onClose: () => void }) {
-  const [confirmed, setConfirmed] = useState(false);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+function WorkspaceDetailsDialog({ item, action, onClose }: {
+  item: CloudWorkspaceListItem;
+  action: "details" | "copy-machine" | "copy-info";
+  onClose: () => void;
+}) {
+  const available = useWorkspaceDetailsAvailable(item.workspace.orgId);
   const [owner] = useState(detailsScope);
-  const submit = async () => {
-    if (!confirmed || pending || owner !== detailsScope()) return;
-    setPending(true); setError(null);
-    try { await restartCloudWorkspace(item); if (owner === detailsScope()) onClose(); }
-    catch (error) { if (owner === detailsScope()) setError(error instanceof Error ? error.message : lifecycleErrorMessage(errorCode(error))); }
-    finally { setPending(false); }
-  };
-  return <Dialog open onOpenChange={(open) => !open && !pending && onClose()}>
-    <DialogContent showClose={!pending} onEscapeKeyDown={(event) => { if (pending) event.preventDefault(); }} onPointerDownOutside={(event) => { if (pending) event.preventDefault(); }}>
-      <DialogHeader><DialogTitle>Restart {item.workspace.name}?</DialogTitle><DialogDescription>The workspace keeps its disk, pinned setup and saved conversations. Running processes will be interrupted. A checkpoint can time out; unsaved in-memory work may be lost.</DialogDescription></DialogHeader>
-      <label className="my-4 flex gap-2 text-sm"><input type="checkbox" checked={confirmed} disabled={pending} onChange={(event) => setConfirmed(event.target.checked)} />I understand running work may be interrupted</label>
-      {pending && <p role="status">Restart pending… Waiting for the workspace operation.</p>}
-      {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
-      <DialogFooter><Button variant="outline" disabled={pending} onClick={onClose}>Cancel</Button><Button disabled={!confirmed || pending || !canRestartWorkspace(item) || owner !== detailsScope()} onClick={() => void submit()}>Restart workspace</Button></DialogFooter>
+  const [restart, setRestart] = useState(false);
+  if (!available || owner !== detailsScope()) return null;
+  if (restart) return <WorkspaceRestartDialog item={item} onClose={onClose} />;
+  return <Dialog open onOpenChange={(open) => !open && onClose()}>
+    <DialogContent>
+      <DialogHeader><DialogTitle>Workspace details</DialogTitle><DialogDescription>Original setup and current connected resources.</DialogDescription></DialogHeader>
+      <CloudWorkspaceDetailsCard item={item}
+        initialCopy={action === "copy-machine" ? "machine" : action === "copy-info" ? "info" : undefined}
+        onInitialCopy={(message) => {
+          showError("", undefined, { title: message, tone: "success", key: "workspace-details-copy" });
+          onClose();
+        }}
+        onRestart={() => setRestart(true)} />
     </DialogContent>
   </Dialog>;
 }

@@ -10,6 +10,9 @@ import { applyLiveTabs, resetCloudAgents } from "@/lib/cloudAgents";
 const mocks = vi.hoisted(() => ({
   api: {
     cloudWorkspaces: vi.fn(),
+    cloudWorkspaceDetails: vi.fn(),
+    cloudWorkspaceRestart: vi.fn(),
+    cloudWorkspaceOperationDto: vi.fn(),
     cloudWorkspaceRepositories: vi.fn(),
     cloudAgentPurgeWorkspace: vi.fn(),
     cloudCatalogLoad: vi.fn(),
@@ -93,6 +96,29 @@ afterEach(() => {
   resetCloudConnections();
   catalog.resetCloudCatalog();
   resetCloudAgents();
+});
+
+it("offers the health card after a runtime disconnect only when restart/details is ready", async () => {
+  const driver = shared("driver");
+  const managed: CloudWorkspaceListItem = {
+    ...driver,
+    workspace: { ...driver.workspace, authority: "manage", you: { role: "manager", canApprove: true } },
+  };
+  mocks.status.organizations![0].role = "admin";
+  await catalog.ingestCloudList({ workspaces: [managed] }, ORG);
+  const view = render(<CloudWorkspaceMain workspaceKey={KEY} sidebarOpen onToggleSidebar={() => undefined} />);
+  await screen.findByTestId("workspace-view");
+  await act(async () => emit({ state: "reconnecting", attempt: 1, reason: "relay_timeout", retryInMs: 250 }));
+  expect(screen.queryByText("Cloud workspace unresponsive")).toBeNull();
+
+  mocks.status.phase2Readiness = { [ORG]: ["cloud.workspaces.restart-details.v1"] };
+  view.rerender(<CloudWorkspaceMain workspaceKey={KEY} sidebarOpen onToggleSidebar={() => undefined} />);
+  const health = screen.getByRole("region", { name: "Workspace health" });
+  expect(within(health).getByRole("button", { name: "Open diagnostics" })).toBeTruthy();
+  fireEvent.click(within(health).getByRole("button", { name: "Restart" }));
+  const dialog = screen.getByRole("dialog", { name: "Restart alpha?" });
+  expect(within(dialog).getByRole("button", { name: "Restart workspace" })).toHaveProperty("disabled", true);
+  expect(mocks.api.cloudWorkspaceRestart).not.toHaveBeenCalled();
 });
 
 describe("a workspace whose share is revoked while it is open (#497)", () => {
