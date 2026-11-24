@@ -12,7 +12,7 @@ import { launch, open, report, serve, sidebar } from "./harness.mjs";
 const shots = process.argv[2];
 if (shots) await mkdir(shots, { recursive: true });
 
-function setup({ mode, state }) {
+function setup({ mode, state, environmentInfo = false }) {
   localStorage.setItem("raccoon.mode", mode);
   localStorage.setItem("raccoon.prefs", JSON.stringify({ sidebarLayout: "simple", sidebarOpen: true, panelOpen: false, tabStrip: true }));
   const at = "2026-11-13T10:00:00Z";
@@ -72,6 +72,26 @@ function setup({ mode, state }) {
       return Promise.reject(`ARCHIVE_SCRIPT_FAILED:${JSON.stringify({ token: "receipt", pane: "archive:run", code: 1, timedOut: false, detail: "no such project: quiet-amber-fox", timeoutMinutes: 2 })}`);
     },
   });
+  if (environmentInfo) {
+    const answers = window.__PW_STUB__.answers;
+    answers.account_status.phase2Readiness = { "org-a": ["cloud.environment-info.v1"] };
+    answers.cloud_workspaces = { workspaces: [] };
+    answers.github_repo = "acme/terminalx-server";
+    answers.cloud_providers = { providers: [{
+      id: "local-docker", displayName: "Local Docker", availability: "available", canManage: true,
+      connection: { state: "connected" }, capabilities: {},
+    }] };
+    answers.organization_environment_status = {
+      provider: "local-docker", supported: true, canManage: true, contextRevision: "s:1",
+      template: { revision: 1, definition: { installScript: "apt-get install -y jq", repositories: [] }, updatedAt: Date.now() },
+      versions: [], pendingChanges: [],
+    };
+    answers.organization_environment_recipes = { recipes: [], contextRevision: "s:1" };
+    window.__COMPUTE_CALLS__ = [];
+    for (const command of ["cloud_remote_attach", "cloud_remote_activate", "cloud_remote_send", "cloud_workspace_resume", "cloud_workspace_create", "organization_environment_build"]) {
+      answers[command] = () => { window.__COMPUTE_CALLS__.push(command); throw new Error("Unexpected compute call"); };
+    }
+  }
 }
 
 async function openScripts(page) {
@@ -262,6 +282,38 @@ try {
     if (shots) await page.screenshot({ path: join(shots, `04-archive-script-failed-${mode}.png`) });
     await dialog.getByRole("button", { name: "Keep workspace" }).click();
     await dialog.waitFor({ state: "hidden" });
+    await page.close();
+
+    // PRO-203: explicitly enabled in this organization, with no connected runtime.
+    page = await open(browser, server.url, { cloud: true, localProjects: 1 }, { width: 960, height: 720 }, {
+      extra: `(${setup})(${JSON.stringify({ mode, state: "saved", environmentInfo: true })})`, colorScheme: mode,
+    });
+    await sidebar(page);
+    await openScripts(page);
+    const setupInfo = page.getByRole("group", { name: "Setup" }).getByRole("button", { name: "Environment info" });
+    await setupInfo.click();
+    const info = page.getByRole("dialog", { name: "Environment info" });
+    await info.getByText("No matching workspace with tool reporting is connected.").waitFor();
+    const setupHelp = (await info.locator("li").count()) === 3;
+    await page.keyboard.press("Escape");
+    await info.waitFor({ state: "hidden" });
+    const settings = page.getByRole("navigation", { name: "Settings sections" });
+    await settings.getByRole("button", { name: "Account", exact: true }).click();
+    await page.getByTestId("account-organization-settings").getByRole("button", { name: "Open", exact: true }).click();
+    await settings.getByRole("group", { name: "Demo settings", exact: true }).getByRole("button", { name: "Environment", exact: true }).click();
+    const template = page.getByRole("form", { name: "Environment template" });
+    await template.getByRole("button", { name: "Environment info" }).click();
+    await info.getByText("No matching workspace with tool reporting is connected.").waitFor();
+    failed += report(`${mode} enabled environment info`, {
+      "setup keeps its three help bullets": setupHelp,
+      "machine script and report share a field": await template.getByRole("textbox", { name: "Machine install script" }).evaluate(
+        (node) => !!node.parentElement.querySelector('button[aria-expanded="true"]')),
+      "popover stays inside the viewport": await info.evaluate((node) => {
+        const { left, right, top, bottom } = node.getBoundingClientRect();
+        return left >= 0 && right <= innerWidth && top >= 0 && bottom <= innerHeight && node.scrollWidth <= node.clientWidth + 1;
+      }),
+      "no compute or remote calls": await page.evaluate(() => window.__COMPUTE_CALLS__.length === 0),
+    });
     await page.close();
   }
 } finally {

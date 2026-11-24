@@ -48,6 +48,7 @@ import { showRunView } from "@/lib/orchestration";
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { WorkStatus } from "@/types/session";
 import { cloudStartError, quoteText, useCloudDraft, useCloudIdleOptions, useCloudProjectChoices } from "./CloudNewSession";
+import { CloudStartSession, useCloudStart } from "./CloudStartSession";
 import { IdleSuspendSelect } from "@/components/cloud/IdleSuspendSelect";
 import { initialIdleSuspend } from "@/lib/idleSuspend";
 import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
@@ -680,6 +681,7 @@ export function NewSessionView({
   const chip = "flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12.5px] text-muted-foreground transition-colors hover:bg-veil-raised hover:text-foreground disabled:opacity-50";
   const createLabel = projectless ? "Ask" : machine ? `Create on ${machine.name}` : "Create";
   const localGit = !projectless && !remote && isGit && !!project;
+  const launchProgress = useCloudStart(undefined, launching?.projectKey === launchProjectKey ? launching : null);
   const branchInfo = projectless ? null : cloud ? (whereShown ? null : (
     <span className="flex min-w-0 items-center gap-1.5 truncate px-2 text-[12.5px] text-muted-foreground" data-testid="cloud-runs-in" title="The agent, its terminals and its files run on a cloud workspace of the organization, not on this computer.">
       <Cloud className="size-3.5 shrink-0" /> {cloud.orgName} cloud
@@ -704,6 +706,8 @@ export function NewSessionView({
       <span className="truncate font-mono">{status?.branch ?? "current branch"}</span>
     </span>
   );
+
+  if (launchProgress) return <div className={cn("flex min-h-64 flex-col", !modal && "h-full")}><CloudStartSession start={launchProgress} /></div>;
 
   return (
     <div className={cn("flex min-h-0 flex-col", !modal && "h-full")} data-quick-start={quick ? "" : undefined}>
