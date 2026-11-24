@@ -728,6 +728,10 @@ impl AccountManager {
         self.ensure_loaded();
         self.adopt_runtime_rotation();
         self.refresh_if_needed();
+        self.cached_context()
+    }
+
+    fn cached_context(&self) -> Option<AccountContext> {
         let inner = self.inner.lock().unwrap();
         inner.session.as_ref().map(|session| AccountContext {
             access_token: session.access_token.clone(),
@@ -1301,24 +1305,29 @@ impl AccountManager {
     /// Rotate the tokens when they are about to expire; true when it asked.
     fn refresh_if_needed(&self) -> bool {
         if crate::data_privacy::enabled() { return false; }
-        let Some((generation, changed)) = self.rotate_if_needed() else { return false };
+        let Some((generation, changed)) = self.rotate_if_needed(None) else { return false };
         self.settle(generation, changed, Some(REFRESH_NOT_SAVED));
         true
     }
 
-    /// Ask for new tokens when the held ones are about to expire and take the
-    /// answer in memory. Returns the generation it was asked for and whether
+    /// Rotate expiring tokens or the exact token rejected by a profile save,
+    /// then take the answer in memory. Returns the generation it was asked for and whether
     /// what the webview sees changed; the caller stores it with
     /// [`Self::settle`] once it holds no lock.
-    fn rotate_if_needed(&self) -> Option<(u64, bool)> {
+    fn rotate_if_needed(&self, rejected: Option<(u64, &str)>) -> Option<(u64, bool)> {
         // Refresh tokens rotate. Serializing this section prevents two status
         // reads from submitting the same token family at once.
         let _gate = self.refresh_gate.lock().unwrap();
         let due = || {
             let inner = self.inner.lock().unwrap();
             inner.session.as_ref().and_then(|session| {
-                should_refresh(session.expires_at, now_ms())
-                    .then(|| (inner.generation, session.clone()))
+                let due = match rejected {
+                    Some((generation, token)) => {
+                        inner.generation == generation && session.access_token == token
+                    }
+                    None => should_refresh(session.expires_at, now_ms()),
+                };
+                due.then(|| (inner.generation, session.clone()))
             })
         };
         due()?;

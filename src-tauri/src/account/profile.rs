@@ -4,6 +4,11 @@ use std::io::Read;
 
 const PROFILE_PATH: &str = "/v1/desktop/auth/display-name";
 const MAX_NAME_LENGTH: usize = 100;
+const NOT_AUTHORIZED: &str =
+    "The account service did not authorize this desktop session. Sign in and try again.";
+const UNAUTHORIZED: &str = "unauthorized";
+const UNSUPPORTED: &str = "display_name_unsupported";
+const PREVIOUS_ACCOUNT: &str = "display_name_saved_for_previous_account";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,12 +23,13 @@ struct ProfileError {
 
 fn profile_error(status: u16, code: Option<&str>) -> &'static str {
     match (status, code) {
-        (401 | 403, _) => "The account service did not authorize this desktop session. Sign in and try again.",
+        (401, _) => UNAUTHORIZED,
+        (403, _) => NOT_AUTHORIZED,
         (400, Some("display_name_required")) => "Enter a display name.",
         (400, Some("display_name_too_long")) => "Display names must be 100 characters or fewer.",
         (400, Some("invalid_request")) => "The account service could not read the display name.",
         (404, Some("user_not_found")) => "Your account could not be found.",
-        (404, _) => "This account service does not support editing display names from the desktop.",
+        (404, _) => UNSUPPORTED,
         (413, _) => "The display name request is too large.",
         _ => "Couldn’t save your display name. Try again.",
     }
@@ -51,8 +57,12 @@ fn put_profile(url: &str, access_token: &str, name: &str) -> Result<UpdatedProfi
         Ok(response) if response.status() == 200 => response,
         Ok(response) | Err(ureq::Error::Status(_, response)) => {
             let status = response.status();
-            let body = serde_json::from_reader::<_, ProfileError>(response.into_reader().take(4096)).ok();
-            return Err(profile_error(status, body.as_ref().map(|body| body.error.as_str())));
+            let body =
+                serde_json::from_reader::<_, ProfileError>(response.into_reader().take(4096)).ok();
+            return Err(profile_error(
+                status,
+                body.as_ref().map(|body| body.error.as_str()),
+            ));
         }
         Err(ureq::Error::Transport(_)) => return Err(profile_error(0, None)),
     };
@@ -74,7 +84,37 @@ impl AccountManager {
             name,
             revision,
             || self.context(),
-            |token, name| put_profile(&endpoint(PROFILE_PATH), token, name),
+            |context, token, name| {
+                let url = endpoint(PROFILE_PATH);
+                let result = put_profile(&url, token, name);
+                if !matches!(result, Err(UNAUTHORIZED)) {
+                    return result;
+                }
+                if crate::data_privacy::enabled() {
+                    return Err(NOT_AUTHORIZED);
+                }
+                if let Some((generation, changed)) =
+                    self.rotate_if_needed(Some((context.generation, token)))
+                {
+                    self.settle(generation, changed, Some(REFRESH_NOT_SAVED));
+                }
+                let refreshed = self
+                    .cached_context()
+                    .filter(|current| {
+                        Self::context_revision(current) == revision && current.access_token != token
+                    })
+                    .ok_or(NOT_AUTHORIZED)?;
+                if !self.phase2_ready(PHASE2_EVENTS, None, Some(&refreshed)) {
+                    return Err(NOT_AUTHORIZED);
+                }
+                put_profile(&url, &refreshed.access_token, name).map_err(|error| {
+                    if error == UNAUTHORIZED {
+                        NOT_AUTHORIZED
+                    } else {
+                        error
+                    }
+                })
+            },
         )
     }
 
@@ -84,7 +124,7 @@ impl AccountManager {
         name: &str,
         revision: &str,
         prepare: impl FnOnce() -> Option<AccountContext>,
-        send: impl FnOnce(&str, &str) -> Result<UpdatedProfile, &'static str>,
+        send: impl FnOnce(&AccountContext, &str, &str) -> Result<UpdatedProfile, &'static str>,
     ) -> Result<AccountStatus, &'static str> {
         if !enabled {
             return Err("Editing your display name is unavailable.");
@@ -119,7 +159,7 @@ impl AccountManager {
                 .access_token
                 .clone()
         };
-        let updated = send(&access_token, name)?;
+        let updated = send(&context, &access_token, name)?;
         if validated_name(&updated.display_name) != Ok(updated.display_name.as_str()) {
             return Err("The account service returned an invalid display name.");
         }
@@ -127,10 +167,11 @@ impl AccountManager {
             let _gate = self.refresh_gate.lock().unwrap();
             let mut inner = self.inner.lock().unwrap();
             if !current(&inner) {
-                return Err(changed_account);
+                return Err(PREVIOUS_ACCOUNT);
             }
-            let mut session = inner.session.clone().ok_or(changed_account)?;
-            let changed = session.cloud.display_name.as_deref() != Some(updated.display_name.as_str());
+            let mut session = inner.session.clone().ok_or(PREVIOUS_ACCOUNT)?;
+            let changed =
+                session.cloud.display_name.as_deref() != Some(updated.display_name.as_str());
             if changed {
                 session.cloud.display_name = Some(updated.display_name);
                 inner.set_session(Some(session));
@@ -140,7 +181,7 @@ impl AccountManager {
         self.settle(context.generation, changed, None);
         let inner = self.inner.lock().unwrap();
         if !current(&inner) {
-            return Err(changed_account);
+            return Err(PREVIOUS_ACCOUNT);
         }
         Ok(snapshot(&inner))
     }
@@ -184,7 +225,10 @@ mod tests {
             let mut stream = BufReader::new(stream);
             let mut line = String::new();
             stream.read_line(&mut line).unwrap();
-            assert_eq!(line.trim_end(), "PUT /v1/desktop/auth/display-name HTTP/1.1");
+            assert_eq!(
+                line.trim_end(),
+                "PUT /v1/desktop/auth/display-name HTTP/1.1"
+            );
             let mut length = 0;
             let mut authorized = false;
             loop {
@@ -217,7 +261,7 @@ mod tests {
                 "  New Name  ",
                 &revision,
                 || Some(context),
-                |token, name| {
+                |_, token, name| {
                     assert!(account.refresh_gate.try_lock().is_ok());
                     put_profile(&url, token, name)
                 },
@@ -237,6 +281,43 @@ mod tests {
     }
 
     #[test]
+    fn maps_display_name_service_errors() {
+        for (status, code, message) in [
+            (
+                400,
+                Some("invalid_request"),
+                "The account service could not read the display name.",
+            ),
+            (400, Some("display_name_required"), "Enter a display name."),
+            (
+                400,
+                Some("display_name_too_long"),
+                "Display names must be 100 characters or fewer.",
+            ),
+            (401, Some("unauthorized"), UNAUTHORIZED),
+            (403, None, NOT_AUTHORIZED),
+            (
+                404,
+                Some("user_not_found"),
+                "Your account could not be found.",
+            ),
+            (404, None, UNSUPPORTED),
+            (
+                413,
+                Some("payload_too_large"),
+                "The display name request is too large.",
+            ),
+            (
+                500,
+                Some("server_error"),
+                "Couldn’t save your display name. Try again.",
+            ),
+        ] {
+            assert_eq!(profile_error(status, code), message);
+        }
+    }
+
+    #[test]
     fn validates_before_sending_and_keeps_the_name_on_failure() {
         let (account, store, context) = account();
         let revision = AccountManager::context_revision(&context);
@@ -251,7 +332,7 @@ mod tests {
                     &name,
                     &revision,
                     || panic!("opened a session"),
-                    |_, _| panic!("sent a PUT")
+                    |_, _, _| panic!("sent a PUT")
                 )
                 .is_err());
         }
@@ -269,25 +350,28 @@ mod tests {
                     "After",
                     &revision,
                     || Some(context.clone()),
-                    |_, _| Err("service unavailable")
+                    |_, _, _| Err("service unavailable")
                 )
                 .err(),
             Some("service unavailable")
         );
-        assert!(account
-            .update_display_name_with(
-                true,
-                "After",
-                &revision,
-                || Some(context),
-                |_, _| {
-                    account.set_context_for_test(None);
-                    Ok(UpdatedProfile {
-                        display_name: "After".into(),
-                    })
-                }
-            )
-            .is_err());
+        assert_eq!(
+            account
+                .update_display_name_with(
+                    true,
+                    "After",
+                    &revision,
+                    || Some(context),
+                    |_, _, _| {
+                        account.set_context_for_test(None);
+                        Ok(UpdatedProfile {
+                            display_name: "After".into(),
+                        })
+                    }
+                )
+                .err(),
+            Some(PREVIOUS_ACCOUNT)
+        );
         assert!(account.snapshot().identity.is_none());
         assert!(store.calls().is_empty());
     }
