@@ -1,21 +1,20 @@
-//! Isolated PRO-220 foundation; deliberately not registered in the application.
-//!
-//! This module neither executes commands nor establishes physical-human consent. Future lead
-//! integration must supply authenticated origin/current approval context and monotonic time,
-//! and implement the native person-only boundary, revocation fencing and execution checks.
-//! Runtime-supplied identity/roles are never a trusted context source. ReadyForLeadIntegration
-//! is an observation of this model only, NOT an execution capability or durable authorization.
-//! Keep one Policy for the integration lifetime: its bounded replay tombstones are not persisted
-//! across fresh instances/restarts. A restart must obtain a new trusted runtime generation.
+//! Dormant PRO-220 policy and executor. The native owner must authenticate turn-start attribution
+//! and publish authority changes synchronously through this policy. Only the trusted local
+//! person-only prompt may record a decision. None of these APIs is a transport or prompt boundary.
+
+#[path = "host_command_executor.rs"]
+mod executor;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::path::Path;
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
+use std::thread;
+use std::time::Instant;
 
 pub const MAX_REQUESTS: usize = 256;
 pub const MAX_REQUEST_BYTES: usize = 32_768;
 pub const MAX_ARGUMENTS: usize = 128;
 pub const MAX_TTL_MS: u64 = 60_000;
-/// Conservative isolated-model bound, not the product timeout/executor contract.
 pub const MAX_TIMEOUT_MS: u64 = 30_000;
 pub const MAX_OUTPUT_BYTES: u64 = 1_048_576;
 
@@ -31,29 +30,37 @@ pub struct Origin {
 
 impl Origin {
     fn valid(&self) -> bool {
-        [&self.mac, &self.account, &self.organization, &self.workspace, &self.tab, &self.turn]
-            .iter().all(|value| identifier(value))
+        [
+            &self.mac,
+            &self.account,
+            &self.organization,
+            &self.workspace,
+            &self.tab,
+            &self.turn,
+        ]
+        .iter()
+        .all(|value| identifier(value))
     }
 }
 
-/// Supplied ONLY by future trusted desktop integration, never decoded from a runtime request.
-/// `origin` describes the CURRENT active account/org/workspace/tab/live turn, with its Mac
-/// captured by trusted turn-start attribution; `local_mac` is this desktop's trusted identity.
-/// None represents missing/unknown state and denies. Revision includes membership/approval
-/// rights and attribution changes, including changes away and back between observations.
+/// Native-only authority. Origin must come from authenticated turn-start attribution for the
+/// current live turn and account. Generation and revision must advance across reconnects and
+/// authority changes. cwd_root is an explicit local workspace mapping. Unknown state denies.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct TrustedContext {
     pub enabled: Option<bool>,
     pub local_mac: Option<String>,
+    pub local_account: Option<String>,
     pub origin: Option<Origin>,
     pub generation: Option<u64>,
     pub approval_revision: Option<u64>,
     pub can_approve: Option<bool>,
     pub turn_active: Option<bool>,
+    pub cwd_root: Option<String>,
 }
 
-/// Untrusted proposal. Strings are exact bytes; no shell parsing, path resolution or environment
-/// inheritance is defined here. Bounds are policy limits, not an execution/sandbox contract.
+/// Proposal identity is checked against native authority. Stamp times in the desktop's
+/// Policy::now_ms clock domain at receipt. The approved executable, argv and cwd are exact.
 #[derive(Clone)]
 pub struct RequestInput {
     pub id: String,
@@ -75,12 +82,15 @@ pub enum Rejection {
     ContextUnavailable,
     ContextMismatch,
     Expired,
-    ClockReversed,
     Replay,
     Capacity,
     Busy,
     InvalidTransition,
     DecisionMismatch,
+    InvalidDirectory,
+    ExecutableUnavailable,
+    UnsupportedPlatform,
+    WorkerUnavailable,
     Poisoned,
 }
 
@@ -88,11 +98,27 @@ pub enum Rejection {
 pub enum State {
     Pending,
     Approved,
-    ReadyForLeadIntegration,
+    Starting,
+    Running,
     Denied,
     Expired,
     Cancelled,
     Revoked,
+    TimedOut,
+    OutputLimitExceeded,
+    SpawnFailed,
+    Failed,
+    Completed,
+}
+
+impl State {
+    fn queued(self) -> bool {
+        matches!(self, Self::Pending | Self::Approved | Self::Starting)
+    }
+
+    fn live(self) -> bool {
+        self.queued() || self == Self::Running
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -102,44 +128,95 @@ pub enum LocalDecision {
     AllowOnce,
 }
 
+/// Raw, bounded output goes only to the trusted caller. No Debug or serialization.
+pub enum ExecutionOutcome {
+    Exited {
+        code: Option<i32>,
+        signal: Option<i32>,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    },
+    Stopped(State),
+}
+
 struct Entry {
-    input: Arc<RequestInput>,
+    expires_at_ms: u64,
     state: State,
+    paths: Option<executor::ApprovedPaths>,
+}
+
+impl Entry {
+    fn stop(&mut self, state: State) {
+        self.state = state;
+        self.paths = None;
+    }
 }
 
 struct Registry {
     context: TrustedContext,
-    last_now_ms: u64,
+    epoch: Arc<()>,
     entries: HashMap<String, Entry>,
+    in_flight: bool,
 }
 
-/// Clones share the SAME registry, context and single-use gates. No machine can be constructed
-/// from a copied request. No reset/removal API exists; full capacity denies further admissions.
+/// Clones share authority, replay tombstones and the single execution slot. The slot stays
+/// occupied through process cleanup. On restart the trusted owner must use a new generation.
 #[derive(Clone)]
 pub struct Policy {
     shared: Arc<Mutex<Registry>>,
+    started_at: Instant,
+    #[cfg(test)]
+    test_clock: Option<Arc<std::sync::atomic::AtomicU64>>,
+    #[cfg(all(test, target_os = "macos"))]
+    test_before_spawn: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(all(test, target_os = "macos"))]
+    test_group_events: Option<Arc<Mutex<Vec<executor::GroupEvent>>>>,
 }
 
 impl Default for Policy {
     fn default() -> Self {
-        Self { shared: Arc::new(Mutex::new(Registry {
-            context: TrustedContext::default(), last_now_ms: 0, entries: HashMap::new(),
-        })) }
+        Self {
+            shared: Arc::new(Mutex::new(Registry {
+                context: TrustedContext::default(),
+                epoch: Arc::new(()),
+                entries: HashMap::new(),
+                in_flight: false,
+            })),
+            started_at: Instant::now(),
+            #[cfg(test)]
+            test_clock: None,
+            #[cfg(all(test, target_os = "macos"))]
+            test_before_spawn: None,
+            #[cfg(all(test, target_os = "macos"))]
+            test_group_events: None,
+        }
     }
 }
 
-/// An immutable request handle; clones share state, never independently copy a machine.
-/// Deliberately no Debug/serialization of potentially sensitive command or identity values.
+/// Immutable request snapshot. Only this Policy can construct a handle for an admitted ID.
 #[derive(Clone)]
 pub struct Request {
     policy: Policy,
     input: Arc<RequestInput>,
+    epoch: Arc<()>,
 }
 
-/// Opaque exact-request binding, not proof of consent. Only trusted future native integration
-/// may use this API to record a local decision. It must not expose it as a remote/webview RPC.
+/// One exact prompt binding. The trusted native prompt displays input() and consumes the binding
+/// on a human decision. Closing a prompt should call cancel. Keep this out of automation/RPC.
 pub struct LocalDecisionBinding {
     input: Arc<RequestInput>,
+    paths: executor::ApprovedPaths,
+}
+
+impl LocalDecisionBinding {
+    pub fn input(&self) -> &RequestInput {
+        &self.input
+    }
+}
+
+pub struct Execution {
+    request: Request,
+    receiver: mpsc::Receiver<ExecutionOutcome>,
 }
 
 impl Policy {
@@ -147,170 +224,367 @@ impl Policy {
         self.shared.lock().map_err(|_| Rejection::Poisoned)
     }
 
-    /// Context changes revoke every live/ready request atomically with respect to transitions.
-    /// Restoring the previous context does not restore any request. Revocation that occurs
-    /// after a Ready observation still needs a future executor's coordinated fence.
-    pub fn update_trusted_context(&self, context: TrustedContext, now_ms: u64) -> Result<(), Rejection> {
+    pub fn now_ms(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(clock) = &self.test_clock {
+            return clock.load(std::sync::atomic::Ordering::Relaxed);
+        }
+        self.started_at.elapsed().as_millis() as u64
+    }
+
+    /// Call on every native authority change, including disconnect, sign-out, disable and turn
+    /// end. This update and the actual OS spawn have the same serialization point.
+    pub fn update_trusted_context(&self, context: TrustedContext) -> Result<(), Rejection> {
         let mut registry = self.lock()?;
-        advance_clock(&mut registry, now_ms)?;
         if registry.context != context {
-            for entry in registry.entries.values_mut() {
-                if matches!(entry.state, State::Pending | State::Approved | State::ReadyForLeadIntegration) {
-                    entry.state = State::Revoked;
-                }
+            for entry in registry
+                .entries
+                .values_mut()
+                .filter(|entry| entry.state.live())
+            {
+                entry.stop(State::Revoked);
             }
             registry.context = context;
+            registry.epoch = Arc::new(());
         }
         Ok(())
     }
 
-    pub fn submit(&self, input: RequestInput, now_ms: u64) -> Result<Request, Rejection> {
+    pub fn submit(&self, input: RequestInput) -> Result<Request, Rejection> {
         let mut registry = self.lock()?;
-        advance_clock(&mut registry, now_ms)?;
+        let now = self.now_ms();
         validate_input(&input)?;
-        // IDs remain occupied even after terminal states. Changed content cannot reuse an ID.
-        if registry.entries.contains_key(&input.id) { return Err(Rejection::Replay); }
-        if registry.entries.len() >= MAX_REQUESTS { return Err(Rejection::Capacity); }
-        check_context(&registry.context, &input, now_ms)?;
+        if registry.entries.contains_key(&input.id) {
+            return Err(Rejection::Replay);
+        }
+        if registry.entries.len() >= MAX_REQUESTS {
+            return Err(Rejection::Capacity);
+        }
+        check_context(&registry.context, &input)?;
+        check_fresh(&input, now)?;
         for entry in registry.entries.values_mut() {
-            if live(entry.state) && now_ms >= entry.input.expires_at_ms {
-                entry.state = State::Expired;
+            if entry.state.queued() && now >= entry.expires_at_ms {
+                entry.stop(State::Expired);
             }
         }
-        // One command at a time, including a consumed ready observation until cancellation,
-        // expiry or context revocation. There is deliberately no executor completion API.
-        if registry.entries.values().any(|entry| live(entry.state)) {
+        if registry.in_flight || registry.entries.values().any(|entry| entry.state.live()) {
             return Err(Rejection::Busy);
         }
         let input = Arc::new(input);
-        registry.entries.insert(input.id.clone(), Entry { input: input.clone(), state: State::Pending });
-        Ok(Request { policy: self.clone(), input })
+        registry.entries.insert(
+            input.id.clone(),
+            Entry {
+                expires_at_ms: input.expires_at_ms,
+                state: State::Pending,
+                paths: None,
+            },
+        );
+        Ok(Request {
+            policy: self.clone(),
+            input,
+            epoch: registry.epoch.clone(),
+        })
+    }
+
+    pub fn prepare_local_decision(
+        &self,
+        request: &Request,
+    ) -> Result<LocalDecisionBinding, Rejection> {
+        self.require_owner(request)?;
+        request.require_pending()?;
+        let paths = executor::ApprovedPaths::open(&request.input)?;
+        request.require_pending()?;
+        Ok(LocalDecisionBinding {
+            input: request.input.clone(),
+            paths,
+        })
+    }
+
+    pub fn record_local_decision(
+        &self,
+        request: &Request,
+        binding: LocalDecisionBinding,
+        decision: LocalDecision,
+    ) -> Result<State, Rejection> {
+        self.require_owner(request)?;
+        let mut registry = self.lock()?;
+        let entry = request.checked(&mut registry, State::Pending)?;
+        if !Arc::ptr_eq(&binding.input, &request.input) {
+            entry.stop(State::Denied);
+            return Err(Rejection::DecisionMismatch);
+        }
+        match decision {
+            LocalDecision::Deny => entry.stop(State::Denied),
+            LocalDecision::AllowOnce => {
+                entry.paths = Some(binding.paths);
+                entry.state = State::Approved;
+            }
+        }
+        Ok(entry.state)
+    }
+
+    fn require_owner(&self, request: &Request) -> Result<(), Rejection> {
+        if !Arc::ptr_eq(&self.shared, &request.policy.shared) {
+            return Err(Rejection::DecisionMismatch);
+        }
+        Ok(())
+    }
+
+    /// Reserve the single-use approval and start a local worker. The worker rechecks authority
+    /// and expiry again under the registry lock immediately before the OS spawn.
+    pub fn start(&self, request: &Request) -> Result<Execution, Rejection> {
+        self.require_owner(request)?;
+        let mut registry = self.lock()?;
+        let entry = request.checked(&mut registry, State::Approved)?;
+        let paths = entry.paths.take().ok_or(Rejection::InvalidTransition)?;
+        entry.state = State::Starting;
+        registry.in_flight = true;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let worker = request.clone();
+        let result = thread::Builder::new()
+            .name("host-command".into())
+            .spawn(move || {
+                let slot = ExecutionSlot(&worker);
+                executor::run(&worker, paths, sender, slot);
+            });
+        if result.is_err() {
+            registry.in_flight = false;
+            request.entry(&mut registry).stop(State::Failed);
+            return Err(Rejection::WorkerUnavailable);
+        }
+        Ok(Execution {
+            request: request.clone(),
+            receiver,
+        })
     }
 }
 
 impl Request {
-    /// Read-only exact immutable values for presentation; callers cannot replace this snapshot.
-    pub fn input(&self) -> &RequestInput { &self.input }
+    pub fn input(&self) -> &RequestInput {
+        &self.input
+    }
 
-    fn checked<'a>(&self, registry: &'a mut Registry, now_ms: u64) -> Result<&'a mut Entry, Rejection> {
-        advance_clock(registry, now_ms)?;
-        let check = check_context(&registry.context, &self.input, now_ms);
-        let entry = registry.entries.get_mut(&self.input.id).ok_or(Rejection::InvalidTransition)?;
-        if !Arc::ptr_eq(&entry.input, &self.input) { return Err(Rejection::DecisionMismatch); }
-        if let Err(reason) = check {
-            if matches!(entry.state, State::Pending | State::Approved | State::ReadyForLeadIntegration) {
-                entry.state = if reason == Rejection::Expired { State::Expired } else { State::Revoked };
-            }
+    fn entry<'a>(&self, registry: &'a mut Registry) -> &'a mut Entry {
+        // Only submit constructs handles and tombstones are retained for this policy's lifetime.
+        registry
+            .entries
+            .get_mut(&self.input.id)
+            .expect("admitted request")
+    }
+
+    fn checked<'a>(
+        &self,
+        registry: &'a mut Registry,
+        expected: State,
+    ) -> Result<&'a mut Entry, Rejection> {
+        let now = self.policy.now_ms();
+        let authority = check_context(&registry.context, &self.input);
+        let same_epoch = Arc::ptr_eq(&self.epoch, &registry.epoch);
+        let entry = self.entry(registry);
+        if entry.state == State::Expired {
+            return Err(Rejection::Expired);
+        }
+        if entry.state != expected {
+            return Err(Rejection::InvalidTransition);
+        }
+        if let Err(reason) = authority.and(if same_epoch {
+            Ok(())
+        } else {
+            Err(Rejection::ContextMismatch)
+        }) {
+            entry.stop(State::Revoked);
+            return Err(reason);
+        }
+        if let Err(reason) = check_fresh(&self.input, now) {
+            entry.stop(State::Expired);
             return Err(reason);
         }
         Ok(entry)
     }
 
-    pub fn state(&self, now_ms: u64) -> Result<State, Rejection> {
+    fn require_pending(&self) -> Result<(), Rejection> {
         let mut registry = self.policy.lock()?;
-        Ok(self.checked(&mut registry, now_ms)?.state)
+        self.checked(&mut registry, State::Pending)?;
+        Ok(())
     }
 
-    pub fn prepare_local_decision(&self, now_ms: u64) -> Result<LocalDecisionBinding, Rejection> {
+    pub fn state(&self) -> Result<State, Rejection> {
         let mut registry = self.policy.lock()?;
-        let entry = self.checked(&mut registry, now_ms)?;
-        if entry.state != State::Pending { return Err(Rejection::InvalidTransition); }
-        Ok(LocalDecisionBinding { input: self.input.clone() })
-    }
-
-    pub fn record_local_decision(&self, binding: LocalDecisionBinding, decision: LocalDecision, now_ms: u64)
-        -> Result<State, Rejection>
-    {
-        let mut registry = self.policy.lock()?;
-        let entry = self.checked(&mut registry, now_ms)?;
-        if !Arc::ptr_eq(&binding.input, &self.input) {
-            entry.state = State::Denied;
-            return Err(Rejection::DecisionMismatch);
+        let entry = self.entry(&mut registry);
+        if entry.state.live() && self.policy.now_ms() >= entry.expires_at_ms {
+            entry.stop(State::Expired);
         }
-        if entry.state != State::Pending { return Err(Rejection::InvalidTransition); }
-        entry.state = match decision { LocalDecision::Deny => State::Denied, LocalDecision::AllowOnce => State::Approved };
         Ok(entry.state)
     }
 
-    /// One successful observation across ALL cloned handles. This does not spawn, issue an
-    /// execution token, assert a person clicked, or authorize any future integration action.
-    pub fn take_ready_for_lead_integration(&self, now_ms: u64) -> Result<State, Rejection> {
+    pub fn cancel(&self) -> Result<State, Rejection> {
         let mut registry = self.policy.lock()?;
-        let entry = self.checked(&mut registry, now_ms)?;
-        if entry.state != State::Approved { return Err(Rejection::InvalidTransition); }
-        entry.state = State::ReadyForLeadIntegration;
-        Ok(entry.state)
-    }
-
-    /// Closing a prompt/cancel is terminal even before a decision. It also fences a ready
-    /// observation in this model; stopping real processes is outside this isolated module.
-    pub fn cancel(&self, now_ms: u64) -> Result<State, Rejection> {
-        let mut registry = self.policy.lock()?;
-        let entry = self.checked(&mut registry, now_ms)?;
-        if !matches!(entry.state, State::Pending | State::Approved | State::ReadyForLeadIntegration) {
+        let entry = self.entry(&mut registry);
+        if !entry.state.live() {
             return Err(Rejection::InvalidTransition);
         }
-        entry.state = State::Cancelled;
-        Ok(entry.state)
+        if self.policy.now_ms() >= entry.expires_at_ms {
+            entry.stop(State::Expired);
+            return Err(Rejection::Expired);
+        }
+        entry.stop(State::Cancelled);
+        Ok(State::Cancelled)
+    }
+
+    fn finish(&self, state: State) -> State {
+        let Ok(mut registry) = self.policy.lock() else {
+            return State::Revoked;
+        };
+        let entry = self.entry(&mut registry);
+        if entry.state.live() {
+            let state = if self.policy.now_ms() >= entry.expires_at_ms {
+                State::Expired
+            } else {
+                state
+            };
+            entry.stop(state);
+        }
+        entry.state
     }
 }
 
-fn advance_clock(registry: &mut Registry, now_ms: u64) -> Result<(), Rejection> {
-    if now_ms < registry.last_now_ms {
-        // Even a subsequent corrected time cannot resurrect an outstanding approval.
-        for entry in registry.entries.values_mut() { entry.state = State::Revoked; }
-        registry.context = TrustedContext::default();
-        return Err(Rejection::ClockReversed);
+struct ExecutionSlot<'a>(&'a Request);
+
+impl Drop for ExecutionSlot<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = self.0.policy.lock() {
+            let entry = self.0.entry(&mut registry);
+            if entry.state.live() {
+                entry.stop(State::Failed);
+            }
+            registry.in_flight = false;
+        }
     }
-    registry.last_now_ms = now_ms;
-    Ok(())
+}
+
+impl Execution {
+    /// Intended for a trusted worker thread. Recheck authority on output handoff, including
+    /// an away-and-back change after the process finished. A future transport must fence its
+    /// own delivery. Dropping an uncollected execution cancels it.
+    pub fn wait(self) -> Result<ExecutionOutcome, Rejection> {
+        let outcome = self
+            .receiver
+            .recv()
+            .map_err(|_| Rejection::WorkerUnavailable)?;
+        if matches!(&outcome, ExecutionOutcome::Exited { .. }) {
+            let registry = self.request.policy.lock()?;
+            if !Arc::ptr_eq(&registry.epoch, &self.request.epoch)
+                || check_context(&registry.context, &self.request.input).is_err()
+            {
+                return Ok(ExecutionOutcome::Stopped(State::Revoked));
+            }
+            if check_fresh(&self.request.input, self.request.policy.now_ms()).is_err() {
+                return Ok(ExecutionOutcome::Stopped(State::Expired));
+            }
+        }
+        Ok(outcome)
+    }
+}
+
+impl Drop for Execution {
+    fn drop(&mut self) {
+        let _ = self.request.cancel();
+    }
 }
 
 fn identifier(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 128 && !value.chars().any(|c| c.is_control() || c.is_whitespace())
+    !value.is_empty()
+        && value.len() <= 128
+        && !value.chars().any(|c| c.is_control() || c.is_whitespace())
 }
 
-fn live(state: State) -> bool {
-    matches!(state, State::Pending | State::Approved | State::ReadyForLeadIntegration)
-}
-
-fn text(value: &str, max: usize, empty: bool) -> bool {
-    (empty || !value.is_empty()) && value.len() <= max && !value.contains('\0')
+fn clean_absolute(value: &str) -> bool {
+    value == "/"
+        || value.strip_prefix('/').is_some_and(|rest| {
+            rest.split('/').all(|part| !matches!(part, "" | "." | "..")) && !rest.contains('\0')
+        })
 }
 
 fn validate_input(input: &RequestInput) -> Result<(), Rejection> {
-    let mut strings = std::iter::once(input.executable.as_str()).chain(std::iter::once(input.cwd.as_str()))
-        .chain(input.arguments.iter().map(String::as_str));
-    let bytes = strings.try_fold(0_usize, |sum, value| sum.checked_add(value.len()));
+    let bytes = [input.executable.as_str(), input.cwd.as_str()]
+        .into_iter()
+        .chain(input.arguments.iter().map(String::as_str))
+        .try_fold(0_usize, |sum, value| sum.checked_add(value.len()));
     let lifetime = input.expires_at_ms.checked_sub(input.issued_at_ms);
-    if !identifier(&input.id) || !input.origin.valid() || input.generation == 0 || input.approval_revision == 0
-        || !text(&input.executable, 4096, false) || !text(&input.cwd, 4096, false)
-        || input.arguments.len() > MAX_ARGUMENTS || input.arguments.iter().any(|arg| !text(arg, 8192, true))
-        || bytes.map_or(true, |bytes| bytes > MAX_REQUEST_BYTES)
+    if !identifier(&input.id)
+        || !input.origin.valid()
+        || input.generation == 0
+        || input.approval_revision == 0
+        || !clean_absolute(&input.executable)
+        || input.executable.len() > 4096
+        || !clean_absolute(&input.cwd)
+        || input.cwd.len() > 4096
+        || input.arguments.len() > MAX_ARGUMENTS
+        || input
+            .arguments
+            .iter()
+            .any(|arg| arg.len() > 8192 || arg.contains('\0'))
+        || bytes.is_none_or(|bytes| bytes > MAX_REQUEST_BYTES)
         || !matches!(lifetime, Some(1..=MAX_TTL_MS))
         || !(1..=MAX_TIMEOUT_MS).contains(&input.timeout_ms)
         || !(1..=MAX_OUTPUT_BYTES).contains(&input.output_limit_bytes)
-    { return Err(Rejection::InvalidRequest); }
+    {
+        return Err(Rejection::InvalidRequest);
+    }
     Ok(())
 }
 
-fn check_context(context: &TrustedContext, input: &RequestInput, now_ms: u64) -> Result<(), Rejection> {
-    let origin = context.origin.as_ref().ok_or(Rejection::ContextUnavailable)?;
-    let local_mac = context.local_mac.as_ref().ok_or(Rejection::ContextUnavailable)?;
-    if context.enabled != Some(true) || context.can_approve != Some(true) || context.turn_active != Some(true)
-        || !origin.valid() || !identifier(local_mac)
+fn check_fresh(input: &RequestInput, now_ms: u64) -> Result<(), Rejection> {
+    if !(input.issued_at_ms..input.expires_at_ms).contains(&now_ms) {
+        return Err(Rejection::Expired);
+    }
+    Ok(())
+}
+
+fn check_context(context: &TrustedContext, input: &RequestInput) -> Result<(), Rejection> {
+    let origin = context
+        .origin
+        .as_ref()
+        .ok_or(Rejection::ContextUnavailable)?;
+    let local_mac = context
+        .local_mac
+        .as_ref()
+        .ok_or(Rejection::ContextUnavailable)?;
+    let local_account = context
+        .local_account
+        .as_ref()
+        .ok_or(Rejection::ContextUnavailable)?;
+    let root = context
+        .cwd_root
+        .as_deref()
+        .ok_or(Rejection::ContextUnavailable)?;
+    if context.enabled != Some(true)
+        || context.can_approve != Some(true)
+        || context.turn_active != Some(true)
+        || !origin.valid()
+        || !identifier(local_mac)
+        || !identifier(local_account)
+        || root == "/"
+        || !clean_absolute(root)
         || context.generation.filter(|n| *n > 0).is_none()
         || context.approval_revision.filter(|n| *n > 0).is_none()
-    { return Err(Rejection::ContextUnavailable); }
-    if local_mac != &origin.mac || origin != &input.origin
+    {
+        return Err(Rejection::ContextUnavailable);
+    }
+    if local_mac != &origin.mac
+        || local_account != &origin.account
+        || origin != &input.origin
         || context.generation != Some(input.generation)
         || context.approval_revision != Some(input.approval_revision)
-    { return Err(Rejection::ContextMismatch); }
-    if now_ms < input.issued_at_ms || now_ms >= input.expires_at_ms { return Err(Rejection::Expired); }
+    {
+        return Err(Rejection::ContextMismatch);
+    }
+    if !Path::new(&input.cwd).starts_with(root) {
+        return Err(Rejection::InvalidDirectory);
+    }
     Ok(())
 }
 
-// Preserve standalone std-only rustc --test support; no application/module registration.
 #[cfg(test)]
 #[path = "host_command_policy_tests.rs"]
 mod tests;
