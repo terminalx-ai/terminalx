@@ -5,6 +5,7 @@ export const phase2Features = {
   presence: "team.presence.v1",
   followReassign: "team.follow-reassign.v1",
   restartDetails: "cloud.workspaces.restart-details.v1",
+  workspaceGroups: "cloud.workspace-groups.v1",
   freshWorkspace: "cloud.automations.fresh-workspace.v1",
   githubTrigger: "cloud.automations.github-trigger.v1",
   webhookTrigger: "cloud.automations.webhook-trigger.v1",
