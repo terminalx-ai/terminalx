@@ -1,0 +1,44 @@
+# 25.01 First run: the Cloud tab with nothing set up, in each state the board draws.
+# Signed out (01) is not here: the fixture is always signed in.
+appId: com.terminalx.phone.fixture
+name: First run on the Cloud tab (25.01)
+---
+- runFlow: flow-25.01-00-theme.yaml
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureCloud: loading }
+- tapOn: "Cloud"
+- assertVisible: "Loading cloud workspaces"
+- takeScreenshot: 25.01-02-reading
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureFirstRun: new, fixtureCompute: none, fixtureLogins: none }
+- tapOn: "Cloud"
+- extendedWaitUntil: { visible: "Start setup", timeout: 20000 }
+- assertVisible: "Step 1 of 4, next: Organization.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.01-03-nothing-set-up
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureFirstRun: new, fixtureCompute: one, fixtureLogins: none }
+- tapOn: "Cloud"
+- extendedWaitUntil: { visible: "Continue: sign your agents in", timeout: 20000 }
+- assertVisible: "Step 2 of 4, done: Connect compute. Boat · connected"
+- waitForAnimationToEnd
+- takeScreenshot: 25.01-04-came-back-half-way
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureFirstRun: new, fixtureCompute: one, fixtureLogins: some }
+- tapOn: "Cloud"
+- extendedWaitUntil: { visible: "Step 4 of 4, next: Launch a workspace.*", timeout: 20000 }
+- assertVisible: "Step 3 of 4, done: Sign your agents in. Codex · connected"
+- waitForAnimationToEnd
+- takeScreenshot: 25.01-05-ready-to-launch
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureFirstRun: workspaces, fixtureCompute: one, fixtureLogins: none }
+- tapOn: "Cloud"
+- extendedWaitUntil: { visible: "Set up cloud workspaces, 2 of 4 steps done", timeout: 20000 }
+- assertVisible: "Checkout redesign.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.01-06-with-workspaces

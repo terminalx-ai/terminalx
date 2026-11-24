@@ -1,4 +1,6 @@
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { useEffect, useState, type ReactNode } from "react";
+import { Keyboard, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ChevronDown, ChevronRight, Plus } from "lucide-react-native";
 import { SetupSteps } from "../../../ui/SetupSteps";
 import { Button, Card } from "../../../ui/primitives";
@@ -53,7 +55,30 @@ export function SetupFold({ model, open, onToggle, offline, onOpen }: { model: S
   </View>;
 }
 
+/**
+ * A form page (25.02's New organization): its content scrolls, and its button
+ * stays at the foot above a hairline, lifted over the keyboard while it is up
+ * so the button is never under it.
+ */
+export function FormPage({ children, footer, testID }: { children: ReactNode; footer: ReactNode; testID?: string }) {
+  const { palette } = useTheme();
+  const insets = useSafeAreaInsets();
+  const [keyboard, setKeyboard] = useState(0);
+  useEffect(() => {
+    const show = Keyboard.addListener("keyboardWillShow", (event) => setKeyboard(event.endCoordinates.height));
+    const hide = Keyboard.addListener("keyboardWillHide", () => setKeyboard(0));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
+  return <View testID={testID} style={[styles.page, { backgroundColor: palette.page }]}>
+    <ScrollView keyboardShouldPersistTaps="handled" contentInsetAdjustmentBehavior="automatic" style={styles.page} contentContainerStyle={styles.content}>{children}</ScrollView>
+    <View style={[styles.footer, { paddingBottom: keyboard ? keyboard + 10 : Math.max(insets.bottom, 12), borderTopColor: palette.border, backgroundColor: palette.page }]}>{footer}</View>
+  </View>;
+}
+
 const styles = StyleSheet.create({
+  page: { flex: 1 },
+  content: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 24, gap: 12 },
+  footer: { paddingHorizontal: 16, paddingTop: 10, borderTopWidth: StyleSheet.hairlineWidth },
   setup: { gap: 12 },
   note: { fontSize: 13, lineHeight: 18, paddingHorizontal: 4 },
   noCompute: { paddingHorizontal: 14, paddingVertical: 14, gap: 6 },

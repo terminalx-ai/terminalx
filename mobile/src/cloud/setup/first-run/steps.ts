@@ -162,6 +162,10 @@ export function setupModel({ organization, reads, chosen, createsOrganizations }
 
   const launchStep: ShownStep = { key: "launch", title: W.STEP_TITLES.launch, detail: attention ? W.LAUNCH_WAITS : W.LAUNCH_DETAIL, state: canLaunch ? "next" : "waiting", alert: false, href: canLaunch ? hrefs.launch(orgId) : null };
 
+  // A step opens its page once it is reached: done, the one to do next, or a key to fix; not while it waits, nor while it could not be read.
+  if (computeStep.state === "waiting" || (computeStep.state === "failed" && !attention)) computeStep.href = null;
+  if (agentsStep.state === "waiting" || agentsStep.state === "failed") agentsStep.href = null;
+
   const steps: ShownStep[] = [
     { key: "organization", title: W.STEP_TITLES.organization, detail: stepOne ? name : W.organizationDetail(name), state: stepOne ? "done" : "next", alert: false, href: hrefs.chooser(orgId) },
     computeStep,

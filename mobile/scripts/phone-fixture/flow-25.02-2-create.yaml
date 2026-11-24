@@ -1,0 +1,45 @@
+# 25.02 Create: empty, named, creating, too short, and could not be created.
+appId: com.terminalx.phone.fixture
+name: New organization (25.02)
+---
+- runFlow: flow-25.02-00-theme.yaml
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureFirstRun: new, fixtureCreate: hold, openRoute: /cloud/setup/new-organization }
+- extendedWaitUntil: { visible: "2 to 60 characters. You can invite people after it is set up.", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.02-04-empty
+- tapOn: "Organization name"
+- inputText: "Northwind"
+# With the keyboard up the button rides above it (not a board state: a check).
+- waitForAnimationToEnd
+- takeScreenshot: check-named-keyboard-up
+# The board draws the form with the keyboard down.
+- hideKeyboard
+- waitForAnimationToEnd
+- takeScreenshot: 25.02-05-named
+- tapOn: "Create organization"
+- extendedWaitUntil: { visible: ".*Creating….*", timeout: 10000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.02-06-creating
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureFirstRun: new, openRoute: /cloud/setup/new-organization }
+- extendedWaitUntil: { visible: "2 to 60 characters. You can invite people after it is set up.", timeout: 20000 }
+- tapOn: "Organization name"
+- inputText: "N"
+- extendedWaitUntil: { visible: "Use 2 to 60 characters.", timeout: 10000 }
+- hideKeyboard
+- waitForAnimationToEnd
+- takeScreenshot: 25.02-07-too-short
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureFirstRun: new, fixtureCreate: network, openRoute: /cloud/setup/new-organization }
+- extendedWaitUntil: { visible: "2 to 60 characters. You can invite people after it is set up.", timeout: 20000 }
+- tapOn: "Organization name"
+- inputText: "Northwind"
+- hideKeyboard
+- tapOn: "Create organization"
+- extendedWaitUntil: { visible: "The organization was not created. Check your connection and try again.", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.02-08-could-not-be-created

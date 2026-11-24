@@ -39,6 +39,15 @@ describe("setupModel", () => {
     expect(chosen.action?.href).toBe("/cloud/compute?orgId=org-1");
   });
 
+  it("opens a step's page once it is reached, not while it waits or could not be read; a key to fix opens", () => {
+    const fresh = setupModel({ organization: owner, reads: reads([]), chosen: false, createsOrganizations: true });
+    expect(fresh.steps.map((step) => step.href)).toEqual(["/cloud/setup/organization?orgId=org-1", null, null, null]);
+    const unread = setupModel({ organization: owner, reads: { providers: failed(), logins: failed() }, chosen: true, createsOrganizations: true });
+    expect(unread.steps.map((step) => step.href)).toEqual(["/cloud/setup/organization?orgId=org-1", null, null, null]);
+    const attention = setupModel({ organization: owner, reads: reads([provider("box", "Boat", "attention-required")], [login("codex")]), chosen: true, createsOrganizations: true });
+    expect(attention.steps.map((step) => step.href)).toEqual(["/cloud/setup/organization?orgId=org-1", "/cloud/compute?orgId=org-1", "/cloud/logins?orgId=org-1", null]);
+  });
+
   it("never calls a step done or missing on a guess: a list that could not be read says so, and a read under way waits", () => {
     const reading = setupModel({ organization: owner, reads: null, chosen: true, createsOrganizations: true });
     expect(reading.reading).toBe(true);

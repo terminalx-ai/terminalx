@@ -18,6 +18,7 @@ vi.mock("react-native", async () => ({
   ...(await import("@mobile/ui/testing/native")),
   KeyboardAvoidingView: (await import("@mobile/ui/testing/native")).View,
   ActivityIndicator: ({ testID }: { testID?: string }) => <span data-testid={testID} role="progressbar" />,
+  Keyboard: { addListener: () => ({ remove: () => undefined }) },
 }));
 vi.mock("@mobile/ui/theme", async (actual) => (await import("@mobile/ui/testing/kit")).boardTheme(await actual()));
 vi.mock("lucide-react-native", async () => (await import("@mobile/ui/testing/kit")).namedIcons());

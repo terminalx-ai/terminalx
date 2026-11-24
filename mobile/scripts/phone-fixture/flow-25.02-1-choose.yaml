@@ -1,0 +1,32 @@
+# 25.02 Organization: choose it, create one, and the organization's page.
+appId: com.terminalx.phone.fixture
+name: Organization (25.02)
+---
+- runFlow: flow-25.02-00-theme.yaml
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureFirstRun: new, fixtureCompute: none, fixtureLogins: none, openRoute: "/cloud/setup/organization?orgId=org-personal" }
+- extendedWaitUntil: { visible: "Continue with the personal one", timeout: 20000 }
+- assertVisible: "Create an organization"
+- waitForAnimationToEnd
+- takeScreenshot: 25.02-01-new-account
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureFirstRun: several, fixtureCompute: none, fixtureLogins: none, openRoute: "/cloud/setup/organization?orgId=org-northwind" }
+- extendedWaitUntil: { visible: "Continue with Northwind", timeout: 20000 }
+- assertVisible: "Acme, Member · an owner or admin sets it up"
+- waitForAnimationToEnd
+- takeScreenshot: 25.02-02-several
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureFirstRun: no-route, fixtureCompute: none, fixtureLogins: none, openRoute: "/cloud/setup/organization?orgId=org-personal" }
+- extendedWaitUntil: { visible: "To create an organization for a team.*", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.02-03-server-without-the-route
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureFirstRun: several, fixtureCompute: one, fixtureLogins: some, openRoute: "/organization/org-northwind" }
+- extendedWaitUntil: { visible: "Compute, Boat · connected", timeout: 20000 }
+- assertVisible: "Agent logins, Codex · connected"
+- waitForAnimationToEnd
+- takeScreenshot: 25.02-09-organization-page

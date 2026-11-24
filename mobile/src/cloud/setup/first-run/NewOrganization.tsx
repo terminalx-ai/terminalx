@@ -9,6 +9,7 @@ import { Notice } from "../../../ui/Notice";
 import { Button, EmptyState } from "../../../ui/primitives";
 import { TextField } from "../../../ui/TextField";
 import { Note, Page } from "../logins/parts";
+import { FormPage } from "./parts";
 import { useSetupReads } from "./reads";
 import * as W from "./words";
 
@@ -45,7 +46,7 @@ export function NewOrganization() {
   // One key per name: the same name tried again is the same request.
   const sent = useRef<{ name: string; key: string } | null>(null);
 
-  const title = <Stack.Screen options={{ title: W.NEW_ORGANIZATION_TITLE, headerLargeTitle: false }} />;
+  const title = <Stack.Screen options={{ title: W.NEW_ORGANIZATION_TITLE, headerLargeTitle: false, headerBackButtonDisplayMode: "minimal" }} />;
   if (!catalog) return <>{title}<EmptyState title="Organization unavailable" detail="Sign in to create an organization." /></>;
 
   // A server without the phone's create route: say where one is made (25.02, "A server without the route").
@@ -75,10 +76,10 @@ export function NewOrganization() {
 
   return <>
     {title}
-    <Page testID="new-organization" footer={<Button label={busy ? W.CREATING : W.CREATE} disabled={!valid || busy} onPress={() => void create()} icon={busy ? (color) => <ActivityIndicator size="small" color={color} /> : undefined} />}>
+    <FormPage testID="new-organization" footer={<Button label={busy ? W.CREATING : W.CREATE} disabled={!valid || busy} onPress={() => void create()} icon={busy ? (color) => <ActivityIndicator size="small" color={color} /> : undefined} />}>
       <TextField label={W.NAME_LABEL} placeholder={W.NAME_LABEL} value={name} onChangeText={(value) => { setName(value); if (failure?.where === "field") setFailure(null); }}
         helper={W.NAME_HELPER} error={nameError} disabled={busy} autoFocus autoCapitalize="words" autoCorrect={false} returnKeyType="done" onSubmitEditing={() => void create()} testID="organization-name" />
       {failure?.where === "notice" ? <Notice tone="danger" text={failure.text} testID="organization-not-created" /> : null}
-    </Page>
+    </FormPage>
   </>;
 }

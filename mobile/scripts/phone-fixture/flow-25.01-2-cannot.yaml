@@ -1,0 +1,58 @@
+# 25.01 When a step cannot be done: a member, a key that stopped working, no network, a list that could not be read;
+# and an account with no organization at all (PRO-524's finding).
+appId: com.terminalx.phone.fixture
+name: First run, when a step cannot be done (25.01)
+---
+- runFlow: flow-25.01-00-theme.yaml
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureFirstRun: member, fixtureCompute: none, fixtureLogins: none }
+- tapOn: "Cloud"
+- extendedWaitUntil: { visible: "Northwind has no compute yet", timeout: 20000 }
+# Step 1 is the person's choice: keep the personal organization, as the board draws it done.
+- tapOn: "Start setup"
+- extendedWaitUntil: { visible: "Continue with the personal one", timeout: 20000 }
+- tapOn: "Continue with the personal one"
+- extendedWaitUntil: { visible: "Continue: connect compute", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.01-07-member
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureFirstRun: new, fixtureCompute: attention, fixtureLogins: some }
+- tapOn: "Cloud"
+- extendedWaitUntil: { visible: "Fix the provider key", timeout: 20000 }
+- assertVisible: "Step 2 of 4, needs attention: Connect compute. Boat rejected the stored key on its last check."
+- waitForAnimationToEnd
+- takeScreenshot: 25.01-08-key-stopped-working
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureFirstRun: offline, fixtureCompute: one, fixtureLogins: none }
+- tapOn: "Cloud"
+- extendedWaitUntil: { visible: "Continue: sign your agents in", timeout: 20000 }
+# The list is read again now and then while the tab is shown; after a few seconds the service cannot be reached.
+- extendedWaitUntil: { visible: "The service could not be reached. What is shown may be out of date.", timeout: 40000 }
+- assertVisible: "Setup carries on when the phone is back online. Nothing you finished is lost."
+- waitForAnimationToEnd
+- takeScreenshot: 25.01-09-no-network
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureFirstRun: new, fixtureCompute: unreadable, fixtureLogins: unreadable }
+- tapOn: "Cloud"
+- extendedWaitUntil: { visible: "Pull down to read it again.", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.01-10-could-not-be-read
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureFirstRun: none }
+- tapOn: "Cloud"
+- extendedWaitUntil: { visible: "Start setup", timeout: 20000 }
+- assertVisible: "Step 1 of 4, next: Organization. Workspaces belong to an organization."
+- waitForAnimationToEnd
+- takeScreenshot: 25.01-11-no-organization
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureFirstRun: none-no-route }
+- tapOn: "Cloud"
+- extendedWaitUntil: { visible: "To create an organization, use the TerminalX desktop app or the web console.*", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.01-12-no-organization-no-route

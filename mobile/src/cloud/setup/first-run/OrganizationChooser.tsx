@@ -30,7 +30,7 @@ export function OrganizationChooser() {
   const [picked, setPicked] = useState<string | null>(null);
   const creates = snapshot.createsOrganizations === true;
 
-  const title = <Stack.Screen options={{ title: W.ORGANIZATION_TITLE, headerLargeTitle: false }} />;
+  const title = <Stack.Screen options={{ title: W.ORGANIZATION_TITLE, headerLargeTitle: false, headerBackButtonDisplayMode: "minimal" }} />;
   if (!catalog) return <>{title}<EmptyState title="Organization unavailable" detail="Sign in to see your organizations." /></>;
   // Nothing read yet: the list comes with the account's capabilities.
   if (!snapshot.refreshedAt && !snapshot.saved && !snapshot.error) return <>{title}<EmptyState busy title="Reading your organizations" detail="" /></>;
