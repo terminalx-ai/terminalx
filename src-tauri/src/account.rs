@@ -23,6 +23,7 @@ use crate::desktop_links::DesktopLinks;
 use crate::keychain::{Keychain, SecretStore};
 
 pub(crate) mod organization_delete;
+mod profile;
 
 pub const STATUS_EVENT: &str = "account_status";
 
@@ -457,6 +458,8 @@ pub struct AccountManager {
     /// order. Taken before `inner`, never while holding it.
     store_gate: Mutex<()>,
     refresh_gate: Mutex<()>,
+    // Serialize display-name writes without blocking session refresh during the request.
+    display_name_gate: Mutex<()>,
     /// When the server last answered with organizations and roles. Held while
     /// asking, so concurrent callers share one answer.
     roles_refreshed: Mutex<Option<Instant>>,
@@ -1853,8 +1856,17 @@ fn post_json<T: DeserializeOwned>(
     body: serde_json::Value,
     access_token: Option<&str>,
 ) -> Result<T, CloudError> {
+    request_json("POST", &endpoint(path), body, access_token)
+}
+
+fn request_json<T: DeserializeOwned>(
+    method: &str,
+    url: &str,
+    body: serde_json::Value,
+    access_token: Option<&str>,
+) -> Result<T, CloudError> {
     let mut request = cloud_agent()
-        .post(&endpoint(path))
+        .request(method, url)
         .set("content-type", "application/json");
     if let Some(token) = access_token {
         request = request.set("authorization", &format!("Bearer {token}"));
