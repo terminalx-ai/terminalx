@@ -512,8 +512,30 @@ In #1523's run (45338978657) the same 91.3 MB of packages took:
 The mirror comes from the image's `/etc/apt/apt-mirrors.txt`, which differs
 by where the runner is. `infra/ci-runners/apt-mirrors.sh` now writes that file
 before every install (Azure first, `archive.ubuntu.com` behind it) and prints
-what it replaced. Whether the Azure mirror is fast from a runner in an AWS
-region is not measured until a job lands on one.
+what it replaced.
+
+What the file held, as the script printed it (#1525's run 45344630294):
+
+| Runner region | priority 1 | priority 2 | priority 3 |
+| --- | --- | --- | --- |
+| `westus3`, `centralus`, `westus2` (Azure) | `http://azure.archive.ubuntu.com/ubuntu/` | `https://archive.ubuntu.com/ubuntu/` | `https://security.ubuntu.com/ubuntu/` |
+| `us-west-2` (AWS) | `http://us-east-2.ec2.archive.ubuntu.com/ubuntu/` | the same | the same |
+
+With the script, in that run:
+
+- Jobs on AWS-region runners were fast from the Azure mirror:
+  `webkit-layout-linux (2)` on `us-west-2` fetched 140 MB in 20 s
+  (7,094 kB/s) and `vitest (1)` on `us-west-2` 4,988 kB in 1 s. The same
+  region got 64.6 kB/s from the EC2 mirror.
+- Every install took 9 to 43 s across `eastus`, `centralus`, `westus`,
+  `westus2`, `westus3`, `southcentralus` and `us-west-2`; the 91.3 MB set took
+  5 to 25 s.
+- Every Linux job was done 11 min 37 s after the push, with waits of up to
+  4 min for a runner.
+
+The case without it, the same morning: #1526's run at 07:28 UTC
+(45348218412) lost `linux-rust-tests (1)` and `(binaries)` to the 30 minute
+limit, with the install at 29 min 27 s and 26 min 56 s.
 
 A cache of the package files was tried and left out. apt does not check a
 file that is already in its archive folder: with apt 2.8.4 in an
