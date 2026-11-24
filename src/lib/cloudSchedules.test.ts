@@ -121,6 +121,10 @@ describe("scheduled tasks: what the dialog says", () => {
     expect(runText({ state: "failed", category: "timed-out" })).toBe("Failed: it ran past its time limit and was stopped");
     expect(runText({ state: "skipped", category: "daily-cap" })).toBe("Skipped: 24 runs had already started in 24 hours");
     expect(runText({ state: "failed", category: "something-new" })).toBe("Failed: something-new");
+    const webhook = { state: "failed", category: "webhook-prompt-too-large" };
+    expect(runText(webhook)).toBe("Failed: webhook-prompt-too-large");
+    expect(runText(webhook, true)).toBe("Failed: the prompt exceeded 32 KiB after inserting the webhook payload");
+    expect(runText({ ...webhook, category: "webhook-payload-forbidden" }, true)).toContain("a command or a forbidden file mention");
     expect(scheduleErrorMessage("cloud_schedule_cleanup_pending")).toContain("Pause the task");
     expect(scheduleErrorMessage("cloud_schedule_needs_approval")).toContain("Delete the task and make it again");
     expect(scheduleErrorMessage("something_new")).toBe("That did not work (something_new).");
@@ -278,7 +282,7 @@ describe("accepted automation inputs and cost projection", () => {
   });
 
   it("does not invent a one-machine-month ceiling or add creation a second time", () => {
-    const lines = automationCostLines(estimate({ createPerRunMinutes: 20, perRunMaxMinutes: 105, monthlyRuns: 720, monthlyMaxMicros: 62_208_000_000, keepsMachineRunning: true }), 60, true, true).join(" ");
+    const lines = automationCostLines(estimate({ createPerRunMinutes: 20, perRunMaxMinutes: 105, monthlyRuns: 720, monthlyMaxMicros: 62_208_000_000, keepsMachineRunning: true }), 60, true, "github").join(" ");
     expect(lines).toContain("105 minutes, including 20 minutes");
     expect(lines).toContain("already included");
     expect(lines).toContain("$62,208.00");
@@ -288,4 +292,23 @@ describe("accepted automation inputs and cost projection", () => {
     expect(lines).not.toContain("wakes this workspace");
     expect(runText({ state: "creating-workspace" })).toBe("Creating workspace");
   });
+});
+
+it("sends exactly the empty webhook trigger without validating hidden timer or GitHub fields", () => {
+  const form: AutomationForm = {
+    ...blankAutomationForm(),
+    name: "Webhook report",
+    prompt: "Report on {{payload.ref}}.",
+    triggerKind: "webhook",
+    time: "invalid",
+    preset: "weekly",
+    weekdays: [],
+  };
+  const estimate = { workspaceId: "template", completionPolicy: "suspend", maxRunMinutes: 60, webhookTrigger: {} };
+  expect(automationEstimateInput(form, "template", [])).toEqual(estimate);
+  expect(automationInput(form, "template", [])).toEqual({
+    ...estimate, name: form.name, prompt: form.prompt, agent: form.agent, mode: form.mode,
+    workspaceMode: "existing", missedRunPolicy: "skip",
+  });
+  expect(automationInput({ ...form, prompt: "" }, "template", [])).toBeNull();
 });

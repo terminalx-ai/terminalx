@@ -196,11 +196,17 @@ const RUN_CATEGORY: Record<string, string> = {
   "file-mention-forbidden": "its prompt mentions a file outside the project",
 };
 
+const WEBHOOK_RUN_CATEGORY: Record<string, string> = {
+  "webhook-payload-forbidden": "the webhook payload turned the prompt into a command or a forbidden file mention",
+  "webhook-prompt-too-large": "the prompt exceeded 32 KiB after inserting the webhook payload",
+};
+
 /** "Failed: it ran past its time limit and was stopped". */
-export function runText(run: Pick<CloudScheduleRun, "state" | "category">): string {
+export function runText(run: Pick<CloudScheduleRun, "state" | "category">, webhookAvailable = false): string {
   const state = RUN_STATE[run.state] ?? run.state;
   if (!run.category || run.state === "completed") return state;
-  return `${state}: ${RUN_CATEGORY[run.category] ?? run.category}`;
+  const webhookReason = webhookAvailable ? WEBHOOK_RUN_CATEGORY[run.category] : undefined;
+  return `${state}: ${webhookReason ?? RUN_CATEGORY[run.category] ?? run.category}`;
 }
 
 /** A time in the reader's own zone: "Oct 12, 09:00". */
@@ -428,7 +434,7 @@ export function useSchedulesOffer(orgId: string, enabled = true, privateWorkspac
 
 export const AUTOMATION_HOLD = "Fresh-workspace and GitHub automations are not enabled yet. Existing automations can still be read, paused and deleted.";
 export interface AutomationForm extends ScheduleForm {
-  triggerKind: "timer" | "github";
+  triggerKind: "timer" | "github" | "webhook";
   workspaceMode: "existing" | "fresh";
   archiveAfterDays: string;
   archiveOnPrMerge: boolean;
@@ -450,8 +456,11 @@ export function githubTriggerError(trigger: CloudScheduleGithubTrigger, reposito
 }
 export function automationFormErrors(form: AutomationForm, repositories: CloudSelectedRepository[]) {
   const errors: Record<string, string> = { ...scheduleFormErrors(form) };
+  if (form.triggerKind !== "timer") {
+    delete errors.time;
+    delete errors.weekdays;
+  }
   if (form.triggerKind === "github") {
-    delete errors.time; delete errors.weekdays;
     const error = githubTriggerError(form.githubTrigger, repositories);
     if (error) errors.githubTrigger = error;
   }
@@ -469,6 +478,7 @@ export function automationEstimateInput(form: AutomationForm, workspaceId: strin
       filters: form.githubTrigger.filters.map((filter) => ({ field: filter.field, operator: filter.operator, value: filter.value.trim() })),
       allowForkPullRequests: form.githubTrigger.allowForkPullRequests ?? false } };
   }
+  if (form.triggerKind === "webhook") return { ...base, webhookTrigger: {} };
   const schedule = timingOf(form);
   return schedule ? { ...base, schedule } : null;
 }
@@ -481,13 +491,14 @@ export function automationInput(form: AutomationForm, workspaceId: string, repos
   return { ...estimate, ...workspace, name: form.name.trim(), prompt: form.prompt, agent: form.agent, mode: form.mode,
     ...(form.model ? { model: form.model } : {}), ...(form.effort ? { effort: form.effort } : {}), missedRunPolicy: form.missedRunPolicy };
 }
-export function automationCostLines(estimate: CloudScheduleEstimate, maxRunMinutes: number, fresh: boolean, github: boolean): string[] {
+export function automationCostLines(estimate: CloudScheduleEstimate, maxRunMinutes: number, fresh: boolean, trigger: AutomationForm["triggerKind"]): string[] {
   const lines = costLines(estimate, maxRunMinutes);
   if (fresh) {
     lines[0] = `Each run creates a fresh workspace. The quoted total is ${estimate.perRunMaxMinutes ?? "unknown"} minutes, including ${estimate.createPerRunMinutes ?? "an unspecified number of"} minutes for creation, starting, the ${maxRunMinutes}-minute run limit and reporting grace: ${formatMicros(estimate.perRunMaxMicros, estimate.currency)} per run. Creation is already included in that total.`;
     lines[1] = `${estimate.monthlyRuns} assumed runs a month: ${formatMicros(estimate.monthlyMaxMicros, estimate.currency)} a month.${estimate.keepsMachineRunning ? " Includes a machine-month for every fresh run left running." : ""}`;
   }
-  if (github) lines.push("GitHub estimate assumption: 24 runs/day and 720/month, not a delivery forecast. There is no scheduled next run.");
+  if (trigger === "webhook") lines.push("Webhook estimate assumes up to 24 runs per day and 720 per month. There is no scheduled next run.");
+  if (trigger === "github") lines.push("GitHub estimate assumption: 24 runs/day and 720/month, not a delivery forecast. There is no scheduled next run.");
   lines.push("Active compute only; storage and model tokens are excluded.");
   return lines;
 }

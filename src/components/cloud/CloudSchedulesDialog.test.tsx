@@ -10,6 +10,9 @@ const mocks = vi.hoisted(() => ({
   openRun: vi.fn(),
   estimate: vi.fn(),
   create: vi.fn(),
+  rotate: vi.fn(),
+  toast: vi.fn(),
+  copy: vi.fn(),
   setActive: vi.fn(),
   remove: vi.fn(),
   pauseAll: vi.fn(),
@@ -22,6 +25,7 @@ vi.mock("@/lib/api", () => ({
     phase2DesktopContractsAvailable: mocks.available,
     cloudAutomationEstimate: mocks.estimate,
     cloudAutomationCreate: mocks.create,
+    cloudAutomationRotateWebhookSecret: mocks.rotate,
     cloudAutomationSetActive: mocks.setActive,
     cloudScheduleDelete: mocks.remove,
     cloudSchedulesPauseAll: mocks.pauseAll,
@@ -39,8 +43,11 @@ vi.mock("@/lib/account", () => ({
 }));
 vi.mock("@/lib/dataPrivacy", () => ({
   getDataPrivacy: () => scope.privacy,
+  useDataPrivacy: () => scope.privacy,
   subscribeDataPrivacy: (listener: () => void) => { scope.privacyListeners.add(listener); return () => scope.privacyListeners.delete(listener); },
 }));
+vi.mock("@/lib/errorToasts", () => ({ showError: mocks.toast }));
+vi.mock("@/lib/clipboard", () => ({ copyText: mocks.copy }));
 vi.mock("@/lib/cloudDashboard", () => ({ openCloudSession: mocks.openRun }));
 
 vi.mock("@/lib/models", async (original) => ({ ...(await original<typeof import("@/lib/models")>()), useModels: () => [] }));
@@ -765,5 +772,101 @@ describe("automation hold and selected repository refusals", () => {
     expect(mocks.estimate).not.toHaveBeenCalled();
     expect(mocks.detail).not.toHaveBeenCalled();
     expect(mocks.setActive).not.toHaveBeenCalled();
+  });
+});
+
+describe("webhook automations", () => {
+  const url = "https://hooks.example.test/trigger/opaque-id";
+  const webhookSchedule = () => ({ ...schedule(), schedule: null, nextRunAt: null, webhookTrigger: { url, secretUpdatedAt: null } });
+
+  function setOrganization(role: string, enabled: boolean) {
+    scope.status = {
+      ...scope.status,
+      organizations: [{ id: "org-1", name: "One", role, cloud: { enabled: true, flags: { "organization.setup-flow.v1": enabled } } }],
+    };
+  }
+
+  it.each([
+    { role: "owner", flag: false, contracts: true },
+    { role: "member", flag: true, contracts: true },
+    { role: "owner", flag: true, contracts: false },
+  ])("keeps existing triggers for $role with flag=$flag and contracts=$contracts", async ({ role, flag, contracts }) => {
+    setOrganization(role, flag);
+    mocks.available.mockResolvedValue(contracts);
+    listed = [webhookSchedule()];
+    open();
+    expect(within(await row()).queryByRole("button", { name: "Show webhook details" })).toBeNull();
+    await fillForm();
+    const trigger = within(screen.getByLabelText("Trigger"));
+    expect(trigger.getAllByRole("option").map((option) => option.textContent)).toEqual(["Schedule", "GitHub event"]);
+    expect(screen.queryByText("{{payload.*}}")).toBeNull();
+    expect(mocks.estimate.mock.calls.every(([input]) => input.schedule && !input.webhookTrigger)).toBe(true);
+  });
+
+  it("quotes and creates a webhook for an admin, disclosing the secret once", async () => {
+    setOrganization("admin", true);
+    mocks.available.mockResolvedValue(true);
+    mocks.create.mockImplementation(async () => {
+      const created = webhookSchedule();
+      listed = [created];
+      return { ...created, webhookSecret: "create-only-secret" };
+    });
+    open();
+    await fillForm();
+    fireEvent.change(screen.getByLabelText("Trigger"), { target: { value: "webhook" } });
+    expect(screen.getByText("{{payload.*}}")).toBeTruthy();
+    const consent = screen.getByRole("checkbox", { name: /I understand this task starts/ });
+    await waitFor(() => expect((consent as HTMLInputElement).disabled).toBe(false));
+    expect(mocks.estimate).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1", completionPolicy: "suspend", maxRunMinutes: 60, webhookTrigger: {},
+    }, "org-1");
+    fireEvent.click(consent);
+    fireEvent.click(screen.getByRole("button", { name: "Create scheduled task" }));
+    expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ webhookTrigger: {} }), "org-1");
+    expect(mocks.create.mock.calls[0][0]).not.toHaveProperty("schedule");
+    const disclosure = within(await screen.findByTestId("webhook-secret"));
+    expect(disclosure.getByText("create-only-secret")).toBeTruthy();
+    await act(async () => fireEvent.click(disclosure.getByRole("button", { name: "Copy secret" })));
+    expect(mocks.copy).toHaveBeenCalledWith("create-only-secret");
+    fireEvent.click(disclosure.getByRole("button", { name: "Done" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show webhook details" }));
+    expect(screen.queryByText("create-only-secret")).toBeNull();
+    expect(mocks.toast).not.toHaveBeenCalled();
+  });
+
+  it("confirms rotation and clears the new secret when details close", async () => {
+    setOrganization("owner", true);
+    mocks.available.mockResolvedValue(true);
+    listed = [webhookSchedule()];
+    mocks.rotate.mockResolvedValue({
+      ...listed[0],
+      webhookTrigger: { url, secretUpdatedAt: 1800000000000 },
+      webhookSecret: "rotation-only-secret",
+    });
+    open();
+    fireEvent.click(await screen.findByRole("button", { name: "Show webhook details" }));
+    const details = within(screen.getByTestId("webhook-details"));
+    expect(details.getByText(/Bearer \$TERMINALX_WEBHOOK_SECRET/)).toBeTruthy();
+    await act(async () => fireEvent.click(details.getByRole("button", { name: "Copy URL" })));
+    expect(mocks.copy).toHaveBeenCalledWith(url);
+    fireEvent.click(details.getByRole("button", { name: "Rotate secret" }));
+    const confirm = within(await screen.findByRole("dialog", { name: "Rotate the webhook secret?" }));
+    expect(mocks.rotate).not.toHaveBeenCalled();
+    fireEvent.click(confirm.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(details.getByRole("button", { name: "Rotate secret" }));
+    fireEvent.click(within(await screen.findByRole("dialog", { name: "Rotate the webhook secret?" })).getByRole("button", { name: "Rotate secret" }));
+    expect(await details.findByText("New secret · just now")).toBeTruthy();
+    expect(details.getByText("The old secret now returns 401.")).toBeTruthy();
+    const disclosure = within(await screen.findByTestId("webhook-secret"));
+    expect(disclosure.getByText("rotation-only-secret")).toBeTruthy();
+    fireEvent.click(disclosure.getByRole("button", { name: "Done" }));
+    expect(details.getByText(url, { exact: true })).toBeTruthy();
+    expect(mocks.rotate).toHaveBeenCalledExactlyOnceWith(ID, "org-1");
+    expect(mocks.toast).toHaveBeenCalledWith(expect.any(String), undefined, { title: "Webhook secret rotated", tone: "success" });
+    expect(JSON.stringify(mocks.toast.mock.calls)).not.toContain("rotation-only-secret");
+    fireEvent.click(screen.getByRole("button", { name: "Hide webhook details" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show webhook details" }));
+    expect(screen.queryByText("rotation-only-secret")).toBeNull();
+    expect(screen.getByText(/Secret updated/)).toBeTruthy();
   });
 });

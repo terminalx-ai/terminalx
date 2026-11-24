@@ -3,7 +3,7 @@ import { CalendarClock, Loader2, Pause, Play, Plus, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { api, type CloudAutomationDto, type CloudSelectedRepository, type CloudScheduleQuote } from "@/lib/api";
+import { api, type CloudAutomationDto, type CloudScheduleWebhookTrigger, type CloudSelectedRepository, type CloudScheduleQuote } from "@/lib/api";
 import {
   PRESETS,
   SCHEDULE_LIMITS,
@@ -25,6 +25,10 @@ import {
   whenText,
   type AutomationForm,
 } from "@/lib/cloudSchedules";
+import { getAccount } from "@/lib/account";
+import { featureFlags, useFeatureFlag } from "@/lib/featureFlags";
+import { managesOrganization } from "@/lib/multiOrg";
+import { WebhookSecretDialog, WebhookDetails, WebhookPayloadHint } from "./WebhookDetails";
 import { GithubTriggerEditor } from "./GithubTriggerEditor";
 import { retireAutomationTargetScope, useAutomationFence, useAutomationScope } from "./CloudAutomationScope";
 import { openCloudSession } from "@/lib/cloudDashboard";
@@ -80,6 +84,9 @@ function ScopedSchedulesDialog({ orgId, workspaceId, name, onClose }: SchedulesT
     const current = capture();
     api.phase2DesktopContractsAvailable().then((available) => { if (current()) setContractsAvailable(available === true); }, () => {});
   }, [capture]);
+  const flagEnabled = useFeatureFlag(featureFlags.organizationSetup, orgId);
+  const webhookAvailable = contractsAvailable && flagEnabled && managesOrganization(getAccount().status, orgId) === true;
+  const [createdSecret, setCreatedSecret] = useState<string | null>(null);
   const [schedules, setSchedules] = useState<CloudAutomationDto[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -123,7 +130,7 @@ function ScopedSchedulesDialog({ orgId, workspaceId, name, onClose }: SchedulesT
 
   const pause = (schedule: CloudAutomationDto) => act(schedule.id, async () => (await api.cloudAutomationSetActive(schedule.id, false, orgId), null));
   const resume = (schedule: CloudAutomationDto) => {
-    if ((schedule.workspaceMode === "fresh" || schedule.githubTrigger) && !contractsAvailable) return;
+    if ((schedule.workspaceMode === "fresh" || schedule.githubTrigger || schedule.webhookTrigger) && !contractsAvailable) return;
     return act(schedule.id, async () => (await api.cloudAutomationSetActive(schedule.id, true, orgId), null));
   };
   const remove = (schedule: CloudAutomationDto) => act(schedule.id, async () => (await api.cloudScheduleDelete(schedule.id, orgId), null));
@@ -141,7 +148,7 @@ function ScopedSchedulesDialog({ orgId, workspaceId, name, onClose }: SchedulesT
         <DialogHeader>
           <DialogTitle>Scheduled tasks for {name}</DialogTitle>
           <DialogDescription>
-            An automation sends one prompt to an agent on a timer or GitHub event, using this workspace or a fresh workspace, with nobody watching. Each run starts billed compute by itself. Only
+            An automation sends one prompt to an agent on {webhookAvailable ? "a timer, GitHub event or webhook" : "a timer or GitHub event"}, using this workspace or a fresh workspace, with nobody watching. Each run starts billed compute by itself. Only
             owners and admins of the organization can make, pause, resume or delete one.
           </DialogDescription>
         </DialogHeader>
@@ -187,13 +194,16 @@ function ScopedSchedulesDialog({ orgId, workspaceId, name, onClose }: SchedulesT
               orgId={orgId}
               workspaceId={workspaceId}
               contractsAvailable={contractsAvailable}
+              webhookAvailable={webhookAvailable}
               onCancel={() => setCreating(false)}
-              onCreated={() => {
+              onCreated={(secret) => {
+                if (webhookAvailable && secret) setCreatedSecret(secret);
                 setCreating(false);
                 void reload();
               }}
             />
           )}
+          {webhookAvailable && createdSecret && <WebhookSecretDialog secret={createdSecret} onClose={() => setCreatedSecret(null)} />}
           {!schedules && !loadError && <Loader2 className="size-4 animate-spin" />}
           {loadError && (
             <p className="text-destructive" data-testid="cloud-schedules-load-error">
@@ -209,7 +219,8 @@ function ScopedSchedulesDialog({ orgId, workspaceId, name, onClose }: SchedulesT
                   schedule={schedule}
                   orgId={orgId}
                   busy={busy !== null}
-                  resumeBlocked={(schedule.workspaceMode === "fresh" || schedule.githubTrigger) && !contractsAvailable ? AUTOMATION_HOLD : resumeBlocked(schedule)}
+                  webhookAvailable={webhookAvailable}
+                  resumeBlocked={(schedule.workspaceMode === "fresh" || schedule.githubTrigger || schedule.webhookTrigger) && !contractsAvailable ? AUTOMATION_HOLD : resumeBlocked(schedule)}
                   confirming={confirming && "id" in confirming && confirming.id === schedule.id ? confirming.kind : null}
                   onPause={() => void pause(schedule)}
                   onAskResume={() => setConfirming({ kind: "resume", id: schedule.id })}
@@ -232,6 +243,7 @@ function ScheduleRow({
   schedule,
   busy,
   resumeBlocked: blocked,
+  webhookAvailable,
   confirming,
   onPause,
   onAskResume,
@@ -243,6 +255,7 @@ function ScheduleRow({
   orgId: string;
   schedule: CloudAutomationDto;
   busy: boolean;
+  webhookAvailable: boolean;
   /** Why Resume would only be refused, or null. */
   resumeBlocked: string | null;
   confirming: "resume" | "delete" | null;
@@ -255,7 +268,12 @@ function ScheduleRow({
 }) {
   const [showRuns, setShowRuns] = useState(false);
   const paused = pausedText(schedule);
-  const next = schedule.githubTrigger ? null : whenText(schedule.nextRunAt);
+  const [showWebhook, setShowWebhook] = useState(false);
+  const [rotatedTrigger, setRotatedTrigger] = useState<CloudScheduleWebhookTrigger | null>(null);
+  const webhook = webhookAvailable ? schedule.webhookTrigger : null;
+  const latestWebhook = rotatedTrigger && webhook && (rotatedTrigger.secretUpdatedAt ?? 0) >= (webhook.secretUpdatedAt ?? 0) ? rotatedTrigger : webhook;
+  const triggerKind = webhook ? "webhook" : schedule.githubTrigger ? "github" : "timer";
+  const next = schedule.githubTrigger || webhook ? null : whenText(schedule.nextRunAt);
   const last = schedule.lastRun;
   return (
     <li className="flex flex-col gap-1 rounded-md border border-hairline px-3 py-2" data-testid={`cloud-schedule-${schedule.id}`}>
@@ -281,7 +299,7 @@ function ScheduleRow({
         </span>
       </div>
       <p className="text-muted-foreground">
-        {schedule.githubTrigger ? `GitHub · ${schedule.githubTrigger.event} · ${schedule.githubTrigger.repositoryId}` : schedule.schedule ? describeTiming(schedule.schedule) : "Trigger unavailable"} · {schedule.workspaceMode === "fresh" ? "New workspace per run" : "Existing workspace"} · {schedule.agent}
+        {schedule.githubTrigger ? `GitHub · ${schedule.githubTrigger.event} · ${schedule.githubTrigger.repositoryId}` : webhook ? "Webhook" : schedule.schedule ? describeTiming(schedule.schedule) : "Trigger unavailable"} · {schedule.workspaceMode === "fresh" ? "New workspace per run" : "Existing workspace"} · {schedule.agent}
         {schedule.mode ? ` · ${SCHEDULE_MODES.find((mode) => mode.id === schedule.mode)?.label ?? schedule.mode}` : ""} · stops after {schedule.maxRunMinutes} minutes
       </p>
       {schedule.githubTrigger && <p>{schedule.githubTrigger.filters.map((filter) => `${filter.field} ${filter.operator} ${filter.value}`).join(" AND ") || "No filters"}. Allow pull requests from forks: {schedule.githubTrigger.allowForkPullRequests ? "Yes" : "No"}.</p>}
@@ -294,16 +312,22 @@ function ScheduleRow({
       )}
       <p className="text-muted-foreground">
         {next && !paused ? `Next run ${next}. ` : ""}
-        {last ? `Last run ${whenText(last.scheduledFor)}: ${runText(last)}.` : "It has not run yet."}
+        {last ? `Last run ${whenText(last.scheduledFor)}: ${runText(last, webhookAvailable)}.` : "It has not run yet."}
       </p>
       <ul className="text-faint">
-        {automationCostLines(schedule.estimate, schedule.maxRunMinutes, schedule.workspaceMode === "fresh", !!schedule.githubTrigger)
+        {automationCostLines(schedule.estimate, schedule.maxRunMinutes, schedule.workspaceMode === "fresh", triggerKind)
           .map((line) => (
             <li key={line}>{line}</li>
           ))}
       </ul>
+      {webhook && <>
+        <Button size="xs" variant="ghost" aria-expanded={showWebhook} onClick={() => setShowWebhook((value) => !value)}>
+          {showWebhook ? "Hide webhook details" : "Show webhook details"}
+        </Button>
+        {showWebhook && latestWebhook && <WebhookDetails trigger={latestWebhook} orgId={orgId} scheduleId={schedule.id} disabled={busy} onRotated={setRotatedTrigger} />}
+      </>}
       <Button size="xs" variant="ghost" onClick={() => setShowRuns((value) => !value)}>{showRuns ? "Hide runs" : "Show runs"}</Button>
-      {showRuns && <CloudAutomationRuns schedule={schedule} orgId={orgId} />}
+      {showRuns && <CloudAutomationRuns schedule={schedule} orgId={orgId} webhookAvailable={webhookAvailable} />}
       {confirming === "resume" && !blocked && (
         <p className="flex flex-wrap items-center gap-2 rounded-md bg-well/40 px-2 py-1.5" data-testid="cloud-schedule-resume-confirm">
           <span>Resuming starts billed compute by itself again on matching triggers, and the task then runs under your account.</span>
@@ -330,7 +354,7 @@ function ScheduleRow({
   );
 }
 
-function CloudAutomationRuns({ schedule, orgId }: { schedule: CloudAutomationDto; orgId: string }) {
+function CloudAutomationRuns({ schedule, orgId, webhookAvailable }: { schedule: CloudAutomationDto; orgId: string; webhookAvailable: boolean }) {
   const capture = useAutomationFence();
   const [detail, setDetail] = useState<Awaited<ReturnType<typeof api.cloudAutomation>> | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -346,8 +370,10 @@ function CloudAutomationRuns({ schedule, orgId }: { schedule: CloudAutomationDto
   if (!detail) return <p>Reading runs…</p>;
   return <ul aria-label="Runs">{detail.runs.length === 0 && <li>No runs yet.</li>}{detail.runs.map((run) => {
     const workspaceId = run.workspaceId && !(detail.schedule.workspaceMode === "fresh" && run.workspaceId === detail.schedule.workspaceId) ? run.workspaceId : null;
+    const trigger = webhookAvailable && run.trigger === "webhook" ? "Webhook"
+      : webhookAvailable && run.trigger === "manual" ? "Manual" : run.trigger;
     return <li key={run.id} data-testid={`automation-run-${run.id}`}>
-      <p>{whenText(run.scheduledFor)} · {runText(run)} · {run.trigger}</p>
+      <p>{whenText(run.scheduledFor)} · {runText(run, webhookAvailable)} · {trigger}</p>
       {run.workBranch && <p>Branch: {run.workBranch}</p>}
       {run.archivedAt ? <p>Archived {whenText(run.archivedAt)}</p> : run.archiveAt ? <p>Archive due {whenText(run.archiveAt)}; archival not observed.</p> : null}
       {workspaceId ? <Button size="xs" variant="ghost" onClick={() => openCloudSession(run.sessionId ? cloudSessionKey(orgId, workspaceId, run.sessionId) : cloudWorkspaceKey(orgId, workspaceId), run.tabId)}>Open run workspace</Button> : <p>Run workspace not allocated.</p>}
@@ -355,7 +381,7 @@ function CloudAutomationRuns({ schedule, orgId }: { schedule: CloudAutomationDto
   })}</ul>;
 }
 
-function NewScheduleForm({ orgId, workspaceId, contractsAvailable, onCancel, onCreated }: { orgId: string; workspaceId: string; contractsAvailable: boolean; onCancel: () => void; onCreated: () => void }) {
+function NewScheduleForm({ orgId, workspaceId, contractsAvailable, webhookAvailable, onCancel, onCreated }: { orgId: string; workspaceId: string; contractsAvailable: boolean; webhookAvailable: boolean; onCancel: () => void; onCreated: (secret?: string) => void }) {
   const capture = useAutomationFence();
   const [form, setForm] = useState<AutomationForm>(blankAutomationForm);
   const [repositories, setRepositories] = useState<CloudSelectedRepository[]>([]);
@@ -402,8 +428,8 @@ function NewScheduleForm({ orgId, workspaceId, contractsAvailable, onCancel, onC
   const errors = automationFormErrors(form, repositories);
   const shown = touched ? errors : {};
 
-  const advanced = form.workspaceMode === "fresh" || form.triggerKind === "github";
-  const held = advanced && !contractsAvailable;
+  const advanced = form.workspaceMode === "fresh" || form.triggerKind !== "timer";
+  const held = (advanced && !contractsAvailable) || (form.triggerKind === "webhook" && !webhookAvailable);
   const estimateInput = automationEstimateInput(form, workspaceId, repositories);
   const estimateKey = estimateInput ? JSON.stringify(estimateInput) : null;
   // Revision prevents A → B → A from reviving a previous quote/agreement.
@@ -448,8 +474,8 @@ function NewScheduleForm({ orgId, workspaceId, contractsAvailable, onCancel, onC
     setSaving(true);
     setError(null);
     try {
-      await api.cloudAutomationCreate(input, orgId);
-      if (current()) onCreated();
+      const result = await api.cloudAutomationCreate(input, orgId);
+      if (current()) onCreated(input.webhookTrigger ? result.webhookSecret : undefined);
     } catch (e) {
       if (current()) setError(scheduleErrorMessage(errorCode(e)));
     } finally {
@@ -542,11 +568,13 @@ function NewScheduleForm({ orgId, workspaceId, contractsAvailable, onCancel, onC
       </fieldset>}
       <label>Trigger <select aria-label="Trigger" className={inputClass} value={form.triggerKind} onChange={(e) => update("triggerKind", e.target.value as AutomationForm["triggerKind"])}>
         <option value="timer">Schedule</option><option value="github">GitHub event</option>
+        {webhookAvailable && <option value="webhook">Webhook</option>}
       </select></label>
       {form.triggerKind === "github" && <>
         {repositoryError && <p role="alert">Could not read repositories. {repositoryError}</p>}
         <GithubTriggerEditor value={form.githubTrigger} repositories={repositories} onChange={(value) => update("githubTrigger", value)} />
       </>}
+      {webhookAvailable && form.triggerKind === "webhook" && <WebhookPayloadHint />}
       {form.triggerKind === "timer" && <><div className="flex flex-wrap items-center gap-2">
         <span className="font-medium">Runs</span>
         <Segmented aria-label="How often" value={form.preset} onChange={(value) => update("preset", value)} options={PRESETS} />
@@ -630,7 +658,7 @@ function NewScheduleForm({ orgId, workspaceId, contractsAvailable, onCancel, onC
         <p className="font-medium">What it costs</p>
         {held ? <p>{AUTOMATION_HOLD}</p> : quote ? (
           <ul className="text-muted-foreground">
-            {automationCostLines(quote.estimate, form.maxRunMinutes, form.workspaceMode === "fresh", form.triggerKind === "github").map((line) => (
+            {automationCostLines(quote.estimate, form.maxRunMinutes, form.workspaceMode === "fresh", form.triggerKind).map((line) => (
               <li key={line}>{line}</li>
             ))}
             {form.triggerKind === "timer" && quote.nextRunAt && <li>First run {whenText(quote.nextRunAt)} (your time).</li>}
