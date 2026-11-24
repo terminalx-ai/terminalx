@@ -124,6 +124,17 @@ async function checkActions(page, column, context) {
   assert.ok(await visible(menu), `${context}: session actions fit in the window`);
   await page.getByRole("menuitem", { name: "Open", exact: true }).waitFor();
   await page.keyboard.press("Escape");
+  await closed(page, await trigger.elementHandle());
+}
+
+/**
+ * Once a menu is closed: Radix gives focus back to its trigger from a timer after the menu unmounts. Until that timer
+ * has run, focus given to another control is taken back by it; on a busy Linux runner it ran in the middle of the
+ * search box's fill, the text went to the trigger and the search stayed empty ("search: card count 2 !== 1").
+ */
+async function closed(page, trigger) {
+  await page.getByRole("menu").waitFor({ state: "detached" });
+  await page.waitForFunction((element) => document.activeElement === element, trigger);
 }
 
 const server = await serve();
@@ -214,11 +225,15 @@ try {
       assert.equal(await cards(columns[3]).count(), 0);
       assert.ok(await visible(search), `${context}: search stays visible`);
       await page.getByRole("button", { name: "Clear search", exact: true }).click();
-      await page.getByRole("button", { name: "Filter", exact: true }).click();
+      // The same button is named "Filter, 1 on" once a filter is chosen.
+      const filter = await page.getByRole("button", { name: "Filter", exact: true }).elementHandle();
+      await filter.click();
       await page.getByRole("menu").scrollIntoViewIfNeeded();
       assert.ok(await visible(page.getByRole("menu")), `${context}: filter menu fits in the window`);
       await page.getByRole("menuitemcheckbox", { name: "Working", exact: true }).click();
       await page.keyboard.press("Escape");
+      // The keys below go to a card's menu: the filter menu's focus return must not take them.
+      await closed(page, filter);
       assert.equal(await cards(columns[0]).count(), 0);
       assert.equal(await cards(columns[1]).count(), count * 2);
       assert.equal(await cards(columns[2]).count(), 0);

@@ -118,6 +118,15 @@ try {
     await list.getByRole("button", { name: "Go to review thread src/slug.js:2-4 (head)", exact: true }).click();
     const card = page.locator('.diff-pane article[data-review-thread="t-open"]:visible');
     await card.waitFor();
+    // Focus is read as the row leaves it, before anything else is clicked: a click on "2 replies" focuses that button
+    // in WebKit on Linux (on macOS a clicked button takes no focus). The app focuses the card once its thread is
+    // mounted in the diff (DiffPane's thread-focus effect), which can be a frame after the card shows, so this waits
+    // up to two seconds of frames for that and reads false if it never comes.
+    const focused = await card.evaluate((node) => new Promise((resolve) => {
+      const until = performance.now() + 2000;
+      const look = () => (document.activeElement === node ? resolve(true) : performance.now() > until ? resolve(false) : requestAnimationFrame(look));
+      look();
+    }));
     await card.getByText("on GitHub · lines 2–4", { exact: true }).waitFor();
     await card.getByRole("button", { name: "2 replies", exact: true }).click();
     await card.getByText("Same pattern in invoices.ts.").waitFor();
@@ -129,8 +138,8 @@ try {
       const line = lines.find((el) => el.textContent.includes('.replace(/[^a-z0-9]+/g, "-")'));
       const next = lines.find((el) => el.textContent.includes(".replace(/^-+|-+$/g"));
       const l = line?.getBoundingClientRect(), n = next?.getBoundingClientRect();
-      return { inEditor: !!editor && box.left >= editor.left - 1 && box.right <= editor.right + 1, betweenLines: !!l && !!n && l.bottom <= box.top + 1 && box.bottom <= n.top + 1, focused: document.activeElement === node };
-    });
+      return { inEditor: !!editor && box.left >= editor.left - 1 && box.right <= editor.right + 1, betweenLines: !!l && !!n && l.bottom <= box.top + 1 && box.bottom <= n.top + 1 };
+    }).then((where) => ({ ...where, focused }));
     if (shots) await page.screenshot({ path: join(shots, `review-threads-inline-${mode}.png`) });
 
     // Resolve: GitHub's state, the inline badge, and the toast with View on GitHub.

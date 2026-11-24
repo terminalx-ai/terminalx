@@ -134,6 +134,10 @@ try {
       const row = page.locator('[data-setting-id="repositories.sparseCheckout"]');
       await row.waitFor();
       await page.waitForFunction(() => document.querySelector("[data-sparse-choice]")?.textContent === "2 of 19 folders");
+      // The Worktree folder row above this one comes 200 ms or more later (the files preview it shows waits that
+      // long), and moves this row down by its height (107 px at 1280). A click measured before it and given after
+      // hit that row instead, and no dialog opened (a busy Linux runner). Measured and clicked once it is there.
+      await page.getByText("Worktree folder", { exact: true }).waitFor();
       const rowText = await row.locator("[data-sparse-choice]").textContent();
       const rowFits = await row.evaluate((node) => node.scrollWidth <= node.clientWidth + 1);
       await row.getByRole("button", { name: "Choose folders…" }).click();

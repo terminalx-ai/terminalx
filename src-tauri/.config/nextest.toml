@@ -27,6 +27,8 @@ retries = 0
 slow-timeout = { period = "60s", terminate-after = 10 }
 failure-output = "immediate-final"
 final-status-level = "flaky"
+# Known flaky tests: none. The end of this file says how one is added.
+overrides = []
 
 [profile.ci.junit]
 # Written to target/nextest/ci/junit.xml, which the job uploads.
@@ -36,33 +38,10 @@ path = "junit.xml"
 # reported as flaky when it then passes (the job's summary names it). One test
 # by its exact name, with the ticket that will fix it on the line above; the
 # entry goes when the ticket closes. Nothing else may be set here.
-
-# PRO-513
-[[profile.ci.overrides]]
-filter = 'test(=machine_host::security_tests::a_caller_from_a_public_address_is_refused_under_every_listen_choice_unless_allowed)'
-retries = 2
-
-# PRO-513
-[[profile.ci.overrides]]
-filter = 'test(=pairing::tests::a_phone_starts_sessions_and_changes_settings_only_as_its_scope_allows)'
-retries = 2
-
-# PRO-513
-[[profile.ci.overrides]]
-filter = 'test(=pairing::tests::phone_router_child_fixture)'
-retries = 2
-
-# PRO-513
-[[profile.ci.overrides]]
-filter = 'test(=bots::calendar::tests::a_duty_deleted_mid_run_ends_its_run_then)'
-retries = 2
-
-# PRO-513
-[[profile.ci.overrides]]
-filter = 'test(=session::watch_tests::an_enter_the_cli_let_go_by_is_written_again_before_the_reader_is_told)'
-retries = 2
-
-# PRO-513
-[[profile.ci.overrides]]
-filter = 'test(=machine_host::security_tests::the_listen_choice_decides_what_is_bound_and_relay_only_opens_no_port)'
-retries = 2
+#
+# None now: PRO-513's were fixed at their cause. One is added at the end of
+# this file in the same four lines each had (its ticket, the
+# `[[profile.ci.overrides]]` header, the filter naming the one test, and how
+# many times it is run again), and the empty `overrides = []` in the `ci`
+# profile above is then taken out: TOML takes the list in one of the two forms,
+# not both.
