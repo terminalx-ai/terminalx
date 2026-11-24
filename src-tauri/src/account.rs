@@ -338,7 +338,8 @@ pub(crate) const PHASE2_FRESH_WORKSPACE: &str = "cloud.automations.fresh-workspa
 pub(crate) const PHASE2_GITHUB_TRIGGER: &str = "cloud.automations.github-trigger.v1";
 pub(crate) const PHASE2_WEBHOOK_TRIGGER: &str = "cloud.automations.webhook-trigger.v1";
 pub(crate) const PHASE2_WORKSPACE_GROUPS: &str = "cloud.workspace-groups.v1";
-const PHASE2_FEATURES: [&str; 12] = [
+pub(crate) const PHASE2_AFFECTED_WORKSPACES: &str = "cloud.agent-logins.affected-workspaces.v1";
+const PHASE2_FEATURES: [&str; 13] = [
     PHASE2_EVENTS, PHASE2_PRESENCE, PHASE2_FOLLOW_REASSIGN, PHASE2_RESTART_DETAILS,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_WEBHOOK_TRIGGER,
     "cloud.environment-info.v1",
@@ -346,6 +347,7 @@ const PHASE2_FEATURES: [&str; 12] = [
     "cloud.workspaces.start-recovery.v1",
     PHASE2_WORKSPACE_GROUPS,
     "cloud.workspaces.access-request-copy.v1",
+    PHASE2_AFFECTED_WORKSPACES,
 ];
 
 fn phase2_organizations(session: &DesktopSession) -> Option<&serde_json::Map<String, serde_json::Value>> {
