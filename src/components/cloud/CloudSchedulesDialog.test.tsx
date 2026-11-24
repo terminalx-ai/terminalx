@@ -512,7 +512,7 @@ async function githubForm() {
   fireEvent.click(await screen.findByRole("button", { name: /New scheduled task/ }));
   fireEvent.change(screen.getByLabelText("Name"), { target: { value: "PR review" } });
   fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "Review the changes." } });
-  fireEvent.change(screen.getByLabelText("Trigger"), { target: { value: "github" } });
+  fireEvent.click(screen.getByRole("radio", { name: "GitHub event" }));
   await screen.findByRole("option", { name: "acme/app" });
   fireEvent.change(screen.getByLabelText("GitHub repository"), { target: { value: "repository-row-7" } });
 }
@@ -554,8 +554,10 @@ describe("accepted raw cloud automations", () => {
     expect(mocks.detail).not.toHaveBeenCalled();
     expect(mocks.estimate).not.toHaveBeenCalled();
     expect(mocks.setActive.mock.calls.every((call) => call[1] === false)).toBe(true);
-    cleanup();
-    await githubForm();
+    cleanup(); open();
+    fireEvent.click(await screen.findByRole("button", { name: /New scheduled task/ }));
+    expect(screen.queryByRole("radio", { name: "GitHub event" })).toBeNull();
+    expect(mocks.repositories).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText("Workspace mode"), { target: { value: "fresh" } });
     await act(async () => { await vi.advanceTimersByTimeAsync(500); });
     expect(screen.getByTestId("cloud-schedule-cost").textContent).toContain("not enabled yet");
@@ -571,7 +573,7 @@ describe("accepted raw cloud automations", () => {
     await githubForm();
     expect(screen.queryByLabelText("Time")).toBeNull();
     expect(screen.queryByLabelText("A missed run")).toBeNull();
-    fireEvent.change(screen.getByLabelText("GitHub event"), { target: { value: "merged" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "GitHub event" }), { target: { value: "merged" } });
     for (let index = 1; index <= 5; index += 1) {
       fireEvent.click(screen.getByRole("button", { name: "Add filter" }));
       fireEvent.change(screen.getByLabelText(`Filter ${index} field`), { target: { value: index === 1 ? "baseBranch" : "label" } });
@@ -723,15 +725,16 @@ describe("automation React scope fences", () => {
   });
 
   it("discards a repository response from a previous organization scope", async () => {
+    scope.status.phase2Readiness = { "org-1": automationFeatures, "org-2": automationFeatures };
     const old = deferred<{ configured: boolean; repositories: CloudSelectedRepository[] }>();
     mocks.repositories.mockReturnValueOnce(old.promise).mockResolvedValue({ configured: true, repositories: [] });
     const view = open();
     fireEvent.click(await screen.findByRole("button", { name: /New scheduled task/ }));
-    fireEvent.change(screen.getByLabelText("Trigger"), { target: { value: "github" } });
+    fireEvent.click(screen.getByRole("radio", { name: "GitHub event" }));
     await waitFor(() => expect(mocks.repositories).toHaveBeenCalledWith("org-1"));
     view.rerender(<CloudSchedulesDialog orgId="org-2" workspaceId="ws-2" name="Two" onClose={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: /New scheduled task/ }));
-    fireEvent.change(screen.getByLabelText("Trigger"), { target: { value: "github" } });
+    fireEvent.click(screen.getByRole("radio", { name: "GitHub event" }));
     await act(async () => old.resolve({ configured: true, repositories: [selectedRepository({ fullName: "old/private" })] }));
     expect(screen.queryByRole("option", { name: "old/private" })).toBeNull();
     expect(mocks.repositories).toHaveBeenLastCalledWith("org-2");
@@ -766,7 +769,7 @@ describe("automation hold and selected repository refusals", () => {
     mocks.repositories.mockResolvedValue({ configured: true, repositories: [selectedRepository({ id: null })] });
     open();
     fireEvent.click(await screen.findByRole("button", { name: /New scheduled task/ }));
-    fireEvent.change(screen.getByLabelText("Trigger"), { target: { value: "github" } });
+    fireEvent.click(screen.getByRole("radio", { name: "GitHub event" }));
     const option = await screen.findByRole("option", { name: "acme/app (repository ID unavailable)" });
     expect((option as HTMLOptionElement).disabled).toBe(true);
     expect(screen.getByRole("status").textContent).toContain("accessible repository with a repository ID");
@@ -815,8 +818,10 @@ describe("webhook automations", () => {
     open();
     expect(within(await row()).queryByRole("button", { name: "Show webhook details" })).toBeNull();
     await fillForm();
-    const trigger = within(screen.getByLabelText("Trigger"));
-    expect(trigger.getAllByRole("option").map((option) => option.textContent)).toEqual(["Schedule", "GitHub event"]);
+    const trigger = within(screen.getByRole("radiogroup", { name: "Trigger" }));
+    expect(trigger.getByRole("radio", { name: "Schedule" })).toBeTruthy();
+    expect(!!trigger.queryByRole("radio", { name: "GitHub event" })).toBe(contracts);
+    expect(trigger.queryByRole("radio", { name: "Webhook" })).toBeNull();
     expect(screen.queryByText("{{payload.*}}")).toBeNull();
     expect(mocks.estimate.mock.calls.every(([input]) => input.schedule && !input.webhookTrigger)).toBe(true);
   });
@@ -831,7 +836,7 @@ describe("webhook automations", () => {
     });
     open();
     await fillForm();
-    fireEvent.change(screen.getByLabelText("Trigger"), { target: { value: "webhook" } });
+    fireEvent.click(screen.getByRole("radio", { name: "Webhook" }));
     expect(screen.getByText("{{payload.*}}")).toBeTruthy();
     const consent = screen.getByRole("checkbox", { name: /I understand this task starts/ });
     await waitFor(() => expect((consent as HTMLInputElement).disabled).toBe(false));

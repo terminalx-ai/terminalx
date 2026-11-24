@@ -31,6 +31,7 @@ import { featureFlags, useFeatureFlag } from "@/lib/featureFlags";
 import { managesOrganization } from "@/lib/multiOrg";
 import { WebhookSecretDialog, WebhookDetails, WebhookPayloadHint } from "./WebhookDetails";
 import { GithubTriggerEditor } from "./GithubTriggerEditor";
+import { CloudAutomationTriggerPicker } from "./CloudAutomationTriggerPicker";
 import { retireAutomationTargetScope, useAutomationFence, useAutomationScope } from "./CloudAutomationScope";
 import { openCloudSession } from "@/lib/cloudDashboard";
 import { cloudSessionKey, cloudWorkspaceKey } from "@/types/target";
@@ -395,7 +396,7 @@ function NewScheduleForm({ orgId, workspaceId, freshAvailable, githubAvailable, 
   const [repositoryError, setRepositoryError] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   useEffect(() => {
-    if (form.triggerKind !== "github") return;
+    if (form.triggerKind !== "github" || !githubAvailable) return;
     const current = capture();
     let stale = false;
     setRepositories([]);
@@ -404,7 +405,7 @@ function NewScheduleForm({ orgId, workspaceId, freshAvailable, githubAvailable, 
       if (current() && !stale) setRepositories(answer.repositories);
     }, (error: unknown) => { if (current() && !stale) setRepositoryError(scheduleErrorMessage(errorCode(error))); });
     return () => { stale = true; };
-  }, [orgId, form.triggerKind, capture]);
+  }, [orgId, form.triggerKind, githubAvailable, capture]);
   const textProps = usePromptTextProps();
   const [touched, setTouched] = useState(false);
   // The settings whose cost was agreed to, not a bare tick: an agreement
@@ -574,11 +575,13 @@ function NewScheduleForm({ orgId, workspaceId, freshAvailable, githubAvailable, 
         <label><input type="checkbox" checked={form.archiveOnPrMerge} onChange={(e) => update("archiveOnPrMerge", e.target.checked)} /> Archive when the PR merges</label>
         {errors.cleanup && <p role="status">{errors.cleanup}</p>}
       </fieldset>}
-      <label>Trigger <select aria-label="Trigger" className={inputClass} value={form.triggerKind} onChange={(e) => update("triggerKind", e.target.value as AutomationForm["triggerKind"])}>
-        <option value="timer">Schedule</option><option value="github">GitHub event</option>
-        {webhookAvailable && <option value="webhook">Webhook</option>}
-      </select></label>
-      {form.triggerKind === "github" && <>
+      <CloudAutomationTriggerPicker
+        value={form.triggerKind}
+        onChange={(kind) => update("triggerKind", kind)}
+        githubAvailable={githubAvailable}
+        webhookAvailable={webhookAvailable}
+      />
+      {form.triggerKind === "github" && githubAvailable && <>
         {repositoryError && <p role="alert">Could not read repositories. {repositoryError}</p>}
         <GithubTriggerEditor value={form.githubTrigger} repositories={repositories} onChange={(value) => update("githubTrigger", value)} />
       </>}
