@@ -1,3 +1,4 @@
+import { thisComputer } from "@/lib/platform";
 import { useEffect, useState, type FormEvent } from "react";
 import { ArrowRight, BookOpen, FileText, Hourglass, Loader2, Square, TriangleAlert } from "@/icons";
 import { MachineHostError } from "@/components/machines/MachineHostError";
@@ -268,7 +269,7 @@ export function TeamBriefEditor() {
         value={text}
         disabled={!brief || !!brief.unreadable}
         onChange={(event) => { if (draft === null && brief) setBase(brief.hash); setDraft(event.target.value); setSaved(false); }}
-        placeholder={"- Ask me before anything leaves this Mac.\n- Status updates go in a table."}
+        placeholder={`- Ask me before anything leaves ${thisComputer}.\n- Status updates go in a table.`}
         aria-label="Team brief text"
         rows={12}
         className="min-h-[200px] w-full max-w-[760px] min-w-0 flex-1 resize-y rounded-md border border-border bg-transparent px-3 py-2 font-mono text-[12.5px] leading-relaxed text-foreground outline-none focus:border-ring"

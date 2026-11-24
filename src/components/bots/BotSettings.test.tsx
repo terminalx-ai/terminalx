@@ -177,9 +177,9 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
     const page = await open([bot("b1", "Sentry", { runsOn: "cloud:org-1:ws-1" })], "b1");
     expect(page.getByTestId("bot-runs-on-cloud").getAttribute("aria-checked")).toBe("true");
     expect((page.getByTestId("bot-runs-on-machine") as HTMLButtonElement).disabled).toBe(true);
-    expect(page.getByTestId("bot-runs-on-elsewhere").textContent).toContain("bring it back to this Mac first");
+    expect(page.getByTestId("bot-runs-on-elsewhere").textContent).toContain("bring it back to this computer first");
     fireEvent.click(page.getByTestId("bot-runs-on-this-mac"));
-    expect((await screen.findByTestId("bot-bring-back")).textContent).toContain("Bring Sentry back to this Mac?");
+    expect((await screen.findByTestId("bot-bring-back")).textContent).toContain("Bring Sentry back to this computer?");
   });
 
   it("a failed save says why", async () => {

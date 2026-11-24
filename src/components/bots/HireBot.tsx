@@ -1,3 +1,4 @@
+import { ThisComputer } from "@/lib/platform";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { MachineHostError } from "@/components/machines/MachineHostError";
 import { Check, ChevronDown, ChevronRight, Cpu, Laptop, Loader2, MessageSquare, Search, Shield, Sparkles, Users, Waypoints } from "@/icons";
@@ -274,7 +275,7 @@ function HireForm({ role }: { role: BotRoleTemplate }) {
         </div>
         <dl className="divide-y divide-hairline border-t border-hairline px-3">
           <Default icon={<Cpu />} label="Agent and model" value={`${agent} · its default model`} />
-          <Default icon={<Laptop />} label="Runs on" value="This Mac" />
+          <Default icon={<Laptop />} label="Runs on" value={ThisComputer} />
           <Default icon={<Shield />} label="Access" value={accessLabel("full")} />
           <Default icon={<Users />} label="Reports to" value="You" />
           {/* What the store gives every new bot (src-tauri bots `create`): it works for you alone. */}
