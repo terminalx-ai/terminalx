@@ -1,0 +1,43 @@
+# 25.04 Codex: sign in with ChatGPT, from choosing how to connected, and cancelling.
+appId: com.terminalx.phone.fixture
+name: Agent logins, Codex sign-in (25.04)
+---
+- runFlow: flow-25.04-00-theme.yaml
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins?orgId=org-acme", fixtureLogins: none, fixtureCodex: pending }
+- extendedWaitUntil: { visible: "Codex, Not connected.*", timeout: 20000 }
+- tapOn: "Codex, Not connected.*"
+- extendedWaitUntil: { visible: "How Codex signs in on Acme’s cloud workspaces.", timeout: 10000 }
+- tapOn: "I am an organization admin.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-05-choose-and-authorize
+- tapOn: "Get a sign-in code"
+- extendedWaitUntil: { visible: "Copy code", timeout: 10000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-07-the-code
+- tapOn: "Copy code"
+- tapOn: "Open sign-in page"
+- waitForAnimationToEnd
+- tapOn: "Done"
+- extendedWaitUntil: { visible: "Waiting for approval.*", timeout: 10000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-08-waiting
+- tapOn: "Cancel sign-in"
+- extendedWaitUntil: { visible: "Cancel this sign-in?", timeout: 5000 }
+- takeScreenshot: 25.04-10-cancel-asks-first
+- tapOn: { text: "Cancel sign-in", index: 0 }
+- extendedWaitUntil: { visible: "Sign-in canceled. Nothing was saved.", timeout: 10000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-11-canceled
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins/codex-sign-in?orgId=org-acme&authorized=1", fixtureCodex: hold }
+- extendedWaitUntil: { visible: "Getting a code from OpenAI…", timeout: 20000 }
+- takeScreenshot: 25.04-06-asking-for-a-code
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins/codex-sign-in?orgId=org-acme&authorized=1", fixtureCodex: complete }
+- extendedWaitUntil: { visible: "Codex connected as alex@example.com.", timeout: 30000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-09-connected
