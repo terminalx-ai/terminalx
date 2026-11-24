@@ -41,7 +41,7 @@ export default function DeleteWorkspaceScreen() {
   // One request at a time, also between a tap and the render that locks the buttons.
   const inFlight = useRef(false);
 
-  const screen = <Stack.Screen options={{ title: DELETE.pageTitle, headerLargeTitle: false }} />;
+  const screen = <Stack.Screen options={{ title: DELETE.pageTitle, headerLargeTitle: false, headerBackButtonDisplayMode: "minimal" }} />;
   if (!catalog) return <View style={[styles.page, { backgroundColor: palette.page }]}>{screen}<EmptyState title={DELETE.unavailable} detail={DELETE.unavailableDetail} /></View>;
   if (!workspace || !orgId || !workspaceId) {
     const closed = access === "deleted" || access === "gone" || access === "not-shared" ? accessText(access) : null;

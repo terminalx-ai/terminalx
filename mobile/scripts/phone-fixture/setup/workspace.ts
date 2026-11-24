@@ -50,7 +50,7 @@ function workspace(id: string, name: string, state: string, fields: Record<strin
     you: { role: "manager", canApprove: true, canManageShares: true }, sharedWith: 0, createdBy: "fixture", lastActivityAt: now,
     runtimeActivity: state === "ready" ? { online: true, activeTurns: 0, pendingApprovals: 0, reportedAt: now, stale: false } : null,
     repositories: [{ identity: "acme/app", fullName: "acme/app", primary: true }],
-    launch: { workBranch: "checkout-redesign", sessionId: `${id}-session`, tabId: `${id}-tab`, phase: state === "ready" ? "ready" : null },
+    launch: { workBranch: name.toLowerCase().replace(/\s+/g, "-"), sessionId: `${id}-session`, tabId: `${id}-tab`, phase: state === "ready" ? "ready" : null },
     ...fields,
   };
 }
