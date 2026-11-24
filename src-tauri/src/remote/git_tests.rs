@@ -253,16 +253,18 @@ fn guarded_commit_hooks_see_the_named_branch_and_branch_specific_config() {
     git(&checkout, &["config", "includeIf.onbranch:main.path", "branch.conf"]);
     std::fs::write(checkout.join(".git/branch.conf"), "[user]\n\tsigningKey = branch-specific\n").unwrap();
     let hook = checkout.join(".git/hooks/pre-commit");
-    std::fs::write(&hook, concat!(
+    write_executable(&hook, concat!(
         "#!/bin/sh\nset -eu\n",
         "test \"$(git branch --show-current)\" = main\n",
         "test \"$(git config --show-scope --get user.signingKey)\" = \"$(printf 'local\\tbranch-specific')\"\n",
         "test \"$(git rev-parse refs/remotes/origin/main)\" = \"$(git rev-parse HEAD)\"\n",
-    )).unwrap();
+        "touch .git/pre-commit-ran\n",
+    ));
     std::fs::write(checkout.join("draft"), "work\n").unwrap();
     let params = json!({ "repo": "app", "message": "work", "author": me(), "expectedBranch": "main", "expectedHead": head });
     let result = f.call("git.commitForPush", params).unwrap();
     assert_eq!(result["branch"], "main");
+    assert!(checkout.join(".git/pre-commit-ran").is_file());
     assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), result["commit"]);
     assert_eq!(git(&checkout, &["status", "--porcelain"]), "");
 }
@@ -288,13 +290,13 @@ fn guarded_commit_requires_checkout_path_signing_in_a_linked_worktree() {
         assert_eq!(signing.stdout, b"local\ttrue\n", "{condition}");
 
         let hook = project.join(".git/hooks/pre-commit");
-        std::fs::write(&hook, concat!(
+        write_executable(&hook, concat!(
             "#!/bin/sh\nset -eu\n",
             "test \"$(git config --show-scope --get commit.gpgSign)\" = 'local\ttrue'\n",
             "test \"$(git config --show-scope --get user.signingKey)\" = 'worktree\ttopic-key'\n",
-        )).unwrap();
+        ));
         let signer = checkout.join("fail-signing");
-        std::fs::write(&signer, "#!/bin/sh\nprintf '%s\\n' \"$@\" > signing-attempt\nexit 1\n").unwrap();
+        write_executable(&signer, "#!/bin/sh\nprintf '%s\\n' \"$@\" > signing-attempt\nexit 1\n");
 
         std::fs::write(checkout.join("staged"), "staged\n").unwrap();
         git(&checkout, &["add", "staged"]);
@@ -364,7 +366,7 @@ fn guarded_commit_preserves_local_and_linked_worktree_config_scopes() {
     let destination_hooks = other.join(".git/destination-hooks");
     std::fs::create_dir(&destination_hooks).unwrap();
     let destination_hook = destination_hooks.join("commit-msg");
-    std::fs::write(&destination_hook, "#!/bin/sh\nprintf 'destination hook ran\\n' > hook-ran\n").unwrap();
+    write_executable(&destination_hook, "#!/bin/sh\nprintf 'destination hook ran\\n' > hook-ran\n");
     let runtime = WorkspaceGit::for_project(project.clone(), Arc::new(WorkspaceFiles::new(project.clone())));
     let head = git(&checkout, &["rev-parse", "HEAD"]);
     git(&project, &["config", "--local", "extensions.worktreeConfig", "true"]);
@@ -382,7 +384,7 @@ fn guarded_commit_preserves_local_and_linked_worktree_config_scopes() {
     std::fs::create_dir(&hooks).unwrap();
     git(&checkout, &["config", "--worktree", "core.hooksPath", "../../../configured hooks"]);
     let hook = hooks.join("pre-commit");
-    std::fs::write(&hook, concat!(
+    write_executable(&hook, concat!(
         "#!/bin/sh\nset -eu\n",
         "test \"$(git config --show-scope --get-all terminalx.scopeTest)\" = ",
         "\"$(printf 'local\\tfrom-local\\nworktree\\tfrom-worktree')\"\n",
@@ -400,7 +402,7 @@ fn guarded_commit_preserves_local_and_linked_worktree_config_scopes() {
         "\"$(printf 'local\\t/terminalx-test/destination')\"\n",
         "git -C ../../../other -c commit.gpgsign=false commit --allow-empty -qm 'check destination hook'\n",
         "printf 'hook ran\\n' > hook-ran\n",
-    )).unwrap();
+    ));
 
     std::fs::write(checkout.join("draft"), "work\n").unwrap();
     let params = json!({
@@ -431,11 +433,11 @@ fn guarded_commit_uses_hooks_selected_by_the_real_git_directory() {
     let hooks = checkout.join(".git/checkout-hooks");
     std::fs::create_dir(&hooks).unwrap();
     let hook = hooks.join("pre-commit");
-    std::fs::write(&hook, concat!(
+    write_executable(&hook, concat!(
         "#!/bin/sh\nset -eu\n",
         "test \"$(git config --show-scope --get core.hooksPath | cut -f1)\" = local\n",
         "printf 'checkout hook ran\\n' > hook-ran\n",
-    )).unwrap();
+    ));
 
     std::fs::write(checkout.join("draft"), "work\n").unwrap();
     let params = json!({ "repo": "app", "message": "work", "author": me(), "expectedBranch": "main", "expectedHead": head });
@@ -453,10 +455,10 @@ fn switching_the_real_head_during_commit_preparation_updates_neither_branch() {
     git(&checkout, &["branch", "other"]);
     std::fs::write(checkout.join("draft"), "work\n").unwrap();
     let hook = checkout.join(".git/hooks/pre-commit");
-    std::fs::write(&hook, concat!(
+    write_executable(&hook, concat!(
         "#!/bin/sh\n",
         "env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git symbolic-ref HEAD refs/heads/other\n",
-    )).unwrap();
+    ));
     let params = json!({ "repo": "app", "message": "work", "author": me(), "expectedBranch": "main", "expectedHead": head });
     assert_eq!(f.code("git.commitForPush", params), "conflict");
     assert_eq!(git(&checkout, &["branch", "--show-current"]), "other");
