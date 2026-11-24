@@ -30,11 +30,15 @@ describe("the spend confirmation", () => {
 
 describe("prices", () => {
   it("puts the provider's own billing line before the estimate note", () => {
-    expect(billingNote({ billing: "Per second, billed by Boat" }, "USD")).toBe("Per second, billed by Boat. Prices are estimates, in US dollars.");
-    expect(billingNote({ billing: "Billed by TerminalX." }, "USD")).toBe("Billed by TerminalX. Prices are estimates, in US dollars.");
+    expect(billingNote({ billing: "Per second, billed by Boat", billedByProvider: true }, "USD")).toBe("Per second, billed by Boat. Prices are estimates, in US dollars.");
     expect(sizeSheetNote("Boat", "USD")).toBe("Boat · prices are estimates, in US dollars");
-    expect(billingNote({ billing: "Billed by Example" }, "EUR")).toBe("Billed by Example. Prices are estimates, in euros.");
-    expect(billingNote({ billing: "Billed by Example" }, "XTS")).toMatch(/^Billed by Example\. Prices are estimates, in /);
+    expect(billingNote({ billing: "Billed by Example", billedByProvider: true }, "EUR")).toBe("Billed by Example. Prices are estimates, in euros.");
+    expect(billingNote({ billing: "Billed by Example", billedByProvider: true }, "XTS")).toMatch(/^Billed by Example\. Prices are estimates, in /);
+  });
+
+  it("names no currency when TerminalX bills, as the board's TerminalX Cloud review says it", () => {
+    expect(billingNote({ billing: "Billed by TerminalX.", billedByProvider: false }, "USD")).toBe("Billed by TerminalX. Prices are estimates.");
+    expect(billingNote({ billing: "Billed by TerminalX", billedByProvider: false }, "EUR")).toBe("Billed by TerminalX. Prices are estimates.");
   });
 
   it("says what a different new price was", () => {

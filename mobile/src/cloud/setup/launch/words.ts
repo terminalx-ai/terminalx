@@ -89,11 +89,17 @@ export function sizeSheetNote(providerLabel: string, currency: string): string {
   return `${providerLabel} · prices are estimates, in ${currencyWords(currency)}`;
 }
 
-/** The provider's own billing line from its descriptor, then that prices are estimates: the note before the countdown. */
-export function billingNote(descriptor: Pick<CloudProviderDescriptor, "billing">, currency: string): string {
+/**
+ * The provider's own billing line from its descriptor, then that prices are
+ * estimates: the note before the countdown. A provider that bills directly
+ * bills in its own money, so the note says which currency the estimate is
+ * in; TerminalX's own bill needs no such word (25.05: "Billed by TerminalX.
+ * Prices are estimates.").
+ */
+export function billingNote(descriptor: Pick<CloudProviderDescriptor, "billing" | "billedByProvider">, currency: string): string {
   const billing = descriptor.billing.trim();
   const said = billing ? `${billing}${/[.!?]$/.test(billing) ? "" : "."} ` : "";
-  return `${said}Prices are estimates, in ${currencyWords(currency)}.`;
+  return descriptor.billedByProvider ? `${said}Prices are estimates, in ${currencyWords(currency)}.` : `${said}Prices are estimates.`;
 }
 
 /**

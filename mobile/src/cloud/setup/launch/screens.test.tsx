@@ -382,7 +382,7 @@ describe("Review, and the spend confirmation", () => {
     const api = server();
     await priced(api, TX);
     await page.show(<LaunchReviewScreen />);
-    expect(page.byId("price-holds")?.textContent).toBe("Billed by TerminalX. Prices are estimates, in US dollars. This price holds for 4:38.");
+    expect(page.byId("price-holds")?.textContent).toBe("Billed by TerminalX. Prices are estimates. This price holds for 4:38.");
     await page.press(button("Launch workspace"));
     expect(spend()[1]).toBe("TerminalX bills this workspace to Northwind: about $0.018 for each hour it is active.");
   });

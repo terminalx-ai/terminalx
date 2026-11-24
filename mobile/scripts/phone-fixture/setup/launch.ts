@@ -8,8 +8,8 @@ import type { SetupHandler } from "./types";
  *
  * | fixtureLaunch | What the server answers |
  * | --- | --- |
- * | `boat` | Boat alone, with Codex, Claude Code and GitHub logins; every check passes |
- * | `agent37` | Agent37 and Boat: Provider shows, Region is a picker |
+ * | `boat` | Boat, then Agent37, with Codex, Claude Code and GitHub logins; every check passes |
+ * | `agent37` | Agent37, then Boat: Region is a picker |
  * | `tx` | TerminalX Cloud alone, which TerminalX bills |
  * | `reading` | What Boat offers is never answered |
  * | `connect` | No provider connected |
@@ -41,9 +41,12 @@ function provider(id: string, label: string, icon: string, billing: string, bill
   };
 }
 
+const boat = () => provider("box", "Boat", "ship", "Per second, billed by Boat", true, "available", "automatic");
+const agent37 = () => provider("agent37", "Agent37", "server", "Hourly, billed by Agent37", true, "available", "required");
+// The board draws Provider on the Boat forms too, so two can launch there: Boat first, which the form starts on.
 const PROVIDERS: Record<string, ReturnType<typeof provider>[]> = {
-  boat: [provider("box", "Boat", "ship", "Per second, billed by Boat", true, "available", "automatic")],
-  agent37: [provider("agent37", "Agent37", "server", "Hourly, billed by Agent37", true, "available", "required"), provider("box", "Boat", "ship", "Per second, billed by Boat", true, "available", "automatic")],
+  boat: [boat(), agent37()],
+  agent37: [agent37(), boat()],
   tx: [provider("terminalx-cloud", "TerminalX Cloud", "cloud", "Billed by TerminalX", false, "available", "automatic")],
   connect: [provider("box", "Boat", "ship", "Per second, billed by Boat", true, "not-connected", "automatic")],
   paused: [provider("box", "Boat", "ship", "Per second, billed by Boat", true, "disabled-for-create", "automatic")],
