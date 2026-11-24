@@ -546,24 +546,29 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      # The build says where the test binary is, and a pull request runs that
+      # binary itself. Another `cargo test` would compile the crate again (11 to
+      # 23 minutes): `tauri::generate_context!` writes the app's compressed
+      # assets into the crate's build output while the crate compiles, so they
+      # are newer than that build and cargo calls the crate dirty ("the file
+      # target/debug/build/raccoon-…/out/… has changed, 17s after last build",
+      # CARGO_LOG=cargo::core::compiler::fingerprint=info on #1528's run).
       - name: build the library's tests by themselves
         id: build
         if: ${{ !cancelled() && steps.helper.outcome == 'success' }}
         working-directory: src-tauri
-        run: cargo test --locked --lib --no-run
+        run: |
+          cargo test --locked --lib --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/build.jsonl"
+          binary=$(jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null) | .executable' "$RUNNER_TEMP/build.jsonl" | tail -n 1)
+          test -x "$binary"
+          echo "binary=$binary" >> "$GITHUB_OUTPUT"
 
-      # For one run only, to be taken out again: why cargo builds the crate a
-      # second time after the step above (11 min 9 s on #1518's second run).
-      - name: Say why the crate is built again
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        working-directory: src-tauri
-        env:
-          CARGO_LOG: cargo::core::compiler::fingerprint=info
-        run: cargo test --locked --lib --no-run -v 2>&1 | { grep -aE 'Dirty|dirty|stale|fingerprint error|changed|Compiling raccoon|Fresh raccoon|Finished' || echo "cargo said nothing was dirty"; }
       - name: cargo test (a pull request, the Apple-only and system-dependent modules)
         if: ${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'pull_request' }}
         working-directory: src-tauri
-        run: cargo test --locked --lib -- $(python3 ../infra/ci-runners/macos-rust.py --filters)
+        env:
+          BINARY: ${{ steps.build.outputs.binary }}
+        run: '"$BINARY" $(python3 ../infra/ci-runners/macos-rust.py --filters)'
 
       - name: cargo test (main, nightly and manual runs, the full macOS suite)
         if: ${{ !cancelled() && steps.build.outcome == 'success' && github.event_name != 'pull_request' }}
