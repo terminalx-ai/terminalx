@@ -51,7 +51,8 @@ const stripTab = (page, name) => strip(page).getByRole("tab", { name, exact: tru
 
 /** Open a file the way a reader does: Open file (⌘P), its name, Enter. */
 async function quickOpen(page, query) {
-  await page.keyboard.press("ControlOrMeta+p");
+  // ⌘ is "Meta" on every host: the page is a Mac's, and "ControlOrMeta" is Ctrl on a Linux host (harness.mjs).
+  await page.keyboard.press("Meta+p");
   const field = page.getByRole("textbox", { name: "Search files" });
   await field.waitFor();
   await field.fill(query);
@@ -164,7 +165,7 @@ try {
     await page.keyboard.type("x");
     await strip(page).locator('[aria-label="Unsaved"]').waitFor();
     const dirty = await stripTabs(page);
-    await page.keyboard.press("ControlOrMeta+z");
+    await page.keyboard.press("Meta+z");
     await strip(page).locator('[aria-label="Unsaved"]').waitFor({ state: "detached" });
 
     // A middle click closes a file tab; the chat tab and the other file stay.
