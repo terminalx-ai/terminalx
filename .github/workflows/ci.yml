@@ -149,8 +149,9 @@ jobs:
         run: pnpm install --frozen-lockfile
       # The hosted image's published software list names no zsh, so it is
       # installed: once, with retries and a time limit.
+      # No limit of its own: the job's bounds it (a slow mirror trips neither the
+      # stall option nor a retry).
       - name: Install shells used by the tests
-        timeout-minutes: 5
         run: sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y zsh && command -v zsh
       - name: vitest
         run: pnpm vitest run --shard=${{ matrix.part }}/4
@@ -686,8 +687,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      # No limit of its own: the job's bounds it (a slow mirror trips neither the
+      # stall option nor a retry).
       - name: Install the tools the tests run
-        timeout-minutes: 5
         run: sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y zsh ripgrep
       - name: Show the Rust toolchain
         id: toolchain

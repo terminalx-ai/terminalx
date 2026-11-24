@@ -261,8 +261,9 @@ def validate(workflow):
 def validate_webkit_linux(workflow, required):
     """The Linux WebKit run: the same policy, every check in one part, and no say in what merges."""
     validate_common(workflow)
-    assert set(workflow["on"]) == {"pull_request", "workflow_dispatch"}, "unexpected trigger"
-    assert workflow["on"]["pull_request"] == "", "it runs for a pull request based on any branch"
+    assert set(workflow["on"]) == {"pull_request", "schedule", "workflow_dispatch"}, "unexpected trigger"
+    # Not on every pull request: only one that changes the checks or the trial itself, whatever its base branch.
+    assert workflow["on"]["pull_request"] == {"paths": ["scripts/webkit/**", ".github/workflows/webkit-linux.yml"]}, "a pull request that changes the checks or the trial, based on any branch"
     assert not set(workflow["jobs"]) & set(required), "a job that would report under a required status's name"
     for name, job in workflow["jobs"].items():
         assert job["runs-on"] == "ubuntu-latest", "hosted Linux only"
@@ -617,6 +618,11 @@ class WebKitOnLinux(unittest.TestCase):
     def test_branch_filter_is_rejected(self):
         # It must also run for a pull request based on another pull request's branch.
         self.rejects(lambda w: w["on"].update(pull_request={"branches": ["main"]}))
+
+    def test_running_on_every_pull_request_is_rejected(self):
+        # On every pull request it queues four jobs beside the required ones, for a result nobody is held to.
+        self.rejects(lambda w: w["on"].update(pull_request=""))
+        self.rejects(lambda w: w["on"]["pull_request"]["paths"].append("src/**"))
 
     def test_missing_or_narrowed_part_is_rejected(self):
         self.rejects(lambda w: self.job(w)["strategy"]["matrix"]["part"].pop())
