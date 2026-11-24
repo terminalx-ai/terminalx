@@ -1,0 +1,39 @@
+# 25.04 A key or token: empty, checking, failed the check, check could not run, GitHub.
+appId: com.terminalx.phone.fixture
+name: Agent logins, a key or token (25.04)
+---
+- runFlow: flow-25.04-00-theme.yaml
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins/claude?orgId=org-acme", fixtureLoginsSave: hold }
+- extendedWaitUntil: { visible: "How Claude Code signs in on Acme’s cloud workspaces.", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-16-claude-empty
+- runFlow: flow-25.04-01-fill.yaml
+- tapOn: "Save"
+- extendedWaitUntil: { visible: "Checking the key…", timeout: 5000 }
+- takeScreenshot: 25.04-17-checking
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins/claude?orgId=org-acme", fixtureLoginsSave: invalid }
+- extendedWaitUntil: { visible: "How Claude Code signs in on Acme’s cloud workspaces.", timeout: 20000 }
+- runFlow: flow-25.04-01-fill.yaml
+- tapOn: "Save"
+- extendedWaitUntil: { visible: "The Claude Code credential failed verification.*", timeout: 10000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-18-failed-the-check
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins/claude?orgId=org-acme", fixtureLoginsSave: unavailable }
+- extendedWaitUntil: { visible: "How Claude Code signs in on Acme’s cloud workspaces.", timeout: 20000 }
+- runFlow: flow-25.04-01-fill.yaml
+- tapOn: "Save"
+- extendedWaitUntil: { visible: "Verification is temporarily unavailable.*", timeout: 10000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-19-check-could-not-run
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins/github?orgId=org-acme" }
+- extendedWaitUntil: { visible: "What clones private repositories into Acme’s cloud workspaces.", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-20-github

@@ -1,0 +1,16 @@
+# The 25.04 boards' theme for this capture: Ember when dark, Den (the app's own default) when light.
+# capture.sh's APPEARANCE reaches Maestro as MAESTRO_APPEARANCE when it is exported with that name.
+appId: com.terminalx.phone.fixture
+name: Theme for 25.04
+---
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected }
+- runFlow:
+    when:
+      true: ${typeof MAESTRO_APPEARANCE != 'undefined' && MAESTRO_APPEARANCE == 'dark'}
+    commands:
+      - tapOn: "Settings"
+      - scrollUntilVisible:
+          element: "Ember theme"
+      - tapOn: "Ember theme"
