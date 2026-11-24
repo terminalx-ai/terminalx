@@ -6,6 +6,8 @@
 // not General; once an organisation manages it, it is a card whose switch
 // reads as on and locked, not greyed out.
 //
+// PRO-305: the held display-name editor, save mark and team toast.
+//
 // Set ACCOUNT_SETTINGS_SHOTS to a directory to also save a picture of each case.
 //
 //   pnpm build && npx playwright install webkit && node scripts/webkit/account-settings.mjs
@@ -17,6 +19,7 @@ const shots = process.env.ACCOUNT_SETTINGS_SHOTS;
 if (shots) await mkdir(shots, { recursive: true });
 const cases = [
   { name: "account", section: "Account", privacy: { enabled: false, managed: false } },
+  { name: "account-display-name", section: "Account", privacy: { enabled: false, managed: false } },
   { name: "account-managed-privacy", section: "Account", privacy: { enabled: true, managed: true } },
   { name: "general", section: "General", privacy: { enabled: false, managed: false } },
 ];
@@ -32,6 +35,12 @@ try {
           (() => {
             const answers = window.__PW_STUB__.answers;
             answers.data_privacy_status = ${JSON.stringify(privacy)};
+            answers.phase2_desktop_contracts_available = ${name === "account-display-name"};
+            answers.account_status.context.account = "mock-account";
+            answers.account_update_display_name = ({ name }) => {
+              answers.account_status = { ...answers.account_status, identity: { ...answers.account_status.identity, name } };
+              return answers.account_status;
+            };
             answers.machine_name = { name: "Alex’s MacBook Pro", chosen: false, computerName: "Alex’s MacBook Pro" };
             answers.pairing_status = { relay: { phase: "off", message: null, attempt: 0 }, host: null, devices: [], activePairing: null, lastError: null };
             answers.work_status_settings = { shareWithTeam: true };
@@ -47,6 +56,7 @@ try {
         await settings.getByRole("switch", { name: "Data privacy mode" }).waitFor();
         if (!privacy.enabled) await page.waitForFunction(() => document.querySelector("[data-testid=machine-name]")?.value === "Alex’s MacBook Pro");
       }
+      if (name === "account-display-name") await settings.getByRole("button", { name: "Edit name" }).waitFor();
       // Settings opens with a fade; spinners (infinite animations) never settle and are not waited for.
       await page.waitForFunction(() => document.getAnimations().every((animation) => animation.playState !== "running" || animation.effect?.getComputedTiming().iterations === Infinity));
       const layout = await settings.evaluate((root) => {
@@ -102,7 +112,27 @@ try {
         checks["no organization setup on Account"] = !layout.text.includes("Organization setup") && !layout.text.includes("Create or switch organization");
         checks["data privacy mode is an Account row"] = layout.privacySwitch?.checked === "false" && !layout.privacySwitch.disabled;
       }
+      checks["Edit name is visible only with the gate on"] = await settings.getByRole("button", { name: "Edit name" }).count() === Number(name === "account-display-name");
       failed += report(`${mode}, 1440px, ${name}`, checks, layout);
+      if (name === "account-display-name") {
+        const identity = settings.getByTestId("account-identity");
+        const edit = identity.getByRole("button", { name: "Edit name" });
+        const original = identity.getByText("Alex Kim", { exact: true });
+        const [nameBox, editBox] = await Promise.all([original.boundingBox(), edit.boundingBox()]);
+        await edit.click();
+        const input = settings.getByRole("textbox", { name: "Display name" });
+        await input.fill("Jordan Lee");
+        await settings.getByRole("button", { name: "Save", exact: true }).click();
+        await identity.getByText("Jordan Lee", { exact: true }).waitFor();
+        const toast = page.getByRole("status").filter({ hasText: "Display name updated" });
+        await toast.waitFor();
+        failed += report(`${mode}, 1440px, display name updated`, {
+          "Edit name is beside the identity": nameBox && editBox && nameBox.x + nameBox.width <= editBox.x && nameBox.y < editBox.y + editBox.height && editBox.y < nameBox.y + nameBox.height,
+          "the editor closes and Saved appears in the identity header": (await input.count()) === 0 && await identity.getByText("Saved", { exact: true }).isVisible(),
+          "the toast names the active team": (await toast.textContent()).includes("Teammates in Demo"),
+        });
+        if (shots) await page.screenshot({ path: join(shots, `display-name-updated-${mode}-1440.png`) });
+      }
       if (name === "account") {
         // PRO-400 (17.01): Sign out asks in the app's own dialog: what happens, then Cancel on the left and a red Sign out on the right.
         await settings.locator("[data-testid=account-sign-out]").getByRole("button", { name: "Sign out", exact: true }).click();

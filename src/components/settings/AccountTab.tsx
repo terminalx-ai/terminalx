@@ -2,7 +2,7 @@ import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { profile, thisComputer } from "@/lib/platform";
 import { DataPrivacySettings } from "./DataPrivacySettings";
 import { RegisteredSetting } from "./settingsRegistry";
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Loader2, LogOut } from "@/icons";
 import { MachineNameSettings } from "./MachineNameSettings";
 import { WorkStatusSettings } from "./WorkStatusSettings";
@@ -12,7 +12,8 @@ import { signIn, signOut, useAccount } from "@/lib/account";
 import { PasteSignInLink } from "@/components/account/PasteSignInLink";
 import { usePairing } from "@/lib/pairing";
 import { openOrganizationSettings } from "@/lib/settingsLinks";
-import type { AccountIdentity } from "@/lib/api";
+import { api, type AccountIdentity } from "@/lib/api";
+import { AccountDisplayName } from "./AccountDisplayName";
 
 /** Up to two initials from the person's name, else the first letter of their email. */
 export function accountInitials(identity: AccountIdentity): string {
@@ -22,7 +23,7 @@ export function accountInitials(identity: AccountIdentity): string {
 }
 
 /** Who is signed in (design 09.06): initials, name with the active organization, email; no box around it. */
-function IdentityHeader({ identity }: { identity: AccountIdentity }) {
+function IdentityHeader({ identity, action }: { identity: AccountIdentity; action?: ReactNode }) {
   return (
     <div className="flex items-center gap-3 pb-4" data-testid="account-identity">
       <span aria-hidden className="flex size-12 shrink-0 items-center justify-center rounded-full bg-accent/15 text-base font-semibold text-accent">
@@ -31,6 +32,7 @@ function IdentityHeader({ identity }: { identity: AccountIdentity }) {
       <div className="min-w-0">
         <div className="flex min-w-0 items-center gap-2">
           <span className="truncate text-[15px] font-medium">{identity.name ?? identity.email}</span>
+          {action}
           {identity.organization && (
             <span className="max-w-48 shrink-0 truncate rounded-md bg-accent/15 px-1.5 py-0.5 text-[11px] font-medium text-accent" title="Active organization">{identity.organization}</span>
           )}
@@ -47,6 +49,16 @@ export function AccountTab() {
   const pairing = usePairing();
   const [confirmingSignOut, setConfirmingSignOut] = useState(false);
   const { status } = account;
+  const [canEditName, setCanEditName] = useState(false);
+  const revision = status.state === "signed-in" && status.context?.account ? status.context.revision : undefined;
+  useEffect(() => {
+    if (!revision || privacy.enabled) return;
+    let current = true;
+    void api.phase2DesktopContractsAvailable().then((enabled) => {
+      if (current) setCanEditName(enabled === true);
+    }).catch(() => {});
+    return () => { current = false; };
+  }, [revision, privacy.enabled]);
 
   // Data privacy mode turns the account's features off: who is signed in, and the card that says what is off.
   if (privacy.enabled) return (
@@ -74,7 +86,13 @@ export function AccountTab() {
     const activeId = identity.organizationId ?? (named.length === 1 ? named[0].id : null);
     return (
       <div className="flex flex-col">
-        <RegisteredSetting setting="account.identity"><div><IdentityHeader identity={identity} /></div></RegisteredSetting>
+        <RegisteredSetting setting="account.identity"><div>
+          {canEditName && revision ? (
+            <AccountDisplayName key={revision} identity={identity} revision={revision}>
+              {(action) => <IdentityHeader identity={identity} action={action} />}
+            </AccountDisplayName>
+          ) : <IdentityHeader identity={identity} />}
+        </div></RegisteredSetting>
         <div className="flex flex-col divide-y divide-hairline border-t border-hairline">
           <MachineNameSettings />
           <WorkStatusSettings />

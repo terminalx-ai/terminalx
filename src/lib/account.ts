@@ -1,5 +1,6 @@
 import { privacyEnabled, subscribeDataPrivacy } from "@/lib/dataPrivacy";
 import { useSyncExternalStore } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { api, closeWorkspaceConnections, closeWorkspaceConnectionsIn, errorMessage, type AccountStatus } from "@/lib/api";
 import { registerAccountRoles, roleAskStamp } from "@/lib/accountRoles";
@@ -12,7 +13,7 @@ import { forgetOtherSetups, forgetSetups } from "@/lib/organizationSetup";
 import { claimCloudMirrorOwner, purgeCloudMirrors } from "@/lib/cloudMirror";
 import { dropCollabIn, resetCollab } from "@/lib/cloudCollab";
 import { featureFlagEnabled, featureFlags } from "@/lib/featureFlags";
-import { forgetOrganizationRoster, setRosterContext } from "@/lib/organizationRoster";
+import { forgetOrganizationRoster, invalidateOrganizationRoster, setRosterContext } from "@/lib/organizationRoster";
 import { resetPeople } from "@/lib/cloudPeople";
 import { dropEditors } from "@/lib/editors";
 import { getPrefs, setPrefs } from "@/lib/prefs";
@@ -108,15 +109,58 @@ function applyStatus(status: AccountStatus) {
     if (left.size > 0) void purgeCloudMirrors((orgId) => !left.has(orgId));
   }
   syncRosterContext(status);
+  if (status.context?.account && status.context.account === state.status.context?.account &&
+      status.identity?.name !== state.status.identity?.name) {
+    for (const org of status.organizations ?? []) invalidateOrganizationRoster(org.id, { refreshCached: true });
+  }
   followUser(status);
   set({ status, ready: true });
   scheduleRefresh(status);
+}
+
+/** A read already in flight can return the snapshot from before a name-change event. */
+function applyReadStatus(status: AccountStatus, atRequest: AccountStatus) {
+  const latest = reported;
+  if (latest.identity && status.identity && latest.context?.account &&
+      latest.context.account === status.context?.account && latest.context.account === atRequest.context?.account &&
+      status.identity.name === atRequest.identity?.name && latest.identity.name !== status.identity.name) {
+    status = { ...status, identity: { ...status.identity, name: latest.identity.name } };
+  }
+  applyStatus(status);
 }
 
 /** Retire cached reads and polling while privacy disables cloud work, including live policy changes. */
 function syncRosterContext(status: AccountStatus) {
   setRosterContext(status.identity?.organizationId ?? null, status.context?.revision ?? "",
     privacyEnabled() ? [] : status.organizations?.filter((org) => featureFlagEnabled(status, featureFlags.teamRoster, org.id)).map((org) => org.id) ?? []);
+}
+
+export function displayNameError(name: string): string | null {
+  const trimmed = name.trim();
+  if (!trimmed) return "Enter a display name.";
+  if (trimmed.length > 100) return "Display names must be 100 characters or fewer.";
+  return null;
+}
+
+export async function updateDisplayName(name: string, contextRevision: string): Promise<string | null> {
+  const invalid = displayNameError(name);
+  if (invalid) throw new Error(invalid);
+  if (privacyEnabled()) throw new Error("Turn off data privacy mode to edit your display name.");
+  const changed = "Your account changed while saving. Open the editor and try again.";
+  const before = reported;
+  if (before.context?.revision !== contextRevision) throw new Error(changed);
+
+  const result = await invoke<AccountStatus>("account_update_display_name", { name: name.trim(), contextRevision });
+  const latest = reported;
+  if (!result.identity?.name || result.context?.revision !== contextRevision ||
+      !latest.identity || latest.context?.revision !== contextRevision) throw new Error(changed);
+  // The native event usually arrived first. If it hasn't, update only the name
+  // so newer roles, capabilities or other account details stay intact.
+  if (latest.identity.name === before.identity?.name && latest.identity.name !== result.identity.name) {
+    applyStatus({ ...latest, identity: { ...latest.identity, name: result.identity.name } });
+  }
+  const status = state.status;
+  return status.organizations?.find((org) => org.id === status.identity?.organizationId && !org.isPersonal)?.name ?? null;
 }
 
 /** Apply the server-confirmed removal through the same membership cleanup as role refresh.
@@ -369,6 +413,7 @@ export function refreshAccountRoles(force = false): Promise<void> {
     return force ? running.then(() => (rolesFlightFresh ? undefined : refreshAccountRoles(true))) : running;
   }
   const askedAt = roleAskStamp();
+  const atRequest = reported;
   const flight: Promise<void> = api
     .accountRefreshRoles(force)
     .then((result) => {
@@ -379,7 +424,7 @@ export function refreshAccountRoles(force = false): Promise<void> {
         // The server's answer is newer than what any list asked for before it implied.
         for (const [orgId, hint] of roleHints) if (hint.at < askedAt) roleHints.delete(orgId);
       }
-      applyStatus(result.status);
+      applyReadStatus(result.status, atRequest);
     })
     .catch(() => {
       // The roles shown stay the last known ones; the next trigger asks again.
@@ -436,9 +481,10 @@ registerAccountRoles({ refresh: (force) => refreshAccountRoles(force), listed: n
 let statusFlight: Promise<void> | null = null;
 export function refreshAccount(): Promise<void> {
   if (statusFlight) return statusFlight;
+  const atRequest = reported;
   return (statusFlight = api
     .accountStatus()
-    .then(applyStatus)
+    .then((status) => applyReadStatus(status, atRequest))
     .catch((error) => set({ status: { ...state.status, lastError: errorMessage(error) }, ready: true }))
     .finally(() => {
       statusFlight = null;

@@ -152,14 +152,16 @@ export async function mutateOrganizationRoster(orgId: string | null | undefined,
 }
 
 /** Membership/access events refresh mounted consumers and expire idle caches. */
-export function invalidateOrganizationRoster(orgId: string) {
+export function invalidateOrganizationRoster(orgId: string, { refreshCached = false } = {}) {
   if (!rosterCacheEnabled(orgId)) return;
   const entry = entries.get(keyOf(orgId));
   if (!entry) return;
   entry.updatedAt = 0;
   entry.sequence++;
   entry.request = undefined;
-  if (entry.listeners.size) void readOrganizationRoster(orgId, { ...entry.options, fresh: true }).catch(() => {});
+  if (entry.listeners.size || (refreshCached && entry.snapshot.roster)) {
+    void readOrganizationRoster(orgId, { ...entry.options, fresh: true }).catch(() => {});
+  }
 }
 export function forgetOrganizationRoster(orgId: string) {
   const entry = entries.get(keyOf(orgId));
