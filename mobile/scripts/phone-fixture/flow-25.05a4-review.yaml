@@ -1,0 +1,112 @@
+# 25.05 row 4, Review and the spend confirmation: the review, the confirmation on Boat and on TerminalX Cloud, launching, an expired price and a new one that differs.
+appId: com.terminalx.phone.fixture
+name: Launch, review and spend confirmation (25.05)
+---
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: boat, openRoute: "/cloud/launch?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "Review price"
+    timeout: 15000
+- tapOn:
+    id: "launch-repository"
+- inputText: "https://github.com/acme/app"
+- tapOn:
+    id: "launch-repository-ref"
+- inputText: "main"
+- tapOn: "Use this repository"
+- tapOn:
+    id: "launch-name"
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- tapOn: "Review price"
+- extendedWaitUntil:
+    visible: "Launch workspace"
+    timeout: 10000
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-14-review
+- tapOn: "Launch workspace"
+- assertVisible: "Launch and start spending?"
+- takeScreenshot: 25.05-15-confirm-the-spend
+- tapOn: "Cancel"
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: tx, openRoute: "/cloud/launch?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "Review price"
+    timeout: 15000
+- tapOn:
+    id: "launch-repository"
+- inputText: "https://github.com/acme/app"
+- tapOn:
+    id: "launch-repository-ref"
+- inputText: "main"
+- tapOn: "Use this repository"
+- tapOn:
+    id: "launch-name"
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- tapOn: "Review price"
+- extendedWaitUntil:
+    visible: "Launch workspace"
+    timeout: 10000
+- waitForAnimationToEnd
+- tapOn: "Launch workspace"
+- assertVisible: "TerminalX bills this workspace to Northwind: .*"
+- takeScreenshot: 25.05-16-confirm-terminalx-cloud
+- tapOn: "Cancel"
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: launching, openRoute: "/cloud/launch?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "Review price"
+    timeout: 15000
+- tapOn:
+    id: "launch-repository"
+- inputText: "https://github.com/acme/app"
+- tapOn:
+    id: "launch-repository-ref"
+- inputText: "main"
+- tapOn: "Use this repository"
+- tapOn:
+    id: "launch-name"
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- tapOn: "Review price"
+- extendedWaitUntil:
+    visible: "Launch workspace"
+    timeout: 10000
+- waitForAnimationToEnd
+- tapOn: "Launch workspace"
+- tapOn: "Launch"
+- assertVisible: ".*Launching….*"
+- takeScreenshot: 25.05-17-launching
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: expired, openRoute: "/cloud/launch?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "Review price"
+    timeout: 15000
+- tapOn:
+    id: "launch-repository"
+- inputText: "https://github.com/acme/app"
+- tapOn:
+    id: "launch-repository-ref"
+- inputText: "main"
+- tapOn: "Use this repository"
+- tapOn:
+    id: "launch-name"
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- tapOn: "Review price"
+- extendedWaitUntil:
+    visible: "That estimate expired. Nothing was launched. Get a new price to carry on."
+    timeout: 10000
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-18-price-expired
+- tapOn: "Get a new price"
+- extendedWaitUntil:
+    visible: "The price changed since you last looked: .*"
+    timeout: 10000
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-19-new-price-different
