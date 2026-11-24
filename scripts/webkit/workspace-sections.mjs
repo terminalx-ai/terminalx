@@ -102,6 +102,12 @@ try {
       // Real keyboard DnD reaches empty sections, with no membership mutation.
       const handle = page.getByRole("button", { name: "Move workspace Owned workspace", exact: true });
       await handle.focus(); await page.keyboard.press("Space");
+      // dnd-kit's KeyboardSensor adds its keydown listener in a zero-delay timer, set as Space picks the workspace up: a
+      // key sent before it ran is lost and the drag never moves (as in sidebar-order.mjs's pickedUp). Once the grip is
+      // held, one timer set now runs after the sensor's, so it is listening. (Not the pickup's words: dnd-kit replaces
+      // them at once with the section the workspace is over.)
+      await page.waitForFunction(() => document.querySelector('[aria-label="Move workspace Owned workspace"]')?.getAttribute("aria-pressed") === "true");
+      await page.evaluate(() => new Promise((resolve) => setTimeout(resolve)));
       await page.keyboard.press("ArrowDown");
       await page.getByText("Over Empty", { exact: true }).waitFor();
       await page.keyboard.press("Space");
