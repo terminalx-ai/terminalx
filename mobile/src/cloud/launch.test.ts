@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudApiError, type CloudCredential, type CloudLifecycle, type CloudPreflight, type CloudProvider, type CloudQuote } from "./api";
-import { LAUNCH_RETRY_MS, LaunchAttempt, QUOTE_EXPIRED, SPEND_NOTICE, agentLogins, cleanupFacts, deleteFacts, deleteFailure, deleteRefusal, firstRunSetup, idleChoices, idleValue, launchProgress, launchProviders, launchRecovery, launchRefusal, mayManage, preflightProblems, pricingNote, problemsTitle, quotedSize, repositoryOf, sizeDetail, sizeValue, stopQuestion, stopState, unanswered } from "./launch";
+import { GITHUB_INSTALLATION_UNAVAILABLE, LAUNCH_RETRY_MS, LaunchAttempt, QUOTE_EXPIRED, SPEND_NOTICE, agentLogins, cleanupFacts, deleteFacts, deleteFailure, deleteRefusal, firstRunSetup, idleChoices, idleValue, launchProgress, launchProviders, launchRecovery, launchRefusal, mayManage, preflightProblems, pricingNote, problemsTitle, quotedSize, repositoryOf, sizeDetail, sizeValue, stopQuestion, stopState, unanswered } from "./launch";
 import { agent37, agent37Setup, boat, boatQuote, boatSetup, claudeKey, codexLogin, githubToken, lifecycle, refuse, server, terminalxCloud, type Answer, type Call } from "./testing/server";
 
 // PRO-530: launching, stopping and deleting a cloud workspace from the phone (25.05, 25.06).
@@ -120,6 +120,12 @@ describe("preflight problems", () => {
       "Connect at least one AI agent.",
       "acme/app: verification is temporarily unavailable. Try again in a moment.",
     ]);
+  });
+
+  it("says who must reconnect GitHub when the organization's GitHub App installation no longer works, instead of asking to try again", () => {
+    const problems = preflightProblems(check([{ kind: "repository", cloneUrl: "https://github.com/acme/app", status: "failed", errorCode: "cloud_workspace_github_installation_unavailable", retryable: false }]), { repository }, credentials)!;
+    expect(problems.items).toEqual(["acme/app: the organization's GitHub App installation was disconnected, suspended or changed. An organization admin must reconnect it in TerminalX Settings."]);
+    expect(problems).toMatchObject({ repository: GITHUB_INSTALLATION_UNAVAILABLE, ref: null, needsGithubToken: false });
   });
 
   it("does not call a setup ready that the server did not, even with no check named", () => {

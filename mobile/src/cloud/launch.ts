@@ -133,6 +133,7 @@ export function firstRunSetup(draft: LaunchDraft, credentials: readonly CloudCre
 // ── Preflight ──
 
 const PREFLIGHT_UNAVAILABLE = "Verification is temporarily unavailable. Try again in a moment.";
+export const GITHUB_INSTALLATION_UNAVAILABLE = "The organization's GitHub App installation was disconnected, suspended or changed. An organization admin must reconnect it in TerminalX Settings.";
 const PREFLIGHT: Record<string, string> = {
   cloud_agent_credential_reauth_required: "Sign-in required.",
   cloud_workspace_credential_invalid: "A credential failed verification. Replace it and try again.",
@@ -141,6 +142,11 @@ const PREFLIGHT: Record<string, string> = {
   cloud_workspace_repository_not_accessible: "The repository is not accessible with the provided credentials.",
   cloud_workspace_repository_ref_not_found: "That branch or tag was not found in the repository.",
   cloud_workspace_repository_verification_unavailable: PREFLIGHT_UNAVAILABLE,
+  // The organization's GitHub App covers the repository, but its installation
+  // was uninstalled, suspended or had its access changed (terminalx-saas
+  // installationPreflightFailure). Not retryable, and the phone cannot
+  // reconnect the App: the desktop's own words for who fixes it and where.
+  cloud_workspace_github_installation_unavailable: GITHUB_INSTALLATION_UNAVAILABLE,
   cloud_workspace_agent_credential_required: "Connect at least one AI agent.",
 };
 const REF_NOT_FOUND = "cloud_workspace_repository_ref_not_found";
