@@ -35,7 +35,10 @@ Two things decide a connection's rights:
   manages the workspace (an organization owner or admin, or its creator),
   `participate` for everyone else and every phone. Runtime-scope
   work (create or kill terminals, file and Git writes, create, close or
-  configure agent tabs, rotate the key) stays `manage`.
+  configure agent tabs, rotate the key) stays `manage`, with one exception:
+  a manager on a `participate` connection may start a session or add an
+  agent tab, in a narrow form
+  ([Starting from a participate connection](#starting-from-a-participate-connection-pro-546)).
 - **Role** (per person, from the API): `manager` (owners and admins, and
   the workspace's creator), `driver` (members shared as drivers), `viewer`
   (members shared as viewers), or `none` (any other member). `canApprove` is
@@ -55,6 +58,7 @@ Two things decide a connection's rights:
 | Watch an agent tab's own terminal (its terminal view) | | ✓ | ✓ | ✓ |
 | Type into an agent tab's own terminal | | | `canApprove` (lease) | ✓ (lease) |
 | Take over another person's tab lease | | | | ✓ |
+| Start a session or add an agent tab from a `participate` connection (a phone) | | | | ✓ (narrow form, never Bypass) |
 | Permission decisions | `canApprove` | `canApprove` | `canApprove` | ✓ |
 
 ### What each role can really do (PRO-88)
@@ -98,6 +102,8 @@ change the mode back.
 - **Manager** (organization owners and admins, and the workspace's creator). Everything, plus the
   runtime-scope work of a `manage` attachment (create and kill terminals,
   file and Git writes, tabs and sessions, the key) and other people's leases.
+  On a `participate` connection, which is what their phone has, a manager
+  also starts a session or adds an agent tab, and nothing else of that list.
 
 `canApprove` is therefore one right: answering permission requests (any
 role), and, for a driver, everything that decides what the agent does
@@ -138,7 +144,11 @@ on every call; `cloud_agents/mailbox.rs` enforces them on every command.
 ### `collab/1`
 
 Granted in `rpc.hello` when asked for. The hello result then carries
-`you: { userId, role, canApprove }`.
+`you: { userId, role, canApprove, listed, canStart }`. `listed` is false
+until the API has said who has access. `canStart` (PRO-546) says whether this
+connection may call `session.create` and `session.addTab` now; `collab.state`
+and `collab.you` carry the same object, so a promotion or a demotion changes
+it without a new connection.
 
 | Method | Params → result | Who |
 | --- | --- | --- |
@@ -280,6 +290,119 @@ role changed).
   shows the runtime's sentence for these refusals, on the outbox entry or as
   the send's error.
 - **Permission decisions** are not lease-bound; they need `canApprove`.
+
+### Starting from a participate connection (PRO-546)
+
+A phone is always a `participate` connection, whoever holds it. A workspace
+launched without a first task has no conversation, so before this rule a
+manager on a phone could start nothing in it.
+
+**The rule.** `session.create` and `session.addTab` stay `manage` in the
+method table. A `participate` connection may call them while its person's
+role is `manager`. That is the whole exception
+(`protocol::MANAGER_START`): terminals, file and Git writes, key rotation,
+`session.close`, `session.delete`, `session.update`, `session.configure`,
+undo, reset, fork and `session.handoff` are refused to it with
+`forbidden`, "… needs manage authority", as before.
+
+**What such a call may carry** (`protocol::manager_start_fields`):
+
+| Method | Fields a `participate` connection may send |
+| --- | --- |
+| `session.create` | `agent`, `model`, `effort`, `mode`, `title`, `prompt`, `clientRequestId` |
+| `session.addTab` | `sessionId`, `agent`, `model`, `effort`, `mode`, `clientRequestId` |
+
+- Any other field is refused by name, whatever its value: `forbidden`, with
+  `data: { reason: "field-needs-manage", field }`. Nothing is dropped
+  unsaid. That leaves out a worktree, a repository, a base branch, an issue
+  and its pipeline, the native Codex engine and a machine's `projectId`: the
+  session runs on the workspace's checkout.
+- `session.addTab` reads no title and no prompt, so it takes neither here.
+  A first prompt for a new tab is a send to it; `session.handoff`, which
+  adds a tab with its prompt in one call, stays `manage`.
+- **The mode is named, and is not Bypass.** A tab whose creator names no
+  mode starts in Bypass (`DEFAULT_PERMISSION_MODE`, which `runtime.agents`
+  also reports as every agent's `defaultMode`), so for a `participate`
+  caller a missing mode would be Bypass by omission. `mode` is therefore
+  required, by its exact name, and the runtime fills in no default:
+
+  | `mode` | Answer | `data.reason` |
+  | --- | --- | --- |
+  | `plan`, `manual`, `auto`, `acceptEdits` | Runs in that mode | |
+  | missing, `null` or blank | `invalid_params` | `mode-required` |
+  | any other name (also `default`, a different case, padding) or not a string | `invalid_params` | `mode-unknown` |
+  | `bypassPermissions` | `forbidden` | `mode-needs-manage` |
+
+  Each refusal's `data` also lists the modes it takes (`modes`), and
+  echoes a string `mode` it refused. A client must not prefill its form
+  from `runtime.agents`' `defaultMode`. A `manage` connection that names no
+  mode gets the default launch mode, as before.
+
+**Who is refused, and how.**
+
+| Caller | Answer |
+| --- | --- |
+| `participate`, role `manager` | Runs, in the narrow form |
+| `participate`, role `driver`, `viewer` or `none` | `forbidden`, "… needs a workspace manager", `data: { role }` with the caller's role |
+| `participate`, before the API's member list has arrived | `forbidden`, `data: { role: "none", reason: "access-unknown" }` |
+| `manage`, role `manager` | Runs with every field, as before |
+| `manage`, person demoted since the attachment was issued | Acts as a participant: the rows above |
+
+The role is read when the call arrives and again where it runs, under the
+admission a new member list waits for, so a manager demoted in between is
+refused. Authorization comes before the idempotency cache: a demoted
+manager who resends a request that ran is refused too. As for every call
+that configures an agent, the person also needs `canApprove` (a manager
+always has it under `collaboration-v1`) and the runtime policy's admission.
+That admission reads the person's row and whether their connection is still
+open; it asks nothing of the attachment's authority or of the client, so it
+admits a manager's phone where it admits their desktop.
+
+**`canStart`.** `you.canStart` is the answer to "would the two calls be
+admitted for this connection now": the same checks, read again. It is about
+rights only, not about which agents are installed. A runtime from before
+this rule sends no `canStart`, and a `participate` client that sees none
+does not offer to start: the call would be refused with "needs manage
+authority".
+
+**What a manager's phone gains.** It could already send prompts, answer
+permission requests, and change an existing tab's model, effort and mode
+with the settings of a send, Bypass included: `Settings::from_json` takes
+`bypassPermissions`, the mailbox applies a send's settings for anyone who
+may configure (`cloud_agents/mailbox.rs`), and the session manager's
+`set_permission_mode` asks nothing of the attachment. It now also makes
+the first conversation and further tabs. It still gets no shell, no file
+or Git write and no key rotation.
+
+So the Bypass refusal is about how a start begins, not a wall around the
+person: a manager can move the tab they just started to Bypass with their
+next send, exactly as they could move any existing tab there before this
+rule. What the refusal buys is that no agent is launched with nothing
+asking as the side effect of a start from a phone, by choice or by leaving
+`mode` out. Closing the later switch for a phone is a separate change, to
+the mailbox's settings path, and needs the command to say which client
+sent it.
+
+**Not covered here: a workspace's first task.** A workspace created with a
+first task starts its agent from a launch the runtime claims from the API
+(`cloud_agents/launch.rs`), not from these calls. A claim that names no
+mode starts in Bypass, and a claim does not say which client created it,
+so the runtime cannot hold a phone's launch to this rule. That check
+belongs where the launch is created, in the API.
+
+**Machines.** A machine's runtime withholds `collab/1` and never has a
+member list, so this rule gives a `participate` connection nothing there:
+it is refused as before any list has arrived, and `projectId`, which a
+machine's `session.create` needs, is not in the narrow form.
+
+**Integrations.** An attachment names a person, not a client: the runtime
+cannot tell an integration key's attachment from its issuer's phone. This
+rule is safe for integrations only because the API mints no attachment for
+one (the public API has no attach route and reports `attach: false`; its
+sessions and messages reach the runtime as scheduled turns, not as a
+connection). If the API ever lets an integration attach, the attachment
+must say what kind of client it is and the runtime must refuse the two
+calls to it, before that ships.
 
 ### Revocation
 
