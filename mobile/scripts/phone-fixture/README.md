@@ -52,6 +52,20 @@ does, through the app. The boards are drawn in Ember when dark and in Den when
 light: for the light run set the simulator's appearance to light and
 `MAESTRO_THEME=Den`.
 
+## Beta access code (25.08)
+
+`fixtureAccessCode: <answer>` starts the phone signed out with no machines.
+Sign in shows "Signing in…" for a few seconds and is then held at the private
+beta, so the access code screen comes up through the app's own layout. Each
+code goes through the app's real `redeemAccessCode` to a redeem route in
+memory, which answers after three seconds as the argument says, in the words
+of the server's contract (PRO-550): `accepted`, `invalid`, `expired`,
+`exhausted`, `rate-limited`, `ended` (the ticket is gone) or `error`.
+`fixtureAccessEmail` is the address the sign-in is for (the long-address
+frame), and `fixtureScenario: offline` is the offline frame. With
+`fixtureSetup: first-run`, an accepted code lands on 25.01's first run.
+`flow-25.08.yaml` shoots every state.
+
 ## A running workspace (25.10)
 
 "Search filters" in Acme runs: the app's real catalog, link, session and

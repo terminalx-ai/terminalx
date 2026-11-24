@@ -6,6 +6,7 @@ import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider
 import { organizationRoleName } from "@mobile/cloud/words";
 import { useApp } from "@mobile/state/AppProvider";
 import { Button, Card, SectionTitle } from "@mobile/ui/primitives";
+import { Spinner } from "@mobile/ui/Spinner";
 import { useTheme } from "@mobile/ui/theme";
 
 /**
@@ -48,7 +49,7 @@ export default function AccountScreen() {
       <Button label="Sign out" kind="danger" onPress={() => void signOut()} />
     </> : <View style={styles.block}>
       <Text style={[styles.detail, { color: palette.muted }]}>Not signed in.</Text>
-      <Button label="Sign in" onPress={() => void app.signIn()} />
+      <Button label={app.signingIn ? "Signing in…" : "Sign in"} disabled={app.signingIn} accessibilityState={{ disabled: app.signingIn, busy: app.signingIn }} icon={app.signingIn ? (color) => <Spinner size={16} color={color} /> : undefined} onPress={() => void app.signIn()} />
     </View>}
   </ScrollView>;
 }
