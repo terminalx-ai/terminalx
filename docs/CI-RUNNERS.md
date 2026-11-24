@@ -218,6 +218,17 @@ reported a day later. `macos-native` was 70% of those minutes and
 compiler on this crate needs more, so a build that takes under four minutes on
 Linux takes 20 to 33 there.
 
+**The crate is compiled once per kind of build.** `tauri::generate_context!`
+writes the app's compressed assets into the crate's `OUT_DIR` while the crate
+compiles, and the crate embeds them, so to cargo they are inputs newer than
+the build: every cargo command after the first compiled the crate again (11 to
+23 minutes on a pull request; on `main` it ran beside the ordinary library
+build and the runner swapped, an hour before the first test). The build step
+dates those files back to 2000, as tauri-codegen 2.7 does itself (the lock
+file has 2.6.3), and then fails unless a second `cargo test --no-run` finds
+every unit fresh. `main`'s `cargo test --locked` still builds the ordinary
+library once, which the binary, the integration tests and the doc-tests need.
+
 `webkit-layout` takes a macOS runner whenever the frontend changed. Two more
 take one only when they are selected:
 
@@ -311,6 +322,13 @@ dependency, and now builds the ones that changed. A job saves only when what
 it restored was not built from its lock file, so `main` keeps one per job and
 lock file and a pull request writes its own only when it changes the lock
 file. A job whose build was whole saves even when a test then failed.
+`macos-native` saves before its tests, as soon as the library's tests are
+built: a suite that fails, or runs out of time (every macOS job on `main`
+from #1521 to #1535 did, and so no `main` cache existed and each pull request
+built every dependency), still leaves the cache. Its tests need the crate's
+output, so it moves the build aside, cleans an APFS clone of it with the same
+`cargo clean`, saves the clone and puts the build back. Which runs may write
+`main`'s scope does not change: a save still uses the run's own primary key.
 `serve-tests` builds what `headless-serve` builds: it restores that job's
 cache and saves none. In `linux-rust-tests` the `binaries` part saves, and
 the four library parts restore what it saved.
@@ -383,9 +401,7 @@ A selected pull request runs the Swift tests, the icon checks, the helper
 build, Clippy over every target (so every Apple-only line of the library, the
 binaries and the integration tests is checked), one build of the library's
 tests, and the tests of the Apple-only and system-dependent modules:
-the test binary that one build made, run with `$(macos-rust.py --filters)`
-(a second `cargo test` would compile the crate again: see the comment on the
-build step in `ci.yml`), 51 name filters
+`cargo test --locked --lib -- $(macos-rust.py --filters)`, 51 name filters
 that match 1,889 of the 5,871 tests. They are the modules with any Apple
 `cfg`, and the ones whose behaviour is the system's without one (terminals,
 process groups, the keychain, sockets). A test fails when a file with an

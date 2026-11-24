@@ -451,7 +451,8 @@ jobs:
       group: ci-macos-native-${{ github.event_name == 'push' && 'main' || github.run_id }}
       cancel-in-progress: false
     runs-on: macos-latest
-    timeout-minutes: 150
+    # Raised to measure a cold run whole; set from its step times before review.
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -537,50 +538,54 @@ jobs:
       # and the suite below run whenever the steps before clippy passed, so a
       # lint on main does not hide what the suite would have said. No step
       # here may continue on error.
+      # The dates go back here too (see the build step below): otherwise the
+      # next Clippy checks the library a second time.
       - name: clippy (the library by itself)
         working-directory: src-tauri
-        run: cargo clippy --locked --test serde_field_naming -- -D warnings
+        run: |
+          cargo clippy --locked --test serde_field_naming -- -D warnings
+          find target/debug/build -path '*/raccoon-*/out/*' -type f -exec touch -t 200001010000 {} +
 
       - name: clippy
         if: ${{ !cancelled() && steps.helper.outcome == 'success' }}
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings
 
-      # The build says where the test binary is, and a pull request runs that
-      # binary itself. Another `cargo test` would compile the crate again (11 to
-      # 23 minutes): `tauri::generate_context!` writes the app's compressed
-      # assets into the crate's build output while the crate compiles, so they
-      # are newer than that build and cargo calls the crate dirty ("the file
-      # target/debug/build/raccoon-…/out/… has changed, 17s after last build",
-      # CARGO_LOG=cargo::core::compiler::fingerprint=info on #1528's run).
+      # Built once. `tauri::generate_context!` writes the app's compressed
+      # assets into the crate's build output (OUT_DIR) while the crate
+      # compiles, and the crate embeds them, so cargo sees inputs newer than
+      # the build and compiles the crate again on the next cargo command ("the
+      # file target/debug/build/raccoon-…/out/… has changed, 17s after last
+      # build"): 11 to 23 minutes on a pull request, most of the 60 minutes
+      # before the first test on main. The files are named by a checksum of
+      # their content, so an old date says nothing false; tauri-codegen 2.7
+      # dates them back itself, and this step does it until the lock file has
+      # that release. The second `--no-run` must find every unit fresh: if the
+      # crate is compiled a second time again, the job fails here and says so.
       - name: build the library's tests by themselves
         id: build
         if: ${{ !cancelled() && steps.helper.outcome == 'success' }}
         working-directory: src-tauri
+        # `shell: bash` sets pipefail: a cargo failure in the check must fail it.
+        shell: bash
         run: |
-          cargo test --locked --lib --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/build.jsonl"
-          binary=$(jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null) | .executable' "$RUNNER_TEMP/build.jsonl" | tail -n 1)
-          test -x "$binary"
-          echo "binary=$binary" >> "$GITHUB_OUTPUT"
+          cargo test --locked --lib --no-run
+          find target/debug/build -path '*/raccoon-*/out/*' -type f -exec touch -t 200001010000 {} +
+          cargo test --locked --lib --no-run --message-format=json | jq -s -e '[.[] | select(.reason == "compiler-artifact")] | (length > 0) and all(.fresh)'
 
-      - name: cargo test (a pull request, the Apple-only and system-dependent modules)
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'pull_request' }}
-        working-directory: src-tauri
-        env:
-          BINARY: ${{ steps.build.outputs.binary }}
-        run: '"$BINARY" $(python3 ../infra/ci-runners/macos-rust.py --filters)'
-
-      - name: cargo test (main, nightly and manual runs, the full macOS suite)
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && github.event_name != 'pull_request' }}
-        working-directory: src-tauri
-        run: cargo test --locked
-
-      # Also when a test failed, as long as the build was whole: a suite that
-      # fails must not leave every later run to build the dependencies again.
+      # Saved as soon as the dependencies are built, before any test runs: a
+      # suite that fails or runs out of time must not leave every later run to
+      # build them again. The tests below need this crate's output, so the
+      # cache is made from a copy (APFS clones, no second copy on disk) with
+      # that output removed, and the build itself is put back untouched.
       - name: Leave this crate's own output out of the cache
+        id: aside
         if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
-        run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
+        run: |
+          mv target "$RUNNER_TEMP/target"
+          cp -cpR "$RUNNER_TEMP/target" target
+          cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
         if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -591,6 +596,22 @@ jobs:
             ~/.cargo/git/db
             src-tauri/target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      - name: Put this crate's own output back
+        if: ${{ !cancelled() && steps.aside.outcome != 'skipped' }}
+        working-directory: src-tauri
+        run: |
+          test -d "$RUNNER_TEMP/target"
+          rm -rf target && mv "$RUNNER_TEMP/target" target
+
+      - name: cargo test (a pull request, the Apple-only and system-dependent modules)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'pull_request' }}
+        working-directory: src-tauri
+        run: cargo test --locked --lib -- $(python3 ../infra/ci-runners/macos-rust.py --filters)
+
+      - name: cargo test (main, nightly and manual runs, the full macOS suite)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && github.event_name != 'pull_request' }}
+        working-directory: src-tauri
+        run: cargo test --locked
 
   # The headless runtime a cloud workspace boots. The runner has no WebView,
   # GTK or ALSA development packages, so a GUI dependency fails the build.
