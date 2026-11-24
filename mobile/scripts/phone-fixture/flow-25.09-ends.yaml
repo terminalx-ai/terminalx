@@ -1,0 +1,114 @@
+# 25.09 How a launch with a first task ends when the agent does not simply run: each outcome from a fresh launch.
+appId: com.terminalx.phone.fixture
+env:
+  THEME: ${MAESTRO_THEME || "Ember"}
+name: First task outcomes (25.09)
+---
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: sign-in }
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+- tapOn: "${THEME} theme"
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: sign-in, openRoute: "/cloud/new?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "New workspace"
+    timeout: 15000
+# The name field has the focus.
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- waitForAnimationToEnd
+- runFlow: steps/launch-first-task.yaml
+- extendedWaitUntil:
+    visible: "The first task did not start"
+    timeout: 60000
+- takeScreenshot: 25.09-13-agent-sign-in
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: unsure }
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+- tapOn: "${THEME} theme"
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: unsure, openRoute: "/cloud/new?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "New workspace"
+    timeout: 15000
+# The name field has the focus.
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- waitForAnimationToEnd
+- runFlow: steps/launch-first-task.yaml
+- extendedWaitUntil:
+    visible: "The first task may not have been sent"
+    timeout: 60000
+- takeScreenshot: 25.09-14-may-not-have-been-sent
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: hold }
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+- tapOn: "${THEME} theme"
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: hold, openRoute: "/cloud/new?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "New workspace"
+    timeout: 15000
+# The name field has the focus.
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- waitForAnimationToEnd
+- runFlow: steps/launch-first-task.yaml
+- extendedWaitUntil:
+    visible: "Cancel launch"
+    timeout: 20000
+- tapOn: "Cancel launch"
+- extendedWaitUntil:
+    visible: "Keep launching"
+    timeout: 10000
+# The alert's own Cancel launch, by where iOS draws it: by name, Maestro can find the page's button under the alert.
+- tapOn:
+    point: "50%,54%"
+- extendedWaitUntil:
+    visible: "Launch canceled"
+    timeout: 20000
+- takeScreenshot: 25.09-15-canceled
+# Launch again keeps the typed task.
+- tapOn: "Launch again"
+- extendedWaitUntil:
+    visible: "New workspace"
+    timeout: 15000
+- scrollUntilVisible:
+    element: "Permission mode.*"
+- scroll
+- assertVisible: "Fix the checkout test that fails on CI, then open a pull request"
+- takeScreenshot: 25.09-17-launch-again-keeps-the-task
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: not-picked-up }
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+- tapOn: "${THEME} theme"
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: not-picked-up, openRoute: "/cloud/new?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "New workspace"
+    timeout: 15000
+# The name field has the focus.
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- waitForAnimationToEnd
+- runFlow: steps/launch-first-task.yaml
+- extendedWaitUntil:
+    visible: "The workspace is ready, but its runtime has not picked up the first task.*"
+    timeout: 200000
+- takeScreenshot: 25.09-16-not-picked-up

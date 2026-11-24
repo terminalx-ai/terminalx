@@ -1,4 +1,4 @@
-import { CloudApiError, type CloudApi, type CloudCredential, type CloudFirstRunSetup, type CloudLifecycle, type CloudOperation, type CloudPreflight, type CloudProvider, type CloudProviderSetup, type CloudQuote, type CloudWorkspace } from "./api";
+import { CloudApiError, type CloudApi, type CloudCredential, type CloudFirstRunSetup, type CloudLaunch, type CloudLifecycle, type CloudOperation, type CloudPreflight, type CloudProvider, type CloudProviderSetup, type CloudQuote, type CloudWorkspace } from "./api";
 
 /**
  * Launching a cloud workspace from the phone, and stopping and deleting one
@@ -153,6 +153,8 @@ export interface PreflightProblems {
   ref: string | null;
   /** The repository is private and no GitHub token is saved: the way on is Agent logins. */
   needsGithubToken: boolean;
+  /** The agents (by login provider) whose login failed its check: a first task on one of them is marked. */
+  agents?: string[];
 }
 
 const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);
@@ -186,6 +188,7 @@ export function preflightProblems(preflight: CloudPreflight, draft: Pick<LaunchD
       if (check.errorCode === "cloud_workspace_repository_credential_required") problems.needsGithubToken = true;
     } else {
       problems.items.push(label && !sentence.includes(label) ? `${label}: ${lowerFirst(sentence)}` : sentence);
+      if (name && !(problems.agents ??= []).includes(name)) problems.agents.push(name);
     }
   }
   return problems;
@@ -206,6 +209,10 @@ export const QUOTE_EXPIRED = "That estimate expired. Nothing was launched. Get a
 const PAUSED = "New cloud workspaces are paused for this organization.";
 const RUNTIME_NOT_READY = "Cloud workspaces are not available yet: the server has not installed a compatible TerminalX runtime. Try again later.";
 const DID_NOT_WORK = "That did not work. Try again in a moment.";
+/** The desktop's sentence for `cloud_workspace_launch_invalid`: a first task's agent, model or effort was refused. */
+export const LAUNCH_INVALID = "Choose a valid agent, model and effort.";
+/** The desktop's 32 KB sentence, about the phone's first task. */
+export const FIRST_TASK_TOO_LONG = "The first task is longer than 32 KB.";
 
 const REFUSED: Record<string, string> = {
   cloud_workspace_quote_expired: QUOTE_EXPIRED,
@@ -234,6 +241,8 @@ const REFUSED: Record<string, string> = {
   cloud_workspace_operation_in_progress: "Something else is still under way on this workspace. Try again when it has finished.",
   cloud_workspace_active_work: "An agent is working here, or is waiting for an answer. Stop it or answer it, then delete.",
   cloud_workspace_request_invalid: "That workspace request is not valid. Check the name, the repository and the branch.",
+  cloud_workspace_launch_invalid: LAUNCH_INVALID,
+  cloud_workspace_prompt_too_long: FIRST_TASK_TOO_LONG,
   cloud_workspace_invalid_response: "Update the app to launch a workspace.",
   account_signed_out: "Sign in to launch a cloud workspace.",
   organization_admin_required: "An organization owner or admin must do that.",
@@ -260,7 +269,7 @@ export function unanswered(error: unknown): boolean {
 
 // ── Launching once ──
 
-export interface LaunchInput { name: string; quoteId: string; setup?: CloudFirstRunSetup }
+export interface LaunchInput { name: string; quoteId: string; setup?: CloudFirstRunSetup; launch?: CloudLaunch }
 
 /** How long to wait before asking again whether a launch that got no answer started. */
 export const LAUNCH_RETRY_MS: readonly number[] = [2_000, 5_000, 10_000];
@@ -293,7 +302,8 @@ export class LaunchAttempt {
    * next call.
    */
   async launch(orgId: string, input: LaunchInput, onUnanswered?: () => void): Promise<CloudLifecycle> {
-    const confirmed = JSON.stringify([orgId, input.name, input.quoteId, input.setup ?? null]);
+    // The first task is part of what was confirmed: the same key never carries a different one.
+    const confirmed = JSON.stringify([orgId, input.name, input.quoteId, input.setup ?? null, input.launch ?? null]);
     if (this.key === null || confirmed !== this.confirmed) {
       this.key = this.makeKey();
       this.confirmed = confirmed;
@@ -301,7 +311,7 @@ export class LaunchAttempt {
     const key = this.key;
     for (let attempt = 0; ; attempt += 1) {
       try {
-        const answer = await this.api.createWorkspace(orgId, { name: input.name, quoteId: input.quoteId, confirmProviderSpend: true, ...(input.setup ? { setup: input.setup } : {}) }, key);
+        const answer = await this.api.createWorkspace(orgId, { name: input.name, quoteId: input.quoteId, confirmProviderSpend: true, ...(input.setup ? { setup: input.setup } : {}), ...(input.launch ? { launch: input.launch } : {}) }, key);
         this.key = null;
         return answer;
       } catch (error) {
@@ -321,7 +331,7 @@ const STAGE_ORDER = ["queued", "preflight", "creating-machine", "bootstrapping",
 export const LAUNCH_STAGES: readonly string[] = ["Queued", "Checking the provider", "Creating the machine", "Installing the runtime", "Connecting to the relay", "Ready"];
 
 /** What the runtime reports while it installs: shown under the stage it belongs to. */
-const RUNTIME_EVENTS: Record<string, string> = {
+export const RUNTIME_EVENTS: Readonly<Record<string, string>> = {
   "credentials-installing": "Installing credentials",
   "credentials-ready": "Credentials ready",
   "repository-cloning": "Cloning the repository",

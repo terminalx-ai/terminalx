@@ -81,4 +81,4 @@ export const Alert = { alert: vi.fn() };
 // A sheet over the screen (25.10's start sheet): drawn in place while visible.
 export const Modal = (props: Props & { visible?: boolean }) => (props.visible === false ? null : <div data-modal="true">{props.children}</div>);
 export const KeyboardAvoidingView = View;
-export const Keyboard = { addListener: () => ({ remove: () => undefined }), dismiss: () => undefined };
+export const Keyboard = { addListener: () => ({ remove: () => undefined }), dismiss: vi.fn(), isVisible: () => false };

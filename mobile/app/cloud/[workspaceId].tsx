@@ -21,6 +21,7 @@ import { GlassIconButton } from "@mobile/ui/glass";
 import { LaunchProgress } from "@mobile/ui/LaunchProgress";
 import { Notice } from "@mobile/ui/Notice";
 import { StartAgentSheet, type StartedTab } from "@mobile/ui/StartAgentSheet";
+import { taskUnderWay, taskWaitEnds } from "@mobile/cloud/first-task";
 import { HeaderLine, ScreenHeader } from "@mobile/ui/SessionChrome";
 import { workspaceActions } from "@mobile/ui/workspace-actions";
 import { WorkspaceActionsButton } from "@mobile/ui/WorkspaceActionsButton";
@@ -67,23 +68,30 @@ export default function CloudWorkspaceScreen() {
   // A launch is shown on the workspace's own page until it runs (25.05): the one this page was opened for, or
   // the one the list says is under way or failed. Once the person has moved past it, the workspace is shown.
   const latest = catalog && orgId ? snapshot.organizations.find((entry) => entry.organization.orgId === orgId)?.workspaces.find((item) => item.workspace.id === params.workspaceId)?.latestOperation : null;
-  const listedLaunch = listed && latest && isLaunch(latest) && (listed.state === "provisioning" || (listed.state === "attention-required" && latest.state === "failed")) ? latest.id : null;
+  // A launch with a first task (25.09) goes on after the machine runs, until its agent runs or does not.
+  // Read again when the wait for the runtime ends, so a task left unclaimed stops holding the page.
+  const now = useNowUntil(taskWaitEnds(listed?.launch));
+  const listedLaunch = listed && latest && isLaunch(latest) && (listed.state === "provisioning" || (listed.state === "attention-required" && latest.state === "failed") || taskUnderWay(listed.launch, now)) ? latest.id : null;
   const [past, setPast] = useState<string | null>(null);
+  // The tab the launch's agent runs in: the conversation opens there.
+  const [launchTab, setLaunchTab] = useState<string | null>(null);
   const launchId = params.operationId && past !== params.operationId ? params.operationId : listedLaunch && past !== listedLaunch ? listedLaunch : null;
   if (catalog && orgId && launchId && access !== "deleted") return <View style={[styles.page, { backgroundColor: palette.page }]}>
     <Stack.Screen options={{ title: params.title ?? "Workspace", headerShown: false }} />
     <LaunchProgress key={launchId} catalog={catalog} orgId={orgId} operationId={launchId} title={(listed ? workspaceTitle(snapshot, listed) : null) ?? params.title ?? "Workspace"}
-      onOpen={() => setPast(launchId)} onRetried={() => setPast(launchId)} onBack={() => router.back()}
+      onOpen={(tabId) => { setLaunchTab(tabId); setPast(launchId); }} onRetried={() => setPast(launchId)} onBack={() => router.back()}
       onDelete={(workspaceId) => router.push({ pathname: "/cloud/delete", params: { orgId, workspaceId } })}
-      onLaunchAgain={() => router.replace({ pathname: "/cloud/new", params: { orgId } })}
-      onFixKey={() => router.push({ pathname: "/organization/[orgId]", params: { orgId } })} />
+      // The canceled launch's first task is put back in the form.
+      onLaunchAgain={() => router.replace({ pathname: "/cloud/new", params: { orgId, from: params.workspaceId } })}
+      onFixKey={() => router.push({ pathname: "/organization/[orgId]", params: { orgId } })}
+      onAgentLogins={() => router.push({ pathname: "/agent-logins", params: { orgId } })} />
   </View>;
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
     <Stack.Screen options={{ title: (listed ? workspaceTitle(snapshot, listed) : null) ?? params.title ?? "Workspace" }} />
     {!catalog ? <EmptyState title="Workspace unavailable" detail="Sign in, then open it again from the Cloud tab." />
       // Access ended, also while this screen was open: the conversation goes at once, with the reason.
       : closed ? <EmptyState title={closed.title} detail={closed.detail} />
-      : session && orgId ? <Workspace key={`${orgId}/${params.workspaceId}`} catalog={catalog} session={session} orgId={orgId} workspaceId={params.workspaceId} listedState={listed?.state ?? null} initialTabId={params.tabId ?? null} />
+      : session && orgId ? <Workspace key={`${orgId}/${params.workspaceId}`} catalog={catalog} session={session} orgId={orgId} workspaceId={params.workspaceId} listedState={listed?.state ?? null} initialTabId={launchTab ?? params.tabId ?? null} />
       : <EmptyState title="Checking access…" detail="Reading the list of workspaces from your account." busy />}
   </View>;
 }

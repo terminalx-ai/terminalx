@@ -106,3 +106,19 @@ notifications are headed "Phone fixture", the copy's own app name.
    Each screenshot is saved under `<output directory>/<run>/<flow name>/takeScreenshot/`.
    For the boards' look, set the simulator to dark appearance and the status bar to 10:25:
    `xcrun simctl status_bar $SIMULATOR_UDID override --time 10:25`.
+
+## A first task at launch (25.09)
+
+`fixtureLaunch: <outcome>` (`setup/launch.ts`) gives Northwind a connected Boat
+and two agent logins and answers the launch form, its price and the launch.
+The launch then moves through its six phases by the clock and ends as the
+outcome says: `running`, `sign-in`, `unsure`, `not-picked-up`, or `hold`
+(10 s a phase, so each can be shown). `flow-25.09.yaml` draws the form, its
+sheets, the review and the phases; `flow-25.09-ends.yaml` the outcomes,
+a cancel and Launch again. They open the form with
+`openRoute: /cloud/new?orgId=org-northwind`.
+
+Maestro's view of the screen trails the app by a few seconds, and its waits
+end after about one phase whatever their timeout, so the flows wait on what a
+phase shows rather than on time. Its tap on an alert's button can land on a
+page button of the same name under the alert; the cancel is tapped by place.

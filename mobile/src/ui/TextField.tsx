@@ -15,6 +15,9 @@ export interface TextFieldHandle {
 
 interface Shared extends Pick<TextInputProps, "autoCapitalize" | "autoCorrect" | "autoComplete" | "spellCheck" | "returnKeyType" | "keyboardType" | "onSubmitEditing" | "autoFocus" | "maxLength"> {
   ref?: Ref<TextFieldHandle>;
+  /** The field gained or lost the keyboard: a form keeps a tall field in view while it is typed in. */
+  onFocus?: () => void;
+  onBlur?: () => void;
   /** Drawn above the field, and what the field is called aloud. */
   label?: string;
   /** What the field is called aloud when it has no label above it. Never the value. */
@@ -154,8 +157,8 @@ export function TextField({ ref, ...props }: TextFieldProps) {
           // A secret is never handed back to the field: what was typed stays in the system's secure input.
           {...(props.secret ? { secureTextEntry: true } : { value: props.value })}
           onChangeText={change}
-          onFocus={() => setFocused(true)}
-          onBlur={() => { setFocused(false); setRefocus(false); }}
+          onFocus={() => { setFocused(true); props.onFocus?.(); }}
+          onBlur={() => { setFocused(false); setRefocus(false); props.onBlur?.(); }}
           editable={!disabled}
           autoFocus={props.autoFocus || refocus}
           autoCapitalize={props.autoCapitalize ?? (secret ? "none" : undefined)}

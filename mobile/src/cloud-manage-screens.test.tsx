@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CloudScreen from "../app/(tabs)/cloud";
 import CloudWorkspaceScreen from "../app/cloud/[workspaceId]";
-import { account } from "./cloud/testing/account";
+import { account, type HeldLaunch } from "./cloud/testing/account";
 import { operation, workspace } from "./cloud/testing/server";
 
 // PRO-530: where launch, stop and delete are reached from the screens that were already there (25.05, 25.06).
@@ -34,7 +34,7 @@ vi.mock("react-native", () => {
     Alert: { alert: mocks.alert }, ActionSheetIOS: { showActionSheetWithOptions: mocks.sheet },
     Platform: { OS: "ios", select: ({ ios, default: fallback }: any) => ios ?? fallback },
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
-    Pressable: ({ children, onPress, onLongPress, disabled, accessibilityLabel, testID }: any) => <button disabled={disabled} aria-label={accessibilityLabel} data-testid={testID} onClick={onPress} onContextMenu={onLongPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
+    Pressable: ({ children, onPress, onLongPress, disabled, accessibilityLabel, accessibilityRole, accessibilityState, testID }: any) => <button disabled={disabled} aria-label={accessibilityLabel} role={accessibilityRole} aria-selected={accessibilityState?.selected} data-testid={testID} onClick={onPress} onContextMenu={onLongPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
     TextInput: ({ value, placeholder }: any) => <input type="text" readOnly value={value} placeholder={placeholder} />,
     FlatList: ({ data, renderItem, ListHeaderComponent, ListEmptyComponent }: any) => <div>{ListHeaderComponent}{data.length ? data.map((entry: unknown, index: number) => <div key={index}>{renderItem({ item: entry })}</div>) : ListEmptyComponent}</div>,
     SectionList: list,
@@ -54,10 +54,10 @@ const pass = (ms = 0) => act(async () => { await vi.advanceTimersByTimeAsync(ms)
  * client and catalog. The workspace's live connection is not what is under
  * test here: the page is handed a conversation with nothing in it.
  */
-async function world(ws: Record<string, unknown>, op: Record<string, unknown> | null = null) {
-  service = account({ workspaces: [{ workspace: workspace({ state: "ready", ...ws }), latestOperation: op ? operation(op) : null }] });
+async function world(ws: Record<string, unknown>, op: Record<string, unknown> | null = null, more: { launch?: Partial<HeldLaunch>; tabs?: unknown[]; startOffer?: string } = {}) {
+  service = account({ workspaces: [{ workspace: workspace({ state: "ready", ...ws }), latestOperation: op ? operation(op) : null, ...(more.launch ? { launch: more.launch } : {}) }] });
   await service.catalog.refresh();
-  const snapshot = { connection: { state: ws.state === "suspended" ? "suspended" : "connected" }, problem: null, collab: { available: false, userId: "u-me", participants: [], leases: {}, notes: {} }, role: "manager", canApprove: true, hasKey: true, interrupts: false, tabs: [], outbox: [], error: null };
+  const snapshot = { connection: { state: ws.state === "suspended" ? "suspended" : "connected" }, problem: null, collab: { available: false, userId: "u-me", participants: [], leases: {}, notes: {} }, role: "manager", canApprove: true, hasKey: true, interrupts: false, ...(more.startOffer ? { startOffer: more.startOffer } : {}), tabs: more.tabs ?? [], outbox: [], error: null };
   const session = { subscribe: () => () => undefined, getSnapshot: () => snapshot, view: () => () => undefined, reconnect: () => undefined, typingIn: () => undefined, outbox: { isDeciding: () => false } };
   mocks.catalog = Object.assign(service.catalog, { retain: () => () => undefined, watch: () => () => undefined, opened: () => session });
   return service;
@@ -89,6 +89,41 @@ describe("the workspace's page", () => {
     // Straight into the workspace: the launch view is gone, with no tap.
     expect(byId("launch-head")).toBeNull();
     expect(byId("workspace-state-line")).not.toBeNull();
+  });
+
+  it("follows a first task past the machine running, and opens the workspace at the launch's own tab (PRO-547)", async () => {
+    const tab = (tabId: string, title: string) => ({ tabId, sessionId: "s1", title, status: "in_progress", source: "live", pendingPermissions: [], events: [], truncated: false, noKey: false, continuous: false });
+    await world({ state: "provisioning" }, { state: "running", stage: "creating-machine" }, { launch: { agent: "claude", promptBytes: 12, createdAt: Date.now() }, tabs: [tab("tab-1", "Shell"), tab("tab-7", "Fix checkout")] });
+    mocks.params = { workspaceId: "ws-9", orgId: "org-1", operationId: "op-9", title: "Checkout redesign" };
+    await show(<CloudWorkspaceScreen />);
+    service.advance("op-9", { stage: "connecting-relay" });
+    service.advance("op-9", { state: "succeeded", stage: "ready", cancelable: false }, { state: "ready" });
+    await pass(3_000);
+    // The machine runs; the agent has not started yet, so the page stays.
+    expect(byId("launch-head")!.textContent).toBe("Starting the agent…");
+    await pass(1_200);
+    expect(byId("launch-head")!.textContent).toBe("Starting the agent…");
+    service.advanceLaunch("ws-9", { state: "started", startingAgentAt: Date.now(), runningAt: Date.now(), sessionId: "s1", tabId: "tab-7" });
+    await pass(3_000);
+    await pass(1_200);
+    expect(byId("launch-head")).toBeNull();
+    expect([...container.querySelectorAll("[role='tab']")].map((entry) => [entry.textContent, entry.getAttribute("aria-selected")])).toEqual([["Shell", "false"], ["Fix checkout", "true"]]);
+  });
+
+  it("leads from a first task that did not start to New conversation (PRO-547 after PRO-548)", async () => {
+    await world({ state: "provisioning" }, { state: "running", stage: "creating-machine" }, { launch: { agent: "claude", promptBytes: 12, createdAt: Date.now() }, startOffer: "yes" });
+    mocks.params = { workspaceId: "ws-9", orgId: "org-1", operationId: "op-9", title: "Checkout redesign" };
+    await show(<CloudWorkspaceScreen />);
+    service.advance("op-9", { stage: "connecting-relay" });
+    service.advance("op-9", { state: "succeeded", stage: "ready", cancelable: false }, { state: "ready" });
+    service.advanceLaunch("ws-9", { state: "failed", category: "agent-sign-in-required", failedAt: Date.now() });
+    await pass(3_000);
+    expect(byId("launch-head")!.textContent).toBe("The first task did not start");
+    await act(async () => { byId("open-workspace")!.click(); });
+    await pass();
+    // The workspace runs with no conversation: the way on is New conversation.
+    expect(byId("launch-head")).toBeNull();
+    expect(byId("empty-start-button")).not.toBeNull();
   });
 
   it("shows a launch the list says is under way, without being told which operation", async () => {
