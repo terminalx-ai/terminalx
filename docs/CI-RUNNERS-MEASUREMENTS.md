@@ -496,3 +496,55 @@ file, so the 30 s stall option never fired and nothing was retried; the same
 step took 24 to 26 s in other jobs of the same run. The step's own limit is
 gone (`main` never had one there); the job's limit bounds it, and the retry
 and stall options stay. A cache for the packages is a later piece.
+
+### The slow package installs are one mirror (24 November 2026)
+
+In #1523's run (45338978657) the same 91.3 MB of packages took:
+
+| Job | Runner region | Mirror | Fetch |
+| --- | --- | --- | --- |
+| `linux-rust` | `us-west-2` | `us-east-2.ec2.archive.ubuntu.com` | 23 min 34 s (64.6 kB/s) |
+| `linux-rust-tests (1)` | `us-west-2` | the same | 24 min 13 s (62.9 kB/s), then cut off at the job's 30 minutes |
+| `linux-rust-tests (2)` | `eastus` | `azure.archive.ubuntu.com` | 5 s (18.9 MB/s) |
+| `linux-rust-tests (4)` | `eastus` | `azure.archive.ubuntu.com` | 5 s (18.3 MB/s) |
+
+`serve-tests` in that run was on a `us-east-1` runner and the EC2 mirror too.
+The mirror comes from the image's `/etc/apt/apt-mirrors.txt`, which differs
+by where the runner is. `infra/ci-runners/apt-mirrors.sh` now writes that file
+before every install (Azure first, `archive.ubuntu.com` behind it) and prints
+what it replaced. Whether the Azure mirror is fast from a runner in an AWS
+region is not measured until a job lands on one.
+
+A cache of the package files was tried and left out. apt does not check a
+file that is already in its archive folder: with apt 2.8.4 in an
+`ubuntu:24.04` container, a cached `.deb` with one byte changed and its size
+kept was "Need to get 0 B" and went to dpkg unread, and `--print-uris` gives
+only an MD5 for each file. A cache would need its own SHA-256 check of every
+file against `apt-cache show` before apt runs as root.
+
+### The first run of the new workflow with an empty queue
+
+A manual run on `main` at 06:09 UTC (45338347689); every job waited 2 s.
+
+| Job | Time |
+| --- | --- |
+| Every Linux job but `linux-rust` | done 12 min 14 s after the start |
+| `linux-rust` | 27 min 57 s: the install 25 min 34 s (30 s in the other jobs), Clippy 2 min 7 s, cargo cache a hit |
+| `linux-rust-tests`, four parts | 6 min 0 s to 9 min 48 s |
+| `linux-rust-tests (binaries)` | 8 min 43 s |
+| `serve-tests` | 12 min 14 s: tools 3 min 12 s, building the runtime 1 min 28 s, tests 7 min 14 s |
+| `vitest`, four parts | 2 min 45 s to 3 min 26 s |
+| `frontend` | 1 min 44 s |
+| `phone-app` | 57 s |
+| `webkit-layout` (macOS) | 33 min 33 s: 129 of 129, 3 at once, 1,906 s for 5,644 s of checks |
+| `macos-native` (full suite) | Clippy 11 min 46 s and 8 min 31 s; the test build still running at 38 min when this was written |
+
+### #1523's first run (45338978657)
+
+Pull request jobs: `frontend` 1 min 38 s, `vitest` 2 min 24 s to 3 min 22 s,
+`phone-app` 1 min 3 s, `serve-tests` 10 min 55 s, `headless-serve` 5 min 42 s,
+`machines-e2e` 3 min 56 s, `machine-compat` 4 min 27 s, `linux-rust-tests`
+parts 2 to 4 7 min 21 s to 7 min 57 s and the binaries 8 min 27 s,
+`webkit-layout` 29 min 38 s. `linux-rust` 27 min 19 s and part 1 (cancelled
+at 30 min 16 s) were the slow mirror. `macos-native` was cancelled at
+32 min 9 s. The Linux WebKit trial failed in all four parts.
