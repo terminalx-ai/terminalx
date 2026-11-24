@@ -602,22 +602,31 @@ ending "126 of 129 checks passed".
 Every check the two pieces changed passed in both trial runs of its piece and
 on macOS (the pieces' reports: sidebar-order, sidebar-extras, file-tab,
 editor-toolbar, review-threads; command-palette, quick-open, chat-controls,
-dictation-edits, dialog-lists, machine-session, cloud-setup). What failed in
-the parts was not theirs:
+dictation-edits, dialog-lists, machine-session, cloud-setup). What each
+failed part ended with, from its log (`FAILED:` and "N of M checks passed"):
+
+| Run | Part 1 | Part 2 | Part 3 | Part 4 |
+| --- | --- | --- | --- | --- |
+| 45361220945 | 31 of 32: `command-palette` | 29 of 30: `agent-dashboard:3` | 29 of 31: `repository-scripts`, `machine-session` | 26 of 31: `chat-controls`, `dictation-edits`, `quick-open`, `composer-controls`, `review-tab` |
+| 45362750128 | 31 of 32: `command-palette` | ok | 29 of 31: `repository-scripts`, `machine-session` | 26 of 31: `chat-controls`, `dictation-edits`, `quick-open`, `composer-controls`, `review-tab` |
+| 45372204285 | ok | ok | 30 of 31: `repository-scripts` | 28 of 31: `organization-roster`, `composer-controls`, `review-tab` |
+| 45373848579 | ok | 28 of 30: `agent-dashboard:3`, `sparse-checkout` | 30 of 31: `repository-scripts` | 29 of 31: `composer-controls`, `review-tab` |
+
+The parts ran 124 checks between them (30, 31, 31 and 32), the five then in
+`macOnly` left out. At `0350c08a0` the input piece's checks were not yet fixed:
+`command-palette`, `quick-open`, `chat-controls`, `dictation-edits` and
+`machine-session` failed there and passed at `880f19ca4`. The rest were not
+the pieces' checks:
 
 | Check | Where | Cause, as far as known |
 | --- | --- | --- |
-| `repository-scripts`, `review-tab`, `composer-controls` | the Linux runs (45372204285 parts 3 and 4, 45373848579 parts 3 and 4) and macOS | main's own at `45280a95` (run 45358840151, job 138324967922): #1529 merged before its CI had a result; fixed on main by a separate worker |
-| `organization-roster` | 45372204285 part 4 | once; being fixed on `raccoon/webkit-linux-flaky` |
-| `sparse-checkout`, `agent-dashboard:3`, `create-project` | once each on 24 November, by the lead's count (the run of each not read here) | being fixed on `raccoon/webkit-linux-flaky` |
+| `repository-scripts`, `review-tab`, `composer-controls` | every run above, and macOS | main's own at `45280a95` (run 45358840151, job 138324967922): #1529 merged before its CI had a result |
+| `agent-dashboard:3` | 45361220945 part 2, 45373848579 part 2 | not read here |
+| `organization-roster` | 45372204285 part 4 | not read here |
+| `sparse-checkout` | 45373848579 part 2: the "Check out only some folders" dialog's `src/` checkbox was not visible in time (sparse-checkout.mjs:141) | not read further here |
 
-The failed parts of 45361220945, 45362750128 and 45373848579 part 2 were not
-read check by check for this table.
-
-So no run above had all four parts green. The gate below is not yet shown
-green on Linux in CI; the step 2 pull request goes to the owner after five
-full Linux runs in a row on the final branch with every check green, and one
-green macOS run of the mac-only checks.
+So no run above had all four parts green, and the gate below is not yet shown
+green on Linux in CI.
 
 What changed in `ci.yml`: the four parts became `webkit-layout-linux`, counted
 in `check`; `webkit-layout` became a Linux job that passes only when every part

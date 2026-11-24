@@ -591,6 +591,10 @@ class WorkflowSecurity(unittest.TestCase):
         # Without the mirror script a runner in an AWS region takes 25 minutes over the same packages.
         self.rejects(lambda w: self.step(w, "linux-rust", name="Install Linux build dependencies").update({"run": self.step(w, "linux-rust", name="Install Linux build dependencies")["run"].removeprefix("sudo infra/ci-runners/apt-mirrors.sh && ")}))
         self.rejects(lambda w: self.step(w, "linux-rust-tests", name="Install Linux build dependencies").update({"run": self.step(w, "linux-rust-tests", name="Install Linux build dependencies")["run"].replace(" -o Acquire::http::Timeout=30", "", 1)}))
+        # The WebKit parts' libraries come through apt too (`--with-deps`), and so from the mirror the script picks.
+        self.rejects(lambda w: self.step(w, "webkit-layout-linux", name="Install WebKit and the libraries it needs").update({"run": "pnpm exec playwright install --with-deps webkit"}))
+        # Without `--with-deps` a hosted Ubuntu runner lacks the libraries WebKit loads.
+        self.rejects(lambda w: self.step(w, "webkit-layout-linux", name="Install WebKit and the libraries it needs").update({"run": "pnpm exec playwright install webkit"}))
 
     def test_missing_vitest_shell_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["vitest"]["steps"].remove(self.step(w, "vitest", name="Install shells")))
