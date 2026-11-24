@@ -52,6 +52,7 @@ export function TextInput({ ref, ...props }: Props & { ref?: Ref<unknown> }) {
     {...attributes(props)}
     type={props.secureTextEntry ? "password" : "text"}
     data-controlled={controlled ? "true" : undefined}
+    data-multiline={props.multiline ? "true" : undefined}
     {...(controlled ? { value: props.value } : {})}
     autoFocus={props.autoFocus}
     disabled={props.editable === false}

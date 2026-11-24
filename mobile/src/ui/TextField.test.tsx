@@ -93,6 +93,21 @@ it("reports what is typed and locks while a request is under way", async () => {
   expect(page.byLabel("Paste Name")).toBeNull();
 });
 
+it("has a multi-line mode (25.09's first task): 96 high, growing to 180, with the same lines under it", async () => {
+  const change = vi.fn();
+  await page.show(<TextField label="Task" multiline value="" onChangeText={change} placeholder="What should the agent work on?" error="The first task is longer than 32 KB." />);
+  expect(input()!.getAttribute("data-multiline")).toBe("true");
+  expect(page.styleOf(field())).toMatchObject({ minHeight: 96, alignItems: "flex-start", paddingVertical: 11, borderColor: "#db695f" });
+  expect(page.styleOf(input())).toMatchObject({ minHeight: 74, maxHeight: 158, lineHeight: 22, fontSize: 16 });
+  expect(page.byText("The first task is longer than 32 KB.")!.getAttribute("role")).toBe("alert");
+  await page.type(input(), "Fix the checkout test, then open a pull request.");
+  expect(change).toHaveBeenLastCalledWith("Fix the checkout test, then open a pull request.");
+  // A one-line field is unchanged.
+  await page.show(<TextField label="Name" value="" onChangeText={change} />);
+  expect(input()!.getAttribute("data-multiline")).toBeNull();
+  expect(page.styleOf(field()).minHeight).toBe(44);
+});
+
 it("pastes the clipboard into an empty field without its stray spaces, and offers Paste only while empty", async () => {
   const change = vi.fn();
   mocks.paste.mockResolvedValue("  https://github.com/acme/app\n");
