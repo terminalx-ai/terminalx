@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { BackHandler, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Stack } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { CircleCheck, UserRound, WifiOff } from "lucide-react-native";
@@ -35,7 +35,13 @@ type Phase =
  * page shows it for a moment and closes onto the Cloud tab's first run.
  */
 export default function AccessCodeScreen() {
-  const request = useApp().accessCode;
+  const app = useApp();
+  const request = app.accessCode;
+  // Taken away other than by Cancel or an accepted code (Android's back, say): that is a Cancel, so the
+  // person is signed out and the next sign-in opens the page again, rather than a hold with no page.
+  const latest = useRef(app);
+  useEffect(() => { latest.current = app; });
+  useEffect(() => () => { if (latest.current.accessCode) latest.current.cancelAccessCode(); }, []);
   // The root layout opens and closes this page as the hold comes and goes. A new sign-in, after this one ended, is a new form.
   return request ? <AccessCodeForm key={request.id} request={request} /> : <Stack.Screen options={{ title: ACCESS_CODE_TEXT.title, headerLeft: () => null }} />;
 }
@@ -87,7 +93,7 @@ function AccessCodeForm({ request }: { request: AccessCodeRequest }) {
   // Armed while offline: sent once the network is back.
   const redeem = app.redeemAccessCode;
   useEffect(() => {
-    if (!armed || !online || flight.current) return;
+    if (!armed || !online || flight.current || !value) return;
     flight.current = true;
     void redeem(value).then((answer) => settle(answer, value));
   });
@@ -104,8 +110,16 @@ function AccessCodeForm({ request }: { request: AccessCodeRequest }) {
     return () => clearTimeout(timer);
   }, [finish, phase.kind]);
 
+  // Android's back is Cancel, except while the code is being checked (it may already be spent) or was accepted.
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => checking || phase.kind === "accepted");
+    return () => subscription.remove();
+  }, [checking, phase.kind]);
+
   const change = (next: string) => {
     setCode(next);
+    // An offline Try again is for the code that was there: emptied, nothing is waiting to go.
+    if (next.trim() === "") setArmed(false);
     // The first change takes a refusal away and turns Continue back on; a lost answer is a new try.
     if (phase.kind === "refused" || phase.kind === "unanswered") setPhase({ kind: "entering" });
   };

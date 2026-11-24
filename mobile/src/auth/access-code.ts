@@ -56,3 +56,24 @@ export function refusalText(refusal: AccessCodeRefusal): string {
 
 /** How long the accepted page shows before it closes onto the Cloud tab (25.08: "shown for a moment"). */
 export const ACCEPTED_PAUSE_MS = 1_200;
+
+/** The access code page's route. */
+export const ACCESS_CODE_ROUTE = "/access-code";
+
+/** What the root layout does about the access code page. */
+export type AccessCodeRouting = "open" | "to-cloud" | "back" | "to-tabs" | "stay";
+
+/**
+ * Whether to open or close the access code page (PRO-551). A hold the page
+ * has not been opened for is opened once (`shownFor` is the hold id it was
+ * last opened for); while a hold stands, nothing else moves. With no hold, a
+ * page still showing closes: onto the Cloud tab once signed in, otherwise
+ * back where it came from, or to the tabs when it was reached with nothing
+ * under it (a link, a launch route).
+ */
+export function accessCodeRouting(state: { holdId: number | null; shownFor: number | null; onPage: boolean; signedIn: boolean; canGoBack: boolean }): AccessCodeRouting {
+  if (state.holdId !== null) return !state.onPage && state.shownFor !== state.holdId ? "open" : "stay";
+  if (!state.onPage) return "stay";
+  if (state.signedIn) return "to-cloud";
+  return state.canGoBack ? "back" : "to-tabs";
+}

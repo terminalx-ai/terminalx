@@ -2,7 +2,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AccessCodeScreen from "../app/access-code";
-import { ACCEPTED_PAUSE_MS, ACCESS_CODE_TEXT, type AccessCodeAnswer } from "./auth/access-code";
+import { ACCEPTED_PAUSE_MS, ACCESS_CODE_TEXT, accessCodeRouting, type AccessCodeAnswer } from "./auth/access-code";
 import { appearance, stage } from "./ui/testing/kit";
 import { themePalette } from "./ui/theme";
 
@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   clipboard: "",
   /** Each code sent, and the answer it is waiting for. */
   sent: [] as { code: string; answer(value: unknown): void }[],
+  /** Android's back button: what the page answers when it is pressed (true: handled, the page stays). */
+  back: [] as (() => boolean)[],
 }));
 vi.mock("expo-router", () => ({
   // The page's header as the stack draws it: its title, and what it puts at the start (Cancel).
@@ -26,7 +28,10 @@ vi.mock("lucide-react-native", async () => (await import("@mobile/ui/testing/kit
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn(), getStringAsync: vi.fn(async () => mocks.clipboard) }));
 vi.mock("react-native", async () => {
   const native = await import("@mobile/ui/testing/native");
-  return { ...native, KeyboardAvoidingView: native.View, Keyboard: { addListener: () => ({ remove: () => undefined }) } };
+  return {
+    ...native, KeyboardAvoidingView: native.View, Keyboard: { addListener: () => ({ remove: () => undefined }) },
+    BackHandler: { addEventListener: (_event: string, listener: () => boolean) => { mocks.back.push(listener); return { remove: () => { mocks.back.splice(mocks.back.indexOf(listener), 1); } }; } },
+  };
 });
 
 const page = stage();
@@ -54,6 +59,8 @@ function held(fields: Record<string, unknown> = {}) {
 const show = async () => { await page.show(<AccessCodeScreen />); await settle(); };
 const type = async (value: string) => { await page.type(field(), value); await settle(); };
 const press = async (element: Element | null) => { await page.press(element); await settle(); };
+/** Android's back: true when the page keeps itself. */
+const androidBack = () => mocks.back.at(-1)!();
 /** Answers the last code sent. */
 const answer = async (value: AccessCodeAnswer) => { await act(async () => mocks.sent.at(-1)!.answer(value)); await settle(); };
 
@@ -309,5 +316,71 @@ describe.each(["dark", "light"] as const)("the access code screen in %s", (schem
     await show();
     expect(page.byId("access-code-field")).toBeNull();
     expect(button("Cancel")).toBeNull();
+  });
+
+  it("offline, a Try again waiting for the network is let go when the field is emptied: nothing is sent", async () => {
+    held({ online: false });
+    await show();
+    await type("K7QM2X9TRB");
+    await press(button("Try again"));
+    await type("");
+    mocks.app = { ...mocks.app, online: true };
+    await show();
+    expect(mocks.app.redeemAccessCode).not.toHaveBeenCalled();
+    expect(cont()?.textContent).toBe("Continue");
+  });
+
+  it("Android's back is Cancel: the page goes, and the page going drops the hold", async () => {
+    await show();
+    expect(androidBack()).toBe(false);
+    // The stack takes the page away: that is a Cancel, so the next sign-in opens the page again.
+    await page.show(null);
+    expect(mocks.app.cancelAccessCode).toHaveBeenCalledTimes(1);
+  });
+
+  it("Android's back does nothing while the code is checked, or once it was accepted", async () => {
+    await show();
+    await type("K7QM2X9TRB");
+    await press(cont());
+    expect(androidBack()).toBe(true);
+    await answer({ status: "accepted" });
+    expect(androidBack()).toBe(true);
+  });
+
+  it("closed by the app once the hold is over, the page cancels nothing", async () => {
+    await show();
+    mocks.app = { ...mocks.app, accessCode: null };
+    await show();
+    await page.show(null);
+    expect(mocks.app.cancelAccessCode).not.toHaveBeenCalled();
+  });
+});
+
+// The root layout's part (_layout.tsx): when the page opens and how it closes.
+describe("opening and closing the access code page", () => {
+  const at = (fields: Partial<Parameters<typeof accessCodeRouting>[0]>) => accessCodeRouting({ holdId: null, shownFor: null, onPage: false, signedIn: false, canGoBack: true, ...fields });
+
+  it("opens once for each hold", () => {
+    expect(at({ holdId: 1 })).toBe("open");
+    expect(at({ holdId: 1, shownFor: 1, onPage: true })).toBe("stay");
+    // Shown and since taken away (Android's back): the same hold is not forced back on.
+    expect(at({ holdId: 1, shownFor: 1 })).toBe("stay");
+  });
+
+  it("a new hold opens the page again, even when the last one's page was taken away while it stood", () => {
+    expect(at({ holdId: 2, shownFor: 1 })).toBe("open");
+    // Already showing: the page starts a fresh form itself.
+    expect(at({ holdId: 2, shownFor: 1, onPage: true })).toBe("stay");
+  });
+
+  it("closes onto the Cloud tab once signed in, back where it came from otherwise", () => {
+    expect(at({ onPage: true, signedIn: true })).toBe("to-cloud");
+    expect(at({ onPage: true })).toBe("back");
+    expect(at({})).toBe("stay");
+  });
+
+  it("reached with no hold and nothing under it (a link, a launch route), it goes to the tabs", () => {
+    expect(at({ onPage: true, canGoBack: false })).toBe("to-tabs");
+    expect(at({ onPage: true, canGoBack: false, signedIn: true })).toBe("to-cloud");
   });
 });
