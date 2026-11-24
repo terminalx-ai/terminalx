@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { thisComputer } from "@/lib/platform";
 import { Hash, Loader2, PlugZap } from "@/icons";
 import type { ListedPort, WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { Switch } from "@/components/ui/controls";
-import type { CloudPortForward, CloudPortSettings } from "@/lib/api";
+import { api, type CloudPortForward, type CloudPortSettings } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import {
   copyForwardUrl,
@@ -33,6 +33,13 @@ export const POLL_MS = 2_000;
 
 /** The checkbox that keeps the remote port's number on this Mac (14.11). */
 export const SAME_PORT_LABEL = `Same port number on ${thisComputer}`;
+export const FORWARDING_OFF = "Port forwarding is off for this workspace. Looking here never starts it.";
+export const INVALID_PORT = "Enter a port from 1 to 65535.";
+export const SSH_PORT_RESERVED = "Port 22 is kept for SSH.";
+
+export function validPort(value: string): boolean {
+  return /^\d{1,5}$/.test(value) && Number(value) >= 1 && Number(value) <= 65535;
+}
 
 const STOPPED = "Previews work while the workspace is running. Looking here never starts it.";
 /** Said beside a state with no connection when previews were open here: they ended with it. */
@@ -60,18 +67,21 @@ export function connectionText(state: WorkspaceConnectionState): { text: string;
 }
 
 /** What a refused forward means, in words. `port` is the workspace's port; on a paired machine the words name it. */
-export function portErrorMessage(error: unknown, port: number, machine: MachinePlace | null = null): string {
+export function portErrorMessage(error: unknown, port: number, machine: MachinePlace | null = null, localPort?: number, phase2 = false): string {
   const code = typeof error === "string" ? error : error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : String(error);
   switch (code) {
     case "cloud_port_in_use":
+      if (phase2) return localPort === undefined
+        ? `No free local port could be assigned on ${thisComputer}.`
+        : `Port ${localPort} is already in use on ${thisComputer}. Choose another local port or leave it blank.`;
       return `Port ${port} is already in use on ${thisComputer}. Untick "${SAME_PORT_LABEL}" to use a free one.`;
     case "cloud_port_not_connected":
       return machine ? `Ports are forwarded while ${machine.name} is connected.` : STOPPED;
     case "cloud_port_invalid":
-      return "Enter a port between 1 and 65535.";
+      return phase2 ? INVALID_PORT : "Enter a port between 1 and 65535.";
     // The native forwarder refuses new forwards while the master switch is off (PRO-355).
     case "cloud_port_forwarding_off":
-      return `Forwarding is off. Turn it on to forward ports to ${thisComputer}.`;
+      return phase2 ? FORWARDING_OFF : `Forwarding is off. Turn it on to forward ports to ${thisComputer}.`;
     case "forbidden":
       return machine ? `You do not have access to ${machine.name}’s ports.` : "You do not have access to this workspace's ports.";
     case "cloud_remote_identity_changed":
@@ -166,6 +176,8 @@ export interface PortsInputs {
   mayOpen: boolean;
   /** The view is on screen: only then is the list read, on a timer. */
   active: boolean;
+  /** The Phase 2 workspace header popover. */
+  phase2?: boolean;
 }
 
 export interface PortsModel {
@@ -188,10 +200,11 @@ export interface PortsModel {
   settings: CloudPortSettings;
   busy: number | null;
   error: string | null;
+  rowFailures: ReadonlyMap<number, string>;
   copied: number | null;
   sameNumber: boolean;
   setSameNumber: (value: boolean) => void;
-  forward: (port: number) => Promise<boolean>;
+  forward: (port: number, options?: { localPort?: number; row?: boolean }) => Promise<boolean>;
   stop: (port: number) => void;
   copy: (localPort: number, port: number) => void;
   open: (localPort: number) => void;
@@ -204,7 +217,7 @@ export interface PortsModel {
  * is a listener on this Mac's loopback over the encrypted connection: there
  * is no public address. Nothing here starts a stopped workspace.
  */
-export function usePorts({ workspaceKey, client, state, connectionId, mayOpen, active }: PortsInputs): PortsModel {
+export function usePorts({ workspaceKey, client, state, connectionId, mayOpen, active, phase2 = false }: PortsInputs): PortsModel {
   const connected = state.state === "connected";
   // On a paired machine the views name it and speak from its own state.
   const machine = useMachinePlace();
@@ -220,6 +233,7 @@ export function usePorts({ workspaceKey, client, state, connectionId, mayOpen, a
   const [detected, setDetected] = useState(true);
   const [busy, setBusy] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [rowFailures, setRowFailures] = useState<ReadonlyMap<number, string>>(() => new Map());
   const [copied, setCopied] = useState<number | null>(null);
   // Ask for the remote port's own number on this Mac, and refuse if taken.
   const [sameNumber, setSameNumber] = useState(false);
@@ -240,27 +254,26 @@ export function usePorts({ workspaceKey, client, state, connectionId, mayOpen, a
   useEffect(() => {
     if (connected) return;
     setListening(null);
+    setRowFailures(new Map());
     if (machine) return;
     expireAll(workspaceKey);
     if (connectionId) dropPortForwards(connectionId);
   }, [connected, machine, workspaceKey, connectionId]);
 
-  const read = useCallback(async () => {
-    if (!usable || !connectionId || !client) return;
-    const [ports] = await Promise.all([client.listPorts().catch(() => null), readPortForwards(connectionId)]);
-    if (!mounted.current || !ports) return;
-    notePortProcesses(connectionId, ports.ports);
-    setListening(ports.ports);
-    setDetected(ports.detected);
-  }, [client, connectionId, usable]);
-
   // Read while shown and connected; never while hidden. One read at a time.
   useEffect(() => {
-    if (!active || !usable) return;
+    if (!active || !usable || !connectionId || !client) return;
     let cancelled = false;
     let timer: number | undefined;
     const tick = async () => {
-      if (document.visibilityState !== "hidden") await read();
+      if (document.visibilityState !== "hidden") {
+        const [ports] = await Promise.all([client.listPorts().catch(() => null), readPortForwards(connectionId)]);
+        if (!cancelled && ports) {
+          notePortProcesses(connectionId, ports.ports);
+          setListening(ports.ports);
+          setDetected(ports.detected);
+        }
+      }
       if (!cancelled) timer = window.setTimeout(() => void tick(), POLL_MS);
     };
     void tick();
@@ -268,17 +281,38 @@ export function usePorts({ workspaceKey, client, state, connectionId, mayOpen, a
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [active, usable, read]);
+  }, [active, usable, client, connectionId, generation]);
 
-  const forward = async (port: number): Promise<boolean> => {
+  const forward = async (port: number, options?: { localPort?: number; row?: boolean }): Promise<boolean> => {
     if (!connectionId) return false;
+    if (phase2 && port === 22) {
+      setError(SSH_PORT_RESERVED);
+      return false;
+    }
+    const localPort = options?.localPort ?? (sameNumber ? port : undefined);
     setBusy(port);
     setError(null);
+    if (rowFailures.has(port)) {
+      setRowFailures((previous) => {
+        const next = new Map(previous);
+        next.delete(port);
+        return next;
+      });
+    }
     try {
-      await forwardPort(connectionId, port, sameNumber);
+      if (options?.localPort === undefined) {
+        await forwardPort(connectionId, port, sameNumber);
+      } else {
+        await api.cloudPortForward(connectionId, port, { localPort: options.localPort, exact: true });
+        await readPortForwards(connectionId);
+      }
       return true;
     } catch (failure) {
-      if (mounted.current) setError(portErrorMessage(failure, port, machine));
+      if (mounted.current) {
+        const message = portErrorMessage(failure, port, machine, localPort, phase2);
+        if (phase2 && options?.row) setRowFailures((previous) => new Map(previous).set(port, message));
+        else setError(message);
+      }
       return false;
     } finally {
       if (mounted.current) setBusy(null);
@@ -345,6 +379,7 @@ export function usePorts({ workspaceKey, client, state, connectionId, mayOpen, a
     settings,
     busy,
     error,
+    rowFailures,
     copied,
     sameNumber,
     setSameNumber,
@@ -362,7 +397,7 @@ export function usePorts({ workspaceKey, client, state, connectionId, mayOpen, a
 export function PortInput({ model, autoFocus, className, onDone }: { model: PortsModel; autoFocus?: boolean; className?: string; onDone?: () => void }) {
   const [typed, setTyped] = useState("");
   const wanted = Number(typed);
-  const valid = /^\d{1,5}$/.test(typed) && wanted >= 1 && wanted <= 65535;
+  const valid = validPort(typed);
   const fieldLabel = model.machine ? `Port on ${model.machine.name}` : "Workspace port";
   return (
     <form
@@ -401,21 +436,22 @@ export function PortInput({ model, autoFocus, className, onDone }: { model: Port
 }
 
 /** The rows of one list, with their actions. */
-export function PortRows({ model, rows }: { model: PortsModel; rows: PortRowModel[] }) {
+export function PortRows({ model, rows, forwardingOff = false }: { model: PortsModel; rows: PortRowModel[]; forwardingOff?: boolean }) {
   return (
     <>
       {rows.map((row) => (
         <PortRow
           key={row.port}
           row={row}
+          failure={row.state.kind === "listening" || row.state.kind === "expired" ? model.rowFailures.get(row.port) : undefined}
           where={model.where}
           busy={model.busy === row.port}
-          locked={model.busy !== null || !model.usable}
+          locked={model.busy !== null || !model.usable || forwardingOff}
           copied={model.copied === row.port}
           onOpen={model.open}
           onCopy={(localPort) => model.copy(localPort, row.port)}
           onStop={model.stop}
-          onForward={(port) => void model.forward(port)}
+          onForward={(port) => void model.forward(port, { row: true })}
         />
       ))}
     </>

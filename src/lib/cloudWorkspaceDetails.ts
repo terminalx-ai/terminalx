@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { phase2Ready } from "@/lib/phase2Readiness";
+import { useDataPrivacy } from "@/lib/dataPrivacy";
 import * as cloudApi from "@/lib/api";
 import type { CloudWorkspace, CloudWorkspaceListItem, CloudWorkspaceOperation, CloudWorkspaceSnapshot } from "@/lib/api";
-import { getAccount, subscribeAccount } from "@/lib/account";
+import { getAccount, subscribeAccount, useAccount } from "@/lib/account";
 import { applyCloudSnapshot, refreshCloudCatalog } from "@/lib/cloudCatalog";
 import { reconnectCloudWorkspace } from "@/lib/cloudConnections";
 import { workspaceAuthority } from "@/lib/cloudCollab";
@@ -30,15 +31,13 @@ interface RestartSnapshot {
   operation: Omit<CloudWorkspaceOperation, "action"> & { action: CloudWorkspaceOperation["action"] | "restart" };
 }
 interface DetailsApi {
-  phase2DesktopContractsAvailable(): Promise<boolean>;
   cloudWorkspaceDetails(workspaceId: string, orgId?: string | null): Promise<CloudWorkspaceDetailsResponse>;
   cloudWorkspaceRestart(workspaceId: string, orgId?: string | null): Promise<RestartSnapshot>;
   cloudWorkspaceOperationDto(operationId: string, orgId?: string | null): Promise<RestartSnapshot>;
 }
 function publicContracts(): { api: DetailsApi; project: (snapshot: RestartSnapshot) => CloudWorkspaceSnapshot } | null {
   const candidate = cloudApi.api as typeof cloudApi.api & Partial<DetailsApi>;
-  if (typeof candidate.phase2DesktopContractsAvailable !== "function"
-    || typeof candidate.cloudWorkspaceDetails !== "function"
+  if (typeof candidate.cloudWorkspaceDetails !== "function"
     || typeof candidate.cloudWorkspaceRestart !== "function"
     || typeof candidate.cloudWorkspaceOperationDto !== "function"
     || !("projectCloudWorkspaceSnapshot" in cloudApi)) return null;
@@ -74,25 +73,9 @@ export function detailsScope(): string {
   return JSON.stringify([accountEpoch, accountScope()]);
 }
 
-export function useWorkspaceDetailsAvailable(): boolean {
-  const [available, setAvailable] = useState<string | null>(null);
-  useEffect(() => {
-    let generation = 0;
-    const check = () => {
-      const request = ++generation;
-      setAvailable(null);
-      const contracts = publicContracts();
-      if (!contracts) return;
-      const scope = detailsScope();
-      void contracts.api.phase2DesktopContractsAvailable().then((ready) => {
-        if (generation === request && scope === detailsScope()) setAvailable(ready === true ? scope : null);
-      }).catch(() => {});
-    };
-    check();
-    const stop = subscribeAccount(check);
-    return () => { ++generation; stop(); };
-  }, []);
-  return available === detailsScope();
+export function useWorkspaceDetailsAvailable(orgId: string): boolean {
+  const { status } = useAccount();
+  return !useDataPrivacy().enabled && publicContracts() !== null && phase2Ready(status, orgId, "restartDetails");
 }
 
 export async function loadWorkspaceDetails(item: CloudWorkspaceListItem): Promise<CloudWorkspaceDetailsResponse> {

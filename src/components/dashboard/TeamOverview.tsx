@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { thisComputer } from "@/lib/platform";
 import { useAccount } from "@/lib/account";
+import { phase2Ready } from "@/lib/phase2Readiness";
 import { useCloudCatalog, type CloudCatalogState } from "@/lib/cloudCatalog";
 import { cloudPresence, useCloudPresence, useCloudPresenceVersion } from "@/lib/cloudPresence";
 import { loadRosterIn } from "@/lib/cloudPeople";
@@ -61,7 +62,9 @@ export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | nu
   const [chosenView, setView] = useState<{ key: string | null; view: TeamView }>({ key, view: "everyone" });
   // Render from the new scope immediately, before effects, including A -> B -> A.
   const selected = selection.key === key ? selection.ids : saved;
-  const view = chosenView.key === key ? chosenView.view : "everyone";
+  const followReady = (org: string) => !privacy.enabled && phase2Ready(status, org, "followReassign");
+  const preferredView = chosenView.key === key ? chosenView.view : "everyone";
+  const view = preferredView === "following" && (!orgId || !followReady(orgId)) ? "everyone" : preferredView;
   const choose = (ids: string[]) => {
     setSelection({ key, ids });
     if (key) try { localStorage.setItem(key, JSON.stringify(ids)); } catch { /* This Mac's filter still works in memory. */ }
@@ -80,8 +83,10 @@ export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | nu
     return presence.state === "live" && presence.workspaces.some((row) => row.workspaceId === workspace && row.activeMembers.length > 0);
   };
   const byRows = rows.filter((row) => !selected.length || selected.includes(!row.orgId ? catalog.viewerUserId ?? "local" : row.ownerId ?? ""));
-  const counts = Object.fromEntries(TEAM_VIEWS.map(({ id }) => [id, byRows.filter((row) => teamPredicate(row, id, catalog, active)).length])) as Record<TeamView, number>;
-  const filtered = byRows.filter((row) => teamPredicate(row, view, catalog, active));
+  const matches = (row: TeamRow, candidate: TeamView) =>
+    (candidate !== "following" || (!!row.orgId && followReady(row.orgId))) && teamPredicate(row, candidate, catalog, active);
+  const counts = Object.fromEntries(TEAM_VIEWS.map(({ id }) => [id, byRows.filter((row) => matches(row, id)).length])) as Record<TeamView, number>;
+  const filtered = byRows.filter((row) => matches(row, view));
   const cloudRows = byRows.filter((row) => row.orgId && row.workspaceId);
   const fact = (row: TeamRow) => {
     const org = catalog.orgs[row.orgId!];
@@ -94,7 +99,7 @@ export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | nu
       return typeof owner === "string" && owner.length > 0;
     })),
     shared: !cloudRows.length || (!!catalog.viewerUserId && cloudRows.every((row) => { const item = fact(row); return !!item && (item.workspace.createdBy === catalog.viewerUserId || !!item.workspace.you); })),
-    following: cloudRows.every((row) => typeof fact(row)?.following === "boolean"),
+    following: !!orgId && followReady(orgId) && cloudRows.every((row) => followReady(row.orgId!) && typeof fact(row)?.following === "boolean"),
     active: cloudRows.every((row) => {
       const presence = cloudPresence.snapshot(row.orgId!);
       return !!fact(row) && presence.state === "live" && presence.workspaces.some((workspace) => workspace.workspaceId === row.workspaceId);

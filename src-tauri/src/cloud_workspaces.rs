@@ -11,7 +11,11 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use url::Url;
 
-use crate::account::{AccountContext, AccountManager, OrgAccess};
+use crate::account::{
+    AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN,
+    PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_PRESENCE, PHASE2_RESTART_DETAILS,
+    PHASE2_WEBHOOK_TRIGGER,
+};
 
 const CONTRACT: &str = "providers-v1";
 /// Archive, tombstones and cleanup reports (terminalx-saas contract §10.6).
@@ -2506,8 +2510,8 @@ fn valid_cursor(value: &str) -> bool {
 pub struct CloudWorkspaceService {
     account: Arc<AccountManager>,
     client: Client,
-    // No authoritative SaaS readiness flag exists yet. Never infer readiness from providers-v1.
-    phase2_enabled: bool,
+    #[cfg(test)]
+    force_phase2_for_test: bool,
 }
 
 impl CloudWorkspaceService {
@@ -2515,7 +2519,8 @@ impl CloudWorkspaceService {
         Self {
             account,
             client: Client::production(),
-            phase2_enabled: false,
+            #[cfg(test)]
+            force_phase2_for_test: false,
         }
     }
 
@@ -2524,7 +2529,7 @@ impl CloudWorkspaceService {
         Self {
             account,
             client: Client::for_test(base, timeout),
-            phase2_enabled: false,
+            force_phase2_for_test: false,
         }
     }
 
@@ -2591,7 +2596,7 @@ impl CloudWorkspaceService {
 
     /// Account-wide inbox; never accepts a user or organization selector.
     pub fn inbox(&self, after: &str, wait_ms: u32) -> Result<crate::desktop_inbox::InboxPage, CloudWorkspaceClientError> {
-        self.phase2_gate(true)?;
+        self.phase2_gate(PHASE2_EVENTS, None, None, "inbox_unavailable")?;
         if !crate::desktop_inbox::valid_cursor(after) || wait_ms > 25_000 { return Err(inbox_invalid()); }
         self.inbox_account(RequestRisk::Read, |client, context| {
             let mut url = client.inbox_url(&[])?;
@@ -2604,7 +2609,7 @@ impl CloudWorkspaceService {
     }
 
     pub fn inbox_stream(&self, after: &str, last_event_id: Option<&str>) -> Result<crate::desktop_inbox::InboxStreamPage, CloudWorkspaceClientError> {
-        self.phase2_gate(true)?;
+        self.phase2_gate(PHASE2_EVENTS, None, None, "inbox_unavailable")?;
         if !crate::desktop_inbox::valid_cursor(after) || last_event_id.is_some_and(|id| !crate::desktop_inbox::valid_cursor(id)) { return Err(inbox_invalid()); }
         self.inbox_account(RequestRisk::Read, |client, context| {
             let mut url = client.inbox_url(&["stream"])?;
@@ -2624,13 +2629,14 @@ impl CloudWorkspaceService {
     }
 
     pub fn inbox_receipts(&self, event_ids: Vec<String>) -> Result<crate::desktop_inbox::InboxReceipt, CloudWorkspaceClientError> {
-        self.phase2_gate(true)?;
+        self.phase2_gate(PHASE2_EVENTS, None, None, "inbox_unavailable")?;
         if event_ids.is_empty() || event_ids.len() > 100 || event_ids.iter().any(|id| !crate::desktop_inbox::valid_cursor(id)) { return Err(inbox_invalid()); }
         self.inbox_account(RequestRisk::Mutation, |client, context| client.send_url("POST", context, client.inbox_url(&["receipts"])? , Some(RequestBody::Json(json!({"eventIds": event_ids}))), None, RequestRisk::Mutation, RESPONSE_LIMIT_BYTES))
     }
 
     fn inbox_account<T>(&self, risk: RequestRisk, operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
         let context = self.account.context().ok_or_else(|| CloudWorkspaceClientError::local("account_signed_out", false))?;
+        self.phase2_gate(PHASE2_EVENTS, None, Some(&context), "inbox_unavailable")?;
         let before = self.account.scope_if_same_account(&context).ok_or_else(|| context_changed_error(risk))?;
         let result = operation(&self.client, &context);
         if !self.account.scope_if_same_account(&context).is_some_and(|scope| scope.members == before.members) {
@@ -2640,11 +2646,12 @@ impl CloudWorkspaceService {
     }
 
     pub fn read_marker(&self, org: &str, workspace: &str, session_id: Option<String>, read_at: String) -> Result<crate::desktop_inbox::ReadMarker, CloudWorkspaceClientError> {
-        self.phase2_gate(true)?;
+        self.phase2_gate(PHASE2_EVENTS, Some(org), None, "inbox_unavailable")?;
         if !valid_resource_id(org) || !valid_resource_id(workspace)
             || session_id.as_ref().is_some_and(|id| id.len() > 128 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:@-".contains(&b)))
             || chrono::DateTime::parse_from_rfc3339(&read_at).is_err() { return Err(inbox_invalid()); }
         let context = self.account.inbox_member_context(org).map_err(|code| CloudWorkspaceClientError::local(code, false))?;
+        self.phase2_gate(PHASE2_EVENTS, Some(org), Some(&context), "inbox_unavailable")?;
         let mut body = json!({"readAt": read_at});
         if let Some(session) = &session_id { body["sessionId"] = json!(session); }
         let result: Result<crate::desktop_inbox::ReadMarker, _> = self.client.request_as("PUT", &context, &["cloud-workspaces", workspace, "read-marker"], None, Some(body), None, RequestRisk::Mutation);
@@ -2654,10 +2661,10 @@ impl CloudWorkspaceService {
         Ok(marker)
     }
 
-    /// Held source-only transport; retain the original context across the entire request.
+    /// Retain the original context across the entire request.
     fn following_in<T>(&self, org: &str, risk: RequestRisk,
         operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
-        if !self.phase2_enabled { return Err(CloudWorkspaceClientError::local("workspace_following_unavailable", true)); }
+        self.phase2_gate(PHASE2_FOLLOW_REASSIGN, Some(org), None, "workspace_following_unavailable")?;
         if !valid_following_path_id(org) { return Err(inbox_invalid()); }
         let original = self.account.context().ok_or_else(|| CloudWorkspaceClientError::local("account_signed_out", false))?;
         let context = self.account.inbox_member_context(org).map_err(|code| CloudWorkspaceClientError::local(code, false))?;
@@ -2665,6 +2672,7 @@ impl CloudWorkspaceService {
             || original.access_token != context.access_token {
             return Err(context_changed_error(risk));
         }
+        self.phase2_gate(PHASE2_FOLLOW_REASSIGN, Some(org), Some(&context), "workspace_following_unavailable")?;
         let result = operation(&self.client, &context);
         // Generation fences A-B-A; active org, profile, session and membership are
         // checked again even for errors. There is no successful cached fallback.
@@ -2706,10 +2714,10 @@ impl CloudWorkspaceService {
         })
     }
 
-    /// Both presence routes are held locally in production, before context or HTTP.
+    /// Both presence routes require readiness in the target organization.
     fn presence_in<T>(&self, org: &str, risk: RequestRisk,
         operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
-        if !self.phase2_enabled { return Err(CloudWorkspaceClientError::local("presence_unavailable", true)); }
+        self.phase2_gate(PHASE2_PRESENCE, Some(org), None, "presence_unavailable")?;
         if !valid_presence_id(org) { return Err(inbox_invalid()); }
         let original = self.account.context().ok_or_else(|| CloudWorkspaceClientError::local("account_signed_out", false))?;
         let context = self.account.inbox_member_context(org).map_err(|code| CloudWorkspaceClientError::local(code, false))?;
@@ -2717,6 +2725,7 @@ impl CloudWorkspaceService {
             || original.access_token != context.access_token {
             return Err(context_changed_error(risk));
         }
+        self.phase2_gate(PHASE2_PRESENCE, Some(org), Some(&context), "presence_unavailable")?;
         let result = operation(&self.client, &context);
         // Generation fences A-B-A; active org, profile, session and membership are
         // checked again even for errors. There is no successful cached fallback.
@@ -2771,26 +2780,56 @@ impl CloudWorkspaceService {
         })
     }
 
-    pub fn phase2_contracts_available(&self) -> bool { self.phase2_enabled }
+    pub fn phase2_contracts_available(&self) -> bool {
+        self.phase2_ready(PHASE2_EVENTS, None, None)
+    }
 
-    fn phase2_gate(&self, inbox: bool) -> Result<(), CloudWorkspaceClientError> {
-        if self.phase2_enabled { Ok(()) } else {
-            Err(CloudWorkspaceClientError::local(if inbox { "inbox_unavailable" } else { "cloud_workspace_runtime_not_ready" }, true))
+    fn phase2_ready(&self, feature: &str, org: Option<&str>, context: Option<&AccountContext>) -> bool {
+        #[cfg(test)]
+        if self.force_phase2_for_test { return true; }
+        self.account.phase2_ready(feature, org, context)
+    }
+
+    fn phase2_target(&self, org: Option<&str>) -> String {
+        match org {
+            Some(org) => org.to_owned(),
+            None => self.account.current_scope().map(|scope| scope.active_org_id).unwrap_or_default(),
         }
+    }
+
+    fn phase2_gate(&self, feature: &str, org: Option<&str>, context: Option<&AccountContext>, code: &str) -> Result<(), CloudWorkspaceClientError> {
+        if self.phase2_ready(feature, org, context) { Ok(()) } else {
+            Err(CloudWorkspaceClientError::local(code, true))
+        }
+    }
+
+    fn schedule_readiness(&self, org: Option<&str>, context: Option<&AccountContext>, mode: Option<&str>, github: bool, webhook: bool) -> Result<(), CloudWorkspaceClientError> {
+        if webhook {
+            self.phase2_gate(PHASE2_WEBHOOK_TRIGGER, org, context, "cloud_workspace_runtime_not_ready")?;
+        }
+        if (mode == Some("fresh") && !self.phase2_ready(PHASE2_FRESH_WORKSPACE, org, context))
+            || (github && !self.phase2_ready(PHASE2_GITHUB_TRIGGER, org, context)) {
+            return Err(CloudWorkspaceClientError::local("cloud_schedule_runtime_unsupported", false));
+        }
+        Ok(())
     }
 
     /// PRO-212 integrated routes authorize by target membership, independent of CS-18.
     pub fn restart(&self, org: Option<&str>, workspace_id: &str) -> Result<CloudWorkspaceSnapshot, CloudWorkspaceClientError> {
-        self.phase2_gate(false)?;
+        let target = self.phase2_target(org);
+        self.phase2_gate(PHASE2_RESTART_DETAILS, Some(&target), None, "cloud_workspace_runtime_not_ready")?;
         self.member_phase2_workspace(org, workspace_id, RequestRisk::Mutation, |client, context| {
+            self.phase2_gate(PHASE2_RESTART_DETAILS, Some(&context.organization_id), Some(context), "cloud_workspace_runtime_not_ready")?;
             let snapshot = client.request(context, &["cloud-workspaces", workspace_id, "restart"], None, Some(json!({})), None, RequestRisk::Mutation)?;
             ensure_snapshot(snapshot, &context.organization_id, Some(workspace_id), RequestRisk::Mutation)
         })
     }
 
     pub fn details(&self, org: Option<&str>, workspace_id: &str) -> Result<CloudWorkspaceDetailsResponse, CloudWorkspaceClientError> {
-        self.phase2_gate(false)?;
+        let target = self.phase2_target(org);
+        self.phase2_gate(PHASE2_RESTART_DETAILS, Some(&target), None, "cloud_workspace_runtime_not_ready")?;
         self.member_phase2_workspace(org, workspace_id, RequestRisk::Read, |client, context| {
+            self.phase2_gate(PHASE2_RESTART_DETAILS, Some(&context.organization_id), Some(context), "cloud_workspace_runtime_not_ready")?;
             let value: CloudWorkspaceDetailsResponse = client.request(context, &["cloud-workspaces", workspace_id, "details"], None, None, None, RequestRisk::Read)?;
             if value.workspace.id != workspace_id || value.workspace.org_id != context.organization_id
                 || value.details.workspace_id != workspace_id || value.details.organization_id != context.organization_id
@@ -3398,8 +3437,9 @@ impl CloudWorkspaceService {
             return Err(CloudWorkspaceClientError::local("cloud_catalog_feed_unavailable", false));
         }
         let cursor = cursor.filter(|cursor| valid_cursor(cursor));
-        let answer = self.client.catalog_feed(&context, cursor, self.phase2_enabled);
-        if self.phase2_enabled && !self.account.is_current(&context) { return Err(context_changed_error(risk)); }
+        let presence = self.phase2_ready(PHASE2_PRESENCE, None, Some(&context));
+        let answer = self.client.catalog_feed(&context, cursor, presence);
+        if presence && !self.account.is_current(&context) { return Err(context_changed_error(risk)); }
         let scope = self.account.scope_if_same_account(&context).filter(|scope| scope.multi_org).ok_or_else(|| context_changed_error(risk))?;
         let Some(body) = answer? else {
             return Ok(CloudCatalogFeed { viewer_user_id: context.user_id.clone(), changed: false, cursor: cursor.map(str::to_string), reset: false, organizations: Vec::new(), deleted_workspace_ids: Vec::new() });
@@ -3409,11 +3449,15 @@ impl CloudWorkspaceService {
         }
         let mut seen = std::collections::BTreeSet::new();
         let mut organizations = Vec::new();
-        for organization in body.organizations {
+        for mut organization in body.organizations {
             if !valid_resource_id(&organization.org_id) || !scope.allows(&organization.org_id) || !seen.insert(organization.org_id.clone()) {
                 continue;
             }
             let org_id = organization.org_id;
+            if !self.phase2_ready(PHASE2_PRESENCE, Some(&org_id), Some(&context)) {
+                organization.presence = None;
+                for item in &mut organization.workspaces { item.presence = None; }
+            }
             let failed = |code: String| CloudCatalogOrganization { presence: None, org_id: org_id.clone(), workspaces: Vec::new(), tombstones: Vec::new(), quota: None, error: Some(code) };
             organizations.push(match organization.error {
                 // Only a code this desktop knows crosses to the webview.
@@ -3819,7 +3863,13 @@ impl CloudWorkspaceService {
             if !can_approve {
                 return Err(CloudWorkspaceClientError::local("cloud_workspace_runtime_unsupported", false));
             }
-            self.phase2_gate(false)?;
+            #[cfg(test)]
+            let manager_ready = self.force_phase2_for_test;
+            #[cfg(not(test))]
+            let manager_ready = false;
+            if !manager_ready {
+                return Err(CloudWorkspaceClientError::local("cloud_workspace_runtime_not_ready", true));
+            }
         }
         self.run_share_in(org, RequestRisk::Mutation, |client, context| {
             let result: CloudWorkspaceShareChange = client.request_as(
@@ -3908,17 +3958,14 @@ impl CloudWorkspaceService {
         let (Some(timing), true) = (timing, valid_resource_id(&input.workspace_id) && valid_schedule_policies(None, &input.completion_policy, input.max_run_minutes)) else {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         };
-        if input.webhook_trigger.is_some() {
-            self.phase2_gate(false)?;
-        }
-        if !self.phase2_enabled && (input.workspace_mode.as_deref() == Some("fresh") || input.github_trigger.is_some()) {
-            return Err(CloudWorkspaceClientError::local("cloud_schedule_runtime_unsupported", false));
-        }
+        let target = self.phase2_target(org);
+        self.schedule_readiness(Some(&target), None, input.workspace_mode.as_deref(), input.github_trigger.is_some(), input.webhook_trigger.is_some())?;
         let mut body = timing;
         body["workspaceId"] = json!(input.workspace_id);
         body["completionPolicy"] = json!(input.completion_policy);
         body["maxRunMinutes"] = json!(input.max_run_minutes);
         self.run_in(org, RequestRisk::Read, |client, context| {
+            self.schedule_readiness(Some(&context.organization_id), Some(context), input.workspace_mode.as_deref(), input.github_trigger.is_some(), input.webhook_trigger.is_some())?;
             client.request_as("POST", context, &["cloud-schedules", "estimate"], None, Some(body), None, RequestRisk::Read).map_err(|mut error: CloudWorkspaceClientError| {
                 // A 404 that names no refusal is a server without the route
                 // (another person's private workspace says so by its code).
@@ -3956,12 +4003,8 @@ impl CloudWorkspaceService {
         if input.prompt.trim().is_empty() || input.prompt.len() > MAX_PROMPT_BYTES || input.prompt.contains('\0') {
             return invalid("cloud_workspace_prompt_too_long");
         }
-        if input.webhook_trigger.is_some() {
-            self.phase2_gate(false)?;
-        }
-        if !self.phase2_enabled && (input.workspace_mode.as_deref() == Some("fresh") || input.github_trigger.is_some()) {
-            return invalid("cloud_schedule_runtime_unsupported");
-        }
+        let target = self.phase2_target(org);
+        self.schedule_readiness(Some(&target), None, input.workspace_mode.as_deref(), input.github_trigger.is_some(), input.webhook_trigger.is_some())?;
         let mut body = json!({
             "workspaceId": input.workspace_id,
             "name": name,
@@ -3981,6 +4024,7 @@ impl CloudWorkspaceService {
             body["effort"] = json!(effort);
         }
         self.run_in(org, RequestRisk::Mutation, |client, context| {
+            self.schedule_readiness(Some(&context.organization_id), Some(context), input.workspace_mode.as_deref(), input.github_trigger.is_some(), input.webhook_trigger.is_some())?;
             let result: CloudScheduleSecretAnswer = client.request(context, &["cloud-schedules"], None, Some(body), None, RequestRisk::Mutation)?;
             if result.schedule.view.workspace_id != input.workspace_id || !valid_schedule_id(&result.schedule.view.id) {
                 return Err(post_send_error(RequestRisk::Mutation));
@@ -3990,11 +4034,13 @@ impl CloudWorkspaceService {
     }
 
     pub fn schedule_webhook_rotate(&self, org: Option<&str>, schedule_id: &str) -> Result<CloudScheduleWriteResult, CloudWorkspaceClientError> {
-        self.phase2_gate(false)?;
+        let target = self.phase2_target(org);
+        self.phase2_gate(PHASE2_WEBHOOK_TRIGGER, Some(&target), None, "cloud_workspace_runtime_not_ready")?;
         if !valid_schedule_id(schedule_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
         self.run_in(org, RequestRisk::Mutation, |client, context| {
+            self.phase2_gate(PHASE2_WEBHOOK_TRIGGER, Some(&context.organization_id), Some(context), "cloud_workspace_runtime_not_ready")?;
             let result: CloudScheduleSecretAnswer = client.request(
                 context, &["cloud-schedules", schedule_id, "webhook", "rotate"],
                 None, Some(json!({})), None, RequestRisk::Mutation,
@@ -4013,19 +4059,21 @@ impl CloudWorkspaceService {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
         let (context, access) = self.context_in(org)?;
-        // Resume can start billed compute. While activation is held, inspect
-        // the saved trigger/mode through the existing authorized detail route
-        // before sending any spend mutation, regardless of the UI adapter.
-        if active && !self.phase2_enabled {
+        // Resume can start billed compute. Read the saved trigger and mode
+        // before the mutation so each required readiness key is enforced.
+        if active {
             let detail: Result<CloudScheduleDetail, _> = self.client.request(&context, &["cloud-schedules", schedule_id], None, None, None, RequestRisk::Read);
             if !self.account.is_current_in(&context, access) {
                 return Err(context_changed_error(RequestRisk::Read));
             }
             let saved = detail?.schedule;
             if saved.id != schedule_id { return Err(invalid_response()); }
-            if saved.workspace_mode != "existing" || saved.github_trigger.is_some() || saved.webhook_trigger.is_some() || saved.schedule.is_none() {
+            if !matches!(saved.workspace_mode.as_str(), "existing" | "fresh")
+                || (saved.schedule.is_none() && saved.github_trigger.is_none() && saved.webhook_trigger.is_none()) {
                 return Err(CloudWorkspaceClientError::local("cloud_schedule_runtime_unsupported", false));
             }
+            self.schedule_readiness(Some(&context.organization_id), Some(&context), Some(&saved.workspace_mode), saved.github_trigger.is_some(), saved.webhook_trigger.is_some())
+                .map_err(|_| CloudWorkspaceClientError::local("cloud_schedule_runtime_unsupported", false))?;
         }
         let (action, body) = if active { ("resume", json!({ "confirmProviderSpend": true })) } else { ("pause", json!({})) };
         // Use the same captured authority for both requests; never recapture
@@ -4120,8 +4168,11 @@ impl CloudWorkspaceService {
         };
         // Once the accepted Phase 2 routes are activated, their existing poll
         // endpoint also accepts a member target without requiring it active.
-        if self.phase2_enabled && matches!(risk, RequestRisk::Read) {
-            self.member_phase2_workspace(org, operation_id, risk, request)
+        if matches!(risk, RequestRisk::Read) && org.is_some_and(|org| self.phase2_ready(PHASE2_RESTART_DETAILS, Some(org), None)) {
+            self.member_phase2_workspace(org, operation_id, risk, |client, context| {
+                self.phase2_gate(PHASE2_RESTART_DETAILS, Some(&context.organization_id), Some(context), "cloud_workspace_runtime_not_ready")?;
+                request(client, context)
+            })
         } else {
             self.run_in(org, risk, request)
         }
@@ -4997,7 +5048,7 @@ mod tests {
             let (base, _, request) = serve_once(response("200 OK", &following_reply(action).to_string(), ""), Duration::from_millis(150));
             let (account, _) = test_service(&base);
             let mut service = CloudWorkspaceService::for_test(account, &base, Duration::from_millis(30));
-            service.phase2_enabled = true;
+            service.force_phase2_for_test = true;
             let error = following_call(&service, action, "org-1").unwrap_err();
             assert_eq!(error.code, "cloud_workspace_request_outcome_unknown");
             assert_eq!(error.status, None);
@@ -5019,7 +5070,7 @@ mod tests {
                 let reply = if rejected { response("401 Unauthorized", r#"{"error":"invalid_access_token"}"#, "") }
                     else { response("200 OK", &body.to_string(), "") };
                 let (base, accepted, request) = serve_once(reply, Duration::from_millis(100));
-                let (account, mut service) = test_service(&base); service.phase2_enabled = true;
+                let (account, mut service) = test_service(&base); service.force_phase2_for_test = true;
                 account.set_memberships_for_test(&["org-1", "org-2"], false);
                 let handle = thread::spawn(move || following_call(&service, action, "org-2"));
                 accepted.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -5077,7 +5128,7 @@ mod tests {
             response("200 OK", r#"{"ttlSeconds":45,"activeMembers":[],"workspaces":[]}"#, ""),
         ]);
         let (account, mut service) = test_service(&base);
-        service.phase2_enabled = true;
+        service.force_phase2_for_test = true;
         // Membership alone authorizes the inactive org, without CS-18 opt-in.
         account.set_memberships_for_test(&["org-1", "org-2"], false);
         let mut body = presence_put_body();
@@ -5112,6 +5163,43 @@ mod tests {
     }
 
     #[test]
+    fn server_readiness_only_opens_its_target_route_and_a_refresh_can_close_it() {
+        let answer = json!({"ttlSeconds": 45, "activeMembers": [], "workspaces": []});
+        let (base, _, request) = serve_once(response("200 OK", &answer.to_string(), ""), Duration::ZERO);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        let readiness = |enabled| json!({
+            "version": 1,
+            "organizations": {
+                "org-1": { (PHASE2_EVENTS): true },
+                "org-2": { (PHASE2_PRESENCE): enabled }
+            }
+        });
+        account.apply_phase2_readiness_for_test(readiness(true));
+
+        assert!(service.phase2_contracts_available());
+        assert_eq!(
+            service.presence_read("org-1", json!({"workspaceIds": []})).unwrap_err().code,
+            "presence_unavailable"
+        );
+        assert_eq!(
+            service.workspace_follow("org-2", "workspace-1", true, json!({})).unwrap_err().code,
+            "workspace_following_unavailable"
+        );
+        assert_eq!(service.presence_read("org-2", json!({"workspaceIds": []})).unwrap().ttl_seconds, 45);
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-2/presence/read HTTP/1.1"));
+        assert!(!captured.extra_request);
+
+        account.apply_phase2_readiness_for_test(readiness(false));
+        assert!(service.phase2_contracts_available());
+        assert_eq!(
+            service.presence_read("org-2", json!({"workspaceIds": []})).unwrap_err().code,
+            "presence_unavailable"
+        );
+    }
+
+    #[test]
     fn phase2_presence_contract_invalid_inputs_and_production_hold_never_http() {
         // A bound listener proves no connection was attempted (unlike a dead port).
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -5127,7 +5215,7 @@ mod tests {
         assert!(!service.phase2_contracts_available());
         assert_eq!(service.presence_put("org-1", presence_put_body()).unwrap_err().code, "presence_unavailable");
         assert_eq!(service.presence_read("org-1", json!({"workspaceIds":[]})).unwrap_err().code, "presence_unavailable");
-        service.phase2_enabled = true;
+        service.force_phase2_for_test = true;
         let valid = presence_put_body();
         let mut invalid = vec![Value::Null, json!([]), json!([valid["deviceId"], 1, null]), json!({}), json!({"deviceId":"x","sequence":1}), json!({"deviceId":1,"sequence":1,"workspaceId":null})];
         for (key, value) in [
@@ -5196,7 +5284,7 @@ mod tests {
             missing_photo, mistyped_name, mistyped_photo, bad_owner, extra_workspace, extra_top, too_many_people,
             json!([45, [], []]), Value::Null, json!({"ttlSeconds":45,"activeMembers":[]})]);
         let (base, requests) = serve_each(bodies.iter().map(|body| response("200 OK", &body.to_string(), "")).collect());
-        let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+        let (_, mut service) = test_service(&base); service.force_phase2_for_test = true;
         assert!(service.presence_read("org-1", json!({"workspaceIds":["workspace-1"]})).unwrap().workspaces.is_empty());
         for _ in 1..bodies.len() {
             assert!(service.presence_read("org-1", json!({"workspaceIds":["workspace-1"]})).is_err());
@@ -5219,7 +5307,7 @@ mod tests {
             response("404 Not Found", r#"{"error":"cloud_workspace_not_found"}"#, ""),
             response("503 Service Unavailable", r#"{"error":"presence_unavailable"}"#, ""),
         ]);
-        let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+        let (_, mut service) = test_service(&base); service.force_phase2_for_test = true;
         let read = || service.presence_read("org-1", json!({"workspaceIds":["workspace-1"]}));
         assert_eq!(read().unwrap().workspaces[0].owner.user_id, "previous-owner");
         let latest = read().unwrap();
@@ -5249,7 +5337,7 @@ mod tests {
         ] {
             for put in [true, false] {
                 let (base, _, request) = serve_once(response(status, &json!({"error":code}).to_string(), if retry.is_some() { "Retry-After: 7\r\n" } else { "" }), Duration::ZERO);
-                let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+                let (_, mut service) = test_service(&base); service.force_phase2_for_test = true;
                 let error = if put { service.presence_put("org-1", presence_put_body()).unwrap_err() }
                     else { service.presence_read("org-1", json!({"workspaceIds":[]})).unwrap_err() };
                 assert_eq!(error.code, code);
@@ -5266,7 +5354,7 @@ mod tests {
         assert_eq!(parse_retry_after(Some("Wed, 21 Oct 2015 07:28:00 GMT")), None);
         assert_eq!(parse_retry_after(Some("1.5")), None);
         let (base, _, request) = serve_once(response("413 Payload Too Large", "framework body limit", ""), Duration::ZERO);
-        let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+        let (_, mut service) = test_service(&base); service.force_phase2_for_test = true;
         assert_eq!(service.presence_read("org-1", json!({"workspaceIds":[]})).unwrap_err().status, Some(413));
         assert!(!request.join().unwrap().extra_request);
     }
@@ -5275,20 +5363,20 @@ mod tests {
     fn phase2_presence_contract_bounds_malformed_put_and_bounded_timeout() {
         let ids: Vec<String> = (0..100).map(|i| format!("workspace_{i}-A")).collect();
         let (base, _, request) = serve_once(response("200 OK", r#"{"ttlSeconds":45,"activeMembers":[],"workspaces":[]}"#, ""), Duration::ZERO);
-        let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+        let (_, mut service) = test_service(&base); service.force_phase2_for_test = true;
         service.presence_read("org-1", json!({"workspaceIds":ids})).unwrap();
         assert!(!request.join().unwrap().extra_request);
         for body in [json!([true,45]), Value::Null, json!({"applied":true,"ttlSeconds":46}), json!({"applied":"true","ttlSeconds":45}),
             json!({"ttlSeconds":45}), json!({"applied":true,"ttlSeconds":45,"extra":1})] {
             let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
-            let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+            let (_, mut service) = test_service(&base); service.force_phase2_for_test = true;
             assert!(service.presence_put("org-1", presence_put_body()).is_err());
             assert!(!request.join().unwrap().extra_request);
         }
         let (base, _, request) = serve_once(response("200 OK", &presence_read_body().to_string(), ""), Duration::from_millis(150));
         let (account, _) = test_service(&base);
         let mut service = CloudWorkspaceService::for_test(account, &base, Duration::from_millis(30));
-        service.phase2_enabled = true;
+        service.force_phase2_for_test = true;
         // The delayed reply is valid for this request: only the transport
         // deadline, not an unrequested workspace, may make this call fail.
         let error = service.presence_read("org-1", json!({"workspaceIds":["workspace-1"]})).unwrap_err();
@@ -5306,7 +5394,7 @@ mod tests {
                 else { presence_read_body().to_string() };
             body.push_str(&" ".repeat(RESPONSE_LIMIT_BYTES as usize + 1));
             let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
-            let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+            let (_, mut service) = test_service(&base); service.force_phase2_for_test = true;
             let error = if put { service.presence_put("org-1", presence_put_body()).unwrap_err() }
                 else { service.presence_read("org-1", json!({"workspaceIds":["workspace-1"]})).unwrap_err() };
             assert_eq!(error.code, if put { "cloud_workspace_request_outcome_unknown" } else { "cloud_workspace_invalid_response" });
@@ -5323,7 +5411,7 @@ mod tests {
                 let reply = if rejected { response("401 Unauthorized", r#"{"error":"invalid_access_token"}"#, "") }
                     else { response("200 OK", &body.to_string(), "") };
                 let (base, accepted, request) = serve_once(reply, Duration::from_millis(100));
-                let (account, mut service) = test_service(&base); service.phase2_enabled = true;
+                let (account, mut service) = test_service(&base); service.force_phase2_for_test = true;
                 account.set_memberships_for_test(&["org-1", "org-2"], false);
                 let handle = thread::spawn(move || if put { service.presence_put("org-2", presence_put_body()).map(|_| ()) }
                     else { service.presence_read("org-2", json!({"workspaceIds":["workspace-1"]})).map(|_| ()) });
@@ -5385,7 +5473,7 @@ mod tests {
 
     fn phase2_service(base: &str) -> (Arc<AccountManager>, CloudWorkspaceService) {
         let (account, mut service) = test_service(base);
-        service.phase2_enabled = true;
+        service.force_phase2_for_test = true;
         (account, service)
     }
 
@@ -5753,7 +5841,7 @@ mod tests {
             let (account, mut service) = test_service(&base);
             account.set_memberships_for_test(&["org-1"], true);
             account.set_catalog_feed_for_test(true);
-            service.phase2_enabled = enabled;
+            service.force_phase2_for_test = enabled;
             let feed = service.catalog_feed(Some("cursor-1")).unwrap();
             assert_eq!(feed.viewer_user_id, "user-1");
             let item = &feed.organizations[0].workspaces[0];
@@ -5768,6 +5856,38 @@ mod tests {
             assert!(request.to_ascii_lowercase().contains("if-none-match: \"cursor-1\""));
             phase2_headers(&request);
         }
+    }
+
+    #[test]
+    fn phase2_presence_catalog_strips_presence_only_in_organizations_without_readiness() {
+        let presence = json!({"activeMembers":[{"userId":"user-2","displayName":null,"photoUrl":null}]});
+        let organization = |org, workspace| {
+            let mut item = feed_item(org, workspace);
+            item["presence"] = presence.clone();
+            item["following"] = json!(true);
+            json!({"orgId":org,"workspaces":[item],"presence":presence})
+        };
+        let body = feed_body(json!([organization("org-1", "workspace-1"), organization("org-2", "workspace-2")]));
+        let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
+        let (account, service) = feed_service(&base, &["org-1", "org-2"]);
+        account.apply_phase2_readiness_for_test(json!({
+            "version": 1,
+            "organizations": {
+                "org-1": { (PHASE2_PRESENCE): true },
+                "org-2": { (PHASE2_PRESENCE): false, (PHASE2_FOLLOW_REASSIGN): true }
+            }
+        }));
+
+        let feed = service.catalog_feed(None).unwrap();
+        assert_eq!(feed.organizations.len(), 2);
+        for (org, enabled) in feed.organizations.iter().zip([true, false]) {
+            assert_eq!(org.org_id, if enabled { "org-1" } else { "org-2" });
+            assert_eq!(org.presence.is_some(), enabled);
+            assert_eq!(org.workspaces.len(), 1);
+            assert_eq!(org.workspaces[0].presence.is_some(), enabled);
+            assert_eq!(org.workspaces[0].following, Some(true));
+        }
+        assert!(request.join().unwrap().text.contains("presence=1"));
     }
 
     #[test]
@@ -8063,7 +8183,7 @@ mod tests {
         // The production constructor and its HTTP fixture both start held.
         assert!(!CloudWorkspaceService::new(account).phase2_contracts_available());
         for enabled in [false, true] {
-            service.phase2_enabled = enabled;
+            service.force_phase2_for_test = enabled;
             let error = service.share_put(None, "workspace-1", "user-2", ShareRole::Manager, false).unwrap_err();
             assert_eq!(error.code, "cloud_workspace_runtime_unsupported");
             assert_eq!(serde_json::to_value(error).unwrap(), json!({"code": "cloud_workspace_runtime_unsupported",
@@ -8303,7 +8423,7 @@ mod tests {
                 let (base, _, request) = serve_once(response(status, &body, ""), if failure == "timeout" { Duration::from_millis(200) } else { Duration::ZERO });
                 let (account, _) = test_service(&base);
                 let mut service = CloudWorkspaceService::for_test(account, &base, if failure == "timeout" { Duration::from_millis(50) } else { Duration::from_secs(2) });
-                service.phase2_enabled = true;
+                service.force_phase2_for_test = true;
                 let started = Instant::now();
                 let error = match method {
                     "GET" => service.shares(None, "workspace-1").unwrap_err(),
@@ -8970,6 +9090,7 @@ mod tests {
         let (base, requests) = serve_each(vec![
             response("200 OK", &json!({"schedules": [view.clone()]}).to_string(), ""),
             response("200 OK", &json!({"schedule": view.clone()}).to_string(), ""),
+            response("200 OK", &json!({"schedule": view.clone()}).to_string(), ""),
             response("200 OK", &json!({"schedule": view}).to_string(), ""),
         ]);
         let (_, service) = phase2_service(&base);
@@ -8983,9 +9104,10 @@ mod tests {
         let requests = requests.join().unwrap();
         assert!(requests[0].starts_with("GET /v1/desktop/orgs/org-1/cloud-schedules?workspaceId=workspace-1 HTTP/1.1"));
         assert!(requests[1].starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/pause HTTP/1.1")));
-        assert!(requests[2].starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/resume HTTP/1.1")));
+        assert!(requests[2].starts_with(&format!("GET /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE} HTTP/1.1")));
+        assert!(requests[3].starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/resume HTTP/1.1")));
         assert_eq!(requests[1].split_once("\r\n\r\n").unwrap().1, "{}");
-        assert_eq!(serde_json::from_str::<Value>(requests[2].split_once("\r\n\r\n").unwrap().1).unwrap(), json!({"confirmProviderSpend": true}));
+        assert_eq!(serde_json::from_str::<Value>(requests[3].split_once("\r\n\r\n").unwrap().1).unwrap(), json!({"confirmProviderSpend": true}));
     }
 
     #[test]

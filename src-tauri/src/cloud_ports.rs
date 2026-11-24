@@ -62,13 +62,7 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 /// Streams whose data arrived before their `ports.open` answer.
 const MAX_EARLY_STREAMS: usize = 64;
 /// How often auto-forward reads `ports.list`.
-#[cfg(not(test))]
 pub const AUTO_POLL: Duration = Duration::from_secs(2);
-/// Under test the poller keeps its order (one list at a time, each answered
-/// before the next wait); the tests read every list and wait one period to
-/// show that none follows, so a shorter one proves the same, sooner.
-#[cfg(test)]
-pub const AUTO_POLL: Duration = Duration::from_millis(250);
 /// Ports auto-forward leaves alone: the ephemeral range, where clients bind,
 /// not servers (`AUTO_FORWARD_SKIPPED` in src/lib/api.ts).
 pub const AUTO_SKIPPED: std::ops::RangeInclusive<u16> = 32768..=60999;
@@ -274,6 +268,8 @@ impl PortForwarder {
         let changed = {
             let mut state = self.inner.state.lock().unwrap();
             let now = (listed(&state), state.settings);
+            // A Stop or pause can overtake publication of an automatic forward.
+            let opened = opened.into_iter().filter(|forward| now.0.contains(forward)).collect::<Vec<_>>();
             if opened.is_empty() && state.told.as_ref() == Some(&now) {
                 return;
             }
@@ -449,6 +445,11 @@ impl PortForwarder {
             if let Some(enabled) = enabled {
                 state.settings.enabled = enabled;
             }
+            if !state.settings.enabled || !state.settings.auto {
+                if let Some(poll) = state.poll.take() {
+                    poll.cancel();
+                }
+            }
             (was && !state.settings.enabled, !was && state.settings.enabled)
         };
         if hold {
@@ -502,7 +503,7 @@ impl PortForwarder {
                 return;
             }
             if let Some(Ok(result)) = listed {
-                self.auto_forward(&result);
+                self.auto_forward(&result, &stop);
             }
             tokio::select! {
                 _ = stop.cancelled() => return,
@@ -514,7 +515,7 @@ impl PortForwarder {
     /// Forward each port in a `ports.list` answer that started listening
     /// since auto-forward was turned on, outside [`AUTO_SKIPPED`], on the
     /// same local port when it is free.
-    fn auto_forward(&self, listed: &Value) {
+    fn auto_forward(&self, listed: &Value, poll: &CancellationToken) {
         // A runtime that cannot tell what listens says nothing about what stopped.
         if listed.get("detected").and_then(Value::as_bool) != Some(true) {
             return;
@@ -531,7 +532,7 @@ impl PortForwarder {
         let (fresh, scope) = {
             let mut guard = self.inner.state.lock().unwrap();
             let state = &mut *guard;
-            if !state.settings.auto || !state.settings.enabled {
+            if poll.is_cancelled() || !state.settings.auto || !state.settings.enabled {
                 return;
             }
             let Some(seen) = state.seen.as_mut() else {
@@ -552,9 +553,12 @@ impl PortForwarder {
             fresh.truncate(room);
             (fresh, state.auto_scope.clone())
         };
-        // The same local number when it is free, except a privileged one
-        // (below 1024), which this Mac's own services may want: a random one.
-        let opened: Vec<Forward> = fresh.into_iter().filter_map(|port| self.open(port, Some(port).filter(|port| *port >= 1024), false, scope.clone(), true).ok()).collect();
+        // Until PRO-189 supplies a Connections strategy and range, prefer
+        // the same unprivileged local number and fall back to a free one.
+        let opened: Vec<Forward> = fresh
+            .into_iter()
+            .filter_map(|port| self.open(port, Some(port).filter(|port| *port >= 1024), false, scope.clone(), Some(poll)).ok())
+            .collect();
         if !opened.is_empty() {
             self.tell(opened);
         }
@@ -570,18 +574,24 @@ impl PortForwarder {
     /// workspace: a connection that is not live is refused, and so is any
     /// new forward while Forwarding is off (`cloud_port_forwarding_off`).
     pub async fn forward(&self, port: u16, local: Option<u16>, exact: bool, scope: Option<String>) -> Result<Forward, String> {
-        let forward = self.open(port, local, exact, scope, false)?;
+        let forward = self.open(port, local, exact, scope, None)?;
         self.tell(Vec::new());
         Ok(forward)
     }
 
-    fn open(&self, port: u16, local: Option<u16>, exact: bool, scope: Option<String>, auto: bool) -> Result<Forward, String> {
+    fn open(&self, port: u16, local: Option<u16>, exact: bool, scope: Option<String>, poll: Option<&CancellationToken>) -> Result<Forward, String> {
         if port == 0 {
             return Err("cloud_port_invalid".into());
         }
+        let auto_cancelled = |state: &State| {
+            poll.is_some_and(|poll| poll.is_cancelled() || !state.settings.auto || state.stopped.contains(&port) || state.forwards.contains_key(&port))
+        };
         let mut wanted = local.filter(|local| *local != 0);
         {
             let mut state = self.inner.state.lock().unwrap();
+            if auto_cancelled(&state) {
+                return Err("cloud_port_auto_cancelled".into());
+            }
             if let Some(listening) = state.forwards.get(&port) {
                 // Open, or waiting and not to be opened yet: as it is.
                 if listening.stop.is_some() || !self.ready() || !state.settings.enabled {
@@ -600,10 +610,13 @@ impl PortForwarder {
         }
         let (listener, reassigned) = bind(wanted, exact)?;
         let local_port = listener.local_addr().map_err(|error| error.to_string())?.port();
-        let forward = Forward { port, local_port, reassigned, state: ForwardState::Open, auto };
+        let forward = Forward { port, local_port, reassigned, state: ForwardState::Open, auto: poll.is_some() };
         let stop = CancellationToken::new();
         {
             let mut state = self.inner.state.lock().unwrap();
+            if auto_cancelled(&state) {
+                return Err("cloud_port_auto_cancelled".into());
+            }
             // Two requests for the same port raced: the first one stands.
             if let Some(listening) = state.forwards.get(&port) {
                 return Ok(listening.forward.clone());
@@ -1643,6 +1656,48 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         while requests.try_recv().is_ok() {}
         assert!(tokio::time::timeout(AUTO_POLL + Duration::from_millis(500), requests.recv()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_cloud_dev_server_is_announced_promptly_and_skips_existing_and_ephemeral_ports() {
+        let (forwarder, mut requests, mut changes) = watched(false);
+        forwarder.forward(3000, None, false, None).await.unwrap();
+        forwarder.set_settings(None, Some(true), Some("org-1".into()));
+        let baseline = next(&mut requests, "ports.list").await;
+        forwarder.on_message(&json!({ "id": baseline["id"], "ok": true, "result": { "detected": true, "ports": [] } }));
+
+        let announced = tokio::time::timeout(Duration::from_secs(5), async {
+            let list = next(&mut requests, "ports.list").await;
+            forwarder.on_message(&json!({ "id": list["id"], "ok": true, "result": {
+                "detected": true, "ports": [{ "port": 5173 }, { "port": 3000 }, { "port": 32768 }, { "port": 60999 }]
+            } }));
+            loop {
+                let change = changes.recv().await.expect("forwarding change");
+                if !change.opened.is_empty() {
+                    break change;
+                }
+            }
+        }).await.expect("5173 forwarded within five seconds");
+
+        assert_eq!(announced.opened.len(), 1);
+        let vite = &announced.opened[0];
+        assert_eq!((vite.port, vite.auto, vite.state), (5173, true, ForwardState::Open));
+        assert_eq!(announced.forwards.iter().map(|forward| forward.port).collect::<Vec<_>>(), vec![3000, 5173]);
+        assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, vite.local_port)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_poll_cannot_seed_or_open_for_a_new_poll() {
+        let (forwarder, mut requests, _changes) = watched(false);
+        forwarder.set_settings(None, Some(true), None);
+        let old_poll = forwarder.inner.state.lock().unwrap().poll.clone().unwrap();
+        forwarder.set_settings(None, Some(false), None);
+        forwarder.set_settings(None, Some(true), None);
+        forwarder.auto_forward(&json!({ "detected": true, "ports": [{ "port": 3000 }] }), &old_poll);
+        assert!(forwarder.inner.state.lock().unwrap().seen.is_none());
+        let _active = next(&mut requests, "ports.list").await;
+        assert!(forwarder.open(5173, None, false, None, Some(&old_poll)).is_err());
+        assert!(forwarder.forwards().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

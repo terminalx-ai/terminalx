@@ -57,8 +57,8 @@ export function WorkspaceActionItems({
   archived?: boolean;
   detailsAllowed?: boolean;
 }) {
-  const detailsAvailable = useWorkspaceDetailsAvailable();
-  const preferencesAvailable = useWorkspacePreferencesAvailable();
+  const detailsAvailable = useWorkspaceDetailsAvailable(item.workspace.orgId);
+  const preferencesAvailable = useWorkspacePreferencesAvailable(item.workspace.orgId);
   const { status } = useAccount();
   const catalog = useCloudCatalog();
   const org = catalog.orgs[item.workspace.orgId];

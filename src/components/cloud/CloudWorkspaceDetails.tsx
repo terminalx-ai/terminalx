@@ -93,7 +93,7 @@ export function CloudWorkspaceDetailsCard({ item, initialCopy }: { item: CloudWo
 }
 
 export function CloudWorkspaceDetails({ item }: { item: CloudWorkspaceListItem }) {
-  const available = useWorkspaceDetailsAvailable();
+  const available = useWorkspaceDetailsAvailable(item.workspace.orgId);
   const [open, setOpen] = useState(false);
   if (!available) return null;
   return <Popover.Root open={open} onOpenChange={setOpen}>

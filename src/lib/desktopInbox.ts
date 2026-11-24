@@ -1,3 +1,4 @@
+import { phase2Ready } from "@/lib/phase2Readiness";
 import { useSyncExternalStore } from "react";
 import { cloudPresence } from "@/lib/cloudPresence";
 import { invoke, type DesktopInboxEvent } from "@/lib/api";
@@ -9,7 +10,7 @@ import { invalidateCloudInboxWorkspace, resyncCloudInboxCatalog, getCloudCatalog
 
 /** Exact commands implemented by the shared contracts worker. Use the existing
  * privacy-aware invoke wrapper; tokens and account fencing remain native.
- * The native readiness command holds production activation, including older builds. */
+ * Older builds without readiness leave the inbox disabled. */
 function inboxInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   // Older invoke wrappers do not classify desktop_inbox commands as cloud work.
   if (privacyEnabled()) return Promise.reject(new Error(PRIVACY_MESSAGE));
@@ -100,11 +101,16 @@ export function bootDesktopInbox() {
   let identity: string | null = null;
   let revision: string | null = null;
   let generation = 0;
+  let eventOrgs: string | null = null;
   const sync = () => {
     const status = getAccount().status;
     const next = !privacyEnabled() && status.state === "signed-in" ? status.context?.account ?? null : null;
     const nextRevision = next ? status.context?.revision ?? null : null;
-    if (next === identity && nextRevision === revision) return;
+    const nextEventOrgs = status.phase2Readiness
+      ? JSON.stringify(Object.keys(status.phase2Readiness).filter((org) => phase2Ready(status, org, "events")).sort())
+      : null;
+    if (next === identity && nextRevision === revision && nextEventOrgs === eventOrgs) return;
+    eventOrgs = nextEventOrgs;
     const token = ++generation;
     pendingReassigned.clear(); publishNotices([]);
     // Clear durable delivery state on an actual identity change; context changes fence in-flight work.
@@ -118,10 +124,14 @@ export function bootDesktopInbox() {
     // Catalog polling can answer before readiness; its authorized markers must be retained
     // even when inbox replay has already checkpointed those marker events on a prior launch.
     configureCloudReadMarkers(next, null);
-    if (!next) return;
+    if (!next || eventOrgs === "[]") return;
     void Promise.resolve().then(() => transport.phase2DesktopContractsAvailable()).then((ready) => {
       if (token !== generation || !ready) return;
-      enableCloudReadMarkerWrites(next, (org, workspace, at, session) => transport.cloudWorkspaceReadMarker(org, workspace, at, session));
+      enableCloudReadMarkerWrites(next, (org, workspace, at, session) => {
+        const status = getAccount().status;
+        if (status.phase2Readiness && !phase2Ready(status, org, "events")) return Promise.resolve(undefined);
+        return transport.cloudWorkspaceReadMarker(org, workspace, at, session);
+      });
       subscriber.start(next);
     }).catch(() => { /* Held or older native build: catalog polling continues unchanged. */ });
   };

@@ -1,14 +1,19 @@
 import { Eye } from "@/icons";
 import { useCloudCatalog } from "@/lib/cloudCatalog";
 import { selectCloudWorkspace } from "@/lib/sessions";
+import { useAccount } from "@/lib/account";
+import { useDataPrivacy } from "@/lib/dataPrivacy";
+import { phase2Ready } from "@/lib/phase2Readiness";
 import { PresenceFaces } from "@/components/dashboard/TeamOverview";
 import { useCloudPresence } from "@/lib/cloudPresence";
 
 /** Following is read from the same authorized live catalog as the rows, never a grant. */
 export function WorkspaceFollowingSection({ orgId }: { orgId: string }) {
+  const { status } = useAccount();
+  const privacy = useDataPrivacy();
   const catalog = useCloudCatalog();
   const org = catalog.orgs[orgId];
-  if (org?.source !== "live" || org.error) return null;
+  if (privacy.enabled || !phase2Ready(status, orgId, "followReassign") || org?.source !== "live" || org.error) return null;
   const rows = org.workspaces.filter((item) => item.following === true && item.workspace.state !== "destroyed" && !item.workspace.deletedAt && !item.workspace.archivedAt);
   if (!rows.length) return null;
   return <section aria-label="Following" className="mb-2 px-1">

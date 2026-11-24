@@ -7,13 +7,16 @@
 //! client checks the pipe is this user's own, served by one of this user's
 //! processes, before it sends a frame, which carries a credential.
 use crate::paths::Canonical;
+use std::cell::RefCell;
 use std::io;
+use std::os::windows::io::{AsHandle, AsRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::ClientOptions;
+use windows_sys::Win32::System::Pipes::PeekNamedPipe;
 
 const MAX_FRAME: u64 = 20 * 1024 * 1024;
 const SECURITY_IDENTIFICATION: u32 = windows_sys::Win32::Storage::FileSystem::SECURITY_SQOS_PRESENT | windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
@@ -70,6 +73,64 @@ pub fn exchange(path: &Path, bytes: Vec<u8>, timeout: Duration) -> io::Result<St
     .map_err(|_| io::Error::other("pipe client thread panicked"))?
 }
 
+/// The client end of a served connection, as far as whether it is still
+/// there. Holds its own handle, so a waiting decision can outlive the task
+/// that read the frame.
+#[derive(Clone)]
+pub(crate) struct PipeClient(Arc<OwnedHandle>);
+
+impl PipeClient {
+    fn of(server: &impl AsHandle) -> io::Result<Self> {
+        Ok(Self(Arc::new(server.as_handle().try_clone_to_owned()?)))
+    }
+
+    /// Whether the client is still waiting for its reply. It sends exactly
+    /// one frame, so bytes after it count as gone, as on the Unix socket:
+    /// unread input cannot extend a disconnected client's lifetime.
+    pub(crate) fn connected(&self) -> bool {
+        let mut available = 0u32;
+        // SAFETY: the handle is owned by `self`. With no buffer, the call
+        // only writes the count to `available`, which is live for the call.
+        let peeked = unsafe {
+            PeekNamedPipe(
+                self.0.as_raw_handle() as _,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        };
+        peeked != 0 && available == 0
+    }
+}
+
+thread_local! {
+    static CLIENT: RefCell<Option<PipeClient>> = const { RefCell::new(None) };
+}
+
+/// The client of the frame being answered on this thread.
+pub(crate) fn current_client() -> Option<PipeClient> {
+    CLIENT.with(|client| client.borrow().clone())
+}
+
+/// Names `client` as this thread's for as long as it lives. Blocking-pool
+/// threads are reused, so it is always cleared again, a panic included.
+struct Answering;
+
+impl Answering {
+    fn for_client(client: Option<PipeClient>) -> Self {
+        CLIENT.with(|current| *current.borrow_mut() = client);
+        Self
+    }
+}
+
+impl Drop for Answering {
+    fn drop(&mut self) {
+        CLIENT.with(|current| *current.borrow_mut() = None);
+    }
+}
+
 /// Serve `path`: each connection sends one frame, which `handler` answers on
 /// a blocking thread, told the frame and the process that sent it. Windows
 /// records that process when the client connects (what `SO_PEERCRED` is on a
@@ -109,10 +170,7 @@ pub fn serve(
                             break;
                         }
                     };
-                    let client = {
-                        use std::os::windows::io::AsRawHandle;
-                        crate::win::process::pipe_client_pid(connected.as_raw_handle() as _)
-                    };
+                    let client = crate::win::process::pipe_client_pid(connected.as_raw_handle() as _);
                     let client = match client {
                         Ok(client) => client,
                         Err(error) => {
@@ -121,6 +179,11 @@ pub fn serve(
                         }
                     };
                     let handler = handler.clone();
+                    // Without a handle of its own the client counts as there,
+                    // which is what a wait falls back to with no transport.
+                    let watch = PipeClient::of(&connected)
+                        .inspect_err(|error| log::warn!("watch a control pipe client: {error}"))
+                        .ok();
                     tokio::spawn(async move {
                         let (read, mut write) = tokio::io::split(connected);
                         let mut line = String::new();
@@ -137,7 +200,11 @@ pub fn serve(
                         {
                             return;
                         }
-                        let Ok(reply) = tokio::task::spawn_blocking(move || handler(line, client)).await
+                        let answer = move || {
+                            let _answering = Answering::for_client(watch);
+                            handler(line, client)
+                        };
+                        let Ok(reply) = tokio::task::spawn_blocking(answer).await
                         else {
                             return;
                         };
@@ -189,5 +256,41 @@ mod tests {
         // Whatever the frame claims, the sender is the process that opened the pipe.
         let answer = exchange(&path, b"from process 1\n".to_vec(), Duration::from_secs(2)).unwrap();
         assert_eq!(answer, format!("{}\n", std::process::id()));
+    }
+
+    #[test]
+    fn a_handler_sees_its_client_leave() {
+        let path = PathBuf::from(format!(r"\\.\pipe\terminalx-test-{}", uuid::Uuid::new_v4()));
+        let (seen, saw) = std::sync::mpsc::channel();
+        serve(path.clone(), move |line, _client| {
+            let watch = current_client().expect("a served frame has a client");
+            let while_waiting = watch.connected();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while watch.connected() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            seen.send((while_waiting, watch.connected())).unwrap();
+            line
+        })
+        .unwrap();
+        // The client gives up and closes its end while the handler waits.
+        let error = exchange(&path, b"wait\n".to_vec(), Duration::from_millis(200)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(saw.recv_timeout(Duration::from_secs(6)).unwrap(), (true, false));
+    }
+
+    #[test]
+    fn a_thread_forgets_its_client_after_answering() {
+        CLIENT.with(|client| assert!(client.borrow().is_none()));
+        let path = PathBuf::from(format!(r"\\.\pipe\terminalx-test-{}", uuid::Uuid::new_v4()));
+        // A pipe server registers with the reactor of the runtime it is made in.
+        let reactor = runtime().unwrap();
+        let _entered = reactor.enter();
+        let server = crate::win::pipe::server(&path, true).unwrap();
+        {
+            let _answering = Answering::for_client(Some(PipeClient::of(&server).unwrap()));
+            assert!(current_client().is_some());
+        }
+        assert!(current_client().is_none());
     }
 }

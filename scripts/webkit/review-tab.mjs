@@ -247,7 +247,7 @@ try {
       "gutter marks only changed lines and numbers the removed one": shape.markers.length === 4 && shape.markers.every((m) => m === "+") && shape.removedNumber === "2",
       "comment + shows on the hovered line only": shape.plusHidden && hoverPlus.length === 1 && hoverPlus[0] === "4",
       "changed text is a flat tint, not underlined": shape.underlined === 0,
-      "draft opens under its line with author, line and Draft state": draftPlace.under && draftPlace.text.includes("Developer") && draftPlace.text.includes("line 4 · comment for the agent") && draftPlace.text.includes("Draft · not saved") && draftPlace.text.includes("Cancel") && draftPlace.text.includes("esc") && draftPlace.text.includes("⌘↵") && clean(draftLayout),
+      "draft opens under its line with author, line and Draft state": draftPlace.under && draftPlace.text.includes("Developer") && draftPlace.text.includes("line 4 · comment for the agent") && draftPlace.text.includes("Draft · not saved") && draftPlace.text.includes("Cancel") && draftPlace.text.includes("esc") && draftPlace.text.includes("⌘⏎") && clean(draftLayout),
       "discard asks in an in-app popover under the draft": askPlace.inView && askPlace.belowCard && askPlace.text.includes("What you wrote on line 4 will be lost") && clean(askLayout),
       "saved card: author, on line N, Draft, no quote": card.text.includes("Developer") && card.text.includes("on line 4") && card.text.includes("Draft") && !card.quote && clean(cardLayout),
       "card actions: filled Add to chat, outlined Add all 2, quiet Edit · Delete": card.filled && card.outlined && card.quietEdit,
