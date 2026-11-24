@@ -126,7 +126,7 @@ name: Start a conversation (25.10)
 - extendedWaitUntil: { visible: "Not sent: this agent tab is no longer in the workspace.", timeout: 20000 }
 - waitForAnimationToEnd
 - takeScreenshot: 25.10-17-tab-gone
-# No answer: the request is asked once and never answered (the client gives up after 30 s).
+# No answer: the request is never answered; the sheet says so after 35 s while the client keeps resending.
 - launchApp:
     stopApp: true
     arguments: { fixtureScenario: connected, openRoute: /cloud, openWorkspace: ws-search, fixtureStart: no-answer }
@@ -150,7 +150,8 @@ name: Start a conversation (25.10)
 - tapOn: { id: "empty-start-button" }
 - waitForAnimationToEnd
 - takeScreenshot: 25.10-20-start-alert
-- tapOn: "Start"
+# The alert's Start: the stopped bar below has a button of the same name.
+- tapOn: { point: "68%,58%" }
 - extendedWaitUntil: { visible: "Starting the workspace. The choices appear when it is running.", timeout: 10000 }
 - waitForAnimationToEnd
 - takeScreenshot: 25.10-21-waking
@@ -159,7 +160,8 @@ name: Start a conversation (25.10)
     arguments: { fixtureScenario: connected, openRoute: /cloud, openWorkspace: ws-warm-up-five, fixtureResume: fail }
 - extendedWaitUntil: { visible: "Start one with an agent.", timeout: 20000 }
 - tapOn: { id: "empty-start-button" }
-- tapOn: "Start"
+# The alert's Start: the stopped bar below has a button of the same name.
+- tapOn: { point: "68%,58%" }
 - extendedWaitUntil: { visible: "The cloud provider is not answering right now. Try again in a moment.", timeout: 10000 }
 - waitForAnimationToEnd
 - takeScreenshot: 25.10-22-did-not-start
