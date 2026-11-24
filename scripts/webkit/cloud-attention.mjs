@@ -25,6 +25,13 @@ const cases = [
   { id: "attention-login", name: "login", rowReason: "The agent needs a working login.", paneReason: /sign.in|login/i, action: "Open Agent logins" },
   { id: "attention-operation", name: "operation", rowReason: /provider credential is no longer valid/i, paneReason: /provider credential is no longer valid/i, action: "Check provider connection" },
 ];
+const startFailure = `${extra}\n(() => {
+  const answers = window.__PW_STUB__.answers;
+  answers.account_status.phase2Readiness = { "org-a": ["cloud.workspaces.start-recovery.v1"] };
+  const { workspace } = answers.cloud_workspaces.workspaces[0];
+  workspace.launch = { ...workspace.launch, category: "repository-access-denied", hasPrompt: true, timings: { syncingAt: 10, failedAt: 20 } };
+  answers.github_repo = ({ projectPath }) => projectPath === "/repos/p0" ? "acme/api" : null;
+})();`;
 try {
   for (const theme of ["dark", "light"]) {
     for (const scenario of cases) {
@@ -72,6 +79,46 @@ try {
       }
       await page.close();
     }
+    const page = await open(browser, server.url, { cloud: true, localProjects: 1 }, { width: 680, height: 700 }, { extra: startFailure, colorScheme: theme });
+    await sidebar(page);
+    await page.locator('[data-testid="cloud-workspace-group"][data-workspace="attention-login"]').first().locator("button").first().click();
+    const pane = page.getByTestId("cloud-workspace-main");
+    const card = pane.getByTestId("cloud-start-failure");
+    const local = card.getByRole("button", { name: "Run on this Mac instead" });
+    const github = card.getByRole("button", { name: "Fix GitHub access" });
+    await local.waitFor();
+    const layout = await card.evaluate((node) => {
+      const pane = node.closest("main").getBoundingClientRect();
+      const card = node.getBoundingClientRect();
+      const buttons = [...node.querySelectorAll("button")].map((button) => button.getBoundingClientRect());
+      return { width: card.width, fits: node.scrollWidth <= node.clientWidth + 1, buttonsFit: buttons.every((box) =>
+        box.width > 0 && box.left >= pane.left - 1 && box.right <= pane.right + 1 && box.top >= card.top && box.bottom <= card.bottom + 1) };
+    });
+    failed += report(`${theme} narrow start failure`, {
+      "setup failure in the header": (await pane.getByTestId("cloud-connection-state").innerText()) === "Setup failed",
+      "cause, GitHub fix and verified local checkout action": /GitHub refused the clone/.test(await card.innerText())
+        && await github.isVisible() && await local.isVisible(),
+      "actions wrap inside the narrow workspace": layout.width < 520 && layout.fits && layout.buttonsFit,
+    }, layout);
+    await pane.screenshot({ path: join(shots, `${theme}-start-failure-narrow.png`), animations: "disabled" });
+    if (theme === "dark") {
+      await card.getByRole("button", { name: "View diagnostics" }).click();
+      const diagnostics = page.getByRole("dialog", { name: "Cloud diagnostics · Demo" });
+      await diagnostics.waitFor();
+      await page.keyboard.press("Escape");
+      await diagnostics.waitFor({ state: "hidden" });
+      await github.click();
+      await page.getByText("GitHub repositories", { exact: true }).waitFor();
+    } else {
+      await local.click();
+      const project = page.getByTestId("project-chip").filter({ hasText: "local-0" });
+      await project.waitFor();
+      failed += report("local recovery", {
+        "opens the matched local project's launch form": await project.isVisible(),
+        "opens a local form": await page.getByTestId("cloud-runs-in").count() === 0,
+      });
+    }
+    await page.close();
   }
 } finally {
   await browser.close();
