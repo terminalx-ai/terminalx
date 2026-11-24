@@ -492,7 +492,8 @@ pub fn run() {
             }
             // A Codex sign-in home left by an app that crashed or was force-quit (PRO-79).
             #[cfg(feature = "desktop")]
-            std::thread::spawn(|| codex_device_login::sweep_stale(&codex_device_login::homes_parent()));
+            // With no private folder for them there are no homes of ours to sweep: a shared one is left alone.
+            std::thread::spawn(|| if let Ok(parent) = codex_device_login::homes_parent() { codex_device_login::sweep_stale(&parent) });
             // Agent account directories a crash left before they were listed (#980).
             std::thread::spawn(agent_accounts::sweep);
             // Attachments are shown from the data folder, wherever
