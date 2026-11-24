@@ -1,0 +1,29 @@
+# 25.04 The list: nothing connected, some connected, a member's view, could not be read.
+appId: com.terminalx.phone.fixture
+name: Agent logins, the list (25.04)
+---
+- runFlow: flow-25.04-00-theme.yaml
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins?orgId=org-acme", fixtureLogins: none }
+- extendedWaitUntil: { visible: "One agent is enough to launch a workspace.", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-01-nothing-connected
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins?orgId=org-acme", fixtureLogins: some }
+- extendedWaitUntil: { visible: "Codex, Connected.*", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-02-some-connected
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins?orgId=org-northwind" }
+- extendedWaitUntil: { visible: "Owners and admins manage agent logins.*", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-03-member
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins?orgId=org-acme", fixtureLogins: unreadable }
+- extendedWaitUntil: { visible: "Agent logins could not be read", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-04-could-not-be-read

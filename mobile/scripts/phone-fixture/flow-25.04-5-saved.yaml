@@ -1,0 +1,30 @@
+# 25.04 A saved login: connected, sign-in required, revoke asks first, remove asks first, remove refused.
+appId: com.terminalx.phone.fixture
+name: Agent logins, a saved login (25.04)
+---
+- runFlow: flow-25.04-00-theme.yaml
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins/claude?orgId=org-acme", fixtureLogins: saved }
+- extendedWaitUntil: { visible: "The login itself is never shown again.*", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-21-connected
+- tapOn: "Revoke…"
+- extendedWaitUntil: { visible: "Revoke Claude Code’s login?", timeout: 5000 }
+- takeScreenshot: 25.04-23-revoke-asks-first
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins/codex?orgId=org-acme", fixtureLogins: saved }
+- extendedWaitUntil: { visible: "OpenAI no longer accepts this login.*", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-22-sign-in-required
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins/cursor?orgId=org-acme", fixtureLogins: saved, fixtureLoginsDelete: in-use }
+- extendedWaitUntil: { visible: "Remove…", timeout: 20000 }
+- tapOn: "Remove…"
+- extendedWaitUntil: { visible: "Remove Cursor’s login?", timeout: 5000 }
+- takeScreenshot: 25.04-24-remove-asks-first
+- tapOn: { text: "Remove", index: 0 }
+- extendedWaitUntil: { visible: "Still in use", timeout: 10000 }
+- takeScreenshot: 25.04-25-remove-refused

@@ -1,0 +1,29 @@
+# 25.04 Codex: when sign-in does not finish (expired, refused, offline, unavailable).
+appId: com.terminalx.phone.fixture
+name: Agent logins, Codex sign-in ends (25.04)
+---
+- runFlow: flow-25.04-00-theme.yaml
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins/codex-sign-in?orgId=org-acme&authorized=1", fixtureCodex: expired }
+- extendedWaitUntil: { visible: "The code expired. Start device login again.", timeout: 30000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-12-code-expired
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins/codex-sign-in?orgId=org-acme&authorized=1", fixtureCodex: failed }
+- extendedWaitUntil: { visible: "Device login failed. Start it again.", timeout: 30000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-13-openai-refused
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins/codex-sign-in?orgId=org-acme&authorized=1", fixtureCodex: offline }
+- extendedWaitUntil: { visible: "Offline. The code is still good until.*", timeout: 30000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-14-offline
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/logins/codex-sign-in?orgId=org-acme&authorized=1", fixtureCodex: unavailable }
+- extendedWaitUntil: { visible: "OpenAI’s device sign-in is not answering right now.*", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.04-15-unavailable

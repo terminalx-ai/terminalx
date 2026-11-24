@@ -1,0 +1,21 @@
+# Fills the key form with a placeholder key (pasted, as a person would), a name, and the authorization.
+appId: com.terminalx.phone.fixture
+name: Fill the 25.04 key form
+---
+- setClipboard: "placeholder-not-a-real-key-0000"
+- tapOn: "Paste .*"
+# iOS asks before an app reads what another app copied (not every time, and not at once).
+- assertVisible:
+    text: "Allow Paste"
+    optional: true
+- runFlow:
+    when:
+      visible: "Allow Paste"
+    commands:
+      - tapOn: "Allow Paste"
+- extendedWaitUntil: { notVisible: "Paste .*", timeout: 5000 }
+- tapOn: "A name or email, shown to admins"
+- inputText: "alex@example.com"
+- hideKeyboard
+- tapOn: "I am an organization admin.*"
+- waitForAnimationToEnd
