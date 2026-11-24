@@ -12,6 +12,8 @@ export interface Choice {
   /** At the row's end, in place of the tick's column: a size's hourly rate, over what it is a rate of. */
   value?: string;
   valueDetail?: string;
+  /** It is shown but cannot be chosen (25.10: an agent not signed in there); `detail` says why. */
+  disabled?: boolean;
 }
 
 /**
@@ -41,9 +43,10 @@ export function ChoiceSheet({ title, subtitle, choices, chosen, help, onChoose, 
         <Card>
           {choices.map((choice, index) => {
             const selected = choice.id === chosen;
-            return <Pressable key={choice.id} testID={`choice-${choice.id}`} accessibilityRole="button" accessibilityLabel={[choice.label, choice.detail, choice.value, choice.valueDetail].filter(Boolean).join(", ")} accessibilityState={{ selected }}
+            return <Pressable key={choice.id} testID={`choice-${choice.id}`} accessibilityRole="button" accessibilityLabel={[choice.label, choice.detail, choice.value, choice.valueDetail].filter(Boolean).join(", ")} accessibilityState={{ selected, disabled: !!choice.disabled }}
+              disabled={choice.disabled}
               onPress={() => { onChoose(choice.id); onClose(); }}
-              style={({ pressed }) => [styles.row, choice.detail ? styles.tall : null, index > 0 ? { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border } : null, selected || pressed ? { backgroundColor: palette.selected } : null]}>
+              style={({ pressed }) => [styles.row, choice.detail ? styles.tall : null, index > 0 ? { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border } : null, selected || pressed ? { backgroundColor: palette.selected } : null, choice.disabled ? styles.off : null]}>
               <View style={styles.body}>
                 <Text style={[styles.label, choice.detail ? styles.strong : null, { color: palette.ink }]}>{choice.label}</Text>
                 {choice.detail ? <Text style={[styles.detail, { color: palette.muted }]}>{choice.detail}</Text> : null}
@@ -72,6 +75,7 @@ const styles = StyleSheet.create({
   listContent: { gap: 8 },
   row: { minHeight: 48, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14, paddingVertical: 9 },
   tall: { minHeight: 60 },
+  off: { opacity: 0.5 },
   body: { flex: 1, minWidth: 0 },
   label: { fontSize: 16, lineHeight: 21 },
   strong: { fontWeight: "600" },

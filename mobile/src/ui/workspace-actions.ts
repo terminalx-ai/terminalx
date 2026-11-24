@@ -14,13 +14,24 @@ import type { RowAction } from "./row-actions";
  *
  * Stop asks first: the tap is small and its effect is not. Delete opens its
  * own page (`openDelete`), which is where it is confirmed.
+ *
+ * In the workspace itself, while it runs and the runtime lets this phone
+ * start agents (25.10), New conversation and Add agent tab come first: each
+ * is given only where it can be done (`start`).
  */
-export function workspaceActions({ catalog, item, openDelete }: { catalog: CloudCatalog | null; item: CloudWorkspaceItem | null | undefined; openDelete(): void }): RowAction[] {
+export function workspaceActions({ catalog, item, openDelete, start }: {
+  catalog: CloudCatalog | null;
+  item: CloudWorkspaceItem | null | undefined;
+  openDelete(): void;
+  start?: { newConversation?(): void; addTab?(): void };
+}): RowAction[] {
   if (!catalog || !item || !mayManage(item.workspace)) return [];
   const { workspace } = item;
   const { orgId, id } = workspace;
   const stopping = stopState(workspace, item.latestOperation);
   const actions: RowAction[] = [];
+  if (start?.newConversation) actions.push({ name: "new-conversation", label: "New conversation", run: start.newConversation });
+  if (start?.addTab) actions.push({ name: "add-tab", label: "Add agent tab", run: start.addTab });
 
   const refused = (title: string, error: unknown) => {
     const busy = error instanceof CloudApiError && error.refusal === "workspace-busy";

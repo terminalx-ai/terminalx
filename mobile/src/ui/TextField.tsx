@@ -40,7 +40,16 @@ interface Shared extends Pick<TextInputProps, "autoCapitalize" | "autoCorrect" |
   steady?: boolean;
   testID?: string;
 }
-interface Plain extends Shared { secret?: false; value: string; onChangeText(value: string): void }
+interface Plain extends Shared {
+  secret?: false;
+  value: string;
+  onChangeText(value: string): void;
+  /**
+   * Several lines (25.09's first task): 96 high, growing with the text to 180,
+   * then scrolling inside, with the same label, helper and error lines.
+   */
+  multiline?: boolean;
+}
 interface Secret extends Shared {
   /** Only ever dots: the value is not drawn, not said aloud, and gone when the field is. */
   secret: true;
@@ -79,6 +88,7 @@ export function TextField({ ref, ...props }: TextFieldProps) {
 
   const name = props.accessibilityLabel ?? label;
   const empty = secret ? !filled : props.value === "";
+  const multiline = !props.secret && props.multiline === true;
 
   // Space around a secret is never part of it, however it got in: a key pasted from the system's
   // own menu often ends in a space or a line break, and only spaces is nothing entered.
@@ -133,7 +143,7 @@ export function TextField({ ref, ...props }: TextFieldProps) {
         <ArrowUpRight size={12} color={palette.accent} />
       </Pressable> : hint ? <Text style={[styles.label, { color: palette.faint }]}>{hint}</Text> : null}
     </View> : null}
-    <View style={[styles.field, { borderColor: border, backgroundColor: palette.raised }, disabled && !steady ? styles.off : null]}>
+    <View style={[styles.field, multiline ? styles.tallField : null, { borderColor: border, backgroundColor: palette.raised }, disabled && !steady ? styles.off : null]}>
       {secret && pasted
         ? <Pressable accessibilityRole="button" accessibilityLabel={name} accessibilityHint="Entered. Double tap to enter it again." accessibilityState={{ disabled: !!disabled }} disabled={disabled} onPress={startOver} style={styles.dots}>
           <Text accessibilityElementsHidden importantForAccessibility="no-hide-descendants" numberOfLines={1} style={[styles.text, face, { color: palette.ink }]}>{DOTS}</Text>
@@ -158,7 +168,8 @@ export function TextField({ ref, ...props }: TextFieldProps) {
           onSubmitEditing={props.onSubmitEditing}
           placeholder={placeholder}
           placeholderTextColor={palette.faint}
-          style={[styles.input, styles.text, face, { color: palette.ink }]}
+          {...(multiline ? { multiline: true, textAlignVertical: "top" as const, scrollEnabled: true } : {})}
+          style={[styles.input, styles.text, multiline ? styles.tallInput : null, face, { color: palette.ink }]}
         />}
       {paste && empty && !disabled ? <Pressable accessibilityRole="button" accessibilityLabel={name ? `Paste ${name}` : "Paste"} onPress={pasteIn} hitSlop={10}>
         <Text style={[styles.paste, { color: palette.accent }]}>Paste</Text>
@@ -173,6 +184,9 @@ const styles = StyleSheet.create({
   label: { fontSize: 13, lineHeight: 18 },
   link: { flexDirection: "row", alignItems: "center", gap: 3 },
   field: { minHeight: 44, borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, paddingHorizontal: 12, flexDirection: "row", alignItems: "center", gap: 8 },
+  // 96 high with its padding, growing to 180: the text area is 74 to 158.
+  tallField: { minHeight: 96, alignItems: "flex-start", paddingVertical: 11 },
+  tallInput: { minHeight: 74, maxHeight: 158, lineHeight: 22 },
   off: { opacity: 0.55 },
   input: { flex: 1, alignSelf: "stretch", paddingVertical: 0 },
   dots: { flex: 1, alignSelf: "stretch", justifyContent: "center" },

@@ -26,6 +26,13 @@ export function useConversationState<T>(key: string, initial: T) {
   return [value, state.update] as const;
 }
 
+/** Set what a conversation's screen will show under `key`, from outside it (a first message given back to its tab's composer). */
+export function setConversationState<T>(key: string, value: T): void {
+  const entry = retained.get(key) as ReturnType<typeof createEntry<T>> | undefined;
+  if (entry) entry.update(value);
+  else retained.set(key, createEntry(value));
+}
+
 /** Drop retained state whose key starts with `prefix` (the person signed out: their drafts do not wait for the next one). */
 export function forgetConversationState(prefix: string): void {
   for (const key of [...retained.keys()]) if (key.startsWith(prefix)) retained.delete(key);

@@ -6,6 +6,7 @@ import type { CommandKind, CommandScope } from "./crypto";
 import { WorkspaceKeys, type SecretStorage } from "./keys";
 import { CloudWorkspaceLink, type CloudLinkOptions, type CloudLinkProblem } from "./link";
 import { CloudOutbox, OutboxError, type OutboxEntry, type OutboxPayload } from "./outbox";
+import { startAgents, startOffer, type StartAgent, type StartOffer, type TabSettings } from "./start-tab";
 import { CloudTranscripts, type BlobStorage } from "./transcripts";
 
 /**
@@ -45,6 +46,22 @@ export interface CloudTab {
    * looked at, until a feed's replay is in again; a checkpoint never makes it so.
    */
   continuous: boolean;
+  /**
+   * The runtime no longer has it (closed elsewhere), but this phone holds a
+   * message for it that did not reach it: the tab stays, with that message,
+   * until the person lets the message go (`dismiss`). Nothing streams.
+   */
+  gone: boolean;
+  /** What its agent runs, as the runtime last listed it; null until then. */
+  settings: TabSettings | null;
+}
+
+/** What a conversation started from the phone became (`session.create`, PRO-546). */
+export interface StartedConversation {
+  sessionId: string;
+  tabId: string;
+  /** The conversation and its agent exist, but its first message may not have reached the agent. */
+  promptNotSent: boolean;
 }
 
 /** Who else is here, who drives each tab, and the notes people left (`collab/1`, docs/CLOUD-SHARING.md). */
@@ -73,6 +90,12 @@ export interface CloudWorkspaceSnapshot {
   hasKey: boolean;
   /** Whether Stop can interrupt (#427): a live connection to a runtime that granted `session/3`. Otherwise Stop is the mailbox `stop`. */
   interrupts: boolean;
+  /**
+   * Whether this phone may start a conversation or add an agent tab here
+   * now (`start-tab.ts`); null while not connected, or while the runtime
+   * does not know yet who may.
+   */
+  startOffer: StartOffer | null;
   tabs: CloudTab[];
   outbox: OutboxEntry[];
   /** The last thing that went wrong while reading, as a code. */
@@ -404,6 +427,41 @@ export class CloudWorkspaceSession {
     await this.outbox.cancel(clientCommandId);
   }
 
+  /** Let go of a message the runtime refused for good; a tab that is gone leaves with its last one. */
+  async dismiss(clientCommandId: string): Promise<void> {
+    await this.outbox.dismiss(clientCommandId);
+    this.dropGone();
+    this.publish();
+  }
+
+  /** The agents this workspace can start, as the start sheet offers them (`runtime.agents`). */
+  async startAgents(): Promise<StartAgent[]> {
+    return startAgents(await this.client.runtimeAgentsReport());
+  }
+
+  /**
+   * A new conversation (`session.create`) in the narrow form a phone may
+   * send. `clientRequestId` is kept by the caller: sent again after no
+   * answer, the runtime answers with the conversation it already started.
+   */
+  async startConversation(params: { agent: string; model?: string; effort?: string; mode: string }, first: { title: string; prompt: string }, clientRequestId: string): Promise<StartedConversation> {
+    const prompt = first.prompt.trim() ? first.prompt : undefined;
+    const result = await this.client.mutate<{ sessionId: string; tabId: string; tab?: AgentTabInfo | null; startError?: string | null }>(
+      "session.create",
+      { ...params, title: first.title, ...(prompt ? { prompt } : {}) },
+      clientRequestId,
+    );
+    this.showStarted(result.sessionId, result.tabId, result.tab ?? null);
+    return { sessionId: result.sessionId, tabId: result.tabId, promptNotSent: !!result.startError };
+  }
+
+  /** Another agent tab beside the conversation's others (`session.addTab`); `clientRequestId` as above. */
+  async addAgentTab(sessionId: string, params: { agent: string; model?: string; effort?: string; mode: string }, clientRequestId: string): Promise<{ sessionId: string; tabId: string }> {
+    const result = await this.client.addSessionTab(sessionId, params, clientRequestId);
+    this.showStarted(result.sessionId, result.tabId, result.tab ?? null);
+    return { sessionId: result.sessionId, tabId: result.tabId };
+  }
+
   /** Stop and let go of the connection. What is kept on the phone stays. */
   close(): void {
     this.closed = true;
@@ -644,6 +702,33 @@ export class CloudWorkspaceSession {
     else this.leases.delete(tabId);
   }
 
+  /** A tab the runtime just started: shown at once, before its next tab list says so. */
+  private showStarted(sessionId: string, tabId: string, info: AgentTabInfo | null): void {
+    const tab = this.tab(tabId);
+    tab.sessionId = sessionId;
+    tab.title = info?.title ?? tab.title;
+    tab.status = info?.status ?? tab.status;
+    tab.source = "live";
+    tab.gone = false;
+    this.publish();
+    void this.client.listAgentTabs().then((tabs) => this.applyLive(tabs), () => undefined);
+  }
+
+  /** Whether this phone holds a message for `tabId` that did not reach it: one on its way, or one refused because the tab is gone. */
+  private holdsFor(tabId: string): boolean {
+    return this.outbox.entries().some((entry) => entry.tabId === tabId && (entry.kind === "send" || entry.kind === "steer")
+      && (entry.state === "unsent" || entry.state === "queued" || entry.state === "leased" || (entry.state === "rejected" && entry.category === "tab-unknown")));
+  }
+
+  /** A gone tab with nothing held for it any more leaves. */
+  private dropGone(): void {
+    for (const tab of [...this.tabs.values()]) {
+      if (!tab.gone || this.holdsFor(tab.tabId)) continue;
+      this.tabs.delete(tab.tabId);
+      void this.transcripts.forget(tab.tabId);
+    }
+  }
+
   private applyLive(tabs: AgentTabInfo[]): void {
     const seen = new Set<string>();
     for (const info of tabs) {
@@ -654,11 +739,21 @@ export class CloudWorkspaceSession {
       tab.status = info.status;
       tab.pendingPermissions = info.pendingPermissions ?? [];
       tab.source = "live";
+      tab.gone = false;
+      if (info.harness) tab.settings = { agent: info.harness, model: info.requestedModel ?? info.model ?? null, effort: info.requestedEffort ?? info.effort ?? null, mode: info.requestedPermissionMode ?? info.permissionMode ?? null };
       if (info.lease !== undefined) this.setLease(info.tabId, info.lease);
     }
-    // The runtime's list is the tabs there are: one it no longer names was closed.
-    for (const tabId of [...this.tabs.keys()]) {
+    // The runtime's list is the tabs there are: one it no longer names was closed. It stays only
+    // while this phone holds a message for it, so the person sees that message was not sent (25.10).
+    for (const [tabId, tab] of [...this.tabs]) {
       if (seen.has(tabId)) continue;
+      if (this.holdsFor(tabId)) {
+        tab.gone = true;
+        const watching = this.viewing.get(tabId);
+        watching?.stop?.();
+        if (watching) watching.stop = null;
+        continue;
+      }
       this.tabs.delete(tabId);
       void this.transcripts.forget(tabId);
     }
@@ -668,7 +763,7 @@ export class CloudWorkspaceSession {
   private async stream(tabId: string): Promise<void> {
     const entry = this.viewing.get(tabId);
     const tab = this.tabs.get(tabId);
-    if (!entry || entry.stop || !tab?.sessionId) return;
+    if (!entry || entry.stop || !tab?.sessionId || tab.gone) return;
     entry.stop = () => undefined;
     try {
       const stop = await this.client.subscribeSession(
@@ -770,7 +865,7 @@ export class CloudWorkspaceSession {
   private tab(tabId: string): CloudTab {
     let tab = this.tabs.get(tabId);
     if (!tab) {
-      tab = { tabId, sessionId: null, title: null, status: "idle", source: "checkpoint", pendingPermissions: [], events: [], truncated: false, noKey: false, continuous: false };
+      tab = { tabId, sessionId: null, title: null, status: "idle", source: "checkpoint", pendingPermissions: [], events: [], truncated: false, noKey: false, continuous: false, gone: false, settings: null };
       this.tabs.set(tabId, tab);
     }
     return tab;
@@ -812,6 +907,7 @@ export class CloudWorkspaceSession {
       hasKey: !!this.keys?.current(),
       // As shown: in the moment after a trip to the home screen an interrupt is refused, never turned into the stop that ends the process.
       interrupts: connection.state === "connected" && connection.capabilities.includes("session/3"),
+      startOffer: startOffer(actual, actual.state === "connected" ? (this.you ?? actual.you ?? null) : null, listed?.you?.role ?? null),
       tabs: [...(this.tabs?.values() ?? [])].map((tab) => ({ ...tab })),
       outbox: this.outbox?.entries() ?? [],
       error: this.error,

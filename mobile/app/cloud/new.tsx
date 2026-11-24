@@ -11,6 +11,7 @@ import { ACCESS_NOTICE, LaunchAttempt, QUOTE_EXPIRED, REPOSITORY_INVALID, SPEND_
 import { ChoiceSheet, type Choice } from "@mobile/ui/ChoiceSheet";
 import { FactRows } from "@mobile/ui/FactRows";
 import { Notice } from "@mobile/ui/Notice";
+import { PickRow } from "@mobile/ui/PickRow";
 import { PriceLines, priceText } from "@mobile/ui/PriceLines";
 import { Button, Card, EmptyState, SectionTitle } from "@mobile/ui/primitives";
 import { ScreenHeader } from "@mobile/ui/SessionChrome";
@@ -373,19 +374,6 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization }: { 
   </>;
 }
 
-/** One line of the form: what it is, what is chosen, and a chevron when it opens a choice. */
-function PickRow({ label, value, onPress, first, bad }: { label: string; value: string; onPress?(): void; first?: boolean; bad?: boolean }) {
-  const { palette } = useTheme();
-  const line = first ? null : { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border };
-  const body = <>
-    <Text style={[styles.rowLabel, { color: palette.ink }]}>{label}</Text>
-    <Text numberOfLines={1} style={[styles.rowValue, { color: bad ? palette.danger : palette.muted }]}>{value}</Text>
-    {onPress ? <ChevronRight size={18} color={palette.faint} /> : null}
-  </>;
-  if (!onPress) return <View accessible accessibilityLabel={`${label}: ${value}`} style={[styles.row, line]}>{body}</View>;
-  return <Pressable testID={`pick-${label.toLowerCase().replace(/\s+/g, "-")}`} accessibilityRole="button" accessibilityLabel={`${label}: ${value}`} onPress={onPress} style={({ pressed }) => [styles.row, line, pressed ? { backgroundColor: palette.raised } : null]}>{body}</Pressable>;
-}
-
 /** The repository's own page: one typed or pasted GitHub URL and an optional branch, with what the last check said of each. */
 function RepositoryStep({ organization, repository, gitRef, problems, page, onUse, onNone, onBack, onToken }: {
   organization: string;
@@ -436,7 +424,6 @@ const styles = StyleSheet.create({
   stateAction: { paddingHorizontal: 24, gap: 8 },
   row: { minHeight: 48, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14, paddingVertical: 9 },
   rowLabel: { fontSize: 16, lineHeight: 21 },
-  rowValue: { flex: 1, fontSize: 15, lineHeight: 20, textAlign: "right" },
   grow: { flex: 1, minWidth: 0 },
   tick: { width: 22, height: 22, borderRadius: 11, alignItems: "center", justifyContent: "center" },
   agentDetail: { flexShrink: 1, fontSize: 13, lineHeight: 18 },
