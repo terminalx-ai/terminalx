@@ -1728,7 +1728,7 @@ pub struct CloudAccessApply {
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(tag = "status", rename_all = "lowercase")]
+#[serde(tag = "status", rename_all = "lowercase", rename_all_fields = "camelCase")]
 enum AccessResult {
     Applied { id: String },
     Failed { id: String, code: String, message: String },
