@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
     cloudWorkspaces: vi.fn(),
     cloudWorkspaceDetails: vi.fn(),
     cloudWorkspaceRestart: vi.fn(),
+    cloudWorkspaceResume: vi.fn(),
     cloudWorkspaceOperationDto: vi.fn(),
     cloudWorkspaceRepositories: vi.fn(),
     cloudAgentPurgeWorkspace: vi.fn(),
@@ -45,6 +46,7 @@ const { CloudWorkspaceAttention } = await import("./CloudWorkspaceAttention");
 const catalog = await import("@/lib/cloudCatalog");
 const sessions = await import("@/lib/sessions");
 const { resetCloudConnections } = await import("@/lib/cloudConnections");
+const { CLOUD_START_RECOVERY } = await import("@/lib/cloudStartFailure");
 
 const ORG = "org-a";
 const KEY = `cloud:${ORG}:alpha`;
@@ -362,4 +364,102 @@ it("keeps a path to start the agent after repairing a login on an attention-requ
   fireEvent.click(screen.getByRole("button", { name: "Open session" }));
   await screen.findByTestId("workspace-view");
   expect(mocks.workspaceConnection).toHaveBeenCalledExactlyOnceWith({ kind: "cloud", organizationId: ORG, workspaceId: "alpha" }, "connect");
+});
+
+describe("workspace start recovery readiness", () => {
+  function failedStart(category = "repository-access-denied") {
+    const row = shared("driver");
+    row.workspace.state = "attention-required";
+    row.workspace.launch = { launchId: "launch", state: "failed", phase: "failed", category, hasPrompt: true,
+      timings: { syncingAt: 5, failedAt: 10 } } as never;
+    return row;
+  }
+
+  it("keeps identical workspace markup for an absent key and a key belonging to another organization", async () => {
+    await catalog.ingestCloudList({ workspaces: [failedStart()] }, ORG);
+    const props = { workspaceKey: KEY, sidebarOpen: true, onToggleSidebar: () => undefined };
+    const { container, rerender } = render(<CloudWorkspaceMain {...props} />);
+    const held = container.innerHTML;
+    expect(screen.getByTestId("cloud-connection-state").textContent).toBe("Needs attention");
+    expect(screen.getByTestId("cloud-workspace-attention")).toBeTruthy();
+    mocks.status.phase2Readiness = { "org-b": [CLOUD_START_RECOVERY] };
+    rerender(<CloudWorkspaceMain {...props} />);
+    expect(container.innerHTML).toBe(held);
+
+    mocks.status.phase2Readiness = { [ORG]: [CLOUD_START_RECOVERY] };
+    rerender(<CloudWorkspaceMain {...props} />);
+    const card = screen.getByRole("region", { name: "Setup failed for alpha" });
+    expect(screen.getByTestId("cloud-connection-state").textContent).toBe("Setup failed");
+    expect(screen.queryByTestId("cloud-workspace-attention")).toBeNull();
+    expect(card.textContent).toContain("GitHub refused the clone.");
+    expect(within(card).queryByRole("button", { name: /fix github|diagnostics|retry|ask|run on this mac/i })).toBeNull();
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+    fireEvent.click(within(card).getByRole("button", { name: "Open session" }));
+    await screen.findByTestId("workspace-view");
+    expect(mocks.workspaceConnection).toHaveBeenCalledExactlyOnceWith({ kind: "cloud", organizationId: ORG, workspaceId: "alpha" }, "connect");
+  });
+
+  it.each(["owner", "admin"] as const)("opens scoped GitHub settings and offers diagnostics to an organization %s", async (role) => {
+    const row = failedStart();
+    row.workspace.launch!.timings.syncingAt = null;
+    mocks.status.phase2Readiness = { [ORG]: [CLOUD_START_RECOVERY] };
+    mocks.status.organizations![0].role = role;
+    await catalog.ingestCloudList({ workspaces: [row] }, ORG);
+    const { takeOrganizationRequest, onOpenSettingRow } = await import("@/lib/settingsLinks");
+    const openRow = vi.fn();
+    const stop = onOpenSettingRow(openRow);
+    try {
+      render(<CloudWorkspaceMain workspaceKey={KEY} sidebarOpen onToggleSidebar={() => undefined} />);
+      const card = screen.getByRole("region", { name: "The cloud workspace didn't start" });
+      expect(screen.getByTestId("cloud-connection-state").textContent).toBe("Didn't start");
+      fireEvent.click(within(card).getByRole("button", { name: "Fix GitHub access" }));
+      expect(takeOrganizationRequest()).toBe(ORG);
+      expect(openRow).toHaveBeenCalledExactlyOnceWith("organizations.github");
+      expect(within(card).getByRole("button", { name: "View diagnostics" })).toBeTruthy();
+      expect(within(card).queryByRole("button", { name: /retry/i })).toBeNull();
+    } finally {
+      stop();
+    }
+  });
+
+  it("runs only an authorized resume and reports a repeated failure of the new operation", async () => {
+    const workspace = { ...shared("driver").workspace, state: "attention-required", authority: "manage", you: { role: "manager", canApprove: true } } as const;
+    const failed = { id: "op-1", workspaceId: "alpha", type: "create", action: "resume", state: "failed",
+      errorCode: "cloud_provider_unavailable", updatedAt: 15 } as const;
+    const original = { workspace, latestOperation: failed } as unknown as CloudWorkspaceListItem;
+    const running = { workspace, operation: { ...failed, id: "op-2", state: "running", errorCode: null, updatedAt: 16 } };
+    const repeated = { workspace, latestOperation: { ...failed, id: "op-2", updatedAt: 17 } } as unknown as CloudWorkspaceListItem;
+    let release!: (value: typeof running) => void;
+    mocks.api.cloudWorkspaceResume.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [repeated] });
+    mocks.status.phase2Readiness = { [ORG]: [CLOUD_START_RECOVERY] };
+    await catalog.ingestCloudList({ workspaces: [original] }, ORG);
+    render(<CloudWorkspaceMain workspaceKey={KEY} sidebarOpen onToggleSidebar={() => undefined} />);
+    const retry = screen.getByRole("button", { name: "Retry resume" });
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+    expect(mocks.api.cloudWorkspaceResume).toHaveBeenCalledExactlyOnceWith("alpha", null);
+    expect(screen.getByRole("status").textContent).toContain("Resuming workspace");
+    expect(screen.queryByTestId("cloud-start-failure")).toBeNull();
+    await act(async () => release(running));
+    expect((await screen.findByRole("alert")).textContent).toContain("Couldn't retry the workspace. The provider did not answer.");
+  });
+
+  it("offers inspection without resume to a workspace driver and preserves unrelated lifecycle attention", async () => {
+    const row = shared("driver");
+    row.workspace.state = "attention-required";
+    row.latestOperation = { id: "op", action: "resume", state: "failed", errorCode: "cloud_provider_unavailable" } as never;
+    mocks.status.phase2Readiness = { [ORG]: [CLOUD_START_RECOVERY] };
+    await catalog.ingestCloudList({ workspaces: [row] }, ORG);
+    render(<CloudWorkspaceMain workspaceKey={KEY} sidebarOpen onToggleSidebar={() => undefined} />);
+    const card = screen.getByTestId("cloud-start-failure");
+    expect(within(card).getByRole("button", { name: "Open session" })).toBeTruthy();
+    expect(within(card).queryByRole("button", { name: "Retry resume" })).toBeNull();
+    await act(() => catalog.ingestCloudList({ workspaces: [
+      { ...row, latestOperation: { ...row.latestOperation!, action: "archive" } },
+    ] }, ORG));
+    expect(screen.queryByTestId("cloud-start-failure")).toBeNull();
+    expect(screen.getByTestId("cloud-workspace-attention")).toBeTruthy();
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+  });
 });
