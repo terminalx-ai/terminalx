@@ -1002,8 +1002,14 @@ jobs:
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
   check:
     # Keep the exact required status and fail closed on failed/cancelled/skipped jobs.
+    #
+    # Not macos-native: a pull request is not held to the macOS Rust suite (the
+    # owner's decision, 24 November 2026). On a pull request the selector still
+    # runs it when it changes Apple-only code, and it reports there as its own
+    # job; `check` does not wait for it. Every other run is held to it by
+    # `check-macos` below, which needs both.
     if: always()
-    needs: [frontend, phone-app, vitest, webkit-layout, linux-rust, linux-rust-tests, macos-rust-changes, macos-native, headless-serve, serve-tests, machine-compat, machines-e2e, desktop-platforms, legacy-runtime-probe]
+    needs: [frontend, phone-app, vitest, webkit-layout, linux-rust, linux-rust-tests, macos-rust-changes, headless-serve, serve-tests, machine-compat, machines-e2e, desktop-platforms, legacy-runtime-probe]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1015,7 +1021,7 @@ jobs:
           RESULTS: ${{ toJSON(needs) }}
         run: |
           echo "$RESULTS" | jq -e '
-            {"macos-native": "required", "machine-compat": "machines",
+            {"machine-compat": "machines",
              "linux-rust": "rust", "linux-rust-tests": "rust", "headless-serve": "rust", "serve-tests": "rust",
              "vitest": "frontend", "webkit-layout": "frontend", "phone-app": "phone"} as $selected
             | .["macos-rust-changes"] as $selector
@@ -1026,3 +1032,18 @@ jobs:
                           and $selected[$job] != null
                           and $selector.outputs[$selected[$job]] == "false")]
                    | all)'
+  check-macos:
+    # Pushes to main, nightly and manual runs: everything `check` requires, and
+    # the full macOS Rust suite. On these the selector answers "true" to
+    # everything, so macos-native always runs and must succeed. Not a required
+    # status; release-serve.yml follows the run's own conclusion, which a
+    # failed job here or in macos-native makes a failure.
+    if: ${{ always() && github.event_name != 'pull_request' }}
+    needs: [check, macos-native]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require check and the macOS suite to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: echo "$RESULTS" | jq -e '(keys == ["check", "macos-native"]) and all(.[]; .result == "success")'

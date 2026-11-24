@@ -321,6 +321,20 @@ saved, built every dependency on every run.
 
 ## macOS Rust coverage
 
+**A pull request is not held to the macOS Rust suite** (the owner's decision,
+24 November 2026). `check`, the required status, does not need
+`macos-native`, so it reports as soon as the Linux jobs and `webkit-layout`
+have, without waiting the 45 to 90 minutes the macOS job takes. On a pull
+request the selector still starts `macos-native` when the change needs it
+(below), and its result shows as its own job; a red one there is information
+for the reviewer, not a block. Pushes to `main`, nightly and manual runs are
+held to it as before, by `check-macos`, which needs `check` and
+`macos-native` and fails unless both succeeded; `release-serve.yml` follows
+that run's conclusion. So an Apple-only failure can now first fail on `main`,
+and the policy tests pin that `check` never needs `macos-native` again
+(it would hold the required status for the whole macOS run) and that
+`check-macos` runs on every event but a pull request.
+
 The full macOS suite runs on pushes to `main`, nightly at 02:23 UTC and on
 manual workflow dispatch. A selected pull request runs the filtered part of it
 (below).
