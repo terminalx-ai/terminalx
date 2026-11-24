@@ -93,6 +93,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   resetCloudConnections();
   catalog.resetCloudCatalog();
   resetCloudAgents();
@@ -108,11 +109,25 @@ it("offers the health card after a runtime disconnect only when restart/details 
   await catalog.ingestCloudList({ workspaces: [managed] }, ORG);
   const view = render(<CloudWorkspaceMain workspaceKey={KEY} sidebarOpen onToggleSidebar={() => undefined} />);
   await screen.findByTestId("workspace-view");
-  await act(async () => emit({ state: "reconnecting", attempt: 1, reason: "relay_timeout", retryInMs: 250 }));
-  expect(screen.queryByText("Cloud workspace unresponsive")).toBeNull();
+  vi.useFakeTimers();
+  const reconnect = { state: "reconnecting", attempt: 1, reason: "relay_timeout", retryInMs: 250 } as const;
+  act(() => emit(reconnect));
+  act(() => vi.advanceTimersByTime(15_000));
+  expect(screen.queryByRole("region", { name: "Workspace health" })).toBeNull();
 
   mocks.status.phase2Readiness = { [ORG]: ["cloud.workspaces.restart-details.v1"] };
   view.rerender(<CloudWorkspaceMain workspaceKey={KEY} sidebarOpen onToggleSidebar={() => undefined} />);
+  act(() => vi.advanceTimersByTime(14_999));
+  expect(screen.queryByRole("region", { name: "Workspace health" })).toBeNull();
+  act(() => emit({ state: "opening" }));
+  act(() => vi.advanceTimersByTime(1));
+  expect(screen.queryByRole("region", { name: "Workspace health" })).toBeNull();
+  act(() => emit({ state: "waitingForRuntime" }));
+  act(() => vi.advanceTimersByTime(5_000));
+  act(() => emit(reconnect));
+  act(() => vi.advanceTimersByTime(9_999));
+  expect(screen.queryByRole("region", { name: "Workspace health" })).toBeNull();
+  act(() => vi.advanceTimersByTime(1));
   const health = screen.getByRole("region", { name: "Workspace health" });
   expect(within(health).getByRole("button", { name: "Open diagnostics" })).toBeTruthy();
   fireEvent.click(within(health).getByRole("button", { name: "Restart" }));

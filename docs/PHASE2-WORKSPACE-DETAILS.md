@@ -62,7 +62,7 @@ refresh existing catalog state. Account/profile changes stop further polling
 and catalog application. Duplicate local requests are refused, server errors
 remain authoritative, and no force/status endpoint or restart event is invented.
 The header shows Restarting while the catalog identifies an open restart by its
-transport action. Confirmation shows the operation is pending until it settles.
+transport action. The confirmation can be closed while the operation is pending. The outcome still appears as a toast.
 Success replaces any held transport with `connect`, preserving lease identity,
 and shows a Restarted workspace toast. Unused transports close. Terminal failure
 shows Couldn't restart workspace with Open workspace to reach the existing
@@ -80,11 +80,11 @@ old-account results. Existing catalog polling continues independently.
   checkout outcome when available. The checkout contract supplies no setup
   duration. SSH and Sync to this Mac are outside this slice.
 - **14.06** uses the existing workspace menu with Copy workspace info, Copy
-  machine ID, Restart workspace and the manager's Open provisioning log entry.
+  machine ID and Restart workspace. The details card offers the provisioning log when the response has a supported URL.
   A successful copy names the field in the toast.
 - **14.07** uses the Restarting chip in workspace and session headers. The
-  workspace pane shows the health card when the running workspace's runtime
-  is unreachable. Restart and Open diagnostics follow their existing authority
+  workspace pane shows the health card after 15 seconds of continuous runtime
+  recovery for a ready workspace. Restart and Open diagnostics follow their existing authority
   rules. The toast uses the workspace name and server outcome. There is no
   workspace number, measured downtime or verified reattached-tab count in
   the restart response. The runtime artifact SHA identifies the installed

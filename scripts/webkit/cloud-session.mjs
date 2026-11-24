@@ -165,12 +165,11 @@ for (const ready of [false, true]) {
   await menu.click();
   await copyInfo.click();
   await page.getByText("Copied workspace info", { exact: true }).waitFor();
-  await menu.click();
-  await log.click();
-  await page.waitForFunction(() => window.__PW_DETAILS__.opened.length === 1);
   await details.click();
   const popover = page.getByRole("dialog", { name: "Workspace details" });
   await popover.getByText("4 cores · 25% used").waitFor();
+  await popover.getByRole("button", { name: "Open provisioning log" }).click();
+  await page.waitForFunction(() => window.__PW_DETAILS__.opened.length === 1);
   const health = popover.getByRole("region", { name: "Workspace health" });
   const resourceReadings = (await health.getByText("2.0 GB used of 4.0 GB").count()) === 1
     && (await health.getByText("10 GB used of 20 GB").count()) === 1;
@@ -184,6 +183,8 @@ for (const ready of [false, true]) {
   await confirmation.getByRole("checkbox").check();
   await submit.click();
   await confirmation.getByText(/Restart pending/).waitFor();
+  await confirmation.getByRole("button", { name: "Close", exact: true }).click();
+  await confirmation.waitFor({ state: "hidden" });
   await page.getByTestId("cloud-workspace-restarting").waitFor();
   await page.waitForFunction(() => window.__PW_DETAILS__.polls.length > 0);
   const noEarlySuccess = (await page.getByText("Restarted workspace", { exact: true }).count()) === 0;
@@ -195,7 +196,7 @@ for (const ready of [false, true]) {
     "short viewport contains the details popover with live CPU, memory and disk": fits && resourceReadings,
     "copy actions and provision log use the returned workspace details": check.copied[0] === "machine-w1" &&
       /Organisation ID: org-a[\s\S]+Workspace ID: w1[\s\S]+Runtime SHA256: fixture-sha/.test(check.copied[1]) &&
-      check.opened[0] === "https://console.example/organizations/org-a" && check.requests.length === 4 &&
+      check.opened[0] === "https://console.example/organizations/org-a" && check.requests.length === 3 &&
       check.requests.every((request) => request.orgId === "org-a" && request.workspaceId === "w1"),
     "restart waits for confirmation and a matching terminal operation": requiresConfirmation && noEarlySuccess &&
       JSON.stringify(check.restarts) === JSON.stringify([{ workspaceId: "w1", orgId: "org-a" }]) &&

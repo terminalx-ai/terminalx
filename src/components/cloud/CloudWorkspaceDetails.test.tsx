@@ -29,6 +29,8 @@ it("renders original pinned metadata and unavailable CPU/disk, and safely falls 
   await screen.findByText("artifact-sha");
   expect(screen.getByText("Version 3 · Toolchain 8")).toBeTruthy(); expect(screen.getAllByText("Unavailable").length).toBeGreaterThanOrEqual(2);
   expect(screen.queryByText("secret")).toBeNull();
+  expect(screen.queryByText("creator")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Open provisioning log" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Copy machine ID" }));
   expect(await screen.findByLabelText("Text to copy")).toHaveProperty("value", "machine");
   expect(screen.queryByText("Copied machine ID")).toBeNull();
