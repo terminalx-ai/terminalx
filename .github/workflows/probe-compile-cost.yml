@@ -1,0 +1,93 @@
+# PROBE, NOT FOR MERGE (#1514 step 3). What `raccoon`'s library test build
+# costs on the Linux runner, and what one-line settings change it. Each variant
+# is a job of its own on its own runner, restores main's linux-rust-tests cache
+# (the dependencies) and saves nothing. It runs only on its own pull request.
+name: Probe, compile cost of the library test build
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/probe-compile-cost.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: probe-compile-cost-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [base, base-again, debug0, cgu64, passes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install Linux build dependencies
+        run: sudo infra/ci-runners/apt-mirrors.sh && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh ripgrep
+      - name: Stand in for the frontend build
+        run: mkdir -p dist && printf '<!doctype html><title>TerminalX</title>\n' > dist/index.html
+      - name: Show the Rust toolchain
+        id: toolchain
+        run: |
+          rustup show && cargo --version && nproc && free -m
+          echo "rustc=$(rustc --version | tr -c '[:alnum:].\n' '-')" >> "$GITHUB_OUTPUT"
+      - name: Restore main's cargo cache (read only)
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: ci-v5-linux-rust-tests-main-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.rustc }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ci-v5-linux-rust-tests-main-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.rustc }}-
+      - name: Build the library's tests (${{ matrix.variant }})
+        working-directory: src-tauri
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -o pipefail
+          case "$VARIANT" in
+            base|base-again) cmd=(cargo test --locked --lib --no-run --timings) ;;
+            debug0) cmd=(cargo test --locked --lib --no-run --timings --config 'profile.test.package.raccoon.debug=0') ;;
+            cgu64) cmd=(cargo test --locked --lib --no-run --timings --config 'profile.test.package.raccoon.codegen-units=64') ;;
+            # -Z flags reach the final crate only (`cargo rustc`), so the
+            # dependencies' fingerprints are those of the base build.
+            passes) cmd=(env RUSTC_BOOTSTRAP=1 cargo rustc --locked --lib --profile test -- -Ztime-passes) ;;
+          esac
+          echo "command: ${cmd[*]}"
+          start=$(date +%s)
+          /usr/bin/time -v "${cmd[@]}" 2>&1 | tee "$RUNNER_TEMP/build.log" | grep -vE '^time:' | tail -80
+          echo "WALL ${VARIANT} $(( $(date +%s) - start )) s"
+          grep -cE '^\s*Compiling ' "$RUNNER_TEMP/build.log" | sed 's/^/units compiled: /'
+          grep -E '^\s*Compiling ' "$RUNNER_TEMP/build.log" | head -5
+          grep -E 'Elapsed \(wall|Maximum resident|Percent of CPU|User time|System time' "$RUNNER_TEMP/build.log"
+      - name: Top-level passes (passes only)
+        if: matrix.variant == 'passes'
+        run: |
+          grep -E '^time: .*(total|analysis|type_check_crate|MIR_borrow_checking|MIR_effect_checking|monomorphization_collector|codegen_crate|LLVM_passes|finish_ongoing_codegen|link_crate|link_binary|run_linker|generate_crate_metadata|expand_crate|macro_expand_crate|parse_crate|lint_checking|incr_comp|serialize|resolve_crate|hir_lowering|codegen_to_LLVM_IR|codegen_module|link)$' "$RUNNER_TEMP/build.log" || true
+      - name: What was built
+        working-directory: src-tauri
+        run: |
+          bin=$(find target/debug -maxdepth 6 -type f -executable -name 'raccoon_lib-*' -newer ../dist/index.html | head -1)
+          echo "binary: $bin"; ls -la "$bin"
+          readelf -p .comment "$bin" | head -12 || true
+          readelf -S -W "$bin" | grep -E '\.debug_|\.text' | awk '{print $2, $6}' || true
+      - name: Keep the timings
+        if: always() && matrix.variant != 'passes'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: timings-${{ matrix.variant }}
+          path: src-tauri/target/cargo-timings/cargo-timing.html
+          if-no-files-found: warn
