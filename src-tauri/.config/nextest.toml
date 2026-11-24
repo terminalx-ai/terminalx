@@ -36,8 +36,3 @@ path = "junit.xml"
 # reported as flaky when it then passes (the job's summary names it). One test
 # by its exact name, with the ticket that will fix it on the line above; the
 # entry goes when the ticket closes. Nothing else may be set here.
-
-# PRO-513
-[[profile.ci.overrides]]
-filter = 'test(=machine_host::security_tests::the_listen_choice_decides_what_is_bound_and_relay_only_opens_no_port)'
-retries = 2
