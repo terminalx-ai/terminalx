@@ -298,6 +298,28 @@ mac-only check measures, such as a component the transcript renders from
 another folder) is found on `main`, after the merge, by `webkit-mac-only` on
 the push. Every other WebKit check runs on every frontend pull request.
 
+#### One rerun, alone, on the Linux parts
+
+A Linux part runs its checks several at once, and a check can fail there only
+because the others hold the processor. So, by the owner's decision (#1514,
+item 21), each check that failed runs once more after the part's other checks
+have ended, by itself, with nothing else running in that part. The part passes
+only if every such check passes alone; one that fails again fails the part.
+There is exactly one rerun: `reruns` in `run-all.mjs` is 1, `rerunFailed`
+refuses any other number, and `infra/ci-runners/test_webkit_reruns.py` fails
+when either allows a second (or a retry loop is added around the one). The
+macOS job (`--only mac-only`) and runs on a Mac make none.
+
+A check that passed only alone is not hidden. The log prints `<name> FAILED
+under load, passed alone` with the output of its first run, the part's last
+lines name it again, and the job summary (`GITHUB_STEP_SUMMARY`) lists it under
+the heading "FAILED under load, passed alone", with that output. It is a check
+to fix: it failed once, on a runner like the next one.
+
+A rerun takes the check's own time again, after the part. A check that timed
+out (ten minutes) and is rerun can take the part past its 25-minute limit; the
+part then fails, as it would have without the rerun.
+
 The legacy runtime diagnostic's macOS leg is gone: its tests patch
 `platform.system` to Linux and to Darwin themselves.
 
