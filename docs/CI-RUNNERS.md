@@ -231,10 +231,15 @@ writes the app's compressed assets into the crate's `OUT_DIR` while the crate
 compiles, and the crate embeds them, so to cargo they are inputs newer than
 the build: every cargo command after the first compiled the crate again (11 to
 23 minutes on a pull request; on `main` it ran beside the ordinary library
-build and the runner swapped, an hour before the first test). The build step
-dates those files back to 2000, as tauri-codegen 2.7 does itself (the lock
-file has 2.6.3), and then fails unless a second `cargo test --no-run` finds
-every unit fresh. `main`'s `cargo test --locked` still builds the ordinary
+build and the runner swapped, an hour before the first test). Cargo -v names
+it: "Dirty raccoon: the file `target/debug/build/raccoon/<hash>/out/<checksum>`
+has changed". The build step dates the files in that folder back to 2000, as
+tauri-codegen 2.7 does itself (the lock file has 2.6.3), and then fails, with
+cargo's reason, unless a second `cargo test --no-run -v` finds every unit
+fresh. The folder is the `out_dir` cargo reports for the crate's build script,
+not a path searched for: cargo 1.100 keeps every unit's output, the test binary
+among them, under `build/raccoon/<hash>/out`, and dating those back makes them
+stale. `main`'s `cargo test --locked` still builds the ordinary
 library once, which the binary, the integration tests and the doc-tests need.
 
 No macOS runner is taken on a pull request unless the selector asks for one.
