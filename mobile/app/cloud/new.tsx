@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View, type ScrollViewInstance } from "react-native";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Crypto from "expo-crypto";
@@ -105,7 +105,17 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   // Launch again after a cancel opens with the first task that was not sent, taken from where the launch kept it.
   const [draft, setDraft] = useState<Draft>(() => ({ name: "", providerId: null, sizeId: "", locationId: "", sourceId: "", idleMinutes: 0, repository: "", ref: "", withoutAgents: [], task: (again ? takeConversationState<FirstTaskDraft>(keptTaskKey(orgId, again)) : undefined) ?? NO_TASK }));
   const [step, setStep] = useState<"form" | "repository" | "review">("form");
-  const [sheet, setSheet] = useState<Sheet>(null);
+  const [sheet, setChosenSheet] = useState<Sheet>(null);
+  // The task is the form's last field: while it is typed in, the form keeps its end in view, above the keyboard
+  // the page shrinks for and as the field grows.
+  const scroller = useRef<ScrollViewInstance>(null);
+  const typing = useRef(false);
+  useEffect(() => {
+    const shown = Keyboard.addListener("keyboardDidShow", () => { if (typing.current) scroller.current?.scrollToEnd({ animated: true }); });
+    return () => shown.remove();
+  }, []);
+  // A sheet opened while the name or the task is being typed would open under the keyboard.
+  const setSheet = (next: Sheet) => { if (next) Keyboard.dismiss(); setChosenSheet(next); };
   const [busy, setBusy] = useState<"pricing" | "launching" | "checking" | null>(null);
   const [problems, setProblems] = useState<PreflightProblems | null>(null);
   const [formRefusal, setFormRefusal] = useState<LaunchRefusal | null>(null);
@@ -307,7 +317,8 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
 
   const page = (title: string, onBack: () => void, body: ReactNode, foot: ReactNode) => <KeyboardAvoidingView style={styles.page} behavior={Platform.OS === "ios" ? "padding" : undefined}>
     {header(title, onBack)}
-    <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}>{body}</ScrollView>
+    <ScrollView ref={scroller} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}
+      onContentSizeChange={() => { if (typing.current) scroller.current?.scrollToEnd({ animated: false }); }}>{body}</ScrollView>
     <View style={[styles.foot, { paddingBottom: insets.bottom + 12 }]}>{foot}</View>
   </KeyboardAvoidingView>;
 
@@ -402,7 +413,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
         {agent ? <>
           <AgentSettingsRows testID="first-task-rows" agent={agent.label} model={null} effort={null} mode={phoneModeLabel(draft.task.mode)} badAgent={!!problems?.agents?.includes(agent.id)}
             onAgent={() => setSheet("agent")} onMode={() => setSheet("mode")} />
-          <TextField testID="first-task" accessibilityLabel="First task" multiline value={draft.task.text} onChangeText={(text) => changeTask({ text })} placeholder={FIRST_TASK_PLACEHOLDER} disabled={busy !== null}
+          <TextField testID="first-task" accessibilityLabel="First task" multiline onFocus={() => { typing.current = true; }} onBlur={() => { typing.current = false; }} value={draft.task.text} onChangeText={(text) => changeTask({ text })} placeholder={FIRST_TASK_PLACEHOLDER} disabled={busy !== null}
             error={tooLong ? FIRST_TASK_TOO_LONG : null} helper={!taskWritten(draft.task.text) && EMPTY_FIRST_TASK_CHECKED_LIVE ? EMPTY_FIRST_TASK : undefined} />
         </> : <Notice testID="first-task-none" tone="info" text={NO_AGENT_TICKED} />}
       </> : null}

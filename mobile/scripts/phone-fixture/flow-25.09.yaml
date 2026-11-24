@@ -1,0 +1,95 @@
+# 25.09 A first task at launch: the form's First task, its sheets, the review, and the launch's six phases.
+appId: com.terminalx.phone.fixture
+# The boards are drawn in Ember when dark and in Den when light: MAESTRO_THEME=Den for the light run.
+env:
+  THEME: ${MAESTRO_THEME || "Ember"}
+name: First task (25.09)
+---
+# The form, held at every phase so each can be shown.
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: hold }
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+- tapOn: "${THEME} theme"
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: hold, openRoute: "/cloud/new?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "New workspace"
+    timeout: 15000
+# The name field has the focus.
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- waitForAnimationToEnd
+- takeScreenshot: 25.09-1-the-whole-form
+- scrollUntilVisible:
+    element: "Permission mode.*"
+- scroll
+- takeScreenshot: 25.09-2-at-first-task
+- tapOn:
+    id: first-task
+- inputText: "Fix the checkout test that fails on CI, then open a pull request"
+- takeScreenshot: 25.09-3-writing-the-task
+# Opening a sheet puts the keyboard away.
+- scrollUntilVisible:
+    direction: UP
+    element:
+      id: pick-agent
+- tapOn:
+    id: pick-agent
+- waitForAnimationToEnd
+- takeScreenshot: 25.09-4-agent
+- tapOn:
+    id: choice-codex
+- waitForAnimationToEnd
+- tapOn:
+    id: pick-permission-mode
+- waitForAnimationToEnd
+- takeScreenshot: 25.09-5-permission-mode
+- tapOn:
+    id: choice-manual
+- scrollUntilVisible:
+    element:
+      id: review-price
+- tapOn:
+    id: review-price
+- extendedWaitUntil:
+    visible:
+      id: launch
+    timeout: 15000
+- scrollUntilVisible:
+    element:
+      id: review-task
+- takeScreenshot: 25.09-6-review-with-a-task
+- tapOn:
+    id: launch
+- tapOn: "Launch"
+- extendedWaitUntil:
+    visible: "Creating the machine, in progress.*"
+    timeout: 20000
+- takeScreenshot: 25.09-7-creating-the-machine
+- extendedWaitUntil:
+    visible: "Installing the runtime, in progress.*"
+    timeout: 90000
+- takeScreenshot: 25.09-8-installing-the-runtime
+- extendedWaitUntil:
+    visible: "Connecting to the runtime, in progress.*"
+    timeout: 90000
+- takeScreenshot: 25.09-9-connecting-to-the-runtime
+- extendedWaitUntil:
+    visible: "Syncing the repository, in progress.*"
+    timeout: 90000
+- takeScreenshot: 25.09-10-syncing-the-repository
+- extendedWaitUntil:
+    visible: "Starting the agent, in progress.*"
+    timeout: 90000
+- takeScreenshot: 25.09-11-starting-the-agent
+# Running shows for a moment, then the conversation opens at the launch's tab by itself. Maestro's view of
+# the screen trails the app by a few seconds, so the opened workspace is not asserted here.
+- extendedWaitUntil:
+    visible: "Running, done"
+    timeout: 30000
+    optional: true
+- takeScreenshot: 25.09-12-running

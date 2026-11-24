@@ -77,3 +77,4 @@ export const AccessibilityInfo = { isReduceMotionEnabled: async () => false, add
 
 export const ActionSheetIOS = { showActionSheetWithOptions: vi.fn() };
 export const Alert = { alert: vi.fn() };
+export const Keyboard = { dismiss: vi.fn(), addListener: () => ({ remove: () => undefined }), isVisible: () => false };

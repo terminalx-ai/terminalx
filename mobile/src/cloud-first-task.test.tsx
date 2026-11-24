@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Alert } from "react-native";
+import { Alert, Keyboard } from "react-native";
 import NewWorkspaceScreen from "../app/cloud/new";
 import { BYPASS_NOT_FROM_PHONE } from "./cloud/agent-settings";
 import { FIRST_TASK_PLACEHOLDER, NO_AGENT_TICKED, RUNTIME_PICKUP_MS, TASK_LEFT, TASK_NOTE, TASK_NOT_PICKED_UP, TASK_UNSURE_LEFT } from "./cloud/first-task";
@@ -99,7 +99,11 @@ describe("the launch form's first task", () => {
 
   it("offers the four modes a phone may send, and says why bypass is not one of them", async () => {
     const service = await form();
+    await page.type(task(), "Fix it");
+    vi.mocked(Keyboard.dismiss).mockClear();
     await page.press(page.byId("pick-permission-mode"));
+    // Opened while the task is typed: the keyboard goes, or it would cover the sheet.
+    expect(Keyboard.dismiss).toHaveBeenCalledOnce();
     expect([...page.byId("choice-sheet")!.querySelectorAll("[data-testid^='choice-']")].map((row) => row.getAttribute("data-testid"))).toEqual(["choice-plan", "choice-manual", "choice-auto", "choice-acceptEdits"]);
     expect(page.byId("choice-sheet")!.textContent).toContain(BYPASS_NOT_FROM_PHONE);
     expect(page.byId("choice-sheet")!.textContent).not.toContain("Bypass permissions,");
@@ -107,7 +111,7 @@ describe("the launch form's first task", () => {
     expect(label("pick-permission-mode")).toBe("Permission mode: Plan");
     await toReview();
     await launch();
-    expect((service.sent("POST", "/cloud-workspaces")[0].body as { launch: unknown }).launch).toEqual({ v: 1, agent: "codex", mode: "plan" });
+    expect((service.sent("POST", "/cloud-workspaces")[0].body as { launch: unknown }).launch).toEqual({ v: 1, agent: "codex", mode: "plan", prompt: "Fix it" });
   });
 
   it("chooses among the ticked agents, and moves the task to the next one when its agent is unticked", async () => {
