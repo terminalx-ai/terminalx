@@ -1,3 +1,4 @@
+import { phase2Ready } from "@/lib/phase2Readiness";
 import { openOrganizationSettings } from "@/lib/settingsLinks";
 import { useEffect, useState } from "react";
 import { Eye, Users } from "@/icons";
@@ -42,17 +43,9 @@ export class WorkspacePreferencesController {
   }
 }
 export const workspacePreferences = new WorkspacePreferencesController();
-export function useWorkspacePreferencesAvailable() {
+export function useWorkspacePreferencesAvailable(orgId: string) {
   const { status } = useAccount();
-  const privacy = useDataPrivacy();
-  const scope = !privacy.enabled && status.state === "signed-in" && status.context ? `${status.context.account}:${status.context.revision}` : null;
-  const [ready, setReady] = useState<string | null>(null);
-  useEffect(() => {
-    let current = true; setReady(null);
-    if (scope) void Promise.resolve().then(() => api.phase2DesktopContractsAvailable()).then((enabled) => { if (current && enabled) setReady(scope); }).catch(() => {});
-    return () => { current = false; };
-  }, [scope]);
-  return !!scope && ready === scope;
+  return !useDataPrivacy().enabled && phase2Ready(status, orgId, "followReassign");
 }
 export function preferenceError(error: unknown): string {
   const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
@@ -72,7 +65,7 @@ export function preferenceError(error: unknown): string {
   return messages[code] ?? (code ? `The server refused this request (${code}).` : "Could not update the workspace. Refresh and check your access.");
 }
 export function WorkspaceFollowButton({ item }: { item: CloudWorkspaceListItem }) {
-  const available = useWorkspacePreferencesAvailable();
+  const available = useWorkspacePreferencesAvailable(item.workspace.orgId);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mountedScope] = useState(preferenceScope);
@@ -95,7 +88,7 @@ export function WorkspaceReassignDialog({ item, onClose }: { item: CloudWorkspac
   const catalog = useCloudCatalog();
   const { status } = useAccount();
   useDataPrivacy();
-  const available = useWorkspacePreferencesAvailable();
+  const available = useWorkspacePreferencesAvailable(item.workspace.orgId);
   const [scope] = useState(preferenceScope);
   const [members, setMembers] = useState<OrganizationMember[] | null>(null);
   const [query, setQuery] = useState("");

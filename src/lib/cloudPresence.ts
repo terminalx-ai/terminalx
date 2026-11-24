@@ -1,3 +1,4 @@
+import { phase2Ready } from "@/lib/phase2Readiness";
 import { useSyncExternalStore } from "react";
 import { api, type PresencePerson, type PresenceReadResponse, type PresencePutInput } from "./api";
 import { getAccount, subscribeAccount } from "./account";
@@ -152,28 +153,25 @@ export const cloudPresence = new PresenceController({
 export function useCloudPresenceVersion() { return useSyncExternalStore(cloudPresence.subscribe, () => cloudPresence.version, () => 0); }
 export function useCloudPresence(orgId: string) { return useSyncExternalStore(cloudPresence.subscribe, () => cloudPresence.snapshot(orgId), () => EMPTY); }
 let stop: (() => void) | null = null;
-/** No endpoint is enabled here: the native constructor remains held. */
 export function bootCloudPresence() {
   if (stop) return;
   let scope: string | null = null;
-  let generation = 0;
-  let enabled = false;
+  let readyOrgs = new Set<string>();
   let watched = new Set<string>();
   const syncTarget = () => {
-    if (!enabled) return;
+    if (!scope) return;
     const store = getSessionStore();
     const key = store.selectedCloudWorkspace ?? (store.selectedSessionId?.startsWith("cloud:") ? store.selectedSessionId.split(":").slice(0, 3).join(":") : null);
     const target = key ? parseCloudWorkspaceKey(key) : null;
     const connected = key && liveCloudConnections().includes(key) && cloudConnectionInfo(key).state === "connected";
-    const orgs = liveCloudOrgIds(getAccount().status);
     const org = target ? getCloudCatalog().orgs[target.orgId] : undefined;
     const authorized = org?.source === "live" && !org.error && org.workspaces.some((item) => item.workspace.id === target?.workspaceId);
-    cloudPresence.setTarget(connected && target && orgs.includes(target.orgId) && authorized ? target : null);
+    cloudPresence.setTarget(connected && target && readyOrgs.has(target.orgId) && authorized ? target : null);
   };
   const syncCatalog = () => {
-    if (!enabled) return;
+    if (!scope) return;
     const catalog = getCloudCatalog();
-    const orgs = liveCloudOrgIds(getAccount().status).filter((org) => catalog.orgs[org]?.source === "live" && !catalog.orgs[org]?.error);
+    const orgs = [...readyOrgs].filter((org) => catalog.orgs[org]?.source === "live" && !catalog.orgs[org]?.error);
     for (const old of watched) if (!orgs.includes(old)) cloudPresence.forget(old);
     watched = new Set(orgs);
     for (const org of orgs) cloudPresence.watch(org, (catalog.orgs[org]?.workspaces ?? []).map((item) => item.workspace.id));
@@ -181,18 +179,21 @@ export function bootCloudPresence() {
   };
   const sync = () => {
     const status = getAccount().status;
-    const next = !privacyEnabled() && status.state === "signed-in" && status.context ? `${status.context.account}:${status.context.revision}` : null;
-    if (next === scope) { syncCatalog(); return; }
-    const token = ++generation; scope = next; enabled = false; watched.clear(); cloudPresence.setScope(null);
-    if (next) void api.phase2DesktopContractsAvailable().then((ready) => {
-      if (token !== generation || !ready) return;
-      enabled = true; cloudPresence.setScope(next); syncCatalog();
-    }).catch(() => {});
+    const orgs = liveCloudOrgIds(status).filter((org) => phase2Ready(status, org, "presence")).sort();
+    const next = !privacyEnabled() && status.context && orgs.length
+      ? JSON.stringify([status.context.account, status.context.revision, orgs]) : null;
+    if (next !== scope) {
+      scope = next;
+      readyOrgs = new Set(orgs);
+      watched.clear();
+      cloudPresence.setScope(next);
+    }
+    syncCatalog();
   };
   const subscriptions = [subscribeAccount(sync), subscribeDataPrivacy(sync), subscribeCloudCatalog(syncCatalog), subscribeCloudConnections(syncTarget), subscribeSessionStore(syncTarget)];
   const leave = () => cloudPresence.leave();
   window.addEventListener("pagehide", leave);
-  stop = () => { ++generation; enabled = false; cloudPresence.dispose(); subscriptions.forEach((unsubscribe) => unsubscribe()); window.removeEventListener("pagehide", leave); stop = null; };
+  stop = () => { scope = null; cloudPresence.dispose(); subscriptions.forEach((unsubscribe) => unsubscribe()); window.removeEventListener("pagehide", leave); stop = null; };
   sync();
 }
 export function resetCloudPresence() { stop?.(); }

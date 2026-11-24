@@ -137,6 +137,7 @@ pub struct AccountStatus {
     agent_command_wake: bool,
     /// The account service implements shared issue work status.
     work_claims: bool,
+    phase2_readiness: BTreeMap<String, Vec<&'static str>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -320,9 +321,38 @@ struct Organization {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Capabilities {
+    // Readiness is process-local and must be refreshed after launch.
+    #[serde(default, skip_serializing)]
+    phase2_readiness: serde_json::Value,
     #[serde(default)]
     flags: BTreeMap<String, bool>,
     refreshed_at: i64,
+}
+
+pub(crate) const PHASE2_EVENTS: &str = "team.events.v1";
+pub(crate) const PHASE2_PRESENCE: &str = "team.presence.v1";
+pub(crate) const PHASE2_FOLLOW_REASSIGN: &str = "team.follow-reassign.v1";
+pub(crate) const PHASE2_RESTART_DETAILS: &str = "cloud.workspaces.restart-details.v1";
+pub(crate) const PHASE2_FRESH_WORKSPACE: &str = "cloud.automations.fresh-workspace.v1";
+pub(crate) const PHASE2_GITHUB_TRIGGER: &str = "cloud.automations.github-trigger.v1";
+pub(crate) const PHASE2_WEBHOOK_TRIGGER: &str = "cloud.automations.webhook-trigger.v1";
+const PHASE2_FEATURES: [&str; 7] = [
+    PHASE2_EVENTS, PHASE2_PRESENCE, PHASE2_FOLLOW_REASSIGN, PHASE2_RESTART_DETAILS,
+    PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_WEBHOOK_TRIGGER,
+];
+
+fn phase2_organizations(session: &DesktopSession) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    let readiness = &session.capabilities.phase2_readiness;
+    if readiness.get("version")?.as_u64()? != 1 { return None; }
+    readiness.get("organizations")?.as_object()
+}
+
+fn phase2_enabled(session: &DesktopSession, feature: &str, org: Option<&str>) -> bool {
+    let Some(organizations) = phase2_organizations(session) else { return false };
+    session.organizations.iter().any(|member| {
+        org.is_none_or(|org| org == member.org_id)
+            && organizations.get(&member.org_id).and_then(|flags| flags.get(feature)).and_then(serde_json::Value::as_bool) == Some(true)
+    })
 }
 
 /// What `POST /v1/desktop/auth/capabilities` answers: a session without tokens.
@@ -478,6 +508,7 @@ impl AccountManager {
             capabilities: Capabilities {
                 flags: BTreeMap::from([("relay.use".into(), context.relay_entitled)]),
                 refreshed_at: 1,
+                phase2_readiness: serde_json::Value::Null,
             },
         });
     }
@@ -549,6 +580,22 @@ impl AccountManager {
         self.refresh_roles_with(true, Instant::now(), |_| Ok(body))
     }
 
+    #[cfg(test)]
+    pub(crate) fn apply_phase2_readiness_for_test(&self, readiness: serde_json::Value) {
+        let (generation, session) = {
+            let inner = self.inner.lock().unwrap();
+            (inner.generation, inner.session.clone().expect("signed in"))
+        };
+        let mut capabilities = session.capabilities.clone();
+        capabilities.phase2_readiness = readiness;
+        let body = SessionBody {
+            cloud: session.cloud.clone(),
+            organizations: session.organizations.clone(),
+            capabilities,
+        };
+        assert!(self.apply_session_body(generation, &session, body).0);
+    }
+
     pub fn configure(&self, app_identifier: &str) -> Result<()> {
         let wanted = keychain_service_name(app_identifier);
         if let Some(current) = self.service.get() {
@@ -580,7 +627,7 @@ impl AccountManager {
     /// token to near its expiry. The answer is saved, so the next launch
     /// starts from it, and announced when it changes what the webview sees.
     ///
-    /// A routine call is throttled; `force` asks at once. No token rotates.
+    /// A routine call is throttled. `force` uses the shorter refresh interval.
     pub fn refresh_roles(&self, app: &AppHandle, force: bool) -> RolesRefresh {
         self.attach_app(app);
         self.ensure_loaded();
@@ -588,58 +635,53 @@ impl AccountManager {
         RolesRefresh { status: self.snapshot(), fresh }
     }
 
+    fn refresh_roles_after_context_change(&self) {
+        *self.roles_refreshed.lock().unwrap() = None;
+        self.refresh_roles_with(true, Instant::now(), fetch_session_body);
+    }
+
     /// True when the server answered with the current organizations and roles.
     fn refresh_roles_with(&self, force: bool, now: Instant, fetch: impl FnOnce(&DesktopSession) -> Result<SessionBody, CloudError>) -> bool {
         if crate::data_privacy::enabled() { return false; }
-        let (fresh, generation, changed, save_failed) = {
+        let rotated = self.refresh_if_needed();
+        let (fresh, generation, changed) = {
             let mut refreshed = self.roles_refreshed.lock().unwrap();
-            // A token rotation brings the same body: nothing more to ask.
-            let token = |manager: &Self| manager.inner.lock().unwrap().session.as_ref().map(|session| session.access_token.clone());
-            let before = token(self);
-            if let Some((generation, changed)) = self.rotate_if_needed() {
-                let after = token(self);
-                let rotated = after.is_some() && after != before;
-                if rotated {
-                    *refreshed = Some(now);
-                }
-                (rotated, generation, changed, Some(REFRESH_NOT_SAVED))
-            } else {
-                // Keep the capability snapshot/request/application in the same
-                // gate as explicit selection. Otherwise a delayed no-selection
-                // response after deletion can overwrite a newer selection.
-                // roles_refreshed is always acquired before refresh_gate.
-                let _selection_gate = self.refresh_gate.lock().unwrap();
-                if !roles_refresh_due(*refreshed, now, force) {
-                    return false;
-                }
-                let Some((generation, session)) = ({
-                    let inner = self.inner.lock().unwrap();
-                    inner.session.clone().map(|session| (inner.generation, session))
-                }) else {
-                    return false;
-                };
-                match fetch(&session) {
-                    Ok(body) => {
-                        let (applied, changed) = self.apply_session_body(generation, &session, body);
-                        if applied {
-                            *refreshed = Some(now);
-                        }
-                        // A relaunch that starts from the roles at sign-in is
-                        // corrected by its first read: not an error to show.
-                        (applied, generation, changed, None)
+            if rotated { *refreshed = None; }
+            // Keep the capability snapshot/request/application in the same
+            // gate as explicit selection. Otherwise a delayed no-selection
+            // response after deletion can overwrite a newer selection.
+            // roles_refreshed is always acquired before refresh_gate.
+            let _selection_gate = self.refresh_gate.lock().unwrap();
+            if !roles_refresh_due(*refreshed, now, force) {
+                return false;
+            }
+            let Some((generation, session)) = ({
+                let inner = self.inner.lock().unwrap();
+                inner.session.clone().map(|session| (inner.generation, session))
+            }) else {
+                return false;
+            };
+            match fetch(&session) {
+                Ok(body) => {
+                    let (applied, changed) = self.apply_session_body(generation, &session, body);
+                    if applied {
+                        *refreshed = Some(now);
                     }
-                    Err(error) => {
-                        // Not a sign-out and not an error to show: the roles shown are
-                        // the last known ones, and the token refresh owns expiry.
-                        log::debug!("could not refresh TerminalX organizations and roles: {error}");
-                        return false;
-                    }
+                    // A relaunch that starts from the roles at sign-in is
+                    // corrected by its first read: not an error to show.
+                    (applied, generation, changed)
+                }
+                Err(error) => {
+                    // Not a sign-out and not an error to show: the roles shown are
+                    // the last known ones, and the token refresh owns expiry.
+                    log::debug!("could not refresh TerminalX organizations and roles: {error}");
+                    return false;
                 }
             }
         };
         // The Keychain write waits for no lock a caller of this holds: a slow
         // one delays neither the next refresh nor any read of the account.
-        self.settle(generation, changed, save_failed);
+        self.settle(generation, changed, None);
         fresh
     }
 
@@ -667,7 +709,8 @@ impl AccountManager {
             return (false, false);
         }
         let before = serde_json::to_value(snapshot(&inner)).ok();
-        let stored_changed = serde_json::to_value(&candidate).ok() != serde_json::to_value(current).ok();
+        let stored_changed = serde_json::to_value(&candidate).ok() != serde_json::to_value(current).ok()
+            || candidate.capabilities.phase2_readiness != current.capabilities.phase2_readiness;
         if stored_changed {
             // Saved so a relaunch starts from the current roles, not the ones at sign-in.
             inner.set_session(Some(candidate));
@@ -733,6 +776,16 @@ impl AccountManager {
         }
         context.organization_id = organization_id.to_string();
         Ok((context, if scope.multi_org { OrgAccess::Member } else { OrgAccess::Active }))
+    }
+
+    pub(crate) fn phase2_ready(&self, feature: &str, org: Option<&str>, context: Option<&AccountContext>) -> bool {
+        if crate::data_privacy::enabled() || !PHASE2_FEATURES.contains(&feature) { return false; }
+        let inner = self.inner.lock().unwrap();
+        inner.session.as_ref().is_some_and(|session| {
+            context.is_none_or(|context| {
+                inner.generation == context.generation && session.access_token == context.access_token
+            }) && phase2_enabled(session, feature, org)
+        })
     }
 
     /// PRO-125 authorizes read markers by membership even on an inactive target.
@@ -876,7 +929,9 @@ impl AccountManager {
             json!({ "orgId": organization_id }),
             Some(&context.access_token),
             None,
-        ))
+        ))?;
+        self.refresh_roles_after_context_change();
+        Ok(())
     }
 
     fn select_organization_with(&self, organization_id: &str, context: &AccountContext,
@@ -901,6 +956,7 @@ impl AccountManager {
                 return Err(anyhow!("account context changed while selecting organization"));
             }
             let mut session = inner.session.clone().ok_or_else(|| anyhow!("account is signed out"))?;
+            session.capabilities.phase2_readiness = serde_json::Value::Null;
             session.cloud.active_org_id = body.cloud.active_org_id;
             session.cloud.active_org_name = body.cloud.active_org_name;
             if !body.organizations.is_empty() {
@@ -1180,6 +1236,7 @@ impl AccountManager {
             self.emit(app);
         }
         self.sync_runtime_copy();
+        self.refresh_roles_after_context_change();
     }
 
     /// Take a sign-in's outcome, in memory. False when the sign-in it belongs
@@ -1640,6 +1697,16 @@ fn snapshot(inner: &Inner) -> AccountStatus {
         catalog_feed: inner.session.as_ref().is_some_and(catalog_feed),
         member_workspaces: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get(MEMBER_WORKSPACES_CAPABILITY) == Some(&true)),
         agent_command_wake: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get(AGENT_COMMAND_WAKE_CAPABILITY) == Some(&true)),
+        phase2_readiness: inner.session.as_ref().and_then(|session| {
+            let readiness = phase2_organizations(session)?;
+            Some(session.organizations.iter().filter_map(|org| {
+                let flags = readiness.get(&org.org_id)?;
+                let features: Vec<_> = PHASE2_FEATURES.into_iter()
+                    .filter(|key| flags.get(key).and_then(serde_json::Value::as_bool) == Some(true))
+                    .collect();
+                (!features.is_empty()).then(|| (org.org_id.clone(), features))
+            }).collect())
+        }).unwrap_or_default(),
         work_claims: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get(crate::work_claims::CAPABILITY) == Some(&true)),
     }
 }
@@ -2397,6 +2464,53 @@ mod tests {
 
     fn role_of(manager: &AccountManager) -> Option<String> {
         snapshot(&manager.inner.lock().unwrap()).organizations.first().map(|org| org.role.clone())
+    }
+
+    #[test]
+    fn phase2_readiness_is_independent_and_fails_closed_on_refresh() {
+        let manager = signed_in("org-a");
+        let start = Instant::now();
+        assert!(manager.refresh_roles_with(true, start, |_| Ok(body("member"))));
+        let context = manager.context().unwrap();
+        for key in PHASE2_FEATURES {
+            assert!(!manager.phase2_ready(key, Some("org-a"), Some(&context)));
+        }
+
+        for (index, enabled_key) in PHASE2_FEATURES.into_iter().enumerate() {
+            let mut answer = body("member");
+            let mut inactive = answer.organizations[0].clone();
+            inactive.org_id = "org-b".into();
+            answer.organizations.push(inactive);
+            answer.capabilities.phase2_readiness = json!({
+                "version": 1,
+                "organizations": {
+                    "org-a": { (enabled_key): "true" },
+                    "org-b": { (enabled_key): true },
+                    "org-nonmember": { (enabled_key): true }
+                }
+            });
+            let now = start + ROLES_REFRESH_FLOOR * (index as u32 * 2 + 1);
+            assert!(manager.refresh_roles_with(true, now, |_| Ok(answer.clone())));
+            for key in PHASE2_FEATURES {
+                assert_eq!(manager.phase2_ready(key, None, Some(&context)), key == enabled_key);
+                assert_eq!(manager.phase2_ready(key, Some("org-b"), Some(&context)), key == enabled_key);
+                assert!(!manager.phase2_ready(key, Some("org-a"), Some(&context)));
+                assert!(!manager.phase2_ready(key, Some("org-nonmember"), Some(&context)));
+            }
+            assert_eq!(manager.snapshot().phase2_readiness["org-b"], [enabled_key]);
+            answer.capabilities.phase2_readiness["organizations"]["org-b"][enabled_key] = json!(false);
+            assert!(manager.refresh_roles_with(true, now + ROLES_REFRESH_FLOOR, |_| Ok(answer)));
+            assert!(!manager.phase2_ready(enabled_key, None, Some(&context)));
+            assert!(manager.snapshot().phase2_readiness.is_empty());
+        }
+
+        let mut answer = body("member");
+        answer.capabilities.phase2_readiness = json!({
+            "version": 2,
+            "organizations": { "org-a": { (PHASE2_EVENTS): true } }
+        });
+        assert!(manager.refresh_roles_with(true, start + ROLES_REFRESH_FLOOR * 15, |_| Ok(answer)));
+        assert!(!manager.phase2_ready(PHASE2_EVENTS, None, None));
     }
 
     #[test]
