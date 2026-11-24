@@ -6,7 +6,8 @@ import { getAccount, subscribeAccount } from "@/lib/account";
 import { privacyEnabled, subscribeDataPrivacy, PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
 import { CloudInboxSubscriber, type InboxStorage, type InboxTransport } from "@/lib/cloudInbox";
 import { configureCloudReadMarkers, enableCloudReadMarkerWrites, reconcileCloudReadMarker } from "@/lib/cloudReadMarkers";
-import { invalidateCloudInboxWorkspace, resyncCloudInboxCatalog, getCloudCatalog, subscribeCloudCatalog } from "@/lib/cloudCatalog";
+import { invalidateCloudInboxWorkspace, resyncCloudInboxCatalog, getCloudCatalog, subscribeCloudCatalog, liveCloudOrgIds } from "@/lib/cloudCatalog";
+import { notifyOrganizationEvent } from "@/lib/notify";
 
 /** Exact commands implemented by the shared contracts worker. Use the existing
  * privacy-aware invoke wrapper; tokens and account fencing remain native.
@@ -29,6 +30,12 @@ let stop: (() => void) | null = null;
 export function applyDesktopInboxEvent(event: DesktopInboxEvent) {
   switch (event.type) {
     case "workspace.share-removed":
+      for (const [id, pending] of pendingNotices) {
+        if (pending.event.workspaceId === event.workspaceId) pendingNotices.delete(id);
+      }
+      if (notices.some((notice) => notice.workspaceId === event.workspaceId)) {
+        publishNotices(notices.filter((notice) => notice.workspaceId !== event.workspaceId));
+      }
       invalidateCloudInboxWorkspace(event.workspaceId, undefined, true);
       break;
     case "workspace.presence-changed":
@@ -36,9 +43,6 @@ export function applyDesktopInboxEvent(event: DesktopInboxEvent) {
       invalidateCloudInboxWorkspace(event.workspaceId, event.organizationId);
       break;
     case "workspace.reassigned":
-      invalidateCloudInboxWorkspace(event.workspaceId, event.organizationId);
-      void takeReassignedNotice(event);
-      break;
     case "workspace.share-added":
       invalidateCloudInboxWorkspace(event.workspaceId, event.organizationId);
       break;
@@ -48,44 +52,55 @@ export function applyDesktopInboxEvent(event: DesktopInboxEvent) {
       invalidateCloudInboxWorkspace(event.workspaceId, event.organizationId);
       break;
   }
-  // Accepted events are access hints and self read markers. None is a completion/attention
-  // event: existing runtime attention alone drives notify.ts and the macOS notification hook.
 }
 export interface ReassignedNotice { id: string; organizationId: string; workspaceId: string; name: string; actorId: string; previousOwnerId: string; note?: string }
 let notices: ReassignedNotice[] = [];
 const noticeListeners = new Set<() => void>();
 function publishNotices(next: ReassignedNotice[]) { notices = next; for (const listener of noticeListeners) listener(); }
-function noticeScope() {
-  const status = getAccount().status;
-  return !privacyEnabled() && status.state === "signed-in" && status.context ? `${status.context.account}:${status.context.revision}` : null;
+type NoticeEvent = Exclude<DesktopInboxEvent, { type: "workspace.share-removed" | "workspace.read-marker-changed" }>;
+interface PendingNotice {
+  event: NoticeEvent;
+  earliestRequest: number;
+  current: () => boolean;
+  committed: boolean;
+  delivering: boolean;
 }
-type ReassignedEvent = Extract<DesktopInboxEvent, { type: "workspace.reassigned" }>;
-const pendingReassigned = new Map<string, { scope: string; event: ReassignedEvent; at: number }>();
-function flushReassignedNotices() {
-  const scope = noticeScope();
+const pendingNotices = new Map<string, PendingNotice>();
+
+// Undefined waits for a fresh answer; null means the current answer denies delivery.
+function authorizedWorkspace({ event, current, earliestRequest }: PendingNotice) {
+  if (!current()) return null;
   const catalog = getCloudCatalog();
-  for (const [id, pending] of pendingReassigned) {
-    if (pending.scope !== scope) { pendingReassigned.delete(id); continue; }
-    const event = pending.event;
-    const org = catalog.orgs[event.organizationId];
-    // A cached row or a catalog asked before the hint cannot authorize note display.
-    if (!catalog.viewerUserId || org?.source !== "live" || org.error || org.requestedAt == null || org.requestedAt < pending.at) continue;
-    pendingReassigned.delete(id);
-    const item = org.workspaces.find((row) => row.workspace.id === event.workspaceId);
-    if (item?.workspace.createdBy !== catalog.viewerUserId || notices.some((notice) => notice.id === id)) continue;
-    const { actorId, previousOwnerId, note } = event.payload;
-    if (!actorId || !previousOwnerId) continue;
-    publishNotices([...notices, { id, organizationId: event.organizationId, workspaceId: event.workspaceId, name: item.workspace.name, actorId, previousOwnerId, ...(typeof note === "string" ? { note: note.slice(0, 500) } : {}) }].slice(-10));
+  const org = catalog.orgs[event.organizationId];
+  if (catalog.revision !== getAccount().status.context?.revision ||
+      org?.source !== "live" || org.error || org.requestedAt == null || org.requestedAt < earliestRequest) return undefined;
+  const workspace = org.workspaces.find((row) => row.workspace.id === event.workspaceId)?.workspace;
+  if (workspace?.orgId !== event.organizationId || workspace.you?.role === "none") return null;
+  if (event.type === "workspace.reassigned") {
+    if (!catalog.viewerUserId) return undefined;
+    return workspace.createdBy === catalog.viewerUserId ? workspace : null;
   }
+  return workspace.accessMode === "organization" ? workspace : null;
 }
-async function takeReassignedNotice(event: ReassignedEvent) {
-  const scope = noticeScope();
-  if (!scope) return;
-  // Keep only this account's bounded pending delivery, never render before reauthorization.
-  if (pendingReassigned.size >= 100) pendingReassigned.delete(pendingReassigned.keys().next().value!);
-  pendingReassigned.set(event.id, { scope, event, at: Date.now() });
-  await Promise.resolve(resyncCloudInboxCatalog()).catch(() => {});
-  if (scope === noticeScope()) flushReassignedNotices();
+
+function flushInboxNotices() {
+  for (const [id, pending] of pendingNotices) {
+    if (!pending.current()) { pendingNotices.delete(id); continue; }
+    if (!pending.committed || pending.delivering) continue;
+    const workspace = authorizedWorkspace(pending);
+    if (workspace === null) pendingNotices.delete(id);
+    if (!workspace) continue;
+    const { event } = pending;
+    pending.delivering = true;
+    if (event.type === "workspace.reassigned") {
+      const { actorId, previousOwnerId, note } = event.payload;
+      publishNotices([...notices, { id, organizationId: event.organizationId, workspaceId: event.workspaceId, name: workspace.name, actorId, previousOwnerId, ...(typeof note === "string" ? { note: note.slice(0, 500) } : {}) }].slice(-10));
+    }
+    const authorized = () => pendingNotices.get(id) === pending && !!authorizedWorkspace(pending);
+    void notifyOrganizationEvent(event.type === "workspace.reassigned" ? "reassigned" : "share-added", authorized).finally(() => {
+      if (pendingNotices.get(id) === pending) pendingNotices.delete(id);
+    });
+  }
 }
 export function getReassignedNotices() { return notices; }
 export function useReassignedNotices() { return useSyncExternalStore((listener) => { noticeListeners.add(listener); return () => { noticeListeners.delete(listener); }; }, () => notices); }
@@ -97,11 +112,48 @@ export function bootDesktopInbox() {
     setItem: (key, value) => localStorage.setItem(key, value),
     removeItem: (key) => localStorage.removeItem(key),
   };
-  const subscriber = new CloudInboxSubscriber(transport, storage, applyDesktopInboxEvent, resyncCloudInboxCatalog);
   let identity: string | null = null;
   let revision: string | null = null;
   let generation = 0;
   let eventOrgs: string | null = null;
+  const subscriber = new CloudInboxSubscriber(transport, storage, (event) => {
+    const account = identity;
+    const token = generation;
+    const canNotify = event.type === "workspace.share-added" || event.type === "workspace.reassigned";
+    const earliestRequest = canNotify
+      ? Math.max(Date.now(), (getCloudCatalog().orgs[event.organizationId]?.requestedAt ?? -1) + 1)
+      : 0;
+    applyDesktopInboxEvent(event);
+    if (!account || !canNotify) return;
+    if (event.type === "workspace.reassigned" && (!event.payload.actorId || !event.payload.previousOwnerId)) return;
+    const current = () => {
+      const status = getAccount().status;
+      return token === generation && !privacyEnabled() && status.context?.account === account && status.context.revision === revision
+        && liveCloudOrgIds(status).includes(event.organizationId) && phase2Ready(status, event.organizationId, "events")
+        && (event.type !== "workspace.reassigned" || phase2Ready(status, event.organizationId, "followReassign"));
+    };
+    if (!current() || pendingNotices.has(event.id)) return;
+    if (pendingNotices.size >= 100) pendingNotices.delete(pendingNotices.keys().next().value!);
+    const pending: PendingNotice = { event, current, earliestRequest, committed: false, delivering: false };
+    pendingNotices.set(event.id, pending);
+    // The subscriber persists receipts and its checkpoint synchronously after apply.
+    // Wait for a successful durable write before any best-effort external effect.
+    void Promise.resolve().then(() => {
+      if (pendingNotices.get(event.id) !== pending || !current()) return;
+      const saved = JSON.parse(storage.getItem(`terminalx.inbox.v1:${encodeURIComponent(account)}`) ?? "null");
+      if (!saved || (BigInt(saved.cursor) < BigInt(event.id) && !saved.seen.includes(event.id))) {
+        pendingNotices.delete(event.id);
+        return;
+      }
+      pending.committed = true;
+      flushInboxNotices();
+      if (pendingNotices.get(event.id) === pending && !pending.delivering) {
+        return resyncCloudInboxCatalog().then(flushInboxNotices);
+      }
+    }).catch(() => {
+      if (!pending.committed && pendingNotices.get(event.id) === pending) pendingNotices.delete(event.id);
+    });
+  }, resyncCloudInboxCatalog);
   const sync = () => {
     const status = getAccount().status;
     const next = !privacyEnabled() && status.state === "signed-in" ? status.context?.account ?? null : null;
@@ -112,7 +164,7 @@ export function bootDesktopInbox() {
     if (next === identity && nextRevision === revision && nextEventOrgs === eventOrgs) return;
     eventOrgs = nextEventOrgs;
     const token = ++generation;
-    pendingReassigned.clear(); publishNotices([]);
+    pendingNotices.clear(); publishNotices([]);
     // Clear durable delivery state on an actual identity change; context changes fence in-flight work.
     subscriber.stop(identity !== next);
     if (identity && identity !== next) {
@@ -135,10 +187,10 @@ export function bootDesktopInbox() {
       subscriber.start(next);
     }).catch(() => { /* Held or older native build: catalog polling continues unchanged. */ });
   };
-  const catalog = subscribeCloudCatalog(flushReassignedNotices);
+  const catalog = subscribeCloudCatalog(flushInboxNotices);
   const account = subscribeAccount(sync);
   const privacy = subscribeDataPrivacy(sync);
   stop = () => { ++generation; catalog(); account(); privacy(); subscriber.stop(); configureCloudReadMarkers(null, null); };
   sync();
 }
-export function resetDesktopInbox() { stop?.(); stop = null; pendingReassigned.clear(); publishNotices([]); }
+export function resetDesktopInbox() { stop?.(); stop = null; pendingNotices.clear(); publishNotices([]); }

@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const f = vi.hoisted(() => ({
-  status: { state: "signed-in", context: { account: "a", revision: "1" } },
-  listeners: new Set<() => void>(), privacyListeners: new Set<() => void>(), private: false,
+  status: { state: "signed-in", context: { account: "a", revision: "1" }, phase2Readiness: undefined as Record<string, string[]> | undefined },
+  listeners: new Set<() => void>(), privacyListeners: new Set<() => void>(), catalogListeners: new Set<() => void>(), private: false,
+  liveOrgs: ["org"], notify: vi.fn(async (_kind: string, _authorized: () => boolean) => {}),
   api: { phase2DesktopContractsAvailable: vi.fn(), desktopInboxStream: vi.fn(), desktopInbox: vi.fn(), desktopInboxReceipts: vi.fn(), cloudWorkspaceReadMarker: vi.fn() },
   presence: vi.fn(), catalog: { viewerUserId: "target", orgs: {} } as import("./cloudCatalog").CloudCatalogState,
   resync: vi.fn(async (): Promise<void> => {}), invoke: vi.fn(), invalidate: vi.fn(), reconcile: vi.fn(), configure: vi.fn(), enable: vi.fn(),
@@ -19,8 +20,13 @@ f.invoke.mockImplementation((command, args) => {
 });
 vi.mock("@/lib/account", () => ({ getAccount: () => ({ status: f.status }), subscribeAccount: (fn: () => void) => { f.listeners.add(fn); return () => f.listeners.delete(fn); } }));
 vi.mock("@/lib/dataPrivacy", () => ({ PRIVACY_MESSAGE: "Turned off by data privacy mode", privacyEnabled: () => f.private, subscribeDataPrivacy: (fn: () => void) => { f.privacyListeners.add(fn); return () => f.privacyListeners.delete(fn); } }));
-vi.mock("@/lib/cloudCatalog", () => ({ invalidateCloudInboxWorkspace: f.invalidate, resyncCloudInboxCatalog: f.resync, getCloudCatalog: () => f.catalog, subscribeCloudCatalog: () => () => {} }));
+vi.mock("@/lib/cloudCatalog", () => ({
+  invalidateCloudInboxWorkspace: f.invalidate, resyncCloudInboxCatalog: f.resync, getCloudCatalog: () => f.catalog,
+  liveCloudOrgIds: () => f.liveOrgs,
+  subscribeCloudCatalog: (fn: () => void) => { f.catalogListeners.add(fn); return () => f.catalogListeners.delete(fn); },
+}));
 vi.mock("@/lib/cloudPresence", () => ({ cloudPresence: { hint: f.presence } }));
+vi.mock("@/lib/notify", () => ({ notifyOrganizationEvent: f.notify }));
 vi.mock("@/lib/cloudReadMarkers", async (original) => {
   const actual = await original<typeof import("./cloudReadMarkers")>();
   f.configure.mockImplementation(actual.configureCloudReadMarkers);
@@ -31,7 +37,13 @@ vi.mock("@/lib/cloudReadMarkers", async (original) => {
 import { cloudActivityRead, reconcileCloudReadMarker, writeCloudReadMarker } from "./cloudReadMarkers";
 import { applyDesktopInboxEvent, bootDesktopInbox, resetDesktopInbox, desktopInboxTransport, getReassignedNotices } from "./desktopInbox";
 const sync = () => f.listeners.forEach((fn) => fn());
-beforeEach(() => { vi.useFakeTimers(); vi.clearAllMocks(); localStorage.clear(); f.catalog = { viewerUserId: "target", orgs: {} } as import("./cloudCatalog").CloudCatalogState; f.private = false; f.status = { state: "signed-in", context: { account: "a", revision: "1" } }; f.api.desktopInboxStream.mockImplementation(() => new Promise(() => {})); });
+beforeEach(() => {
+  vi.useFakeTimers(); vi.clearAllMocks(); localStorage.clear();
+  f.catalog = { viewerUserId: "target", orgs: {} } as import("./cloudCatalog").CloudCatalogState;
+  f.private = false; f.liveOrgs = ["org"];
+  f.status = { state: "signed-in", context: { account: "a", revision: "1" }, phase2Readiness: undefined };
+  f.api.desktopInboxStream.mockImplementation(() => new Promise(() => {}));
+});
 afterEach(() => { resetDesktopInbox(); vi.useRealTimers(); });
 describe("desktop inbox integration", () => {
   it("invokes the accepted native commands with exact arguments without API casts", async () => {
@@ -68,11 +80,13 @@ describe("desktop inbox integration", () => {
     for (const call of calls) await expect(call).rejects.toThrow("Turned off by data privacy mode");
     expect(f.invoke).not.toHaveBeenCalled();
   });
-  it("leaves production held when the authoritative gate is false", async () => {
+  it("leaves production held when the authoritative gate is false even with organization readiness", async () => {
+    f.status.phase2Readiness = { org: ["team.events.v1"] };
     f.api.phase2DesktopContractsAvailable.mockResolvedValue(false);
     bootDesktopInbox(); await vi.advanceTimersByTimeAsync(60_000);
     expect(f.api.phase2DesktopContractsAvailable).toHaveBeenCalledTimes(1);
     expect(f.api.desktopInboxStream).not.toHaveBeenCalled(); expect(f.api.desktopInbox).not.toHaveBeenCalled();
+    expect(f.notify).not.toHaveBeenCalled();
   });
   it.each([true, false])("retains catalog markers ingested before readiness resolves to %s", async (ready) => {
     let resolve!: (value: boolean) => void;
@@ -118,6 +132,7 @@ describe("desktop inbox integration", () => {
     applyDesktopInboxEvent({ id: "1", workspaceId: "private", type: "workspace.share-removed", createdAt: "2026-11-14T10:00:00Z" });
     expect(f.invalidate).toHaveBeenCalledWith("private", undefined, true);
     expect(f.reconcile).not.toHaveBeenCalled();
+    expect(f.notify).not.toHaveBeenCalled();
   });
 });
 
@@ -149,27 +164,113 @@ it("treats presence as an authorized refresh hint and retains checkpoints throug
   expect(f.invalidate).toHaveBeenCalledWith("workspace", "org");
 });
 
-it("reauthorizes a targeted reassignment and preserves its plain-text actor and note", async () => {
-  f.catalog = { owner: "a", revision: "1", loaded: true, viewerUserId: "target", orgs: { org: { orgId: "org", source: "live", error: null, requestedAt: Date.now(), workspaces: [{ workspace: { id: "workspace", orgId: "org", createdBy: "target", name: "Visible" } }] } }, notices: [], createMemory: {} } as unknown as import("./cloudCatalog").CloudCatalogState;
-  const event = { id: "8", type: "workspace.reassigned" as const, organizationId: "org", workspaceId: "workspace", payload: { actorId: "actor", previousOwnerId: "old", note: "Away until Monday" }, createdAt: "2026-11-15T12:00:00Z" };
-  applyDesktopInboxEvent(event);
+const share = { id: "8", type: "workspace.share-added", organizationId: "org", workspaceId: "workspace", payload: {}, createdAt: "2026-11-15T12:00:00Z" } as const;
+const reassignment = { ...share, type: "workspace.reassigned", payload: { actorId: "actor", previousOwnerId: "old", note: "Away until Monday" } } as const;
+const removal = { id: "9", type: "workspace.share-removed", workspaceId: share.workspaceId, createdAt: share.createdAt } as const;
+const inboxKey = "terminalx.inbox.v1:a";
+
+function deliver(...events: import("./api").DesktopInboxEvent[]) {
+  f.status.phase2Readiness = { org: ["team.events.v1", "team.follow-reassign.v1"] };
+  f.api.phase2DesktopContractsAvailable.mockResolvedValue(true);
+  f.api.desktopInboxStream.mockResolvedValueOnce({ cursor: events.at(-1)!.id, events });
+  bootDesktopInbox();
+}
+
+function setWorkspace({ createdBy = "target", accessMode = "organization", source = "live", role = "driver" } = {}) {
+  f.catalog = {
+    revision: "1", viewerUserId: "target",
+    orgs: { org: { source, error: null, requestedAt: Date.now(), workspaces: [
+      { workspace: { id: share.workspaceId, orgId: "org", accessMode, createdBy, name: "Visible", you: { role } } },
+    ] } },
+  } as unknown as import("./cloudCatalog").CloudCatalogState;
+  f.catalogListeners.forEach((fn) => fn());
+}
+
+it("notifies a share after a fresh live list and deduplicates replay after relaunch", async () => {
+  setWorkspace();
+  deliver(share, share);
   await vi.advanceTimersByTimeAsync(0);
-  expect(f.resync).toHaveBeenCalled();
-  expect(f.invalidate).toHaveBeenCalledWith("workspace", "org");
-  expect(getReassignedNotices()).toEqual([{ id: "8", organizationId: "org", workspaceId: "workspace", name: "Visible", actorId: "actor", previousOwnerId: "old", note: "Away until Monday" }]);
+  expect(f.notify).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  setWorkspace({ source: "saved" });
+  expect(f.notify).not.toHaveBeenCalled();
+  setWorkspace();
+  expect(f.notify).toHaveBeenCalledExactlyOnceWith("share-added", expect.any(Function));
+  expect(f.notify.mock.calls[0][1]()).toBe(true);
+  expect(getReassignedNotices()).toEqual([]);
+  expect(JSON.parse(localStorage.getItem(inboxKey)!)).toEqual({ cursor: "8", seen: [], receipts: ["8"] });
+  resetDesktopInbox();
+  deliver(share);
+  await vi.advanceTimersByTimeAsync(1);
+  setWorkspace();
+  expect(f.notify).toHaveBeenCalledTimes(1);
 });
 
-it("does not display a reassignment after auth changed or the refreshed row belongs to someone else", async () => {
-  let finish!: () => void;
-  f.resync.mockReturnValueOnce(new Promise<void>((resolve) => { finish = resolve; }));
-  const event = { id: "9", type: "workspace.reassigned" as const, organizationId: "org", workspaceId: "workspace", payload: { actorId: "actor", previousOwnerId: "old", note: "Private note" }, createdAt: "2026-11-15T12:00:00Z" };
-  applyDesktopInboxEvent(event);
-  f.status = { state: "signed-in", context: { account: "b", revision: "2" } };
-  finish(); await vi.advanceTimersByTimeAsync(0);
+it("keeps the authorized reassignment notice and routes a generic banner", async () => {
+  deliver(reassignment);
+  await vi.advanceTimersByTimeAsync(0);
+  setWorkspace();
+  expect(f.notify).toHaveBeenCalledExactlyOnceWith("reassigned", expect.any(Function));
+  expect(getReassignedNotices()).toEqual([{ id: "8", organizationId: "org", workspaceId: "workspace", name: "Visible", actorId: "actor", previousOwnerId: "old", note: "Away until Monday" }]);
+  expect(localStorage.getItem(inboxKey)).not.toContain("Away until Monday");
+});
+
+it.each([
+  { event: share, workspace: { accessMode: "private" } },
+  { event: share, workspace: { role: "none" } },
+  { event: reassignment, workspace: { createdBy: "someone-else" } },
+])("drops a notice when a fresh list denies access", async ({ event, workspace }) => {
+  deliver(event);
+  await vi.advanceTimersByTimeAsync(0);
+  setWorkspace(workspace);
+  setWorkspace();
+  expect(f.notify).not.toHaveBeenCalled();
   expect(getReassignedNotices()).toEqual([]);
-  f.catalog = { ...f.catalog, viewerUserId: "someone-else" };
-  applyDesktopInboxEvent(event); await vi.advanceTimersByTimeAsync(0);
-  expect(getReassignedNotices()).toEqual([]);
+});
+
+it.each(["account", "privacy", "membership", "organization gate", "revocation"] as const)(
+  "fences a pending native banner after %s changes", async (change) => {
+    deliver(reassignment);
+    await vi.advanceTimersByTimeAsync(0);
+    setWorkspace();
+    const authorized = f.notify.mock.calls[0][1];
+    expect(authorized()).toBe(true);
+    switch (change) {
+      case "account": f.status.context.account = "b"; sync(); break;
+      case "privacy": f.private = true; f.privacyListeners.forEach((fn) => fn()); break;
+      case "membership": f.liveOrgs = []; break;
+      case "organization gate": f.status.phase2Readiness = { other: ["team.events.v1"] }; sync(); break;
+      case "revocation": applyDesktopInboxEvent(removal); expect(getReassignedNotices()).toEqual([]); break;
+    }
+    expect(authorized()).toBe(false);
+  },
+);
+
+it("keeps a share for an organization without event readiness quiet when another organization enables the inbox", async () => {
+  deliver(share);
+  f.status.phase2Readiness = { other: ["team.events.v1"] };
+  await vi.advanceTimersByTimeAsync(0);
+  setWorkspace();
+  expect(f.invalidate).toHaveBeenCalledWith(share.workspaceId, "org");
+  expect(f.notify).not.toHaveBeenCalled();
+});
+
+it("invalidates a queued share revoked within the same page", async () => {
+  deliver(share, removal);
+  await vi.advanceTimersByTimeAsync(0);
+  setWorkspace();
+  expect(f.notify).not.toHaveBeenCalled();
+});
+
+it("does not notify when recording delivery fails", async () => {
+  const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementationOnce(() => { throw new Error("disk full"); });
+  try {
+    deliver(share);
+    await vi.advanceTimersByTimeAsync(0);
+    setWorkspace();
+    expect(localStorage.getItem(inboxKey)).toBeNull();
+    expect(f.notify).not.toHaveBeenCalled();
+  } finally { setItem.mockRestore(); }
 });
 
 it("checkpoints mixed presence and coalesced marker hints while retaining startup resync", async () => {
@@ -184,4 +285,5 @@ it("checkpoints mixed presence and coalesced marker hints while retaining startu
   expect(f.reconcile).toHaveBeenCalledWith("org", "workspace", { sessionId: "session", readAt: "2026-11-15T12:00:00Z" });
   expect(JSON.parse(localStorage.getItem("terminalx.inbox.v1:a")!).cursor).toBe("22");
   expect(getReassignedNotices()).toEqual([]);
+  expect(f.notify).not.toHaveBeenCalled();
 });
