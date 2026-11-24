@@ -4,7 +4,7 @@ import { CalendarClock, Loader2, Pause, Play, Plus, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { api, type CloudAutomationDto, type CloudScheduleWebhookTrigger, type CloudSelectedRepository, type CloudScheduleQuote } from "@/lib/api";
+import { api, type CloudAutomationDto, type CloudScheduleRun, type CloudScheduleWebhookTrigger, type CloudSelectedRepository, type CloudScheduleQuote } from "@/lib/api";
 import {
   PRESETS,
   SCHEDULE_LIMITS,
@@ -33,6 +33,7 @@ import { WebhookSecretDialog, WebhookDetails, WebhookPayloadHint } from "./Webho
 import { GithubTriggerEditor } from "./GithubTriggerEditor";
 import { retireAutomationTargetScope, useAutomationFence, useAutomationScope } from "./CloudAutomationScope";
 import { openCloudSession } from "@/lib/cloudDashboard";
+import { findCloudWorkspace, liveCloudOrgIds, relistCloudCatalog, useCloudCatalog } from "@/lib/cloudCatalog";
 import { cloudSessionKey, cloudWorkspaceKey } from "@/types/target";
 import { errorCode } from "@/lib/cloudTerminals";
 import { EFFORT_LABEL, modelOptionText, offeredOn, useModels } from "@/lib/models";
@@ -361,26 +362,52 @@ function ScheduleRow({
   );
 }
 
+function allocatedRunWorkspaceId(schedule: CloudAutomationDto, run: CloudScheduleRun): string | null {
+  if (schedule.workspaceMode === "fresh" && run.workspaceId === schedule.workspaceId) return null;
+  return run.workspaceId || null;
+}
+
 function CloudAutomationRuns({ schedule, orgId, webhookAvailable }: { schedule: CloudAutomationDto; orgId: string; webhookAvailable: boolean }) {
   const capture = useAutomationFence();
   const [detail, setDetail] = useState<Awaited<ReturnType<typeof api.cloudAutomation>> | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const catalog = useCloudCatalog();
+  const [catalogRelisted, setCatalogRelisted] = useState(false);
+  const { status } = getAccount();
+  const org = catalog.orgs[orgId];
+  const [catalogAtOpen] = useState(() => ({ at: Date.now(), workspaces: org?.workspaces }));
+  // A context change can retain the previous rows. A fresh list can share its
+  // request timestamp with the panel opening, but it publishes new rows.
+  const canUseCatalog = catalogRelisted && org?.source === "live" && !org.error
+    && org.requestedAt != null && org.requestedAt >= catalogAtOpen.at && org.workspaces !== catalogAtOpen.workspaces
+    && catalog.owner === status.identity?.email && catalog.revision === (status.context?.revision ?? null)
+    && liveCloudOrgIds(status).includes(orgId);
   useEffect(() => {
     const current = capture();
     let stale = false;
     api.cloudAutomation(schedule.id, orgId).then((answer) => {
-      if (current() && !stale) setDetail(answer);
+      if (!current() || stale) return;
+      setDetail(answer);
+      if (answer.schedule.workspaceMode === "fresh" && answer.runs.some((run) => allocatedRunWorkspaceId(answer.schedule, run))) {
+        void relistCloudCatalog(orgId).then(() => {
+          if (current() && !stale) setCatalogRelisted(true);
+        }, () => undefined);
+      }
     }, (e: unknown) => { if (current() && !stale) setError(scheduleErrorMessage(errorCode(e))); });
     return () => { stale = true; };
   }, [schedule.id, orgId, capture]);
   if (error) return <p role="alert">Could not read runs. {error}</p>;
   if (!detail) return <p>Reading runs…</p>;
   return <ul aria-label="Runs">{detail.runs.length === 0 && <li>No runs yet.</li>}{detail.runs.map((run) => {
-    const workspaceId = run.workspaceId && !(detail.schedule.workspaceMode === "fresh" && run.workspaceId === detail.schedule.workspaceId) ? run.workspaceId : null;
+    const workspaceId = allocatedRunWorkspaceId(detail.schedule, run);
+    const freshWorkspaceId = detail.schedule.workspaceMode === "fresh" ? workspaceId : null;
+    const workspace = freshWorkspaceId && canUseCatalog ? findCloudWorkspace(catalog, orgId, freshWorkspaceId)?.workspace : null;
+    const workspaceName = workspace?.orgId === orgId && workspace.you?.role !== "none" && workspace.state !== "destroyed" ? workspace.name.trim() : "";
     const trigger = webhookAvailable && run.trigger === "webhook" ? "Webhook"
       : webhookAvailable && run.trigger === "manual" ? "Manual" : run.trigger;
     return <li key={run.id} data-testid={`automation-run-${run.id}`}>
       <p>{whenText(run.scheduledFor)} · {runText(run, webhookAvailable)} · {trigger}</p>
+      {freshWorkspaceId && <p className="wrap-anywhere">{workspaceName ? `Workspace ${workspaceName}` : `Workspace ID ${freshWorkspaceId}`}</p>}
       {run.workBranch && <p>Branch: {run.workBranch}</p>}
       {run.archivedAt ? <p>Archived {whenText(run.archivedAt)}</p> : run.archiveAt ? <p>Archive due {whenText(run.archiveAt)}; archival not observed.</p> : null}
       {workspaceId ? <Button size="xs" variant="ghost" onClick={() => openCloudSession(run.sessionId ? cloudSessionKey(orgId, workspaceId, run.sessionId) : cloudWorkspaceKey(orgId, workspaceId), run.tabId)}>Open run workspace</Button> : <p>Run workspace not allocated.</p>}
