@@ -26,6 +26,8 @@ export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint, r
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [overlap, setOverlap] = useState<(TurnUndoResult & { action: "undo" | "restore" }) | null>(null);
+  /** Keep takes Undo away for good, so it asks first. */
+  const [confirmingKeep, setConfirmingKeep] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setSaved(null);
@@ -90,7 +92,7 @@ export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint, r
       })}
       {saved && changes.length > 0 && !saved.reviewed && !saved.unavailableReason && !checkpoint?.api?.readOnly && <div className="flex gap-1">
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => void review("undo")}><Undo2 /> Undo turn</Button>
-        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void review("keep")}><Check /> Keep</Button>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirmingKeep(true)}><Check /> Keep</Button>
       </div>}
       {saved && changes.length > 0 && !saved.reviewed && !saved.unavailableReason && !checkpoint?.api?.readOnly && saved.expiresIn ? <p role="status" className="w-full text-xs text-muted-foreground">{expiryNote(saved.expiresIn)}</p> : null}
       {saved?.reviewed && <span role="status" className="text-xs text-muted-foreground">{saved.undone ? "Undone" : saved.restored ? "Restored" : "Kept"}</span>}
@@ -108,6 +110,16 @@ export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint, r
           <DialogFooter>
             <Button variant="secondary" disabled={busy} onClick={() => setOverlap(null)}>Cancel</Button>
             <Button variant="destructive" disabled={busy} onClick={() => overlap && void review(overlap.action, overlap.token)}>{overlap?.action === "restore" ? "Restore anyway" : "Undo anyway"}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={confirmingKeep} onOpenChange={(open) => { if (!open && !busy) setConfirmingKeep(false); }}>
+        <DialogContent showClose={!busy}>
+          <DialogTitle>{`Keep turn ${saved?.number}'s changes?`}</DialogTitle>
+          <DialogDescription className="mt-2 text-sm text-muted-foreground">Undo for this turn will no longer be offered.</DialogDescription>
+          <DialogFooter>
+            <Button variant="secondary" disabled={busy} onClick={() => setConfirmingKeep(false)}>Cancel</Button>
+            <Button disabled={busy} onClick={() => { setConfirmingKeep(false); void review("keep"); }}>Keep</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
