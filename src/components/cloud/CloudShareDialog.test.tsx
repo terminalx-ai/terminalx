@@ -1,7 +1,7 @@
 import { refreshRosterFlags, rosterFlagAccount } from "@/test/rosterFlags";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CloudWorkspaceShare, CloudWorkspaceShares } from "@/lib/api";
+import type { CloudAccessApply, CloudGroupShare, CloudWorkspaceShare, CloudWorkspaceShares } from "@/lib/api";
 
 const mocks = vi.hoisted(() => ({
   shares: vi.fn(),
@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   access: vi.fn(),
   membersIn: vi.fn(),
   workspaces: vi.fn(),
+  groups: vi.fn(),
+  apply: vi.fn(),
 }));
 vi.mock("@/lib/api", () => ({
   api: {
@@ -19,6 +21,8 @@ vi.mock("@/lib/api", () => ({
     cloudWorkspaceShareRevoke: mocks.revoke,
     cloudWorkspaceSetAccess: mocks.access,
     cloudWorkspaces: mocks.workspaces,
+    cloudWorkspaceGroups: mocks.groups,
+    cloudWorkspaceSharesApply: mocks.apply,
   },
 }));
 vi.mock("@/lib/organizationMembers", () => ({ organizationMembers: { list: mocks.members, listIn: mocks.membersIn } }));
@@ -47,6 +51,8 @@ let listed: CloudWorkspaceShares;
 
 beforeEach(() => {
   refreshRosterFlags();
+  mocks.groups.mockReset().mockResolvedValue({ groups: [], nextCursor: null });
+  mocks.apply.mockReset();
   listed = { shares: [share()], you: { role: "manager", canApprove: true, canManageShares: true } };
   mocks.shares.mockReset().mockImplementation(async () => listed);
   mocks.put.mockReset().mockImplementation(async (_ws: string, userId: string, role: string, canApprove: boolean) => {
@@ -651,4 +657,240 @@ it("closes a Share profile when capability refresh removes the flag", async () =
   expect(screen.queryByRole("dialog", { name: "Profile of Alice" })).toBeNull();
   expect(screen.queryByRole("button", { name: /View profile/ })).toBeNull();
   expect(screen.getByTestId("cloud-share-dialog")).toBeTruthy();
+});
+
+describe("organization workspace-group readiness", () => {
+  const feature = "cloud.workspace-groups.v1";
+  const group = { id: "group-1", name: "Release crew", memberCount: 3 };
+  const existingGroup = { id: "group-2", name: "Testing crew", memberCount: 1 };
+  const revision = "account-1";
+  function enabled(organization = "org-1", groupShares: CloudGroupShare[] = []) {
+    account.status.phase2Readiness = { [organization]: [feature] };
+    listed = { ...listed, groupShares, accessRevision: "opaque:1" };
+  }
+  function renderEditor(props: Partial<Parameters<typeof CloudShareDialog>[0]> = {}) {
+    const onClose = vi.fn();
+    return { ...render(<CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments" onClose={onClose} {...props} />), onClose };
+  }
+
+  function receipt(result: { shares?: CloudWorkspaceShare[]; groupShares?: CloudGroupShare[]; accessRevision: string }, results: unknown[]) {
+    listed = { ...listed, ...result };
+    return { accessRevision: listed.accessRevision, groupShares: listed.groupShares, shares: listed.shares, results };
+  }
+  const save = () => screen.getByRole("button", { name: "Save" });
+  const search = () => screen.getByRole("searchbox", { name: /Add people or groups from/ });
+  const role = (name: string) => screen.getByRole("combobox", { name: `Role for ${name}` });
+
+  it("keeps the exact legacy dialog and calls when only another organization is enabled", async () => {
+    enabled("org-2", [{ groupId: group.id, group, role: "driver", canApprove: true }]);
+    renderEditor();
+    await screen.findByRole("combobox", { name: "Add person" });
+    expect(mocks.shares).toHaveBeenCalledWith("ws-1", "org-1");
+    expect(screen.queryByText("Release crew")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+    fireEvent.change(role("Alice"), { target: { value: "driver" } });
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith("ws-1", "u-alice", "driver", false, "org-1"));
+    expect(mocks.groups).not.toHaveBeenCalled();
+    expect(mocks.apply).not.toHaveBeenCalled();
+  });
+
+  it("uses the inactive member organization's exact search and cursor, including already-shared groups", async () => {
+    enabled("org-2", [{ groupId: existingGroup.id, group: existingGroup, role: "driver", canApprove: true }]);
+    mocks.groups
+      .mockResolvedValueOnce({ groups: [existingGroup], nextCursor: "page:2" })
+      .mockResolvedValueOnce({ groups: [group], nextCursor: null });
+    renderEditor({ orgId: "org-2" });
+    expect(await screen.findByText("Group · 1 member")).toBeTruthy();
+    expect(mocks.shares).toHaveBeenCalledWith("ws-1", "org-2", revision);
+    fireEvent.change(search(), { target: { value: "CreW & %" } });
+    expect((await screen.findByRole("button", { name: /Testing crew.*Already added/ }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(await screen.findByRole("button", { name: "More groups" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Release crew/ }));
+    expect(mocks.groups.mock.calls).toEqual([
+      ["org-2", "CreW & %", null, revision],
+      ["org-2", "CreW & %", "page:2", revision],
+    ]);
+    expect(screen.getByText("Group · 3 members")).toBeTruthy();
+    expect(screen.getByText("1 unsaved change · nothing changes until you press Save")).toBeTruthy();
+    expect(mocks.apply).not.toHaveBeenCalled();
+  });
+
+  it("ignores an earlier search response after the query changes", async () => {
+    enabled();
+    let respond!: (value: unknown) => void;
+    mocks.groups.mockImplementation((_org: string, query: string) => query === "Release"
+      ? new Promise((resolve) => { respond = resolve; })
+      : Promise.resolve({ groups: [], nextCursor: null }));
+    renderEditor();
+    await screen.findByTestId("cloud-share-you");
+    fireEvent.change(search(), { target: { value: "Release" } });
+    await waitFor(() => expect(respond).toBeTypeOf("function"));
+    fireEvent.change(search(), { target: { value: "Something else" } });
+    await screen.findByText("No one matches the search. You can add members and groups of org-1.");
+    await act(async () => respond({ groups: [group], nextCursor: "more" }));
+    expect(screen.queryByText("Release crew")).toBeNull();
+    expect(screen.queryByText("More groups")).toBeNull();
+  });
+
+  it("names discarded changes on Escape and button close, and keeps the draft on Keep editing", async () => {
+    enabled();
+    const { onClose } = renderEditor();
+    await screen.findByTestId("cloud-share-you");
+    fireEvent.change(role("Alice"), { target: { value: "driver" } });
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    let confirmation = await screen.findByRole("dialog", { name: "Discard access changes?" });
+    expect(within(confirmation).getByText("Alice · Change to Driver, approval off")).toBeTruthy();
+    fireEvent.click(within(confirmation).getByRole("button", { name: "Keep editing" }));
+    expect((role("Alice") as HTMLSelectElement).value).toBe("driver");
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    confirmation = await screen.findByRole("dialog", { name: "Discard access changes?" });
+    fireEvent.click(within(confirmation).getByRole("button", { name: "Discard changes" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(mocks.apply).not.toHaveBeenCalled();
+  });
+
+  it("commits one batch, identifies the failed row, then retries only that row with a fresh request", async () => {
+    enabled();
+    mocks.groups.mockResolvedValue({ groups: [group], nextCursor: null });
+    mocks.apply.mockImplementationOnce(async (_workspace: string, _org: string, request: CloudAccessApply) =>
+      receipt({ shares: [share({ role: "driver" })], accessRevision: "opaque:2" }, request.changes.map((change) =>
+        change.subject.type === "group" ? { id: change.id, status: "failed", code: "organization_group_not_found", message: "The group could not be found." }
+          : { id: change.id, status: "applied" })))
+      .mockImplementationOnce(async (_workspace: string, _org: string, request: CloudAccessApply) =>
+        receipt({ groupShares: [{ groupId: group.id, group, role: "viewer", canApprove: false }], accessRevision: "opaque:3" },
+          request.changes.map(({ id }) => ({ id, status: "applied" }))));
+    renderEditor();
+    await screen.findByTestId("cloud-share-you");
+    fireEvent.change(role("Alice"), { target: { value: "driver" } });
+    fireEvent.change(search(), { target: { value: "Release" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Release crew/ }));
+    expect(screen.getByText(/2 unsaved changes/)).toBeTruthy();
+    expect(mocks.put).not.toHaveBeenCalled();
+    expect(mocks.apply).not.toHaveBeenCalled();
+    fireEvent.click(save());
+    expect((await screen.findByText(/The group could not be found/)).textContent).toContain("Release crew");
+    await waitFor(() => expect((save() as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.getByText("1 of 2 changes saved.")).toBeTruthy();
+    fireEvent.click(save());
+    await screen.findByText("Access changes saved.");
+    const [[workspace, org, first, context], [, , second]] = mocks.apply.mock.calls;
+    expect([workspace, org, context]).toEqual(["ws-1", "org-1", revision]);
+    expect(first).toMatchObject({ accessRevision: "opaque:1", changes: [
+      { op: "put", subject: { type: "user", id: "u-alice" }, role: "driver", canApprove: false },
+      { op: "put", subject: { type: "group", id: group.id }, role: "viewer", canApprove: false },
+    ] });
+    expect(new Set(first.changes.map((change: { id: string }) => change.id)).size).toBe(2);
+    expect(second).toMatchObject({ accessRevision: "opaque:2", changes: [{ ...first.changes[1], id: expect.any(String) }] });
+    expect(second.requestId).not.toBe(first.requestId);
+    expect(mocks.put).not.toHaveBeenCalled();
+    expect(mocks.revoke).not.toHaveBeenCalled();
+  });
+
+  it("freezes the original payload on an ambiguous reply and uses the server standing after replay", async () => {
+    enabled();
+    mocks.apply.mockRejectedValueOnce({ code: "cloud_workspace_request_outcome_unknown", retryWithSameIdempotencyKey: true })
+      .mockImplementationOnce(async (_workspace: string, _org: string, request: CloudAccessApply) => {
+        listed = { ...listed, you: { role: "viewer", canApprove: false, canManageShares: false } };
+        return receipt({ shares: [], accessRevision: "opaque:2" }, request.changes.map(({ id }) => ({ id, status: "applied" })));
+      });
+    renderEditor();
+    await screen.findByTestId("cloud-share-you");
+    fireEvent.click(screen.getByRole("button", { name: "Revoke Alice" }));
+    fireEvent.click(save());
+    const retry = await screen.findByRole("button", { name: "Retry save" });
+    expect((screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((search() as HTMLInputElement).disabled).toBe(true);
+    expect(mocks.shares).toHaveBeenCalledTimes(1);
+    fireEvent.click(retry);
+    await screen.findByRole("heading", { name: "Who has access" });
+    expect(mocks.apply.mock.calls[0]).toEqual(mocks.apply.mock.calls[1]);
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+  });
+
+  it("requires review after a stale revision and builds a fresh envelope", async () => {
+    enabled();
+    mocks.apply.mockRejectedValueOnce({ code: "cloud_workspace_access_revision_conflict" })
+      .mockImplementationOnce(async (_workspace: string, _org: string, request: CloudAccessApply) =>
+        receipt({ shares: [share({ role: "driver" })], accessRevision: "opaque:3" }, request.changes.map(({ id }) => ({ id, status: "applied" }))));
+    renderEditor();
+    await screen.findByTestId("cloud-share-you");
+    fireEvent.change(role("Alice"), { target: { value: "driver" } });
+    fireEvent.click(save());
+    const refresh = await screen.findByRole("button", { name: "Refresh access" });
+    expect((save() as HTMLButtonElement).disabled).toBe(true);
+    listed = { ...listed, accessRevision: "opaque:2", shares: [share({ canApprove: true }), share({ userId: "u-bob", name: "Bob" })] };
+    fireEvent.click(refresh);
+    await screen.findByRole("combobox", { name: "Role for Bob" });
+    expect((role("Alice") as HTMLSelectElement).value).toBe("driver");
+    expect(mocks.apply).toHaveBeenCalledTimes(1);
+    fireEvent.click(save());
+    await screen.findByText("Access changes saved.");
+    expect(mocks.apply.mock.calls[1][2]).toMatchObject({ accessRevision: "opaque:2", changes: [{ subject: { type: "user", id: "u-alice" }, canApprove: true }] });
+    expect(mocks.apply.mock.calls[1][2].requestId).not.toBe(mocks.apply.mock.calls[0][2].requestId);
+  });
+
+  it("submits a replacement administrator with approval before removing the old grant", async () => {
+    enabled();
+    listed = { ...listed, shares: [share({ role: "manager", canApprove: true }), share({ userId: "u-bob", name: "Bob" })] };
+    mocks.apply.mockImplementationOnce(async (_workspace: string, _org: string, request: CloudAccessApply) =>
+      receipt({ shares: [share({ userId: "u-bob", name: "Bob", role: "manager", canApprove: true })], accessRevision: "opaque:2" },
+        request.changes.map(({ id }) => ({ id, status: "applied" }))));
+    renderEditor();
+    await screen.findByTestId("cloud-share-you");
+    fireEvent.click(screen.getByRole("button", { name: "Revoke Alice" }));
+    fireEvent.change(role("Bob"), { target: { value: "manager" } });
+    const approval = screen.getByRole("switch", { name: "Can approve permissions: Bob" });
+    expect(approval.getAttribute("aria-checked")).toBe("true");
+    expect((approval as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(save());
+    await screen.findByText("Access changes saved.");
+    expect(mocks.apply.mock.calls[0][2].changes).toMatchObject([
+      { op: "put", subject: { type: "user", id: "u-bob" }, role: "manager", canApprove: true },
+      { op: "remove", subject: { type: "user", id: "u-alice" } },
+    ]);
+  });
+
+  it("retires an ambiguous payload when the account context changes", async () => {
+    enabled();
+    mocks.apply.mockRejectedValueOnce({ code: "cloud_workspace_request_outcome_unknown" });
+    const onClose = vi.fn();
+    const props = { orgId: "org-1", workspaceId: "ws-1", name: "Payments", onClose };
+    const { rerender } = render(<CloudShareDialog {...props} />);
+    await screen.findByTestId("cloud-share-you");
+    fireEvent.click(screen.getByRole("button", { name: "Revoke Alice" }));
+    fireEvent.click(save());
+    await screen.findByRole("button", { name: "Retry save" });
+    account.status = { ...account.status, context: { account: "replacement", scope: "replacement", revision: "replacement-1" } };
+    rerender(<CloudShareDialog {...props} />);
+    await waitFor(() => expect((save() as HTMLButtonElement).disabled).toBe(true));
+    expect(screen.queryByRole("button", { name: "Retry save" })).toBeNull();
+    expect(mocks.shares).toHaveBeenLastCalledWith("ws-1", "org-1", "replacement-1");
+    expect(mocks.apply).toHaveBeenCalledTimes(1);
+  });
+
+  it("confirms visibility before making a private workspace shareable and saves using the refreshed revision", async () => {
+    enabled();
+    listed = { ...listed, shares: [] };
+    mocks.groups.mockResolvedValue({ groups: [group], nextCursor: null });
+    mocks.access.mockImplementationOnce(async () => {
+      listed = { ...listed, accessRevision: "opaque:visible" };
+      return { accessMode: "organization" };
+    });
+    mocks.apply.mockImplementationOnce(async (_workspace: string, _org: string, request: CloudAccessApply) =>
+      receipt({ groupShares: [{ groupId: group.id, group, role: "viewer", canApprove: false }], accessRevision: "opaque:saved" },
+        request.changes.map(({ id }) => ({ id, status: "applied" }))));
+    renderEditor({ accessMode: "private", createdBy: "u-me" });
+    await screen.findByTestId("cloud-share-you");
+    fireEvent.change(search(), { target: { value: "Release" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Release crew/ }));
+    fireEvent.click(save());
+    const confirmation = await screen.findByRole("dialog", { name: "Make workspace visible and save?" });
+    expect(mocks.access).not.toHaveBeenCalled();
+    expect(mocks.apply).not.toHaveBeenCalled();
+    fireEvent.click(within(confirmation).getByRole("button", { name: "Make visible and save" }));
+    await waitFor(() => expect(mocks.apply).toHaveBeenCalledTimes(1));
+    expect(mocks.access).toHaveBeenCalledWith("ws-1", "organization", "org-1", revision);
+    expect(mocks.apply.mock.calls[0][2].accessRevision).toBe("opaque:visible");
+  });
 });

@@ -574,8 +574,12 @@ export const api = {
   /** Pause every active scheduled task of the organization. */
   cloudSchedulesPauseAll: (orgId?: string | null) => invoke<{ paused: number }>("cloud_schedules_pause_all", { orgId: orgId ?? null }),
   /** Who the workspace is shared with, and what the caller may do (PRO-30, docs/CLOUD-SHARING.md). */
-  cloudWorkspaceShares: (workspaceId: string, orgId?: string | null) =>
-    invoke<CloudWorkspaceShares>("cloud_workspace_shares", { workspaceId, orgId: orgId ?? null }),
+  cloudWorkspaceShares: (workspaceId: string, orgId?: string | null, contextRevision?: string) =>
+    invoke<CloudWorkspaceShares>("cloud_workspace_shares", { workspaceId, orgId: orgId ?? null, ...(contextRevision === undefined ? {} : { contextRevision }) }),
+  cloudWorkspaceGroups: (orgId: string, query: string, cursor: string | null, contextRevision: string) =>
+    invoke<CloudGroupPage>("cloud_workspace_groups", { orgId, query, cursor, contextRevision }),
+  cloudWorkspaceSharesApply: (workspaceId: string, orgId: string, request: CloudAccessApply, contextRevision: string) =>
+    invoke<CloudAccessApplied>("cloud_workspace_shares_apply", { workspaceId, orgId, request, contextRevision }),
   /** Grant or change a member's share; only managers and the workspace's creator may. */
   cloudWorkspaceSharePut: (workspaceId: string, userId: string, role: CloudShareRole, canApprove: boolean, orgId?: string | null) =>
     invoke<{ share: CloudWorkspaceShare; created?: boolean }>("cloud_workspace_share_put", { workspaceId, userId, role, canApprove, orgId: orgId ?? null }),
@@ -587,8 +591,8 @@ export const api = {
    * hide it from everyone but its creator (the server revokes every share with
    * it). Only an organization owner or admin may (`organization_admin_required`).
    */
-  cloudWorkspaceSetAccess: (workspaceId: string, accessMode: "private" | "organization", orgId?: string | null) =>
-    invoke<CloudWorkspace>("cloud_workspace_set_access", { workspaceId, accessMode, orgId: orgId ?? null }),
+  cloudWorkspaceSetAccess: (workspaceId: string, accessMode: "private" | "organization", orgId?: string | null, contextRevision?: string) =>
+    invoke<CloudWorkspace>("cloud_workspace_set_access", { workspaceId, accessMode, orgId: orgId ?? null, ...(contextRevision === undefined ? {} : { contextRevision }) }),
   /** The workspace's idle window and its choices (PRO-410), for whoever may manage it. */
   cloudWorkspaceIdleSuspend: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceIdleSuspend>("cloud_workspace_idle_suspend", { workspaceId, orgId: orgId ?? null }),
@@ -1663,6 +1667,45 @@ function requireLegacyCloudSchedule(value: CloudAutomationDto): CloudSchedule {
 export interface CloudWorkspaceShares {
   shares: CloudWorkspaceShare[];
   you: { role: CloudCollaborationRole; canApprove: boolean; canManageShares: boolean };
+  accessRevision?: string;
+  groupShares?: CloudGroupShare[];
+}
+
+export interface CloudGroup {
+  id: string;
+  name: string;
+  memberCount: number;
+}
+
+export interface CloudGroupPage {
+  groups: CloudGroup[];
+  nextCursor: string | null;
+}
+
+export interface CloudGroupShare {
+  groupId: string;
+  group: CloudGroup;
+  role: CloudShareRole;
+  canApprove: boolean;
+}
+
+export type CloudShareSubject = { type: "user" | "group"; id: string };
+export type CloudAccessChange = { id: string; subject: CloudShareSubject } & (
+  | { op: "put"; role: CloudShareRole; canApprove: boolean }
+  | { op: "remove" }
+);
+
+export interface CloudAccessApply {
+  accessRevision: string;
+  requestId: string;
+  changes: CloudAccessChange[];
+}
+
+export interface CloudAccessApplied {
+  accessRevision: string;
+  shares: CloudWorkspaceShare[];
+  groupShares: CloudGroupShare[];
+  results: ({ id: string; status: "applied" } | { id: string; status: "failed"; code: string; message: string })[];
 }
 
 export type CloudWorkspaceLaunchPhase =

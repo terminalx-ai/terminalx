@@ -740,6 +740,8 @@ pub fn run() {
             commands::cloud_workspace_unarchive,
             commands::cloud_workspace_disposition,
             commands::cloud_workspace_shares,
+            commands::cloud_workspace_groups,
+            commands::cloud_workspace_shares_apply,
             commands::cloud_workspace_share_put,
             commands::cloud_workspace_share_revoke,
             commands::cloud_schedules,
