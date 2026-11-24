@@ -54,12 +54,16 @@ try {
     }
     await page.emulateMedia({ colorScheme: "light" });
   };
-  const openDialog = async () => {
+  // `from`: "start" while there is no project, the start screen's Quick start; "palette" once one exists, when the
+  // start screen gives way and the palette keeps all three actions. Said by each call rather than read from the page:
+  // read at once after the page loaded, a busy Linux runner had not drawn the start screen yet, and the palette was
+  // asked on a page that had none.
+  const openDialog = async (from) => {
     const start = page.getByTestId("start-screen");
-    if (await start.count()) {
+    if (from === "start") {
       await start.getByRole("button", { name: "Quick start", exact: true }).click();
     } else {
-      // Once a project exists the start screen gives way; the palette keeps all three actions.
+      await start.waitFor({ state: "detached" });
       await page.keyboard.press(`${mod}+K`);
       await page.getByLabel("Command palette search").fill("Add a project: Quick start");
       await page.getByRole("option", { name: /Add a project: Quick start/ }).first().click();
@@ -72,7 +76,7 @@ try {
   const radio = (dialog, name) => dialog.getByRole("radio", { name: new RegExp(`^${name.replace(/\+/g, "\\+")}`) });
 
   // The default state, as the design draws it.
-  let dialog = await openDialog();
+  let dialog = await openDialog("start");
   assert.equal(await dialog.getByRole("heading", { name: "Create a project" }).count(), 1);
   assert.equal(await page.locator("#start-quick-name").evaluate((el) => el === document.activeElement), true, "the name is focused");
   assert.equal(await dialog.getByTestId("start-destination").textContent(), "~/TerminalX/Projects/tx-review-lab");
@@ -98,7 +102,7 @@ try {
   await page.evaluate(() => {
     window.__CREATE__ = () => Promise.reject({ code: "destination-exists", message: "/Users/demo/TerminalX/Projects/tx-review-lab already exists. Choose another name." });
   });
-  dialog = await openDialog();
+  dialog = await openDialog("start");
   await page.keyboard.press(`${mod}+Enter`);
   await dialog.getByRole("alert").waitFor();
   assert.match(await dialog.getByRole("alert").textContent(), /already exists\. Choose another name\./);
@@ -124,7 +128,7 @@ try {
 
   // The link opens Settings › Projects (its Project templates page), where a folder is added as a template.
   await page.evaluate(() => { window.__CREATE__ = null; window.__PW_STUB__.answers["plugin:dialog|open"] = "/Users/demo/templates/house-style"; });
-  dialog = await openDialog();
+  dialog = await openDialog("palette");
   await dialog.getByRole("button", { name: "Add your own templates in Settings › Projects" }).click();
   await dialog.waitFor({ state: "detached" });
   await page.getByRole("heading", { name: "Project templates", exact: true, level: 2 }).waitFor();
@@ -138,7 +142,7 @@ try {
 
   // The template added there is offered in the dialog and is what the project is made from.
   await page.getByRole("heading", { name: "Projects", exact: true }).waitFor({ state: "detached" });
-  dialog = await openDialog();
+  dialog = await openDialog("palette");
   await radio(dialog, "house-style").click();
   await capture("08-user-template");
   await dialog.getByRole("button", { name: /^Create/ }).click();

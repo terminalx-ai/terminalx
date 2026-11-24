@@ -14,6 +14,11 @@ spec.loader.exec_module(selector)
 ROOT = Path(__file__).resolve().parents[2]
 LONG_APPLE_FUNCTION = '#[cfg(target_os = "macos")]\nfn apple() {\n' + "".join(f"    step({n});\n" for n in range(40)) + "}\n"
 LONG_SHARED_FUNCTION = "fn shared() {\n" + "".join(f"    step({n});\n" for n in range(40)) + "}\n"
+# run-all.mjs as it stands: the checks, then the ones left to macOS, each with its reason.
+RUN_ALL = (
+    'export const checks = [\n  "chat-find", "chat-scrollbar",\n];\n'
+    'export const macOnly = new Map([\n  ["chat-scrollbar", "measures macOS\'s overlay scrollbars"],\n]);\n'
+)
 
 
 class Fixture(unittest.TestCase):
@@ -32,6 +37,12 @@ class Fixture(unittest.TestCase):
         self.write("src-tauri/src/long.rs", LONG_APPLE_FUNCTION + "\n" + LONG_SHARED_FUNCTION)
         self.write("src-tauri/src/startup/macos.rs", "fn launch() {}\n")
         self.write("src/app.ts", "export {};\n")
+        self.write("scripts/webkit/run-all.mjs", RUN_ALL)
+        self.write("scripts/webkit/harness.mjs", 'const stub = await read("./tauri-stub.js");\n')
+        self.write("scripts/webkit/tauri-stub.js", "window.stub = 1;\n")
+        self.write("scripts/webkit/chat-scrollbar.mjs", 'import { launch } from "./harness.mjs";\n')
+        self.write("scripts/webkit/chat-find.mjs", 'import { launch } from "./harness.mjs";\nimport "./find-only.mjs";\n')
+        self.write("scripts/webkit/find-only.mjs", "export {};\n")
         self.commit()
         self.base = self.git("rev-parse", "HEAD").strip()
 
@@ -139,7 +150,19 @@ class WhatAChangeNeeds(Fixture):
             (["docs/NOTES.md"], set()),
             (["README.md", "docs/screens/one.png"], set()),
             (["src/components/App.tsx"], {"frontend"}),
-            (["scripts/webkit/run-all.mjs"], {"frontend"}),
+            (["scripts/webkit/run-all.mjs"], {"frontend", "mac-webkit"}),
+            # A WebKit check that runs on Linux, and a file only it loads: the Linux parts alone.
+            (["scripts/webkit/chat-find.mjs", "scripts/webkit/find-only.mjs"], {"frontend"}),
+            # A mac-only check, what it loads, and what it loads in turn.
+            (["scripts/webkit/chat-scrollbar.mjs"], {"frontend", "mac-webkit"}),
+            (["scripts/webkit/harness.mjs"], {"frontend", "mac-webkit"}),
+            (["scripts/webkit/tauri-stub.js"], {"frontend", "mac-webkit"}),
+            # What it renders, and what every mac-only check renders; not what none of them does.
+            (["src/components/chat/Chat.tsx"], {"frontend", "mac-webkit"}),
+            (["src/styles/app.css"], {"frontend", "mac-webkit"}),
+            (["pnpm-lock.yaml"], {"frontend", "phone", "mac-webkit"}),
+            (["src/components/settings/ShortcutsTab.tsx"], {"frontend"}),
+            (["src/components/changes/PrConversation.tsx"], {"frontend"}),
             (["mobile/app/index.tsx", "mobile/app.json"], {"phone"}),
             # The desktop imports from the phone app's sources, and the root Vitest run includes their tests.
             (["mobile/src/ui/transcript-rows.ts"], {"phone", "frontend"}),
@@ -153,10 +176,9 @@ class WhatAChangeNeeds(Fixture):
             (["src-tauri/src/remote/protocol.rs"], {"rust", "frontend"}),
             (["src/lib/fixtures/cloudWorkspaceList.server.json"], {"rust", "frontend"}),
             (["scripts/remote-runtime/fake-claude"], {"rust", "frontend"}),
-            (["pnpm-lock.yaml"], {"frontend", "phone"}),
             # Nothing else shows the jobs themselves still work.
-            ([".github/workflows/ci.yml"], {"required", "rust", "frontend", "phone"}),
-            (["infra/ci-runners/macos-rust.py"], {"required", "rust", "frontend", "phone"}),
+            ([".github/workflows/ci.yml"], {"required", "rust", "frontend", "phone", "mac-webkit"}),
+            (["infra/ci-runners/macos-rust.py"], {"required", "rust", "frontend", "phone", "mac-webkit"}),
             (["docs/NOTES.md", "mobile/app/index.tsx", "src-tauri/src/shared.rs"], {"phone", "rust"}),
         ]:
             with self.subTest(paths=paths):
@@ -166,6 +188,45 @@ class WhatAChangeNeeds(Fixture):
     def test_a_deleted_file_counts(self):
         self.git("rm", "-q", "src/app.ts")
         self.assertEqual(self.needs("docs/NOTES.md"), {"frontend"})
+
+    def test_a_check_moved_to_mac_only_selects_its_script(self):
+        # Moved in this change: the check's script selects on the head's list, and run-all.mjs itself selects.
+        self.write("scripts/webkit/run-all.mjs", RUN_ALL.replace('  ["chat-scrollbar",', '  ["chat-find", "x"],\n  ["chat-scrollbar",'))
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.assertEqual(self.needs("scripts/webkit/find-only.mjs"), {"frontend", "mac-webkit"})
+
+    def test_a_check_moved_off_mac_only_still_selects_in_that_change(self):
+        # Read from the base too: the change that takes a check off the list still runs it on macOS once.
+        self.write("scripts/webkit/run-all.mjs", RUN_ALL.replace('  ["chat-scrollbar", "measures macOS\'s overlay scrollbars"],\n', '  ["chat-find", "x"],\n'))
+        self.write("scripts/webkit/chat-scrollbar.mjs", "changed\n")
+        self.commit()
+        found = selector.answers(self.base, "HEAD")["mac-webkit"]
+        self.assertEqual(found, ["scripts/webkit/chat-scrollbar.mjs", "scripts/webkit/run-all.mjs"])
+
+    def test_a_mac_only_check_with_no_rendered_paths_selects_on_every_frontend_change(self):
+        self.write("scripts/webkit/run-all.mjs", RUN_ALL.replace('  ["chat-scrollbar",', '  ["not-yet-placed", "x"],\n  ["chat-scrollbar",'))
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.assertEqual(self.needs("src/components/settings/ShortcutsTab.tsx"), {"frontend", "mac-webkit"})
+
+    def test_an_unreadable_mac_only_list_selects_on_every_frontend_change(self):
+        for text in ("export const checks = [];\n", 'export const macOnly = new Map(entries);\n'):
+            with self.subTest(text=text):
+                self.git("checkout", "-q", "--detach", self.base)
+                self.write("scripts/webkit/run-all.mjs", text)
+                self.commit()
+                head = self.git("rev-parse", "HEAD").strip()
+                self.write("src/components/settings/ShortcutsTab.tsx", "changed\n")
+                self.commit()
+                self.assertEqual(selector.answers(head, "HEAD")["mac-webkit"], ["src/components/settings/ShortcutsTab.tsx"])
+        self.git("checkout", "-q", "--detach", self.base)
+        self.git("rm", "-q", "scripts/webkit/run-all.mjs")
+        self.commit()
+        head = self.git("rev-parse", "HEAD").strip()
+        self.write("src/components/changes/PrConversation.tsx", "changed\n")
+        self.commit()
+        self.assertEqual(selector.answers(head, "HEAD")["mac-webkit"], ["src/components/changes/PrConversation.tsx"])
 
     def run_main(self, *args):
         output = Path(self.temp.name) / "github-output"
@@ -178,11 +239,12 @@ class WhatAChangeNeeds(Fixture):
         self.write("mobile/app/index.tsx", "changed\n")
         self.commit()
         _, written = self.run_main("--base", self.base, "--head", "HEAD")
-        self.assertEqual(written, {"required": "false", "rust": "false", "frontend": "false", "phone": "true"})
+        self.assertEqual(written, {"required": "false", "rust": "false", "frontend": "false", "phone": "true", "mac-webkit": "false"})
 
     def test_every_other_run_gets_everything(self):
+        # The macOS WebKit job among them: every push to main, nightly and manual run.
         _, written = self.run_main("--all")
-        self.assertEqual(written, {"required": "true", "rust": "true", "frontend": "true", "phone": "true"})
+        self.assertEqual(written, {"required": "true", "rust": "true", "frontend": "true", "phone": "true", "mac-webkit": "true"})
 
     def test_the_macos_filters_are_one_line_of_arguments(self):
         printed, written = self.run_main("--filters")
@@ -203,6 +265,20 @@ class RulesAgainstThisTree(unittest.TestCase):
         for module in selector.APPLE_ONLY:
             with self.subTest(module=module):
                 self.assertTrue(any(f == module or f.startswith(module) for f in files), "no such module: remove it from APPLE_ONLY")
+
+    def test_every_mac_only_check_and_what_it_renders_is_in_this_tree(self):
+        names = selector.mac_only_checks((ROOT / selector.RUN_ALL).read_text())
+        self.assertIsNotNone(names, "run-all.mjs's macOnly could not be read")
+        self.assertEqual(sorted(selector.MAC_WEBKIT_RENDERS), sorted(names), "MAC_WEBKIT_RENDERS names the checks in macOnly, no more")
+        files = subprocess.check_output(["git", "-C", str(ROOT), "ls-files"], text=True).split("\n")
+        for path in [*selector.MAC_WEBKIT_SHELL, *(p for paths in selector.MAC_WEBKIT_RENDERS.values() for p in paths)]:
+            with self.subTest(path=path):
+                self.assertTrue(any(f == path or f.startswith(path) for f in files), "no such path: a rule that matches nothing selects nothing")
+        rules = selector.mac_webkit_rules("HEAD", lambda path: selector.read_tree(ROOT, path))
+        for name in names:
+            with self.subTest(check=name):
+                self.assertIn(f"scripts/webkit/{name}.mjs", rules)
+        self.assertIn("scripts/webkit/harness.mjs", rules)
 
     def test_every_macos_filter_names_a_module(self):
         files = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "src-tauri/src"], text=True).split("\n")
@@ -267,6 +343,10 @@ class RulesAgainstAGrowingTree(Fixture):
     def test_an_apple_only_path_dependency_is_found(self):
         self.write("src-tauri/Cargo.toml", '[package]\nname = "x"\n[target.\'cfg(target_os = "macos")\'.dependencies]\nmetal = { path = "src/metal" }\nobjc = "1"\n[target.\'cfg(unix)\'.dependencies]\nposix = { path = "src/posix" }\n')
         self.assertEqual(self.gaps()["Apple-only path dependencies that MACOS does not name"], ["src-tauri/src/metal"])
+
+    def test_a_mac_only_check_without_rendered_paths_is_found(self):
+        self.write("scripts/webkit/run-all.mjs", RUN_ALL.replace('  ["chat-scrollbar",', '  ["not-yet-placed", "x"],\n  ["chat-scrollbar",'))
+        self.assertEqual(self.gaps()["mac-only WebKit checks MAC_WEBKIT_RENDERS does not name"], ["not-yet-placed"])
 
     def test_a_script_the_macos_job_runs_is_found(self):
         self.write("scripts/sign.py", "import sign_lib\nimport os\n")

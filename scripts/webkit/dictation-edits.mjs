@@ -16,11 +16,12 @@
 //   arrive when the mic closes);
 // - the same holds once the mic has closed, and after a message is sent;
 // - Undo brings the deleted text back, and what is said next goes after it;
-// - a key pressed while holding Right Option to talk edits the draft, and the
-//   result that settles afterwards does not undo the edit;
 // - a local model that streams (#754): a word deleted while its words stream
 //   in stays deleted through the partials and the final after it, and a model
 //   that cannot stream says its words appear when the reader stops.
+//
+// Holding Right Option to talk is checked in dictation-hold-to-talk.mjs, on a
+// Mac only (run-all.mjs `macOnly`).
 //
 // Since the chat-first sidebar (#484) a local session is opened from its
 // conversation row and its tabs from the title bar's strip; a cloud session is
@@ -132,6 +133,10 @@ async function closeMic(page, text = "") {
   await page.getByText("Finishing…", { exact: true }).waitFor({ state: "detached" });
 }
 
+// Select all, Cut and Undo are the engine's own editing keys, not the app's shortcuts, so they are the host's: ⌘ on a
+// Mac, Ctrl in WebKit on Linux, where ⌘A, ⌘X and ⌘Z do nothing. Playwright's ControlOrMeta is that key on each host.
+// The app's own key (⌘⇧D) stays the Mac's: the page is the Mac app's whatever the host (harness.mjs).
+
 /** Select `count` characters backwards from the caret, as Shift+Left does. */
 async function selectBack(page, count) {
   for (let i = 0; i < count; i++) await page.keyboard.press("Shift+ArrowLeft");
@@ -144,7 +149,7 @@ for (const [name, surface] of Object.entries(SURFACES)) {
   await selectBack(page, " build".length);
   await page.keyboard.press("Backspace");
   const afterBackspace = await settled(page, field);
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Delete");
   const afterDelete = await settled(page, field);
 
@@ -152,7 +157,7 @@ for (const [name, surface] of Object.entries(SURFACES)) {
   await hear(page, "Fix");
   await hear(page, "Fix the build");
   const dictated = await settled(page, field);
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Backspace");
   const afterDictatedDelete = await settled(page, field);
   // The utterance comes back settled, with the same words tidied up.
@@ -211,7 +216,7 @@ for (const [name, surface] of Object.entries(SURFACES)) {
   await hear(page, "Fix the build please");
   const dictated = await settled(page, field);
   await selectBack(page, "please".length);
-  await page.keyboard.press("Meta+X");
+  await page.keyboard.press("ControlOrMeta+X");
   const afterCut = await settled(page, field);
   await selectBack(page, "build ".length);
   await page.keyboard.press("Backspace");
@@ -239,7 +244,7 @@ for (const [name, surface] of Object.entries(SURFACES)) {
   const { page, field } = await sessionComposer();
   await field.fill("Old notes");
   await openMic(page);
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Backspace");
   await page.keyboard.type("New:");
   const edited = await settled(page, field);
@@ -263,12 +268,12 @@ for (const [name, surface] of Object.entries(SURFACES)) {
   await hear(page, "Fix the build");
   await closeMic(page, "Fix the build.");
   const dictated = await settled(page, field);
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Backspace");
   const afterDelete = await settled(page, field);
-  await page.keyboard.press("Meta+Z");
+  await page.keyboard.press("ControlOrMeta+Z");
   const afterUndo = await settled(page, field);
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Backspace");
   await page.keyboard.type("Run the tests");
   const afterTyping = await settled(page, field);
@@ -318,10 +323,10 @@ for (const close of [false, true]) {
   const { page, field } = await sessionComposer();
   await openMic(page);
   await hear(page, "Fix the build");
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Backspace");
   const afterDelete = await settled(page, field);
-  await page.keyboard.press("Meta+Z");
+  await page.keyboard.press("ControlOrMeta+Z");
   const afterUndo = await settled(page, field);
   await hear(page, "Fix the build.");
   const afterSettled = await settled(page, field);
@@ -336,33 +341,6 @@ for (const close of [false, true]) {
       "what is said next goes after it, not over it": afterSpeech === "Fix the build Then run the tests",
     },
     { afterDelete, afterUndo, afterSettled, afterSpeech },
-  );
-  await page.close();
-}
-
-// Hold Right Option to talk: another key ends the dictation, and still edits the draft.
-{
-  const { page, field } = await sessionComposer();
-  await page.keyboard.down("AltRight");
-  await page.getByText("Listening. Speak, then release the key.", { exact: true }).waitFor();
-  await hear(page, "Fix the build");
-  const dictated = await settled(page, field);
-  await page.evaluate(() => {
-    window.__settled = "Fix the build.";
-  });
-  // Option+Backspace: the word before the caret.
-  await page.keyboard.press("Backspace");
-  await page.keyboard.up("AltRight");
-  await page.getByText(/^Listening\./).waitFor({ state: "detached" });
-  await page.getByText("Finishing…", { exact: true }).waitFor({ state: "detached" });
-  const afterDelete = await settled(page, field);
-  failed += report(
-    "a key pressed while holding Right Option to talk",
-    {
-      "the words were dictated": dictated === "Fix the build",
-      "the edit is kept when the dictation it ended settles": afterDelete === "Fix the ",
-    },
-    { dictated, afterDelete },
   );
   await page.close();
 }

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Say which parts of CI a pull request needs, from both sides of its merge base.
 
-Four answers, each `true` or `false`, written to $GITHUB_OUTPUT:
+Five answers, each `true` or `false`, written to $GITHUB_OUTPUT:
 
 - `required`: the macOS job (Swift tests, icons, the helper, the Apple-only and
   system-dependent Rust tests);
 - `rust`: the Rust jobs on Linux;
-- `frontend`: the frontend jobs (TypeScript, Vitest, the WebKit checks);
-- `phone`: the phone app's own checks.
+- `frontend`: the frontend jobs (TypeScript, Vitest, the WebKit checks on Linux);
+- `phone`: the phone app's own checks;
+- `mac-webkit`: the WebKit checks that run on macOS alone (`run-all.mjs`
+  `macOnly`): their scripts, what those load, and the product they render.
 
 No GitHub API permissions are needed. Paths and source are read from Git
 objects, so deleted and renamed files still count. This is a coverage selector,
@@ -128,6 +130,44 @@ PHONE = EVERYTHING + (
 
 RULES = {"required": MACOS, "rust": RUST, "frontend": FRONTEND, "phone": PHONE}
 
+# The WebKit checks that run on macOS alone are named in run-all.mjs's `macOnly`, read from both sides of the change,
+# so a check moved there selects its own script with no change here. Each such script, run-all.mjs, and every file in
+# scripts/webkit/ that one of them names by a `./` path (harness.mjs, the stubs it reads) select the job.
+RUN_ALL = "scripts/webkit/run-all.mjs"
+WEBKIT = "scripts/webkit/"
+MAC_ONLY_MAP = re.compile(r"export const macOnly = new Map\(\[(.*?)\n\]\);", re.S)
+MAC_ONLY_NAME = re.compile(r'^\s*\["([\w:-]+)",', re.M)
+LOCAL_FILE = re.compile(r"""["']\./([\w.-]+\.m?js)["']""")
+
+# What every mac-only check renders: the app's shell, its styles and theme, the platform it reads, and what builds it
+# (the Vite config, the packages and their patches, Playwright's WebKit among them, and the Node version).
+MAC_WEBKIT_SHELL = (
+    "src/App.tsx", "src/main.tsx", "index.html", "src/styles/", "src/lib/glass.ts", "src/lib/theme.ts",
+    "src/lib/platform.ts", "src/components/layout/", "src/components/ui/",
+    "vite.config.ts", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "patches/", ".nvmrc",
+)
+
+# And what each one renders besides: the product paths its assertions measure. A name in `macOnly` that is not here
+# selects the job on every frontend change (`frontend`'s rules): what cannot be placed is not left out.
+# test_macos_rust.py fails when one is missing and when a path here is not in the tree.
+MAC_WEBKIT_RENDERS = {
+    # The transcript's and the composer's scrollbars, and the prompt map's rail beside them.
+    "chat-scrollbar": ("src/components/chat/",),
+    # The resource popover (StatusBar, in layout) over a live terminal and chat.
+    "app-resources": ("src/components/chat/", "src/components/terminal/"),
+    # A lead's workers in the sidebar (RunRows, in layout) and their run marks.
+    "run-sidebar": ("src/components/orchestration/", "src/components/session/"),
+    # Tooltips, menus, question cards and the recovery banner over the chat and the composer.
+    "readable-panels": ("src/components/chat/",),
+    # A pull request's conversation in the review panel, scrolled.
+    "pr-conversation": ("src/components/changes/",),
+    # Holding Right Option to talk: the composer's dictation and the shortcut that holds it.
+    "dictation-hold-to-talk": (
+        "src/components/chat/", "src/lib/dictation.ts", "src/lib/dictationContext.ts", "src/lib/dictationText.ts",
+        "src/lib/shortcuts.ts", "src/lib/shortcutMigration.ts", "src/lib/hotkeys.ts",
+    ),
+}
+
 
 def git(*args):
     return subprocess.check_output(["git", *args])
@@ -180,7 +220,47 @@ def answers(base, head):
     merge_base, changed = changed_files(base, head)
     found = {name: sorted(path for path in changed if matches(path, rules)) for name, rules in RULES.items()}
     found["required"] = sorted(set(found["required"]) | set(holds_an_apple_cfg(merge_base, head, changed)))
+    rules = mac_webkit_rules(merge_base) | mac_webkit_rules(head)
+    found["mac-webkit"] = sorted(path for path in changed if matches(path, tuple(rules)))
     return found
+
+
+def shown(rev, path):
+    """The file at `path` in `rev`, or None when it is not there."""
+    done = subprocess.run(["git", "show", f"{rev}:{path}"], capture_output=True)
+    return done.stdout.decode(errors="replace") if done.returncode == 0 else None
+
+
+def mac_only_checks(text):
+    """The names in run-all.mjs's `macOnly`, or None when the list cannot be read from `text`."""
+    block = MAC_ONLY_MAP.search(text or "")
+    names = MAC_ONLY_NAME.findall(block.group(1)) if block else []
+    return names or None
+
+
+def mac_webkit_rules(rev, read=None):
+    """The paths that select the macOS WebKit job, as `macOnly` stands in `rev`.
+
+    `read(path)` gives a file's text or None; by default it is read from Git at `rev`. When run-all.mjs is missing or
+    its `macOnly` cannot be read, every frontend path selects: the job is never left out on a guess.
+    """
+    read = read or (lambda path: shown(rev, path))
+    rules = set(EVERYTHING) | {RUN_ALL}
+    names = mac_only_checks(read(RUN_ALL))
+    if names is None:
+        return rules | set(FRONTEND)
+    pending = [f"{WEBKIT}{name.split(':')[0]}.mjs" for name in names]
+    seen = set()
+    while pending:
+        script = pending.pop()
+        if script in seen:
+            continue
+        seen.add(script)
+        pending += [f"{WEBKIT}{name}" for name in LOCAL_FILE.findall(read(script) or "")]
+    rules |= seen | set(MAC_WEBKIT_SHELL)
+    for name in names:
+        rules |= set(MAC_WEBKIT_RENDERS.get(name, FRONTEND))
+    return rules
 
 
 def filter_path(name):
@@ -371,7 +451,15 @@ def gaps(root):
         "files the phone app imports that PHONE does not name": sorted(p for p in leaving_imports(root, "mobile/", ("mobile/",)) if not covered(p, PHONE)),
         "Apple-only path dependencies that MACOS does not name": [p for p in apple_path_dependencies(root) if not covered(p, MACOS)],
         "scripts the macOS job runs that MACOS does not name": [p for p in macos_job_scripts(root) if not covered(p, MACOS)],
+        "mac-only WebKit checks MAC_WEBKIT_RENDERS does not name": [
+            name for name in (mac_only_checks(read_tree(root, RUN_ALL)) or []) if name not in MAC_WEBKIT_RENDERS
+        ],
     }
+
+
+def read_tree(root, path):
+    file = Path(root) / path
+    return file.read_text(errors="replace") if file.exists() else None
 
 
 def main():
@@ -386,13 +474,13 @@ def main():
         print(" ".join(MACOS_FILTERS))
         return
     if args.list:
-        for name, rules in RULES.items():
+        for name, rules in {**RULES, "mac-webkit": mac_webkit_rules("HEAD", lambda path: read_tree(".", path))}.items():
             print(f"{name}:")
             for rule in sorted(rules):
                 print(f"  {rule}")
         return
     if args.all:
-        found = {name: ["(not a pull request)"] for name in RULES}
+        found = {name: ["(not a pull request)"] for name in [*RULES, "mac-webkit"]}
     elif args.base:
         found = answers(args.base, args.head)
     else:

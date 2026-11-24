@@ -39,7 +39,9 @@ machine, a pull request's edited workflow included.
 | `macos-rust-changes` | Ubuntu | always | The selector: what this change needs (next section). |
 | `frontend` | Ubuntu | always | Portable icon tests and the CI policy, selector and measurement tests, whatever changed. `tsc` and `vite build` when the frontend changed. The one place `tsc` runs. |
 | `vitest` | Ubuntu, four at once | frontend | The full Vitest run in four parts (`--shard=N/4`): every test file is in exactly one. |
-| `webkit-layout` | **macOS** | frontend | All WebKit layout checks after `vite build`, the machine-screen scripts among them; the screens are kept as an artifact. `scripts/webkit/run-all.mjs` runs several at once. |
+| `webkit-layout-linux` | Ubuntu, four at once | frontend | The WebKit layout checks after `vite build`, in four parts (`run-all.mjs --shard N/4`): every check is in exactly one part, and on Linux a part leaves out the checks in run-all's `macOnly` list. The machine-screen scripts are among them. |
+| `webkit-layout` | Ubuntu | always | The required WebKit status. Passes only when every Linux part succeeded, or all were skipped because the selector succeeded and answered "false" for the frontend; a part that failed or was cancelled fails it. Keeps the parts' machine screens as one artifact, `machine-screens`, and fails when there are none. |
+| `webkit-mac-only` | **macOS** | mac-webkit | The checks in `macOnly` alone (`run-all.mjs --only mac-only`), each listed with what Linux lacks. |
 | `phone-app` | Ubuntu | phone | The phone app's `tsc` and its Vitest run (`pnpm --dir mobile test`). |
 | `linux-rust` | Ubuntu on **every PR** | Rust | `cargo clippy --locked --all-targets -- -D warnings`; GTK/WebKit/audio dependencies installed. Main push/nightly/manual runs alone may use the owner-approved `CI_LINUX_RUNNER` label; unset/empty falls back to Ubuntu. |
 | `linux-rust-tests` | Ubuntu, five at once | Rust | The library's tests under cargo-nextest in four parts, and a fifth with the other test binaries, the doc tests and the local owner path without desktop features (below). |
@@ -50,28 +52,31 @@ machine, a pull request's edited workflow included.
 | `machines-e2e` | Ubuntu | always; decides in a step | Two machines end to end (PRO-358). |
 | `desktop-platforms` | Ubuntu | always | Off-macOS helper build, Linux renderer and launcher tests. No Rust on Linux: that is `linux-rust` and `linux-rust-tests`. Disabled Windows steps retained. |
 | `legacy-runtime-probe` | Ubuntu | always | Legacy AppImage diagnostics. Its tests set the operating system themselves, so one runner covers Linux and macOS. |
-| `check` | Ubuntu | always | The aggregate. Every other job must succeed. A job in the "Runs" column's frontend, phone, Rust, macOS or machines rows may be skipped instead, and only when the selector succeeded and answered "false" for it. |
+| `check` | Ubuntu | always | The aggregate. Every other job must succeed. A job in the "Runs" column's frontend, phone, Rust, macOS, mac-webkit or machines rows may be skipped instead, and only when the selector succeeded and answered "false" for it. |
 
-All runners are GitHub-hosted. `.github/workflows/webkit-linux.yml` is a second
-workflow: the WebKit checks on Linux in four parts, not required and not part
-of `check` ("macOS runner time" below).
+All runners are GitHub-hosted. The WebKit checks run in `ci.yml` alone: the
+trial workflow `webkit-linux.yml` that first ran them on Linux is gone.
+`test_workflow_security.py` runs `run-all.mjs --list` for each Linux part
+(as on Linux) and for `webkit-mac-only`, and fails when a check the suite
+lists runs in neither or in both.
 
 ## What a pull request runs
 
 `infra/ci-runners/macos-rust.py` reads the paths a pull request changes, from
-both sides of its merge base, and answers four questions. `check` accepts a
+both sides of its merge base, and answers five questions. `check` accepts a
 skipped job only on its answer. Pushes to `main`, nightly and manual runs
-answer "true" to all four.
+answer "true" to all five.
 
 | Answer | True when the change touches | Jobs |
 | --- | --- | --- |
 | `rust` | `src-tauri/`, `native/`, the toolchain, and each path outside them that a Rust test or build script reads (`packages/portable/src/`, the shared fixtures under `src/lib/`, `scripts/remote-runtime/`, `skill-guides/`, `schemas/` and others) | `linux-rust`, `linux-rust-tests`, `headless-serve`, `serve-tests` |
-| `frontend` | `src/`, `packages/`, `scripts/`, `mobile/src/` (a desktop test imports from it, and the root Vitest run includes its tests), the package and Vite files, and each Rust or other file a frontend test reads by path (`src-tauri/src/remote/protocol.rs`, `src-tauri/src/fixtures/` and others) | `tsc` and the build in `frontend`, `vitest`, `webkit-layout` |
+| `frontend` | `src/`, `packages/`, `scripts/`, `mobile/src/` (a desktop test imports from it, and the root Vitest run includes its tests), the package and Vite files, and each Rust or other file a frontend test reads by path (`src-tauri/src/remote/protocol.rs`, `src-tauri/src/fixtures/` and others) | `tsc` and the build in `frontend`, `vitest`, `webkit-layout-linux` |
+| `mac-webkit` | a mac-only check's script, `run-all.mjs`, every file in `scripts/webkit/` one of them names by a `./` path (`harness.mjs` and the stubs it reads), the app's shell and styles (`MAC_WEBKIT_SHELL`), and what each mac-only check renders (`MAC_WEBKIT_RENDERS`) | `webkit-mac-only` |
 | `phone` | `mobile/`, `packages/`, the package files, the desktop types the phone app imports | `phone-app` |
 | `required` | the macOS rules ("macOS Rust coverage" below) | `macos-native` |
 
 A change to `.github/workflows/ci.yml` or `infra/ci-runners/` answers "true" to
-all four. A documentation-only pull request runs `macos-rust-changes`,
+all five. A documentation-only pull request runs `macos-rust-changes`,
 `frontend` (the policy tests and the icon check), `machines-e2e` (which decides
 in a step), `desktop-platforms`, `legacy-runtime-probe` and `check`.
 
@@ -87,15 +92,18 @@ Rust jobs alone, 2 the phone app alone, and 118 the macOS job.
 
 **What a skipped job leaves to `main`:** a pull request that changes no Rust
 input runs no Rust job before merge, and one that changes no frontend input
-runs no Vitest or WebKit check. A dependency the rules do not name (a test
+runs no Vitest or WebKit check. One that changes the frontend but none of the
+`mac-webkit` paths runs every WebKit check but the mac-only ones ("macOS runner
+time" below). A dependency the rules do not name (a test
 that reads a file through a path the check cannot see) is first tested on
 `main`, where every run is whole.
 
 `check` is the aggregate, so its required status gates Rust and native checks.
 The separate required `frontend` and `webkit-layout` names stay unchanged; no
-ruleset edit is needed. GitHub reports a job skipped by its `if` as passing, so
-a skipped `webkit-layout` does not hold a pull request; `check` is what refuses
-a skip the selector did not ask for. No tests are dropped or newly ignored.
+ruleset edit is needed. `webkit-layout` is never skipped: it runs on Linux on
+every pull request and reports what its parts did. GitHub reports a job skipped
+by its `if` as passing, so `check` is what refuses a skip the selector did not
+ask for. No tests are dropped or newly ignored.
 Portable source icon tests run on Linux; macOS retains all source and Apple
 decoder checks.
 
@@ -229,8 +237,8 @@ file has 2.6.3), and then fails unless a second `cargo test --no-run` finds
 every unit fresh. `main`'s `cargo test --locked` still builds the ordinary
 library once, which the binary, the integration tests and the doc-tests need.
 
-`webkit-layout` takes a macOS runner whenever the frontend changed. Two more
-take one only when they are selected:
+No macOS runner is taken on a pull request unless the selector asks for one.
+Three jobs take one only when they are selected:
 
 - `macos-native`: pushes to `main`, nightly, manual runs, and pull requests
   selected by `infra/ci-runners/macos-rust.py` ("macOS Rust coverage"). An
@@ -238,28 +246,68 @@ take one only when they are selected:
   merge, and no pull request runs macOS Clippy: they run on `main` after it.
 - `machine-compat`: the same events, and pull requests that touch the machines
   (`scripts/machine-e2e/relevant.py`, the list `machines-e2e` uses).
+- `webkit-mac-only`: the same events, and pull requests the `mac-webkit` answer
+  selects (below).
 
 `macos-rust-changes` decides all three and `check` accepts a skipped macOS job
-on its word alone. On `main`, each of the two jobs keeps the run in progress and
-the newest waiting commit: an older commit still waiting when a newer one
-arrives is cancelled and its `check` fails. The newest commit of a burst of
-merges is always tested.
+on its word alone. On `main`, `macos-native` and `machine-compat` each keep the
+run in progress and the newest waiting commit: an older commit still waiting
+when a newer one arrives is cancelled and its `check` fails. The newest commit
+of a burst of merges is always tested.
 
-The required WebKit layout checks stay on macOS for now. They were tried on
-Linux on 19 November 2026, in the WebKit build Playwright ships there: 40 of
-the 107 failed, against 6 on macOS that day. The fixtures used macOS paths
-(`/private/...`), the app showed Ctrl where the checks read ⌘, and others
-timed out. Since then the harness gives every page the macOS platform, the
-host-dependent key presses and paths are fixed, and `run-all.mjs` names the
-five checks it leaves out on Linux, each with its reason.
+### The WebKit layout checks
 
-`.github/workflows/webkit-linux.yml` runs them on Linux on every pull request,
-in four parts on four runners (`run-all.mjs --shard N/4`; every check is in
-exactly one part). It is not a required status and not part of `check`: it
-shows whether the checks pass there and how long each part takes. When they
-do, `webkit-layout` can move to Linux and the last macOS runner an ordinary
-pull request waits for is gone. Policy tests hold that workflow to the same
-rules as CI: read-only token, no secrets, pinned actions, hosted runners.
+They run on Linux, in four parts (`webkit-layout-linux`), whenever the frontend
+changed, and `webkit-layout` is the required status that stands for the parts.
+On the hosted three-core macOS runner the whole suite took 30 to 37 minutes,
+the longest required job on every frontend pull request; on Linux a part took
+4 to 10 minutes (docs/CI-RUNNERS-MEASUREMENTS.md, "Step 2").
+
+They were first tried on Linux on 19 November 2026, in the WebKit build
+Playwright ships there: 40 of the 107 failed, against 6 on macOS that day. The
+fixtures used macOS paths (`/private/...`), the app showed Ctrl where the
+checks read ⌘, and others timed out. Since then the harness gives every page
+the macOS platform, the checks press `Meta` for the app's own keys and the
+host's key for the engine's editing keys, read layers and layout once they have
+settled, and `run-all.mjs` names the checks it leaves out on Linux, each with
+what Linux lacks:
+
+| Check | Why Linux cannot make it |
+| --- | --- |
+| `chat-scrollbar` | measures macOS's overlay scrollbars; WebKit on Linux draws GTK's own |
+| `app-resources` | compares rendered pixels and WebGL output for equality, which Linux's software rendering does not reproduce |
+| `run-sidebar` | part of it checks the Mac's glass sidebar (backdrop blur), which WebKit on Linux does not composite the same |
+| `readable-panels` | measures text contrast through the Mac's glass panels, likewise |
+| `pr-conversation` | samples frame times against the Mac runner's frame rate |
+| `dictation-hold-to-talk` | holds Right Option (the Mac's key, `hold:AltRight`) and presses Option+Backspace; WebKit on Linux has no editing key while Alt is held, so the edit is never made |
+
+The first five are judgements made on a Mac, not seen failing on Linux
+(`WEBKIT_MAC_ONLY_TOO=1` runs them there to find out). `dictation-hold-to-talk`
+was split from `dictation-edits` on what a Linux run showed.
+
+`webkit-mac-only` runs those checks alone (`run-all.mjs --only mac-only`), on
+every push to `main`, nightly, by hand, and on a pull request whose `mac-webkit`
+answer is "true": one that changes a mac-only check's script, `run-all.mjs`,
+`harness.mjs` or the stubs it reads, the app's shell and styles (`src/App.tsx`,
+`src/main.tsx`, `index.html`, `src/styles/`, `src/lib/glass.ts`, `theme.ts`,
+`platform.ts`, `src/components/layout/`, `src/components/ui/`), the build (the
+Vite config, the package and lock files, `patches/`, `.nvmrc`), or what one of
+the checks renders: `src/components/chat/` (the scrollbars, the panels over the
+chat, dictation), `src/components/terminal/` (the resource popover over a live
+terminal), `src/components/orchestration/` and `src/components/session/` (the
+run sidebar), `src/components/changes/` (the pull request conversation), and
+dictation and its shortcut in `src/lib/` (`dictation*.ts`, `shortcuts.ts`,
+`shortcutMigration.ts`, `hotkeys.ts`). `macos-rust.py --list` prints the whole
+list. The answer fails closed: a check in `macOnly` with no entry of its own in
+`MAC_WEBKIT_RENDERS`, or a `run-all.mjs` whose `macOnly` cannot be read, selects
+the job on every frontend change, and `test_macos_rust.py` fails when an entry
+is missing or names a path that is not in the tree.
+
+**What is left to `main`:** a mac-only check broken by a pull request the
+answer does not select (a product file outside those paths that changes what a
+mac-only check measures, such as a component the transcript renders from
+another folder) is found on `main`, after the merge, by `webkit-mac-only` on
+the push. Every other WebKit check runs on every frontend pull request.
 
 The legacy runtime diagnostic's macOS leg is gone: its tests patch
 `platform.system` to Linux and to Darwin themselves.
@@ -487,7 +535,7 @@ access, future jobs and repository integrity are the assets to protect.
 | Cache poisoning crosses a trust boundary | Job + PR-number/main/run namespace + OS + architecture + compiler + lockfile write keys. Restores try the run's own namespace, then main's for the same lock file, then main's newest for the same job, OS, architecture and compiler. No other-PR fallback, none across jobs or platforms, and no implicit pnpm cache. | No shared volumes or writable object-store caches. Native GitHub merge-ref cache write scope must remain in use. All cached content must be public and credential-free. |
 | Runner reaches production, metadata or controller | No network/cloud setup performed by this PR. | CI-only cloud project, no private network, no inbound firewall rules, external egress controls denying private/link-local/metadata/controller destinations. Allow only required build/GitHub traffic. |
 | Resource abuse, failed deletion or controller compromise | Default remains GitHub-hosted. | Controller concurrency/cost/lifetime caps, bounded deletion grace, independent cleanup reconciliation, patched separate controller with minimal credentials and private operational logs. |
-| Security policy regresses in a later edit | `test_workflow_security.py` exercises violations, for CI and for the Linux WebKit workflow, and is run by required `frontend` in a step no selector answer skips. `check` gates every job and accepts a skip only on the selector's answer. | Normal branch protection and review of workflow/runner changes. PR-authored policy tests cannot authorize access to private runners. |
+| Security policy regresses in a later edit | `test_workflow_security.py` exercises violations, and is run by required `frontend` in a step no selector answer skips. `check` gates every job and accepts a skip only on the selector's answer. | Normal branch protection and review of workflow/runner changes. PR-authored policy tests cannot authorize access to private runners. |
 
 GitHub cautions against self-hosted runners in public repositories because PR
 code can compromise them. Read-only tokens and ephemeral VMs reduce impact;

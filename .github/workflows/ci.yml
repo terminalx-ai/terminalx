@@ -5,10 +5,10 @@ name: CI
 # YAML is not a runner access boundary: see docs/CI-RUNNERS.md before enabling it.
 #
 # macOS runners are the scarce ones: a handful run at once for the whole
-# account, and a job that needs one waits behind every other. webkit-layout
-# needs one whenever the frontend changed; macos-native and machine-compat take
-# one only when `macos-rust-changes` selects them (docs/CI-RUNNERS.md "macOS
-# runner time"). Everything else runs on Linux, the long suites in parts.
+# account, and a job that needs one waits behind every other. macos-native,
+# machine-compat and webkit-mac-only take one only when `macos-rust-changes`
+# selects them (docs/CI-RUNNERS.md "macOS runner time"). Everything else runs
+# on Linux, the long suites in parts, the WebKit layout checks among them.
 #
 # A pull request runs the jobs its changes need: `macos-rust-changes` answers
 # for the Rust jobs, the frontend jobs, the phone app and macOS, and `check`
@@ -82,17 +82,19 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
-      # First, and on every pull request: these need nothing installed but Python.
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+      # On every pull request. These need Python and the Node of .nvmrc, no
+      # packages: the policy tests ask scripts/webkit/run-all.mjs which checks
+      # each WebKit job runs.
       - name: Verify the CI policy
         run: |
           python3 -m pip install Pillow==11.1.0 PyYAML==6.0.2
           python3 -m unittest discover -s infra/ci-runners -p 'test_*.py'
       # The icon check asks Expo for the phone app's configuration (`pnpm exec
       # expo config`), so the packages are installed on every pull request too.
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version-file: .nvmrc
       - name: Install npm dependencies
         run: pnpm install --frozen-lockfile
       - name: Verify portable source icons
@@ -156,19 +158,20 @@ jobs:
       - name: vitest
         run: pnpm vitest run --shard=${{ matrix.part }}/4
 
-  # On macOS, whenever the frontend changed. The same checks on Linux, in four
-  # parts, are .github/workflows/webkit-linux.yml: not required, and not part
-  # of `check`, until they have passed there (docs/CI-RUNNERS.md "macOS runner
-  # time").
-  webkit-layout:
+  # The WebKit layout checks on Linux, whenever the frontend changed, in four
+  # parts on four runners: `run-all.mjs --shard i/4` deals every check to
+  # exactly one part, and on Linux leaves out the ones in its `macOnly` list
+  # (each with its reason), which `webkit-mac-only` runs. A part takes 4 to 10
+  # minutes; the whole suite on the three-core macOS runner took 30 to 37.
+  webkit-layout-linux:
     needs: macos-rust-changes
     if: needs.macos-rust-changes.outputs.frontend == 'true'
-    runs-on: macos-latest
-    # On a slow runner the checks alone take 31 to 37 minutes (three at once,
-    # a load average of 9 to 55 on three cores); at 35 the job was cancelled
-    # with 116 of 128 checks done and none failed (#1518's second run). The
-    # limit comes down when the checks run on Linux, not before.
-    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -183,27 +186,89 @@ jobs:
       # `frontend` runs tsc; this needs only the built app.
       - name: Build the frontend
         run: pnpm exec vite build
-      - name: Install WebKit for the layout checks
-        run: pnpm exec playwright install webkit
-      # scripts/webkit/run-all.mjs runs them several at once, the scripts that
-      # shoot the machine screens among them.
-      - name: WebKit layout checks
-        run: pnpm test:webkit-layout
+      - name: Install WebKit and the libraries it needs
+        timeout-minutes: 10
+        run: sudo infra/ci-runners/apt-mirrors.sh && pnpm exec playwright install --with-deps webkit
+      - name: WebKit layout checks, this part of four
+        run: node scripts/webkit/run-all.mjs --shard ${{ matrix.part }}/4
         # The machine checks among them also keep their pictures (PRO-360).
         env:
           MACHINE_SIDEBAR_SHOTS: scripts/webkit/output/machines-screens/machine-sidebar
           MACHINE_SESSION_SHOTS: scripts/webkit/output/machines-screens/machine-session
           MACHINE_PORTS_SHOTS: scripts/webkit/output/machines-screens/machine-ports
-      # The machine screens the WebKit fixture shoots against two machines
-      # (PRO-358, scripts/webkit/machines-screens.mjs) and every other 21.xx
-      # screen (pairing, connection states, the machine page, updates), kept
-      # for review beside the designs.
+      # Each part keeps the machine screens of the checks it ran; webkit-layout
+      # puts them together as one artifact, and fails when there are none.
+      - name: Upload this part's machine screens
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: machine-screens-${{ matrix.part }}
+          path: scripts/webkit/output/machines-screens
+          if-no-files-found: ignore
+
+  # The required status `webkit-layout` (branch protection names it), on Linux
+  # and on every pull request: it passes only when every Linux part succeeded,
+  # or when all were skipped because the selector, which succeeded, answered
+  # "false" for the frontend. A part failed or cancelled fails it. It then keeps
+  # the machine screens (PRO-358, scripts/webkit/machines-screens.mjs, and every
+  # other 21.xx screen) as one artifact, for review beside the designs.
+  webkit-layout:
+    if: always()
+    needs: [macos-rust-changes, webkit-layout-linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require every Linux part to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -e '
+            .["macos-rust-changes"] as $selector
+            | .["webkit-layout-linux"].result as $parts
+            | $selector.result == "success"
+              and ($parts == "success"
+                   or ($parts == "skipped" and $selector.outputs.frontend == "false"))'
+      - name: Gather the machine screens
+        if: needs.webkit-layout-linux.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: machine-screens-*
+          merge-multiple: true
+          path: machine-screens
       - name: Upload the machine screens
+        if: needs.webkit-layout-linux.result == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: machine-screens
-          path: scripts/webkit/output/machines-screens
+          path: machine-screens
           if-no-files-found: error
+
+  # The WebKit checks a Linux runner cannot make (run-all.mjs `macOnly`, each
+  # with its reason), on macOS: every push to main, nightly, manual runs, and a
+  # pull request only when the selector's `mac-webkit` answer is "true": one
+  # that changes a mac-only check, what it loads, or the product it renders
+  # (docs/CI-RUNNERS.md "macOS runner time"). A mac-only check broken by any
+  # other pull request is found on main.
+  webkit-mac-only:
+    needs: macos-rust-changes
+    if: needs.macos-rust-changes.outputs.mac-webkit == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install npm dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build the frontend
+        run: pnpm exec vite build
+      - name: Install WebKit for the layout checks
+        run: pnpm exec playwright install webkit
+      - name: WebKit layout checks that need macOS
+        run: node scripts/webkit/run-all.mjs --only mac-only
 
   linux-rust:
     needs: macos-rust-changes
@@ -400,6 +465,7 @@ jobs:
       rust: ${{ steps.select.outputs.rust }}
       frontend: ${{ steps.select.outputs.frontend }}
       phone: ${{ steps.select.outputs.phone }}
+      mac-webkit: ${{ steps.select.outputs.mac-webkit }}
       machines: ${{ steps.machines.outputs.run }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -407,7 +473,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       # What this run needs: macOS, the Rust jobs, the frontend jobs, the phone
-      # app. Everything, unless it is a pull request.
+      # app, the mac-only WebKit checks. Everything, unless it is a pull request.
       - name: Select what this change needs
         id: select
         env:
@@ -1039,7 +1105,7 @@ jobs:
   check:
     # Keep the exact required status and fail closed on failed/cancelled/skipped jobs.
     if: always()
-    needs: [frontend, phone-app, vitest, webkit-layout, linux-rust, linux-rust-tests, macos-rust-changes, macos-native, headless-serve, serve-tests, machine-compat, machines-e2e, desktop-platforms, legacy-runtime-probe]
+    needs: [frontend, phone-app, vitest, webkit-layout-linux, webkit-layout, webkit-mac-only, linux-rust, linux-rust-tests, macos-rust-changes, macos-native, headless-serve, serve-tests, machine-compat, machines-e2e, desktop-platforms, legacy-runtime-probe]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1053,7 +1119,7 @@ jobs:
           echo "$RESULTS" | jq -e '
             {"macos-native": "required", "machine-compat": "machines",
              "linux-rust": "rust", "linux-rust-tests": "rust", "headless-serve": "rust", "serve-tests": "rust",
-             "vitest": "frontend", "webkit-layout": "frontend", "phone-app": "phone"} as $selected
+             "vitest": "frontend", "webkit-layout-linux": "frontend", "webkit-mac-only": "mac-webkit", "phone-app": "phone"} as $selected
             | .["macos-rust-changes"] as $selector
             | $selector.result == "success"
               and ([to_entries[] | .key as $job | .value.result

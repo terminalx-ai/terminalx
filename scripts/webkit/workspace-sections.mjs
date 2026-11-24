@@ -111,7 +111,12 @@ try {
       await handle.scrollIntoViewIfNeeded();
       const from = await handle.boundingBox(), to = await target.boundingBox();
       await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
-      await page.mouse.down(); await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 12 }); await page.mouse.up();
+      await page.mouse.down(); await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 12 });
+      // dnd-kit drops on the section it last found under the pointer, found in a render after a move. Released before
+      // that render, the drop went to the section the pointer had left (a busy Linux runner: nothing reached Review).
+      // Released once it says it is over Review, as a person lets go once the section is marked.
+      await page.getByText("Over Review", { exact: true }).waitFor();
+      await page.mouse.up();
       await target.getByTestId("cloud-workspace-group").waitFor();
       check(await page.getByRole("group", { name: "Empty section", exact: true }).getByTestId("cloud-workspace-group").count() === 0, `${width}px pointer moves a workspace into an empty section`);
       const beforeOutside = await target.getByTestId("cloud-workspace-group").count();

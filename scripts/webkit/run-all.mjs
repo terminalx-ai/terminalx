@@ -64,6 +64,8 @@ export const checks = [
   // `pnpm test:webkit-layout`, the four machine screens from CI's own step.
   "team-presence-following",
   "machines-pairing", "machine-connection", "machine-page", "machine-update",
+  // Split from dictation-edits (2026-11): its Right Option case, which only a Mac can make.
+  "dictation-hold-to-talk",
 ];
 
 /**
@@ -79,8 +81,10 @@ const entryArguments = new Map([
 ]);
 
 /**
- * The checks that are left out on a Linux host, each with why. They run on macOS as before. These are judgements made
- * on a Mac (2026-11), not seen failing on Linux: WEBKIT_MAC_ONLY_TOO=1 runs them on Linux too, to find out.
+ * The checks that are left out on a Linux host, each with why. CI runs them in its macOS job (`--only mac-only`) and
+ * every other check in its Linux parts: infra/ci-runners/test_workflow_security.py fails when a check is in neither or
+ * in both. The first five are judgements made on a Mac (2026-11), not seen failing on Linux; WEBKIT_MAC_ONLY_TOO=1 runs
+ * them on Linux too, to find out. The others were moved here from what a Linux run showed, each reason from that run.
  */
 export const macOnly = new Map([
   ["chat-scrollbar", "measures macOS's overlay scrollbars (they take no width and fade); WebKit on Linux draws GTK's own"],
@@ -88,6 +92,7 @@ export const macOnly = new Map([
   ["run-sidebar", "part of it checks the Mac's glass sidebar (backdrop blur through the window), which WebKit on Linux does not composite the same"],
   ["readable-panels", "measures text contrast through the Mac's glass panels (backdrop blur), which WebKit on Linux does not composite the same"],
   ["pr-conversation", "samples frame times while a list scrolls, against the Mac runner's frame rate"],
+  ["dictation-hold-to-talk", "holds Right Option (the Mac's key, hold:AltRight) and presses Option+Backspace to delete a word; WebKit on Linux has no editing key while Alt is held, so the edit is never made"],
 ]);
 
 /**
@@ -119,11 +124,23 @@ const startsVite = (name) => {
 // check to run for it until only Vite checks remain.
 const viteAtOnce = 2;
 
-// These measure against the clock, so other checks competing for the processor
-// would be what they measured: they run after the rest, one at a time.
-// pr-conversation samples frame times while a list scrolls. cloud-history must
-// see a loading line that its fixture replaces 2.5 s after the page subscribes.
-const alone = new Set(["pr-conversation", "cloud-history"]);
+/**
+ * The checks that run alone, each with why: they measure against the clock, so other checks competing for the
+ * processor would be what they measured. They run after the rest of their part has ended, one at a time. Being here
+ * does not move a check to another part (`dealtApart`, below).
+ */
+export const alone = new Map([
+  ["pr-conversation", "samples frame times while a list scrolls"],
+  ["cloud-history", "must see a loading line that its fixture replaces 2.5 s after the page subscribes"],
+  // Step 2's Linux probe (run 45403430912, attempt 2): 124 ms with the runner at load 11.7 and 3 WebKit at once.
+  ["machine-session", "a sent message must be drawn within 100 ms of the Enter key, timed in the page"],
+]);
+
+/**
+ * The checks `shard` deals as a kind of their own: those `alone` held when the parts were dealt this way (2026-11).
+ * One added to `alone` since keeps the part it had, so that a check moved to run alone changes no part's list.
+ */
+const dealtApart = new Set(["pr-conversation", "cloud-history"]);
 
 const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
 // The slowest check takes about five minutes on a slow runner. Past this one
@@ -183,12 +200,12 @@ function run(name) {
 
 /**
  * Part `index` (from 1) of `count` of `names`, each name in exactly one part. Each kind is dealt out in turn, in the
- * list's order: the Vite checks first, so every part gets its share of them (they start slowest); then the `alone`
- * ones, which still run alone, after the rest of their part; then the others. Which part a check is in does not
+ * list's order: the Vite checks first, so every part gets its share of them (they start slowest); then the
+ * `dealtApart` ones, which run alone, after the rest of their part; then the others. Which part a check is in does not
  * depend on the host: the checks left out on Linux are left out after the parts are dealt.
  */
 export function shard(names, index, count) {
-  const kinds = [names.filter((name) => startsVite(name) && !alone.has(name)), names.filter((name) => alone.has(name)), names.filter((name) => !startsVite(name) && !alone.has(name))];
+  const kinds = [names.filter((name) => startsVite(name) && !dealtApart.has(name)), names.filter((name) => dealtApart.has(name)), names.filter((name) => !startsVite(name) && !dealtApart.has(name))];
   const parts = Array.from({ length: count }, () => []);
   let next = 0;
   for (const kind of kinds) for (const name of kind) parts[next++ % count].push(name);
@@ -304,7 +321,10 @@ async function main() {
     }
   }
   await pool(selected.filter((name) => !alone.has(name)), jobs, async (name) => { results.push(await run(name)); });
-  for (const name of selected.filter((name) => alone.has(name))) results.push(await run(name));
+  for (const name of selected.filter((name) => alone.has(name))) {
+    console.log(`alone, after the others: ${name}: ${alone.get(name)}`);
+    results.push(await run(name));
+  }
 
   const failed = results.filter((result) => !result.ok);
   const slowest = [...results].sort((a, b) => b.ms - a.ms).slice(0, 10);
