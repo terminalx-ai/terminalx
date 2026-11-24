@@ -56,7 +56,6 @@ export const checks = [
   // bot-items, bot-handoffs, bot-runs and bot-suggestions, in one process (2026-11).
   "bot-pages",
   "bot-duties",
-  "bot-handoffs",
   "bot-message-cards",
   "bot-handoffs-page",
   "bot-calendar",
