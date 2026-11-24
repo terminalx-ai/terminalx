@@ -13,7 +13,7 @@ vi.mock("@/lib/cloudCatalog", () => ({ applyCloudSnapshot: m.apply, refreshCloud
 vi.mock("@/lib/cloudConnections", () => ({ reconnectCloudWorkspace: m.reconnect }));
 vi.mock("@/lib/cloudCollab", () => ({ workspaceAuthority: (w: any) => ({ lifecycle: w.you?.role === "manager" }) }));
 vi.mock("@/lib/cloudLifecycle", () => ({ isArchived: (w: any) => !!w.archivedAt, isOpen: (op: any) => op && ["queued", "running"].includes(op.state), lifecycleErrorMessage: (code: string) => code }));
-import { canRestartWorkspace, loadWorkspaceDetails, restartCloudWorkspace, workspaceInfo } from "./cloudWorkspaceDetails";
+import { canRestartWorkspace, loadWorkspaceDetails, provisioningLogUrl, restartCloudWorkspace, workspaceInfo } from "./cloudWorkspaceDetails";
 const item = { workspace: { id: "ws", orgId: "org", name: "Workspace", state: "ready", provider: "machine0", createdAt: 1700000000000, you: { role: "manager" } }, latestOperation: null } as unknown as CloudWorkspaceListItem;
 const snapshot = (state: string) => ({ workspace: item.workspace, operation: { id: "op", workspaceId: "ws", action: "restart", type: "create", cancelable: false, state } });
 const details = { workspace: item.workspace, details: { organizationId: "org", workspaceId: "ws", provider: "machine0", createdBy: "creator", machineId: "machine", environmentVersionId: "env", environmentVersion: { id: "env", versionNumber: 2, toolchainVersion: 4 }, repositories: [{ cloneUrl: "https://secret@example.com/repo" }], runtime: { sha256: "sha", protocol: 1, installedAt: 1700000000000 }, provisioningLog: null } } as CloudWorkspaceDetailsResponse;
@@ -39,6 +39,13 @@ describe("accepted workspace details/restart contract", () => {
     expect(text).toContain("2023-11-14T22:13:20.000Z");
     expect(text).not.toContain("secret");
     expect(text).not.toContain("Workspace number");
+  });
+  it("uses only the returned HTTPS provisioning entry without credentials", () => {
+    const link = (url: string) => provisioningLogUrl({ ...details.details, provisioningLog: { operationId: null, url } });
+    expect(link("https://console.example/organizations/org")).toBe("https://console.example/organizations/org");
+    expect(link("https://token@console.example/organizations/org")).toBeNull();
+    expect(link("http://console.example/organizations/org")).toBeNull();
+    expect(link("/organizations/org")).toBeNull();
   });
   it("keeps 202 pending, prevents duplicate submissions, polls existing operation and reconnects only on success", async () => {
     vi.useFakeTimers();

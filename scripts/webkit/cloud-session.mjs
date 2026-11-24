@@ -25,7 +25,9 @@
 // - a tab whose agent cannot sign in (PRO-110): its notice and the Agent
 //   logins button sit above the transcript, inside the window.
 // - the Phase 2 cloud header pauses and resumes forwards with ⌘Y, and
-//   announces a native automatic forward while the popover is closed.
+//   announces a native automatic forward while the popover is closed;
+// - the Phase 2 details card fits in a short viewport, samples CPU, and the
+//   workspace menu and header reflect readiness and queued restart feedback.
 //
 // A cloud session is reached through the command palette ("Go to cloud
 // session…", then its title): the chat-first sidebar lists no cloud sessions.
@@ -88,6 +90,119 @@ function inPlace(layout, also = {}) {
 const server = await serve();
 const browser = await launch();
 let failed = 0;
+
+for (const ready of [false, true]) {
+  const viewport = { width: 960, height: 450 };
+  const page = await open(browser, server.url, { cloud: true, localProjects: 0, session: { role: "manager", lines: 4 } }, viewport, {
+    extra: `(() => {
+      const { answers, emit } = window.__PW_STUB__;
+      const org = answers.cloud_catalog_load.orgs["org-a"];
+      const row = org.workspaces[0];
+      org.sessions.w1.capabilities.push("lifecycle/1");
+      const check = window.__PW_DETAILS__ = { requests: [], copied: [], opened: [], polls: [], restarts: [], done: false };
+      if (${ready}) answers.account_status.phase2Readiness = { "org-a": ["cloud.workspaces.restart-details.v1"] };
+      const url = "https://console.example/organizations/org-a";
+      answers.cloud_workspace_details = (args) => {
+        check.requests.push(args);
+        return { workspace: row.workspace, details: {
+          organizationId: "org-a", workspaceId: "w1", createdBy: "u-owner", provider: row.workspace.provider,
+          repositories: [{ fullName: "demo/repo", ref: "main" }], machineId: "machine-w1",
+          environmentVersionId: "env-2", environmentVersion: { id: "env-2", versionNumber: 2, toolchainVersion: 4 },
+          runtime: { sha256: "fixture-sha", protocol: 1, installedAt: Date.now() },
+          provisioningLog: { url, operationId: null },
+        } };
+      };
+      answers.copy_text = ({ text }) => { check.copied.push(text); };
+      answers["plugin:opener|open_url"] = ({ url }) => { check.opened.push(url); };
+      const snapshot = (state) => {
+        row.latestOperation = {
+          id: "restart-op", workspaceId: "w1", action: "restart", type: "create", state, cancelable: false,
+          createdAt: Date.now(), updatedAt: Date.now(),
+        };
+        return { workspace: row.workspace, operation: row.latestOperation };
+      };
+      answers.cloud_workspace_restart = (args) => { check.restarts.push(args); return snapshot("queued"); };
+      answers.cloud_workspace_operation = (args) => {
+        check.polls.push(args);
+        return snapshot(check.done ? "succeeded" : "running");
+      };
+      const send = answers.cloud_remote_send;
+      answers.cloud_remote_send = (args) => {
+        if (args.frame.method !== "lifecycle.resources") return send(args);
+        const result = {
+          v: 1, observedAt: Date.now(), cpu: { cores: 4, usage: 0.25 },
+          memory: { totalBytes: 4294967296, availableBytes: 2147483648 },
+          storage: { totalBytes: 21474836480, availableBytes: 10737418240, totalInodes: 100, availableInodes: 90 },
+        };
+        const message = { id: args.frame.id, ok: true, result };
+        setTimeout(() => emit("cloud_remote_event", { kind: "message", connectionId: "conn-1", message }), 0);
+        return true;
+      };
+    })()`,
+  });
+  await openCloudSession(page, await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle));
+  await page.getByTestId("cloud-agent-lease").waitFor();
+  const details = page.getByRole("button", { name: "Workspace details", exact: true });
+  const menu = page.getByTestId("session-location");
+  await menu.click();
+  const copyMachine = page.getByRole("menuitem", { name: "Copy machine ID" });
+  const copyInfo = page.getByRole("menuitem", { name: "Copy workspace info" });
+  const log = page.getByRole("menuitem", { name: "Open provisioning log" });
+  const restartMenu = page.getByRole("menuitem", { name: "Restart workspace…" });
+  if (!ready) {
+    await page.getByRole("menuitem", { name: "Share…" }).waitFor();
+    failed += report("Phase 2 workspace details held", {
+      "the header and menu stay held by default": (await details.count()) === 0 && (await copyMachine.count()) === 0 &&
+        (await copyInfo.count()) === 0 && (await log.count()) === 0 && (await restartMenu.count()) === 0,
+      "no details or restart calls": await page.evaluate(() => !window.__PW_DETAILS__.requests.length && !window.__PW_DETAILS__.restarts.length),
+    });
+    await page.close();
+    continue;
+  }
+  await restartMenu.waitFor();
+  await copyMachine.click();
+  await page.getByText("Copied machine ID", { exact: true }).waitFor();
+  await menu.click();
+  await copyInfo.click();
+  await page.getByText("Copied workspace info", { exact: true }).waitFor();
+  await menu.click();
+  await log.click();
+  await page.waitForFunction(() => window.__PW_DETAILS__.opened.length === 1);
+  await details.click();
+  const popover = page.getByRole("dialog", { name: "Workspace details" });
+  await popover.getByText("4 cores · 25% used").waitFor();
+  const health = popover.getByRole("region", { name: "Workspace health" });
+  const resourceReadings = (await health.getByText("2.0 GB used of 4.0 GB").count()) === 1
+    && (await health.getByText("10 GB used of 20 GB").count()) === 1;
+  const cardBounds = await popover.boundingBox();
+  const fits = cardBounds && cardBounds.x >= 0 && cardBounds.y >= 0 &&
+    cardBounds.x + cardBounds.width <= viewport.width + SLACK && cardBounds.y + cardBounds.height <= viewport.height + SLACK;
+  await health.getByRole("button", { name: "Restart", exact: true }).click();
+  const confirmation = page.getByRole("dialog", { name: "Restart share-demo?" });
+  const submit = confirmation.getByRole("button", { name: "Restart workspace", exact: true });
+  const requiresConfirmation = await submit.isDisabled();
+  await confirmation.getByRole("checkbox").check();
+  await submit.click();
+  await confirmation.getByText(/Restart pending/).waitFor();
+  await page.getByTestId("cloud-workspace-restarting").waitFor();
+  await page.waitForFunction(() => window.__PW_DETAILS__.polls.length > 0);
+  const noEarlySuccess = (await page.getByText("Restarted workspace", { exact: true }).count()) === 0;
+  await page.evaluate(() => { window.__PW_DETAILS__.done = true; });
+  await page.getByText("Restarted workspace", { exact: true }).waitFor();
+  await page.getByTestId("cloud-workspace-restarting").waitFor({ state: "hidden" });
+  const check = await page.evaluate(() => window.__PW_DETAILS__);
+  failed += report("Phase 2 workspace details and restart", {
+    "short viewport contains the details popover with live CPU, memory and disk": fits && resourceReadings,
+    "copy actions and provision log use the returned workspace details": check.copied[0] === "machine-w1" &&
+      /Organisation ID: org-a[\s\S]+Workspace ID: w1[\s\S]+Runtime SHA256: fixture-sha/.test(check.copied[1]) &&
+      check.opened[0] === "https://console.example/organizations/org-a" && check.requests.length === 4 &&
+      check.requests.every((request) => request.orgId === "org-a" && request.workspaceId === "w1"),
+    "restart waits for confirmation and a matching terminal operation": requiresConfirmation && noEarlySuccess &&
+      JSON.stringify(check.restarts) === JSON.stringify([{ workspaceId: "w1", orgId: "org-a" }]) &&
+      check.polls.every((poll) => poll.orgId === "org-a" && poll.operationId === "restart-op"),
+  }, { cardBounds, check });
+  await page.close();
+}
 
 for (const role of ["manager", "viewer"]) {
   const name = `cloud session (${role})`;
