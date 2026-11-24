@@ -31,6 +31,7 @@ fn profile_error(status: u16, code: Option<&str>) -> &'static str {
         (404, Some("user_not_found")) => "Your account could not be found.",
         (404, _) => UNSUPPORTED,
         (413, _) => "The display name request is too large.",
+        (500, Some("server_error")) => "The account service couldn’t save your display name. Try again later.",
         _ => "Couldn’t save your display name. Try again.",
     }
 }
@@ -310,7 +311,7 @@ mod tests {
             (
                 500,
                 Some("server_error"),
-                "Couldn’t save your display name. Try again.",
+                "The account service couldn’t save your display name. Try again later.",
             ),
         ] {
             assert_eq!(profile_error(status, code), message);
