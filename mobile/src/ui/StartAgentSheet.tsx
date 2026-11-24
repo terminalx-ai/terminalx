@@ -31,14 +31,15 @@ const newRequestId = () => `phone-${Date.now().toString(36)}-${Math.random().toS
  * workspace starts (`waking`) the message can be written, and the choices
  * appear once it runs.
  */
-export function StartAgentSheet({ kind, session, snapshot, sessionId, initialText = "", waking, wakeFailure, onRetryWake, onStarted, onClose }: {
+export function StartAgentSheet({ kind, session, snapshot, sessionId, text, onText, waking, wakeFailure, onRetryWake, onStarted, onClose }: {
   kind: "conversation" | "tab";
   session: CloudWorkspaceSession;
   snapshot: CloudWorkspaceSnapshot;
   /** The conversation an added tab joins (the tab on screen's). */
   sessionId?: string | null;
-  /** The message to start with: one that was not sent to a tab that is gone. */
-  initialText?: string;
+  /** The first message, held by the screen: closing the sheet keeps it for the next time it opens. */
+  text: string;
+  onText(text: string): void;
   /** Stopped when the sheet was asked for, and starting now. */
   waking?: boolean;
   /** The start's own sentence, when the workspace did not start. */
@@ -51,7 +52,6 @@ export function StartAgentSheet({ kind, session, snapshot, sessionId, initialTex
   const insets = useSafeAreaInsets();
   const [reading, setReading] = useState<Reading>({ state: "reading" });
   const [choices, setChoices] = useState<StartChoices | null>(null);
-  const [text, setText] = useState(initialText);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<StartFailure | null>(null);
   const [picker, setPicker] = useState<Picker>(null);
@@ -159,7 +159,7 @@ export function StartAgentSheet({ kind, session, snapshot, sessionId, initialTex
               onEffort={locked || !model || model.efforts.length < 2 ? undefined : () => setPicker("effort")}
               onMode={locked || !agent || agent.modes.length < 2 ? undefined : () => setPicker("mode")} />
             : spinnerLine ? <Skeleton /> : null}
-          {conversation && !(wakeFailure || reading.state === "unread") ? <TextField testID="start-message" multiline accessibilityLabel="First message" placeholder={START_WORDS.placeholder} value={text} onChangeText={setText} disabled={locked}
+          {conversation && !(wakeFailure || reading.state === "unread") ? <TextField testID="start-message" multiline accessibilityLabel="First message" placeholder={START_WORDS.placeholder} value={text} onChangeText={onText} disabled={locked}
             helper={emptyAllowed && !text.trim() && !failure ? START_WORDS.noMessage : undefined} /> : null}
           {failure ? <Notice testID="start-failure" tone={failure.kind === "no-answer" || failure.kind === "offline" ? "warning" : failure.kind === "refused" ? "warning" : "danger"} text={failure.text} icon={failure.kind === "no-answer" || failure.kind === "offline" ? (color) => <WifiOff size={16} color={color} /> : undefined} /> : null}
           <Button testID="start-submit" label={label} disabled={!canSend} onPress={() => void start()} style={styles.submit} />

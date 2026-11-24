@@ -140,7 +140,9 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
   // New conversation and Add agent tab (25.10), for a manager the runtime lets start agents from a phone.
   const manager = roleNow === "manager";
   const offer = snapshot.startOffer;
-  const [sheet, setSheet] = useState<{ kind: "conversation" | "tab"; text?: string; replaces?: string } | null>(null);
+  const [sheet, setSheet] = useState<{ kind: "conversation" | "tab"; replaces?: string } | null>(null);
+  // What was typed in the sheet stays when it is closed, until a conversation starts with it.
+  const [sheetText, setSheetText] = useConversationState(`cloud:${scope}:start-draft`, "");
   const [waking, setWaking] = useState(false);
   const [wakeFailure, setWakeFailure] = useState<string | null>(null);
   const [promptNotSent, setPromptNotSent] = useState<string | null>(null);
@@ -151,15 +153,17 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
   };
   if (waking && live) setWaking(false);
   const openSheet = (kind: "conversation" | "tab", text?: string, replaces?: string) => {
-    if (!stopped) return setSheet({ kind, text, replaces });
+    if (text !== undefined) setSheetText(text);
+    if (!stopped) return setSheet({ kind, replaces });
     // Stopped: a new conversation starts it, which is billed, so it is asked first; then the sheet opens at once.
     Alert.alert(START_WORDS.startAsk, START_WORDS.startAskText, [
       { text: "Cancel", style: "cancel" },
-      { text: "Start", onPress: () => { wake(); setSheet({ kind, text, replaces }); } },
+      { text: "Start", onPress: () => { wake(); setSheet({ kind, replaces }); } },
     ]);
   };
   const started = ({ tabId: opened, promptNotSent: notSent, text }: StartedTab) => {
     const replaced = sheet?.replaces;
+    if (sheet?.kind === "conversation") setSheetText("");
     setSheet(null);
     setChosen(opened);
     // The message a gone tab could not take went with the new conversation: it is let go of, and the gone tab with it.
@@ -212,14 +216,14 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
       : tab ? <Conversation key={tab.tabId} catalog={catalog} session={session} scope={scope} orgId={orgId} workspaceId={workspaceId} tabId={tab.tabId} live={live} listedState={listedState} stop={stop}
         goneHelp={goneHelp} promptNotSent={promptNotSent === tab.tabId} />
       : <View style={styles.flex}>
-        <View style={[styles.flex, styles.centred]}>{live || (stopped && manager && !starting) ? <EmptyStart manager={manager} offer={live ? offer : "yes"} disabled={!!sheet}
+        <View style={[styles.flex, styles.centred]}>{live || (manager && (stopped || waking) && !starting) ? <EmptyStart manager={manager} offer={live ? offer : "yes"} disabled={!!sheet || waking}
             onStart={() => openSheet("conversation")} onStop={PROVEN_BY_LIVE_CHECK.stopAndStartReplacesRuntime && stopAction ? stopAction.run : undefined} />
           : stopped || starting || listedState === "attention-required" ? <EmptyState icon={(color) => <MessageSquareDashed size={34} color={color} strokeWidth={1.6} />} title="No conversation yet" detail={listedState === "attention-required" ? "Nothing has been saved in this workspace yet." : "Nothing was said in this workspace before it stopped."} />
           : listedState === "archived" ? <EmptyState title="No conversation yet" detail="Nothing was saved in this workspace before it was archived." />
           : <EmptyState title="Connecting…" detail="The conversation shows once this phone reaches the workspace." busy />}</View>
         {startBarShown(listedState, starting, live, stop) ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={roleNow} creatorId={listed?.createdBy ?? null} starting={starting} /> : null}
       </View>}
-    {sheet ? <StartAgentSheet kind={sheet.kind} session={session} snapshot={snapshot} sessionId={tab?.sessionId ?? null} initialText={sheet.text}
+    {sheet ? <StartAgentSheet kind={sheet.kind} session={session} snapshot={snapshot} sessionId={tab?.sessionId ?? null} text={sheetText} onText={setSheetText}
       waking={waking && !live} wakeFailure={live ? null : wakeFailure} onRetryWake={wake} onStarted={started} onClose={() => setSheet(null)} /> : null}
   </>;
 }

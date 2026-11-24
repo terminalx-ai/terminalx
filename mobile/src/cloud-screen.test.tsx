@@ -49,7 +49,7 @@ vi.mock("react-native", () => {
 });
 // The start sheet has its own tests (StartAgentSheet.test.tsx); here, what the screen opens it with, and what it does with its answer.
 vi.mock("@mobile/ui/StartAgentSheet", () => ({
-  StartAgentSheet: (props: any) => (mocks.sheet = props) && <div data-testid="start-sheet">{`${props.kind}|${props.initialText ?? ""}|${props.waking ? "waking" : ""}`}</div>,
+  StartAgentSheet: (props: any) => (mocks.sheet = props) && <div data-testid="start-sheet">{`${props.kind}|${props.text}|${props.waking ? "waking" : ""}`}</div>,
 }));
 vi.mock("@mobile/ui/Notice", () => ({ Notice: ({ text, testID }: any) => <div data-testid={testID}>{text}</div> }));
 vi.mock("@mobile/ui/primitives", () => ({
@@ -1102,6 +1102,20 @@ describe("starting a conversation from the phone (25.10)", () => {
     await click("Workspace actions");
     // No tab to add one beside: Add agent tab is not offered.
     expect(offered()).toEqual(["New conversation", "Stop workspace", "Delete workspace…", "Cancel"]);
+  });
+
+  it("closing the sheet keeps what was typed for the next time it opens; starting with it clears it", async () => {
+    world({ role: "manager", tabs: 0, startOffer: "yes" });
+    await show(<CloudWorkspaceScreen />);
+    await click("Start a conversation");
+    await act(async () => mocks.sheet.onText("Update the changelog"));
+    await act(async () => mocks.sheet.onClose());
+    await click("Start a conversation");
+    expect(sheet()).toBe("conversation|Update the changelog|");
+    await act(async () => mocks.sheet.onStarted({ tabId: "t1", promptNotSent: false, text: "Update the changelog" }));
+    await click("Workspace actions");
+    await act(async () => mocks.alert.mock.calls.at(-1)![2][0].onPress());
+    expect(sheet()).toBe("conversation||");
   });
 
   it("a running workspace with a tab offers both, above Stop and Delete", async () => {

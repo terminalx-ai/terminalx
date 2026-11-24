@@ -1,0 +1,166 @@
+# 25.10 Start a conversation and add an agent tab from the phone (PRO-548), in a running workspace
+# whose runtime answers in the fixture (`live-workspace.ts`), and in a stopped one.
+appId: com.terminalx.phone.fixture
+# The boards are drawn in Ember when dark and in Den when light: MAESTRO_THEME=Den for the light run.
+env:
+  THEME: ${MAESTRO_THEME || "Ember"}
+name: Start a conversation (25.10)
+---
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected }
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+- tapOn: "${THEME} theme"
+# A manager, no conversation yet.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: /cloud, openWorkspace: ws-search }
+- extendedWaitUntil: { visible: "Start one with an agent.", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-01-empty-manager
+- tapOn: { id: "empty-start-button" }
+- extendedWaitUntil: { visible: "Permission mode: Ask every time", timeout: 10000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-02-sheet-ready
+- tapOn: { id: "pick-agent" }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-03-agent-picker
+- tapOn: { id: "choice-sheet-backdrop", index: 0 }
+- tapOn: { id: "pick-model" }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-04-model-picker
+- tapOn: { id: "choice-sheet-backdrop", index: 0 }
+- tapOn: { id: "pick-permission-mode" }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-05-mode-picker
+- tapOn: { id: "choice-sheet-backdrop", index: 0 }
+- tapOn: "First message"
+- inputText: "Update the changelog for the search filters."
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-06-writing
+- tapOn: "Start conversation"
+- extendedWaitUntil: { visible: "Update the changelog for the search filters.", timeout: 10000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-07-started
+# Add agent tab, beside a conversation.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: /cloud, openWorkspace: ws-search, fixtureStart: tab }
+- extendedWaitUntil: { visible: ".*Want me to open the pull request.*", timeout: 20000 }
+- tapOn: { id: "workspace-actions" }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-08-actions
+- tapOn: "Add agent tab"
+- extendedWaitUntil: { visible: "Permission mode: Ask every time", timeout: 10000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-09-add-tab-sheet
+- tapOn: "Add tab"
+- extendedWaitUntil: { visible: "Agent 2", timeout: 10000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-10-tab-added
+# Someone who may not start one.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: /cloud, openWorkspace: ws-search, fixtureStart: other }
+- extendedWaitUntil: { visible: ".*can start one.", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-11-empty-other
+# A runtime too old.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: /cloud, openWorkspace: ws-search, fixtureStart: old }
+- extendedWaitUntil: { visible: ".*needs a newer runtime.*", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-12-runtime-too-old
+- tapOn: { id: "workspace-actions" }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-13-runtime-too-old-actions
+# The agents could not be read.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: /cloud, openWorkspace: ws-search, fixtureStart: unread }
+- extendedWaitUntil: { visible: "Start one with an agent.", timeout: 20000 }
+- tapOn: { id: "empty-start-button" }
+- extendedWaitUntil: { visible: "The agents in this workspace could not be read.", timeout: 10000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-14-agents-unread
+# Refused for the role.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: /cloud, openWorkspace: ws-search, fixtureStart: refused }
+- extendedWaitUntil: { visible: "Start one with an agent.", timeout: 20000 }
+- tapOn: { id: "empty-start-button" }
+- extendedWaitUntil: { visible: "Permission mode: Ask every time", timeout: 10000 }
+- tapOn: "First message"
+- inputText: "Run the tests."
+- tapOn: "New conversation"
+- tapOn: "Start conversation"
+- extendedWaitUntil: { visible: "Only this workspace's creator or an organization owner or admin can do that.", timeout: 10000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-15-refused
+# The first message did not reach the agent.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: /cloud, openWorkspace: ws-search, fixtureStart: prompt-failed }
+- extendedWaitUntil: { visible: "Start one with an agent.", timeout: 20000 }
+- tapOn: { id: "empty-start-button" }
+- extendedWaitUntil: { visible: "Permission mode: Ask every time", timeout: 10000 }
+- tapOn: "First message"
+- inputText: "Run the tests."
+- tapOn: "New conversation"
+- tapOn: "Start conversation"
+- extendedWaitUntil: { visible: ".*may not have reached it.", timeout: 10000 }
+- hideKeyboard
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-16-first-message-not-sent
+# A tab closed elsewhere while a message was on its way.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: /cloud, openWorkspace: ws-search, fixtureStart: gone }
+- extendedWaitUntil: { visible: ".*Want me to open the pull request.*", timeout: 20000 }
+- tapOn: "Message for the agent"
+- inputText: "Open the pull request."
+- tapOn: "Send"
+- extendedWaitUntil: { visible: "Not sent: this agent tab is no longer in the workspace.", timeout: 20000 }
+- hideKeyboard
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-17-tab-gone
+# No answer: the request is asked once and never answered (the client gives up after 30 s).
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: /cloud, openWorkspace: ws-search, fixtureStart: no-answer }
+- extendedWaitUntil: { visible: "Start one with an agent.", timeout: 20000 }
+- tapOn: { id: "empty-start-button" }
+- extendedWaitUntil: { visible: "Permission mode: Ask every time", timeout: 10000 }
+- tapOn: "First message"
+- inputText: "Run the tests."
+- tapOn: "New conversation"
+- tapOn: "Start conversation"
+- extendedWaitUntil: { visible: "No answer came back. Try again: nothing is started twice.", timeout: 120000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-18-no-answer
+# A stopped workspace with nothing in it: the sentence and button over the Start bar, the question, and the start.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: /cloud, openWorkspace: ws-warm-up-five, fixtureResume: hold }
+- extendedWaitUntil: { visible: "Start one with an agent.", timeout: 20000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-19-stopped-empty
+- tapOn: { id: "empty-start-button" }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-20-start-alert
+- tapOn: "Start"
+- extendedWaitUntil: { visible: "Starting the workspace. The choices appear when it is running.", timeout: 10000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-21-waking
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: /cloud, openWorkspace: ws-warm-up-five, fixtureResume: fail }
+- extendedWaitUntil: { visible: "Start one with an agent.", timeout: 20000 }
+- tapOn: { id: "empty-start-button" }
+- tapOn: "Start"
+- extendedWaitUntil: { visible: "The cloud provider is not answering right now. Try again in a moment.", timeout: 10000 }
+- waitForAnimationToEnd
+- takeScreenshot: 25.10-22-did-not-start

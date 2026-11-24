@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceRpcError, type RuntimeAgent } from "@terminalx/portable/workspace";
 import { PROVEN_BY_LIVE_CHECK, START_WORDS, startAgents } from "@mobile/cloud/start-tab";
@@ -15,6 +15,12 @@ vi.mock("./Spinner", () => ({ Spinner: () => <i data-testid="spinner" /> }));
 vi.mock("expo-clipboard", () => ({ getStringAsync: vi.fn() }));
 
 const page = stage();
+
+/** The screen's side: it holds what is typed, as the workspace screen does. */
+function Held(props: Omit<Parameters<typeof StartAgentSheet>[0], "text" | "onText"> & { initialText?: string }) {
+  const [text, setText] = useState(props.initialText ?? "");
+  return <StartAgentSheet {...props} text={text} onText={setText} />;
+}
 const CLAUDE: RuntimeAgent = {
   id: "claude", name: "Claude Code", caps: {} as never, defaultMode: "bypassPermissions", signIn: "signedIn", modes: ["plan", "manual", "auto", "acceptEdits", "bypassPermissions"],
   models: [{ id: "opus", label: "Opus", efforts: ["medium", "high"], defaultEffort: "high", isDefault: true } as never, { id: "sonnet", label: "Sonnet", efforts: [], defaultEffort: null, isDefault: false } as never],
@@ -48,7 +54,7 @@ describe("the start sheet (25.10)", () => {
     let finish!: () => void;
     const read = w.answers.agents;
     w.answers.agents = () => new Promise((resolve) => { finish = () => resolve(read()); });
-    await page.show(<StartAgentSheet kind="conversation" session={w.session} snapshot={snap()} onStarted={vi.fn()} onClose={vi.fn()} />);
+    await page.show(<Held kind="conversation" session={w.session} snapshot={snap()} onStarted={vi.fn()} onClose={vi.fn()} />);
     expect(page.byText(START_WORDS.reading)).not.toBeNull();
     expect(page.byId("start-skeleton")).not.toBeNull();
     expect(page.byId("start-submit")!.getAttribute("aria-disabled")).toBe("true");
@@ -61,7 +67,7 @@ describe("the start sheet (25.10)", () => {
   it("starts with what was typed, and hands back the tab it opened", async () => {
     const w = workspace();
     const started = vi.fn();
-    await page.show(<StartAgentSheet kind="conversation" session={w.session} snapshot={snap()} onStarted={started} onClose={vi.fn()} />);
+    await page.show(<Held kind="conversation" session={w.session} snapshot={snap()} onStarted={started} onClose={vi.fn()} />);
     // Until the live check proves an empty first message starts the agent, Start needs a message, and nothing says otherwise.
     expect(page.byId("start-submit")!.getAttribute("aria-disabled")).toBe("true");
     expect(page.byText(START_WORDS.noMessage)).toBeNull();
@@ -74,7 +80,7 @@ describe("the start sheet (25.10)", () => {
   it("with the flag on, says an empty first message starts the agent waiting, and lets it start", async () => {
     PROVEN_BY_LIVE_CHECK.emptyFirstMessageStartsAgent = true;
     const w = workspace();
-    await page.show(<StartAgentSheet kind="conversation" session={w.session} snapshot={snap()} onStarted={vi.fn()} onClose={vi.fn()} />);
+    await page.show(<Held kind="conversation" session={w.session} snapshot={snap()} onStarted={vi.fn()} onClose={vi.fn()} />);
     expect(page.byText(START_WORDS.noMessage)).not.toBeNull();
     expect(page.byId("start-submit")!.getAttribute("aria-disabled")).not.toBe("true");
   });
@@ -82,7 +88,7 @@ describe("the start sheet (25.10)", () => {
   it("Add agent tab: its line under the title, no message, and session.addTab for the conversation on screen", async () => {
     const w = workspace();
     const started = vi.fn();
-    await page.show(<StartAgentSheet kind="tab" session={w.session} snapshot={snap()} sessionId="s1" onStarted={started} onClose={vi.fn()} />);
+    await page.show(<Held kind="tab" session={w.session} snapshot={snap()} sessionId="s1" onStarted={started} onClose={vi.fn()} />);
     expect(page.byText(START_WORDS.addTab)).not.toBeNull();
     expect(page.byText(START_WORDS.addTabUnder)).not.toBeNull();
     expect(page.byLabel("First message")).toBeNull();
@@ -94,7 +100,7 @@ describe("the start sheet (25.10)", () => {
 
   it("lists agents not signed in or not installed, dimmed and not pickable, and the four modes without bypass and with the owner's line", async () => {
     const w = workspace();
-    await page.show(<StartAgentSheet kind="conversation" session={w.session} snapshot={snap()} onStarted={vi.fn()} onClose={vi.fn()} />);
+    await page.show(<Held kind="conversation" session={w.session} snapshot={snap()} onStarted={vi.fn()} onClose={vi.fn()} />);
     await page.press(page.byId("pick-agent"));
     expect(page.byText(START_WORDS.agentsSubtitle)).not.toBeNull();
     expect(page.byId("choice-gemini")!.getAttribute("aria-disabled")).toBe("true");
@@ -110,7 +116,7 @@ describe("the start sheet (25.10)", () => {
   it("no answer: says so, offers Try again, and asks again with the same request", async () => {
     const w = workspace();
     w.answers.create = async () => { throw new Error("RPC timed out: session.create"); };
-    await page.show(<StartAgentSheet kind="conversation" session={w.session} snapshot={snap()} onStarted={vi.fn()} onClose={vi.fn()} />);
+    await page.show(<Held kind="conversation" session={w.session} snapshot={snap()} onStarted={vi.fn()} onClose={vi.fn()} />);
     await page.type(page.byLabel("First message"), "Go");
     await page.press(page.byId("start-submit"));
     expect(page.byText(START_WORDS.noAnswer)).not.toBeNull();
@@ -122,7 +128,7 @@ describe("the start sheet (25.10)", () => {
   it("a refusal says who can, and the next try is a new request", async () => {
     const w = workspace();
     w.answers.create = async () => { throw new WorkspaceRpcError("forbidden", "needs a workspace manager", "session.create", { role: "driver" }); };
-    await page.show(<StartAgentSheet kind="conversation" session={w.session} snapshot={snap()} onStarted={vi.fn()} onClose={vi.fn()} />);
+    await page.show(<Held kind="conversation" session={w.session} snapshot={snap()} onStarted={vi.fn()} onClose={vi.fn()} />);
     await page.type(page.byLabel("First message"), "Go");
     await page.press(page.byId("start-submit"));
     expect(page.byText(START_WORDS.refused)).not.toBeNull();
@@ -133,7 +139,7 @@ describe("the start sheet (25.10)", () => {
   it("any other refusal is the general sentence", async () => {
     const w = workspace();
     w.answers.create = async () => { throw new WorkspaceRpcError("invalid_params", "mode is required", "session.create", { reason: "mode-required" }); };
-    await page.show(<StartAgentSheet kind="conversation" session={w.session} snapshot={snap()} onStarted={vi.fn()} onClose={vi.fn()} />);
+    await page.show(<Held kind="conversation" session={w.session} snapshot={snap()} onStarted={vi.fn()} onClose={vi.fn()} />);
     await page.type(page.byLabel("First message"), "Go");
     await page.press(page.byId("start-submit"));
     expect(page.byText(START_WORDS.other)).not.toBeNull();
@@ -142,7 +148,7 @@ describe("the start sheet (25.10)", () => {
   it("the agents could not be read: the danger line with Try again, and nothing else to do", async () => {
     const w = workspace();
     w.answers.agents = async () => { throw new Error("method_not_found"); };
-    await page.show(<StartAgentSheet kind="conversation" session={w.session} snapshot={snap()} onStarted={vi.fn()} onClose={vi.fn()} />);
+    await page.show(<Held kind="conversation" session={w.session} snapshot={snap()} onStarted={vi.fn()} onClose={vi.fn()} />);
     expect(page.byText(START_WORDS.unread)).not.toBeNull();
     expect(page.byId("start-rows")).toBeNull();
     expect(page.byLabel("First message")).toBeNull();
@@ -151,14 +157,14 @@ describe("the start sheet (25.10)", () => {
 
   it("not connected: says so, and Start waits for the connection", async () => {
     const w = workspace(false);
-    await page.show(<StartAgentSheet kind="conversation" session={w.session} snapshot={snap({ connection: { state: "stopped" } as never, startOffer: null })} onStarted={vi.fn()} onClose={vi.fn()} />);
+    await page.show(<Held kind="conversation" session={w.session} snapshot={snap({ connection: { state: "stopped" } as never, startOffer: null })} onStarted={vi.fn()} onClose={vi.fn()} />);
     expect(page.byText(START_WORDS.offline)).not.toBeNull();
     expect(page.byId("start-submit")!.getAttribute("aria-disabled")).toBe("true");
   });
 
   it("while the workspace starts: the spinner line, the rows' outline, and a message can be written", async () => {
     const w = workspace(false);
-    await page.show(<StartAgentSheet kind="conversation" session={w.session} snapshot={snap({ connection: { state: "connecting" } as never, startOffer: null })} waking onStarted={vi.fn()} onClose={vi.fn()} />);
+    await page.show(<Held kind="conversation" session={w.session} snapshot={snap({ connection: { state: "connecting" } as never, startOffer: null })} waking onStarted={vi.fn()} onClose={vi.fn()} />);
     expect(page.byText(START_WORDS.waking)).not.toBeNull();
     expect(page.byId("start-skeleton")).not.toBeNull();
     expect(page.byLabel("First message")).not.toBeNull();
@@ -168,7 +174,7 @@ describe("the start sheet (25.10)", () => {
   it("the workspace did not start: the start's own sentence with Try again, the message kept", async () => {
     const w = workspace(false);
     const retry = vi.fn();
-    await page.show(<StartAgentSheet kind="conversation" session={w.session} snapshot={snap({ connection: { state: "stopped" } as never, startOffer: null })} initialText="Keep me"
+    await page.show(<Held kind="conversation" session={w.session} snapshot={snap({ connection: { state: "stopped" } as never, startOffer: null })} initialText="Keep me"
       waking wakeFailure="The cloud provider is not answering right now. Try again in a moment." onRetryWake={retry} onStarted={vi.fn()} onClose={vi.fn()} />);
     expect(page.byText("The cloud provider is not answering right now. Try again in a moment.")).not.toBeNull();
     await page.press(page.byText(START_WORDS.tryAgain)?.closest("[role='button']") ?? null);
@@ -178,7 +184,7 @@ describe("the start sheet (25.10)", () => {
 
   it("a runtime too old says to restart it, and nothing can be started", async () => {
     const w = workspace();
-    await page.show(<StartAgentSheet kind="conversation" session={w.session} snapshot={snap({ startOffer: "old" })} onStarted={vi.fn()} onClose={vi.fn()} />);
+    await page.show(<Held kind="conversation" session={w.session} snapshot={snap({ startOffer: "old" })} onStarted={vi.fn()} onClose={vi.fn()} />);
     expect(page.byText(START_WORDS.old)).not.toBeNull();
     expect(page.byId("start-submit")!.getAttribute("aria-disabled")).toBe("true");
   });
