@@ -8,7 +8,8 @@ showing “This Mac,” and missing filter presence states. On the current base,
 the account-and-organization-scoped By menu coexisted with a second global
 People picker. The latter used agent state and recent session timestamps as
 presence. The overview now has one By menu and uses current workspace presence
-for the header and filter. Legacy unscoped owner choices have no effect.
+for the header and filter when presence is ready. The held dashboard retains its
+existing People chip, Active now faces and named Owner cells.
 
 - **02.01 and 02.15.** Owned cloud rows show the current owner’s profile avatar.
   The table offers Owner, Status, and Last active sorting. Owner and Status
@@ -17,11 +18,12 @@ for the header and filter. Legacy unscoped owner choices have no effect.
   owner and do not count as Mine.
 - **02.04.** Where appears for a presence-ready visible organization even with
   no paired machine. Named sidebar workspace rows expose the teammate profile
-  as its own button. The organization header obtains its online count from the
+  as its own button, up to three faces followed by a count of the rest. The organization header obtains its online count from the
   authorized aggregate.
 - **02.05.** By is a searchable multi-select with Anyone reset and per-account,
   per-organization persistence. Each option can show Active when the selected
-  organization’s current projection includes the member. The five Views use
+  organization’s current projection includes the member. Cached workspace ownership
+keeps the filter and Owner column usable when the catalog is offline. The five Views use
   the same filtered dataset for rows and counts. Following continues to use
   its independent readiness and current catalog preference.
 - **13.25 and 13.14.** The profile dot distinguishes online, known offline,

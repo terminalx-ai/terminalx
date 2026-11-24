@@ -191,3 +191,12 @@ it("uses only authorized live presence for the By menu and profiles, and drops i
   expect(screen.getByRole("button", { name: "View profile: Bob", hidden: true }).dataset.online).toBeUndefined();
   expect(screen.getByText("Presence unavailable")).toBeTruthy();
 });
+
+
+it("caps compact workspace faces and shows how many more people are present", () => {
+  const people = Array.from({ length: 5 }, (_, index) => ({ userId: `person-${index}`, displayName: `Person ${index}`, photoUrl: null }));
+  f.presence = { state: "live", activeMembers: people, workspaces: [{ workspaceId: "workspace", owner: people[0], activeMembers: people }] };
+  render(<PresenceFaces orgId="org" workspaceId="workspace" compact />);
+  expect(screen.getAllByRole("button", { name: /View profile:/ })).toHaveLength(3);
+  expect(screen.getByLabelText("2 more people").textContent).toBe("+2");
+});

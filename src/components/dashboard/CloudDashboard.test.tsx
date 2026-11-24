@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_DASHBOARD_PREFERENCES } from "@terminalx/portable/dashboard";
 import { rememberPeople } from "@/lib/cloudPeople";
+import { ownerStorageKey } from "./TeamOverview";
 import { thisComputer } from "@/lib/platform";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { AccountStatus, CloudWorkspaceListItem } from "@/lib/api";
@@ -159,6 +160,7 @@ afterEach(() => {
   catalog.resetCloudCatalog();
   resetCloudAgents();
   resetCloudSessions();
+  localStorage.removeItem(ownerStorageKey("a", ORG));
 });
 
 describe("a waiting cloud tab", () => {
@@ -391,6 +393,7 @@ describe("the command palette", () => {
 
 
 it("filters table sessions by cloud owner and archive state and opens an archived row without waking", async () => {
+  mocks.status.phase2Readiness = { [ORG]: ["team.presence.v1"] };
   rememberPeople([{ userId: "amy", displayName: "Amy" }, { userId: "zoe", displayName: "Zoe" }]);
   await poll(ORG, [item("ws-1", ORG, { createdBy: "amy", state: "suspended" })]);
   await poll(OTHER, [item("ws-b", OTHER, { createdBy: "zoe", repositories: [betaSite] })]);
@@ -405,6 +408,7 @@ it("filters table sessions by cloud owner and archive state and opens an archive
   fireEvent.pointerDown(screen.getByRole("button", { name: "Hiding archived" }), { button: 0, ctrlKey: false });
   fireEvent.click(await screen.findByRole("menuitemradio", { name: "Only archived" }));
   await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  expect(screen.queryByRole("button", { name: /^People:/ })).toBeNull();
   // The people picker (02.05): Amy alone.
   fireEvent.pointerDown(screen.getByRole("button", { name: "By Anyone" }), { button: 0, ctrlKey: false });
   const picker = await screen.findByRole("menu");
@@ -425,6 +429,40 @@ it("filters table sessions by cloud owner and archive state and opens an archive
   fireEvent.click(row);
   expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${ORG}:ws-1:old`);
   expectNoWake();
+});
+
+it("preserves the base dashboard toolbar and named owners while presence is held", async () => {
+  rememberPeople([{ userId: "amy", displayName: "Amy" }]);
+  await poll(ORG, [item("ws-1", ORG, { createdBy: "amy", runtimeActivity: { ...pending(0), activeTurns: 1 } })]);
+  act(() => catalog.cacheCloudSessions(ORG, "ws-1", [
+    session("s1", "Fix login redirect", "idle", { lastMessageAt: new Date().toISOString() }),
+  ] as never, ["session/2"]));
+  prefs.setPrefs({ dashboard: { ...DEFAULT_DASHBOARD_PREFERENCES, view: "table", owners: ["amy"] } });
+  render(<TooltipProvider><AgentDashboard /></TooltipProvider>);
+  expect(screen.getByRole("button", { name: "People: Amy" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "By Anyone" })).toBeTruthy();
+  expect(screen.getByRole("group", { name: "Active now: Amy" })).toBeTruthy();
+  const row = await screen.findByRole("row", { name: /Fix login redirect/ });
+  expect(within(row).getByRole("button", { name: "View profile: Amy" })).toBeTruthy();
+  expect(within(row).getByText("Amy", { exact: true })).toBeTruthy();
+  expect(screen.queryByRole("row", { name: /Landing page copy/ })).toBeNull();
+  expect(screen.queryByRole("columnheader", { name: "Where" })).toBeNull();
+});
+
+it.each(["cache", "error"])("preserves cached owners and a saved By filter when the catalog has %s", async (availability) => {
+  mocks.status.phase2Readiness = { [ORG]: ["team.presence.v1"] };
+  rememberPeople([{ userId: "amy", displayName: "Amy" }]);
+  await poll(ORG, [item("ws-1", ORG, { createdBy: "amy" })]);
+  const org = catalog.getCloudCatalog().orgs[ORG]!;
+  if (availability === "cache") org.source = "cache";
+  else org.error = "cloud_workspace_unavailable";
+  localStorage.setItem(ownerStorageKey("a", ORG), JSON.stringify(["amy"]));
+  prefs.setPrefs({ dashboard: { ...DEFAULT_DASHBOARD_PREFERENCES, view: "table" } });
+  render(<TooltipProvider><AgentDashboard /></TooltipProvider>);
+  expect(screen.getByRole("button", { name: "By Amy" })).toBeTruthy();
+  const row = await screen.findByRole("row", { name: /Fix login redirect/ });
+  expect(within(row).getByRole("button", { name: "View profile: Amy" })).toBeTruthy();
+  expect(screen.queryByRole("row", { name: /Landing page copy/ })).toBeNull();
 });
 
 it("shows a cloud row's Active time from its workspace's lastActivityAt only, and a local row's from its own messages", async () => {
