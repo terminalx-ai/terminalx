@@ -41,3 +41,12 @@ describe("the Projects group (PRO-131)", () => {
     expect(palette.projects).toBe("Project templates");
   });
 });
+
+describe("rows only a Mac has", () => {
+  it("offers the Option key setting on a Mac only", () => {
+    const row = { section: "general", macOnly: true } as const;
+    expect(settingOffered(row, true)).toBe(true);
+    expect(settingOffered(row, false)).toBe(false);
+    expect(settingOffered({ section: "general" }, false)).toBe(true);
+  });
+});
