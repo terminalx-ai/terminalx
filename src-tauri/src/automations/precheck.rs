@@ -261,20 +261,17 @@ pub fn execute(command: &str, timeout: Duration, dir: &Path, set: &[(String, Str
         use std::os::unix::process::CommandExt;
         process.process_group(0);
     }
+    #[cfg(unix)]
+    let spawned = process.spawn();
+    // What the check starts goes with it, as its process group does on Unix:
+    // the shell is in its job before it runs, so nothing it starts is outside
+    // it, and a check that cannot be put in one does not run.
     #[cfg(windows)]
-    std::os::windows::process::CommandExt::creation_flags(&mut process, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-    let mut child = match process.spawn() {
+    let spawned = crate::win::process::spawn_tied(&mut process, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    let mut child = match spawned {
         Ok(child) => child,
         Err(error) => return failed(format!("The first check could not start in {}: {error}", dir.display()), started.elapsed().as_millis() as u64),
     };
-    // Windows has no process group to signal: a job stands in for it, so
-    // `stop` ends whatever the check left running in the background.
-    #[cfg(windows)]
-    if let Err(error) = crate::win::process::tie_to_this_process(&child) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return failed(format!("The first check could not be tied to TerminalX: {error}"), started.elapsed().as_millis() as u64);
-    }
     let stdout = capture(child.stdout.take(), STDOUT_CAP, true);
     let stderr = capture(child.stderr.take(), STDERR_CAP, false);
     let (Some((stdout, stdout_done)), Some((stderr, stderr_done))) = (stdout, stderr) else {
@@ -459,6 +456,7 @@ struct Claim(String);
 
 /// Whether an automation's evaluation is still going on its own thread: tests wait for it to end.
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn evaluating(automation_id: &str) -> bool {
     CHECKING.lock().unwrap_or_else(|error| error.into_inner()).contains(automation_id)
 }

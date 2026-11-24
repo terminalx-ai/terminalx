@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { thisComputer } from "@/lib/platform";
 import { Hash, Loader2, PlugZap } from "@/icons";
 import type { ListedPort, WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { Switch } from "@/components/ui/controls";
@@ -31,7 +32,7 @@ import { useMachinePlace, type MachinePlace } from "./workspacePlace";
 export const POLL_MS = 2_000;
 
 /** The checkbox that keeps the remote port's number on this Mac (14.11). */
-export const SAME_PORT_LABEL = "Same port number on this Mac";
+export const SAME_PORT_LABEL = `Same port number on ${thisComputer}`;
 
 const STOPPED = "Previews work while the workspace is running. Looking here never starts it.";
 /** Said beside a state with no connection when previews were open here: they ended with it. */
@@ -63,14 +64,14 @@ export function portErrorMessage(error: unknown, port: number, machine: MachineP
   const code = typeof error === "string" ? error : error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : String(error);
   switch (code) {
     case "cloud_port_in_use":
-      return `Port ${port} is already in use on this Mac. Untick "${SAME_PORT_LABEL}" to use a free one.`;
+      return `Port ${port} is already in use on ${thisComputer}. Untick "${SAME_PORT_LABEL}" to use a free one.`;
     case "cloud_port_not_connected":
       return machine ? `Ports are forwarded while ${machine.name} is connected.` : STOPPED;
     case "cloud_port_invalid":
       return "Enter a port between 1 and 65535.";
     // The native forwarder refuses new forwards while the master switch is off (PRO-355).
     case "cloud_port_forwarding_off":
-      return "Forwarding is off. Turn it on to forward ports to this Mac.";
+      return `Forwarding is off. Turn it on to forward ports to ${thisComputer}.`;
     case "forbidden":
       return machine ? `You do not have access to ${machine.name}’s ports.` : "You do not have access to this workspace's ports.";
     case "cloud_remote_identity_changed":
@@ -451,7 +452,7 @@ function PortsUnavailable({ model, workspaceKey, state, mayOpen }: { model: Port
           {restarting && <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />}
           {text}
         </p>
-        {model.awayWithForwards && <p className="mt-1">Forwarded ports open again on this Mac when {machine!.name} is back.</p>}
+        {model.awayWithForwards && <p className="mt-1">Forwarded ports open again on {thisComputer} when {machine!.name} is back.</p>}
         {!machine && model.expiredCount > 0 && <p className="mt-1">{CLOSED_WITH_CONNECTION}</p>}
       </div>
     );
@@ -541,7 +542,7 @@ export function CloudPortsView(props: PortsInputs) {
       {model.connected && !anyRows && <PortsEmpty model={model} />}
       {model.connected && <PortInput model={model} className="mx-3.5 mt-2" />}
       <p className="mx-3.5 mt-3 mb-3 text-xs leading-4 text-faint">
-        A forward opens {machine ? `a port of ${machine.name}` : "a workspace port"} at <span className="font-mono">127.0.0.1</span> on this Mac, over your encrypted connection to {machine ? machine.name : "the workspace"}; it has no public address. While a forward is open, other programs on this Mac can reach it, and it shares cookies with anything else on 127.0.0.1.
+        A forward opens {machine ? `a port of ${machine.name}` : "a workspace port"} at <span className="font-mono">127.0.0.1</span> on {thisComputer}, over your encrypted connection to {machine ? machine.name : "the workspace"}; it has no public address. While a forward is open, other programs on {thisComputer} can reach it, and it shares cookies with anything else on 127.0.0.1.
       </p>
     </div>
   );

@@ -27,6 +27,7 @@ fn refusal(error: anyhow::Error) -> String {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bot_cannot_finish_an_item_while_a_line_of_done_means_is_unmet() {
     let (_home, sink, bot) = bots_on();
     let item = add(&sink, &bot, &as_bot(), new("Merge main into phase-2", &["main is merged | checked by code", "cargo test passes"])).unwrap();
@@ -72,6 +73,7 @@ fn a_bot_cannot_finish_an_item_while_a_line_of_done_means_is_unmet() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn states_change_only_as_the_rules_allow() {
     let (_home, sink, bot) = bots_on();
     add(&sink, &bot, &as_bot(), new("Sort the open issues", &[])).unwrap();
@@ -103,6 +105,7 @@ fn states_change_only_as_the_rules_allow() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_question_has_two_to_four_answers_and_the_owners_answer_moves_the_item_on() {
     let (_home, sink, bot) = bots_on();
     add(&sink, &bot, &as_bot(), NewItem { start: true, ..new("Move macOS CI to our own runner", &["CI runs on the Mac mini"]) }).unwrap();
@@ -159,6 +162,7 @@ fn a_question_has_two_to_four_answers_and_the_owners_answer_moves_the_item_on() 
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_owner_gives_work_and_stops_items_as_the_owner() {
     let (_home, sink, bot) = bots_on();
     let given = add(&sink, &bot, &By::Owner, NewItem { asked_by: Some("someone else".into()), ..new("Weekly status for the owner", &[]) }).unwrap();
@@ -174,6 +178,7 @@ fn the_owner_gives_work_and_stops_items_as_the_owner() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn unknown_fields_states_and_records_survive_a_save() {
     let (_home, sink, bot) = bots_on();
     let file = crate::store::root().unwrap().join(DIR).join(&bot.id).join(FILE);
@@ -207,6 +212,7 @@ fn unknown_fields_states_and_records_survive_a_save() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn every_list_and_log_is_bounded() {
     let (_home, sink, bot) = bots_on();
     add(&sink, &bot, &as_bot(), new("Chatty", &[])).unwrap();
@@ -259,6 +265,7 @@ fn add_template() -> Item {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bot_cannot_push_its_owners_entries_out_of_an_items_history() {
     let (_home, sink, bot) = bots_on();
     add(&sink, &bot, &as_bot(), new("Chatty", &[])).unwrap();
@@ -305,6 +312,7 @@ fn closed_items_the_owner_took_part_in_outlast_the_bots_own() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_parallel_burst_cannot_pass_the_rate_and_a_refused_command_gives_its_slot_back() {
     let (_home, _sink, bot) = bots_on();
     let passed = std::thread::scope(|scope| {
@@ -341,6 +349,7 @@ fn a_closed_item_whose_messages_wait_is_not_trimmed() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_full_list_refuses_to_grow_but_can_shrink_and_still_takes_the_owners_answer() {
     let (_home, sink, bot) = bots_on();
     WRITE_LIMIT_FOR_TESTS.with(|limit| limit.set(Some(24 * 1024)));
@@ -374,6 +383,7 @@ fn a_full_list_refuses_to_grow_but_can_shrink_and_still_takes_the_owners_answer(
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_launch_is_told_its_open_items_as_its_own_notes() {
     let (_home, sink, bot) = bots_on();
     assert!(launch_note(&bot, &crate::bots::memory::working_place(&bot)).is_none(), "nothing to say with no items");
@@ -393,6 +403,7 @@ fn a_launch_is_told_its_open_items_as_its_own_notes() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn links_are_checked_and_parsed() {
     let (_home, sink, bot) = bots_on();
     add(&sink, &bot, &as_bot(), new("Linked", &[])).unwrap();

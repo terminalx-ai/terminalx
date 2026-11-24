@@ -97,7 +97,7 @@ it("shows timings, operations with retry hints, restart decisions, connections a
   const legend = screen.getByLabelText("Relay close reasons");
   expect(legend.textContent).toContain("stale_generation");
   expect(legend.textContent).toContain("Update TerminalX");
-  expect(screen.getByLabelText("Connection closes on this Mac").textContent).toContain("auth_expired");
+  expect(screen.getByLabelText("Connection closes on this computer").textContent).toContain("auth_expired");
   expect(api.cloudDiagnostics).toHaveBeenCalledWith(7, null);
 });
 
@@ -107,7 +107,7 @@ it("tells a member the organization's diagnostics are for administrators and kee
   expect(await screen.findByText(/Only organization owners and administrators/)).toBeTruthy();
   expect(screen.queryByLabelText("Recent operations")).toBeNull();
   expect(screen.queryByLabelText("Create timings")).toBeNull();
-  expect(screen.getByLabelText("Connection closes on this Mac").textContent).toContain("auth_expired");
+  expect(screen.getByLabelText("Connection closes on this computer").textContent).toContain("auth_expired");
   expect(screen.getByRole("button", { name: /Export diagnostics/ })).toBeTruthy();
 });
 
@@ -122,7 +122,7 @@ it("says the server does not offer diagnostics yet and still shows local closes"
   vi.mocked(api.cloudDiagnostics).mockRejectedValue({ code: "cloud_diagnostics_not_supported", status: 404 });
   render(<OrganizationDiagnostics contextRevision="rev-1" />);
   expect((await screen.findByRole("alert")).textContent).toContain("not available on this server");
-  expect(screen.getByLabelText("Connection closes on this Mac").textContent).toContain("4102");
+  expect(screen.getByLabelText("Connection closes on this computer").textContent).toContain("4102");
 });
 
 it("exports only to a path the user chose, with the selected window", async () => {

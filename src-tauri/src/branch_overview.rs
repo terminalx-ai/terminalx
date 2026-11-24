@@ -437,6 +437,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         sh(d, &["init", "-q", "-b", "main"]);
+        sh(d, &["config", "core.autocrlf", "false"]);
         commit(d, "a.txt", "one\n", "Ann");
         sh(d, &["checkout", "-qb", "feature"]);
         commit(d, "b.txt", "mine\n", "Ann");
@@ -468,7 +469,7 @@ mod tests {
         // A clone of the branch someone else pushed to: their commit is listed until it is pulled.
         let other = tempfile::tempdir().unwrap();
         let o = other.path().join("c");
-        sh(other.path(), &["clone", "-q", "-b", "feature", d.to_str().unwrap(), "c"]);
+        sh(other.path(), &["clone", "-q", "-c", "core.autocrlf=false", "-b", "feature", d.to_str().unwrap(), "c"]);
         commit(d, "e.txt", "theirs too\n", "Di");
         assert_eq!(overview(&o, None, false).unpulled, 0, "not seen before a fetch");
         assert!(fetch(&o));

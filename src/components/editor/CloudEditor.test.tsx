@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { revealInFileManager } from "@/lib/platform";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { SearchQuery, openSearchPanel, searchPanelOpen, setSearchQuery } from "@codemirror/search";
 import { EditorView } from "@codemirror/view";
@@ -114,7 +115,7 @@ describe("a cloud workspace file in the editor", () => {
   it("saves conditionally on the content it was read at", async () => {
     const { container } = await mount();
     expect(screen.getByTestId("editor-cloud-file")).toBeTruthy();
-    expect(screen.queryByLabelText("Reveal in Finder")).toBeNull();
+    expect(screen.queryByLabelText(revealInFileManager)).toBeNull();
     type(container, "// mine\n");
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(cloud.files.get("src/main.rs")!.text).toBe("fn main() {}\n// mine\n"));
@@ -231,7 +232,7 @@ describe("a cloud workspace file in the editor", () => {
 
     // Moved in Settings: the old key no longer saves, the new one does.
     act(() => setPrefs({ shortcuts: { "files.save": ["mod+alt+s"], "files.find": ["mod+shift+y"] } }));
-    expect(screen.getByRole("button", { name: "Save" }).textContent).toContain("CtrlAltS");
+    expect(screen.getByRole("button", { name: "Save" }).textContent).toContain("Ctrl+Alt+S");
     type(container, "// more\n");
     act(() => content.focus());
     fireEvent.keyDown(content, { key: "s", code: "KeyS", ctrlKey: true });

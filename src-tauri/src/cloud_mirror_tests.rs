@@ -96,7 +96,7 @@ fn a_first_sync_copies_the_file_set_and_records_its_revision() {
     assert_eq!(revision.manifest_id, f.manifest().manifest_id);
     assert_eq!((revision.files, revision.bytes), (3, 6 + 13 + 10));
     assert_eq!(revision.repositories[0].branch.as_deref(), Some("main"));
-    assert!(published.status.root.ends_with("cloud-mirrors/org-1/workspace-1/files"));
+    assert!(Path::new(&published.status.root).ends_with("cloud-mirrors/org-1/workspace-1/files"));
 
     // Nothing changed in the workspace: nothing to read, nothing written.
     let again = f.mirror.plan(&f.manifest()).unwrap();
@@ -640,7 +640,7 @@ fn a_mirror_belongs_to_one_workspace_and_is_off_until_enabled() {
     }
     let mirror = Mirror::at(&home, "org-1", "workspace-1").unwrap();
     // Asking about a mirror that was never turned on creates nothing.
-    assert_eq!(mirror.status().unwrap(), Status { enabled: false, root: home.join("cloud-mirrors/org-1/workspace-1/files").to_string_lossy().into_owned(), revision: None, files: 0 });
+    assert_eq!(mirror.status().unwrap(), Status { enabled: false, root: home.join("cloud-mirrors").join("org-1").join("workspace-1").join("files").to_string_lossy().into_owned(), revision: None, files: 0 });
     assert!(!home.join("cloud-mirrors").exists());
     let empty = Manifest { manifest_id: "m".into(), repositories: Vec::new(), entries: Vec::new(), truncated: false };
     assert!(mirror.plan(&empty).is_err());

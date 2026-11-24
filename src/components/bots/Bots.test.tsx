@@ -378,14 +378,14 @@ describe("Bots: the team table (23.02)", () => {
     const rows = main().getAllByTestId("bots-table-row");
     expect(rows.map((row) => row.dataset.bot)).toEqual(["a", "i", "g"]);
     const cells = (row: HTMLElement) => [...row.querySelectorAll("td")].map((cell) => cell.textContent?.trim());
-    expect(cells(rows[0]).slice(0, 6)).toEqual(["AtlasCTO", "Quiet", "–", "This Mac", "You", "Personal"]);
-    expect(cells(rows[1]).slice(3, 6)).toEqual(["This Mac", "Atlas", "Personal, org-1"]);
+    expect(cells(rows[0]).slice(0, 6)).toEqual(["AtlasCTO", "Quiet", "–", "This computer", "You", "Personal"]);
+    expect(cells(rows[1]).slice(3, 6)).toEqual(["This computer", "Atlas", "Personal, org-1"]);
     // A place and a role a newer app wrote are shown as their own text; a lead that is gone is said to be.
     expect(cells(rows[2]).slice(0, 6)).toEqual(["GhostFuture role", "Paused", "–", "cloudWorkspace", "A removed bot", "Wherever you give it work"]);
     expect(rows[2].dataset.paused).toBe("true");
     expect(within(rows[2]).getByTestId("bot-avatar-paused")).toBeTruthy();
     expect(main().getAllByTestId("bots-stat").map((card) => card.textContent)).toEqual([
-      "Team3 bots2 on this Mac · 1 elsewhere",
+      "Team3 bots2 on this computer · 1 elsewhere",
       "Needs you0Nothing waiting",
       "Working now2 ready1 paused",
       "Spent today—Model and cloud time · shown, never capped",
@@ -531,7 +531,7 @@ describe("Bots: what a bot is doing, from its sessions (PRO-515)", () => {
     expect(sidebarStatus("a").dataset.doing).toBe("working");
     expect(doingNow("a").textContent?.trim()).toBe("Working · Home chat");
     expect(doingNow("a").dataset.doing).toBe("working");
-    expect(sidebar().getByRole("button", { name: /Atlas, CTO, Working · Home chat, runs on This Mac/ })).toBeTruthy();
+    expect(sidebar().getByRole("button", { name: /Atlas, CTO, Working · Home chat, runs on This computer/ })).toBeTruthy();
     // Iris has a chat, and nothing of hers is in a turn.
     expect(sidebarStatus("i").textContent).toBe("Quiet");
     expect(doingNow("i").textContent?.trim()).toBe("Quiet");

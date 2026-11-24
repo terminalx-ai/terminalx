@@ -85,7 +85,7 @@ describe("purgeTombstones", () => {
     expect(getCloudAgents({ organizationId: "org-1", workspaceId: "ws-gone" }).tabs).toEqual([]);
     expect(notices).toEqual([{ workspaceId: "ws-gone", name: "Docs site", unsentCommands: 2, unsavedFiles: 1 }]);
     expect(purgeNoticeText(notices[0])).toBe(
-      "“Docs site” was permanently deleted. TerminalX removed what this Mac kept of it, including 2 agent messages that never reached it and unsaved edits in 1 file.",
+      "“Docs site” was permanently deleted. TerminalX removed what this computer kept of it, including 2 agent messages that never reached it and unsaved edits in 1 file.",
     );
   });
 
@@ -111,7 +111,7 @@ describe("purgeTombstones", () => {
     const notices = await purgeTombstones([tombstone], new Map());
     expect(notices).toHaveLength(1);
     expect(purgeNoticeText(notices[0])).toBe(
-      "A cloud workspace was permanently deleted. TerminalX removed what this Mac kept of it, including unsaved edits in 1 file.",
+      "A cloud workspace was permanently deleted. TerminalX removed what this computer kept of it, including unsaved edits in 1 file.",
     );
   });
 

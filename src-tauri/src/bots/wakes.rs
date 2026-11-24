@@ -1006,6 +1006,6 @@ pub fn event_prompt(template: &str, event: &BotEvent) -> String {
     prompt(template, &event.summary, &details, &event.body)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "wakes_tests.rs"]
 mod tests;

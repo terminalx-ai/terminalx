@@ -21,6 +21,7 @@ fn home_chat(id: &str) -> SessionEntry {
 /// A chat that cannot prove it is refused, never taken for the owner; the
 /// owner's terminal reads a list by naming the bot and changes nothing.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bot_changes_only_its_own_work_list() {
     let _home = crate::store::temp_home();
     bots_on();
@@ -297,8 +298,8 @@ impl Drop for Switches {
 /// Review 2 (M1), through the real launch and send: the owner's message that did not reach a stopped home chat is
 /// not put in the launch prompt. Once the chat's agent has started it is sent as a message, once, and only then
 /// cleared; a launch that fails sends nothing and keeps it waiting.
-#[cfg(unix)]
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_message_that_waited_for_the_home_chat_is_sent_once_its_agent_starts() {
     use std::sync::atomic::Ordering;
     let _home = crate::store::temp_home();
@@ -307,13 +308,10 @@ fn a_message_that_waited_for_the_home_chat_is_sent_once_its_agent_starts() {
     let program = dir.path().join("claude");
     // Up, keeping exactly what is typed at it.
     std::fs::write(&program, "#!/bin/sh\nstty raw -echo\nexec cat > \"$0.typed\"\n").unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    let launcher = crate::binpath::runnable_for_tests(&program);
     let typed_path = program.with_extension("typed");
     let typed = || std::fs::read_to_string(&typed_path).unwrap_or_default();
-    let _claude = crate::harness::claude::pty::claude_program_for_tests(program.clone());
+    let _claude = crate::harness::claude::pty::claude_program_for_tests(launcher);
     let (service, _sink) = headless_service();
     let service = service.with_local_lifetime(crate::local_runtime::Lifetime::new(std::time::Duration::ZERO));
     service.manager.follow_pane_exits();
@@ -383,6 +381,7 @@ fn a_message_that_waited_for_the_home_chat_is_sent_once_its_agent_starts() {
 /// PRO-493: what the owner sent waits for the bot's current home chat, and only that chat's own agent tab starting
 /// sends it. An older home chat, or another agent tab the owner added to the chat, starting sends nothing.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn only_the_home_chats_own_tab_starting_sends_what_waits() {
     let _home = crate::store::temp_home();
     bots_on();
@@ -431,6 +430,7 @@ fn only_the_home_chats_own_tab_starting_sends_what_waits() {
 
 /// PRO-493: Needs you is read without waiting on a tab whose lock a slow launch holds.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn needs_you_does_not_wait_behind_a_launching_tab() {
     let _home = crate::store::temp_home();
     bots_on();

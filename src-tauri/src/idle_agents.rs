@@ -143,6 +143,7 @@ pub fn sweep(manager: &SessionManager, limit: Option<Duration>, now: Instant) ->
 /// agent's own children, its MCP and language servers among them, still
 /// descend from it and do not count. Processes that cannot be read are said
 /// to be there: not knowing is not idle.
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn process_table() -> Option<String> {
     let program = if std::path::Path::new("/bin/ps").exists() { "/bin/ps" } else { "ps" };
     let mut command = std::process::Command::new(program);
@@ -152,18 +153,54 @@ pub(crate) fn process_table() -> Option<String> {
 }
 
 pub fn left_running(leader: u32) -> Option<String> {
-    match process_table() {
-        Some(table) => match strays(&table, leader) {
-            0 => None,
-            1 => Some("a process it left running".into()),
-            n => Some(format!("{n} processes it left running")),
-        },
+    #[cfg(windows)]
+    let counted = windows_strays(leader);
+    #[cfg(not(windows))]
+    let counted = process_table().map(|table| strays(&table, leader));
+    match counted {
+        Some(0) => None,
+        Some(1) => Some("a process it left running".into()),
+        Some(n) => Some(format!("{n} processes it left running")),
         None => Some("processes that could not be checked".into()),
     }
 }
 
+/// The same on Windows, where the agent's job is its process group: what is
+/// in the job and no longer descends from the agent. `None` when unreadable.
+#[cfg(windows)]
+fn windows_strays(leader: u32) -> Option<usize> {
+    let job = || crate::pty::pane_jobs::members(leader).or_else(|| crate::win::process::tied_members(leader));
+    // The job of an agent that has ended is let go, which ends what was in it.
+    let ended = || job().is_none() && !crate::win::process::is_running(leader);
+    if ended() {
+        return Some(0);
+    }
+    let read = || -> Option<Vec<u32>> {
+        let members = job()?.ok()?;
+        // A job recorded for an earlier process that had this id says nothing of this one.
+        if !members.contains(&leader) && crate::win::process::is_running(leader) {
+            return None;
+        }
+        let descendants = crate::win::process::descendants(leader).ok()?;
+        Some(members.into_iter().filter(|pid| *pid != leader && !descendants.iter().any(|(entry, _)| entry.pid == *pid)).collect())
+    };
+    let first = read()?;
+    if first.is_empty() {
+        return Some(0);
+    }
+    // A helper in the middle of exiting can no longer be placed under its
+    // parent for a moment: only what is still there on a second look was left.
+    std::thread::sleep(Duration::from_millis(150));
+    if ended() {
+        return Some(0);
+    }
+    let second = read()?;
+    Some(first.iter().filter(|pid| second.contains(pid)).count())
+}
+
 /// How many members of `leader`'s process group in a `pid ppid pgid` table
 /// do not descend from it.
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn strays(table: &str, leader: u32) -> usize {
     let mut parents = HashMap::new();
     let mut members = Vec::new();

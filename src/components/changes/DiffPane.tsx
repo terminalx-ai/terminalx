@@ -1,4 +1,5 @@
 import { createPortal } from "react-dom";
+import { bindingText } from "@/lib/shortcuts";
 import { diffComments } from "./diffComments";
 import { REVIEW_DRAFT_ID, ReviewCommentCard, ReviewDraftCard, useReviewComments } from "./ReviewComments";
 import { GitHubThreadComment } from "./ReviewThreads";
@@ -131,7 +132,7 @@ export function DiffPane({ path, before, after, mode, base, originalPath, worksp
   useLayoutEffect(() => draftHere && placeDraft ? placeDraft() : undefined, [draftHere, placeDraft]);
   return <div className={cn("flex flex-col", !stacked && "h-full min-h-0")}>
     {selection && commentable && <div className="flex shrink-0 items-center gap-2 px-2 py-1 text-[11px] text-muted-foreground">
-      <Button size="xs" variant="secondary" disabled={review?.busy} onClick={() => review?.start(selection)} title="⌘/Ctrl Shift M on a line also adds a comment; Shift-click + for a range">Comment on selection</Button>
+      <Button size="xs" variant="secondary" disabled={review?.busy} onClick={() => review?.start(selection)} title={`${bindingText("mod+shift+m")} on a line also adds a comment; Shift-click + for a range`}>Comment on selection</Button>
     </div>}
     <div ref={host} className={cn("diff-pane select-text", !stacked && "min-h-0 flex-1 overflow-auto scrollbar-thin")} />
     {unplaced.length > 0 && <section ref={unplacedList} aria-label="Threads without a current diff line" className={cn("shrink-0 space-y-2 border-t border-hairline p-2", !stacked && "max-h-[40%] overflow-auto scrollbar-thin")}>

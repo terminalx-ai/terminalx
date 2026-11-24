@@ -590,7 +590,7 @@ pub fn public_id(path: &str) -> String {
 /// are not offered, so they cannot be named.
 pub fn by_public_id(id: &str) -> Result<Project> {
     list()?.0.into_iter().find(|project| !project.archived && public_id(&project.path) == id)
-        .context("That project is no longer on this Mac.")
+        .with_context(|| crate::platform_profile::localize("That project is no longer on this Mac."))
 }
 
 /// A local mirror of a cloud workspace holds files a remote machine chose

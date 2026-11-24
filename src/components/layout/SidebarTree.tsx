@@ -1,3 +1,4 @@
+import { revealInFileManager } from "@/lib/platform";
 import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
 import { archiveWithUndo } from "@/lib/archiveNotices";
 import { reportError } from "@/lib/errorToasts";
@@ -298,7 +299,7 @@ function WorkspaceNode({
                   <FolderOpen /> Open
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => void revealItemInDir(workspace.path)}>
-                  <FolderOpen /> Reveal in Finder
+                  <FolderOpen /> {revealInFileManager}
                 </DropdownMenuItem>
                 {!workspace.isMain ? (
                   <>

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ThisComputer, thisComputer } from "@/lib/platform";
 import { ChevronRight, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
@@ -88,7 +89,7 @@ export function MachinePage({ machineId, onBack }: { machineId: string; onBack: 
     return (
       <div className="grid gap-3" data-testid="machine-page">
         <Breadcrumb name="Machine" onBack={onBack} />
-        <p className="text-[13px] text-muted-foreground">This machine is no longer paired with this Mac.</p>
+        <p className="text-[13px] text-muted-foreground">This machine is no longer paired with {thisComputer}.</p>
       </div>
     );
   }
@@ -154,7 +155,7 @@ export function MachinePage({ machineId, onBack }: { machineId: string; onBack: 
       <section className="flex items-center gap-6 border-t border-hairline pt-4" data-testid="machine-remove" aria-label="Remove this machine">
         <div className="min-w-0 flex-1">
           <div className="text-[13px] font-medium">Remove this machine</div>
-          <p className="mt-0.5 text-[12.5px] text-muted-foreground">This Mac stops operating {machine.name} and forgets its credential. Sessions on {machine.hasWindow === false ? "the server" : machine.name} stay there.</p>
+          <p className="mt-0.5 text-[12.5px] text-muted-foreground">{ThisComputer} stops operating {machine.name} and forgets its credential. Sessions on {machine.hasWindow === false ? "the server" : machine.name} stay there.</p>
         </div>
         <Button size="sm" variant="outline" className="shrink-0 border-destructive/60 text-destructive hover:bg-destructive/10" onClick={() => setRemoving(true)}>
           Remove

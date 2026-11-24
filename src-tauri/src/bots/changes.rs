@@ -344,13 +344,18 @@ pub fn no_links(home: &Path, rel: &str) -> Result<()> {
 /// Open a file for reading without following a link in its last part:
 /// a link there fails to open rather than being read through.
 pub fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(windows)]
+    return crate::win::fs::open_read_refusing_links(path);
+    #[cfg(not(windows))]
     let mut options = std::fs::OpenOptions::new();
+    #[cfg(not(windows))]
     options.read(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
+    #[cfg(not(windows))]
     options.open(path)
 }
 
@@ -360,7 +365,11 @@ pub fn is_link_refusal(error: &std::io::Error) -> bool {
     {
         error.raw_os_error() == Some(libc::ELOOP)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        error.raw_os_error() == Some(crate::win::fs::LINK_REFUSED)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = error;
         false

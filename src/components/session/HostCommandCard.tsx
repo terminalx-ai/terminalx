@@ -1,4 +1,5 @@
 import { useId, useRef, useState } from "react";
+import { thisComputer, yourComputer } from "@/lib/platform";
 import { Button } from "@/components/ui/button";
 
 /** Immutable display data supplied by future lead integration, never identity authority. */
@@ -67,8 +68,8 @@ export function HostCommandCard({ request, state, onIntent }: HostCommandCardPro
   return (
     <section aria-labelledby={`${id}-title`} aria-describedby={`${id}-disclosure ${id}-escaping`} className="overflow-hidden rounded-xl border border-hairline-strong bg-card">
       <div className="px-4 pb-3.5 pt-3">
-        <p className="text-[11px] font-medium uppercase tracking-wide text-warning">On your Mac</p>
-        <h3 id={`${id}-title`} className="mt-1 text-sm font-medium text-foreground">Run this command on your Mac?</h3>
+        <p className="text-[11px] font-medium uppercase tracking-wide text-warning">On {yourComputer}</p>
+        <h3 id={`${id}-title`} className="mt-1 text-sm font-medium text-foreground">Run this command on {yourComputer}?</h3>
         <p role="status" aria-live="polite" className="mt-1 text-xs text-muted-foreground">{status}</p>
         <dl className="mt-3 space-y-2 text-xs">
           <Detail label="Request" value={request.requestId} />
@@ -77,7 +78,7 @@ export function HostCommandCard({ request, state, onIntent }: HostCommandCardPro
             <dt className="font-medium text-muted-foreground">Arguments (in order)</dt>
             <dd>{args === null ? "Unavailable" : args.length === 0 ? <span>No arguments</span> : <ol className="list-inside list-decimal space-y-1">{args.map((argument, index) => <li key={index}><Value value={argument} /></li>)}</ol>}</dd>
           </div>
-          <Detail label="Working directory on this Mac" value={request.cwd} />
+          <Detail label={`Working directory on ${thisComputer}`} value={request.cwd} />
           <Detail label="Requesting agent" value={request.agent} />
           <Detail label="Turn" value={request.turn} />
           <Detail label="Origin account (display only)" value={request.originAccount} />

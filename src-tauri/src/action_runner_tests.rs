@@ -114,7 +114,8 @@ fn an_action_runs_in_a_terminal_tab_with_the_workspace_environment_and_reports_i
     // Hidden only keeps an action out of menus; asked for by id it still runs.
     // Quotes and `&&` prove the command runs whole, as the reader's shell reads it.
     rig.actions(vec![RepositoryActionEntry { hidden: true, ..action("dev",
-        "printf 'cwd=%s\\nport=%s\\nports=%s\\nworkspace=%s\\naction=%s\\n' \"$PWD\" \"$TERMINALX_PORT\" \"$TERMINALX_PORTS\" \"$TERMINALX_WORKSPACE_PATH\" \"$TERMINALX_ACTION_ID\" && sleep 0.3 && exit 7") }]);
+        // Git for Windows' `$PWD` is its own /c/... form; `pwd -W` is the Windows path.
+        "printf 'cwd=%s\\nport=%s\\nports=%s\\nworkspace=%s\\naction=%s\\n' \"$(pwd -W 2>/dev/null || printf %s \"$PWD\")\" \"$TERMINALX_PORT\" \"$TERMINALX_PORTS\" \"$TERMINALX_WORKSPACE_PATH\" \"$TERMINALX_ACTION_ID\" && sleep 0.3 && exit 7") }]);
     let heard = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
     for name in [EVENT, "pty_opened", "pty_exit"] {
         let heard = heard.clone();
@@ -135,7 +136,8 @@ fn an_action_runs_in_a_terminal_tab_with_the_workspace_environment_and_reports_i
 
     let exited = rig.wait_for(&entry.id, &pane, State::Exited);
     assert_eq!(exited.exit_code, Some(7), "the PTY child's own exit code");
-    // The code is the one in the tab's own pty_exit event.
+    // The code is the one in the tab's own pty_exit event, announced after the last of its output.
+    wait_until("the tab's exit to be announced", || heard.lock().unwrap().iter().any(|(name, raw)| name == "pty_exit" && serde_json::from_str::<PtyExit>(raw).is_ok_and(|exit| exit.id == pane)));
     let heard_now = heard.lock().unwrap().clone();
     let exit: PtyExit = heard_now.iter().filter(|(name, _)| name == "pty_exit").map(|(_, raw)| serde_json::from_str::<PtyExit>(raw).unwrap())
         .find(|exit| exit.id == pane).expect("the tab's exit is announced");
@@ -145,7 +147,8 @@ fn an_action_runs_in_a_terminal_tab_with_the_workspace_environment_and_reports_i
     assert!(!ports["TERMINALX_PORT"].is_empty());
     let text = rig.output(&pane);
     let cwd = crate::paths::canonicalize(&entry.cwd).unwrap();
-    assert!(text.contains(&format!("cwd={}\r\n", cwd.display())), "{text}");
+    let shown = if cfg!(windows) { cwd.display().to_string().replace('\\', "/") } else { cwd.display().to_string() };
+    assert!(text.contains(&format!("cwd={shown}\r\n")), "{text}");
     assert!(text.contains(&format!("port={}\r\n", ports["TERMINALX_PORT"])), "{text}");
     assert!(text.contains(&format!("ports={}\r\n", ports["TERMINALX_PORTS"])), "{text}");
     assert!(text.contains(&format!("workspace={}\r\n", entry.cwd)), "{text}");
@@ -196,8 +199,10 @@ fn a_running_non_concurrent_action_is_returned_and_restart_replaces_it() {
     assert!(restarted.started);
     assert_ne!(restarted.run.pane_id, first.run.pane_id);
     assert!(!rig.manager.terminals().is_live(&first.run.pane_id), "the old tab is closed");
-    wait_until("the restarted run to start", || std::fs::read_to_string(&count).is_ok_and(|c| c.len() == 3));
-    assert_eq!(std::fs::read_to_string(&count).unwrap(), "x-x", "the new run started once the old one had exited");
+    // Windows has no polite signal for the old run's trap to answer: it is ended outright.
+    let expected = if cfg!(windows) { "xx" } else { "x-x" };
+    wait_until("the restarted run to start", || std::fs::read_to_string(&count).is_ok_and(|c| c.len() == expected.len()));
+    assert_eq!(std::fs::read_to_string(&count).unwrap(), expected, "the new run started once the old one had exited");
     assert_eq!(rig.action_panes(), vec![restarted.run.pane_id.clone()]);
     let listed = rig.states(&entry.id);
     assert_eq!(listed.iter().map(|r| (r.pane_id.clone(), r.state)).collect::<Vec<_>>(), vec![(restarted.run.pane_id.clone(), State::Running)]);
@@ -235,6 +240,8 @@ fn the_desktop_records_an_exit_relayed_from_the_runtime() {
     sink.unlisten(listener);
 }
 
+// A run can only refuse a polite signal on Unix: Windows ends its job outright.
+#[cfg(unix)]
 #[test]
 fn a_restart_whose_old_run_will_not_stop_starts_nothing_and_holds_up_no_other_action() {
     let rig = Rig::new();

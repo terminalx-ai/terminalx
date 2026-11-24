@@ -1,4 +1,5 @@
 import type { AgentRoute, AgentRouteCheckResult, AgentRouteField, AgentRouteSettings, AgentRouteTemplate } from "@/lib/api";
+import { thisComputer } from "@/lib/platform";
 
 /**
  * Words for a member's own agent model routes (PRO-18): what a route's
@@ -99,13 +100,13 @@ export function routeStatus(route: AgentRoute): { text: string; tone: "ok" | "ne
 export function macCheckLine(check: AgentRouteCheckResult, model?: string): { text: string; warn: boolean } {
   if (check.outcome === "ok") {
     const models = listedModels(check, 8);
-    return { text: `Reached from this Mac with the credential.${models ? ` It lists ${models}.` : ""}`, warn: false };
+    return { text: `Reached from ${thisComputer} with the credential.${models ? ` It lists ${models}.` : ""}`, warn: false };
   }
   if (check.outcome === "unverified") {
-    return { text: `Reached from this Mac, but ${checkReason(check.code)}. Saved; the workspace checks it again.`, warn: false };
+    return { text: `Reached from ${thisComputer}, but ${checkReason(check.code)}. Saved; the workspace checks it again.`, warn: false };
   }
   const models = check.code === "model-unsupported" ? listedModels(check, 8) : null;
-  return { text: `Checked from this Mac: ${checkReason(check.code, model)}.${models ? ` It lists ${models}.` : ""}`, warn: true };
+  return { text: `Checked from ${thisComputer}: ${checkReason(check.code, model)}.${models ? ` It lists ${models}.` : ""}`, warn: true };
 }
 
 /** Why a route change was refused, in words. */

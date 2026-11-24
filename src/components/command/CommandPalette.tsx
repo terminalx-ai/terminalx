@@ -1,4 +1,5 @@
 import { MANUAL_STATUSES, manualStatusLabel, normalizeManualStatus, type ManualStatus } from "@terminalx/portable/manualStatus";
+import { thisComputer } from "@/lib/platform";
 import { ManualStatusIcon } from "@/components/session/ManualStatus";
 import { conversationTitle } from "@/lib/sessions";
 import { editLocalSection, openSectionDialog, useLocalSections, type LocalSectionEdit } from "@/lib/localSections";
@@ -122,7 +123,7 @@ import {
   upsertSession,
   useSessionStore,
 } from "@/lib/sessions";
-import { SHORTCUT_ACTIONS, isMac, keycaps, useKeymap, type ShortcutAction } from "@/lib/shortcuts";
+import { SHORTCUT_ACTIONS, joinKeycaps, keycaps, useKeymap, type ShortcutAction } from "@/lib/shortcuts";
 import { openCloudSession, useCloudDashboard } from "@/lib/cloudDashboard";
 import { updateCloudSession, useCloudSessionForStatus } from "@/lib/cloudSessions";
 import { openNewCloudWorkspace } from "@/components/cloud/NewCloudWorkspaceDialog";
@@ -220,7 +221,7 @@ const APP_ACTIONS_FIRST = [
 const APP_ACTIONS_LAST = ["command:shortcut:app.checkUpdates", "command:shortcut:app.docs", "command:shortcut:app.reportIssue", "command:shortcut:app.about"];
 
 /** A binding as one keycap (design 07.04): ⇧⌘X on the Mac, Ctrl+Shift+X elsewhere. */
-const chordCap = (binding: string) => keycaps(binding).join(isMac ? "" : "+");
+const chordCap = (binding: string) => joinKeycaps(keycaps(binding));
 
 interface CommandEntry extends PaletteEntityBase {
   group: "commands";
@@ -671,7 +672,7 @@ export function CommandPalette({
       indexPaletteItem({ id: "command:mode:dark", group: "commands" as const, primary: "Appearance: Dark", secondary: theme.mode === "dark" ? "Current appearance" : "Use the dark appearance", recentAt: 3, icon: Moon, run: () => setMode("dark") }),
       indexPaletteItem({ id: "command:settings:search", group: "commands" as const, primary: "Search settings…", secondary: "Find a setting by name and open it", recentAt: 2, icon: Settings, keepOpen: true, run: () => { setScope("settings"); setQuery(""); setSelected(0); } }, ["preferences options configure"]),
       indexPaletteItem({ id: "command:new-issue", group: "commands" as const, primary: "New issue…", secondary: "Create a GitHub or Linear issue for the project", recentAt: 2, icon: CircleDot, run: () => openNewIssue() }, ["issue create new bug feature github linear ticket"]),
-      indexPaletteItem({ id: "command:pair-phone", group: "commands" as const, primary: "Pair a phone…", secondary: "Drive this Mac's sessions from TerminalX for iPhone", recentAt: 2, icon: Smartphone, run: () => openPairPhone() }, ["phone iphone mobile pair pairing device qr remote"]),
+      indexPaletteItem({ id: "command:pair-phone", group: "commands" as const, primary: "Pair a phone…", secondary: `Drive ${thisComputer}'s sessions from TerminalX for iPhone`, recentAt: 2, icon: Smartphone, run: () => openPairPhone() }, ["phone iphone mobile pair pairing device qr remote"]),
       indexPaletteItem({ id: "command:worktree-cleanup", group: "commands" as const, primary: "Clean up worktrees…", secondary: "Review and remove safe worktrees across open projects, here and on cloud workspaces", recentAt: 2, icon: Trash2, run: () => openWorktreeCleanup() }, ["worktree workspace cleanup disk space remove delete prune"]),
       indexPaletteItem({ id: "command:local-section:create", group: "commands" as const, primary: "New section…", secondary: "Group sessions across local projects", recentAt: 2, icon: FolderPlus, run: () => openSectionDialog({ kind: "create" }) }, ["create sidebar local section"]),
       ...(selectedSession && !store.selectedCloudWorkspace ? [indexPaletteItem({ id: "command:local-section:move", group: "commands" as const, primary: "Move to section…", secondary: inSection ? `In ${inSection.name}` : "", recentAt: 3, icon: FolderInput, keepOpen: true, session: true, run: () => { setMoveIds([selectedSession.id]); setQuery(""); setError(null); } }, [conversationTitle(selectedSession), "move session sidebar section"])] : []),

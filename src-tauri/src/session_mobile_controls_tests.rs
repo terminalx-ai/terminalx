@@ -161,11 +161,13 @@ impl Drop for Cli {
 
 impl Cli {
     fn new() -> Self {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let phone = Phone::paired();
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("claude");
         std::fs::write(&program, "#!/bin/sh\nprintf 'listening\\n'\n(while :; do printf '.'; sleep 0.2; done) &\nstty -icanon\nexec cat\n").unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         let program = claude::pty::claude_program_for_tests(program);
         phone.manager.follow_pane_exits();
@@ -308,13 +310,11 @@ impl Drop for Codex {
 
 impl Codex {
     fn new() -> Self {
-        use std::os::unix::fs::PermissionsExt;
         let phone = Phone::paired_on(json!({"harness":"codex","model":"","providerSessionId":CONVERSATION}));
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("codex");
         std::fs::write(&program, CODEX).unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let program = codex::pty::codex_program_for_tests(program.clone());
+        let program = codex::pty::codex_program_for_tests(crate::binpath::runnable_for_tests(&program));
         // Its rollout, in the home the app runs Codex in: what each launch resumes.
         let day = codex::home::managed_root().unwrap().join("sessions/2026/11/02");
         std::fs::create_dir_all(&day).unwrap();

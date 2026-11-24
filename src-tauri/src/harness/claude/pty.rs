@@ -173,8 +173,54 @@ pub fn launch_command(opts: LaunchOptions<'_>) -> Option<String> {
             obj.insert("skipDangerousModePermissionPrompt".into(), json!(true));
         }
     }
-    c.push_str(&format!(" --settings {}", quote(&settings.to_string())));
+    c.push_str(&format!(" --settings {}", quote(&settings_argument(&program, &settings.to_string()))));
     Some(c)
+}
+
+/// What `--settings` is given: the JSON itself, or on Windows, for a `.cmd`
+/// launcher such as npm's, a private file holding it. cmd reads the quotes in
+/// JSON again, so such an argument can't safely reach it.
+fn settings_argument(program: &Path, settings: &str) -> String {
+    #[cfg(windows)]
+    if program.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat")) {
+        match settings_file(settings) {
+            Ok(path) => return path.to_string_lossy().into_owned(),
+            Err(error) => log::warn!("write a launch's settings file: {error:#}"),
+        }
+    }
+    let _ = program;
+    settings.to_string()
+}
+
+/// A private file holding `settings`, named by its content so relaunches share
+/// it. Files no launch has written for a week are removed.
+#[cfg(windows)]
+fn settings_file(settings: &str) -> anyhow::Result<std::path::PathBuf> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Write};
+    const KEPT_FOR: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+    let dir = crate::store::root()?.join("launch-settings");
+    crate::win::fs::create_private_dir_all(&dir)?;
+    for entry in std::fs::read_dir(&dir)?.flatten() {
+        let old = entry.metadata().and_then(|meta| meta.modified()).ok().and_then(|at| at.elapsed().ok()).is_some_and(|age| age > KEPT_FOR);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    let path = dir.join(format!("{:x}.json", Sha256::digest(settings.as_bytes())));
+    if let Ok(mut file) = crate::win::fs::open_private(&path) {
+        let mut held = String::new();
+        if file.read_to_string(&mut held).is_ok() && held == settings {
+            drop(file);
+            std::fs::File::options().write(true).open(&path)?.set_modified(std::time::SystemTime::now())?;
+            return Ok(path);
+        }
+        drop(file);
+        std::fs::remove_file(&path)?;
+    }
+    let mut file = crate::win::fs::create_new_private(&path)?;
+    file.write_all(settings.as_bytes())?;
+    Ok(path)
 }
 
 /// The full-screen questions the CLI can open on before its composer, each
@@ -492,6 +538,22 @@ mod tests {
     use super::*;
     use crate::harness::tui::Composer;
 
+    #[cfg(windows)]
+    #[test]
+    fn a_cmd_launcher_is_started_directly_with_its_settings_in_a_private_file() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let launcher = dir.path().join("claude.cmd");
+        std::fs::write(&launcher, "@exit /b 0\r\n").unwrap();
+        let _program = claude_program_for_tests(launcher);
+        let settings = json!({ "hooks": { "Stop": "it's \"quoted\" & 100%" } });
+        let line = launch_command(LaunchOptions { provider_session_id: "id", resume: false, fork_from: None, model: "", effort: None, permission_mode: "default", title: None, settings: &settings }).unwrap();
+        let words = crate::pty::direct_program(&line).expect("a launcher is started itself");
+        let at = words.iter().position(|word| word == "--settings").unwrap();
+        let held: Value = serde_json::from_str(&std::fs::read_to_string(&words[at + 1]).unwrap()).unwrap();
+        assert_eq!(held, settings);
+    }
+
     /// What a 110 by 40 terminal shows once it has drawn `output`: the size
     /// the fixtures were recorded at.
     fn drawn(output: &[u8]) -> vt100::Parser {
@@ -661,9 +723,9 @@ mod tests {
 
     #[test]
     fn a_new_tab_names_its_session_and_a_resumed_one_reopens_it() {
-        if crate::binpath::resolve("claude").is_none() {
-            return;
-        }
+        // Taking a turn keeps another test's pinned stand-in (a `.cmd` on
+        // Windows, whose settings go in a file) out of this command line.
+        let _program = claude_program_for_tests(std::path::PathBuf::from("/opt/claude"));
         let settings = json!({});
         let fresh = launch_command(LaunchOptions {
             provider_session_id: "abc",
@@ -717,9 +779,7 @@ mod tests {
     /// fresh start, a resume, and a fork alike.
     #[test]
     fn bypass_is_the_default_launch_and_survives_resume() {
-        if crate::binpath::resolve("claude").is_none() {
-            return;
-        }
+        let _program = claude_program_for_tests(std::path::PathBuf::from("/opt/claude"));
         let settings = json!({"hooks": {}});
         let launch = |mode, resume, fork_from| {
             launch_command(LaunchOptions {
@@ -786,9 +846,7 @@ mod tests {
     /// CLI restores a resumed session's own mode and ignores the flag.
     #[test]
     fn a_settings_restart_forks_the_conversation_and_carries_the_new_mode() {
-        if crate::binpath::resolve("claude").is_none() {
-            return;
-        }
+        let _program = claude_program_for_tests(std::path::PathBuf::from("/opt/claude"));
         let settings = json!({});
         let c = launch_command(LaunchOptions {
             provider_session_id: "minted",

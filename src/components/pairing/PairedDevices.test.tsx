@@ -125,7 +125,7 @@ describe("Device dock tab", () => {
     expect(tab().textContent).toBe("Device · 2");
     fireEvent.click(tab());
     const panel = screen.getByRole("tabpanel", { name: "Device · 2" });
-    expect(within(panel).getByText(/can see and drive sessions on this Mac/)).toBeTruthy();
+    expect(within(panel).getByText(/can see and drive sessions on this computer/)).toBeTruthy();
     expect(within(panel).getByText("Priya's iPhone")).toBeTruthy();
     expect(within(panel).getByText("Kitchen iPhone")).toBeTruthy();
     expect(within(panel).queryByText("Studio iPad")).toBeNull();

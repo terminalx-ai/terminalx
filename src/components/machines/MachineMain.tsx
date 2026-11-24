@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { thisComputer } from "@/lib/platform";
 import { PanelLeft, RotateCw } from "@/icons";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { Button } from "@/components/ui/button";
@@ -79,7 +80,7 @@ export function MachineMain({ machineKey, sidebarOpen, onToggleSidebar }: { mach
         {!store.ready ? (
           <span>Reading your machines…</span>
         ) : !machine ? (
-          <span>This machine is no longer paired with this Mac.</span>
+          <span>This machine is no longer paired with {thisComputer}.</span>
         ) : attachError ? (
           <>
             <span role="alert">

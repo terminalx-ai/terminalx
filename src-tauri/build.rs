@@ -25,6 +25,11 @@ fn main() {
     {
         tauri_build::build();
         place_tauri_outputs();
+        // The library's unit tests link the resource tauri-build compiled for
+        // the app: without its Common Controls v6 manifest they cannot start.
+        if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            println!("cargo:rustc-link-search=native={}", std::env::var("OUT_DIR").unwrap());
+        }
     }
 }
 

@@ -1,3 +1,4 @@
+import { fileManager } from "@/lib/platform";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -99,7 +100,7 @@ describe("Home navigation (#1103)", () => {
     render(<HomeShortcut />);
     const home = screen.getByRole("button", { name: "Home" });
     expect(home.getAttribute("aria-pressed")).toBe("false");
-    expect(home.textContent).toContain("CtrlAlt0");
+    expect(home.textContent).toContain("Ctrl+Alt+0");
     fireEvent.click(home);
     expect(store.getSessionStore().view).toBe("home");
     expect(store.getSessionStore().selectedSessionId).toBeNull();
@@ -189,14 +190,16 @@ describe("project context menus (PRO-187)", () => {
     else fireEvent.click(screen.getByRole("button", { name: "Project menu for web" }));
     const menu = await screen.findByRole("menu");
     // The designed project menu (02.14, PRO-386), with the project's appearance and pipeline kept beside its settings.
-    const keys = (await import("@/lib/hotkeys")).shortcutKeys;
+    const { shortcutKeys } = await import("@/lib/hotkeys");
+    const { joinKeycaps } = await import("@/lib/shortcuts");
+    const keys = (action: Parameters<typeof shortcutKeys>[0]) => joinKeycaps(shortcutKeys(action));
     expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual([
-      `New session${keys("app.newSession").join("")}`, `Start from a branch, issue or PR…${keys("app.startFrom").join("")}`,
+      `New session${keys("app.newSession")}`, `Start from a branch, issue or PR…${keys("app.startFrom")}`,
       "Project settings", "Scripts and actions", "Name and appearance", "Issue pipeline…", "Open in",
       "Pin project", "Hide projectHidden from the sidebar; sessions keep running", "Remove project…The folder on disk is left as it is.",
     ]);
     fireEvent.keyDown(within(menu).getByRole("menuitem", { name: "Open in" }), { key: "ArrowRight" });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Finder" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: fileManager }));
     const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
     expect(revealItemInDir).toHaveBeenCalledWith("/repos/web");
   });

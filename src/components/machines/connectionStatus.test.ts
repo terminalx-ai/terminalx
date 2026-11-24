@@ -41,7 +41,7 @@ const STATES: { state: MachineConnectionState; label: string; hint: string; tone
     view: "Mac mini runs an older TerminalX. Update TerminalX there to connect.",
   },
   { state: { state: "updating", version: "0.2.34", since: NOW }, label: "Updating", hint: "Back in under a minute", tone: "updating", view: "Mac mini is updating. Back in under a minute. Sessions there keep running." },
-  { state: { state: "accessRemoved" }, label: "Access removed", hint: "Revoked on that Mac", tone: "removed", view: "Mac mini no longer allows this Mac. Pair again to reconnect." },
+  { state: { state: "accessRemoved" }, label: "Access removed", hint: "Revoked on that Mac", tone: "removed", view: "Mac mini no longer allows this computer. Pair again to reconnect." },
 ];
 
 describe("machine connection states (21.09)", () => {
@@ -101,7 +101,7 @@ describe("inline messages (21.09)", () => {
     expect(machineMessageText("unreachable", { name: "Mac mini" })).toBe("Mac mini isn't reachable. Sessions there keep running.");
     expect(machineMessageText("signIn", { name: "dev-server", agent: "Claude Code" })).toBe("Claude Code isn't signed in on dev-server. Sign in from its page.");
     expect(machineMessageText("projectMissing", { name: "dev-server", project: "terminalx" })).toBe("terminalx isn't a project on dev-server yet. Add it there first.");
-    expect(machineMessageText("accessRemoved", { name: "Studio" })).toBe("Studio no longer allows this Mac. Pair again to reconnect.");
+    expect(machineMessageText("accessRemoved", { name: "Studio" })).toBe("Studio no longer allows this computer. Pair again to reconnect.");
     expect(machineMessageText("localOnly", { name: "Studio" })).toBe("Browser and computer use aren't available on another machine.");
   });
 });

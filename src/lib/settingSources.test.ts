@@ -79,7 +79,7 @@ describe("rows kept in the user file", () => {
 describe("settings files and their errors", () => {
   const file = (patch: Partial<SettingsFileLayer>): SettingsFileLayer => ({ layer: "repositoryShared", path: "/r/.terminalx/settings.json", displayPath: "~/r/.terminalx/settings.json", exists: true, keys: 3, git: null, problem: null, ...patch });
   it("chips say whether the file exists, how many keys it sets and what Git does with it", () => {
-    expect(fileChips(file({ layer: "managed", exists: false, keys: 0, path: "/Library/Managed Preferences/x.plist" }))).toEqual(["none on this Mac"]);
+    expect(fileChips(file({ layer: "managed", exists: false, keys: 0, path: "/Library/Managed Preferences/x.plist" }))).toEqual(["none on this computer"]);
     expect(fileChips(file({ git: "committed" }))).toEqual(["3 keys", "committed"]);
     expect(fileChips(file({ layer: "repositoryLocal", git: "ignored", keys: 1 }))).toEqual(["1 key", "ignored by Git"]);
     expect(fileChips(file({ layer: "user", git: null, keys: 14 }))).toEqual(["14 keys"]);

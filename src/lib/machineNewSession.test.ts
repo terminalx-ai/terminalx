@@ -62,14 +62,14 @@ describe("Where it runs: a machine's row", () => {
     expect(offline.detail).toMatch(/^Offline · last seen today at /);
     // The paired record's time when the connection has none.
     expect(machineWhereRow({ state: { state: "offline", lastSeenAt: null, retryInMs: 1 }, machine: { lastSeenAt: seen - 86_400_000 }, running: null, freeBytes: null, agents: null, projects: null, wantedProject: null }, NOW).detail).toMatch(/^Offline · last seen yesterday at /);
-    expect(row({ state: "offline", lastSeenAt: null, retryInMs: 1 })).toEqual({ enabled: false, detail: "Offline · never reached from this Mac" });
+    expect(row({ state: "offline", lastSeenAt: null, retryInMs: 1 })).toEqual({ enabled: false, detail: "Offline · never reached from this computer" });
   });
 
   it("a machine that needs an update, is updating, refuses this Mac or is not connected cannot be chosen, with why", () => {
     expect(row({ state: "needsUpdate", version: "0.2.20", side: "machine" })).toEqual({ enabled: false, detail: "Needs update · it runs an older TerminalX" });
-    expect(row({ state: "needsUpdate", version: "0.2.40", side: "thisMac" })).toEqual({ enabled: false, detail: "Needs update · it runs a newer TerminalX than this Mac" });
+    expect(row({ state: "needsUpdate", version: "0.2.40", side: "thisMac" })).toEqual({ enabled: false, detail: "Needs update · it runs a newer TerminalX than this computer" });
     expect(row({ state: "updating", version: "0.2.34", since: 1 })).toEqual({ enabled: false, detail: "Updating · back in under a minute" });
-    expect(row({ state: "accessRemoved" })).toEqual({ enabled: false, detail: "No longer allows this Mac · pair again in Settings → Machines" });
+    expect(row({ state: "accessRemoved" })).toEqual({ enabled: false, detail: "No longer allows this computer · pair again in Settings → Machines" });
     expect(row({ state: "connecting", trying: ["lan"] })).toEqual({ enabled: false, detail: "Connecting…" });
     expect(row({ state: "reconnecting", lostAt: 1, attempt: 1, retryInMs: 1, trying: ["relay"] })).toEqual({ enabled: false, detail: "Reconnecting…" });
     expect(row({ state: "idle" })).toEqual({ enabled: false, detail: "Not connected" });

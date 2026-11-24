@@ -1094,6 +1094,7 @@ mod tests {
         assert!(!limited(&session("anyone", None)));
     }
 
+    #[cfg_attr(windows, ignore = "Windows does not allow a file name that ends in a space")]
     #[test]
     fn codex_rules_are_excluded_in_a_git_dir_whose_name_ends_in_a_space() {
         let dir = tempfile::tempdir().unwrap();

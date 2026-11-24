@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { bindingText } from "@/lib/shortcuts";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogScrollArea, DialogTitle } from "@/components/ui/dialog";
 import { Kbd } from "@/components/ui/tooltip";
@@ -321,7 +322,7 @@ export function SparseCheckoutDialog({ project, value, onClose, onSaved }: {
           <div className="ml-auto flex items-center gap-2">
             <Button variant="outline" disabled={saving} onClick={onClose}>Cancel</Button>
             <Button disabled={!listing || saving} onClick={() => void save()} aria-label={saving ? "Saving…" : "Save"} aria-keyshortcuts="Meta+Enter Control+Enter">
-              {saving ? "Saving…" : "Save"}<Kbd className="ml-0.5 bg-transparent text-xs text-current opacity-70">⌘↵</Kbd>
+              {saving ? "Saving…" : "Save"}<Kbd className="ml-0.5 bg-transparent text-xs text-current opacity-70">{bindingText("mod+enter")}</Kbd>
             </Button>
           </div>
         </div>

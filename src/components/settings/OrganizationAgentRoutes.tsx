@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { thisComputer } from "@/lib/platform";
 import { Loader2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, type AgentRoute, type AgentRouteAgent, type AgentRouteCheckResult, type AgentRoutes, type AgentRouteSettings, type AgentRouteTemplate } from "@/lib/api";
@@ -378,14 +379,14 @@ function RouteEditor({
             </label>
           ) : (
             <p className="text-muted-foreground">
-              When you save, the app asks for the {template.credential.label.toLowerCase()} in its own secure dialog and checks it from this Mac.{" "}
+              When you save, the app asks for the {template.credential.label.toLowerCase()} in its own secure dialog and checks it from {thisComputer}.{" "}
               {template.credential.help}
             </p>
           )}
           {entering && (
             <label className="flex items-start gap-2">
               <input type="checkbox" checked={edit.saveUnchecked} disabled={busy} onChange={(event) => onChange({ ...edit, saveUnchecked: event.target.checked })} />
-              <span>Save even if this Mac's check fails: an endpoint may answer only the cloud, or serve a model it doesn't list. The workspace checks it again.</span>
+              <span>Save even if {thisComputer}'s check fails: an endpoint may answer only the cloud, or serve a model it doesn't list. The workspace checks it again.</span>
             </label>
           )}
         </div>

@@ -428,7 +428,7 @@ pub fn prepare_account(cwd: &str, exe: &Path, root: &Path, id: &str) -> Result<P
     anyhow::ensure!(crate::agent_accounts::valid_id(id) && id != crate::agent_accounts::LOCAL, "not an added Codex account");
     let _building = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
     let (account, home) = account_paths(root, id);
-    anyhow::ensure!(account.is_dir(), "This Codex account's sign-in is no longer on this Mac. Sign in again in Settings → Agents.");
+    anyhow::ensure!(account.is_dir(), "{}", crate::platform_profile::localize("This Codex account's sign-in is no longer on this Mac. Sign in again in Settings → Agents."));
     let shared = crate::store::ensure_dir(root.join("codex"))?;
     let hooks_live = prepare_account_in(&home, &account, user_root(), &shared, cwd, exe)?;
     Ok(Prepared { home, hooks_live })
@@ -473,9 +473,40 @@ fn force_link(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+/// On Windows a folder is linked with a junction, which needs no privilege. A
+/// file needs a symbolic link, because Codex replaces its login file and a
+/// hard link would be left behind holding the old one.
+#[cfg(windows)]
+fn force_link(source: &Path, target: &Path) -> Result<()> {
+    /// `ERROR_PRIVILEGE_NOT_HELD`.
+    const NO_SYMLINK_PRIVILEGE: i32 = 1314;
+    match std::fs::symlink_metadata(target) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            if std::fs::read_link(target).is_ok_and(|current| current == source) {
+                return Ok(());
+            }
+            std::fs::remove_file(target).or_else(|_| std::fs::remove_dir(target))?;
+        }
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir(target).context("a folder with files in it is in the way")?,
+        Ok(_) => std::fs::remove_file(target)?,
+        Err(_) => {}
+    }
+    if source.is_dir() {
+        crate::win::fs::junction(target, source)?;
+        return Ok(());
+    }
+    std::os::windows::fs::symlink_file(source, target).map_err(|error| {
+        if error.raw_os_error() == Some(NO_SYMLINK_PRIVILEGE) {
+            anyhow::anyhow!("An added Codex account needs Windows to allow symbolic links. Turn on Developer Mode in Windows Settings → System → For developers, then try again.")
+        } else {
+            error.into()
+        }
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn force_link(_source: &Path, _target: &Path) -> Result<()> {
-    anyhow::bail!("agent accounts need a unix host")
+    anyhow::bail!("agent accounts aren't available on this system")
 }
 
 /// The rest of a home for terminal tabs: hooks, the mirrored config and the
@@ -585,7 +616,7 @@ pub fn prepare_native_account(cwd: &str, root: &Path, id: &str) -> Result<PathBu
     anyhow::ensure!(crate::agent_accounts::valid_id(id) && id != crate::agent_accounts::LOCAL, "not an added Codex account");
     let _building = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
     let (account, _) = account_paths(root, id);
-    anyhow::ensure!(account.is_dir(), "This Codex account's sign-in is no longer on this Mac. Sign in again in Settings → Agents.");
+    anyhow::ensure!(account.is_dir(), "{}", crate::platform_profile::localize("This Codex account's sign-in is no longer on this Mac. Sign in again in Settings → Agents."));
     let home = account.join("native");
     let shared = crate::store::ensure_dir(root.join(NATIVE_HOME))?;
     prepare_native_account_in(&home, &account, user_root(), &shared, cwd)?;

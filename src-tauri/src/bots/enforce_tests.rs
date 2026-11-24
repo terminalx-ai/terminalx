@@ -54,6 +54,7 @@ fn until(what: &str, done: impl Fn() -> bool) {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn lowering_access_or_pausing_reaches_a_chat_made_earlier() {
     let _home = bots_on();
     let (manager, _terminals, sink) = manager();
@@ -91,6 +92,7 @@ fn lowering_access_or_pausing_reaches_a_chat_made_earlier() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_running_chat_is_held_to_a_pause_and_stopped_by_a_delete_or_the_switch() {
     let _home = bots_on();
     let (manager, terminals, sink) = manager();
@@ -121,6 +123,7 @@ fn a_running_chat_is_held_to_a_pause_and_stopped_by_a_delete_or_the_switch() {
 /// gets back as much of its own mode as the bot allows now, never more.
 /// L4: another bot's sessions are left alone.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_resume_or_more_access_gives_back_the_mode_a_tab_had() {
     let _home = bots_on();
     let (manager, _terminals, sink) = manager();
@@ -148,6 +151,7 @@ fn a_resume_or_more_access_gives_back_the_mode_a_tab_had() {
 /// N2: a running tab the limit cannot be applied to is stopped, and its
 /// stored mode is held. A native Codex tab under ask-before-acting is plan.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_running_tab_the_limit_cannot_reach_is_stopped_and_held() {
     let _home = bots_on();
     let (manager, terminals, sink) = manager();
@@ -182,6 +186,7 @@ fn set_status(entry: &SessionEntry, status: TabStatus) {
 /// one in a turn is asked for the mode after its turn. L-b (review 4): once
 /// all of it is asked for it is forgotten, so a rename after the turn stops nothing.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_resume_reaches_a_finished_tab_and_one_in_a_turn() {
     let _home = bots_on();
     let (manager, terminals, sink) = manager();
@@ -218,6 +223,7 @@ fn a_resume_reaches_a_finished_tab_and_one_in_a_turn() {
 /// L1 and L3: a mode set by hand is the tab's own, so no later reconcile
 /// lifts it; and only a change to what a bot is told restarts its agents.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_mode_set_by_hand_stays_and_a_rename_restarts_nothing() {
     let _home = bots_on();
     let (manager, terminals, sink) = manager();
@@ -247,6 +253,7 @@ fn a_mode_set_by_hand_stays_and_a_rename_restarts_nothing() {
 /// H1: deleting a bot stops every session that works for it, a session it
 /// started included, and gives none of them a wider mode back.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_delete_stops_the_bots_sessions_and_gives_back_nothing() {
     let _home = bots_on();
     let (manager, terminals, sink) = manager();
@@ -279,6 +286,7 @@ fn a_delete_stops_the_bots_sessions_and_gives_back_nothing() {
 /// PRO-470: a role put back, or a change to it undone, reaches the bot's
 /// agents as a role write does; a note, or undoing one, restarts nothing.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_role_put_back_or_undone_starts_the_bots_agents_again() {
     let _home = bots_on();
     let (manager, terminals, sink) = manager();

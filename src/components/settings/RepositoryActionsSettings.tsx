@@ -1,4 +1,5 @@
 import { useId, useState, type ReactNode } from "react";
+import { bindingText, joinKeycaps } from "@/lib/shortcuts";
 import { Popover as PopoverPrimitive } from "radix-ui";
 import { DndContext, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
 import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
@@ -47,7 +48,7 @@ export function RepositoryActionsSettings({ actions, onChange, onReset, sourceFi
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <h4 id={`${errorId}-title`} className="text-[15px] font-semibold">Run actions</h4>
-          <p className="mt-1 text-[13px] text-muted-foreground">Shortcuts for quick commands such as the dev server or the test suite. The first visible one runs with {runKeys.join("") || "the Run shortcut"}; with several, it opens the Run menu.</p>
+          <p className="mt-1 text-[13px] text-muted-foreground">Shortcuts for quick commands such as the dev server or the test suite. The first visible one runs with {joinKeycaps(runKeys) || "the Run shortcut"}; with several, it opens the Run menu.</p>
         </div>
         <Button variant="outline" size="sm" className="shrink-0" aria-label="Add action" disabled={mutation.busy} onClick={() => {
           mutation.clearError();
@@ -218,7 +219,7 @@ function ActionDialog({ action, actions, isNew, busy, error, sourceFile, onClose
                   describedBy={errors.command ? `${id}-command-error` : `${id}-command-hint`} onChange={(command) => setDraft({ ...draft, command })} />
               </div>
               {errors.command ? <RepositoryFieldError id={`${id}-command-error`} error={errors.command} />
-                : <p id={`${id}-command-hint`} className="mt-1.5 text-xs text-faint">Runs in the workspace folder with your and the project's variables. ⌘↵ saves.</p>}
+                : <p id={`${id}-command-hint`} className="mt-1.5 text-xs text-faint">Runs in the workspace folder with your and the project's variables. {bindingText("mod+enter")} saves.</p>}
             </div>
             <ActionSwitch id={`${id}-run-after-setup`} label="Run after setup" description="Starts once a new workspace finishes its setup script." checked={draft.runAfterSetup} onCheckedChange={(runAfterSetup) => setDraft({ ...draft, runAfterSetup })} />
             <ActionSwitch id={`${id}-concurrent`} label="Allow several at once" description="Off stops the running one before starting again." checked={draft.concurrent} onCheckedChange={(concurrent) => setDraft({ ...draft, concurrent })} />
@@ -231,7 +232,7 @@ function ActionDialog({ action, actions, isNew, busy, error, sourceFile, onClose
             </div>}
             <div className="ml-auto flex items-center gap-2">
               <Button variant="outline" size="sm" disabled={busy} onClick={onClose}>Cancel</Button>
-              <Button type="submit" size="sm" disabled={busy} aria-label={busy ? "Saving…" : "Save action"}>{busy ? "Saving…" : <>Save <kbd className="font-sans text-[11px] opacity-60">⌘↵</kbd></>}</Button>
+              <Button type="submit" size="sm" disabled={busy} aria-label={busy ? "Saving…" : "Save action"}>{busy ? "Saving…" : <>Save <kbd className="font-sans text-[11px] opacity-60">{bindingText("mod+enter")}</kbd></>}</Button>
             </div>
           </DialogFooter>
         </form>

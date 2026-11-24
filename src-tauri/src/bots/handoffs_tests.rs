@@ -111,6 +111,7 @@ fn refusal_text(error: anyhow::Error) -> String {
 
 /// Labels say who sent it and what it is, and that it is no approval.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn labels_name_the_sender_and_say_it_is_no_approval() {
     let _home = bots_on();
     let sink = BroadcastSink::new(64);

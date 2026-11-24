@@ -140,7 +140,7 @@ describe("Add a machine → On your account (screen 21.03)", () => {
     await act(async () => request.resolve({ code: CODE, grantRequestId: "grant-2" }));
     await within(dialog).findByText("Waiting for approval on Mac mini…");
     await act(async () => pairAnswer.resolve({ paired: false, reason: "not-approved", message: "not approved" }));
-    expect((await within(dialog).findByRole("alert")).textContent).toContain("Mac mini did not allow this Mac");
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("Mac mini did not allow this computer");
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_account_finish", { grantRequestId: "grant-2", paired: false }));
   });
 
@@ -218,6 +218,6 @@ describe("Add a machine → On your account (screen 21.03)", () => {
   it("says the account still has to approve this Mac", async () => {
     directory = { signedIn: true, installation: "approvalRequired", machines: [] };
     const { dialog } = open();
-    expect((await within(dialog).findByRole("status")).textContent).toContain("Your account has not approved this Mac yet.");
+    expect((await within(dialog).findByRole("status")).textContent).toContain("Your account has not approved this computer yet.");
   });
 });

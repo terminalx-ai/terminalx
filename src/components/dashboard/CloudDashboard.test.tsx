@@ -411,7 +411,7 @@ it("filters table sessions by cloud owner and archive state and opens an archive
   fireEvent.change(within(picker).getByRole("textbox", { name: "Filter people" }), { target: { value: "am" } });
   expect(within(picker).queryByRole("checkbox", { name: /Zoe/ })).toBeNull();
   fireEvent.click(within(picker).getByRole("checkbox", { name: /Amy/ }));
-  expect(within(picker).getByText(/Owner filter is saved on this Mac/)).toBeTruthy();
+  expect(within(picker).getByText(/Owner filter is saved on this computer/)).toBeTruthy();
   fireEvent.keyDown(picker, { key: "Escape" });
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(screen.getByRole("button", { name: "People: Amy" })).toBeTruthy();

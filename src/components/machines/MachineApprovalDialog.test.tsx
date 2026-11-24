@@ -42,7 +42,7 @@ afterEach(cleanup);
 
 async function shown() {
   render(<MachineApprovalHost />);
-  return screen.findByRole("dialog", { name: "Let Paresh’s MacBook Pro operate this Mac?" });
+  return screen.findByRole("dialog", { name: "Let Paresh’s MacBook Pro operate this computer?" });
 }
 
 describe("Let a computer operate this Mac (screen 21.05)", () => {
@@ -72,18 +72,18 @@ describe("Let a computer operate this Mac (screen 21.05)", () => {
     const dialog = await shown();
     const able = within(dialog).getByRole("region", { name: "It will be able to" });
     expect(within(able).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
-      "Start, steer and stop sessions in this Mac’s projects",
+      "Start, steer and stop sessions in this computer’s projects",
       "Open terminals and read or change files in those projects",
-      "Commit, push and open pull requests with this Mac’s git sign-in",
+      "Commit, push and open pull requests with this computer’s git sign-in",
     ]);
     const wont = within(dialog).getByRole("region", { name: "TerminalX won't let it" });
     expect(within(wont).getByText("TerminalX won’t let it")).toBeTruthy();
     expect(within(wont).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
-      "Use this Mac’s built-in browser, computer use or dictation",
-      "Pair other computers or change who may operate this Mac",
+      "Use this computer’s built-in browser, computer use or dictation",
+      "Pair other computers or change who may operate this computer",
     ]);
     expect(within(wont).getByText("Its terminals and agents run as you, so they can reach anything your account can.")).toBeTruthy();
-    expect(dialog.textContent).not.toContain("Control this Mac’s screen");
+    expect(dialog.textContent).not.toContain("Control this computer’s screen");
     expect(within(dialog).getByText("You can revoke it later in Settings → Machines.")).toBeTruthy();
   });
 
@@ -119,7 +119,7 @@ describe("Let a computer operate this Mac (screen 21.05)", () => {
   it("binds Keep this Mac awake to pairing.keepAwake", async () => {
     view = hostView({ keepAwake: false }, { pending: pending() });
     const dialog = await shown();
-    const awake = within(dialog).getByRole("switch", { name: "Keep this Mac awake while it is connected" });
+    const awake = within(dialog).getByRole("switch", { name: "Keep this computer awake while it is connected" });
     expect(awake.getAttribute("aria-checked")).toBe("false");
     fireEvent.click(awake);
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("pairing_set_keep_awake", { enabled: true }));
@@ -133,7 +133,7 @@ describe("Let a computer operate this Mac (screen 21.05)", () => {
       throw new Error(command);
     });
     const dialog = await shown();
-    const awake = within(dialog).getByRole("switch", { name: "Keep this Mac awake while it is connected" });
+    const awake = within(dialog).getByRole("switch", { name: "Keep this computer awake while it is connected" });
     fireEvent.click(awake);
     expect(await within(dialog).findByText("Could not keep this Mac awake")).toBeTruthy();
     expect(awake.getAttribute("aria-checked")).toBe("true");

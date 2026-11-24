@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { thisComputer } from "@/lib/platform";
 import { Popover } from "radix-ui";
 import { Button } from "@/components/ui/button";
 import { retryRelay, usePairing } from "@/lib/pairing";
@@ -23,7 +24,7 @@ export function RelayStatus() {
   const label = !ready ? "Relay loading" : relay.phase === "connected" ? "Relay connected"
     : relay.phase === "connecting" ? "Relay connecting" : relay.phase === "offline" ? "Relay unavailable" : "Relay not configured";
   const explanation = !ready ? "Checking the Relay connection…" : relay.phase === "connected"
-    ? "Relay lets paired phones and shared sessions reach this Mac from other networks. Local terminals keep running if Relay disconnects."
+    ? `Relay lets paired phones and shared sessions reach ${thisComputer} from other networks. Local terminals keep running if Relay disconnects.`
     : relay.phase === "off"
       ? "Relay is not configured for this session. Check Settings → Account. Local terminals and LAN pairing are available without Relay."
       : relay.message ?? "Relay is reconnecting automatically. Local terminals and LAN pairing remain available.";

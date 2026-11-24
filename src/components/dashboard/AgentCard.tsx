@@ -1,4 +1,5 @@
 import { sessionStatus as detailedStatus } from "@terminalx/portable/sessionStatus";
+import { thisComputer } from "@/lib/platform";
 import { archiveWithUndo } from "@/lib/archiveNotices";
 import { StatusBadge, SessionStatus } from "@/components/ui/SessionStatus";
 import { useEffect, useRef, type ReactNode } from "react";
@@ -386,7 +387,7 @@ export function MachineAgentCard({
               <span className="truncate font-mono">{workspaceName(session)}</span>
             </span>
           )}
-          <span className="flex min-w-0 shrink items-center gap-1 rounded-sm bg-veil-raised px-1.5 py-0.5 text-[10px] text-muted-foreground" title={`Runs on ${session.machineName}, not on this Mac`}>
+          <span className="flex min-w-0 shrink items-center gap-1 rounded-sm bg-veil-raised px-1.5 py-0.5 text-[10px] text-muted-foreground" title={`Runs on ${session.machineName}, not on ${thisComputer}`}>
             <MachineIcon machine={machine} className="size-2.5 shrink-0" />
             <span className="truncate">{session.machineName}</span>
           </span>

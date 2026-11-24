@@ -41,7 +41,14 @@ pub struct InputDevice {
 /// opaque; the name is what the reader picked in Settings and what older
 /// settings files already hold, so that is what is matched on.
 fn device_name(device: &cpal::Device) -> Option<String> {
-    device.description().ok().map(|d| d.name().to_string())
+    let description = device.description().ok()?;
+    // Windows' short description is "Microphone" for nearly every input; its
+    // friendly name is what tells them apart.
+    #[cfg(windows)]
+    if let Some(friendly) = description.extended().first() {
+        return Some(friendly.clone());
+    }
+    Some(description.name().to_string())
 }
 
 /// Input devices by name; the name is what the reader recognises and what
@@ -55,10 +62,14 @@ pub fn list_inputs() -> Vec<InputDevice> {
     let mut out = Vec::new();
     if let Ok(devices) = host.input_devices() {
         for d in devices {
-            if let Some(name) = device_name(&d) {
-                let is_default = default_name.as_deref() == Some(name.as_str());
-                out.push(InputDevice { id: name.clone(), name, is_default });
+            let Some(name) = device_name(&d) else { continue };
+            // A name is the id settings store: a second device of the same name
+            // could not be told from the first, and capture opens the first.
+            if out.iter().any(|known: &InputDevice| known.name == name) {
+                continue;
             }
+            let is_default = default_name.as_deref() == Some(name.as_str());
+            out.push(InputDevice { id: name.clone(), name, is_default });
         }
     }
     out

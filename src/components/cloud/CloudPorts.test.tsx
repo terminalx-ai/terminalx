@@ -98,7 +98,7 @@ describe("the Ports tab (PRO-28, 14.11)", () => {
     expect(words).toContain("Ports and previews");
     expect(words).toContain("no public address");
     // What a forward exposes is said where it is made.
-    expect(words).toContain("other programs on this Mac can reach it");
+    expect(words).toContain("other programs on this computer can reach it");
     expect(words).toContain("shares cookies");
     // 14.11's preview-link card is PRO-135: it is not here.
     expect(words).not.toContain("preview link");
@@ -131,12 +131,12 @@ describe("the Ports tab (PRO-28, 14.11)", () => {
     const { client } = setup();
     draw(<CloudPortsView workspaceKey="ws-1" client={client} state={live} connectionId="cloud-1" mayOpen active />);
     await waitFor(() => expect(screen.getAllByTestId("cloud-port")).toHaveLength(2));
-    fireEvent.click(screen.getByRole("checkbox", { name: "Same port number on this Mac" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Same port number on this computer" }));
     fireEvent.click(within(row(3000)).getByRole("button", { name: "Forward" }));
-    expect((await screen.findByRole("alert")).textContent).toContain("Port 3000 is already in use on this Mac");
+    expect((await screen.findByRole("alert")).textContent).toContain("Port 3000 is already in use on this computer");
     expect(mocks.invoke).toHaveBeenCalledWith("cloud_port_forward", { connectionId: "cloud-1", port: 3000, localPort: 3000, exact: true });
 
-    fireEvent.click(screen.getByRole("checkbox", { name: "Same port number on this Mac" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Same port number on this computer" }));
     fireEvent.click(within(row(3000)).getByRole("button", { name: "Forward" }));
     await waitFor(() => expect(within(row(3000)).getByTestId("cloud-port-address").textContent).toBe("→ 127.0.0.1:49000"));
     expect(mocks.invoke).toHaveBeenLastCalledWith("cloud_port_forward", { connectionId: "cloud-1", port: 3000, localPort: null, exact: false });
@@ -334,7 +334,7 @@ describe("the Ports tab (PRO-28, 14.11)", () => {
     expect(portErrorMessage("cloud_port_not_connected", 3000)).toContain("never starts it");
     expect(portErrorMessage({ code: "forbidden" }, 3000)).toBe("You do not have access to this workspace's ports.");
     expect(portErrorMessage("cloud_port_invalid", 0)).toContain("between 1 and 65535");
-    expect(portErrorMessage("cloud_port_in_use", 5173)).toBe('Port 5173 is already in use on this Mac. Untick "Same port number on this Mac" to use a free one.');
+    expect(portErrorMessage("cloud_port_in_use", 5173)).toBe('Port 5173 is already in use on this computer. Untick "Same port number on this computer" to use a free one.');
     expect(portErrorMessage("something_new", 3000)).toBe("The port could not be forwarded. Try again.");
   });
 });

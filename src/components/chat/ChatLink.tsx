@@ -19,6 +19,7 @@ import type { LocalPathInfo } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "@/components/ui/menu";
 import { copyText } from "@/lib/clipboard";
+import { isMac } from "@/lib/platform";
 import { citedFileKind, type CitedFileKind } from "@/lib/codexCitations";
 import { File, FileImage, FilePdf, FileSpreadsheet, FileText, Presentation } from "@/icons";
 
@@ -135,7 +136,7 @@ export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, clas
       data-streamdown="link"
       data-file-chip={file || undefined}
       // A link's own title (a cited file's full path) comes first; a website link adds how to choose a browser.
-      title={destination.kind === "web" ? `${props.title ? `${props.title}\n` : ""}${asksForBrowser ? "Choose a browser" : `Open in ${BROWSER_NAMES[primaryBrowser]}`}${hasWorkspace ? `; ${navigator.platform.toLowerCase().includes("mac") ? "⇧⌘" : "Shift+Ctrl"}-click to open in ${BROWSER_NAMES[alternateBrowser]}` : ""}` : props.title}
+      title={destination.kind === "web" ? `${props.title ? `${props.title}\n` : ""}${asksForBrowser ? "Choose a browser" : `Open in ${BROWSER_NAMES[primaryBrowser]}`}${hasWorkspace ? `; ${isMac ? "⇧⌘" : "Shift+Ctrl"}-click to open in ${BROWSER_NAMES[alternateBrowser]}` : ""}` : props.title}
       aria-haspopup={asksForBrowser ? "dialog" : undefined}
       aria-expanded={asksForBrowser ? chooserOpen : undefined}
       tabIndex={props.tabIndex ?? (asksForBrowser ? 0 : undefined)}

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { thisComputer } from "@/lib/platform";
 import { useAccount } from "@/lib/account";
 import { useCloudCatalog, type CloudCatalogState } from "@/lib/cloudCatalog";
 import { cloudPresence, useCloudPresence, useCloudPresenceVersion } from "@/lib/cloudPresence";
@@ -105,7 +106,7 @@ export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | nu
         <input aria-label="Filter people" placeholder="Filter people" value={peopleQuery} onChange={(event) => setPeopleQuery(event.target.value)} onKeyDown={(event) => { if (event.key !== "Escape") event.stopPropagation(); }} className="mx-2 mb-2 w-[calc(100%-1rem)] rounded bg-well px-2 py-1 text-xs" />
         <DropdownMenuItem onSelect={() => choose([])}>Anyone</DropdownMenuItem>
         {[...owners].filter(([, name]) => name.toLowerCase().includes(peopleQuery.toLowerCase())).sort((a, b) => a[1].localeCompare(b[1])).map(([id, name]) => <DropdownMenuCheckboxItem key={id} checked={selected.includes(id)} onSelect={(event) => event.preventDefault()} onCheckedChange={() => choose(selected.includes(id) ? selected.filter((value) => value !== id) : [...selected, id])}>{name}</DropdownMenuCheckboxItem>)}
-        <p className="px-2 py-2 text-[10px] text-muted-foreground">Owner filter is saved on this Mac. Local sessions count as yours.</p>
+        <p className="px-2 py-2 text-[10px] text-muted-foreground">Owner filter is saved on {thisComputer}. Local sessions count as yours.</p>
       </DropdownMenuContent>
     </DropdownMenu>
   </>;

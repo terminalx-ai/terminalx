@@ -109,7 +109,8 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         let text = a.to_string_lossy();
-        assert!(text.starts_with("/tmp/terminalx-ab-"));
+        assert!(a.starts_with("/tmp"), "{text}");
+        assert!(a.file_name().unwrap().to_string_lossy().starts_with(SOCKET_DIRECTORY_PREFIX), "{text}");
         // Enough room for `<dir>/terminalx-<32 char profile>.sock` inside
         // the 104-byte sun_path limit.
         assert!(text.len() + 1 + "terminalx-".len() + 32 + ".sock".len() < 104, "{text}");
@@ -119,8 +120,14 @@ mod tests {
     fn derives_a_private_socket_dir_and_idle_bound_when_nothing_is_inherited() {
         let tmp = tempfile::tempdir().unwrap();
         let env = create(&HashMap::new(), tmp.path());
-        assert!(env.owns_socket_directory);
         assert_eq!(env.get("AGENT_BROWSER_IDLE_TIMEOUT_MS"), Some("600000"));
+        // Windows has no socket folder to make private.
+        if cfg!(windows) {
+            assert!(!env.owns_socket_directory);
+            assert_eq!(env.socket_dir, None);
+            return;
+        }
+        assert!(env.owns_socket_directory);
         let dir = env.socket_dir.clone().unwrap();
         assert!(dir.is_dir());
         #[cfg(unix)]

@@ -1,4 +1,5 @@
 import { useSettingsFile } from "@/lib/settingsFile";
+import { ThisComputer, profile, thisComputer } from "@/lib/platform";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState } from "react";
 import { Loader2 } from "@/icons";
@@ -11,6 +12,9 @@ import type { MachineName } from "@/types/pairing";
  * says "You · on <name>" for work started here. Relay's account directory
  * gets it too. Shown and changed here whether or not Relay is on.
  */
+/** The system's settings app ("System Settings", "Settings"): the first step of its About path. */
+const systemSettings = profile.aboutSettingsPath?.split(" → ")[0] ?? null;
+
 export function MachineNameSettings() {
   const { revision } = useSettingsFile();
   const [machine, setMachine] = useState<MachineName | null>(null);
@@ -54,14 +58,14 @@ export function MachineNameSettings() {
     <RegisteredSetting setting="account.machineName"><div className="py-1" data-testid="machine-name-settings">
       <div className="flex items-center justify-between gap-4 py-2">
         <div className="min-w-0">
-          <label id="machine-name-label" htmlFor="machine-name" className="text-[13px] font-medium">This Mac’s name</label>
+          <label id="machine-name-label" htmlFor="machine-name" className="text-[13px] font-medium">{ThisComputer}’s name</label>
           {machine && (
             <p className="text-xs leading-relaxed text-muted-foreground">
-              Your other Macs show work started here as “You · on {machine.name}”.{" "}
+              Your other computers show work started here as “You · on {machine.name}”.{" "}
               {!machine.chosen
-                ? "It is the name in System Settings → General → About, and changes with it."
+                ? (profile.aboutSettingsPath ? `It is the name in ${profile.aboutSettingsPath}, and changes with it.` : "It is the system’s own name for it, and changes with it.")
                 : computerName && computerName !== machine.name
-                  ? `In System Settings this Mac is called “${computerName}”.`
+                  ? (systemSettings ? `In ${systemSettings} ${thisComputer} is called “${computerName}”.` : `The system calls ${thisComputer} “${computerName}”.`)
                   : null}
             </p>
           )}
@@ -94,7 +98,7 @@ export function MachineNameSettings() {
             }}
             className="h-8 w-full rounded-md border border-hairline bg-well px-2.5 pr-7 text-[13px] outline-none focus:border-ring disabled:opacity-60"
           />
-          {saving && <Loader2 className="absolute top-2 right-2 size-4 animate-spin text-faint" aria-label="Saving this Mac’s name" />}
+          {saving && <Loader2 className="absolute top-2 right-2 size-4 animate-spin text-faint" aria-label={`Saving ${thisComputer}’s name`} />}
         </div>
       </div>
       {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}

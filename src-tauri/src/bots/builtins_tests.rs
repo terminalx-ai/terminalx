@@ -88,6 +88,7 @@ fn completed(duty: &Automation) -> AutomationRun {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn every_bot_has_one_look_around_and_one_tidy_that_stay_built_in() {
     let rig = rig();
     let atlas = rig.hire("Atlas");
@@ -124,6 +125,7 @@ fn every_bot_has_one_look_around_and_one_tidy_that_stay_built_in() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_built_ins_run_is_marked_held_to_read_only_mode_without_hooks_and_told_its_rules() {
     let rig = rig();
     let atlas = rig.hire("Atlas");
@@ -156,6 +158,7 @@ fn a_built_ins_run_is_marked_held_to_read_only_mode_without_hooks_and_told_its_r
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_look_around_with_nothing_new_to_see_costs_no_model_and_is_logged_as_nothing_new() {
     let rig = rig();
     let atlas = rig.hire("Atlas");
@@ -230,6 +233,7 @@ fn a_look_around_with_nothing_new_to_see_costs_no_model_and_is_logged_as_nothing
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_tidy_waits_until_memory_changed_since_the_last_one() {
     let rig = rig();
     let atlas = rig.hire("Atlas");
@@ -249,6 +253,7 @@ fn a_tidy_waits_until_memory_changed_since_the_last_one() {
 
 /// Every tidy is one undoable history entry (PRO-470's history).
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_tidy_merges_and_removes_as_one_change_that_one_undo_puts_back() {
     let rig = rig();
     let atlas = rig.hire("Atlas");
@@ -293,6 +298,7 @@ fn a_tidy_merges_and_removes_as_one_change_that_one_undo_puts_back() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_tidy_is_refused_whole_when_its_lines_do_not_read_as_named() {
     let rig = rig();
     let atlas = rig.hire("Atlas");

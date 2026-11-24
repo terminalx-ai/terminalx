@@ -2,6 +2,7 @@
 // Pure functions over the native contract (src/types/settingsSources.ts and
 // src/types/configuration.ts); the components only lay these out.
 import type { ConfigurationLayer, ConfigurationLayerValue, ConfigurationValue } from "@/types/configuration";
+import { thisComputer } from "@/lib/platform";
 import type { SettingsFileEffect, SettingsFileLayer, SettingsFileProblem } from "@/types/settingsSources";
 
 /** The badges this build can produce. There is no organization layer and no staged rollout, so neither has a badge. */
@@ -112,7 +113,7 @@ export function resetFor(value: ConfigurationValue): { layer: ConfigurationLayer
 /** The chips beside a file in Settings files. */
 export function fileChips(file: SettingsFileLayer): string[] {
   if (file.layer === "defaults") return [];
-  if (!file.exists) return ["none on this Mac"];
+  if (!file.exists) return [`none on ${thisComputer}`];
   const chips = [`${file.keys} ${file.keys === 1 ? "key" : "keys"}`];
   if (file.git === "committed") chips.push("committed");
   if (file.git === "ignored") chips.push("ignored by Git");

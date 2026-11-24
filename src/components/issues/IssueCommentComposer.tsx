@@ -21,7 +21,7 @@ import {
   type PostHooks,
 } from "@/lib/issueDrafts";
 import { issueOps, type IssueUser } from "@/lib/issueOps";
-import { isMac } from "@/lib/shortcuts";
+import { bindingText } from "@/lib/shortcuts";
 
 /** The most people the mention list offers at once. */
 const MENTIONS_SHOWN = 6;
@@ -294,7 +294,7 @@ export function IssueCommentComposer({
           textareaRef={area}
           onKeyDown={onKeyDown}
           onSubmit={() => void post(false)}
-          hint={isMac ? "⌘↩ to comment" : "Ctrl+Enter to comment"}
+          hint={`${bindingText("mod+enter")} to comment`}
         >
           <MicButton dictation={dictation} />
           {canClose && (

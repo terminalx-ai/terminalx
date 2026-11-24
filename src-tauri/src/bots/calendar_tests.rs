@@ -554,6 +554,7 @@ impl Rig {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_week_is_read_through_the_dispatch_for_every_bot_or_one_and_never_with_bots_off() {
     let rig = rig();
     let atlas = rig.hire("Atlas");
@@ -599,6 +600,7 @@ fn the_week_is_read_through_the_dispatch_for_every_bot_or_one_and_never_with_bot
 /// PRO-499: deleting a duty keeps its run log and its name; the week draws its past runs and its log still opens.
 /// Its bot's deletion takes the kept log with it. The week starts on the day the window asks for.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_deleted_duty_is_read_through_the_dispatch_and_goes_with_its_bot() {
     let rig = rig();
     let atlas = rig.hire("Atlas");
@@ -645,6 +647,7 @@ fn a_deleted_duty_is_read_through_the_dispatch_and_goes_with_its_bot() {
 /// duty's log to close it after, so the week would draw it running for ever. A run written to the kept log after
 /// the delete is read as ended at the deletion too.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_duty_deleted_mid_run_ends_its_run_then() {
     let rig = rig();
     let atlas = rig.hire("Atlas");

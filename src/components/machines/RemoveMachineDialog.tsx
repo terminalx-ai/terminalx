@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { thisComputer } from "@/lib/platform";
 import { Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -38,7 +39,7 @@ export function RemoveMachineDialog({ machine, onClose, onRemoved }: { machine: 
       <DialogContent width="max-w-[440px]" data-testid="remove-machine">
         <DialogTitle className="text-sm font-semibold">Remove {machine.name}?</DialogTitle>
         <DialogDescription className={cn(soft, "grid gap-2")}>
-          <span>{machine.name} leaves the sidebar, and this Mac forgets its credential. To operate it again, pair it again.</span>
+          <span>{machine.name} leaves the sidebar, and {thisComputer} forgets its credential. To operate it again, pair it again.</span>
           <span>Sessions on {machine.name} stay there and keep running. Nothing on {machine.name} is changed or deleted.</span>
         </DialogDescription>
         {error && <p role="alert" className="text-[12.5px] text-destructive">{error}</p>}

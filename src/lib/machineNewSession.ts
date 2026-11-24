@@ -1,4 +1,5 @@
 import { WorkspaceRpcError, type MachineProject, type RuntimeAgent, type RuntimeIssueRef, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { thisComputer } from "@/lib/platform";
 import { newCloudAgentTab } from "@/lib/cloudAgents";
 import { machineAgentScope } from "@/lib/machineCatalog";
 import { selectCloudSession } from "@/lib/sessions";
@@ -89,14 +90,14 @@ export function machineWhereRow(input: MachineWhereInput, now = Date.now()): Mac
     }
     case "offline": {
       const seen = state.lastSeenAt ?? input.machine.lastSeenAt;
-      return { enabled: false, detail: seen ? `Offline · last seen ${seenText(seen, now)}` : "Offline · never reached from this Mac" };
+      return { enabled: false, detail: seen ? `Offline · last seen ${seenText(seen, now)}` : `Offline · never reached from ${thisComputer}` };
     }
     case "needsUpdate":
-      return { enabled: false, detail: state.side === "thisMac" ? "Needs update · it runs a newer TerminalX than this Mac" : "Needs update · it runs an older TerminalX" };
+      return { enabled: false, detail: state.side === "thisMac" ? `Needs update · it runs a newer TerminalX than ${thisComputer}` : "Needs update · it runs an older TerminalX" };
     case "updating":
       return { enabled: false, detail: "Updating · back in under a minute" };
     case "accessRemoved":
-      return { enabled: false, detail: "No longer allows this Mac · pair again in Settings → Machines" };
+      return { enabled: false, detail: `No longer allows ${thisComputer} · pair again in Settings → Machines` };
     case "connecting":
       return { enabled: false, detail: "Connecting…" };
     case "reconnecting":

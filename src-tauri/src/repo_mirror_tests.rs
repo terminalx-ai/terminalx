@@ -1,5 +1,8 @@
 use super::*;
 
+/// A file name git has to quote. Windows allows no newline in one.
+const UNUSUAL_NAME: &str = if cfg!(windows) { "new file é.bin" } else { "new\nfile.bin" };
+
 struct Repo {
     _temp: tempfile::TempDir,
     root: PathBuf,
@@ -70,18 +73,18 @@ fn committed_staged_unstaged_untracked_binary_and_deleted_files_round_trip() {
     git(&r.source, &["add", "file.txt"]).unwrap();
     fs::write(r.source.join("file.txt"), "unstaged\n").unwrap();
     fs::remove_file(r.source.join("gone.txt")).unwrap();
-    fs::write(r.source.join("new\nfile.bin"), [0, 255, 13, 10, 0]).unwrap();
+    fs::write(r.source.join(UNUSUAL_NAME), [0, 255, 13, 10, 0]).unwrap();
     assert!(r.start().active);
     assert_eq!(fs::read_to_string(r.root.join("file.txt")).unwrap(), "unstaged\n");
-    assert_eq!(fs::read(r.root.join("new\nfile.bin")).unwrap(), [0, 255, 13, 10, 0]);
+    assert_eq!(fs::read(r.root.join(UNUSUAL_NAME)).unwrap(), [0, 255, 13, 10, 0]);
     assert!(!r.root.join("gone.txt").exists());
     assert_eq!(head(&r.root).unwrap(), original_head);
     assert_eq!(fs::read(r.root.join(".git/index")).unwrap(), original_index);
-    fs::rename(r.source.join("new\nfile.bin"), r.source.join("renamed.bin")).unwrap();
+    fs::rename(r.source.join(UNUSUAL_NAME), r.source.join("renamed.bin")).unwrap();
     fs::write(r.source.join("file.txt"), "later\n").unwrap();
     r.tick().unwrap();
     assert_eq!(fs::read_to_string(r.root.join("file.txt")).unwrap(), "later\n");
-    assert!(!r.root.join("new\nfile.bin").exists());
+    assert!(!r.root.join(UNUSUAL_NAME).exists());
     stop(&r.root).unwrap();
     r.clean();
     assert_eq!(head(&r.root).unwrap(), original_head);
@@ -358,6 +361,7 @@ fn submodules_are_refused_before_creating_a_recovery_record() {
     r.clean();
 }
 
+#[cfg_attr(windows, ignore = "Windows does not allow a file name that ends in a space")]
 #[test]
 fn a_main_checkout_whose_name_ends_in_a_space_can_be_mirrored() {
     let dir = tempfile::tempdir().unwrap();

@@ -618,7 +618,11 @@ mod safe_open {
         Ok(path)
     }
     pub(super) fn read(root: &Directory, relative: &Path) -> Result<File> {
-        let file = File::open(checked(&root.0, relative, false)?)?;
+        let path = checked(&root.0, relative, false)?;
+        #[cfg(windows)]
+        let file = crate::win::fs::open_plain(&path, false, false)?;
+        #[cfg(not(windows))]
+        let file = File::open(path)?;
         anyhow::ensure!(file.metadata()?.is_file(), "Only regular files can be copied");
         Ok(file)
     }

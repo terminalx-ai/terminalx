@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { thisComputer } from "@/lib/platform";
 import { getName } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { BYPASS_MODE, FIRST_RUN_PERMISSION_MODE, PERMISSION_MODES, pickerMode } from "@terminalx/portable/agentSettings";
@@ -166,7 +167,7 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
               <Step
                 number={2}
                 title="Open a project"
-                description="A folder on this Mac, a GitHub repository, or a fresh empty project to try things in."
+                description={`A folder on ${thisComputer}, a GitHub repository, or a fresh empty project to try things in.`}
                 aside={
                   <div role="group" aria-label="Get started" className="flex flex-wrap gap-2" onKeyDown={moveFocus}>
                     {BRIEF_ACTIONS.map(({ id, label }) => {
@@ -182,7 +183,7 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
                 }
               />
             ) : (
-              <Step number={2} active emphasized title="Open a project" description="A folder on this Mac, a GitHub repository, or a fresh empty project to try things in.">
+              <Step number={2} active emphasized title="Open a project" description={`A folder on ${thisComputer}, a GitHub repository, or a fresh empty project to try things in.`}>
                 <div role="group" aria-label="Get started" className="mt-3.5 grid grid-cols-1 gap-2.5 @lg:grid-cols-3" onKeyDown={moveFocus}>
                   {START_ACTIONS.map((action) => {
                     const Icon = ICONS[action.id];

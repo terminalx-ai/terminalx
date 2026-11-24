@@ -33,6 +33,7 @@ fn bots_stay_off_where_they_cannot_be_held_to_their_access() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn everything_refuses_while_the_switch_is_off() {
     let _home = crate::store::temp_home();
     let sink = BroadcastSink::new(8);
@@ -49,6 +50,7 @@ fn everything_refuses_while_the_switch_is_off() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn hiring_asks_for_a_role_and_a_name_and_defaults_the_rest() {
     let (_home, sink, mut events) = bots_on();
     let bot = create(sink.as_ref(), "cto", "  Atlas  ").unwrap();
@@ -80,6 +82,7 @@ fn hiring_asks_for_a_role_and_a_name_and_defaults_the_rest() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_home_is_made_from_the_role_template_at_hire() {
     let (_home, sink, _events) = bots_on();
     let bot = create(sink.as_ref(), "watcher", "Argus").unwrap();
@@ -96,6 +99,7 @@ fn a_home_is_made_from_the_role_template_at_hire() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn slugs_come_from_the_name_and_are_never_shared() {
     assert_eq!(slugify("Atlas"), "atlas");
     assert_eq!(slugify("  Atlas  Prime! "), "atlas-prime");
@@ -124,6 +128,7 @@ fn slugs_come_from_the_name_and_are_never_shared() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bot_is_named_by_id_slug_or_name() {
     let (_home, sink, _events) = bots_on();
     let atlas = create(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -138,6 +143,7 @@ fn a_bot_is_named_by_id_slug_or_name() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn an_update_changes_what_it_names_and_refuses_what_cannot_be() {
     let (_home, sink, mut events) = bots_on();
     let atlas = create(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -187,6 +193,7 @@ fn an_update_changes_what_it_names_and_refuses_what_cannot_be() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn pausing_records_when_and_by_whom_and_resuming_clears_it() {
     let (_home, sink, mut events) = bots_on();
     let atlas = create(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -224,6 +231,7 @@ fn pausing_records_when_and_by_whom_and_resuming_clears_it() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn deleting_a_bot_moves_its_home_to_the_trash() {
     let (_home, sink, mut events) = bots_on();
     let atlas = create(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -255,6 +263,7 @@ fn deleting_a_bot_moves_its_home_to_the_trash() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_role_is_read_and_replaced_through_its_bot() {
     let (_home, sink, mut events) = bots_on();
     let bot = create(sink.as_ref(), "docs-writer", "Quill").unwrap();
@@ -271,6 +280,7 @@ fn a_role_is_read_and_replaced_through_its_bot() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_runtime_answers_the_apps_commands_and_bots_survive_a_restart() {
     let (_home, sink, mut events) = bots_on();
     let ask = |operation: &str, params: Value| call(sink.as_ref(), operation, &params).unwrap();
@@ -339,6 +349,7 @@ fn record(id: &str, slug: &str, extra: Value) -> Value {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bot_with_values_from_a_newer_build_lists_shows_and_round_trips_unchanged() {
     let (_home, sink, _events) = bots_on();
     let newer = record("0198-new", "atlas", json!({
@@ -373,6 +384,7 @@ fn a_bot_with_values_from_a_newer_build_lists_shows_and_round_trips_unchanged() 
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_record_this_build_cannot_read_is_counted_kept_and_hides_no_other() {
     let (_home, sink, _events) = bots_on();
     let bad = json!({"id": "0198-bad", "slug": 7});
@@ -388,6 +400,7 @@ fn a_record_this_build_cannot_read_is_counted_kept_and_hides_no_other() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_file_this_build_cannot_read_refuses_every_command_and_stays_as_it_was() {
     let (_home, sink, mut events) = bots_on();
     let path = crate::store::root().unwrap().join("bots.json");
@@ -404,6 +417,7 @@ fn a_file_this_build_cannot_read_refuses_every_command_and_stays_as_it_was() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_hand_edited_record_whose_id_names_no_home_can_still_be_deleted() {
     let (_home, sink, _events) = bots_on();
     write_file(json!({"bots": [record("a/b", "atlas", json!({})), record("0198-b", "iris", json!({"reportsTo": "a/b"}))]}));
@@ -415,6 +429,7 @@ fn a_hand_edited_record_whose_id_names_no_home_can_still_be_deleted() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn every_change_is_announced_in_order_with_its_revision() {
     let (_home, sink, mut events) = bots_on();
     let atlas = create(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -431,6 +446,7 @@ fn every_change_is_announced_in_order_with_its_revision() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn reserved_words_are_never_a_slug_and_the_id_always_names_the_bot() {
     let (_home, sink, _events) = bots_on();
     let slugs: Vec<String> = ["Owner", "Personal", "All", "everyone", "Atlas"].iter().map(|name| create(sink.as_ref(), "cto", name).unwrap().slug).collect();
@@ -447,6 +463,7 @@ fn get_by_slug(slug: &str) -> Bot {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn refusals_are_told_apart_from_failures() {
     let (_home, sink, _events) = bots_on();
     let kind = |error: anyhow::Error| refusal(&error).cloned();
@@ -463,6 +480,7 @@ fn refusals_are_told_apart_from_failures() {
 
 /// PRO-478: who besides the owner may ask a bot for work, and what each may do.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn who_can_ask_keeps_people_and_bots_with_what_each_may_do() {
     let (_home, sink, _events) = bots_on();
     let sentry = create(sink.as_ref(), "security-auditor", "Sentry").unwrap();
@@ -502,6 +520,7 @@ fn who_can_ask_keeps_people_and_bots_with_what_each_may_do() {
 
 /// An entry a newer build wrote is kept through a save of the whole list, as it was.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn an_asker_this_build_does_not_know_is_kept_as_it_was() {
     let (_home, _sink, _events) = bots_on();
     let sink = BroadcastSink::new(8);
@@ -517,6 +536,7 @@ fn an_asker_this_build_does_not_know_is_kept_as_it_was() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_list_change_made_on_an_older_read_is_refused() {
     let (_home, sink, _events) = bots_on();
     let bot = create(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -530,6 +550,7 @@ fn a_list_change_made_on_an_older_read_is_refused() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn an_asker_missing_a_field_leaves_the_bot_readable() {
     let (_home, sink, _events) = bots_on();
     let bot = create(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -543,6 +564,7 @@ fn an_asker_missing_a_field_leaves_the_bot_readable() {
 
 /// A resume asked for from the CLI is shown for a day, then forgotten.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_resume_request_is_dropped_after_a_day() {
     let (_home, sink, _events) = bots_on();
     let bot = create(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -564,6 +586,7 @@ fn a_resume_request_is_dropped_after_a_day() {
 
 /// L4: the change events carry no resume request older than a day either.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_stale_resume_request_is_not_announced() {
     let (_home, sink, mut events) = bots_on();
     let bot = create(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -592,6 +615,7 @@ fn a_stale_resume_request_is_not_announced() {
 /// or otherwise changed asker, another agent, model or effort, a rename and
 /// another place to run (PRO-478) do not.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn an_update_no_person_asked_for_gives_nothing_more() {
     let (_home, sink, _events) = bots_on();
     let atlas = create(sink.as_ref(), "cto", "Atlas").unwrap();

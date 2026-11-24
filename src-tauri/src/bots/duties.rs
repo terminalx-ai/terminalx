@@ -537,7 +537,8 @@ fn check_folder(key: &str) -> Result<PathBuf> {
     let dir = root.join(key);
     match std::fs::symlink_metadata(&dir) {
         Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&dir)?,
-        Ok(_) => std::fs::remove_file(&dir)?,
+        // A link to a folder is itself removed as a folder on Windows; its target is untouched.
+        Ok(_) => std::fs::remove_file(&dir).or_else(|error| if cfg!(windows) { std::fs::remove_dir(&dir).map_err(|_| error) } else { Err(error) })?,
         Err(_) => {}
     }
     #[cfg(unix)]

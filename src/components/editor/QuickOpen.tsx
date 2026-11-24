@@ -14,7 +14,7 @@ import { cn } from "@/lib/cn";
 import { dirName, fileName } from "@/lib/paths";
 import { openProjectSearch } from "@/lib/projectSearch";
 import { forgetRecentFiles, recentFiles } from "@/lib/recentFiles";
-import { isMac, keycaps } from "@/lib/shortcuts";
+import { isMac, joinKeycaps, keycaps } from "@/lib/shortcuts";
 import { localFileSource, type FileSource } from "@/lib/workspaceFiles";
 import type { ChangedFile } from "@/types/session";
 
@@ -39,7 +39,7 @@ const MARK: Record<ChangedFile["status"], { letter: string; tone: string; word: 
 type Row = { kind: "heading"; label: string } | { kind: "file"; hit: FileHit; index: number };
 
 /** A shortcut as one keycap, as the design shows it: ⌘⏎, ⌥⌘C; Ctrl+Enter off the Mac. */
-const cap = (keys: string[]) => keys.join(isMac ? "" : "+");
+const cap = (keys: string[]) => joinKeycaps(keys);
 
 const fileWord = (n: number) => `${n.toLocaleString()} ${n === 1 ? "file" : "files"}`;
 

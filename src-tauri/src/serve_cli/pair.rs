@@ -98,7 +98,7 @@ fn pair(args: &[String]) -> Result<i32> {
     };
     // Before anything is turned on: a window pairs this Mac's phones.
     if phone && (status.phone_route || status.phones.window_open) {
-        eprintln!("terminalx-serve pair: TerminalX is open on this Mac, so its window pairs phones: Settings → Devices.");
+        eprintln!("{}", crate::platform_profile::localize("terminalx-serve pair: TerminalX is open on this Mac, so its window pairs phones: Settings → Devices."));
         return Ok(1);
     }
     if if phone { !status.hosting() } else { !status.enabled } {
@@ -405,7 +405,7 @@ fn pair_phone(runtime: &Runtime, attachment: &Attachment, machine_id: &str) -> R
         let created = match attachment.call(machine_wire::PHONE_CODE, json!({})) {
             Ok(created) => serde_json::from_value::<CreatedPhoneCode>(created).context("read the phone pairing code")?,
             Err(error) if refusal_code(&error) == Some("window_takes_phones") => {
-                eprintln!("terminalx-serve pair: TerminalX is open on this Mac, so its window pairs phones: Settings → Devices.");
+                eprintln!("{}", crate::platform_profile::localize("terminalx-serve pair: TerminalX is open on this Mac, so its window pairs phones: Settings → Devices."));
                 return Ok(1);
             }
             Err(error) => {

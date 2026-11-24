@@ -1,4 +1,5 @@
 import { usePipelineLaunch, pipelineSettings } from "@/lib/pipelineLaunch";
+import { ThisComputer } from "@/lib/platform";
 import { pipelineForSession, useIssuePipelines } from "@/lib/issuePipeline";
 import { continuationWorkspaces, containingWorkspace, continuationDefaultProject, type ContainingWorkspace } from "@/lib/continuation-destination";
 import { useSessionStore } from "@/lib/sessions";
@@ -216,7 +217,7 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
     try {
       const portable = await agent.prepareContinuation(session.id, source.id, true);
       // A runtime older than this app still names its transcript: nothing of it could be read there.
-      if (portable.transcriptPath) throw new Error("This Mac's runtime is older than the app. Quit and reopen TerminalX to hand off to another machine.");
+      if (portable.transcriptPath) throw new Error(`${ThisComputer}'s runtime is older than the app. Quit and reopen TerminalX to hand off to another machine.`);
       const prompt = continuationPrompt(portable, "focused").replace(
         "Inspect the current workspace, including git status and relevant files. Workspace files are authoritative when they differ from the history. This is the same shared workspace, branch, and uncommitted changes; subsequent edits affect it as usual.",
         `This is a new session on another computer, ${name}, in a new worktree of its project there. Inspect the current working directory before continuing. Files the history mentions are on the other computer; do not assume they are present here.`,
@@ -337,7 +338,7 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
         {runsOnShown && <label className="mt-4 flex flex-col gap-2 text-xs font-medium">
           Runs on
           <select aria-label="Runs on" data-testid="handoff-runs-on" className="h-8 rounded-md border bg-background px-2 text-xs" disabled={locked} value={runsOn ?? ""} onChange={(event) => setRunsOn(event.target.value || null)}>
-            <option value="">This Mac</option>
+            <option value="">{ThisComputer}</option>
             {connections.machines.map((machine) => {
               const { state } = machineConnection(connections, machine.machineId);
               const row = machineWhereRow({ state, machine, running: null, freeBytes: null, agents: null, projects: null, wantedProject: null });

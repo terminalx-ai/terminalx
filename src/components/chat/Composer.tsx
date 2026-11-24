@@ -30,7 +30,7 @@ import { cn } from "@/lib/cn";
 import { useDictationContext } from "@/lib/dictationContext";
 import { usePromptTextProps } from "@/lib/autocorrect";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
-import { matchesShortcut } from "@/lib/shortcuts";
+import { matchesShortcut, joinKeycaps } from "@/lib/shortcuts";
 import { BYPASS_MODE, EFFORT_LABEL, PERMISSION_MODES, aliasRuns, effortChoices, modeIsUnguarded, modeLabel, modelForTab, modelGroups, modelNote, pendingSettingsNote, pickerMode, prettyModelId, requestAgentSettings, runningModelName, useModels } from "@/lib/models";
 import { usePickerModels } from "@/lib/cloudModels";
 import { ModelPickerEmpty } from "@/components/chat/ModelPickerEmpty";
@@ -44,6 +44,11 @@ import { DictationStatus, MicButton, useDictationInto, useDictationShortcuts } f
 import { PickerMenu, type PickerItem } from "./PickerMenu";
 import { AttachButton, DropHint, useAttachments } from "./useImageAttachments";
 import { AttachmentChips } from "./ComposerAttachments";
+import { ComposerAiEditor } from "./ComposerAiEditor";
+import { ComposerHistorySearch } from "./ComposerHistorySearch";
+import { SnippetVariablesDialog } from "./SnippetVariablesDialog";
+import { snippetVariables } from "@/lib/snippetVariables";
+import type { AiEditorBackend } from "@/lib/aiEdit";
 import { beginComposerSend, finishComposerSend, returnToDraft, useComposerSend, withReturned } from "@/lib/composerSends";
 import { useComposerHistory } from "./useComposerHistory";
 import { usePrMention } from "./usePrMention";
@@ -64,6 +69,7 @@ export function insertNewLine(el: HTMLTextAreaElement) {
 // Matches the textarea's max-h-60: about ten lines before it scrolls.
 const MAX_HEIGHT = 240;
 const savedSnippets = () => getPrefs().promptSnippets;
+const aiEditorOn = () => getPrefs().aiEditor;
 /** A picker row that is a saved snippet, not an agent command: its id follows. */
 const SNIPPET = "snippet:";
 const NO_HISTORY: string[] = [];
@@ -141,7 +147,13 @@ export function Composer({
   autoFocus,
   onOpenCodexTab,
   beforeSend,
+  aiEditor = null,
+  aiEditorUnavailable = null,
 }: {
+  /** Fixes, restyles or translates the draft. Null where this tab can't use it. */
+  aiEditor?: AiEditorBackend | null;
+  /** Why this tab has no AI Editor. */
+  aiEditorUnavailable?: string | null;
   tab: TabEntry;
   /** Stable backend/tab identity; pending sends survive view replacement. */
   sendScope?: string;
@@ -448,10 +460,28 @@ export function Composer({
     [listKey],
   );
 
+  // A snippet with `{{values}}` to ask for, and the part of the draft it replaces.
+  const [filling, setFilling] = useState<{ text: string; start: number; end: number } | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const placeInDraft = useCallback((next: string, position: number) => {
+    onDraftChange(next);
+    requestAnimationFrame(() => {
+      const el = ref.current;
+      if (!el) return;
+      el.focus({ preventScroll: true });
+      el.setSelectionRange(position, position);
+      setCaret(position);
+    });
+  }, [onDraftChange]);
+
   const complete = useCallback(
     (item: PickerItem) => {
       if (!token) return;
       const snippet = token.kind === "slash" && item.id.startsWith(SNIPPET) ? snippets.find((saved) => `${SNIPPET}${saved.id}` === item.id) : undefined;
+      if (snippet && snippetVariables(snippet.text).length) {
+        setFilling({ text: snippet.text, start: token.start, end: caret });
+        return;
+      }
       const replacement = snippet ? snippet.text : token.kind === "slash" ? `/${item.id} ` : `@${item.id} `;
       const before = draft.slice(0, token.start);
       const after = draft.slice(caret);
@@ -474,8 +504,19 @@ export function Composer({
   // "/goal" with nothing after it was pressed in a Codex chat: it stays, said wrong, until the text changes (PRO-380, 03.20).
   const [emptyGoal, setEmptyGoal] = useState(false);
   const goalMissing = emptyGoal && isEmptyGoal(draft);
-  const send = useCallback(async (alternate = false) => {
-    const text = draft.trim();
+  const showAiEditor = useSyncExternalStore(subscribePrefs, aiEditorOn, aiEditorOn);
+  const [aiEditorOpen, setAiEditorOpen] = useState(false);
+  // What Apply replaced, for its one step of Undo while the draft is still what it wrote.
+  const [aiApplied, setAiApplied] = useState<{ before: string; after: string; label: string } | null>(null);
+  useEffect(() => {
+    setAiEditorOpen(false);
+    setAiApplied(null);
+    setHistoryOpen(false);
+    setFilling(null);
+  }, [tab.id]);
+  // `override`: the text to send when the draft state has not caught up with it yet.
+  const send = useCallback(async (alternate = false, override?: string) => {
+    const text = (override ?? draft).trim();
     if ((!text && !sendable.length) || disabled || heldReason || prMention.attaching) return;
     const goalProblem = goalCommandProblem(text, tab.harness, !!sendable.length, commands);
     if (goalProblem) {
@@ -564,6 +605,16 @@ export function Composer({
     }
     // An open menu owns the arrows (the pickers above, the model and permission menus); dictation owns the draft.
     if (!pickerOpen && !prMention.open && !modelMenu.open && !modeMenuOpen && !dictation.dictating && recall.onKeyDown(e)) return;
+    if (showAiEditor && aiEditor && draft.trim() && !dictation.dictating && matchesShortcut(e.nativeEvent, "composer.aiEditor")) {
+      e.preventDefault();
+      setAiEditorOpen(true);
+      return;
+    }
+    if (!dictation.dictating && matchesShortcut(e.nativeEvent, "composer.historySearch")) {
+      e.preventDefault();
+      setHistoryOpen(true);
+      return;
+    }
     if (matchesShortcut(e.nativeEvent, "composer.send")) {
       e.preventDefault();
       void send();
@@ -581,7 +632,7 @@ export function Composer({
     }
   };
 
-  const alternateKeys = keysOf("composer.sendAlternate").join("+");
+  const alternateKeys = joinKeycaps(keysOf("composer.sendAlternate"));
   const sendLabel = busy && followUps === "hold" ? "Hold until the turn ends" : "Send";
   const sendHint = busy && followUps && alternateKeys
     ? `${sendLabel} · ${alternateKeys} ${followUps === "hold" ? "interrupts and sends" : "holds until the turn ends"}`
@@ -865,6 +916,28 @@ export function Composer({
             )}
             {/* Nothing can be sent: attaching and dictating into it are off too. */}
             <AttachButton attach={attach} disabled={disabled} />
+            {showAiEditor && (
+              <ComposerAiEditor
+                draft={draft}
+                backend={aiEditor}
+                open={aiEditorOpen}
+                onOpenChange={setAiEditorOpen}
+                disabled={disabled || !aiEditor || dictation.dictating || reviewsReady > 0 || !draft.trim()}
+                reason={!aiEditor ? aiEditorUnavailable : dictation.dictating ? "Finish dictating first" : reviewsReady > 0 ? "Send or remove the review comments first" : !draft.trim() ? "Type something to edit" : null}
+                canSend={!disabled && !heldReason && !sending && !prMention.attaching}
+                onApply={(text) => {
+                  setAiApplied({ before: draft, after: text, label: "AI Editor changed your draft." });
+                  onDraftChange(text);
+                  setAiEditorOpen(false);
+                  requestAnimationFrame(() => ref.current?.focus({ preventScroll: true }));
+                }}
+                onApplyAndSend={(text) => {
+                  setAiEditorOpen(false);
+                  setAiApplied(null);
+                  void send(false, text);
+                }}
+              />
+            )}
             <MicButton dictation={dictation} disabled={disabled} />
             {beforeSend}
             {/* One button: Stop while the agent works and nothing is typed, Send (a queued message while it works) once something is. Stop's shortcut works either way. */}
@@ -911,13 +984,52 @@ export function Composer({
         // One line, cut short rather than pushing the composer up (the whole of it is the tooltip), and none in a
         // narrow composer, where it would be a stub and its line is the room an approval's buttons need.
         <div className="truncate px-1 pt-1.5 text-[11.5px] text-faint @max-[34rem]:hidden" data-testid="follow-up-hint"
-          title={`${keysOf("composer.send").join("")} ${followUps === "hold" ? "holds it for after the turn" : "sends it to the agent now"} · ${alternateKeys.replaceAll("+", "")} ${followUps === "hold" ? "sends now and interrupts" : "holds it for after the turn"} · change the default in Settings › Agents › Follow-ups`}>
-          {keysOf("composer.send").join("")} {followUps === "hold" ? "holds it for after the turn" : "sends it to the agent now"}
-          {" · "}{keysOf("composer.sendAlternate").join("")} {followUps === "hold" ? "sends now and interrupts" : "holds it for after the turn"}
+          title={`${joinKeycaps(keysOf("composer.send"))} ${followUps === "hold" ? "holds it for after the turn" : "sends it to the agent now"} · ${alternateKeys} ${followUps === "hold" ? "sends now and interrupts" : "holds it for after the turn"} · change the default in Settings › Agents › Follow-ups`}>
+          {joinKeycaps(keysOf("composer.send"))} {followUps === "hold" ? "holds it for after the turn" : "sends it to the agent now"}
+          {" · "}{alternateKeys} {followUps === "hold" ? "sends now and interrupts" : "holds it for after the turn"}
           {" · "}change the default in{" "}
           <button type="button" className="underline-offset-2 hover:text-muted-foreground hover:underline" onClick={() => openSettingRow("agents.followUps")}>Settings › Agents › Follow-ups</button>
         </div>
       ) : null}
+      {filling && (
+        <SnippetVariablesDialog
+          text={filling.text}
+          onClose={() => setFilling(null)}
+          onInsert={(text) => {
+            const before = draft.slice(0, filling.start);
+            setFilling(null);
+            placeInDraft(before + text + draft.slice(filling.end), before.length + text.length);
+          }}
+        />
+      )}
+      {historyOpen && (
+        <ComposerHistorySearch
+          history={history}
+          onClose={() => setHistoryOpen(false)}
+          onPick={(text) => {
+            setHistoryOpen(false);
+            setAiApplied(draft ? { before: draft, after: text, label: "Replaced your draft with an earlier message." } : null);
+            setDismissedToken(tokenAtCaret(text, text.length) ? `${tokenAtCaret(text, text.length)!.kind}:${tokenAtCaret(text, text.length)!.start}` : null);
+            placeInDraft(text, text.length);
+          }}
+        />
+      )}
+      {aiApplied && aiApplied.after === draft && (
+        <div role="status" className="flex items-center gap-1.5 px-2 pt-1.5 text-[11.5px] text-muted-foreground" data-testid="ai-editor-applied">
+          {aiApplied.label}
+          <button
+            type="button"
+            className="underline underline-offset-2 hover:text-foreground"
+            onClick={() => {
+              onDraftChange(aiApplied.before);
+              setAiApplied(null);
+              requestAnimationFrame(() => ref.current?.focus({ preventScroll: true }));
+            }}
+          >
+            Undo
+          </button>
+        </div>
+      )}
       {switched && tab.requestedModel === switched.to && <ModelSwitchNotice model={labelOf(switched.to)} onUndo={undoSwitch} />}
       {setupRunning && <div className="mt-1.5 px-2 text-[11px] text-muted-foreground" role="status">Setup running</div>}
       {pendingNote && (

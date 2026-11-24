@@ -1,3 +1,4 @@
+import { fileManager } from "@/lib/platform";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -77,10 +78,10 @@ it("says when a row's menu action fails: archive, pin, reveal", async () => {
   const menu = () => render(<TooltipProvider><Toasts /><DropdownMenu open><DropdownMenuTrigger>Menu</DropdownMenuTrigger><DropdownMenuContent>
     <ConversationMenuItems session={session} branch="main" rename={null} />
   </DropdownMenuContent></DropdownMenu></TooltipProvider>);
-  for (const name of [/^Archive/, /^Pin/, /^Finder/]) {
+  for (const name of [/^Archive/, /^Pin/, new RegExp(`^${fileManager}`)]) {
     const view = menu();
     // Reveal in Finder is under Open in (02.13).
-    if (String(name) === String(/^Finder/)) fireEvent.keyDown(within(screen.getByRole("menu")).getByRole("menuitem", { name: "Open in" }), { key: "ArrowRight" });
+    if (String(name) === String(new RegExp(`^${fileManager}`))) fireEvent.keyDown(within(screen.getByRole("menu")).getByRole("menuitem", { name: "Open in" }), { key: "ArrowRight" });
     await act(async () => fireEvent.click(await screen.findByRole("menuitem", { name })));
     view.unmount();
   }
@@ -89,5 +90,5 @@ it("says when a row's menu action fails: archive, pin, reveal", async () => {
   expect(texts).toHaveLength(3);
   expect(texts[0]).toContain("Couldn't archive “Notarize release builds”:set_session_archived failed");
   expect(texts[1]).toContain("Couldn't pin “Notarize release builds”:set_session_pinned failed");
-  expect(texts[2]).toContain("Couldn't reveal “Notarize release builds” in Finder:no such folder");
+  expect(texts[2]).toContain(`Couldn't reveal “Notarize release builds” in ${fileManager}:no such folder`);
 });

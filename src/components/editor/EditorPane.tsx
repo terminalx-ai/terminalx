@@ -1,3 +1,4 @@
+import { revealInFileManager } from "@/lib/platform";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Compartment, EditorState, StateEffect, StateField, type Extension } from "@codemirror/state";
@@ -546,7 +547,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
       {notice && !error && <div role="status" className="shrink-0 truncate px-3 py-1.5 text-xs text-muted-foreground" data-testid="editor-notice">{notice}</div>}
       {status === "binary" && (
         <div className="p-4 text-sm text-muted-foreground">
-          Cannot preview {entry.name}. {cloud ? "It is binary or not UTF-8 text." : attachment ? "It is not text. Use Download to save a copy, or Reveal in Finder from the More menu." : "This binary format is unsupported. Use Reveal in Finder to open it externally."}
+          Cannot preview {entry.name}. {cloud ? "It is binary or not UTF-8 text." : attachment ? `It is not text. Use Download to save a copy, or ${revealInFileManager} from the More menu.` : `This binary format is unsupported. Use ${revealInFileManager} to open it externally.`}
         </div>
       )}
       {status === "loading" && <div className="p-4 text-sm text-muted-foreground">Loading…</div>}

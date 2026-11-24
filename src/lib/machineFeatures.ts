@@ -1,4 +1,5 @@
 import type { MachineConnectionState, MachineUpdateSide } from "@/types/machines";
+import { thisComputer } from "@/lib/platform";
 
 /**
  * Every feature this desktop uses on a machine, the namespace it needs, and
@@ -41,7 +42,7 @@ export const MACHINE_FEATURES: readonly MachineFeature[] = [
   { id: "cleanup", label: "Worktree clean-up", capability: "cleanup/1", action: "clean up worktrees" },
   { id: "pipelines", label: "Issue pipelines", capability: "pipeline/1", action: "run issue pipelines" },
   { id: "pipelineReviewers", label: "Pipeline reviewers", capability: "pipeline/2", action: "choose pipeline reviewers" },
-  { id: "updates", label: "Updating it from this Mac", capability: "machine/3", action: "update it from this Mac" },
+  { id: "updates", label: `Updating it from ${thisComputer}`, capability: "machine/3", action: `update it from ${thisComputer}` },
   { id: "agentSetup", label: "Signing in its agents from here", capability: "machine/4", action: "sign in its agents" },
   { id: "projects", label: "Adding projects from here", capability: "machine/6", action: "add and remove its projects" },
   { id: "sessionRuns", label: "Setup and Run scripts", capability: "machine/7", action: "run its sessions' Setup and Run scripts" },

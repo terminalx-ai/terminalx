@@ -153,8 +153,8 @@ impl Wire {
     /// fails, the connection stays up.
     pub(crate) fn too_large_response(&self, id: &str, plaintext_bytes: usize) -> Value {
         let advice = match (self.transport, self.fragments()) {
-            (Transport::Relay, false) => " Update TerminalX on this phone, or connect on the same Wi-Fi as your Mac.",
-            _ => " Open it on your Mac instead.",
+            (Transport::Relay, false) => crate::platform_profile::localize_static(" Update TerminalX on this phone, or connect on the same Wi-Fi as your Mac."),
+            _ => crate::platform_profile::localize_static(" Open it on your Mac instead."),
         };
         json!({
             "id": id,

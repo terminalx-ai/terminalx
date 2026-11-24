@@ -345,6 +345,6 @@ pub fn after_setup(manager: &SessionManager, session: &str) {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "action_runner_tests.rs"]
 mod tests;

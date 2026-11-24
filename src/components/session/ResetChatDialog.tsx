@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { joinKeycaps } from "@/lib/shortcuts";
 import { errorMessage } from "@/lib/api";
 import { usePref } from "@/lib/prefs";
 import { Button } from "@/components/ui/button";
@@ -116,7 +117,7 @@ export function ResetChatDialog({ reset: run, endSeq, target, agent: agentLabel,
       </div>
       <DialogFooter>
         <Button variant="ghost" disabled={busy} onClick={onClose}>Cancel</Button>
-        <Button disabled={busy} onClick={() => void reset()}>{busy ? "Resetting…" : overlap ? `${undo ? "Undo" : "Reset"} anyway` : action}{!busy && <kbd aria-hidden className="ml-1 rounded-sm bg-current/15 px-1 font-sans text-[12px] leading-5 opacity-80">{keycaps("mod+enter").join("")}</kbd>}</Button>
+        <Button disabled={busy} onClick={() => void reset()}>{busy ? "Resetting…" : overlap ? `${undo ? "Undo" : "Reset"} anyway` : action}{!busy && <kbd aria-hidden className="ml-1 rounded-sm bg-current/15 px-1 font-sans text-[12px] leading-5 opacity-80">{joinKeycaps(keycaps("mod+enter"))}</kbd>}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>;

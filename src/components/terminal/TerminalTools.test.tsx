@@ -60,7 +60,7 @@ describe("terminal search", () => {
     expect(row.className).not.toMatch(/\babsolute\b/);
     expect(bar.className).not.toMatch(/\babsolute\b/);
     expect(bar.className).toContain("w-[475px]");
-    expect(within(bar).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["↵ next", "⇧↵ previous", "Ctrl+Alt+C match case", "esc closes"]);
+    expect(within(bar).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["↵ next", "Shift+Enter previous", "Ctrl+Alt+C match case", "esc closes"]);
     for (const name of ["Match case", "Match whole word", "Use regular expression"]) expect(within(bar).getByRole("button", { name }).getAttribute("aria-pressed")).toBe("false");
     expect(within(bar).getByRole("button", { name: "Match case" }).textContent).toBe("Aa");
     expect(within(bar).getByRole("button", { name: "Match whole word" }).textContent).toBe("ab");

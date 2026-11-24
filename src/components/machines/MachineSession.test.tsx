@@ -45,7 +45,7 @@ describe("a machine session while its machine is away (21.09, PRO-347)", () => {
   it("offers to pair again with a machine that removed this Mac, and its settings", () => {
     render(<MachineConnectionNotice machineId="m1" name="Studio" state={{ state: "accessRemoved" }} />);
     const notice = screen.getByTestId("machine-session-unreachable");
-    expect(notice.textContent).toContain("Studio no longer allows this Mac. Pair again to reconnect.");
+    expect(notice.textContent).toContain("Studio no longer allows this computer. Pair again to reconnect.");
     expect(notice.querySelector('[data-testid="machine-message"]')?.getAttribute("data-kind")).toBe("accessRemoved");
     expect(screen.getByRole("button", { name: "Pair again" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Machine settings" }));
