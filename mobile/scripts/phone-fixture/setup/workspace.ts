@@ -35,7 +35,7 @@ const BOAT = {
   id: "box", displayName: "Boat", availability: "available", canManage: true,
   connection: { state: "connected", connectedAt: Date.now() - 30 * 24 * 60 * MINUTE },
   descriptor: {
-    id: "box", label: "Boat", icon: "box", order: 1, description: "Sandboxes on Boat.", billing: "Per second, billed by Boat.", billedByProvider: true, listed: true,
+    id: "box", label: "Boat", icon: "box", order: 1, description: "Fast-start sandboxes that sleep when idle. Part of the disk resets on resume.", billing: "Per second, billed by Boat.", billedByProvider: true, listed: true,
     credentialSource: "organization", credentialFields: [{ name: "apiKey", kind: "secret", label: "API key" }],
     capabilities: { pauseResumeWithMemory: true, stopStart: true, snapshots: true, exec: true, computeRunsUntilStopped: true },
     offering: { locations: "automatic", sources: "image", machineClasses: "fixed", pricingSource: "provider", suspendedBilling: "none" },

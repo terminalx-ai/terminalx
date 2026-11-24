@@ -14,7 +14,7 @@ const press = async (label: string) => { last()[2].find((entry) => entry.text ==
 const row = (state: string, role: string, fields: Record<string, unknown> = {}, latestOperation: Record<string, unknown> | null = null) =>
   ({ workspace: { id: "ws-1", orgId: "org-1", name: "Checkout redesign", provider: "box", state, you: { role, canApprove: true }, ...fields }, latestOperation }) as unknown as CloudWorkspaceItem;
 
-function catalog(providers: () => Promise<unknown[]> = async () => [{ id: "box", descriptor: { label: "Boat", billing: "Per second, billed by Boat." } }]) {
+function catalog(providers: () => Promise<unknown[]> = async () => [{ id: "box", descriptor: { label: "Boat", description: "Sandboxes on Boat.", billing: "Per second, billed by Boat." } }]) {
   return {
     api: { providers: vi.fn(providers), suspend: vi.fn(async () => ({ workspace: {}, operation: { id: "op-stop", state: "running" } })) },
     start: vi.fn(async () => "started"),

@@ -105,7 +105,7 @@ export const STOP = {
   stoppingDetail: "Saving the workspace, then suspending the machine.",
   stoppingButton: "Stopping…",
   stoppingShort: "Stopping…",
-  failedTitle: "The workspace did not stop",
+  failedTitle: "It did not stop",
   failedDetail: (cause: string) => `${cause} It may still be running, and billing.`,
   retry: "Retry stop",
   startTitle: "Start this workspace?",
@@ -135,6 +135,22 @@ export function billingLine(provider: { label: string; billing: string } | null)
   const name = /[A-Z]/.test(word.slice(1)) || provider.label.split(/\s/)[0] === word;
   const joined = name ? line : `${line.charAt(0).toLowerCase()}${line.slice(1)}`;
   return `${provider.label}: ${joined.endsWith(".") ? joined : `${joined}.`}`;
+}
+
+/**
+ * The provider's own warning about its disk, from its descriptor's
+ * description ("Part of the disk resets on resume."), after its name, as the
+ * alert before stopping a turn under way repeats it ("Boat: part of the disk
+ * resets on resume."). Null when the provider says nothing about its disk.
+ */
+export function diskLine(provider: { label: string; description: string } | null): string | null {
+  if (!provider) return null;
+  const sentence = provider.description.split(/(?<=[.!?])\s+/).map((part) => part.trim()).find((part) => /\bdisk\b/i.test(part));
+  if (!sentence) return null;
+  const word = sentence.split(/[\s,.;:]/)[0] ?? "";
+  const name = /[A-Z]/.test(word.slice(1)) || provider.label.split(/\s/)[0] === word;
+  const joined = name ? sentence : `${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}`;
+  return `${provider.label}: ${/[.!?]$/.test(joined) ? joined : `${joined}.`}`;
 }
 
 export const DELETE = {

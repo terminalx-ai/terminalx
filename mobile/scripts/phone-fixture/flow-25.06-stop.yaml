@@ -26,7 +26,7 @@ name: Stop workspace (25.06)
 - launchApp:
     stopApp: true
     arguments: { fixtureScenario: connected, fixtureWorkspace: manage-failed-stop, openRoute: /cloud, openWorkspace: ws-checkout }
-- assertVisible: "The workspace did not stop"
+- assertVisible: "It did not stop"
 - waitForAnimationToEnd
 - takeScreenshot: 25.06-10-it-did-not-stop
 - launchApp:

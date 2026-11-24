@@ -1249,6 +1249,15 @@ describe("stopping a workspace from the phone (25.06)", () => {
     expect(lastAlert()[2].map((entry) => entry.text)).toEqual(["Cancel", "Stop anyway"]);
   });
 
+  it("…while an agent is working, on a provider that warns about its disk: repeats that warning, as the board does", async () => {
+    world({ role: "manager" });
+    mocks.catalog.api.providers.mockImplementation(async () => [{ ...BOAT, descriptor: { ...BOAT.descriptor, description: "Fast-start sandboxes that sleep when idle. Part of the disk resets on resume." } }]);
+    await show(<CloudWorkspaceScreen />);
+    await sheet();
+    await pressInAlert("Stop workspace");
+    expect(lastAlert()[1]).toBe("Claude Code is in the middle of a turn. Stopping interrupts it; what it has not saved may be lost. Boat: part of the disk resets on resume.");
+  });
+
   it("Stopping: the header line and the bar say so, and the composer is gone", async () => {
     const { snapshot } = world({ role: "manager" });
     snapshot.tabs[0].status = "idle";
@@ -1285,7 +1294,7 @@ describe("stopping a workspace from the phone (25.06)", () => {
     expect(stateLine().textContent).toBe("Needs attention · Manager");
     expect(text()).toContain("This workspace needs attention.");
     const bar = container.querySelector('[data-testid="stop-bar"]')!;
-    expect(bar.textContent).toContain("The workspace did not stop");
+    expect(bar.textContent).toContain("It did not stop");
     expect(bar.textContent).toContain("The provider could not be reached. It may still be running, and billing.");
     expect(container.querySelector('input[type="text"]')).toBeNull();
     await click("Retry stop");

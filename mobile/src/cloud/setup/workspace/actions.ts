@@ -5,7 +5,7 @@ import { resumeFailure } from "../../resume";
 import { refusalText } from "../../words";
 import type { RowAction } from "../../../ui/row-actions";
 import { operationOpen } from "./launch";
-import { billingLine, STOP } from "./sentences";
+import { billingLine, diskLine, STOP } from "./sentences";
 
 /**
  * Stop, Start and Delete of a cloud workspace (25.06), for whoever the server
@@ -61,15 +61,17 @@ export function workspaceRowActions(item: CloudWorkspaceItem, context: Workspace
 }
 
 /**
- * Asks before stopping: what it does (and that a turn is under way, when one
- * is), then the provider's own billing line from its descriptor. Only the
+ * Asks before stopping: what it does, then the provider's own billing line
+ * from its descriptor; when a turn is under way, that it is, then the
+ * provider's own warning about its disk (its billing line if it has none). Only the
  * alert's Stop sends the request.
  */
 export async function askToStop(catalog: CloudCatalog, workspace: Pick<CloudWorkspace, "orgId" | "id" | "provider" | "providerDescriptor">, working: { agent: string | null } | null, onStopping?: (lifecycle: CloudLifecycle) => void): Promise<void> {
   const described = await catalog.api.providers(workspace.orgId).then((providers) => providers.find((provider) => provider.id === workspace.provider)?.descriptor ?? null, () => null);
-  const billing = billingLine(described);
+  // A turn under way: the provider's own warning about its disk, as the board repeats it; else its billing line.
+  const quoted = (working ? diskLine(described) : null) ?? billingLine(described);
   const said = working ? STOP.working(working.agent) : STOP.message;
-  Alert.alert(working ? STOP.workingTitle : STOP.title, billing ? `${said} ${billing}` : said, [
+  Alert.alert(working ? STOP.workingTitle : STOP.title, quoted ? `${said} ${quoted}` : said, [
     { text: STOP.cancel, style: "cancel" },
     { text: working ? STOP.confirmWorking : STOP.confirm, style: working ? "destructive" : "default", onPress: () => void stop(catalog, workspace, onStopping) },
   ]);

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CloudOperation, CloudWorkspaceItem } from "../../api";
 import { launchView, leftAtProvider, listedLaunch, operationOpen, stageIndex } from "./launch";
-import { billingLine, launchCause } from "./sentences";
+import { billingLine, diskLine, launchCause } from "./sentences";
 
 const op = (fields: Partial<CloudOperation> = {}): CloudOperation => ({ id: "op-1", workspaceId: "ws-1", type: "create", state: "running", stage: "queued", cancelable: true, createdAt: 1, updatedAt: 2, ...fields });
 const listItem = (state: string, latestOperation: Record<string, unknown> | null) => ({ workspace: { id: "ws-1", orgId: "org-1", name: "Checkout redesign", provider: "box", state }, latestOperation }) as unknown as CloudWorkspaceItem;
@@ -80,5 +80,8 @@ describe("the provider's billing line", () => {
     expect(billingLine({ label: "TerminalX Cloud", billing: "TerminalX bills this workspace" })).toBe("TerminalX Cloud: TerminalX bills this workspace.");
     expect(billingLine({ label: "Boat", billing: "  " })).toBeNull();
     expect(billingLine(null)).toBeNull();
+    expect(diskLine({ label: "Boat", description: "Fast-start sandboxes that sleep when idle. Part of the disk resets on resume." })).toBe("Boat: part of the disk resets on resume.");
+    expect(diskLine({ label: "Boat", description: "Sandboxes on Boat." })).toBeNull();
+    expect(diskLine(null)).toBeNull();
   });
 });
