@@ -1,7 +1,4 @@
 #!/usr/bin/env node
-// PROBE, removed before ready: fails its first run in a job, so the part shows the one rerun (#1514 item 21).
-import { existsSync as probeSeen, writeFileSync as probeMark } from "node:fs";
-if (!probeSeen("/tmp/webkit-rerun-probe")) { probeMark("/tmp/webkit-rerun-probe", ""); console.error("probe: machine-name fails its first run on purpose"); process.exit(1); }
 // #686: this Mac's name in Settings → Account, in the desktop's WebKit. It is
 // there with Relay off; since PRO-375 it is an inline text field on the right
 // of its row, a long name stays inside the field, and renaming saves on Enter.
