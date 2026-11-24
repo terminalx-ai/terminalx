@@ -284,6 +284,18 @@ async function canNotify(): Promise<boolean> {
   return permission;
 }
 
+/** Organization inbox events use generic copy because banners can appear on the lock screen. */
+export async function notifyOrganizationEvent(kind: "share-added" | "reassigned", authorized: () => boolean): Promise<void> {
+  if (!isMac || !sendsBanner() || !authorized()) return;
+  if (!await canNotify() || !sendsBanner() || !authorized()) return;
+  try {
+    sendNotification({
+      title: kind === "share-added" ? "Workspace shared with you" : "Workspace reassigned to you",
+      body: "Open TerminalX to view the workspace.",
+    });
+  } catch { /* A best-effort banner never affects inbox delivery. */ }
+}
+
 // ---- notifications turned off in macOS (PRO-327)
 
 /**
