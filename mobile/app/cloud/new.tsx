@@ -4,19 +4,23 @@ import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-rou
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Crypto from "expo-crypto";
 import { Check, ChevronRight, CirclePause, CloudOff, ServerOff, WifiOff } from "lucide-react-native";
-import { CloudApiError, type CloudApi, type CloudCredential, type CloudFirstRunSetup, type CloudOrganization, type CloudProvider, type CloudProviderSetup, type CloudQuote } from "@mobile/cloud/api";
+import { CloudApiError, type CloudApi, type CloudCredential, type CloudFirstRunSetup, type CloudLaunch, type CloudOrganization, type CloudProvider, type CloudProviderSetup, type CloudQuote } from "@mobile/cloud/api";
+import { BYPASS_NOT_FROM_PHONE, PHONE_DEFAULT_MODE, phoneModeLabel, phoneModes } from "@mobile/cloud/agent-settings";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import type { CloudCatalog } from "@mobile/cloud/catalog";
+import { EMPTY_FIRST_TASK, FIRST_TASK_PLACEHOLDER, FIRST_TASK_TOO_LONG, NO_AGENT_TICKED, keptTaskKey, launchOf, taskAgent, taskAgents, taskFacts, taskTooLong, taskWritten, type FirstTaskDraft } from "@mobile/cloud/first-task";
+import { EMPTY_FIRST_TASK_CHECKED_LIVE } from "@mobile/cloud/live-checks";
 import { ACCESS_NOTICE, LaunchAttempt, QUOTE_EXPIRED, REPOSITORY_INVALID, SPEND_NOTICE, agentLogins, credentialName, firstRunSetup, idleChoiceLabel, idleChoices, idleValue, launchProviders, launchRefusal, loginDetail, preflightProblems, pricingNote, problemsTitle, providerLabel, quotedSize, repositoryOf, sizeDetail, sizeValue, unanswered, type LaunchRefusal, type PreflightProblems } from "@mobile/cloud/launch";
 import { ChoiceSheet, type Choice } from "@mobile/ui/ChoiceSheet";
 import { FactRows } from "@mobile/ui/FactRows";
 import { Notice } from "@mobile/ui/Notice";
-import { PickRow } from "@mobile/ui/PickRow";
+import { AgentSettingsRows, PickRow } from "@mobile/ui/PickRow";
 import { PriceLines, priceText } from "@mobile/ui/PriceLines";
 import { Button, Card, EmptyState, SectionTitle } from "@mobile/ui/primitives";
 import { ScreenHeader } from "@mobile/ui/SessionChrome";
 import { TextField } from "@mobile/ui/TextField";
 import { useTheme } from "@mobile/ui/theme";
+import { keepConversationState, takeConversationState } from "@mobile/state/conversation-state";
 
 /** The longest name the server takes for a workspace. */
 const NAME_MAX = 80;
@@ -29,7 +33,8 @@ const NAME_MAX = 80;
  * server's quote. Nothing is created before the confirmation's Launch.
  */
 export default function NewWorkspaceScreen() {
-  const params = useLocalSearchParams<{ orgId?: string }>();
+  // `from`: a canceled launch whose unsent first task the form opens with (Launch again).
+  const params = useLocalSearchParams<{ orgId?: string; from?: string }>();
   const { palette } = useTheme();
   const router = useRouter();
   const catalog = useCloudCatalog();
@@ -41,7 +46,7 @@ export default function NewWorkspaceScreen() {
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
     <Stack.Screen options={{ title: "New workspace", headerShown: false }} />
     {catalog && organization
-      ? <LaunchFlow key={organization.orgId} catalog={catalog} organization={organization} organizations={organizations} onOrganization={setChosen} />
+      ? <LaunchFlow key={organization.orgId} catalog={catalog} organization={organization} organizations={organizations} onOrganization={setChosen} again={params.orgId === organization.orgId ? params.from ?? null : null} />
       : <>
         <ScreenHeader title="New workspace" onBack={() => router.back()} />
         {catalog
@@ -54,7 +59,8 @@ export default function NewWorkspaceScreen() {
 type Offer =
   | { status: "reading" }
   | { status: "closed"; kind: "not-connected" | "paused" | "unavailable" | "unreachable"; text: string }
-  | { status: "open"; providers: CloudProvider[]; credentials: CloudCredential[] };
+  /** `loginsRead`: false for a member, whom the server does not show the organization's logins. */
+  | { status: "open"; providers: CloudProvider[]; credentials: CloudCredential[]; loginsRead: boolean };
 
 interface Draft {
   name: string;
@@ -67,6 +73,8 @@ interface Draft {
   ref: string;
   /** Agent logins the person unticked; every other working one is given to the workspace. */
   withoutAgents: string[];
+  /** The first task (25.09): which ticked agent starts, in which mode, and what it is told. */
+  task: FirstTaskDraft;
 }
 
 /** What a price was asked for and is launched with: fixed when the quote comes back. */
@@ -77,11 +85,15 @@ interface Priced {
   repository: string | null;
   agents: string[];
   provider: CloudProvider;
+  /** The first task, as it is sent; none when no agent is ticked or the person cannot choose logins. */
+  launch: CloudLaunch | undefined;
 }
 
-type Sheet = "organization" | "provider" | "size" | "region" | "image" | "idle" | null;
+type Sheet = "organization" | "provider" | "size" | "region" | "image" | "idle" | "agent" | "mode" | null;
 
-function LaunchFlow({ catalog, organization, organizations, onOrganization }: { catalog: CloudCatalog; organization: CloudOrganization; organizations: CloudOrganization[]; onOrganization(orgId: string): void }) {
+const NO_TASK: FirstTaskDraft = { agent: null, mode: PHONE_DEFAULT_MODE, text: "" };
+
+function LaunchFlow({ catalog, organization, organizations, onOrganization, again }: { catalog: CloudCatalog; organization: CloudOrganization; organizations: CloudOrganization[]; onOrganization(orgId: string): void; again: string | null }) {
   const { palette } = useTheme();
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -90,7 +102,8 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization }: { 
 
   const [offer, setOffer] = useState<Offer>({ status: "reading" });
   const [setup, setSetup] = useState<CloudProviderSetup | null>(null);
-  const [draft, setDraft] = useState<Draft>({ name: "", providerId: null, sizeId: "", locationId: "", sourceId: "", idleMinutes: 0, repository: "", ref: "", withoutAgents: [] });
+  // Launch again after a cancel opens with the first task that was not sent, taken from where the launch kept it.
+  const [draft, setDraft] = useState<Draft>(() => ({ name: "", providerId: null, sizeId: "", locationId: "", sourceId: "", idleMinutes: 0, repository: "", ref: "", withoutAgents: [], task: (again ? takeConversationState<FirstTaskDraft>(keptTaskKey(orgId, again)) : undefined) ?? NO_TASK }));
   const [step, setStep] = useState<"form" | "repository" | "review">("form");
   const [sheet, setSheet] = useState<Sheet>(null);
   const [busy, setBusy] = useState<"pricing" | "launching" | "checking" | null>(null);
@@ -126,10 +139,10 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization }: { 
         const providers = await api.providers(orgId);
         const { choices, blocked } = launchProviders(providers);
         // The logins are for owners and admins to read; a member launches without choosing any.
-        const credentials = await api.credentials(orgId).catch((error: unknown) => { if (error instanceof CloudApiError && error.refusal === "admin-required") return [] as CloudCredential[]; throw error; });
+        const credentials = await api.credentials(orgId).catch((error: unknown) => { if (error instanceof CloudApiError && error.refusal === "admin-required") return null; throw error; });
         if (!current) return;
         if (blocked) return setOffer({ status: "closed", kind: blocked, text: blocked === "paused" ? "New cloud workspaces are paused for this organization." : `${organization.name} has no provider to launch on yet.` });
-        setOffer({ status: "open", providers: choices, credentials });
+        setOffer({ status: "open", providers: choices, credentials: credentials ?? [], loginsRead: credentials !== null });
         setDraft((held) => (held.providerId && choices.some((provider) => provider.id === held.providerId) ? held : { ...held, providerId: choices[0]!.id }));
       } catch (error) {
         if (current) setOffer((held) => (held.status === "open" ? held : closed(error)));
@@ -175,6 +188,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization }: { 
     setProblems(null);
     setFormRefusal(null);
   };
+  const changeTask = (patch: Partial<FirstTaskDraft>) => setDraft((held) => ({ ...held, task: { ...held.task, ...patch } }));
 
   const toOrganization = () => router.push({ pathname: "/organization/[orgId]", params: { orgId } });
   const header = (title: string, onBack: () => void) => <ScreenHeader title={title} subtitle={organization.name} onBack={onBack} />;
@@ -203,6 +217,12 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization }: { 
   const source = setup.sources.find((entry) => entry.id === draft.sourceId) ?? null;
   const logins = agentLogins(offer.credentials);
   const ticked = logins.filter((login) => !draft.withoutAgents.includes(login.id));
+  // The first task starts one of the ticked agents. A member, who cannot see the logins, launches without one,
+  // and so does an organization with no working login: there is nothing to start.
+  const agents = taskAgents(ticked);
+  const firstTask = offer.loginsRead && logins.length > 0;
+  const agent = firstTask ? taskAgent(draft.task.agent, agents) : null;
+  const tooLong = firstTask && taskTooLong(draft.task.text);
   const typedRepository = draft.repository.trim();
   const repository = typedRepository ? repositoryOf(typedRepository) : null;
   const hourly = (micros: number | undefined) => (micros == null ? null : priceText(micros, setup.currency));
@@ -212,7 +232,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization }: { 
     // A launch that got no answer may be running: nothing is priced, and so nothing launched anew, until that is known.
     if (inFlight.current || noAnswer) return;
     const name = draft.name.trim();
-    if (!name || !size || !place || !source) return;
+    if (!name || !size || !place || !source || tooLong) return;
     if (typedRepository && !repository) return setProblems({ items: [REPOSITORY_INVALID], repository: REPOSITORY_INVALID, ref: null, needsGithubToken: false });
     const first = firstRunSetup({ repository, ref: draft.ref, agentIds: ticked.map((login) => login.id) }, offer.credentials);
     inFlight.current = true;
@@ -231,7 +251,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization }: { 
       // A new price for what was already under review: said when it is not the same.
       const before = step === "review" && priced && priced.name === name && priced.quote.configuration.machineClassId === quote.configuration.machineClassId && priced.quote.provider === quote.provider ? priced.quote.activeHourlyMicros : null;
       setPriceBefore(before !== null && before !== quote.activeHourlyMicros ? before : null);
-      setPriced({ name, quote, setup: first, repository: repository ? [repository.fullName, draft.ref.trim()].filter(Boolean).join(" · ") : null, agents: ticked.map((login) => credentialName(login.provider)), provider });
+      setPriced({ name, quote, setup: first, repository: repository ? [repository.fullName, draft.ref.trim()].filter(Boolean).join(" · ") : null, agents: ticked.map((login) => credentialName(login.provider)), provider, launch: firstTask ? launchOf(draft.task, agents) : undefined });
       setExpired(false);
       setStep("review");
     } catch (error) {
@@ -256,8 +276,10 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization }: { 
     setBusy(asked ? "checking" : "launching");
     setRefusal(null);
     try {
-      const answer = await attempt.current!.launch(orgId, { name: priced.name, quoteId: priced.quote.id, ...(priced.setup ? { setup: priced.setup } : {}) }, () => { if (alive.current) { setBusy("checking"); setNoAnswer(true); } });
+      const answer = await attempt.current!.launch(orgId, { name: priced.name, quoteId: priced.quote.id, ...(priced.setup ? { setup: priced.setup } : {}), ...(priced.launch ? { launch: priced.launch } : {}) }, () => { if (alive.current) { setBusy("checking"); setNoAnswer(true); } });
       catalog.adopt(orgId, answer);
+      // Kept on the phone until the agent has it: a canceled launch puts it back in the form.
+      if (priced.launch) keepConversationState(keptTaskKey(orgId, answer.workspace.id), { ...draft.task, agent: priced.launch.agent });
       // The workspace exists from here: its own page shows the launch until it runs.
       router.replace({ pathname: "/cloud/[workspaceId]", params: { workspaceId: answer.workspace.id, orgId, operationId: answer.operation.id, title: answer.workspace.name } });
     } catch (error) {
@@ -310,6 +332,11 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization }: { 
         { label: "Repository", value: priced.repository ?? "None" },
         { label: "Agents", value: priced.agents.length ? priced.agents.join(", ") : "None" },
       ]} />
+      {priced.launch ? <>
+        <SectionTitle>First task</SectionTitle>
+        <FactRows testID="review-task" facts={taskFacts(priced.launch)} />
+        {!priced.launch.prompt && EMPTY_FIRST_TASK_CHECKED_LIVE ? <Text testID="review-empty-task" style={[styles.help, { color: palette.muted }]}>{EMPTY_FIRST_TASK}</Text> : null}
+      </> : null}
       <SectionTitle>Price</SectionTitle>
       <PriceLines testID="review-price" quote={quote} now={api.serverNow} note={pricingNote(priced.provider, quote.pricing)} onExpired={() => setExpired(true)} />
       {noAnswer ? null : expired ? <Notice testID="price-expired" tone="warning" text={QUOTE_EXPIRED} />
@@ -332,9 +359,11 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization }: { 
     region: { title: "Region", subtitle: providerName, chosen: draft.locationId, choices: setup.locations.map((entry) => ({ id: entry.id, label: entry.label })), choose: (id) => change({ locationId: id }) },
     image: { title: "Image", subtitle: providerName, chosen: draft.sourceId, choices: setup.sources.map((entry) => ({ id: entry.id, label: entry.label, detail: entry.description })), choose: (id) => change({ sourceId: id }) },
     idle: { title: "Stop when idle", chosen: String(draft.idleMinutes), help: "A stopped workspace starts again when you send it a message.", choices: idleChoices(setup).map((minutes) => ({ id: String(minutes), label: idleChoiceLabel(minutes) })), choose: (id) => change({ idleMinutes: Number(id) }) },
+    agent: { title: "Agent", subtitle: "The agents ticked for this workspace", chosen: agent?.id ?? null, choices: agents.map((entry) => ({ id: entry.id, label: entry.label, detail: entry.detail })), choose: (id) => { changeTask({ agent: id }); setProblems(null); } },
+    mode: { title: "Permission mode", help: BYPASS_NOT_FROM_PHONE, chosen: draft.task.mode, choices: phoneModes().map((mode) => ({ id: mode.id, label: mode.label, detail: mode.hint })), choose: (id) => changeTask({ mode: phoneModes().find((mode) => mode.id === id)?.id ?? PHONE_DEFAULT_MODE }) },
   };
   const open = sheet ? sheets[sheet] : null;
-  const ready = !!draft.name.trim() && !!size && !!place && !!source;
+  const ready = !!draft.name.trim() && !!size && !!place && !!source && !tooLong;
 
   return <>
     {page("New workspace", () => router.back(), <>
@@ -368,6 +397,15 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization }: { 
           </Pressable>;
         })}
       </Card>
+      {firstTask ? <>
+        <SectionTitle>First task</SectionTitle>
+        {agent ? <>
+          <AgentSettingsRows testID="first-task-rows" agent={agent.label} model={null} effort={null} mode={phoneModeLabel(draft.task.mode)} badAgent={!!problems?.agents?.includes(agent.id)}
+            onAgent={() => setSheet("agent")} onMode={() => setSheet("mode")} />
+          <TextField testID="first-task" accessibilityLabel="First task" multiline value={draft.task.text} onChangeText={(text) => changeTask({ text })} placeholder={FIRST_TASK_PLACEHOLDER} disabled={busy !== null}
+            error={tooLong ? FIRST_TASK_TOO_LONG : null} helper={!taskWritten(draft.task.text) && EMPTY_FIRST_TASK_CHECKED_LIVE ? EMPTY_FIRST_TASK : undefined} />
+        </> : <Notice testID="first-task-none" tone="info" text={NO_AGENT_TICKED} />}
+      </> : null}
       <Text style={[styles.help, { color: palette.muted }]}>{ACCESS_NOTICE}</Text>
     </>, <Button testID="review-price" label={busy === "pricing" ? "Checking and pricing…" : "Review price"} disabled={!ready || busy !== null || !!problems} accessibilityState={{ disabled: !ready || busy !== null || !!problems, busy: busy === "pricing" }} onPress={() => void price()} />)}
     {open ? <ChoiceSheet title={open.title} subtitle={open.subtitle} help={open.help} choices={open.choices} chosen={open.chosen} onChoose={open.choose} onClose={() => setSheet(null)} /> : null}

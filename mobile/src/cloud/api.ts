@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ORGANIZATION_DELETION_REFUSALS, organizationDeletionBlockers } from "@terminalx/portable/organizationDeletion";
+import { isPhoneMode, type PhoneMode } from "./agent-settings";
 import type { CheckpointEnvelope, CommandEnvelope } from "./crypto";
 
 /**
@@ -219,7 +220,28 @@ const workspaceSchema = z
       .passthrough()
       .nullish(),
     repositories: z.array(z.object({ identity: z.string().nullish(), fullName: z.string().nullish(), primary: z.boolean().optional() }).passthrough()).nullish(),
-    launch: z.object({ workBranch: z.string().nullish(), sessionId: z.string().nullish(), tabId: z.string().nullish(), phase: z.string().nullish() }).passthrough().nullish(),
+    // A launch's first task as the server reports it (contract 19.2): where it is, and once running the tab holding it.
+    launch: z
+      .object({
+        workBranch: z.string().nullish(),
+        sessionId: z.string().nullish(),
+        tabId: z.string().nullish(),
+        phase: z.string().nullish(),
+        state: z.string().nullish(),
+        agent: z.string().nullish(),
+        model: z.string().nullish(),
+        effort: z.string().nullish(),
+        mode: z.string().nullish(),
+        hasPrompt: z.boolean().nullish(),
+        category: z.string().nullish(),
+        timings: z
+          .object({ requestedAt: z.number().nullish(), bootingAt: z.number().nullish(), authenticatingAt: z.number().nullish(), syncingAt: z.number().nullish(), startingAgentAt: z.number().nullish(), runningAt: z.number().nullish(), failedAt: z.number().nullish() })
+          .partial()
+          .nullish()
+          .catch(undefined),
+      })
+      .passthrough()
+      .nullish(),
   })
   .passthrough();
 
@@ -417,6 +439,35 @@ const preflightCheckSchema = z.discriminatedUnion("kind", [
 const preflightSchema = z.object({ version: z.literal(1), ready: z.boolean(), checks: z.array(preflightCheckSchema) });
 export type CloudPreflight = z.infer<typeof preflightSchema>;
 export type CloudPreflightCheck = z.infer<typeof preflightCheckSchema>;
+
+/** The first task a launch carries (contract 19.1): the agent to start, how, and what it is told first. */
+export interface CloudLaunch {
+  v: 1;
+  /** The runtime's name for the agent: `claude`, `codex`, `cursor`. */
+  agent: string;
+  /** Left out for the agent's own default. */
+  model?: string;
+  effort?: string;
+  /** Always named, and never bypass: a launch that names no mode starts in bypass (`cloud_agents/launch.rs`). */
+  mode: PhoneMode;
+  /** Left out for none; otherwise 1 to 32 KB, as typed. */
+  prompt?: string;
+}
+
+/** What the server takes as a first task's text: at most 32 KB, no NUL (`launchIntentConstants.maxPromptBytes`). */
+export const MAX_LAUNCH_PROMPT_BYTES = 32 * 1024;
+
+/** A first task as the server's parser takes it: exactly these keys, and a mode a phone may send. */
+function launchBody(launch: CloudLaunch): CloudLaunch {
+  const prompt = launch.prompt;
+  if (launch.v !== 1 || !/^[a-z0-9-]{1,32}$/.test(launch.agent) || !isPhoneMode(launch.mode)
+    || (launch.model !== undefined && !/^[\x21-\x7e]{1,100}$/.test(launch.model))
+    || (launch.effort !== undefined && !/^[a-z]{1,16}$/.test(launch.effort))
+    || (prompt !== undefined && (!prompt || prompt.includes("\u0000") || new TextEncoder().encode(prompt).length > MAX_LAUNCH_PROMPT_BYTES))) {
+    throw new CloudApiError("cloud_workspace_request_invalid", 422);
+  }
+  return { v: 1, agent: launch.agent, ...(launch.model !== undefined ? { model: launch.model } : {}), ...(launch.effort !== undefined ? { effort: launch.effort } : {}), mode: launch.mode, ...(prompt !== undefined ? { prompt } : {}) };
+}
 
 /** What a new workspace starts with: the repositories to clone and the stored logins to install. */
 export interface CloudFirstRunSetup {
@@ -784,11 +835,15 @@ export class CloudApi {
    * the same key with the same input then answers with that first launch
    * instead of starting a second, and with a different input it is refused
    * (`idempotency-key-reused`).
+   *
+   * `launch` is the first task (PRO-547): the runtime starts that agent in
+   * the new workspace and sends it the prompt once. Its mode is always one a
+   * phone may name; anything else is refused here, before anything is sent.
    */
-  async createWorkspace(orgId: string, input: { name: string; quoteId: string; confirmProviderSpend: true; setup?: CloudFirstRunSetup }, idempotencyKey: string): Promise<CloudLifecycle> {
+  async createWorkspace(orgId: string, input: { name: string; quoteId: string; confirmProviderSpend: true; setup?: CloudFirstRunSetup; launch?: CloudLaunch }, idempotencyKey: string): Promise<CloudLifecycle> {
     // Refused here as the server would, before anything is sent.
     if (!IDEMPOTENCY_KEY.test(idempotencyKey)) throw new CloudApiError("cloud_workspace_request_invalid", 422);
-    const body = { name: input.name, quoteId: input.quoteId, confirmProviderSpend: input.confirmProviderSpend, ...(input.setup ? { setup: firstRun(input.setup) } : {}) };
+    const body = { name: input.name, quoteId: input.quoteId, confirmProviderSpend: input.confirmProviderSpend, ...(input.setup ? { setup: firstRun(input.setup) } : {}), ...(input.launch ? { launch: launchBody(input.launch) } : {}) };
     const answer = read(lifecycleSchema, await this.request("POST", `${base(orgId)}/cloud-workspaces`, body, { "Idempotency-Key": idempotencyKey }));
     if (answer.workspace.orgId !== orgId || answer.operation.workspaceId !== answer.workspace.id) throw invalidResponse();
     return answer;

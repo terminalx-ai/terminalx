@@ -126,11 +126,13 @@ describe("the launch form", () => {
     expect(page.byId("choice-60")).not.toBeNull();
   });
 
-  it("offers the organization's working agent logins, ticked, and no model: the server's setup answer has none", async () => {
+  it("offers the organization's working agent logins, ticked, and no model to choose: the server's setup answer has none", async () => {
     await form();
     expect(page.byId("agent-codex")!.getAttribute("aria-label")).toBe("Codex, alex@example.com");
     expect(page.byId("agent-claude")).not.toBeNull();
-    expect(page.container.textContent).not.toMatch(/model/i);
+    // The first task (PRO-547) states the agent's own default, with nothing to pick.
+    expect(page.byLabel("Model: Agent’s default")).not.toBeNull();
+    expect(page.byId("pick-model")).toBeNull();
   });
 
   it("does not price until it has a name", async () => {
@@ -251,7 +253,7 @@ describe("the launch form", () => {
       await answer("Launch");
       const sent = service.sent("POST", "/cloud-workspaces");
       expect(sent).toHaveLength(1);
-      expect(sent[0].body).toEqual({ name: "Checkout redesign", quoteId: "quote_1", confirmProviderSpend: true, setup: { version: 1, credentialIds: ["cred_codex", "cred_claude"] } });
+      expect(sent[0].body).toEqual({ name: "Checkout redesign", quoteId: "quote_1", confirmProviderSpend: true, setup: { version: 1, credentialIds: ["cred_codex", "cred_claude"] }, launch: { v: 1, agent: "codex", mode: "manual" } });
       expect(sent[0].headers["Idempotency-Key"]).toMatch(/^[0-9a-f-]{36}$/);
       expect(mocks.router.replace).toHaveBeenCalledWith({ pathname: "/cloud/[workspaceId]", params: { workspaceId: "ws-2", orgId: "org-1", operationId: "op-3", title: "Checkout redesign" } });
       // The list has it at once, before the next read of the list.
@@ -447,7 +449,7 @@ describe("the launch form", () => {
 describe("a launch in progress", () => {
   const launched = async (op: Record<string, unknown> = {}, ws: Record<string, unknown> = {}) => {
     const service = await signedIn({ workspaces: [{ workspace: workspace(ws), latestOperation: operation(op) }] });
-    const on = { onOpen: vi.fn(), onDelete: vi.fn(), onRetried: vi.fn(), onBack: vi.fn(), onLaunchAgain: vi.fn(), onFixKey: vi.fn() };
+    const on = { onOpen: vi.fn(), onDelete: vi.fn(), onRetried: vi.fn(), onBack: vi.fn(), onLaunchAgain: vi.fn(), onFixKey: vi.fn(), onAgentLogins: vi.fn() };
     await page.show(<LaunchProgress catalog={service.catalog} orgId="org-1" operationId="op-9" title="Checkout redesign" {...on} />);
     await pass();
     return { service, on };

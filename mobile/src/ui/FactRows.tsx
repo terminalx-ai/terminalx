@@ -9,6 +9,8 @@ export interface Fact {
   mono?: boolean;
   /** How it went, for a cleanup report: removed, not confirmed, pending. */
   tone?: "success" | "warning" | "danger";
+  /** A value of several lines (a first task, 25.09): under its label, in full, rather than beside it. */
+  block?: boolean;
 }
 
 /**
@@ -23,6 +25,10 @@ export function FactRows({ facts, layout = "pairs", embedded, testID }: { facts:
     const color = fact.tone === "success" ? palette.success : fact.tone === "warning" ? palette.warning : fact.tone === "danger" ? palette.danger : palette.ink;
     const line = index > 0 || embedded ? { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border } : null;
     const face = fact.mono ? [styles.mono, { fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }) }] : null;
+    if (fact.block) return <View key={index} accessible accessibilityLabel={`${fact.label}: ${fact.value}`} style={[styles.block, line]}>
+      <Text style={[styles.pairLabel, { color: palette.muted }]}>{fact.label}</Text>
+      <Text selectable style={[styles.blockValue, face, { color }]}>{fact.value}</Text>
+    </View>;
     return <View key={index} accessible accessibilityLabel={`${fact.label}: ${fact.value}`} style={[layout === "sentences" ? styles.sentence : styles.pair, line]}>
       <Text style={[layout === "sentences" ? styles.sentenceLabel : styles.pairLabel, { color: palette.muted }]}>{fact.label}</Text>
       <Text selectable={fact.mono} style={[layout === "sentences" ? styles.sentenceValue : styles.pairValue, face, { color }]}>{fact.value}</Text>
@@ -39,4 +45,6 @@ const styles = StyleSheet.create({
   sentenceLabel: { width: 74, fontSize: 14, lineHeight: 21 },
   sentenceValue: { flex: 1, fontSize: 14, lineHeight: 21 },
   mono: { fontSize: 13 },
+  block: { paddingHorizontal: 14, paddingVertical: 9 },
+  blockValue: { fontSize: 15, lineHeight: 21, marginTop: 4 },
 });
