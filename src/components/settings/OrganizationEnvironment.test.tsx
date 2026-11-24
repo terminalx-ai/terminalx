@@ -1,6 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { api } from "@/lib/api";
+import { api, type AccountStatus, type CloudWorkspaceListItem } from "@/lib/api";
+import { ENVIRONMENT_TOOLS } from "@/lib/environmentInfo";
+import { ENVIRONMENT_INFO_FEATURE } from "@/lib/environmentInfoRuntime";
 import { organizationEnvironment, type EnvironmentRecipe, type EnvironmentStatus, type EnvironmentVersion } from "@/lib/organizationEnvironment";
 import { OrganizationEnvironment } from "./OrganizationEnvironment";
 import { describedAs, learnDescriptors } from "@/test/cloudProviderDescriptors";
@@ -9,6 +11,21 @@ import { describedAs, learnDescriptors } from "@/test/cloudProviderDescriptors";
 learnDescriptors();
 
 vi.mock("@/lib/api", () => ({ api: { cloudProviders: vi.fn() } }));
+const reportContext = vi.hoisted(() => ({
+  account: { state: "signed-out" } as AccountStatus,
+  privacy: { enabled: false, ready: true },
+  workspaces: [] as CloudWorkspaceListItem[],
+  client: vi.fn(),
+}));
+vi.mock("@/lib/account", async (original) => ({ ...await original<typeof import("@/lib/account")>(), useAccount: () => ({ status: reportContext.account }) }));
+vi.mock("@/lib/dataPrivacy", async (original) => ({ ...await original<typeof import("@/lib/dataPrivacy")>(), useDataPrivacy: () => reportContext.privacy }));
+vi.mock("@/lib/cloudCatalog", async (original) => ({
+  ...await original<typeof import("@/lib/cloudCatalog")>(),
+  useCloudCatalog: () => ({ owner: "owner@example.test", revision: "rev-1", orgs: { org: { source: "live", workspaces: reportContext.workspaces } } }),
+}));
+vi.mock("@/lib/cloudConnections", async (original) => ({
+  ...await original<typeof import("@/lib/cloudConnections")>(), connectedCloudClient: reportContext.client,
+}));
 vi.mock("@/lib/organizationEnvironment", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/organizationEnvironment")>()),
   organizationEnvironment: {
@@ -108,9 +125,63 @@ const mount = () => render(<OrganizationEnvironment contextRevision="rev-1" />);
 const settled = () => screen.findByLabelText("Environment template");
 
 beforeEach(() => {
+  reportContext.account = { state: "signed-out" } as AccountStatus;
+  reportContext.privacy.enabled = false;
+  reportContext.workspaces = [];
+  reportContext.client.mockReset();
   providers.mockResolvedValue({ providers: [provider("local-docker")] } as never);
   environment.status.mockResolvedValue(status());
   environment.recipes.mockResolvedValue({ recipes: [recipe()], contextRevision: "rev-1" });
+});
+
+it("holds the install-script placement without readiness for this organization", async () => {
+  reportContext.account = {
+    state: "signed-in", expiresAt: null, lastError: null,
+    identity: { email: "owner@example.test", organizationId: "org", name: "Owner", organization: "Org" },
+    organizations: [{ id: "org", name: "Org", role: "owner", cloud: { enabled: true, flags: {} } }],
+    context: { scope: "scope", revision: "rev-1" }, phase2Readiness: { other: [ENVIRONMENT_INFO_FEATURE] },
+  };
+  render(<OrganizationEnvironment contextRevision="rev-1" organizationId="org" />);
+  expect((await screen.findByRole("textbox", { name: "Machine install script" })).parentElement?.tagName).toBe("LABEL");
+  expect(screen.queryByRole("button", { name: "Environment info" })).toBeNull();
+  expect(reportContext.client).not.toHaveBeenCalled();
+});
+
+it("reports from an already connected workspace of the organization and provider, then clears on privacy mode", async () => {
+  reportContext.account = {
+    state: "signed-in", expiresAt: null, lastError: null,
+    identity: { email: "owner@example.test", organizationId: "org", name: "Owner", organization: "Org" },
+    organizations: [{ id: "org", name: "Org", role: "owner", cloud: { enabled: true, flags: {} } }],
+    context: { account: "owner", scope: "scope", revision: "rev-1" }, phase2Readiness: { org: [ENVIRONMENT_INFO_FEATURE] },
+  };
+  const provider = status().provider;
+  const row = (id: string, overrides = {}) => ({
+    workspace: { id, orgId: "org", provider, name: id, state: "ready", authority: "manage", ...overrides }, latestOperation: null,
+  }) as CloudWorkspaceListItem;
+  reportContext.workspaces = [
+    row("a-other-provider", { provider: "different" }), row("b-other-org", { orgId: "other" }),
+    row("c-stopped", { state: "suspended" }), row("d-viewer", { authority: "participate" }),
+    row("e-unconnected"), row("f-connected"),
+  ];
+  const call = vi.fn().mockResolvedValue({
+    version: 1, observedAt: Date.now(), tools: ENVIRONMENT_TOOLS.map(([id]) => ({ id, status: "installed", version: "24.1.0" })),
+  });
+  reportContext.client.mockImplementation((key: string) => key === "cloud:org:f-connected" ? {
+    call, connection: { state: "connected", authority: "manage", capabilities: ["environment/1"], runtimeGeneration: 1 },
+  } : null);
+  const view = <OrganizationEnvironment contextRevision="rev-1" organizationId="org" />;
+  const rendered = render(view);
+  const trigger = await screen.findByRole("button", { name: "Environment info" });
+  expect(trigger.closest("form")?.contains(screen.getByRole("textbox", { name: "Machine install script" }))).toBe(true);
+  expect(call).not.toHaveBeenCalled();
+  fireEvent.click(trigger);
+  expect(await screen.findByText("f-connected")).toBeTruthy();
+  expect(await screen.findAllByText("24.1.0")).toHaveLength(ENVIRONMENT_TOOLS.length);
+  expect(new Set(reportContext.client.mock.calls.map(([key]) => key))).toEqual(new Set(["cloud:org:e-unconnected", "cloud:org:f-connected"]));
+  reportContext.privacy.enabled = true;
+  rendered.rerender(<OrganizationEnvironment contextRevision="rev-1" organizationId="org" />);
+  expect(screen.queryByRole("dialog", { name: "Environment info" })).toBeNull();
+  expect(call).toHaveBeenCalledWith("environment.cancel", expect.anything());
 });
 
 afterEach(() => {
