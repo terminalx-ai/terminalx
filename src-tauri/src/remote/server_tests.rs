@@ -884,7 +884,7 @@ async fn roles_decide_what_a_participant_reads_types_and_holds() {
         { "userId": "bob", "role": "viewer", "canApprove": true },
     ])));
     let (admin, mut admin_events, hello) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
-    assert_eq!(hello["you"], json!({ "userId": "admin", "role": "manager", "canApprove": true, "listed": true }));
+    assert_eq!(hello["you"], json!({ "userId": "admin", "role": "manager", "canApprove": true, "listed": true, "canStart": true }));
     let (alice, _alice_events, hello) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
     assert_eq!(hello["you"]["role"], "driver");
     let (bob, _bob_events, _) = person(&f.rpc, "d-bob", Authority::Participate, "bob").await;

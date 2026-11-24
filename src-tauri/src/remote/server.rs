@@ -1184,10 +1184,26 @@ impl WorkspaceRpc {
 
     /// `listed` is false until the API has said who has access: the runtime
     /// then refuses participants everything until it knows, and clients must
-    /// not read the role as "not shared".
+    /// not read the role as "not shared". `canStart` (PRO-546) says whether
+    /// this connection may start a session or add an agent tab now. A runtime
+    /// from before it says nothing, which a `participate` client reads as no.
     fn you(&self, peer: &Peer) -> Value {
         let access = self.access(peer);
-        json!({ "userId": peer.user_id, "role": access.role, "canApprove": access.can_approve, "listed": self.collab.known() })
+        json!({ "userId": peer.user_id, "role": access.role, "canApprove": access.can_approve, "listed": self.collab.known(), "canStart": self.may_start(peer) })
+    }
+
+    /// Whether `peer` may call `session.create` and `session.addTab` now
+    /// (PRO-546): the dispatcher's checks and the configuration gate's, read
+    /// again. It is about the connection's rights only, not about whether an
+    /// agent is installed here or which capabilities the connection asked for.
+    fn may_start(&self, peer: &Peer) -> bool {
+        let user = peer.user_id.as_deref().unwrap_or("");
+        let stamp = self.collab.runtime_policy.stamp(user);
+        protocol::MANAGER_START.iter().all(|name| {
+            let spec = protocol::find_method(name).expect("a start method is a method");
+            self.authority(peer) >= spec.authority || self.authorize_participant(peer, spec).is_ok()
+        }) && self.access(peer).can_configure()
+            && self.collab.runtime_policy.admit(user, stamp.as_ref(), collab::v2::Action::Configure, None).is_ok()
     }
 
     /// Apply the API's latest member list (`collaboration` on `/refresh`):
@@ -1514,7 +1530,11 @@ impl WorkspaceRpc {
             Some(_) => {}
         }
         let authority = self.authority(peer);
-        if authority < spec.authority {
+        // PRO-546: the one exception to the table. A `participate` connection
+        // goes on to the role check for the two start methods, which asks for
+        // a manager; what it sent is narrowed where the call runs
+        // (`start_params`). Every other `manage` method is refused here.
+        if authority < spec.authority && !protocol::MANAGER_START.contains(&spec.name) {
             return Err(RpcError::forbidden(format!("{method} needs manage authority")));
         }
         if authority == Authority::Participate {
@@ -1574,6 +1594,9 @@ impl WorkspaceRpc {
             // Bytes sent to a port are input to whatever listens there.
             "ports.list" | "ports.open" | "ports.write" => Role::Driver,
             "lease.takeOver" => Role::Manager,
+            // PRO-546: a session or an agent tab is started by a manager,
+            // from a phone as from a desktop. The list is the dispatcher's.
+            start if protocol::MANAGER_START.contains(&start) => Role::Manager,
             _ => Role::Viewer,
         };
         let access = self.access(peer);
@@ -1824,6 +1847,7 @@ impl WorkspaceRpc {
             "session.list" => self.session_list(peer),
             "session.get" => self.session_get(peer, params),
             "session.create" => {
+                let params = self.start_params(peer, method, params)?;
                 if params.get("repository").is_some_and(|target| !target.is_null()) && !peer.granted("session-repository/1") {
                     return Err(RpcError::new("capability_not_granted", "Repository session routing was not negotiated."));
                 }
@@ -1832,7 +1856,7 @@ impl WorkspaceRpc {
                 }
                 // On a machine, refused here without `machine/1` or a project.
                 if self.is_machine() {
-                    project()?;
+                    self.project(peer, &params)?;
                 }
                 self.session_create(params)
             },
@@ -1867,7 +1891,7 @@ impl WorkspaceRpc {
             "session.configure" => self.session_configure(peer, params),
             "session.markRead" => self.session_mark_read(peer, params),
             "session.update" => self.session_update(peer, params),
-            "session.addTab" => self.session_add_tab(peer, params),
+            "session.addTab" => self.session_add_tab(peer, self.start_params(peer, method, params)?),
             "session.delete" => self.session_delete(peer, params),
             "runtime.agents" => self.runtime_agents(peer, &params),
             "bots.list" | "bots.home" | "bots.answer" | "bots.importPart" | "bots.import" | "bots.export" | "bots.exportPart" | "bots.remove" => {
@@ -1906,6 +1930,24 @@ impl WorkspaceRpc {
             }
             other => Err(RpcError::new("method_not_found", format!("{other} is not a workspace method"))),
         }
+    }
+
+    /// PRO-546: the parameters of a `session.create` or `session.addTab` as
+    /// this connection may send them now. A `manage` connection's are its
+    /// own, untouched. A `participate` connection's person must still be a
+    /// manager: read again here, under the admission a new member list waits
+    /// for, so a demotion that arrived after the dispatcher's check is not
+    /// outrun. What it sent is then held to the narrow form.
+    fn start_params(&self, peer: &Peer, method: &str, params: Value) -> Result<Value, RpcError> {
+        let spec = protocol::find_method(method).expect("a start method is a method");
+        if self.authority(peer) >= spec.authority {
+            return Ok(params);
+        }
+        if !protocol::MANAGER_START.contains(&method) {
+            return Err(RpcError::forbidden(format!("{method} needs manage authority")));
+        }
+        self.authorize_participant(peer, spec)?;
+        participant_start(method, params)
     }
 
     /// Whether `peer` may be handed the content key now: the same checks as
@@ -4168,7 +4210,8 @@ impl WorkspaceRpc {
         self.check_new_tab(&p.agent, &p.model, mode.as_deref())?;
         let mut new_tab = crate::session_ops::NewTab { transport: Default::default(), harness: p.agent, model: p.model, effort: p.effort, permission_mode: mode };
         if p.native_codex { crate::session_ops::native_codex(&mut new_tab, false); }
-        // Through the session manager where there is one: it is the one place that refuses a Bypass tab in a shared session.
+        // Through the session manager where there is one, which checks the caller's configuration permit again. It refuses no
+        // mode: `allowed_while_shared` takes every one. A participate caller's Bypass is refused in `participant_start`.
         let tab = match &self.sessions {
             Some(manager) => manager.add_tab(&session.id, &new_tab).map_err(|error| RpcError::new("refused", error.to_string()))?,
             None => crate::session_ops::add_tab_entry(&session.id, &new_tab).map_err(RpcError::internal)?,
@@ -5266,6 +5309,53 @@ fn check_base_ref(base: &str) -> Result<String, RpcError> {
 
 fn parse<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, RpcError> {
     serde_json::from_value(params).map_err(|error| RpcError::invalid(error.to_string()))
+}
+
+/// PRO-546: what a `participate` connection sent with `session.create` or
+/// `session.addTab`, held to the narrow form
+/// ([`protocol::manager_start_fields`]). A field outside it is refused by
+/// name whatever its value, never dropped unsaid.
+///
+/// The mode is named, and is not Bypass. A tab whose creator names no mode
+/// starts in Bypass (`DEFAULT_PERMISSION_MODE`), so a missing or blank mode
+/// would be Bypass by omission: it is refused, and no default is filled in.
+/// Each refusal has a `data.reason` a client can rely on: `mode-required`,
+/// `mode-unknown` and `mode-needs-manage`.
+fn participant_start(method: &str, params: Value) -> Result<Value, RpcError> {
+    let allowed = protocol::manager_start_fields(method).ok_or_else(|| RpcError::forbidden(format!("{method} needs manage authority")))?;
+    let fields = params.as_object().ok_or_else(|| RpcError::invalid(format!("{method} takes an object of parameters")))?;
+    if let Some(field) = fields.keys().find(|field| !allowed.contains(&field.as_str())) {
+        return Err(RpcError::forbidden(format!("{method} from a participate connection takes only {}: {field} needs manage authority", allowed.join(", ")))
+            .with_data(json!({ "reason": "field-needs-manage", "field": field })));
+    }
+    // The modes it may name: every launch mode but Bypass.
+    let asks: Vec<&str> = PERMISSION_MODES.iter().copied().filter(|mode| *mode != crate::harness::settings::BYPASS_MODE).collect();
+    let one_of = asks.join(", ");
+    let required = || RpcError::invalid(format!("{method} from a participate connection must name its permission mode: one of {one_of}"))
+        .with_data(json!({ "reason": "mode-required", "modes": asks }));
+    let refused = match fields.get("mode") {
+        // Blank says nothing, as everywhere a mode is read (`requested_mode`).
+        None | Some(Value::Null) => Some(required()),
+        Some(Value::String(mode)) if mode.trim().is_empty() => Some(required()),
+        Some(Value::String(mode)) if mode == crate::harness::settings::BYPASS_MODE => Some(
+            RpcError::forbidden(format!("{method} from a participate connection cannot start an agent in Bypass: name one of {one_of}, or start it from a desktop"))
+                .with_data(json!({ "reason": "mode-needs-manage", "mode": mode, "modes": asks })),
+        ),
+        // By its exact name: a mode is not trimmed, folded or guessed here.
+        Some(Value::String(mode)) if asks.contains(&mode.as_str()) => None,
+        Some(Value::String(mode)) => Some(
+            RpcError::invalid(format!("{method} from a participate connection does not know the permission mode {mode}: name one of {one_of}"))
+                .with_data(json!({ "reason": "mode-unknown", "mode": mode, "modes": asks })),
+        ),
+        Some(_) => Some(
+            RpcError::invalid(format!("{method} from a participate connection takes its permission mode as a string: one of {one_of}"))
+                .with_data(json!({ "reason": "mode-unknown", "modes": asks })),
+        ),
+    };
+    match refused {
+        Some(error) => Err(error),
+        None => Ok(params),
+    }
 }
 
 fn required_str<'a>(params: &'a Value, name: &str) -> Result<&'a str, RpcError> {
