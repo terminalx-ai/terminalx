@@ -126,7 +126,7 @@ def validate_common(workflow):
             if re.search(r"apt-get\b.*\binstall\b", step.get("run", "")):
                 # A stalled download is no error to apt without a timeout, so retries alone never fire: every apt-get call has both.
                 calls = step["run"].count("apt-get ")
-                assert calls and all(step["run"].count(option) == calls for option in ("Acquire::Retries=5", "Acquire::http::Timeout=30", "Acquire::https::Timeout=30")) and "timeout-minutes" in step, "a package install without retries, a stall limit and a time limit"
+                assert calls and all(step["run"].count(option) == calls for option in ("Acquire::Retries=5", "Acquire::http::Timeout=30", "Acquire::https::Timeout=30")) and ("timeout-minutes" in step or "timeout-minutes" in job), "a package install without retries, a stall limit and a time limit of its own or its job's"
 
 
 def validate(workflow):
@@ -508,7 +508,10 @@ class WorkflowSecurity(unittest.TestCase):
 
     def test_package_install_without_retries_or_a_limit_is_rejected(self):
         self.rejects(lambda w: self.step(w, "vitest", name="Install shells").update({"run": "sudo apt-get update && sudo apt-get install -y zsh && command -v zsh"}))
-        self.rejects(lambda w: self.step(w, "linux-rust-tests", name="Install Linux build dependencies").pop("timeout-minutes"))
+        # The Linux Rust installs have no limit of their own (a slow mirror failed three parts at ten minutes), so
+        # their job's must be there; the options that retry a stalled download stay.
+        self.rejects(lambda w: w["jobs"]["linux-rust-tests"].pop("timeout-minutes"))
+        self.rejects(lambda w: self.step(w, "linux-rust-tests", name="Install Linux build dependencies").update({"run": self.step(w, "linux-rust-tests", name="Install Linux build dependencies")["run"].replace(" -o Acquire::http::Timeout=30", "", 1)}))
 
     def test_missing_vitest_shell_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["vitest"]["steps"].remove(self.step(w, "vitest", name="Install shells")))

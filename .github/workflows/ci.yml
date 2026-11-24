@@ -224,9 +224,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      # No limit of its own: the job's bounds it. A mirror that serves every
+      # small file slowly trips neither the stall option nor a retry, and a ten
+      # minute limit here failed three parts of one run while the same step
+      # took 25 s in its other jobs.
       - name: Install Linux build dependencies
         if: runner.environment == 'github-hosted'
-        timeout-minutes: 10
         run: sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh ripgrep
       # tauri-build needs the folder the frontend builds into; no Rust test
       # reads what is in it, so these jobs do not install or build the frontend.
@@ -295,8 +298,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      # No limit of its own, as in linux-rust: the job's bounds it.
       - name: Install Linux build dependencies
-        timeout-minutes: 10
         run: sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh ripgrep
       # tauri-build needs the folder the frontend builds into; no Rust test
       # reads what is in it, so these jobs do not install or build the frontend.
@@ -521,13 +524,13 @@ jobs:
       # test because that checks the library as --all-targets will, with the
       # test-only dependency features on.
       #
-      # clippy stays ahead of the tests, on a pull request too. The first
-      # compile after the frontend changes writes the embedded assets, and the
-      # next cargo command then repeats that one compile: here that is a
-      # one-minute check. On #1518's first run, with clippy left out of pull
-      # requests, the repeat fell on the library's test build instead: 34
-      # minutes, then 28 more. And a lint in an Apple-only function has no
-      # other check before merge.
+      # clippy runs ahead of the tests, on a pull request too: a lint in an
+      # Apple-only function has no other check before merge. It does not spare
+      # the tests a second compile. The crate is compiled again by the cargo
+      # command after its first test build, wherever clippy stands: 34 minutes
+      # then 28 with clippy left out (#1518's first run), 9 min 53 s then
+      # 11 min 9 s inside the test step with clippy in front (its second).
+      # Which input changes between the two is not found.
       #
       # A clippy failure fails the job and does not stop the tests: the build
       # and the suite below run whenever the steps before clippy passed, so a

@@ -486,3 +486,13 @@ Two more flaky results seen that night, neither fixed here:
 | --- | --- | --- |
 | `bots::calendar::tests::a_duty_deleted_mid_run_ends_its_run_then` (`src/bots/calendar_tests.rs:669`) | #1515's macOS rerun | 5,844 passed, 1 failed |
 | `agent-dashboard` on `main` (one check, seven layouts) | #1520's WebKit rerun | cut off at `run-all`'s 600 s; #1515 splits it into three entries |
+
+### #1518's third run (head `3456d0c3`): the package mirror
+
+`linux-rust-tests` parts 1, 2 and 4 failed in "Install Linux build
+dependencies" at that step's ten minute limit. The mirror
+(`us-east-2.ec2.archive.ubuntu.com`) served packages at seconds per small
+file, so the 30 s stall option never fired and nothing was retried; the same
+step took 24 to 26 s in other jobs of the same run. The step's own limit is
+gone (`main` never had one there); the job's limit bounds it, and the retry
+and stall options stay. A cache for the packages is a later piece.
