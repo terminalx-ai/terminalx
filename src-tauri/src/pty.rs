@@ -3425,10 +3425,13 @@ time.sleep(60)
     }
 
     /// The same, of a program that never stops printing.
+    #[cfg(unix)]
     fn endless_flood(terminals: &Terminals, dir: &tempfile::TempDir) -> impl Fn() -> u64 {
         flood_of(terminals, dir, "tr \"\\0\" x < /dev/zero")
     }
 
+    // A POSIX `sh` and `/dev/zero`: the flood tests run where both are.
+    #[cfg(unix)]
     fn flood_of(terminals: &Terminals, dir: &tempfile::TempDir, program: &str) -> impl Fn() -> u64 {
         let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
         let received = Arc::new(AtomicU64::new(0));
@@ -3442,6 +3445,7 @@ time.sleep(60)
     }
 
     /// Wait until the pane is being held for its view: nothing more is sent for a while.
+    #[cfg(unix)]
     fn until_held(sent: &impl Fn() -> u64) -> u64 {
         let deadline = Instant::now() + Duration::from_secs(60);
         let mut last = sent();
@@ -3461,6 +3465,7 @@ time.sleep(60)
 
     #[cfg(unix)]
     const TOTAL: u64 = 64 * 1024 * 1024;
+    #[cfg(unix)]
     const WINDOW: u64 = (FLOW_HIGH + 16 * MAX_CHUNK) as u64;
 
     #[cfg(unix)]
@@ -3511,12 +3516,15 @@ time.sleep(60)
         terminals.kill_all();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_view_that_was_replaced_cannot_detach_or_answer_for_the_one_that_took_its_place() {
         let terminals = Terminals::new();
         let dir = tempfile::tempdir().unwrap();
         let sent = endless_flood(&terminals, &dir);
         let held = until_held(&sent);
+        // A flood that never started would settle too, and prove nothing below.
+        assert!(held > FLOW_HIGH as u64, "the flood never started: {held} bytes sent");
 
         // A second view of the same pane takes over (the first was disposed, its detach is still on its way).
         let second = Arc::new(AtomicU64::new(0));

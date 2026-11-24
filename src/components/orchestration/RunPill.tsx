@@ -1,6 +1,6 @@
 import { CircleAlert, Clock, LoaderCircle, ShieldAlert } from "@/icons";
 import { cn } from "@/lib/cn";
-import { isMac, useShortcutKeys } from "@/lib/hotkeys";
+import { joinKeycaps, useShortcutKeys } from "@/lib/hotkeys";
 import { useReducedMotion } from "@/lib/reducedMotion";
 import { resetClock } from "@/lib/orchestration";
 import type { Run } from "@/types/orchestration";
@@ -52,7 +52,7 @@ export function RunPill({ run, onOpen }: { run: Run | null | undefined; onOpen: 
 export function RunViewHint({ className }: { className?: string }) {
   const keys = useShortcutKeys("app.runView");
   if (!keys.length) return null;
-  const text = keys.join(isMac ? "" : "+");
+  const text = joinKeycaps(keys);
   return (
     <span data-testid="run-view-hint" title="Open the Run view (Go → Run View)" className={cn("mr-1.5 inline-flex shrink-0 items-center gap-1 self-center whitespace-nowrap text-[11.5px] text-faint", className)}>
       <kbd className="font-sans text-muted-foreground">{text}</kbd>

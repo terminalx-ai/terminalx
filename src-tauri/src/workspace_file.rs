@@ -53,9 +53,11 @@ pub(crate) fn open_relative(mut directory: std::fs::File, relative: &Path) -> st
     Ok(directory)
 }
 
-#[cfg(not(unix))]
+/// `path` is canonical, so a link at its last component was swapped in after
+/// validation and is refused. Its ancestors are not pinned as on Unix.
+#[cfg(windows)]
 pub(crate) fn open(_root: &Path, path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::File::open(path)
+    crate::win::fs::open_plain(path, false, false)
 }
 
 #[cfg(all(test, unix))]

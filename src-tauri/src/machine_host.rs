@@ -396,7 +396,7 @@ pub struct MachineHost {
 /// Refused while a window takes this Mac's phones: it pairs and removes them.
 #[cfg(unix)]
 fn window_takes_phones(recovery: &str) -> ControlError {
-    ControlError::new("window_takes_phones", &crate::platform_profile::localize("TerminalX is open on this Mac, so its window looks after phones."), Some(recovery.into()))
+    ControlError::new("window_takes_phones", crate::platform_profile::localize("TerminalX is open on this Mac, so its window looks after phones."), Some(recovery.into()))
 }
 
 static INSTALLED: OnceLock<Arc<MachineHost>> = OnceLock::new();

@@ -4,6 +4,7 @@
  * of the bot's home chat (design 23.04). The tokens are typed here and go to the window's own command, which checks
  * them with the service and keeps them with the bots' other logins; nothing here reads them back.
  */
+import { thisComputer } from "@/lib/platform";
 import { useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Check, Copy, Hash, Loader2, Send } from "@/icons";
@@ -133,7 +134,7 @@ export function ChatAppDialog({ bot, service, onClose }: { bot: Bot; service: Ch
                 />
               </label>
             ))}
-            <p className="text-[11.5px] leading-4 text-faint">Kept on this Mac with the bots' other logins, readable by you alone; never in the bot's settings or its chats.</p>
+            <p className="text-[11.5px] leading-4 text-faint">Kept on {thisComputer} with the bots' other logins, readable by you alone; never in the bot's settings or its chats.</p>
             {error && <p role="alert" className="text-xs text-destructive" data-testid="bot-chat-app-error">{error}</p>}
             <div className="flex justify-end gap-2">
               <Button type="button" variant="outline" size="sm" onClick={onClose}>Cancel</Button>

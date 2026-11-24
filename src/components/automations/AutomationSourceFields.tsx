@@ -1,3 +1,4 @@
+import { thisComputer } from "@/lib/platform";
 import { useEffect, useRef, useState } from "react";
 import { Switch } from "@/components/ui/controls";
 import { automationsApi, errorMessage, issues as issuesApi, type IssueTeam } from "@/lib/api";
@@ -389,7 +390,7 @@ function PullRequestFields({ projectPath, source, onChange }: { projectPath: str
       </label>
       {source.fromForks && (
         <div role="note" className={WARNING_NOTE}>
-          <span className="font-medium text-foreground">Runs can work on outsiders' code.</span> A pull request from a fork can contain anything; an unattended run that builds or tests it runs that code on this Mac.
+          <span className="font-medium text-foreground">Runs can work on outsiders' code.</span> A pull request from a fork can contain anything; an unattended run that builds or tests it runs that code on {thisComputer}.
         </div>
       )}
     </>

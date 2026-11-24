@@ -123,7 +123,7 @@ import {
   upsertSession,
   useSessionStore,
 } from "@/lib/sessions";
-import { SHORTCUT_ACTIONS, isMac, keycaps, useKeymap, type ShortcutAction } from "@/lib/shortcuts";
+import { SHORTCUT_ACTIONS, joinKeycaps, keycaps, useKeymap, type ShortcutAction } from "@/lib/shortcuts";
 import { openCloudSession, useCloudDashboard } from "@/lib/cloudDashboard";
 import { updateCloudSession, useCloudSessionForStatus } from "@/lib/cloudSessions";
 import { openNewCloudWorkspace } from "@/components/cloud/NewCloudWorkspaceDialog";
@@ -221,7 +221,7 @@ const APP_ACTIONS_FIRST = [
 const APP_ACTIONS_LAST = ["command:shortcut:app.checkUpdates", "command:shortcut:app.docs", "command:shortcut:app.reportIssue", "command:shortcut:app.about"];
 
 /** A binding as one keycap (design 07.04): ⇧⌘X on the Mac, Ctrl+Shift+X elsewhere. */
-const chordCap = (binding: string) => keycaps(binding).join(isMac ? "" : "+");
+const chordCap = (binding: string) => joinKeycaps(keycaps(binding));
 
 interface CommandEntry extends PaletteEntityBase {
   group: "commands";

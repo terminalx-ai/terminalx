@@ -234,13 +234,15 @@ def validate(workflow):
     for steps in [rust, tests["steps"], native["steps"], jobs["serve-tests"]["steps"]]:
         assert any("command -v rg && command -v zsh" in s.get("run", "") for s in steps), "security fixtures must not skip missing tools"
     assert any(s.get("run") == "cargo test --locked" and s.get("if") == "${{ !cancelled() && steps.build.outcome == 'success' && github.event_name != 'pull_request' }}" for s in native["steps"]), "macOS full suite on main, nightly and manual runs"
-    assert any(s.get("run") == "cargo test --locked --lib -- $(python3 ../infra/ci-runners/macos-rust.py --filters)" and s.get("if") == "${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'pull_request' }}" for s in native["steps"]), "the Apple-only and system-dependent tests on a selected pull request"
+    assert any(s.get("run") == '"$BINARY" $(python3 ../infra/ci-runners/macos-rust.py --filters)' and s.get("env") == {"BINARY": "${{ steps.build.outputs.binary }}"} and s.get("if") == "${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'pull_request' }}" for s in native["steps"]), "the Apple-only and system-dependent tests on a selected pull request"
     # Clippy on every run of the job, a pull request's too, ahead of the tests; and a Clippy failure does not stop
     # the build or the suite: they wait only on the last step before Clippy, and nothing continues on error.
     after_helper = "${{ !cancelled() && steps.helper.outcome == 'success' }}"
     names = [s.get("run", "") for s in native["steps"]]
     clippy = [i for i, run in enumerate(names) if run.startswith("cargo clippy")]
-    build = names.index("cargo test --locked --lib --no-run")
+    build = next(i for i, run in enumerate(names) if run.startswith("cargo test --locked --lib --no-run --message-format=json-render-diagnostics > "))
+    # The build names the binary and a pull request runs it: another `cargo test` compiles the crate again.
+    assert 'echo "binary=$binary" >> "$GITHUB_OUTPUT"' in names[build] and 'test -x "$binary"' in names[build], "the build says which binary a pull request runs"
     assert [names[i] for i in clippy] == ["cargo clippy --locked --test serde_field_naming -- -D warnings", "cargo clippy --locked --all-targets -- -D warnings"] and max(clippy) < build, "both macOS Clippy runs, ahead of the tests"
     assert "if" not in native["steps"][clippy[0]] and native["steps"][clippy[1]].get("if") == after_helper, "macOS Clippy on a pull request too"
     assert native["steps"][build].get("if") == after_helper and native["steps"][build].get("id") == "build", "macOS builds the library's tests whenever it runs, also after a lint"
@@ -487,7 +489,9 @@ class WorkflowSecurity(unittest.TestCase):
         self.rejects(lambda w: w["jobs"]["macos-native"]["concurrency"].update({"cancel-in-progress": "true"}))
 
     def test_narrowed_macos_run_is_rejected(self):
-        self.rejects(lambda w: self.step(w, "macos-native", run="cargo test --locked --lib -- $(").update({"run": "cargo test --locked --lib -- dictation::"}))
+        self.rejects(lambda w: self.step(w, "macos-native", run='"$BINARY" $(').update({"run": '"$BINARY" dictation::'}))
+        # Back to cargo test, a pull request compiles the crate a second time.
+        self.rejects(lambda w: self.step(w, "macos-native", run='"$BINARY" $(').update({"run": "cargo test --locked --lib -- $(python3 ../infra/ci-runners/macos-rust.py --filters)"}))
         self.rejects(lambda w: self.step(w, "macos-native", name="cargo test (main").update({"if": "github.event_name == 'schedule'"}))
         self.rejects(lambda w: self.step(w, "macos-native", name="cargo test (main").update({"run": "cargo test --locked --lib"}))
         self.rejects(lambda w: self.step(w, "macos-native", run="cargo test --locked --lib --no-run").update({"if": "github.event_name != 'pull_request'"}))
