@@ -48,11 +48,62 @@ const credentialSchema = z.object({
 export type StoredHost = z.infer<typeof hostSchema>;
 export type HostCredential = z.infer<typeof credentialSchema>;
 
-export async function readHosts(): Promise<StoredHost[]> {
+/** Where a host list that is not JSON at all is copied, once, before anything is written over it. */
+export const UNREADABLE_HOSTS_KEY = `${HOSTS_KEY}:unreadable`;
+
+/**
+ * The stored hosts this version can read, and the entries it cannot (a newer
+ * version's, or a damaged one). One unreadable entry used to make the whole
+ * list read as empty, and the next save then erased every pairing.
+ */
+async function readStored(): Promise<{ hosts: StoredHost[]; unreadable: unknown[] }> {
   const raw = await AsyncStorage.getItem(HOSTS_KEY);
-  if (!raw) return [];
-  const parsed = z.array(hostSchema).safeParse(JSON.parse(raw));
-  return parsed.success ? parsed.data : [];
+  if (!raw) return { hosts: [], unreadable: [] };
+  let entries: unknown;
+  try {
+    entries = JSON.parse(raw);
+  } catch {
+    entries = null;
+  }
+  if (!Array.isArray(entries)) {
+    // Nothing in it can be kept beside new pairings: keep the whole of it aside instead.
+    if (!(await AsyncStorage.getItem(UNREADABLE_HOSTS_KEY))) await AsyncStorage.setItem(UNREADABLE_HOSTS_KEY, raw);
+    return { hosts: [], unreadable: [] };
+  }
+  const hosts: StoredHost[] = [];
+  const unreadable: unknown[] = [];
+  for (const entry of entries) {
+    const parsed = hostSchema.safeParse(entry);
+    if (parsed.success) hosts.push(parsed.data);
+    else unreadable.push(entry);
+  }
+  return { hosts, unreadable };
+}
+
+/** Save `hosts` with the entries this version could not read, unchanged, after them. */
+async function writeStored(hosts: StoredHost[], unreadable: unknown[]): Promise<void> {
+  await AsyncStorage.setItem(HOSTS_KEY, JSON.stringify([...hosts, ...unreadable]));
+}
+
+let changes: Promise<unknown> = Promise.resolve();
+
+/**
+ * Change the stored list, one change at a time: each reads what the one
+ * before it wrote, so two at once (a pairing and a rename) both land.
+ */
+function changeHosts<T>(change: (hosts: StoredHost[]) => { hosts: StoredHost[]; result: T } | Promise<{ hosts: StoredHost[]; result: T }>): Promise<T> {
+  const run = changes.then(async () => {
+    const stored = await readStored();
+    const next = await change(stored.hosts);
+    await writeStored(next.hosts, stored.unreadable);
+    return next.result;
+  });
+  changes = run.catch(() => undefined);
+  return run;
+}
+
+export async function readHosts(): Promise<StoredHost[]> {
+  return (await readStored()).hosts;
 }
 
 export async function readHostCredential(hostId: string): Promise<HostCredential | null> {
@@ -66,11 +117,12 @@ export async function savePairedHost(host: StoredHost, credential: HostCredentia
   const validatedHost = hostSchema.parse(host);
   const validatedCredential = credentialSchema.parse(credential);
   await SecureStore.setItemAsync(credentialKey(host.id), JSON.stringify(validatedCredential), OPTIONS);
-  const hosts = await readHosts();
-  // Pairing the same computer again keeps what it is called here: a name typed on this phone always, its own name unless a newer one came with the pairing.
-  const before = hosts.find((item) => item.id === host.id || item.publicKeyB64 === host.publicKeyB64);
-  const named = { ...validatedHost, ...(before?.customName ? { customName: before.customName } : {}), ...(validatedHost.hostName ?? before?.hostName ? { hostName: validatedHost.hostName ?? before?.hostName } : {}) };
-  await AsyncStorage.setItem(HOSTS_KEY, JSON.stringify([...hosts.filter((item) => item.id !== host.id && item.publicKeyB64 !== host.publicKeyB64), named]));
+  const before = await changeHosts((hosts) => {
+    // Pairing the same computer again keeps what it is called here: a name typed on this phone always, its own name unless a newer one came with the pairing.
+    const previous = hosts.find((item) => item.id === host.id || item.publicKeyB64 === host.publicKeyB64);
+    const named = { ...validatedHost, ...(previous?.customName ? { customName: previous.customName } : {}), ...(validatedHost.hostName ?? previous?.hostName ? { hostName: validatedHost.hostName ?? previous?.hostName } : {}) };
+    return { hosts: [...hosts.filter((item) => item.id !== host.id && item.publicKeyB64 !== host.publicKeyB64), named], result: previous };
+  });
   endPairingInstance(host.id);
   if (before && before.id !== host.id) endPairingInstance(before.id);
 }
@@ -87,21 +139,20 @@ export async function writeHostCredential(hostId: string, credential: HostCreden
  */
 export async function updateStoredHost(host: StoredHost): Promise<void> {
   const { hostName: _hostName, customName: _customName, headless: _headless, platform: _platform, ...validated } = hostSchema.parse(host);
-  const hosts = await readHosts();
   // What the computer says of itself is kept as last stored: the connection's copy may predate it.
   const kept = (item: StoredHost) => ({ ...(item.hostName ? { hostName: item.hostName } : {}), ...(item.customName ? { customName: item.customName } : {}), ...(item.headless !== undefined ? { headless: item.headless } : {}), ...(item.platform ? { platform: item.platform } : {}) });
-  await AsyncStorage.setItem(HOSTS_KEY, JSON.stringify(hosts.map((item) => item.id === host.id ? { ...validated, ...kept(item) } : item)));
+  await changeHosts((hosts) => ({ hosts: hosts.map((item) => item.id === host.id ? { ...validated, ...kept(item) } : item), result: undefined }));
 }
 
 /** Keep what the computer said of itself (PRO-359). Returns the stored host, or null when it is no longer paired. */
 export async function setHostKind(hostId: string, kind: { headless: boolean; platform: string | null }): Promise<StoredHost | null> {
-  const hosts = await readHosts();
-  const current = hosts.find((item) => item.id === hostId);
-  if (!current) return null;
-  const { platform: _platform, ...rest } = current;
-  const next = hostSchema.parse({ ...rest, headless: kind.headless, ...(kind.platform ? { platform: kind.platform } : {}) });
-  await AsyncStorage.setItem(HOSTS_KEY, JSON.stringify(hosts.map((item) => item.id === hostId ? next : item)));
-  return next;
+  return changeHosts((hosts) => {
+    const current = hosts.find((item) => item.id === hostId);
+    if (!current) return { hosts, result: null };
+    const { platform: _platform, ...rest } = current;
+    const next = hostSchema.parse({ ...rest, headless: kind.headless, ...(kind.platform ? { platform: kind.platform } : {}) });
+    return { hosts: hosts.map((item) => item.id === hostId ? next : item), result: next };
+  });
 }
 
 /**
@@ -110,27 +161,28 @@ export async function setHostKind(hostId: string, kind: { headless: boolean; pla
  * the stored host, or null when it is no longer paired.
  */
 export async function setHostNames(hostId: string, change: { hostName?: string; customName?: string | null }): Promise<StoredHost | null> {
-  const hosts = await readHosts();
-  const current = hosts.find((item) => item.id === hostId);
-  if (!current) return null;
-  const { customName: previousCustom, ...rest } = current;
-  const customName = change.customName === undefined ? previousCustom : change.customName ?? undefined;
-  const next = hostSchema.parse({ ...rest, ...(change.hostName ? { hostName: change.hostName } : {}), ...(customName ? { customName } : {}) });
-  await AsyncStorage.setItem(HOSTS_KEY, JSON.stringify(hosts.map((item) => item.id === hostId ? next : item)));
-  return next;
+  return changeHosts((hosts) => {
+    const current = hosts.find((item) => item.id === hostId);
+    if (!current) return { hosts, result: null };
+    const { customName: previousCustom, ...rest } = current;
+    const customName = change.customName === undefined ? previousCustom : change.customName ?? undefined;
+    const next = hostSchema.parse({ ...rest, ...(change.hostName ? { hostName: change.hostName } : {}), ...(customName ? { customName } : {}) });
+    return { hosts: hosts.map((item) => item.id === hostId ? next : item), result: next };
+  });
 }
 
 export async function removeHost(hostId: string): Promise<void> {
   await clearTranscriptCaches(hostId);
-  await AsyncStorage.setItem(HOSTS_KEY, JSON.stringify((await readHosts()).filter((host) => host.id !== hostId)));
+  await changeHosts((hosts) => ({ hosts: hosts.filter((host) => host.id !== hostId), result: undefined }));
   endPairingInstance(hostId);
   await SecureStore.deleteItemAsync(credentialKey(hostId), OPTIONS).catch(() => undefined);
 }
 
 export async function removeAutomaticHosts(userId: string): Promise<void> {
-  const hosts = await readHosts();
-  const automatic = hosts.filter((host) => host.provenance.kind === "automatic" && host.provenance.userId === userId);
-  await AsyncStorage.setItem(HOSTS_KEY, JSON.stringify(hosts.filter((host) => !automatic.includes(host))));
+  const automatic = await changeHosts((hosts) => {
+    const automatic = hosts.filter((host) => host.provenance.kind === "automatic" && host.provenance.userId === userId);
+    return { hosts: hosts.filter((host) => !automatic.includes(host)), result: automatic };
+  });
   automatic.forEach((host) => endPairingInstance(host.id));
   await Promise.all(automatic.map((host) => clearTranscriptCaches(host.id)));
   await Promise.all(automatic.map((host) => SecureStore.deleteItemAsync(credentialKey(host.id), OPTIONS).catch(() => undefined)));
