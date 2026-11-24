@@ -27,6 +27,8 @@ retries = 0
 slow-timeout = { period = "60s", terminate-after = 10 }
 failure-output = "immediate-final"
 final-status-level = "flaky"
+# Known flaky tests: none. The end of this file says how one is added.
+overrides = []
 
 [profile.ci.junit]
 # Written to target/nextest/ci/junit.xml, which the job uploads.
@@ -36,3 +38,10 @@ path = "junit.xml"
 # reported as flaky when it then passes (the job's summary names it). One test
 # by its exact name, with the ticket that will fix it on the line above; the
 # entry goes when the ticket closes. Nothing else may be set here.
+#
+# None now: PRO-513's were fixed at their cause. One is added at the end of
+# this file in the same four lines each had (its ticket, the
+# `[[profile.ci.overrides]]` header, the filter naming the one test, and how
+# many times it is run again), and the empty `overrides = []` in the `ci`
+# profile above is then taken out: TOML takes the list in one of the two forms,
+# not both.
