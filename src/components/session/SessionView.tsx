@@ -22,7 +22,7 @@ import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { useShortcut } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { checkoutLabel, rootCheckout, worktreeCheckout } from "@/lib/checkout";
-import { openAutomations, renameWorkspace, selectSession, useSessionStore } from "@/lib/sessions";
+import { openAutomations, openHome, renameWorkspace, selectSession, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
 import { ContinuationDialog } from "./ContinuationDialog";
@@ -349,7 +349,8 @@ function CloudSessionEmpty({ cloud }: { cloud: CloudSessionModel }) {
     <div className="flex flex-1 flex-col items-center justify-center gap-1 text-sm text-muted-foreground">
       {cloud.locked ? (
         // No access (never shared, or removed): the lock pane replaces the whole session body.
-        <NotSharedNotice kind={cloud.locked} onBack={() => selectSession(null)} onRecheck={cloud.recheckAccess} />
+        <NotSharedNotice kind={cloud.locked} onBack={() => selectSession(null)} onOverview={openHome} onRecheck={cloud.recheckAccess}
+          requestTarget={machine ? undefined : { orgId: cloud.orgId, workspaceId: cloud.workspaceId }} />
       ) : (
         // One state at a time: stopped, loading, or empty (with what this person can do about it).
         machine ? (

@@ -846,7 +846,7 @@ pub struct CloudWorkspace {
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub creator: Option<PresencePerson>,
+    pub creator: Option<WorkspaceCreator>,
 
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<i64>,
@@ -2204,6 +2204,15 @@ pub struct PresencePerson {
     #[serde(deserialize_with = "required_nullable_string")]
     pub display_name: Option<String>,
     #[serde(deserialize_with = "required_nullable_string")]
+    pub photo_url: Option<String>,
+}
+
+/// Catalog creator names are additive and do not require a presence photo.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceCreator {
+    pub user_id: String,
+    pub display_name: Option<String>,
     pub photo_url: Option<String>,
 }
 
@@ -8514,6 +8523,18 @@ mod tests {
             request.join().unwrap();
             assert_eq!(error.code, code);
         }
+    }
+
+    #[test]
+    fn catalog_creator_accepts_the_name_without_a_presence_photo() {
+        let mut workspace: Value = serde_json::from_str::<Value>(&snapshot_body(None)).unwrap()["workspace"].clone();
+        workspace["createdBy"] = json!("creator-1");
+        workspace["creator"] = json!({ "userId": "creator-1", "displayName": "Aisha" });
+        let parsed: CloudWorkspace = serde_json::from_value(workspace).unwrap();
+        let creator = parsed.creator.unwrap();
+        assert_eq!(creator.user_id, "creator-1");
+        assert_eq!(creator.display_name.as_deref(), Some("Aisha"));
+        assert!(creator.photo_url.is_none());
     }
 
     #[test]
