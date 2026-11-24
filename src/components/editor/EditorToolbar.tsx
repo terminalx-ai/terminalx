@@ -1,3 +1,4 @@
+import { revealInFileManager } from "@/lib/platform";
 import { useEffect, useRef, useState } from "react";
 import { joinKeycaps } from "@/lib/shortcuts";
 import { Code, Copy, Download, EllipsisVertical, Eye, FolderOpen, Save } from "@/icons";
@@ -61,7 +62,7 @@ export function ViewOptionsMenu({ copyKeys, onCopy, onDownload, onReveal, disabl
           <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={onReveal} className="h-8 gap-2.5 px-2.5 text-[12.5px] [&_svg]:size-3.5">
             <FolderOpen />
-            Reveal in Finder
+            {revealInFileManager}
           </DropdownMenuItem>
         </>}
       </DropdownMenuContent>
@@ -141,7 +142,7 @@ export function EditorToolbar({ path, relativePath, change = null, markdown, vie
           </Button>
           <ViewOptionsMenu copyKeys={copyKeys} onCopy={onCopy} onDownload={onDownload} onReveal={!cloud && narrow ? reveal : undefined} disabled={contentsDisabled} />
           {!cloud && (
-            <Button variant="ghost" size="icon-xs" aria-label="Reveal in Finder" title="Reveal in Finder" className="hidden @min-[220px]/editor-toolbar:inline-flex" onClick={reveal}>
+            <Button variant="ghost" size="icon-xs" aria-label={revealInFileManager} title={revealInFileManager} className="hidden @min-[220px]/editor-toolbar:inline-flex" onClick={reveal}>
               <FolderOpen />
             </Button>
           )}

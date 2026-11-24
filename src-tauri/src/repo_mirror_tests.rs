@@ -361,6 +361,7 @@ fn submodules_are_refused_before_creating_a_recovery_record() {
     r.clean();
 }
 
+#[cfg_attr(windows, ignore = "Windows does not allow a file name that ends in a space")]
 #[test]
 fn a_main_checkout_whose_name_ends_in_a_space_can_be_mirrored() {
     let dir = tempfile::tempdir().unwrap();

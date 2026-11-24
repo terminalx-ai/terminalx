@@ -358,6 +358,7 @@ mod tests {
         assert_eq!(branch_at(repo).as_deref(), Some("main"));
     }
 
+    #[cfg_attr(windows, ignore = "Windows does not allow a file name that ends in a space")]
     #[test]
     fn a_checkout_name_that_ends_in_a_space_is_its_own_repo() {
         let dir = tempfile::tempdir().unwrap();

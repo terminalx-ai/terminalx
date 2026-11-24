@@ -1703,6 +1703,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(repo.path().join("b.txt")).unwrap(), "peer work\n");
     }
 
+    #[cfg_attr(windows, ignore = "Windows does not allow a file name that ends in a space")]
     #[test]
     fn root_keeps_a_checkout_name_that_ends_in_a_space() {
         let dir = tempfile::tempdir().unwrap();

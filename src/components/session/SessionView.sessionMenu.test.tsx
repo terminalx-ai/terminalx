@@ -1,3 +1,4 @@
+import { revealInFileManager } from "@/lib/platform";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -88,7 +89,7 @@ describe("the title bar's session menu", () => {
       expect.stringMatching(/^Open in terminal view/),
       expect.stringMatching(/^Archive session/),
     ]);
-    for (const kept of ["Copy branch name", "Reveal in Finder", "Continue in New Session…", "Pair a phone…"]) expect(within(menu).getByText(kept)).toBeTruthy();
+    for (const kept of ["Copy branch name", revealInFileManager, "Continue in New Session…", "Pair a phone…"]) expect(within(menu).getByText(kept)).toBeTruthy();
   });
 
   it("shows only shortcuts the keymap has, with the keys it has for them", async () => {

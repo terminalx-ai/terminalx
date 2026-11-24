@@ -380,7 +380,7 @@ describe("agent logins in Settings (PRO-79)", () => {
     expect(lentUntil(login({ displayIdentity: "x · lent until yesterday" }))).toBeNull();
 
     const before = agentLoginStatus(lent, at - 3 * 60 * 60_000);
-    expect(before.text).toMatch(/^Connected · sign-in lent from a Mac · ada@example\.com · expires in 3 h \(/);
+    expect(before.text).toMatch(/^Connected · sign-in lent from a computer · ada@example\.com · expires in 3 h \(/);
     expect(before.warn).toBe(false);
     const soon = agentLoginStatus(lent, at - 20 * 60_000);
     expect(soon.text).toContain("expires in 20 min");

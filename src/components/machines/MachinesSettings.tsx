@@ -126,7 +126,7 @@ function MachinesList({ onOpen, showIntroduction }: { onOpen: (machineId: string
       {listenStatus && (
         <RegisteredSetting setting="machines.listen">
           <div className="border-b border-hairline py-3">
-            <MachineHosting name="This Mac" status={listenStatus} runsAs={view?.status?.runsAs ?? null} busy={host.busy} onChange={(listen, allowPublic) => void setMachineListen(listen, allowPublic)} />
+            <MachineHosting name={ThisComputer} status={listenStatus} runsAs={view?.status?.runsAs ?? null} busy={host.busy} onChange={(listen, allowPublic) => void setMachineListen(listen, allowPublic)} />
           </div>
         </RegisteredSetting>
       )}

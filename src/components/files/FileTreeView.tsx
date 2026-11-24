@@ -1,3 +1,4 @@
+import { revealInFileManager } from "@/lib/platform";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AppWindow, AtSign, ChevronDown, ChevronRight, Copy, ExternalLink, Eye, FileDiff, FilePlus, FileSearch, Folder, FolderOpen, FolderSearch, FolderTree,
@@ -750,7 +751,7 @@ function RootedFileTreeView({
                   </ContextMenuItem>
                   {!source && (
                     <ContextMenuItem onSelect={() => void revealItemInDir(abs(row.path)).catch(() => {})}>
-                      <FolderSearch /> Reveal in Finder
+                      <FolderSearch /> {revealInFileManager}
                     </ContextMenuItem>
                   )}
                   {!row.isDir && git?.discard && (

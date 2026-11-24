@@ -1490,6 +1490,7 @@ mod tests {
         assert!(terminals.panes().is_empty());
     }
 
+    #[cfg_attr(windows, ignore = "Windows does not allow a file name that ends in a space")]
     #[test]
     fn a_git_dir_whose_name_ends_in_a_space_names_the_repository() {
         let dir = tempfile::tempdir().unwrap();

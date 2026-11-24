@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { revealInFileManager } from "@/lib/platform";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { SearchQuery, openSearchPanel, searchPanelOpen, setSearchQuery } from "@codemirror/search";
 import { EditorView } from "@codemirror/view";
@@ -114,7 +115,7 @@ describe("a cloud workspace file in the editor", () => {
   it("saves conditionally on the content it was read at", async () => {
     const { container } = await mount();
     expect(screen.getByTestId("editor-cloud-file")).toBeTruthy();
-    expect(screen.queryByLabelText("Reveal in Finder")).toBeNull();
+    expect(screen.queryByLabelText(revealInFileManager)).toBeNull();
     type(container, "// mine\n");
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(cloud.files.get("src/main.rs")!.text).toBe("fn main() {}\n// mine\n"));

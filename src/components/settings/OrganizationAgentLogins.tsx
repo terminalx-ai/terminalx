@@ -245,7 +245,7 @@ const SIGN_IN_REQUIRED = "sign-in-required";
 export function agentLoginStatus(login: AgentLogin | undefined, now = Date.now()): { text: string; warn: boolean } {
   if (!login || login.state === "disconnected") return { text: "Not connected", warn: false };
   const lent = lentUntil(login);
-  const how = login.authKind === "api-key" ? "API key" : lent ? "sign-in lent from a Mac" : "subscription login";
+  const how = login.authKind === "api-key" ? "API key" : lent ? "sign-in lent from a computer" : "subscription login";
   const who = lent ? ` · ${lent.who}` : login.displayIdentity ? ` · ${login.displayIdentity}` : "";
   if (login.state === "revoked") return { text: `Revoked (${how}${who}): workspaces no longer receive it. Replace it to use this agent again.`, warn: true };
   // The provider stopped accepting it (a sign-in revoked on its side, terminalx-saas #241): stored, and of no use until signed in again.

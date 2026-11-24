@@ -1,3 +1,4 @@
+import { fileManager } from "@/lib/platform";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import type { SettingsFileStatus } from "@/lib/settingsFile";
@@ -91,7 +92,7 @@ it("Open personal settings.json opens the user file, names its broken line, and 
 
   openMenu(screen.getByRole("button", { name: "More ways to open personal settings.json" }));
   const menu = await screen.findByRole("menu");
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Your settings~/.raccoon/settings.json", "Finder1", "Cursor2", "VS Code3", "Zed4", "Copy pathCtrl+Shift+C"]);
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Your settings~/.raccoon/settings.json", `${fileManager}1`, "Cursor2", "VS Code3", "Zed4", "Copy pathCtrl+Shift+C"]);
   fireEvent.click(within(menu).getByRole("menuitem", { name: "VS Code" }));
   await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("open_settings_file", { path: "/Users/me/.raccoon/settings.json", editor: "vscode" }));
 

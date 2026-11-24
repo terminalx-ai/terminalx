@@ -250,10 +250,16 @@ mod tests {
         })
         .await
         .unwrap_err();
-        assert_eq!(attempts, 1);
+        // Windows reports a bind over another listener as access denied, so
+        // there it is a taken port and is retried.
+        assert_eq!(attempts, if cfg!(windows) { BIND_ATTEMPTS } else { 1 });
         assert_eq!(
             error.to_string(),
-            "TerminalX does not have permission to use port 6768 for LAN pairing."
+            if cfg!(windows) {
+                "Another program, or another copy of TerminalX, is using port 6768. Close it and retry."
+            } else {
+                "TerminalX does not have permission to use port 6768 for LAN pairing."
+            }
         );
         assert!(!prepare(PairingConnectionMode::Automatic, || Err(
             io::ErrorKind::PermissionDenied.into()

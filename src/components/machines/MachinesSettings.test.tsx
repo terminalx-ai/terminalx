@@ -1,6 +1,7 @@
 import "@testing-library/dom";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ThisComputer } from "@/lib/platform";
 import type { MachineActivityEntry, MachineConnectionView, MachineHostView, PairedMachine } from "@/types/machines";
 import { computer, hostView, pairedMachine } from "./machineFixtures.test-utils";
 
@@ -198,7 +199,7 @@ describe("Settings → Machines (screen 21.02)", () => {
   it("shows where this Mac listens with the switch off, with its phone listener's addresses (PRO-487)", async () => {
     view = { ...view, allowOperating: false, listen: "lan", allowPublic: false, phoneListening: ["192.168.1.20:6768"], status: { ...view.status!, listen: { choice: "lan", chosen: true, addresses: [], allowPublic: false, askPublic: false, refusedPublicAt: null } } };
     render(<MachinesSettings />);
-    const choices = await screen.findByRole("radiogroup", { name: "Where This Mac listens" });
+    const choices = await screen.findByRole("radiogroup", { name: `Where ${ThisComputer} listens` });
     expect(within(choices).getByRole("radio", { name: "Local network" }).getAttribute("aria-checked")).toBe("true");
     expect(screen.getByTestId("machine-hosting-listening").textContent).toContain("Listening on 192.168.1.20:6768.");
     fireEvent.click(within(choices).getByRole("radio", { name: "Relay only" }));
@@ -208,7 +209,7 @@ describe("Settings → Machines (screen 21.02)", () => {
   it("chooses where this Mac listens while it can be operated, and says who it runs as (PRO-487)", async () => {
     view = { ...view, allowOperating: true, status: { ...view.status!, listen: { choice: "relay", chosen: true, addresses: [], allowPublic: false, askPublic: false, refusedPublicAt: null }, runsAs: { user: "paresh", root: false, passwordlessSudo: false } } };
     render(<MachinesSettings />);
-    const choices = await screen.findByRole("radiogroup", { name: "Where This Mac listens" });
+    const choices = await screen.findByRole("radiogroup", { name: `Where ${ThisComputer} listens` });
     expect(screen.getByTestId("machine-hosting-listening").textContent).toContain("No port is open.");
     expect(screen.getByTestId("machine-hosting-runs-as").textContent).toBe("Runs as paresh · No passwordless sudo.");
     fireEvent.click(within(choices).getByRole("radio", { name: "Local network" }));

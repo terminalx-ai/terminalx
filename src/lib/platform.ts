@@ -55,3 +55,7 @@ export const secretStoreThe = profile.secretStoreThe;
 export const secretStoreShort = profile.secretStoreShort;
 /** "Keychain", "Encrypted store". */
 export const secretStoreWord = profile.secretStoreWord;
+/** "Finder", "File Explorer", "File Manager". */
+export const fileManager = profile.fileManager;
+/** The action that shows a file there: "Reveal in Finder", "Reveal in File Explorer". */
+export const revealInFileManager = `Reveal in ${fileManager}`;

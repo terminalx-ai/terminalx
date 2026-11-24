@@ -28,6 +28,8 @@ export interface PlatformProfile {
   secretStoreWord: string;
   /** Where the system shows the computer's name; null where there is no one place. */
   aboutSettingsPath: string | null;
+  /** The app that shows files, as a menu names it: "Finder", "File Explorer", "File Manager". */
+  fileManager: string;
   /** Modifier glyphs (⌘⌥⇧⌃) or their names (Ctrl, Alt, Shift). */
   keyStyle: "symbols" | "words";
   /** What goes between the keys of a shortcut: "⇧⌘D", "Ctrl+Shift+D". */

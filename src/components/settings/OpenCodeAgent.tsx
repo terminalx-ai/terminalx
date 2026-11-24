@@ -6,7 +6,7 @@
 // the picker's models are OpenCode's own per-provider list in its config
 // file, so the CLI on its own and every TerminalX tab agree.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { thisComputer } from "@/lib/platform";
+import { thisComputer, fileManager } from "@/lib/platform";
 import { bindingText } from "@/lib/shortcuts";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -126,8 +126,8 @@ export function OpenCodeAgent({ harness, readiness, checking, recheck }: {
         Update available · {update}
       </span>}
       <span className="ml-auto flex shrink-0 gap-1">
-        {installed && <Button size="xs" variant="ghost" className="text-xs" onClick={() => void agentExecutables.reveal("opencode").catch((e: unknown) => showError("Couldn’t show OpenCode in Finder", e))}>
-          <FolderOpen /> Open in Finder
+        {installed && <Button size="xs" variant="ghost" className="text-xs" onClick={() => void agentExecutables.reveal("opencode").catch((e: unknown) => showError(`Couldn’t show OpenCode in ${fileManager}`, e))}>
+          <FolderOpen /> Open in {fileManager}
         </Button>}
         <Button size="xs" variant="ghost" className="text-xs" onClick={() => void opencode.openLogs().catch((e: unknown) => showError("Couldn’t open OpenCode’s logs", e))}>
           <FileText /> View logs

@@ -7,6 +7,7 @@ import { errorMessage, experimental, type ExperimentalSettings } from "@/lib/api
 import { noteExperimentalSettings } from "@/lib/experimentalSettings";
 import { refreshModels } from "@/lib/models";
 import { refreshHarnesses } from "@/lib/sessions";
+import { familyNow } from "@/lib/platform";
 
 export { NATIVE_CODEX_DESCRIPTION, ORCHESTRATOR_RUNS_DESCRIPTION } from "./settingsRegistry";
 
@@ -154,6 +155,9 @@ export function ExperimentalTab() {
     }
   };
 
+  // The runtime refuses both on Windows, so a switch here could only fail.
+  const windows = familyNow() === "windows";
+
   return (
     <div className="flex flex-col" data-testid="experimental-settings">
       <RegisteredSetting setting="experimental.nativeCodex"
@@ -166,14 +170,15 @@ export function ExperimentalTab() {
         control={<Switch aria-label="Orchestration runs" checked={orchestratorRuns ?? false} disabled={orchestratorRuns === null} onCheckedChange={(on) => void changeRuns(on)} />}
       />
       <RegisteredSetting setting="experimental.localVmTasks"
-        control={<Switch aria-label="Local VM tasks" checked={localVmTasks ?? false} disabled={localVmTasks === null} onCheckedChange={(on) => void changeLocalVmTasks(on)} />}
+        control={<Switch aria-label="Local VM tasks" checked={!windows && (localVmTasks ?? false)} disabled={windows || localVmTasks === null} onCheckedChange={(on) => void changeLocalVmTasks(on)} />}
       />
       <RegisteredSetting setting="experimental.opencode"
         control={<Switch aria-label="OpenCode" checked={openCode ?? false} disabled={openCode === null} onCheckedChange={(on) => void changeOpenCode(on)} />}
       />
       <RegisteredSetting setting="experimental.bots"
-        control={<Switch aria-label="Bots" checked={bots ?? false} disabled={bots === null} onCheckedChange={(on) => void changeBots(on)} />}
+        control={<Switch aria-label="Bots" checked={!windows && (bots ?? false)} disabled={windows || bots === null} onCheckedChange={(on) => void changeBots(on)} />}
       />
+      {windows && <p data-testid="experimental-windows-note" className="pb-2 text-xs text-muted-foreground">Local VM tasks and Bots are not available on Windows yet.</p>}
       {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}
     </div>
   );

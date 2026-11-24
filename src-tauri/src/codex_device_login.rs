@@ -602,14 +602,13 @@ fn start_with(program: &Path, extra_args: &[String], path_env: &str, parent: &Pa
             }
         }
         command.env("USERPROFILE", home.path()).env("TEMP", home.path()).env("TMP", home.path());
-        std::os::windows::process::CommandExt::creation_flags(&mut command, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     }
-    let mut child = command.spawn().map_err(|error| if error.kind() == std::io::ErrorKind::NotFound { DeviceLoginError::CliMissing } else { DeviceLoginError::Unavailable })?;
+    #[cfg(unix)]
+    let spawned = command.spawn();
+    // In its job before it runs, so an npm launcher's node cannot escape it.
     #[cfg(windows)]
-    if crate::win::process::tie_to_this_process(&child).is_err() {
-        let _ = child.kill();
-        return Err(DeviceLoginError::Unavailable);
-    }
+    let spawned = crate::win::process::spawn_tied(&mut command, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    let mut child = spawned.map_err(|error| if error.kind() == std::io::ErrorKind::NotFound { DeviceLoginError::CliMissing } else { DeviceLoginError::Unavailable })?;
 
     let lifeline = child.stdin.take();
     let stdout = child.stdout.take().ok_or(DeviceLoginError::Unavailable)?;

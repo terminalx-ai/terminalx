@@ -2,7 +2,7 @@
 // row menu of a setting kept in the user file, Open settings.json, the Can't
 // save toast and the badges legend. The words come from src/lib/settingSources.
 import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
-import { thisComputer } from "@/lib/platform";
+import { thisComputer, fileManager } from "@/lib/platform";
 import { bindingText, isMac } from "@/lib/shortcuts";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { configuration, type SettingsEditor } from "@/lib/configuration";
@@ -65,7 +65,7 @@ export async function revealSettingsPath(path: string, displayPath: string): Pro
   try {
     await revealItemInDir(path);
   } catch (error) {
-    showError(`Couldn’t show ${displayPath} in Finder`, error);
+    showError(`Couldn’t show ${displayPath} in ${fileManager}`, error);
   }
 }
 
@@ -90,7 +90,7 @@ export function UserFileRowAccessory({ keys }: { keys: readonly string[] }) {
 
 /** Where each app in Open in comes from: its colour on a small tile, as the design draws them (11.10). */
 const OPEN_IN: readonly { label: string; icon: typeof Code; tone: string; editor?: (typeof EDITORS)[number] }[] = [
-  { label: "Finder", icon: Folder, tone: "text-info" },
+  { label: fileManager, icon: Folder, tone: "text-info" },
   { label: "Cursor", icon: MousePointer2, tone: "text-foreground", editor: EDITORS[0] },
   { label: "VS Code", icon: Code, tone: "text-info", editor: EDITORS[1] },
   { label: "Zed", icon: Zap, tone: "text-accent", editor: EDITORS[2] },

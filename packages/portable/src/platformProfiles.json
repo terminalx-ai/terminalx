@@ -11,6 +11,7 @@
     "secretStoreShort": "the Keychain",
     "secretStoreWord": "Keychain",
     "aboutSettingsPath": "System Settings → General → About",
+    "fileManager": "Finder",
     "keyStyle": "symbols",
     "keyJoiner": ""
   },
@@ -26,6 +27,7 @@
     "secretStoreShort": "the Windows encrypted store",
     "secretStoreWord": "Encrypted store",
     "aboutSettingsPath": "Settings → System → About",
+    "fileManager": "File Explorer",
     "keyStyle": "words",
     "keyJoiner": "+"
   },
@@ -41,6 +43,7 @@
     "secretStoreShort": "the secret store",
     "secretStoreWord": "Secret store",
     "aboutSettingsPath": null,
+    "fileManager": "File Manager",
     "keyStyle": "words",
     "keyJoiner": "+"
   }

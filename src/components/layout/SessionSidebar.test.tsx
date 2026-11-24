@@ -1,3 +1,4 @@
+import { fileManager } from "@/lib/platform";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -198,7 +199,7 @@ describe("project context menus (PRO-187)", () => {
       "Pin project", "Hide projectHidden from the sidebar; sessions keep running", "Remove project…The folder on disk is left as it is.",
     ]);
     fireEvent.keyDown(within(menu).getByRole("menuitem", { name: "Open in" }), { key: "ArrowRight" });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Finder" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: fileManager }));
     const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
     expect(revealItemInDir).toHaveBeenCalledWith("/repos/web");
   });

@@ -653,17 +653,21 @@ fn withheld_mobile_reply(reason: Withhold) {
     assert!(rig.observer.answered.lock().unwrap().is_empty());
 }
 
-// Its hook directories are POSIX paths, which only read as absolute on Unix.
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
+/// A recorded POSIX directory as this system writes an absolute one, in a
+/// fixture's text: the gates only trust absolute directories.
+fn fixture_paths(text: &str) -> String {
+    if cfg!(windows) { text.replace("/workspace/", "C:/workspace/") } else { text.to_string() }
+}
+
 #[test]
 fn permission_context_survives_the_hook_without_changing_tool_input() {
     // The app's own gate is said apart from the agent's words (#775).
     for (gate, input, description, reason) in [
-        ("PreToolUse", json!({"command":"git status --short --branch", "workdir":"/workspace/app"}), Value::Null, json!("Approval is required because this session is set to Ask every time.")),
-        ("PermissionRequest", json!({"cmd":"pwd", "workdir":"/workspace/other", "justification":"Inspect the selected checkout"}), json!("Inspect the selected checkout"), json!(codex::pty::OUTSIDE_SANDBOX)),
+        ("PreToolUse", json!({"command":"git status --short --branch", "workdir":&*fixture_paths("/workspace/app")}), Value::Null, json!("Approval is required because this session is set to Ask every time.")),
+        ("PermissionRequest", json!({"cmd":"pwd", "workdir":&*fixture_paths("/workspace/other"), "justification":"Inspect the selected checkout"}), json!("Inspect the selected checkout"), json!(codex::pty::OUTSIDE_SANDBOX)),
     ] {
-        let (payload, _) = permission_card(CliKind::Codex, "manual", gate, json!({"cwd":"/workspace/app", "tool_name":"Bash", "tool_input":input}), Decision::Deny);
-        assert_eq!(payload["cwd"], "/workspace/app", "the hook's directory must reach the recorded permission event");
+        let (payload, _) = permission_card(CliKind::Codex, "manual", gate, json!({"cwd":&*fixture_paths("/workspace/app"), "tool_name":"Bash", "tool_input":input}), Decision::Deny);
+        assert_eq!(payload["cwd"], &*fixture_paths("/workspace/app"), "the hook's directory must reach the recorded permission event");
         assert_eq!(payload["description"], description, "{gate}: the description is the agent's own words, never the app's");
         assert_eq!(payload["reason"], reason, "{gate}: why the card is up");
         assert_eq!(payload["input"], input, "display context must not rewrite the provider's tool arguments");
@@ -700,6 +704,7 @@ const REPEATED_REWORDED_IN_AUTO: &str = include_str!("harness/codex/fixtures/per
 fn replay_codex_hooks(rig: &Rig, recording: &str) -> Vec<String> {
     let mut running = HashMap::new();
     let mut cards: Vec<String> = Vec::new();
+    let recording = fixture_paths(recording);
     for line in recording.lines() {
         let record: Value = serde_json::from_str(line).unwrap();
         let (hook, event) = (record["hook"].as_u64().unwrap(), record["event"].as_str().unwrap().to_string());
@@ -776,13 +781,12 @@ const JUSTIFICATION: &str = "Probe: may I create a file outside the workspace?";
 /// card that stayed live after Allow, and answering it ran the command
 /// again. Now the repeat files no card and is turned away with a reason the
 /// model reads, and the command runs once.
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
 #[test]
 fn a_command_run_again_while_it_waits_on_its_card_files_no_second_card() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
     let cards = replay_codex_hooks(&rig, REPEATED_WHILE_WAITING);
     assert_eq!(permission_log(&rig), [
-        ("asked".into(), Some(ASK_IN_REPORTED_DIRECTORY.into()), None),
+        ("asked".into(), Some(fixture_paths(ASK_IN_REPORTED_DIRECTORY)), None),
         ("Allowed".into(), None, None),
         ("asked".into(), Some(codex::pty::OUTSIDE_SANDBOX.into()), Some(JUSTIFICATION.into())),
         ("Allowed".into(), None, None),
@@ -793,13 +797,12 @@ fn a_command_run_again_while_it_waits_on_its_card_files_no_second_card() {
 /// A repeat is the same command whichever gate it reaches and whichever gate
 /// the first call waits at: here the first waits to leave the sandbox and
 /// the repeat asks at `PreToolUse`. It files no card, and the command runs once.
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
 #[test]
 fn a_command_run_again_while_it_waits_to_leave_the_sandbox_files_no_second_card() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
     let cards = replay_codex_hooks(&rig, REPEATED_WHILE_LEAVING_SANDBOX);
     assert_eq!(permission_log(&rig), [
-        ("asked".into(), Some(ASK_IN_REPORTED_DIRECTORY.into()), None),
+        ("asked".into(), Some(fixture_paths(ASK_IN_REPORTED_DIRECTORY)), None),
         ("Allowed".into(), None, None),
         ("asked".into(), Some(codex::pty::OUTSIDE_SANDBOX.into()), Some(JUSTIFICATION.into())),
         ("Allowed".into(), None, None),
@@ -824,13 +827,12 @@ fn a_command_run_again_with_a_reworded_justification_files_no_second_card() {
 /// Allowing the command at `PreToolUse` does not let it out of the sandbox:
 /// Codex then asks for that at `PermissionRequest`, on its own card, which
 /// says so and carries the model's justification.
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
 #[test]
 fn a_codex_command_asked_about_runs_outside_the_sandbox_only_when_that_is_allowed_too() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
     let cards = replay_codex_hooks(&rig, FIRST_COMMAND);
     assert_eq!(permission_log(&rig), [
-        ("asked".into(), Some(ASK_IN_REPORTED_DIRECTORY.into()), None),
+        ("asked".into(), Some(fixture_paths(ASK_IN_REPORTED_DIRECTORY)), None),
         ("Allowed".into(), None, None),
         ("asked".into(), Some(codex::pty::OUTSIDE_SANDBOX.into()), Some(JUSTIFICATION.into())),
         ("Allowed".into(), None, None),
@@ -841,15 +843,14 @@ fn a_codex_command_asked_about_runs_outside_the_sandbox_only_when_that_is_allowe
 /// A denied command is blocked at `PreToolUse`, and Codex does not ask about
 /// it again. When the model runs it once more, that run is asked about too:
 /// an earlier answer stands for nothing but the call it was given to.
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
 #[test]
 fn a_denied_codex_command_run_again_is_asked_about_again() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
     let cards = replay_codex_hooks(&rig, DENIED);
     assert_eq!(permission_log(&rig), [
-        ("asked".into(), Some(ASK_IN_REPORTED_DIRECTORY.into()), None),
+        ("asked".into(), Some(fixture_paths(ASK_IN_REPORTED_DIRECTORY)), None),
         ("Denied".into(), None, None),
-        ("asked".into(), Some(ASK_IN_REPORTED_DIRECTORY.into()), None),
+        ("asked".into(), Some(fixture_paths(ASK_IN_REPORTED_DIRECTORY)), None),
         ("Denied".into(), None, None),
     ]);
     stale_clicks_do_nothing(&rig, &cards);
@@ -915,7 +916,7 @@ fn answer_command(rig: &Rig, frame: HookFrame, option: &str, session_option: boo
     reply
 }
 
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
+#[cfg_attr(not(unix), ignore = "TerminalX runs approved read-only commands itself only on Unix; on Windows the command asks on a card")]
 #[test]
 fn ask_mode_discovery_skips_cards_with_normalized_input_for_both_clis() {
     for kind in [CliKind::Claude, CliKind::Codex] {
@@ -940,7 +941,7 @@ fn ask_mode_discovery_skips_cards_with_normalized_input_for_both_clis() {
             assert!(!rig.events().iter().any(|event| matches!(event.payload, Payload::PermissionRequested { .. })));
         }
         for command in ["pwd; touch file", "ls && rm file", "cat file | curl example.com", "ls > file"] {
-            answer_command(&rig, command_frame(&rig, gate, command, "/workspace/app"), "deny", true);
+            answer_command(&rig, command_frame(&rig, gate, command, &fixture_paths("/workspace/app")), "deny", true);
         }
     }
 }
@@ -948,7 +949,7 @@ fn ask_mode_discovery_skips_cards_with_normalized_input_for_both_clis() {
 /// Codex records no item for a call its hook answered, so TerminalX shows
 /// the command it ran as a row of its own, with the command's own result.
 /// Claude's transcript carries the call and its result already.
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
+#[cfg_attr(not(unix), ignore = "TerminalX runs approved read-only commands itself only on Unix; on Windows the command asks on a card")]
 #[test]
 fn a_command_terminalx_ran_for_codex_gets_its_own_row() {
     for kind in [CliKind::Codex, CliKind::Claude] {
@@ -1021,7 +1022,7 @@ impl Drop for AsVerifier {
     }
 }
 
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
+#[cfg_attr(not(unix), ignore = "TerminalX runs approved read-only commands itself only on Unix; on Windows the command asks on a card")]
 #[test]
 fn verifier_lookups_keep_actionable_model_visible_outcomes() {
     for kind in [CliKind::Claude, CliKind::Codex] {
@@ -1122,7 +1123,7 @@ fn verifier_lookups_keep_actionable_model_visible_outcomes() {
 /// Where the person has not let read-only commands run unasked, or the
 /// agent's sandbox could narrow what it reads, the command is refused, with
 /// the verifier sent to its file tools, and never left to the agent's shell.
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
+#[cfg_attr(not(unix), ignore = "TerminalX runs approved read-only commands itself only on Unix; on Windows the command asks on a card")]
 #[test]
 fn a_verifier_s_read_only_command_is_answered_at_pre_tool_use_or_refused() {
     for kind in [CliKind::Claude, CliKind::Codex] {
@@ -1173,7 +1174,6 @@ fn a_verifier_s_read_only_command_is_answered_at_pre_tool_use_or_refused() {
     }
 }
 
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
 #[test]
 fn codex_normalized_input_never_reuses_unguarded_turn_answers() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
@@ -1182,16 +1182,16 @@ fn codex_normalized_input_never_reuses_unguarded_turn_answers() {
     // No answer stands in for another (PRO-160): each run asks.
     for answer in ["deny", "allow"] {
         let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PreToolUse".into(),
-            payload: json!({"cwd":"/workspace/a", "tool_name":"Bash", "tool_input":input.clone()}) };
+            payload: json!({"cwd":&*fixture_paths("/workspace/a"), "tool_name":"Bash", "tool_input":input.clone()}) };
         answer_command(&rig, frame, answer, true);
     }
     for input in [
         json!({"command":"pwd", "workdir":"../b"}),
         json!({"command":"pwd", "workdir":null}),
-        json!({"command":"pwd", "workdir":"/workspace/a", "cwd":"/workspace/b"}),
+        json!({"command":"pwd", "workdir":&*fixture_paths("/workspace/a"), "cwd":&*fixture_paths("/workspace/b")}),
     ] {
         let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PreToolUse".into(),
-            payload: json!({"cwd":"/workspace/a", "tool_name":"Bash", "tool_input":input}) };
+            payload: json!({"cwd":&*fixture_paths("/workspace/a"), "tool_name":"Bash", "tool_input":input}) };
         answer_command(&rig, frame, "deny", false);
     }
     assert!(rig.events().iter().any(|event| matches!(&event.payload, Payload::PermissionRequested { reason: Some(reason), .. } if reason.contains("verifiable execution directory"))));
@@ -1208,7 +1208,7 @@ fn codex_0164_frame(rig: &Rig, cwd: &std::path::Path, command: &str) -> HookFram
     HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PreToolUse".into(), payload }
 }
 
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
+#[cfg_attr(not(unix), ignore = "TerminalX runs approved read-only commands itself only on Unix; on Windows the command asks on a card")]
 #[test]
 fn codex_0164_discovery_and_session_grants_enforce_their_directory_at_execution() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
@@ -1244,19 +1244,18 @@ fn codex_0164_discovery_and_session_grants_enforce_their_directory_at_execution(
     assert!(rig.events().iter().any(|e| matches!(&e.payload, Payload::PermissionRequested { reason: Some(reason), .. } if reason.contains("Session allowances are limited to"))));
 }
 
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
 #[test]
 fn execution_directory_never_falls_back_to_a_codex_session_directory() {
-    let mut payload = json!({"cwd":"/workspace/a", "tool_name":"Bash", "tool_input":{"command":"git diff"}});
+    let mut payload = json!({"cwd":&*fixture_paths("/workspace/a"), "tool_name":"Bash", "tool_input":{"command":"git diff"}});
     assert_eq!(permission_directory(CliKind::Codex, &payload), None);
-    payload["tool_input"]["workdir"] = json!("/workspace/b");
-    assert_eq!(permission_directory(CliKind::Codex, &payload), Some("/workspace/b"));
+    payload["tool_input"]["workdir"] = json!(&*fixture_paths("/workspace/b"));
+    assert_eq!(permission_directory(CliKind::Codex, &payload), Some(&*fixture_paths("/workspace/b")));
     assert_eq!(permission_directory(CliKind::Claude, &payload), None);
     payload["tool_input"].as_object_mut().unwrap().remove("workdir");
-    assert_eq!(permission_directory(CliKind::Claude, &payload), Some("/workspace/a"));
+    assert_eq!(permission_directory(CliKind::Claude, &payload), Some(&*fixture_paths("/workspace/a")));
 }
 
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
+#[cfg_attr(not(unix), ignore = "TerminalX runs approved read-only commands itself only on Unix; on Windows the command asks on a card")]
 #[test]
 fn turning_the_builtin_list_off_asks_on_the_next_command_in_a_running_tab() {
     for kind in [CliKind::Claude, CliKind::Codex] {
@@ -1267,11 +1266,10 @@ fn turning_the_builtin_list_off_asks_on_the_next_command_in_a_running_tab() {
         let mut settings = store::settings::load();
         settings.agents.read_only_commands = false;
         store::settings::save(&settings).unwrap();
-        answer_command(&rig, command_frame(&rig, gate, "pwd", "/workspace/app"), "deny", true);
+        answer_command(&rig, command_frame(&rig, gate, "pwd", &fixture_paths("/workspace/app")), "deny", true);
     }
 }
 
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
 #[test]
 fn session_allowance_matches_the_exact_input_directory_and_tab_across_turns() {
     for kind in [CliKind::Claude, CliKind::Codex] {
@@ -1279,47 +1277,46 @@ fn session_allowance_matches_the_exact_input_directory_and_tab_across_turns() {
         let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
         let option = crate::harness::read_only::SESSION_OPTION;
         // Allow once does not create a session grant.
-        answer_command(&rig, command_frame(&rig, gate, "touch note", "/workspace/app"), "allow", true);
-        answer_command(&rig, command_frame(&rig, gate, "touch note", "/workspace/app"), option, true);
+        answer_command(&rig, command_frame(&rig, gate, "touch note", &fixture_paths("/workspace/app")), "allow", true);
+        answer_command(&rig, command_frame(&rig, gate, "touch note", &fixture_paths("/workspace/app")), option, true);
         rig.hook("Stop", json!({}));
         let cards = rig.events().iter().filter(|event| matches!(event.payload, Payload::PermissionRequested { .. })).count();
-        let mut repeat = command_frame(&rig, gate, "touch note", "/workspace/app");
+        let mut repeat = command_frame(&rig, gate, "touch note", &fixture_paths("/workspace/app"));
         repeat.payload["tool_input"]["description"] = json!("Create the note for the next step");
         assert!(rig.manager.on_hook(repeat).output.is_some());
         assert_eq!(rig.events().iter().filter(|event| matches!(event.payload, Payload::PermissionRequested { .. })).count(), cards);
-        answer_command(&rig, command_frame(&rig, gate, "touch other", "/workspace/app"), "deny", true);
-        answer_command(&rig, command_frame(&rig, gate, "touch note; rm file", "/workspace/app"), "deny", true);
-        answer_command(&rig, command_frame(&rig, gate, "touch note", "/workspace/other"), "deny", true);
+        answer_command(&rig, command_frame(&rig, gate, "touch other", &fixture_paths("/workspace/app")), "deny", true);
+        answer_command(&rig, command_frame(&rig, gate, "touch note; rm file", &fixture_paths("/workspace/app")), "deny", true);
+        answer_command(&rig, command_frame(&rig, gate, "touch note", &fixture_paths("/workspace/other")), "deny", true);
         // A grant for another tab cannot authorize this one.
         let grants = rig.manager.session_commands.lock().unwrap().remove(&key_of(SESSION, TAB)).unwrap();
         rig.manager.session_commands.lock().unwrap().insert(key_of(SESSION, "another-tab"), grants);
-        answer_command(&rig, command_frame(&rig, gate, "touch note", "/workspace/app"), "deny", true);
+        answer_command(&rig, command_frame(&rig, gate, "touch note", &fixture_paths("/workspace/app")), "deny", true);
     }
 }
 
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
+#[cfg_attr(not(unix), ignore = "TerminalX runs approved read-only commands itself only on Unix; on Windows the command asks on a card")]
 #[test]
 fn automatic_discovery_and_session_grants_never_answer_codex_escalation() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
     let app = rig._dir.path().to_str().unwrap();
     assert_eq!(ran_by_terminalx(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", "pwd", app)), CliKind::Codex).map(|(status, _)| status), Some(0));
-    answer_command(&rig, command_frame(&rig, "PermissionRequest", "pwd", "/workspace/app"), "deny", false);
-    answer_command(&rig, command_frame(&rig, "PreToolUse", "touch note", "/workspace/app"), crate::harness::read_only::SESSION_OPTION, true);
-    assert!(rig.manager.on_hook(command_frame(&rig, "PreToolUse", "touch note", "/workspace/app")).output.is_some());
-    answer_command(&rig, command_frame(&rig, "PermissionRequest", "touch note", "/workspace/app"), "deny", false);
+    answer_command(&rig, command_frame(&rig, "PermissionRequest", "pwd", &fixture_paths("/workspace/app")), "deny", false);
+    answer_command(&rig, command_frame(&rig, "PreToolUse", "touch note", &fixture_paths("/workspace/app")), crate::harness::read_only::SESSION_OPTION, true);
+    assert!(rig.manager.on_hook(command_frame(&rig, "PreToolUse", "touch note", &fixture_paths("/workspace/app"))).output.is_some());
+    answer_command(&rig, command_frame(&rig, "PermissionRequest", "touch note", &fixture_paths("/workspace/app")), "deny", false);
 }
 
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
 #[test]
 fn a_codex_cmd_approval_cannot_authorize_a_different_write_in_the_same_turn() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
-    let mut allowed = command_frame(&rig, "PreToolUse", "", "/workspace/app");
+    let mut allowed = command_frame(&rig, "PreToolUse", "", &fixture_paths("/workspace/app"));
     allowed.payload["tool_name"] = json!("exec_command");
-    allowed.payload["tool_input"] = json!({"cmd":"touch note", "workdir":"/workspace/app"});
+    allowed.payload["tool_input"] = json!({"cmd":"touch note", "workdir":&*fixture_paths("/workspace/app")});
     answer_command(&rig, allowed, "allow", true);
-    let mut frame = command_frame(&rig, "PreToolUse", "", "/workspace/app");
+    let mut frame = command_frame(&rig, "PreToolUse", "", &fixture_paths("/workspace/app"));
     frame.payload["tool_name"] = json!("exec_command");
-    frame.payload["tool_input"] = json!({"cmd":"rm file", "workdir":"/workspace/app"});
+    frame.payload["tool_input"] = json!({"cmd":"rm file", "workdir":&*fixture_paths("/workspace/app")});
     answer_command(&rig, frame, "deny", true);
 }
 
@@ -1809,7 +1806,7 @@ fn a_silent_live_turn_keeps_counting_after_the_warning() {
     assert_eq!(rig.counts(), (0, 0), "completion releases compute even though the CLI stays alive");
 }
 
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
+#[cfg_attr(windows, ignore = "runs a POSIX command in a live pane")]
 #[test]
 fn a_silent_live_turn_has_a_separate_one_hour_cloud_budget() {
     let rig = Rig::with_live_pane();
@@ -2930,7 +2927,7 @@ fn delivery_stages(rig: &Rig) -> Vec<String> {
         .filter(|v| v["type"] == "prompt_delivery").filter_map(|v| v["stage"].as_str().map(String::from)).collect()
 }
 
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
+#[cfg_attr(windows, ignore = "runs a POSIX command in a live pane")]
 #[test]
 fn an_enter_the_cli_let_go_by_is_written_again_before_the_reader_is_told() {
     let rig = Rig::running("cat >/dev/null");
@@ -2965,7 +2962,7 @@ fn an_enter_the_cli_let_go_by_is_written_again_before_the_reader_is_told() {
 /// is nudged like any prompt, and the dialog that sent it hears each one;
 /// the tab still raises no warning of its own, the dialog being the one to
 /// say what became of it.
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
+#[cfg_attr(windows, ignore = "runs a POSIX command in a live pane")]
 #[test]
 fn a_continuation_left_in_the_input_is_nudged_without_raising_the_banner() {
     let rig = Rig::running("cat >/dev/null");
@@ -2997,7 +2994,7 @@ fn a_continuation_left_in_the_input_is_nudged_without_raising_the_banner() {
 /// Enter written after it says nothing new, and once its input queue is full
 /// the write never returns, holding the tab (#661). The nudge stands back
 /// and says why.
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
+#[cfg_attr(windows, ignore = "runs a POSIX command in a live pane")]
 #[test]
 fn no_enter_is_written_into_a_cli_that_has_not_read_its_input() {
     let rig = Rig::running("sleep 600");
@@ -3025,7 +3022,7 @@ fn no_enter_is_written_into_a_cli_that_has_not_read_its_input() {
 
 /// The reader's own Enter, from the dialog: held to what a nudge is held to,
 /// and only for the prompt still awaited.
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
+#[cfg_attr(windows, ignore = "runs a POSIX command in a live pane")]
 #[test]
 fn the_readers_enter_goes_only_where_a_nudge_would() {
     let rig = Rig::running("cat >/dev/null");
@@ -3557,7 +3554,7 @@ fn startup_refuses_only_itself_while_detached_ownership_is_unconfirmed() {
 /// A prompt in that window waits for it and starts the CLI, and the tab is
 /// never left refusing later prompts. One that cannot confirm the old
 /// process's exit refuses just itself.
-#[cfg_attr(windows, ignore = "not yet working on Windows")]
+#[cfg_attr(windows, ignore = "runs a POSIX command in a live pane")]
 #[test]
 fn a_prompt_while_the_exited_cli_is_still_going_neither_locks_the_tab_nor_targets_the_shell() {
     for confirmable in [true, false] {

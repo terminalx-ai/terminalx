@@ -98,7 +98,7 @@ export function MachineNameSettings() {
             }}
             className="h-8 w-full rounded-md border border-hairline bg-well px-2.5 pr-7 text-[13px] outline-none focus:border-ring disabled:opacity-60"
           />
-          {saving && <Loader2 className="absolute top-2 right-2 size-4 animate-spin text-faint" aria-label="Saving this Mac’s name" />}
+          {saving && <Loader2 className="absolute top-2 right-2 size-4 animate-spin text-faint" aria-label={`Saving ${thisComputer}’s name`} />}
         </div>
       </div>
       {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}

@@ -559,6 +559,7 @@ fn the_repository_schema_says_what_the_resolver_accepts() {
     assert_eq!(schema["additionalProperties"], false);
 }
 
+#[cfg_attr(windows, ignore = "Windows does not allow a file name that ends in a space")]
 #[test]
 fn a_checkout_name_that_ends_in_a_space_is_a_repository() {
     let dir = tempfile::tempdir().unwrap();

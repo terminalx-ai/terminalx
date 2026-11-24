@@ -217,15 +217,10 @@ fn start_claude(program: &Path, dir: &Path, path_env: &str) -> Result<ClaudeLogi
     // No watchdog shell: the CLI runs in a job that ends with this process.
     #[cfg(windows)]
     let (mut child, lifeline) = {
-        use std::os::windows::process::CommandExt;
         let mut command = claude_command(program, dir, path_env, &["auth", "login", "--claudeai"]);
-        command.current_dir(dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
-            .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-        let mut child = command.spawn().context("Claude Code's sign-in could not start")?;
-        if let Err(error) = crate::win::process::tie_to_this_process(&child) {
-            let _ = child.kill();
-            return Err(anyhow::Error::new(error).context("Claude Code's sign-in could not start"));
-        }
+        command.current_dir(dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+        let child = crate::win::process::spawn_tied(&mut command, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+            .context("Claude Code's sign-in could not start")?;
         (child, None::<std::process::ChildStdin>)
     };
     let stdout = child.stdout.take().context("Claude Code's sign-in could not start")?;

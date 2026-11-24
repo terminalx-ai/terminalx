@@ -1,3 +1,4 @@
+import { isMac } from "@/lib/platform";
 import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { SearchAddon, type ISearchOptions, type ISearchResultChangeEvent } from "@xterm/addon-search";
 import type { Terminal } from "@xterm/xterm";
@@ -244,7 +245,7 @@ export function TerminalTools({ id, shown, frame }: { id: string; shown: boolean
         </div>
         <ul aria-label="Find keys" data-testid="terminal-find-keys" className="flex flex-wrap items-center gap-x-3 gap-y-0.5 border-t border-hairline px-1 pt-1 text-[11px] text-muted-foreground">
           <li><kbd className={kbd}>↵</kbd> next</li>
-          <li><kbd className={kbd}>⇧↵</kbd> previous</li>
+          <li><kbd className={kbd}>{isMac ? "⇧↵" : "Shift+Enter"}</kbd> previous</li>
           <li><kbd className={kbd}>{TERMINAL_KEYS.matchCase.label}</kbd> match case</li>
           <li><kbd className={kbd}>esc</kbd> closes</li>
         </ul>

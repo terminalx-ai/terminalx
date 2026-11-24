@@ -1,3 +1,4 @@
+import { revealInFileManager } from "@/lib/platform";
 import { openPairPhone } from "@/lib/pairing";
 import { copyText } from "@/lib/clipboard";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -151,7 +152,7 @@ export function SessionMenu({ session, branch, cloud = false, terminalView, onCo
           )}
           <DropdownMenuSeparator />
           {branch && <DropdownMenuItem onSelect={() => void copyText(branch).catch(failed("Could not copy the branch name"))}><Copy /> Copy branch name</DropdownMenuItem>}
-          <DropdownMenuItem onSelect={() => void revealItemInDir(session.cwd).catch(failed("Could not reveal the workspace"))}><FolderOpen /> Reveal in Finder</DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => void revealItemInDir(session.cwd).catch(failed("Could not reveal the workspace"))}><FolderOpen /> {revealInFileManager}</DropdownMenuItem>
           {onContinue && <DropdownMenuItem onSelect={onContinue}><SessionContinue /> Continue in New Session…</DropdownMenuItem>}
           <DropdownMenuItem onSelect={() => openPairPhone()}><Smartphone /> Pair a phone…</DropdownMenuItem>
           <DropdownMenuSeparator />

@@ -1,5 +1,5 @@
 import { EmptyView } from "@/components/start/EmptyView";
-import { thisComputer } from "@/lib/platform";
+import { thisComputer, revealInFileManager } from "@/lib/platform";
 import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, FileCode2, FolderOpen, Loader2, RefreshCw, Search } from "@/icons";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -237,7 +237,7 @@ function SkillReader({ skill, onRefresh }: { skill: DiscoveredSkill | null; onRe
           </div>
           <div className="flex shrink-0 items-center gap-1">
             <Button variant="ghost" size="sm" onClick={() => void revealItemInDir(skill.dirPath).catch(() => {})}>
-              <FolderOpen /> Reveal in Finder
+              <FolderOpen /> {revealInFileManager}
             </Button>
             <Button variant="outline" size="sm" onClick={() => void openPath(skill.skillFilePath).catch(() => {})}>
               <FileCode2 /> Open in editor

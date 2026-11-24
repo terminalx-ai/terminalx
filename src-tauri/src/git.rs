@@ -389,14 +389,18 @@ fn capture(mut command: Command, input: Option<Vec<u8>>, cancel: Option<&std::sy
     command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    #[cfg(windows)]
-    if input.is_some() {
-        std::os::windows::process::CommandExt::creation_flags(&mut command, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-    }
+    #[cfg(unix)]
     let mut child = command.spawn()?;
     // Only a one-shot program: a job would also end a daemon git left running.
+    // It joins the job before it runs, so nothing it starts can escape.
     #[cfg(windows)]
-    let tied = input.is_some() && crate::win::process::tie_to_this_process(&child).is_ok();
+    let tied = input.is_some();
+    #[cfg(windows)]
+    let mut child = if tied {
+        crate::win::process::spawn_tied(&mut command, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)?
+    } else {
+        command.spawn()?
+    };
     if let Some(bytes) = input {
         let stdin = child.stdin.take();
         // Beside the reads: the program may answer before it has read all of this.
