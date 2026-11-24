@@ -182,22 +182,33 @@ fn os_version() -> Option<String> {
         let version = String::from_utf8(output.stdout).ok()?.trim().to_string();
         (output.status.success() && !version.is_empty()).then_some(version)
     }
-    // `10.0.26100`: the build says which Windows (22000 and later are 11).
+    // `ver` says `10.0.26100` for both 10 and 11; the build says which
+    // (22000 and later are 11), so the tag reads as Windows names itself.
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let output = std::process::Command::new("cmd.exe").args(["/d", "/c", "ver"]).creation_flags(CREATE_NO_WINDOW).output().ok()?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        let version = text.split("Version ").nth(1)?.split(']').next()?.trim();
-        let parts: Vec<&str> = version.split('.').take(3).collect();
-        (output.status.success() && parts.len() == 3 && parts.iter().all(|part| part.parse::<u32>().is_ok())).then(|| parts.join("."))
+        if !output.status.success() {
+            return None;
+        }
+        windows_version(&String::from_utf8_lossy(&output.stdout))
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
         let release = std::fs::read_to_string("/etc/os-release").ok()?;
         release.lines().find_map(|line| line.strip_prefix("VERSION_ID=")).map(|value| value.trim_matches('"').to_string()).filter(|value| !value.is_empty())
     }
+}
+
+/// `11 (build 26100)` from `ver`'s `Microsoft Windows [Version 10.0.26100.4061]`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_version(ver: &str) -> Option<String> {
+    let version = ver.split("Version ").nth(1)?.split(']').next()?.trim();
+    let mut parts = version.split('.').map(str::parse::<u32>);
+    let (major, _minor, build) = (parts.next()?.ok()?, parts.next()?.ok()?, parts.next()?.ok()?);
+    let release = if major == 10 && build >= 22000 { 11 } else { major };
+    Some(format!("{release} (build {build})"))
 }
 
 pub(super) fn registered() -> Result<Vec<Project>, RpcError> {
@@ -463,6 +474,15 @@ impl Projects {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_is_named_by_its_release_and_build_not_its_kernel_version() {
+        assert_eq!(windows_version("\r\nMicrosoft Windows [Version 10.0.26100.4061]\r\n").as_deref(), Some("11 (build 26100)"));
+        assert_eq!(windows_version("Microsoft Windows [Version 10.0.22000.1]").as_deref(), Some("11 (build 22000)"));
+        assert_eq!(windows_version("Microsoft Windows [Version 10.0.19045.5737]").as_deref(), Some("10 (build 19045)"));
+        assert_eq!(windows_version("Microsoft Windows [Version 10.0]"), None);
+        assert_eq!(windows_version("not a version"), None);
+    }
 
     #[test]
     fn project_ids_match_the_architecture_notes_vectors() {

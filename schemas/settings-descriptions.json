@@ -3,7 +3,7 @@
   "agents.idleStopMinutes": "An agent sitting at its prompt still holds its memory, its MCP servers and its language server. Once it has had nothing to do for this long it is stopped; its conversation stays, and your next message starts it again where it left off. An agent at work, waiting for your answer, or waiting on something it started (a background command, monitor or agent, a wakeup or scheduled job, a process it left running) keeps running, and so does one you started yourself in a terminal. An agent in an archived session, or one whose workspace was removed, is stopped after 10 idle minutes.",
   "agents.readOnlyCommands": "Run common discovery commands without an approval card: ls, cat, rg, grep, pwd, and git status, diff and log. Every command in a chain or pipe must qualify. Redirects, shell expansions, unknown options and commands that can run helpers still ask. Turn this off to ask for every command. Commands you explicitly allow for a session keep that allowance in the approved directory until TerminalX restarts.",
   "conversations.archiveIdleDays": "A conversation nobody has written in for this long leaves the sidebar's list for its archive: View → Show archived lists it under its project, and the command palette still finds it. Nothing is deleted, and its next message brings it back. A conversation stays while it is pinned or open, while any of its tabs is working, waiting for you or holding a queued message, while its last reply is unread, while its worktree has uncommitted or unpushed work, and while its issue pipeline's pull request is open.",
-  "diagnostics.recoveryIncidents": "When a session warns that it needs attention, TerminalX notes on this Mac when the warning was raised, how long it was on screen, what you pressed and what became of the turn, so a false warning can be reported with evidence. Only labels, counts and times are kept: never a message, code, a command's output or a file path. Export it to attach to a report; sessions are named by codes that change with every export.",
+  "diagnostics.recoveryIncidents": "When a session warns that it needs attention, TerminalX notes on this computer when the warning was raised, how long it was on screen, what you pressed and what became of the turn, so a false warning can be reported with evidence. Only labels, counts and times are kept: never a message, code, a command's output or a file path. Export it to attach to a report; sessions are named by codes that change with every export.",
   "experimental.bots": "AI employees with standing roles: each has a name, a role, its own memory and a home folder. Also turns on the terminalx bots commands.",
   "experimental.localVmTasks": "Settings → Local VMs, picking the computer a tab’s agent uses, and Local VM task cards in a conversation.",
   "experimental.nativeCodex": "New Codex sessions connect to Codex directly, so the chat shows when it compacts. Needs Codex 0.164.0 or newer; opening the terminal view moves a session to Codex’s own terminal.",
@@ -41,6 +41,7 @@
   "orchestrator.workerMode": "Push, merge and deploy stay blocked by deny rules in every mode.",
   "orchestrator.workersAtOnce": "Across every run. Sessions you start by hand are not counted.",
   "orchestrator.workersPerRun": "The rest wait in a queue and start as workers finish.",
+  "preferences.aiEditor": "A button in the composer that fixes, restyles or translates your draft with your Claude Code login. Your text is sent only when you ask, and nothing changes until you apply it.",
   "preferences.animations": "The raccoon forages in an empty session and runs along the composer while an agent is working. Off hides the raccoon only; working marks keep moving unless your system's Reduce motion is on.",
   "preferences.autocorrect": "Your keyboard's spelling correction, smart quotes and dashes, and text replacements apply in prompts, answers to an agent's questions, and notes. Off leaves what you type exactly as typed.",
   "preferences.branchSessions": "Several sessions on one branch: as tabs beside each other in the tab bar, with one row for the branch in the sidebar; or listed under the branch in the sidebar, with the tab bar holding only the open session's tabs. Without the tab bar they are in the sidebar.",
@@ -90,9 +91,11 @@
   "preferences.shortcuts.app.zoomIn": "App keyboard shortcut.",
   "preferences.shortcuts.app.zoomOut": "App keyboard shortcut.",
   "preferences.shortcuts.app.zoomReset": "App keyboard shortcut.",
+  "preferences.shortcuts.composer.aiEditor": "Composer keyboard shortcut.",
   "preferences.shortcuts.composer.dictate": "Composer keyboard shortcut.",
   "preferences.shortcuts.composer.historyNext": "Composer keyboard shortcut.",
   "preferences.shortcuts.composer.historyPrevious": "Composer keyboard shortcut.",
+  "preferences.shortcuts.composer.historySearch": "Composer keyboard shortcut.",
   "preferences.shortcuts.composer.mention": "Composer keyboard shortcut.",
   "preferences.shortcuts.composer.newLine": "Composer keyboard shortcut.",
   "preferences.shortcuts.composer.send": "Composer keyboard shortcut.",
@@ -164,5 +167,5 @@
   "transcriptionInputDevice": "Choose the microphone used for dictation.",
   "transcriptionModel": "Select, download, or delete an on-device speech recognition model.",
   "transcriptionMute": "Keeps whatever is playing out of the transcript. Unmuted automatically when recording stops.",
-  "workStatus.shareWithTeam": "Teammates in an organization that connected a repository see which of its issues you have a session on: your name, the session’s title and branch, and whether an agent is working. Your other machines always see it, with this Mac’s name. Prompts, transcripts, paths and code never leave this Mac."
+  "workStatus.shareWithTeam": "Teammates in an organization that connected a repository see which of its issues you have a session on: your name, the session’s title and branch, and whether an agent is working. Your other machines always see it, with this computer’s name. Prompts, transcripts, paths and code never leave this computer."
 }

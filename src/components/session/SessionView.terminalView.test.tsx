@@ -1,3 +1,4 @@
+import { revealInFileManager } from "@/lib/platform";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceListItem, TabLayout } from "@/lib/api";
@@ -519,7 +520,7 @@ describe("a local session's row of tabs under the title bar", () => {
     fireEvent.pointerDown(menu, { button: 0, pointerType: "mouse" });
     fireEvent.pointerUp(menu, { button: 0, pointerType: "mouse" });
     fireEvent.click(menu);
-    await screen.findByRole("menuitem", { name: "Reveal in Finder" });
+    await screen.findByRole("menuitem", { name: revealInFileManager });
     expect(screen.queryByRole("menuitem", { name: /repo root/ })).toBeNull();
   });
 

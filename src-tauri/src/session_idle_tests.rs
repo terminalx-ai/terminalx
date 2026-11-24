@@ -16,7 +16,7 @@ const CONVERSATION: &str = "5a0e4a52-8f7c-4e0b-9a51-3f8c6f2d9b10";
 const SITS: &str = "printf 'ready\\n'\nstty -icanon\nexec cat\n";
 /// The same, having first left a process running that its own parent has
 /// let go of, as `nohup … &` from one of its commands does.
-const LEAVES_ONE: &str = "(sleep 300 & echo $! > left.pid)\nprintf 'ready\\n'\nstty -icanon\nexec cat\n";
+const LEAVES_ONE: &str = "(sleep 300 & { cat /proc/$!/winpid 2>/dev/null || echo $!; } > left.pid)\nprintf 'ready\\n'\nstty -icanon\nexec cat\n";
 /// Short enough to wait for here; what is under test is what happens at it.
 const LIMIT: Duration = Duration::from_millis(300);
 

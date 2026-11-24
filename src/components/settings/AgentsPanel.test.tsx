@@ -192,15 +192,15 @@ describe("Agents · API key (PRO-306)", () => {
   it("saves a key to the Keychain, shows it masked, and restarts exactly the agent's running tabs", async () => {
     show();
     fireEvent.click(await screen.findByRole("radio", { name: /API key/ }));
-    expect(screen.getByText("Kept in the Keychain. TerminalX passes it to Claude Code when a tab starts, in place of ANTHROPIC_API_KEY.")).toBeTruthy();
+    expect(screen.getByText("Kept in the secret store. TerminalX passes it to Claude Code when a tab starts, in place of ANTHROPIC_API_KEY.")).toBeTruthy();
     const field = screen.getByLabelText("Anthropic API key") as HTMLInputElement;
     expect(field.type).toBe("password");
     fireEvent.change(field, { target: { value: KEY } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    await waitFor(() => expect(toast("API key saved to the Keychain")).toBeTruthy());
+    await waitFor(() => expect(toast("API key saved to the secret store")).toBeTruthy());
     expect(saved).toEqual([{ harness: "claude", key: KEY }]);
-    expect(toast("API key saved to the Keychain").textContent).toContain("New Claude Code tabs use it. 2 running tabs keep their current login until you restart them.");
+    expect(toast("API key saved to the secret store").textContent).toContain("New Claude Code tabs use it. 2 running tabs keep their current login until you restart them.");
     expect(screen.getByLabelText("Saved Anthropic API key").textContent).toBe(MASKED);
     expect(screen.getByText("Saved")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Remove" })).toBeTruthy();
@@ -210,7 +210,7 @@ describe("Agents · API key (PRO-306)", () => {
 
     await waitFor(() => expect(statusLine().textContent).toBe("Using an API key · verified just now"));
     expect(calls("agent_login_verify")).toEqual([{ harness: "claude" }]);
-    expect(row("Login")).toBe("API key · ANTHROPIC_API_KEY · Keychain");
+    expect(row("Login")).toBe("API key · ANTHROPIC_API_KEY · Secret store");
     // PRO-377: the organization stays in the details with a key in use.
     expect(row("Organization")).toBe("Acme");
     // The badge follows the readiness check a save asks for, which may answer after the key's own check.
@@ -218,8 +218,8 @@ describe("Agents · API key (PRO-306)", () => {
 
     // A Codex tab, a tab already on the new key: neither is restarted.
     running.claude.push({ sessionId: "s1", tabId: "t9", current: true });
-    fireEvent.click(within(toast("API key saved to the Keychain")).getByRole("button", { name: "Restart 2 tabs" }));
-    await waitFor(() => expect(screen.queryByRole("status", { name: "API key saved to the Keychain" })).toBeNull());
+    fireEvent.click(within(toast("API key saved to the secret store")).getByRole("button", { name: "Restart 2 tabs" }));
+    await waitFor(() => expect(screen.queryByRole("status", { name: "API key saved to the secret store" })).toBeNull());
     expect(calls("stop_tab")).toEqual([{ sessionId: "s1", tabId: "t1" }, { sessionId: "s2", tabId: "t2" }]);
     expect(startTabAgent.mock.calls.map((call) => (call as unknown as [SessionEntry, { id: string }])[1].id)).toEqual(["t1", "t2"]);
   });
@@ -230,9 +230,9 @@ describe("Agents · API key (PRO-306)", () => {
     fireEvent.click(await screen.findByRole("radio", { name: /API key/ }));
     fireEvent.change(screen.getByLabelText("Anthropic API key"), { target: { value: KEY } });
     fireEvent.keyDown(screen.getByLabelText("Anthropic API key"), { key: "Enter" });
-    await waitFor(() => expect(toast("API key saved to the Keychain").textContent).toContain("New Claude Code tabs use it."));
-    expect(toast("API key saved to the Keychain").textContent).not.toContain("running");
-    expect(within(toast("API key saved to the Keychain")).queryByRole("button", { name: /Restart/ })).toBeNull();
+    await waitFor(() => expect(toast("API key saved to the secret store").textContent).toContain("New Claude Code tabs use it."));
+    expect(toast("API key saved to the secret store").textContent).not.toContain("running");
+    expect(within(toast("API key saved to the secret store")).queryByRole("button", { name: /Restart/ })).toBeNull();
   });
 
   it.each([0, 1, 2])("removes the key with %i running tabs and goes back to the subscription login", async (count) => {
@@ -250,7 +250,7 @@ describe("Agents · API key (PRO-306)", () => {
     const title = "API key removed · Claude Code uses your Claude login again";
     await waitFor(() => expect(toast(title)).toBeTruthy());
     expect(calls("agent_login_remove_key")).toEqual([{ harness: "claude" }]);
-    expect(toast(title).textContent).toContain("Deleted from the Keychain. New tabs sign in with Claude Max (ada@example.com).");
+    expect(toast(title).textContent).toContain("Deleted from the secret store. New tabs sign in with Claude Max (ada@example.com).");
     if (count) {
       expect(toast(title).textContent).toContain(count === 1
         ? "1 running tab keeps its current login until you restart it."
@@ -278,7 +278,7 @@ describe("Agents · API key (PRO-306)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Remove" }));
     const title = "API key removed · Claude Code needs a sign-in";
     await waitFor(() => expect(toast(title)).toBeTruthy());
-    expect(toast(title).textContent).toContain("Deleted from the Keychain. Sign in to Claude Code below to start new tabs.");
+    expect(toast(title).textContent).toContain("Deleted from the secret store. Sign in to Claude Code below to start new tabs.");
     expect(toast(title).textContent).not.toContain("running");
     expect(within(toast(title)).queryByRole("button", { name: /Restart/ })).toBeNull();
     await waitFor(() => expect(statusLine().textContent).toBe("Sign in required"));
@@ -306,26 +306,26 @@ describe("Agents · API key (PRO-306)", () => {
     offers.codex = { variable: "OPENAI_API_KEY", file: "~/.zshrc" };
     show([codex]);
     const offer = await screen.findByText(/in your login shell/);
-    expect(offer.textContent).toBe("Found OPENAI_API_KEY in your login shell (~/.zshrc). Copy it to the Keychain so new tabs use it without that file?");
+    expect(offer.textContent).toBe("Found OPENAI_API_KEY in your login shell (~/.zshrc). Copy it to the secret store so new tabs use it without that file?");
     expect(calls("agent_login_import_shell")).toHaveLength(0);
-    fireEvent.click(screen.getByRole("button", { name: "Import to the Keychain" }));
+    fireEvent.click(screen.getByRole("button", { name: "Import to the secret store" }));
 
     const title = "Imported OPENAI_API_KEY from your shell environment";
     await waitFor(() => expect(toast(title)).toBeTruthy());
     expect(toast(title).textContent).toContain("Codex uses it in new tabs. Switch back to ChatGPT any time. 1 running tab keeps its current login until you restart it.");
     expect(screen.getByRole("radio", { name: /API key/, checked: true })).toBeTruthy();
     expect(screen.getByText("From your shell")).toBeTruthy();
-    expect(screen.getByText(/A copy is now in the Keychain/).textContent).toBe("Found in your login shell (~/.zshrc). A copy is now in the Keychain, so it works without that file.");
+    expect(screen.getByText(/A copy is now in the secret store/).textContent).toBe("Found in your login shell (~/.zshrc). A copy is now in the secret store, so it works without that file.");
     // PRO-377: no second Keychain note under an imported key.
-    expect(screen.queryByText(/^Kept in the Keychain/)).toBeNull();
-    expect(screen.queryByRole("button", { name: "Import to the Keychain" })).toBeNull();
+    expect(screen.queryByText(/^Kept in the secret store/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Import to the secret store" })).toBeNull();
     await waitFor(() => expect(screen.getByLabelText("Verified")).toBeTruthy());
   });
 
   it("does not ask again once the offer is declined", async () => {
     offers.claude = { variable: "ANTHROPIC_API_KEY" };
     show();
-    expect((await screen.findByText(/in your login shell/)).textContent).toBe("Found ANTHROPIC_API_KEY in your login shell. Copy it to the Keychain so new tabs use it without that file?");
+    expect((await screen.findByText(/in your login shell/)).textContent).toBe("Found ANTHROPIC_API_KEY in your login shell. Copy it to the secret store so new tabs use it without that file?");
     fireEvent.click(screen.getByRole("button", { name: "Don't import" }));
     await waitFor(() => expect(screen.queryByText(/in your login shell/)).toBeNull());
     expect(calls("agent_login_dismiss_shell")).toEqual([{ harness: "claude" }]);
@@ -411,7 +411,7 @@ describe("Agents · API key (PRO-306)", () => {
     expect((screen.getByLabelText("Anthropic API key") as HTMLInputElement).type).toBe("text");
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect((await screen.findByRole("alert")).textContent).toBe("Could not save the key to the Keychain. Nothing changed.");
-    expect(screen.queryByRole("status", { name: "API key saved to the Keychain" })).toBeNull();
+    expect(screen.queryByRole("status", { name: "API key saved to the secret store" })).toBeNull();
     expect(calls("agent_login_tabs")).toHaveLength(0);
   });
 });

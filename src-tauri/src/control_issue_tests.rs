@@ -1,8 +1,8 @@
 //! Exercise the same local owner path with and without the desktop feature.
+use std::io::{BufRead, BufReader, Write};
 use super::*;
 use std::io::Read;
 use std::net::TcpListener;
-use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 
 const CHILD: &str = "TERMINALX_TEST_ISSUE_START";
@@ -41,7 +41,7 @@ fn issue_start_child() {
     std::fs::create_dir_all(&bin).unwrap();
     // Availability only: the prompt is queued, and no real agent is invoked.
     std::fs::write(bin.join("claude"), "#!/bin/sh\nexit 0\n").unwrap();
-    std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::binpath::runnable_for_tests(bin.join("claude"));
     assert!(crate::binpath::set_priority_dir(&bin));
     let repo = super::tests::git_repo();
     let project = projects::add(repo.path().to_str().unwrap()).unwrap();
@@ -129,7 +129,7 @@ fn session_parent_child() {
     std::fs::create_dir_all(&bin).unwrap();
     // Availability only: the prompt is queued, and no real agent is invoked.
     std::fs::write(bin.join("claude"), "#!/bin/sh\nexit 0\n").unwrap();
-    std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::binpath::runnable_for_tests(bin.join("claude"));
     assert!(crate::binpath::set_priority_dir(&bin));
     let repo = super::tests::git_repo();
     let project = projects::add(repo.path().to_str().unwrap()).unwrap();
@@ -209,7 +209,7 @@ case "$3:$6" in
   *) exit 99 ;;
 esac
 "#).unwrap();
-    std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::binpath::runnable_for_tests(bin.join("gh"));
     assert!(crate::binpath::set_priority_dir(&bin));
     let repo = super::tests::git_repo();
     let project = projects::add(repo.path().to_str().unwrap()).unwrap();
@@ -324,7 +324,7 @@ fn worker_limit_child() {
     std::fs::create_dir_all(&bin).unwrap();
     // An agent that waits for its prompt and never ends a turn.
     std::fs::write(bin.join("claude"), "#!/bin/sh\ncase \"$*\" in *--settings*) stty -icanon; exec cat ;; esac\nexit 0\n").unwrap();
-    std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::binpath::runnable_for_tests(bin.join("claude"));
     assert!(crate::binpath::set_priority_dir(&bin));
     let repo = super::tests::git_repo();
     let project = projects::add(repo.path().to_str().unwrap()).unwrap();
@@ -405,7 +405,7 @@ fn orchestrate_start_child() {
     std::fs::create_dir_all(&bin).unwrap();
     // Never started: no session here sends a prompt. It only has to be there to be offered.
     std::fs::write(bin.join("claude"), "#!/bin/sh\nexit 0\n").unwrap();
-    std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::binpath::runnable_for_tests(bin.join("claude"));
     assert!(crate::binpath::set_priority_dir(&bin));
     let repo = super::tests::git_repo();
     let project = projects::add(repo.path().to_str().unwrap()).unwrap();
@@ -457,7 +457,7 @@ fn orchestration_run_child() {
     let launches = crate::store::root().unwrap().join("launches");
     std::fs::create_dir_all(&launches).unwrap();
     std::fs::write(bin.join("claude"), format!("#!/bin/sh\ncase \"$*\" in *--settings*) printf '%s' \"$*\" > \"{0}/.$$\" && mv \"{0}/.$$\" \"{0}/launch.$$\"; stty -icanon; exec cat ;; esac\nexit 0\n", launches.display())).unwrap();
-    std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::binpath::runnable_for_tests(bin.join("claude"));
     assert!(crate::binpath::set_priority_dir(&bin));
     let repo = super::tests::git_repo();
     let project = projects::add(repo.path().to_str().unwrap()).unwrap();
@@ -550,7 +550,13 @@ fn orchestration_run_child() {
     // own launch carries none.
     let until = Instant::now() + Duration::from_secs(20);
     let (launch, leads) = loop {
-        let started: Vec<String> = std::fs::read_dir(&launches).unwrap().filter_map(|entry| entry.ok()).filter(|entry| entry.file_name().to_string_lossy().starts_with("launch.")).filter_map(|entry| std::fs::read_to_string(entry.path()).ok()).collect();
+        let started: Vec<String> = std::fs::read_dir(&launches).unwrap().filter_map(|entry| entry.ok()).filter(|entry| entry.file_name().to_string_lossy().starts_with("launch.")).filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            // A `.cmd` launcher on Windows is given its settings in a file: read as if they were inline.
+            .map(|launch| match launch.split_once("--settings ") {
+                Some((before, file)) if std::path::Path::new(file.trim()).is_file() => format!("{before}--settings {}", std::fs::read_to_string(file.trim()).unwrap()),
+                _ => launch,
+            })
+            .collect();
         let (limited, free): (Vec<&String>, Vec<&String>) = started.iter().partition(|launch| launch.contains("Bash(git push:*)"));
         if let (Some(worker), Some(lead)) = (limited.first(), free.first()) {
             assert_eq!((limited.len(), free.len()), (1, 1), "one worker and one lead were launched");

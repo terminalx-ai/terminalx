@@ -46,13 +46,13 @@ describe("a machine's agents (PRO-350, 21.10)", () => {
 
   it("offers Sign in again for a sign-in the CLI could not tell", () => {
     const [row] = machineAgentRows({ agents: [agent({ version: "2.4.1", signIn: "unknown" })], missing: [] });
-    expect(agentRowLine(row, "this Mac’s")).toBe("2.4.1 · its sign-in could not be checked");
+    expect(agentRowLine(row, "this computer’s")).toBe("2.4.1 · its sign-in could not be checked");
     expect(agentRowAction(row, true)).toBe("login");
   });
 
   it("names whose sign-in sessions use", () => {
     expect(signInOwner({ hasWindow: false, os: { family: "linux" } })).toBe("this server’s");
-    expect(signInOwner({ os: { family: "macos" } })).toBe("this Mac’s");
+    expect(signInOwner({ os: { family: "macos" } })).toBe("this computer’s");
     expect(signInOwner({ hasWindow: true, os: { family: "linux" } })).toBe("this machine’s");
   });
 });

@@ -1,4 +1,6 @@
+import { revealInFileManager } from "@/lib/platform";
 import { useEffect, useRef, useState } from "react";
+import { joinKeycaps } from "@/lib/shortcuts";
 import { Code, Copy, Download, EllipsisVertical, Eye, FolderOpen, Save } from "@/icons";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
@@ -60,7 +62,7 @@ export function ViewOptionsMenu({ copyKeys, onCopy, onDownload, onReveal, disabl
           <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={onReveal} className="h-8 gap-2.5 px-2.5 text-[12.5px] [&_svg]:size-3.5">
             <FolderOpen />
-            Reveal in Finder
+            {revealInFileManager}
           </DropdownMenuItem>
         </>}
       </DropdownMenuContent>
@@ -132,7 +134,7 @@ export function EditorToolbar({ path, relativePath, change = null, markdown, vie
             />
           )}
           {/* The menu has both; the toolbar's own buttons give way first when it narrows. */}
-          <Button variant="ghost" size="icon-xs" aria-label="Copy file contents" title={`Copy file contents ${copyKeys.join("")}`.trim()} className="hidden @min-[400px]/editor-toolbar:inline-flex" disabled={contentsDisabled} onClick={onCopy}>
+          <Button variant="ghost" size="icon-xs" aria-label="Copy file contents" title={`Copy file contents ${joinKeycaps(copyKeys)}`.trim()} className="hidden @min-[400px]/editor-toolbar:inline-flex" disabled={contentsDisabled} onClick={onCopy}>
             <Copy />
           </Button>
           <Button variant="ghost" size="icon-xs" aria-label="Download" title="Download" className="hidden @min-[400px]/editor-toolbar:inline-flex" disabled={contentsDisabled} onClick={onDownload}>
@@ -140,14 +142,14 @@ export function EditorToolbar({ path, relativePath, change = null, markdown, vie
           </Button>
           <ViewOptionsMenu copyKeys={copyKeys} onCopy={onCopy} onDownload={onDownload} onReveal={!cloud && narrow ? reveal : undefined} disabled={contentsDisabled} />
           {!cloud && (
-            <Button variant="ghost" size="icon-xs" aria-label="Reveal in Finder" title="Reveal in Finder" className="hidden @min-[220px]/editor-toolbar:inline-flex" onClick={reveal}>
+            <Button variant="ghost" size="icon-xs" aria-label={revealInFileManager} title={revealInFileManager} className="hidden @min-[220px]/editor-toolbar:inline-flex" onClick={reveal}>
               <FolderOpen />
             </Button>
           )}
-          <Button variant="ghost" size="xs" onClick={onSave} disabled={saveDisabled} aria-label="Save" title={`Save ${saveKeys.join("")}`}>
+          <Button variant="ghost" size="xs" onClick={onSave} disabled={saveDisabled} aria-label="Save" title={`Save ${joinKeycaps(saveKeys)}`}>
             <Save className="size-3.5" />
             <span className="hidden @min-[440px]/editor-toolbar:inline">Save</span>
-            <kbd className="ml-1 hidden text-[10px] text-faint @min-[520px]/editor-toolbar:inline">{saveKeys.join("")}</kbd>
+            <kbd className="ml-1 hidden text-[10px] text-faint @min-[520px]/editor-toolbar:inline">{joinKeycaps(saveKeys)}</kbd>
           </Button>
         </span>
       </div>

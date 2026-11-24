@@ -221,7 +221,7 @@ it("Settings files lists each layer with its chips and an error naming file, lin
   await waitFor(() => expect(section.querySelectorAll("li")).toHaveLength(5));
   const items = [...section.querySelectorAll<HTMLElement>("li[data-settings-file]")];
   expect(items.map((item) => item.dataset.settingsFile)).toEqual(["managed", "repositoryLocal", "repositoryShared", "user", "defaults"]);
-  expect(within(items[0]).getByText("none on this Mac")).toBeTruthy();
+  expect(within(items[0]).getByText("none on this computer")).toBeTruthy();
   expect(within(items[1]).getByText("Project · local")).toBeTruthy();
   expect(within(items[1]).getByText("ignored by Git")).toBeTruthy();
   expect(within(items[2]).getByText("committed")).toBeTruthy();

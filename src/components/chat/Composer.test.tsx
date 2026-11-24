@@ -1063,6 +1063,58 @@ describe("composer history (PRO-85)", () => {
     } finally { act(() => setPrefs({ promptSnippets: [] })); }
   });
 
+  it("asks for a snippet's {{variables}} and inserts the filled text", async () => {
+    act(() => setPrefs({ promptSnippets: [{ id: "a", name: "review-pr", text: "Review {{pr}} for {{team}}." }] }));
+    try {
+      const list = { commands: [], note: null };
+      function CloudComposer() {
+        const [draft, setDraft] = useState("");
+        return <Composer tab={tab} commands={{ key: "cloud|snippet-vars", known: () => null, load: async () => list }} busy={false} draft={draft} onDraftChange={setDraft} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+      }
+      render(<CloudComposer />);
+      const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+      fireEvent.change(box, { target: { value: "/rev", selectionStart: 4 } });
+      fireEvent.mouseDown(await screen.findByRole("option", { name: /review-pr/ }));
+      fireEvent.change(await screen.findByLabelText("pr"), { target: { value: "#7" } });
+      fireEvent.change(screen.getByLabelText("team"), { target: { value: "web" } });
+      fireEvent.click(screen.getByRole("button", { name: "Insert" }));
+      await waitFor(() => expect(box.value).toBe("Review #7 for web."));
+      expect(screen.queryByText("Fill in the snippet")).toBeNull();
+    } finally { act(() => setPrefs({ promptSnippets: [] })); }
+  });
+
+  it("opens the AI Editor from its shortcut, applies the result and undoes it", async () => {
+    const aiEditor = { run: vi.fn(async () => "Fix the prompt"), cancel: vi.fn() };
+    function EditorComposer() {
+      const [draft, setDraft] = useState("fix teh prompt");
+      return <Composer tab={tab} aiEditor={aiEditor} busy={false} draft={draft} onDraftChange={setDraft} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    }
+    render(<EditorComposer />);
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    act(() => sendShortcut("composer.aiEditor", box));
+    fireEvent.click(await screen.findByTestId("ai-editor-run"));
+    fireEvent.click(await screen.findByTestId("ai-editor-apply"));
+    await waitFor(() => expect(box.value).toBe("Fix the prompt"));
+    fireEvent.click(within(screen.getByTestId("ai-editor-applied")).getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(box.value).toBe("fix teh prompt"));
+  });
+
+  it("searches the chat's earlier messages from its shortcut and puts the picked one in the draft", async () => {
+    const history = ["fix the login bug", "add tests"];
+    function SearchComposer() {
+      const [draft, setDraft] = useState("");
+      return <Composer tab={tab} history={history} busy={false} draft={draft} onDraftChange={setDraft} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    }
+    render(<SearchComposer />);
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    act(() => sendShortcut("composer.historySearch", box));
+    const search = await screen.findByRole("combobox", { name: "Search messages" });
+    fireEvent.change(search, { target: { value: "login" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() => expect(box.value).toBe("fix the login bug"));
+    expect(screen.queryByRole("combobox", { name: "Search messages" })).toBeNull();
+  });
+
   it("lists a cloud tab's commands from its source instead of the local CLI, and says why some are missing", async () => {
     const list = { commands: [{ name: "compact", description: "Shorten", source: "builtin" as const }], note: "Other commands need someone who can approve permissions." };
     const load = vi.fn(async () => list);
@@ -1772,7 +1824,7 @@ describe("the composer's model picker (PRO-397)", () => {
     show({ files: { key: "repo", search: async () => [] }, contextUsed: 31_000, contextMax: 100_000 });
     const toolbar = document.querySelector("[data-composer-toolbar]")!;
     const order = [...toolbar.querySelectorAll("button")].map((button) => button.getAttribute("data-testid") ?? button.getAttribute("aria-label"));
-    expect(order).toEqual(["model-picker", "permission-mode", "Context 31% used", "Mention a file", "Attach files", "Dictate", "Send"]);
+    expect(order).toEqual(["model-picker", "permission-mode", "Context 31% used", "Mention a file", "Attach files", "ai-editor", "Dictate", "Send"]);
     expect(screen.getByTestId("model-picker").textContent).toBe("Opus 5.5high");
     expect(screen.getByTestId("permission-mode-label").textContent).toBe("Auto");
     expect(screen.getByTestId("context-percent").textContent).toBe("31%");

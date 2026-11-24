@@ -1,4 +1,5 @@
 import { CircleDot, EyeOff, GitPullRequest, Unplug } from "@/icons";
+import { thisComputer } from "@/lib/platform";
 import { message } from "@tauri-apps/plugin-dialog";
 import { ContextMenuCheckboxItem, ContextMenuItem, DropdownMenuCheckboxItem, DropdownMenuItem } from "@/components/ui/menu";
 import { errorMessage } from "@/lib/api";
@@ -32,7 +33,7 @@ function canLinkPr(session: SessionEntry): boolean {
   return isLocalKey(session.id) && !!session.cwd && !!session.branch && !session.worktreeRemoved;
 }
 
-const SHARE_HINT = "Its work status never leaves this Mac: your other machines and your team do not see it.";
+const SHARE_HINT = `Its work status never leaves ${thisComputer}: your other machines and your team do not see it.`;
 
 /**
  * A session's issue link and what it shares (#441): "Link to issue…" or

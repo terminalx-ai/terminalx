@@ -1,4 +1,5 @@
 import { WorkspaceRpcError, type RuntimeWorkspaceRemoved, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { thisComputer } from "@/lib/platform";
 import { allMachineSessions, forgetMachineSessions } from "@/lib/machineCatalog";
 import { getSessionStore, openWelcome } from "@/lib/sessions";
 import { turnLive, type WorkspaceHost } from "@/lib/workspaceRemoval";
@@ -16,10 +17,10 @@ export function machineWorkspaceHost(input: { machineId: string; name: string; s
   const { machineId, name, sessionId, client } = input;
   return {
     key: `machine:${machineId}|${sessionId}`,
-    keepConversationsUnavailable: `Removing a worktree on ${name} from this Mac cannot keep its conversations. Cancel to leave it on ${name} as it is.`,
+    keepConversationsUnavailable: `Removing a worktree on ${name} from ${thisComputer} cannot keep its conversations. Cancel to leave it on ${name} as it is.`,
     disposition: (options) => client.workspaceDisposition<WorkspaceDisposition>(sessionId, options),
     remove: async (options): Promise<BranchOutcome> => {
-      if (options.keepSessions) throw new Error(`Removing a worktree on ${name} from this Mac cannot keep its conversations.`);
+      if (options.keepSessions) throw new Error(`Removing a worktree on ${name} from ${thisComputer} cannot keep its conversations.`);
       const removed = await client
         .removeSessionWorkspace(sessionId, {
           deleteBranch: options.deleteBranch,

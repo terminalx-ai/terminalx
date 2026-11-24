@@ -346,6 +346,6 @@ fn start_pending(manager: &SessionManager, session: &str) {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "workspace_setup_tests.rs"]
 mod tests;

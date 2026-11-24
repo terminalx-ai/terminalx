@@ -1,6 +1,8 @@
 //! Pinned turn trees and narrowly scoped restores. No shell interpolation or pathspec expansion.
 use super::*;
 use std::collections::BTreeSet;
+#[path = "checkpoint_bytes.rs"]
+pub(crate) mod bytes;
 #[path = "checkpoint_retention.rs"]
 mod retention;
 #[cfg(test)]
@@ -31,6 +33,32 @@ pub fn pin_many(cwd: &Path, session: &str, turn: &str, snapshots: &[(&str, &str)
         })
         .collect::<Result<Vec<_>>>()?;
     retention::pin(cwd, &updates)
+}
+
+/// Pin snapshots with their kept bytes, as `<edge>-bytes`, and plain trees
+/// (the staging) as they are. An edge pinned again without bytes loses the old ones.
+pub fn pin_exact(cwd: &Path, session: &str, turn: &str, snapshots: &[(&str, &bytes::Snapshot)], trees: &[(&str, &str)]) -> Result<()> {
+    let edges: Vec<String> = snapshots.iter().map(|(edge, _)| format!("{edge}-bytes")).collect();
+    let mut updates: Vec<(&str, &str)> = trees.to_vec();
+    for ((edge, snapshot), kept_edge) in snapshots.iter().zip(&edges) {
+        updates.push((edge, snapshot.tree.as_str()));
+        match snapshot.kept_bytes() {
+            Some(kept) => updates.push((kept_edge, kept)),
+            None => {
+                let stale = reference(session, turn, kept_edge)?;
+                if run_ok(cwd, &["show-ref", "--verify", "--quiet", &stale]) {
+                    run(cwd, &["update-ref", "-d", &stale])?;
+                }
+            }
+        }
+    }
+    pin_many(cwd, session, turn, &updates)
+}
+
+/// The kept bytes pinned for `edge`, to read a snapshot back from its refs.
+pub fn pinned_kept(cwd: &Path, session: &str, turn: &str, edge: &str) -> Option<String> {
+    let name = reference(session, turn, &format!("{edge}-bytes")).ok()?;
+    run(cwd, &["rev-parse", "--verify", "--quiet", &name]).ok().map(|id| id.trim().to_string())
 }
 
 pub fn exists(cwd: &Path, session: &str, turn: &str, edge: &str) -> Result<bool> {
@@ -64,6 +92,13 @@ pub fn paths(cwd: &Path, base: &str, head: &str) -> Result<Vec<String>> {
         .collect())
 }
 
+/// The files that differ between two snapshots, line endings included.
+pub fn exact_paths(cwd: &Path, a: &bytes::Snapshot, b: &bytes::Snapshot) -> Result<Vec<String>> {
+    let mut all: BTreeSet<String> = paths(cwd, &a.tree, &b.tree)?.into_iter().collect();
+    all.extend(bytes::changed_paths(cwd, a, b)?);
+    Ok(all.into_iter().collect())
+}
+
 fn safe_path(cwd: &Path, path: &str) -> Result<()> {
     let relative = Path::new(path);
     if path.is_empty()
@@ -90,7 +125,7 @@ fn safe_path(cwd: &Path, path: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn current(cwd: &Path, paths: &[String]) -> Result<String> {
+pub fn current(cwd: &Path, paths: &[String]) -> Result<bytes::Snapshot> {
     for path in paths {
         safe_path(cwd, path)?;
     }
@@ -98,15 +133,15 @@ pub fn current(cwd: &Path, paths: &[String]) -> Result<String> {
 }
 
 /// Roll back a failed restore when possible. Callers pin the backup trees before writing.
-pub fn restore_with_backup(cwd: &Path, tree: &str, index: &str, paths: &[String], before: &str, before_index: &str) -> Result<()> {
+pub fn restore_with_backup(cwd: &Path, target: &bytes::Snapshot, index: &str, paths: &[String], before: &bytes::Snapshot, before_index: &str) -> Result<()> {
     // Refuse invalid paths/source entries before starting (and before attempting rollback).
     for path in paths {
         safe_path(cwd, path)?;
-        contains(cwd, tree, path)?;
+        contains(cwd, &target.tree, path)?;
         contains(cwd, index, path)?;
     }
-    if let Err(error) = restore(cwd, tree, index, paths) {
-        return match restore(cwd, before, before_index, paths) {
+    if let Err(error) = restore_exact(cwd, target, index, paths) {
+        return match restore_exact(cwd, before, before_index, paths) {
             Ok(()) => Err(error.context("Restore failed; the previous files and staging were restored")),
             Err(rollback) => Err(error.context(format!(
                 "Restore failed and rollback failed ({rollback:#}); the previous files are retained in the backup checkpoint"
@@ -133,7 +168,14 @@ fn contains(cwd: &Path, tree: &str, path: &str) -> Result<bool> {
 /// Restore only the named files, including binary blobs, modes, links and deletions.
 /// The index is restored separately, preserving the staging state from before the turn.
 /// Validate every path before the first write; never recurse into a directory or follow a link.
+#[cfg(test)]
 pub fn restore(cwd: &Path, tree: &str, index_tree: &str, paths: &[String]) -> Result<()> {
+    restore_exact(cwd, &bytes::Snapshot::new(tree, None), index_tree, paths)
+}
+
+/// [`restore`] of a snapshot, each file with its exact bytes.
+pub fn restore_exact(cwd: &Path, snapshot: &bytes::Snapshot, index_tree: &str, paths: &[String]) -> Result<()> {
+    let tree = snapshot.tree.as_str();
     for tree in [tree, index_tree] {
         if !is_tree_id(tree) {
             bail!("Invalid restore tree");
@@ -150,6 +192,7 @@ pub fn restore(cwd: &Path, tree: &str, index_tree: &str, paths: &[String]) -> Re
     for (path, in_tree, in_index) in entries {
         if in_tree {
             run(cwd, &["--literal-pathspecs", "restore", &format!("--source={tree}"), "--worktree", "--", path])?;
+            bytes::put_back(cwd, snapshot, path)?;
         } else {
             match std::fs::remove_file(cwd.join(path)) {
                 Ok(()) => {}

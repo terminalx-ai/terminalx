@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
+import { ThisComputer, thisComputer } from "@/lib/platform";
 import { Check, ChevronDown, Cloud, Folder, GitBranch, Laptop, Plus } from "@/icons";
 import { WorkspaceRpcError, type MachineProject, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { RemoteGit, type RemoteBranch } from "@terminalx/portable/workspaceGit";
@@ -219,7 +220,7 @@ export function WhereMenu({
 }) {
   const menu = useRowMenu();
   const { machines } = useMachineConnections();
-  const label = current.kind === "local" ? "This Mac" : current.kind === "machine" ? current.name : `${current.orgName} cloud`;
+  const label = current.kind === "local" ? ThisComputer : current.kind === "machine" ? current.name : `${current.orgName} cloud`;
   const icon = current.kind === "local" ? <Laptop className="size-[13px]" /> : current.kind === "machine" ? <MachineIcon machine={current.machine} className="size-[13px]" /> : <Cloud className="size-[13px] text-info" />;
   return (
     <DropdownMenu {...menu.root}>
@@ -242,7 +243,7 @@ export function WhereMenu({
         <WhereItem
           testId="where-this-mac"
           icon={<Laptop />}
-          name="This Mac"
+          name={ThisComputer}
           detail={
             localProject ? (
               <>
@@ -250,7 +251,7 @@ export function WhereMenu({
                 <span className="font-mono text-xs">{homePath(localProject.path)}</span>
               </>
             ) : (
-              "Your projects on this Mac"
+              `Your projects on ${thisComputer}`
             )
           }
           chosen={current.kind === "local"}
@@ -401,7 +402,7 @@ export function MachineFormLine({ draft, agentId, agentName }: { draft: MachineD
     <>
     {draft.missingProject && <MachineMessage kind="projectMissing" name={draft.name} project={draft.missingProject} className="mt-2" />}
     <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-xs text-faint" data-testid="machine-form-line">
-      <span>Runs on {draft.name}; this Mac can sleep</span>
+      <span>Runs on {draft.name}; {thisComputer} can sleep</span>
       <span className="ml-auto flex items-center gap-x-4">
         {agentName && signIn === "signedIn" && (
           <span className="flex items-center gap-1" data-testid="machine-agent-signed-in">

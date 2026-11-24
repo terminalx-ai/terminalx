@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { thisComputer } from "@/lib/platform";
 import { save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
@@ -65,7 +66,7 @@ export function StartupDiagnostics() {
       <DialogContent width="max-w-[48rem]">
         <DialogHeader>
           <DialogTitle>Local startup diagnostics</DialogTitle>
-          <DialogDescription>Inspect child startup on this Mac and preview a local report. This is separate from cloud diagnostics.</DialogDescription>
+          <DialogDescription>Inspect child startup on {thisComputer} and preview a local report. This is separate from cloud diagnostics.</DialogDescription>
         </DialogHeader>
         <div className="space-y-4 text-sm">
           {error && <p role="alert" className="text-destructive">{error}</p>}

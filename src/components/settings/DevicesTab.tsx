@@ -1,4 +1,5 @@
 import { Loader2, Smartphone } from "@/icons";
+import { thisComputer } from "@/lib/platform";
 import { Button } from "@/components/ui/button";
 import { PairedDeviceList } from "@/components/pairing/PairedDevices";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
@@ -26,7 +27,7 @@ function DevicesTabContent() {
       <RegisteredSetting setting="devices.pairing"><section>
         <div className="text-sm font-medium">Pair a phone</div>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-          Scan a one-time code with TerminalX on your phone, then approve it here after comparing the fingerprint. The code is made on this Mac and never uploaded.
+          Scan a one-time code with TerminalX on your phone, then approve it here after comparing the fingerprint. The code is made on {thisComputer} and never uploaded.
         </p>
         <Button className="mt-3" size="sm" variant="secondary" onClick={() => openPairPhone()}>
           <Smartphone /> Pair a phone…

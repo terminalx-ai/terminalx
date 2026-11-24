@@ -456,7 +456,7 @@ impl<'a> Store<'a> {
         ensure!(agent == Agent::Codex, "Only Codex takes a custom provider.");
         let base_url = base_url.map(str::trim).filter(|url| !url.is_empty());
         if let Some(url) = base_url {
-            ensure!(crate::agent_route_check::valid_base_url(url), "Use an https:// address (or http:// to this Mac), with no user name, query or fragment.");
+            ensure!(crate::agent_route_check::valid_base_url(url), "{}", crate::platform_profile::localize("Use an https:// address (or http:// to this Mac), with no user name, query or fragment."));
         }
         self.update(agent, |entry| {
             entry.base_url = base_url.map(|url| url.trim_end_matches('/').to_string());
@@ -1240,7 +1240,7 @@ pub fn running(harness: &str) -> Vec<RunningTab> {
 
 /// Save `key` for `harness` as the desktop does, into `secrets`, and give
 /// this process's runtime memory the current keys, as its desktop would.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) fn save_for_test(harness: &str, key: &str, secrets: &crate::keychain::testing::MemorySecrets) {
     let store = Store { root: crate::store::root().unwrap(), secrets };
     store.save_key(Agent::of(harness).unwrap(), key, None).unwrap();

@@ -1,4 +1,5 @@
 import { RegisteredSetting } from "./settingsRegistry";
+import { thisComputer } from "@/lib/platform";
 import { useState } from "react";
 import { Lock, MinusCircle } from "@/icons";
 import { Switch } from "@/components/ui/controls";
@@ -15,7 +16,7 @@ const TURNED_OFF: readonly { label: string; detail: string }[] = [
   { label: "Organisations", detail: "their pages, members and the work status teammates see" },
   { label: "Remote control and pairing", detail: "phones and other Macs that control this one" },
   { label: "MCP servers from organisation config", detail: "servers an organisation adds to your agents" },
-  { label: "External logging", detail: "error reports sent from this Mac" },
+  { label: "External logging", detail: `error reports sent from ${thisComputer}` },
 ];
 
 /**

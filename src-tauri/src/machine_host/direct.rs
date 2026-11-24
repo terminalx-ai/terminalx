@@ -80,6 +80,9 @@ fn bind(address: SocketAddr) -> std::io::Result<TcpListener> {
     // (TIME_WAIT is 60 s there). macOS lets it share the port, so not there.
     #[cfg(target_os = "linux")]
     socket.set_reuseaddr(true)?;
+    // Windows lets a wildcard listener coexist with one on a single address.
+    #[cfg(windows)]
+    crate::win::net::bind_exclusively(&socket)?;
     socket.bind(address)?;
     socket.listen(1024)
 }
@@ -93,11 +96,11 @@ pub(crate) fn listen_everywhere(host: Arc<MachineHost>, rpc: Arc<WorkspaceRpc>, 
 /// Listen on `address`: one of the addresses the listen setting binds.
 pub(crate) fn listen(host: Arc<MachineHost>, rpc: Arc<WorkspaceRpc>, address: SocketAddr) -> Result<Listening> {
     let port = address.port();
-    let listener = bind(address).map_err(|error| match error.kind() {
+    let listener = bind(address).map_err(|error| match crate::listen::port_taken(&error) {
         // Kept as the cause, so the host can tell a port still in use (which
         // frees up) from a failure that does not.
-        std::io::ErrorKind::AddrInUse => anyhow!(error).context(format!("port {port} is in use; another program, or the window, still holds it")),
-        _ => anyhow!(error).context(format!("listen on {address}")),
+        true => anyhow!(error).context(format!("port {port} is in use; another program, or the window, still holds it")),
+        false => anyhow!(error).context(format!("listen on {address}")),
     })?;
     let address = listener.local_addr()?;
     let accept = tokio::spawn(async move {
@@ -362,7 +365,7 @@ pub(crate) fn computer_label(label: Option<&str>) -> String {
 }
 
 pub(crate) fn computer_platform(platform: Option<&str>) -> Option<String> {
-    platform.filter(|platform| matches!(*platform, "macos" | "linux")).map(str::to_string)
+    platform.filter(|platform| matches!(*platform, "macos" | "linux" | "windows")).map(str::to_string)
 }
 
 /// The pairing fingerprint both screens show (decision 5).

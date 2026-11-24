@@ -7,7 +7,6 @@
 //! into a CLI that never submitted it, a reboot, and "continue" sent to a tab
 //! that then resumed nothing. Tests wait for what they expect to appear,
 //! never for an amount of time to pass.
-#[cfg(unix)]
 use std::time::Duration;
 
 use serde_json::json;
@@ -17,28 +16,22 @@ use super::*;
 const SESSION: &str = "unstarted";
 const TAB: &str = "handoff";
 const CONVERSATION: &str = "12cfb036-cbbc-41df-8868-fb0979d00bca";
-#[cfg(unix)]
 const HANDOFF: &str = "Continue work from the prior TerminalX conversation using the context below. The original provider session is read-only.";
 
 /// The stand-in once it has noted its arguments: up, and reading what it is
 /// given as it comes, as a TUI does, while its terminal echoes it.
 const LISTENS: &str = "printf 'listening\\n'\nstty -icanon\nexec cat\n";
 /// Or up until it is given a line, and then gone, as when the reader quits it.
-#[cfg(unix)]
 const QUITS: &str = "printf 'listening\\n'\nread line\n";
 /// Or gone at once, saying why.
-#[cfg(unix)]
 const REFUSES: &str = "printf 'No conversation found with session ID: 12cfb036\\n' >&2\nexit 1\n";
 /// Or gone at once with a credential and a home folder in what it said, as a
 /// failing `apiKeyHelper` prints them.
-#[cfg(unix)]
 const LEAKS: &str = "printf 'apiKeyHelper failed: ANTHROPIC_API_KEY=sk-ant-api03-Zx9Qw8Er7Ty6Ui5Op4As3Df2 in /Users/alice/.claude/key.sh\\n' >&2\nexit 1\n";
 
 /// No CLI here was started by hand, so none needs finding.
-#[cfg(unix)]
 struct Nowhere;
 
-#[cfg(unix)]
 impl follow::Locator for Nowhere {
     fn locate(&self, _agent: &crate::foreground::Agent) -> Option<follow::Located> {
         None
@@ -99,13 +92,11 @@ impl Rig {
     }
 
     /// What the tab's log held before the app was started again.
-    #[cfg(unix)]
     fn logged(&self, seq: u64, payload: Value) {
         let event = json!({ "id": format!("before-{seq}"), "sessionId": SESSION, "tabId": TAB, "harness": "claude", "seq": seq, "ts": index::now(), "payload": payload });
         store::append_line(&store::log_path(SESSION, TAB).unwrap(), &event.to_string()).unwrap();
     }
 
-    #[cfg(unix)]
     fn wait(&self, what: &str, done: impl Fn() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(60);
         while !done() {
@@ -115,19 +106,16 @@ impl Rig {
     }
 
     /// The arguments the stand-in was started with, one a line.
-    #[cfg(unix)]
     fn args(&self) -> Vec<String> {
         self.wait("the CLI to be started", || std::fs::read_to_string(&self.ran).is_ok_and(|ran| ran.ends_with('\n')));
         std::fs::read_to_string(&self.ran).unwrap().lines().map(String::from).collect()
     }
 
-    #[cfg(unix)]
     fn rt(&self) -> Arc<Mutex<TabRuntime>> {
         self.manager.runtime(SESSION, TAB).unwrap()
     }
 
     /// Claude Code's `SessionStart` hook, as the stand-in has none.
-    #[cfg(unix)]
     fn up(&self) {
         if let Engine::Cli(p) = &self.rt().lock().unwrap().engine {
             p.ready.mark();
@@ -135,19 +123,16 @@ impl Rig {
     }
 
     /// What was typed at the stand-in, as its terminal echoed it.
-    #[cfg(unix)]
     fn typed(&self) -> String {
         String::from_utf8_lossy(&self.manager.terminals.read_output(&SessionManager::pane_id(TAB)).unwrap_or_default()).into_owned()
     }
 
     /// Where Claude Code writes the conversation, in the test's own home.
-    #[cfg(unix)]
     fn transcript(&self) -> PathBuf {
         claude::transcript::transcript_in(&crate::agent_data::claude_projects_root().unwrap(), self.checkout.to_str().unwrap(), CONVERSATION)
     }
 
     /// Claude Code taking a prompt and answering it.
-    #[cfg(unix)]
     fn cli_takes(&self, prompt: &str, reply: &str) {
         let path = self.transcript();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -176,12 +161,10 @@ impl Rig {
     }
 }
 
-#[cfg(unix)]
 fn passed(args: &[String], flag: &str, value: &str) -> bool {
     args.windows(2).any(|pair| pair[0] == flag && pair[1] == value)
 }
 
-#[cfg(unix)]
 /// The common case: a tab opened, its CLI started, and nothing sent before
 /// the app went. The CLI never wrote the conversation, so there is nothing
 /// to resume, and nothing was lost.
@@ -197,7 +180,6 @@ fn a_conversation_its_cli_never_wrote_is_started_under_the_same_id_not_resumed()
     assert_eq!(tab.provider_session_id.as_deref(), Some(CONVERSATION));
 }
 
-#[cfg(unix)]
 #[test]
 fn a_conversation_its_cli_wrote_is_resumed() {
     let rig = Rig::new(claude_tab(None), LISTENS);
@@ -208,7 +190,6 @@ fn a_conversation_its_cli_wrote_is_resumed() {
     assert!(!args.iter().any(|arg| arg == "--session-id"), "{args:?}");
 }
 
-#[cfg(unix)]
 /// #663 as it happened: the handoff (seq 1) was written and never submitted,
 /// "yo" was queued behind it, and after a reboot "continue" relaunched a tab
 /// whose conversation Claude Code had never written.
@@ -249,7 +230,6 @@ fn a_handoff_the_cli_never_took_is_sent_again_ahead_of_the_prompt_that_relaunche
     assert!(matches!(&rig.rt().lock().unwrap().engine, Engine::Cli(p) if p.awaiting_delivery.is_none()), "the handoff was delivered");
 }
 
-#[cfg(unix)]
 #[test]
 fn a_prompt_the_cli_never_took_is_offered_again_and_goes_again_as_it_was_sent() {
     let rig = Rig::new(claude_tab(None), LISTENS);
@@ -286,7 +266,6 @@ fn nothing_is_resent_where_nothing_went_unanswered() {
     assert!(error.to_string().contains("no unanswered prompt"), "{error:#}");
 }
 
-#[cfg(unix)]
 /// A CLI gone before it ever got going says why, in both the desktop app,
 /// which follows terminals, and a workspace runtime, which does not.
 #[test]
@@ -302,7 +281,6 @@ fn a_cli_that_exits_as_it_starts_says_why() {
     }
 }
 
-#[cfg(unix)]
 /// Why it went reaches the chat, which is kept, forked and broadcast, only
 /// as the agent's own words always do (#667): no credential, no home folder.
 #[test]
@@ -318,7 +296,6 @@ fn what_a_cli_says_as_it_exits_is_redacted() {
     }
 }
 
-#[cfg(unix)]
 /// One the reader quit after it was up says only that it went: its last
 /// screen is not a reason.
 #[test]
@@ -370,8 +347,6 @@ fn a_prompt_that_never_got_going_does_not_hold_up_the_ones_after_it() {
     drop(writer.ticket().take());
 }
 
-// Its stand-in CLIs are POSIX shell scripts.
-#[cfg(unix)]
 #[path = "session_held_tests.rs"]
 mod held_queue;
 

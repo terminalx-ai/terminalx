@@ -119,6 +119,7 @@ fn status_lines(session: &str) -> Vec<String> {
 /// Done when (1): the lead hands a scoped check to a bot that reports to it, the answer comes back labelled as a
 /// bot's words, and the lead carries on in the chat it handed it from.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_lead_hands_a_scoped_check_to_its_report_and_carries_on_with_the_answer() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -201,6 +202,7 @@ fn a_lead_hands_a_scoped_check_to_its_report_and_carries_on_with_the_answer() {
 /// Tests the labels, and that a bot's message is never treated as an approval: a bot that writes "approved" to
 /// another changes nothing the owner decides, and nothing it sends is recorded, shown or sent as the owner's.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bots_message_is_never_an_approval_and_is_never_the_owners() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -256,6 +258,7 @@ fn a_bots_message_is_never_an_approval_and_is_never_the_owners() {
 /// down a chain past its depth; it sends at a bounded rate; a claim it cannot prove is no bot; another bot's records
 /// are not its to read; a paused bot sends nothing; and with Bots off nothing answers.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn hand_offs_keep_to_the_line_and_its_bounds() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -363,6 +366,7 @@ fn hand_offs_keep_to_the_line_and_its_bounds() {
 /// too. Stop on the card stops only that bot's work on the hand-off: its chat for it and what it started for the
 /// item, never its other chats or the sender's, and the sender is told by the owner.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn work_for_a_paused_bot_waits_and_stop_stops_only_that_bots_work() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -463,6 +467,7 @@ fn work_for_a_paused_bot_waits_and_stop_stops_only_that_bots_work() {
 
 /// PRO-498: a resume returns at once; the work that waited starts after it, on a thread of its own.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_resume_returns_before_the_work_that_waited_starts() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -490,6 +495,7 @@ fn a_resume_returns_before_the_work_that_waited_starts() {
 
 /// PRO-498: a burst of sends at once from one bot passes the rate limit exactly as far as it allows.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_burst_of_sends_at_once_stops_at_the_rate_limit() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -518,6 +524,7 @@ fn a_burst_of_sends_at_once_stops_at_the_rate_limit() {
 /// PRO-498: what the owner hands from the window is not two bots' back and forth: it does not count in the pair's
 /// limit.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn items_the_owner_hands_on_do_not_count_in_the_pair_limit() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -670,6 +677,7 @@ fn a_bots_message_is_published_with_the_bot_as_its_author() {
 /// with "Can hand off work"; nothing else. A report sends its lead messages and answers, never work. The rule is
 /// judged on the records under the store's lock.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn work_goes_down_the_line_or_where_who_can_ask_allows_it() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -702,6 +710,7 @@ fn work_goes_down_the_line_or_where_who_can_ask_allows_it() {
 /// Lead review 1: two bots handing each other work, answered each time so no open hand-off blocks it, stop at the
 /// pair's limit over its window, closed ones counted.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn back_and_forth_between_two_bots_is_bounded_over_time() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -723,6 +732,7 @@ fn back_and_forth_between_two_bots_is_bounded_over_time() {
 /// three times; then it is held, shown with Resend, and sent after one of its bot's chats starts
 /// (`chat::launched`) or when the owner resends it. Only work that cannot reach its bot fails.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_message_or_answer_that_cannot_be_sent_waits_and_is_sent_after_a_launch() {
     use std::sync::atomic::Ordering;
     let _home = crate::store::temp_home();
@@ -788,6 +798,7 @@ fn a_message_or_answer_that_cannot_be_sent_waits_and_is_sent_after_a_launch() {
 /// Lead review 1: a hand-off left waiting for a bot that is not paused is labelled so, and starts the next time
 /// one of its chats starts.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_hand_off_left_waiting_for_a_bot_that_is_not_paused_starts_at_its_next_launch() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -820,6 +831,7 @@ fn a_hand_off_left_waiting_for_a_bot_that_is_not_paused_starts_at_its_next_launc
 /// whose line (or Who can ask entry) the owner then removes, does not start on resume: no chat, no item, nothing
 /// sent to it; it fails naming the rule, and its sender is told.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_waiting_hand_off_does_not_start_on_a_line_the_owner_removed() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -880,6 +892,7 @@ fn a_waiting_hand_off_does_not_start_on_a_line_the_owner_removed() {
 /// open working ones. An answer makes room at once, and the chat made for it (never the home chat) is let go once
 /// its turn ends. A resume starts no more than the cap; the rest start as room is made.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bot_works_on_a_bounded_number_of_hand_offs_and_an_answer_makes_room() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -927,6 +940,7 @@ fn a_bot_works_on_a_bounded_number_of_hand_offs_and_an_answer_makes_room() {
 
 /// Lead review 2 (M2): two hand-offs sent at once to a bot with room for one: exactly one goes in.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn two_hand_offs_sent_at_once_into_the_last_room_one_goes_in() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -955,6 +969,7 @@ fn two_hand_offs_sent_at_once_into_the_last_room_one_goes_in() {
 /// Lead review 3 (N1): a start that delivers, where that delivery is a third failed try and gives a hand-off up,
 /// does not lock the start a second time on its own thread: the hand-off waiting for room starts.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_start_whose_delivery_gives_a_hand_off_up_starts_the_next_without_hanging() {
     use std::sync::atomic::Ordering;
     let _home = crate::store::temp_home();
@@ -1005,6 +1020,7 @@ fn a_start_whose_delivery_gives_a_hand_off_up_starts_the_next_without_hanging() 
 /// chat a hand-off is worked on in fails the hand-off and tells the bot that handed it, in the chat it handed it
 /// from; the bot whose chat went keeps its item.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn deleting_the_chat_a_hand_off_is_worked_on_in_fails_it_and_tells_its_sender() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -1042,6 +1058,7 @@ fn deleting_the_chat_a_hand_off_is_worked_on_in_fails_it_and_tells_its_sender() 
 /// PRO-521: an archived chat goes on working, and what is sent to a chat that was archived or deleted reaches its
 /// bot's home chat instead, which is brought back from the archive, or made again, when it is the one that went.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn what_is_sent_to_a_closed_chat_reaches_the_bots_home_chat() {
     let _home = crate::store::temp_home();
     let _switches = Switches;

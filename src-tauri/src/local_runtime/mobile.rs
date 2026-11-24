@@ -1115,8 +1115,8 @@ fn create_session(manager: &crate::session::SessionManager, params: &Value) -> R
     use crate::session_ops::{NewQuickChat, NewSession, NewTab};
     let p: Create = serde_json::from_value(params.clone()).context("Invalid new session request.")?;
     let agent = crate::harness::offered().into_iter().find(|harness| harness.id == p.agent)
-        .with_context(|| format!("{} is not an agent this Mac offers.", p.agent))?;
-    if !agent.available { bail!("{} is not installed on this Mac.", agent.name); }
+        .with_context(|| crate::platform_profile::localize(&format!("{} is not an agent this Mac offers.", p.agent)))?;
+    if !agent.available { bail!("{}", crate::platform_profile::localize(&format!("{} is not installed on this Mac.", agent.name))); }
     let mode = crate::store::index::requested_mode(p.mode);
     if let Some(mode) = mode.as_deref() {
         if !matches!(mode, "plan" | "manual" | "auto" | "acceptEdits" | "bypassPermissions") { bail!("Unknown permission mode {mode}."); }

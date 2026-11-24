@@ -1,4 +1,5 @@
 import { useMemo, useState, type ReactNode, type RefObject } from "react";
+import { thisComputer } from "@/lib/platform";
 import { Popover } from "radix-ui";
 import { Archive, ArrowDownWideNarrow, ArrowUpNarrowWide, CalendarClock, Check, ChevronDown, ListFilter, Plus, Search, SlidersHorizontal, UserRound, Users, X } from "@/icons";
 import {
@@ -8,7 +9,7 @@ import {
 import { initials } from "@/lib/cloudPeople";
 import { cn } from "@/lib/cn";
 import { relativeTime } from "@/lib/time";
-import { keycaps, useKeymap } from "@/lib/shortcuts";
+import { keycaps, useKeymap, joinKeycaps } from "@/lib/shortcuts";
 import { TABLE_COLUMNS, REQUIRED_COLUMN, type DashboardPreferences, type DashboardSort, type Inclusion, type TableColumn, type TableColumnId } from "@terminalx/portable/dashboard";
 
 /** Someone who owns a session on the overview, with how recently they worked. */
@@ -118,7 +119,7 @@ export function PeopleChip({ people, selected, onChange }: { people: OverviewPer
             ))}
             {!shown.length && <div className="px-2.5 py-2 text-[12px] text-faint">No one matches.</div>}
           </div>
-          <p className="mx-2.5 mb-1 mt-1.5 border-t border-hairline pt-2 text-[11.5px] leading-4 text-faint">Owner filter is saved on this Mac. Local sessions count as yours.</p>
+          <p className="mx-2.5 mb-1 mt-1.5 border-t border-hairline pt-2 text-[11.5px] leading-4 text-faint">Owner filter is saved on {thisComputer}. Local sessions count as yours.</p>
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
@@ -262,7 +263,7 @@ export function NewSessionButton({ onClick }: { onClick: () => void }) {
       className="inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-foreground px-3 text-[12.5px] font-medium text-background outline-none hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ring/50">
       <Plus aria-hidden className="size-3.5" />
       New session
-      {binding && <kbd aria-hidden className="ml-1 rounded border border-background/20 px-1 font-sans text-[11px] leading-4 text-background/70">{keycaps(binding).join("")}</kbd>}
+      {binding && <kbd aria-hidden className="ml-1 rounded border border-background/20 px-1 font-sans text-[11px] leading-4 text-background/70">{joinKeycaps(keycaps(binding))}</kbd>}
     </button>
   );
 }

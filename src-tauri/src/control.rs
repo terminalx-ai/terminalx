@@ -3302,6 +3302,7 @@ fn refuse_other_bots_items(manager: &SessionManager, params: &Value, window: Opt
 
 /// Whether a call reads bot `bot`'s own duties. The window and a person's
 /// terminal read any bot's; a process in a bot's session reads only its own.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn own_duties_read(command: &str, params: &Value, bot: Option<&str>) -> bool {
     // The week of duties (PRO-473) likewise, for its own bot only: never every bot's.
     command == "runtime.session.bots" && matches!(params["operation"].as_str(), Some("duties" | "dutyWeek")) && bot.is_some_and(|bot| params["params"]["id"].as_str() == Some(bot))
@@ -3382,6 +3383,7 @@ thread_local! {
 
 /// [`refuse_bot_runtime_call`] on a runtime whose window cannot prove itself.
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code))]
 fn refuse_bot_runtime_call_unkeyed(manager: &SessionManager, command: &str, params: &Value, window: Option<(i32, u64)>) -> Result<(), ControlError> {
     refuse_bot_runtime_call(manager, command, params, window, false)
 }
@@ -3529,6 +3531,7 @@ struct Caller {
     /// Where the kernel places the caller among the runtime's panes, whatever it works for.
     placed: Option<crate::session::Placed>,
     /// The process the kernel says sent the command; `None` in-process or off unix.
+    #[cfg_attr(not(unix), allow(dead_code))]
     peer: Option<i32>,
     /// That process had exited, or was a zombie, when it was looked at: it
     /// cannot be placed, so nothing it asks for that matters is done.
@@ -4474,6 +4477,7 @@ mod tests {
     /// PRO-468: a pause run from a bot's own chat is that bot's, and that
     /// chat cannot resume it, nor every bot at once. The owner still can.
     #[test]
+    #[cfg_attr(windows, ignore = "Bots are off on Windows")]
     fn a_bot_chat_pauses_as_the_bot_and_never_resumes_it() {
         let _home = crate::store::temp_home();
         let mut settings = crate::store::settings::load();
@@ -4640,6 +4644,7 @@ mod tests {
     /// again is left to any (PRO-489). Held from the runtime's dispatch, so a
     /// refusal comes before the pipeline or the issue is even looked up.
     #[test]
+    #[cfg_attr(windows, ignore = "Bots are off on Windows")]
     fn a_bot_acts_outward_with_the_owners_sign_in_only_with_full_access() {
         let _home = crate::store::temp_home();
         let mut settings = crate::store::settings::load();
@@ -4820,6 +4825,7 @@ mod tests {
     /// what it leaves is the other bot's to read, labelled with the sender;
     /// and it stays on the reporting line as `bots tell` does (PRO-475).
     #[test]
+    #[cfg_attr(windows, ignore = "Bots are off on Windows")]
     fn a_bot_leaves_another_bot_a_message_only_as_itself() {
         let _home = crate::store::temp_home();
         let mut settings = crate::store::settings::load();
@@ -4872,6 +4878,7 @@ mod tests {
     /// one of its own duties, by name or id, and never another bot's; anyone
     /// else names the bot. Switching on stays the window's.
     #[test]
+    #[cfg_attr(windows, ignore = "Bots are off on Windows")]
     fn a_bot_switches_off_its_own_duty_and_no_other_bots() {
         let _home = crate::store::temp_home();
         let mut settings = crate::store::settings::load();
@@ -4950,6 +4957,7 @@ mod tests {
     /// session the bot started is the bot too. Every write is recorded as the
     /// bot's, from the session it runs in. The owner names the bot.
     #[test]
+    #[cfg_attr(windows, ignore = "Bots are off on Windows")]
     fn a_bot_writes_only_its_own_memory_from_a_session_it_proves() {
         let _home = crate::store::temp_home();
         let mut settings = crate::store::settings::load();
@@ -5063,6 +5071,7 @@ mod tests {
     /// cleans up after the bot, whose record is gone: its chats go to the
     /// archive, and the failure is said.
     #[test]
+    #[cfg_attr(windows, ignore = "Bots are off on Windows")]
     fn a_delete_whose_history_cannot_move_still_cleans_up_after_the_bot() {
         let _home = crate::store::temp_home();
         let mut settings = crate::store::settings::load();
@@ -5087,6 +5096,7 @@ mod tests {
     /// call removed: never for an id that was never a bot or was deleted
     /// before, and never with Bots off.
     #[test]
+    #[cfg_attr(windows, ignore = "Bots are off on Windows")]
     fn the_delete_clean_up_runs_only_for_a_bot_the_delete_removed() {
         let _home = crate::store::temp_home();
         let mut settings = crate::store::settings::load();
@@ -6115,6 +6125,7 @@ mod tests {
     /// A session a bot's chat starts through the CLI works for the bot: it
     /// records the chat as its parent, and starts within the bot's access.
     #[test]
+    #[cfg_attr(windows, ignore = "Bots are off on Windows")]
     fn what_a_bot_starts_works_for_it_under_its_access() {
         let _home = crate::store::temp_home();
         let mut settings = crate::store::settings::load();
@@ -6152,6 +6163,7 @@ mod tests {
     /// Where no window can confirm a resume (no TerminalX on a Mac), the CLI
     /// says so and asks for none: it never says it is waiting (PRO-468).
     #[test]
+    #[cfg_attr(windows, ignore = "Bots are off on Windows")]
     fn a_resume_no_window_can_confirm_is_refused_and_not_waited_for() {
         let _home = crate::store::temp_home();
         let mut settings = crate::store::settings::load();
@@ -6194,6 +6206,7 @@ mod tests {
 
     /// is off; on, the records, the homes and the trash are the app's.
     #[test]
+    #[cfg_attr(windows, ignore = "Bots are off on Windows")]
     fn the_cli_keeps_bots_only_while_the_switch_is_on() {
         let _home = crate::store::temp_home();
         let (service, sink) = headless_service();

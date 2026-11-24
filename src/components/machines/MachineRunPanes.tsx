@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { joinKeycaps } from "@/lib/shortcuts";
+import { useShortcutKeys } from "@/lib/hotkeys";
 import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
 import { RepositoryIcon } from "@/components/ui/IconPicker";
 import { Button } from "@/components/ui/button";
@@ -144,6 +146,7 @@ export function MachineSetupPane({ cloud, runs }: { cloud: CloudSessionModel; ru
 
 /** The Run tab: the machine project's actions with their latest run there. Show brings the run's terminal forward in the dock. */
 export function MachineRunPane({ cloud, runs, onShow }: { cloud: CloudSessionModel; runs: MachineSessionRuns; onShow: (terminalId: string) => void }) {
+  const runKeys = joinKeycaps(useShortcutKeys("session.runAction"));
   const name = cloud.machine?.name ?? "the machine";
   const update = machineRunsUpdate(cloud);
   const { actions } = runs.source;
@@ -154,7 +157,7 @@ export function MachineRunPane({ cloud, runs, onShow }: { cloud: CloudSessionMod
   else if (!actions.length)
     body = (
       <Notice testId="run-empty">
-        No run script on {name} yet. Add one there in <span className="text-foreground">{RUN_ACTIONS_PLACE}</span>: it starts the project's dev server or app on {name}, and ⌘R runs it.
+        No run script on {name} yet. Add one there in <span className="text-foreground">{RUN_ACTIONS_PLACE}</span>: it starts the project's dev server or app on {name}{runKeys ? <>, and {runKeys} runs it</> : null}.
       </Notice>
     );
   else

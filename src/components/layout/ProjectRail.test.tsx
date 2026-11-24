@@ -18,10 +18,10 @@ it("keeps Overview keycaps and ARIA in sync with defaults, custom keys, collisio
   render(<AppDestinations onOpenHome={vi.fn()} onNewSession={vi.fn()} onSearch={vi.fn()} onOpenIssues={vi.fn()} onOpenAgents={vi.fn()} onOpenAutomations={vi.fn()} />);
   const overview = screen.getByRole("button", { name: /^Overview/ });
   expect(overview.getAttribute("aria-keyshortcuts")).toBe("Control+1");
-  expect(overview.textContent).toContain("Ctrl1");
+  expect(overview.textContent).toContain("Ctrl+1");
   act(() => setPrefs({ shortcuts: { "app.agentDashboard": ["mod+shift+a", "mod+0"] } }));
   expect(overview.getAttribute("aria-keyshortcuts")).toBe("Control+Shift+A Control+0");
-  expect(overview.textContent).toContain("CtrlShiftA");
+  expect(overview.textContent).toContain("Ctrl+Shift+A");
   const unboundCases: Record<string, string[]>[] = [{ "session.tab1": ["mod+1"] }, { "app.agentDashboard": [] }];
   for (const shortcuts of unboundCases) {
     act(() => setPrefs({ shortcuts }));

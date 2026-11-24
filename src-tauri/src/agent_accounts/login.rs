@@ -67,7 +67,7 @@ impl Programs {
             Agent::Claude => self.claude.as_deref(),
             Agent::Codex => self.codex.as_deref(),
         };
-        program.filter(|program| program.is_file()).with_context(|| format!("{} is not installed on this Mac. Install it in Settings → Agents first.", agent.label()))
+        program.filter(|program| program.is_file()).with_context(|| crate::platform_profile::localize(&format!("{} is not installed on this Mac. Install it in Settings → Agents first.", agent.label())))
     }
 }
 
@@ -217,15 +217,10 @@ fn start_claude(program: &Path, dir: &Path, path_env: &str) -> Result<ClaudeLogi
     // No watchdog shell: the CLI runs in a job that ends with this process.
     #[cfg(windows)]
     let (mut child, lifeline) = {
-        use std::os::windows::process::CommandExt;
         let mut command = claude_command(program, dir, path_env, &["auth", "login", "--claudeai"]);
-        command.current_dir(dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
-            .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-        let mut child = command.spawn().context("Claude Code's sign-in could not start")?;
-        if let Err(error) = crate::win::process::tie_to_this_process(&child) {
-            let _ = child.kill();
-            return Err(anyhow::Error::new(error).context("Claude Code's sign-in could not start"));
-        }
+        command.current_dir(dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+        let child = crate::win::process::spawn_tied(&mut command, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+            .context("Claude Code's sign-in could not start")?;
         (child, None::<std::process::ChildStdin>)
     };
     let stdout = child.stdout.take().context("Claude Code's sign-in could not start")?;
@@ -337,7 +332,7 @@ fn attempts() -> std::sync::MutexGuard<'static, Vec<Attempt>> {
 pub(crate) fn start_in(store: &Store<'_>, agent: Agent, again: Option<&str>, programs: &Programs, person: Option<&claude_dir::Person>, sign_out: &dyn SignOut) -> Result<Started> {
     let program = programs.program(agent)?.to_path_buf();
     if agent == Agent::Codex {
-        ensure!(crate::codex_device_login::trusted_program(&program), "The codex on this Mac could be replaced by another account, so TerminalX does not run it.");
+        ensure!(crate::codex_device_login::trusted_program(&program), "{}", crate::platform_profile::localize("The codex on this Mac could be replaced by another account, so TerminalX does not run it."));
     }
     // One at a time per agent: a new start abandons the open one.
     let open: Vec<Attempt> = {
@@ -383,12 +378,12 @@ pub(crate) fn start_in(store: &Store<'_>, agent: Agent, again: Option<&str>, pro
         Agent::Codex => {
             let path = crate::codex_device_login::trusted_path(&programs.path_env);
             if !crate::codex_device_login::runs_trusted(&program, &path) {
-                return Err(undo(anyhow::anyhow!("The codex on this Mac could be replaced by another account, so TerminalX does not run it.")));
+                return Err(undo(anyhow::anyhow!("{}", crate::platform_profile::localize("The codex on this Mac could be replaced by another account, so TerminalX does not run it."))));
             }
             let (login, code) = crate::codex_device_login::start_into(&program, &programs.codex_args, &path, &crate::codex_device_login::homes_parent(), &dir)
                 .map_err(|error| undo(anyhow::anyhow!(match error {
-                    crate::codex_device_login::DeviceLoginError::CliMissing => "Codex is not installed on this Mac. Install it in Settings → Agents first.",
-                    crate::codex_device_login::DeviceLoginError::CliUntrusted => "The codex on this Mac could be replaced by another account, so TerminalX does not run it.",
+                    crate::codex_device_login::DeviceLoginError::CliMissing => crate::platform_profile::localize_static("Codex is not installed on this Mac. Install it in Settings → Agents first."),
+                    crate::codex_device_login::DeviceLoginError::CliUntrusted => crate::platform_profile::localize_static("The codex on this Mac could be replaced by another account, so TerminalX does not run it."),
                     crate::codex_device_login::DeviceLoginError::Unavailable => "Codex could not begin a sign-in. Check the connection and try again.",
                 })))?;
             let page = code.verification_url.clone();
@@ -494,7 +489,15 @@ impl SignOut for Cli {
                 let mut command = Command::new(program);
                 command.args(["logout", "-c", "cli_auth_credentials_store=\"file\""]).env_clear().env("PATH", crate::codex_device_login::trusted_path(&self.programs.path_env)).env("CODEX_HOME", dir);
                 if let Some(home) = dirs::home_dir() {
+                    #[cfg(windows)]
+                    command.env("USERPROFILE", &home);
                     command.env("HOME", home);
+                }
+                #[cfg(windows)]
+                for name in crate::codex_device_login::WINDOWS_ENV {
+                    if let Some(value) = std::env::var_os(name) {
+                        command.env(name, value);
+                    }
                 }
                 command
             }

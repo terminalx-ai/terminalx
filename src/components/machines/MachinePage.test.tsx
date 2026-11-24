@@ -410,7 +410,7 @@ describe("Remove this machine (21.10)", () => {
     const onBack = vi.fn();
     render(<MachinePage machineId={DEV.machineId} onBack={onBack} />);
     const row = screen.getByTestId("machine-remove");
-    expect(row.textContent).toContain("This Mac stops operating dev-server and forgets its credential. Sessions on the server stay there.");
+    expect(row.textContent).toContain("This computer stops operating dev-server and forgets its credential. Sessions on the server stay there.");
     fireEvent.click(within(row).getByRole("button", { name: "Remove" }));
     const dialog = await screen.findByTestId("remove-machine");
     fireEvent.click(within(dialog).getByRole("button", { name: "Remove" }));

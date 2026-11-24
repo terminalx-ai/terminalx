@@ -359,7 +359,7 @@ it.each([
   expect(getPrefs().panelOpen).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "Device · 1 connected phone" }));
   const details = screen.getByRole("dialog", { name: "Device" });
-  expect(details.textContent).toContain("Connected phones can see and drive sessions on this Mac.");
+  expect(details.textContent).toContain("Connected phones can see and drive sessions on this computer.");
   expect(screen.getByRole("button", { name: "Disconnect Priya's iPhone" })).toBeTruthy();
 });
 

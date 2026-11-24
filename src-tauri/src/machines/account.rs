@@ -426,12 +426,12 @@ impl AccountPairing {
         let Some(context) = (self.context)() else { return Err(not_signed_in()) };
         let (installation, state) = self.register(&context)?;
         if state != InstallationState::Ready {
-            return Err(refuse("not_signed_in", "Sign in to TerminalX again to let this Mac pair through your account."));
+            return Err(refuse("not_signed_in", crate::platform_profile::localize("Sign in to TerminalX again to let this Mac pair through your account.")));
         }
         let host = self.hosts(&context)?.into_iter().find(|host| host.host_id == host_id).ok_or_else(|| refuse("machine_not_available", "This machine is no longer on your account."))?;
         let host_key = host_key(&host).map_err(|error| refuse("key_mismatch", format!("{error:#}")))?;
         if !advertises_operating(&host) {
-            return Err(refuse("machine_not_available", "\"Let other computers operate this Mac\" is off on this machine."));
+            return Err(refuse("machine_not_available", "Letting other computers operate it is off on this machine."));
         }
         if host.reachability != "live" {
             return Err(refuse("machine_offline", "This machine is offline."));
@@ -472,7 +472,7 @@ impl AccountPairing {
         let mut grant = match self.call::<GrantResponse>(&context, "POST", "/v1/account/pairing-grant-requests", Some(body)) {
             Ok(response) => response.grant,
             Err(CallError::Status { status: 409, code: Some(code) }) if code == "host_binding_operating_unavailable" => {
-                return Err(refuse("machine_not_available", "\"Let other computers operate this Mac\" is off on this machine."));
+                return Err(refuse("machine_not_available", "Letting other computers operate it is off on this machine."));
             }
             Err(error) => return Err(error.refusal()),
         };

@@ -1,4 +1,5 @@
 import { useDataPrivacy } from "@/lib/dataPrivacy";
+import { profile, thisComputer } from "@/lib/platform";
 import { DataPrivacySettings } from "./DataPrivacySettings";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useState } from "react";
@@ -95,9 +96,9 @@ export function AccountTab() {
           {pairing.status.host && (
             <RegisteredSetting setting="account.sharing"><details className="py-3">
               <summary className="cursor-pointer text-[13px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring/40">Advanced</summary>
-              <div className="mt-3 text-xs font-medium">What this Mac shares</div>
+              <div className="mt-3 text-xs font-medium">What {thisComputer} shares</div>
               <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                The account directory receives exactly the seven binding fields below so your signed-in phone can find this Mac. Sessions, projects, worktrees, transcripts, paths, scrollback, and device credentials never leave through account binding. The work status above names, for each session linked to an issue, only the issue, the session’s title and branch, its state and when it was last active.
+                The account directory receives exactly the seven binding fields below so your signed-in phone can find {thisComputer}. Sessions, projects, worktrees, transcripts, paths, scrollback, and device credentials never leave through account binding. The work status above names, for each session linked to an issue, only the issue, the session’s title and branch, its state and when it was last active.
               </p>
               <dl className="mt-3 grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[11px]">
                 <dt className="text-faint">Host ID</dt><dd className="truncate font-mono">{pairing.status.host.hostId}</dd>
@@ -119,7 +120,7 @@ export function AccountTab() {
               <div className="min-w-0">
                 <div className="text-[13px] font-medium">Sign out</div>
                 <p className="text-xs leading-relaxed text-muted-foreground">
-                  Signs out of TerminalX on this Mac. Local sessions keep working; cloud workspaces and pairing need an account. Your session is kept in macOS Keychain until then.
+                  Signs out of TerminalX on {thisComputer}. Local sessions keep working; cloud workspaces and pairing need an account.{profile.secretStore ? ` Your session is kept in ${profile.secretStore} until then.` : null}
                 </p>
               </div>
               <Button variant="outline" size="sm" className="shrink-0" disabled={account.busy} onClick={() => setConfirmingSignOut(true)}>

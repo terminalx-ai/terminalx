@@ -259,7 +259,7 @@ fn the_main_directory_is_protected_whatever_it_is_called_or_asked() {
     // The backend refuses each, with the token it handed out itself, by a
     // made-up token, and through a symlink to the main directory.
     let alias = f.base.join("alias");
-    std::os::unix::fs::symlink(&alpha, &alias).unwrap();
+    link_folder(&alpha, &alias);
     let session = f.session(&alpha, &alpha, TabStatus::Idle);
     for (path, token) in [(alpha.clone(), main.token.clone()), (alpha.clone(), "forged".into()), (alias, main.token), (opened.clone(), f.find(&opened).token), (outer.clone(), found.token)] {
         for project_path in [alpha.clone(), opened.clone()] {
@@ -280,7 +280,7 @@ fn a_main_directory_reached_by_another_spelling_is_still_protected() {
     let wt = f.pushed(&alpha, "aliased");
     // The same worktree is open as a project through a symlink.
     let link = f.base.join("link-to-worktree");
-    std::os::unix::fs::symlink(&wt, &link).unwrap();
+    link_folder(&wt, &link);
     f.open(&link, "linked");
     assert_eq!(f.find(&wt).verdict, Verdict::Protected);
 }
@@ -1072,7 +1072,7 @@ fn cleanup_refuses_a_parent_with_an_unidentified_pruned_legacy_checkout() {
     sh(&project, &["worktree", "prune"]);
     // Recreated ordinary directories resolve through Git to the parent.
     std::fs::create_dir_all(&sub).unwrap();
-    assert_eq!(git::run(&sub, &["rev-parse", "--show-toplevel"]).unwrap().trim(), parent.to_str().unwrap());
+    assert_eq!(crate::paths::canonicalize(git::run(&sub, &["rev-parse", "--show-toplevel"]).unwrap().trim()).unwrap(), crate::paths::canonicalize(&parent).unwrap());
     let candidate = fixture.find(&parent);
     assert_eq!(candidate.verdict, Verdict::Unverifiable);
     assert!(candidate.reason.as_deref().unwrap().contains("Cannot establish the checkout"));
@@ -1101,4 +1101,12 @@ fn cleanup_does_not_reconcile_an_unidentified_pruned_shared_checkout() {
     assert!(index::get(&fork.id).is_ok());
     assert!(index::get(&companion.id).is_ok());
     assert!(fixture.stopped.lock().unwrap().is_empty());
+}
+
+/// Another way to reach a folder: a symlink, or on Windows a junction, which needs no privilege.
+fn link_folder(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    crate::win::fs::junction(link, target).unwrap();
 }

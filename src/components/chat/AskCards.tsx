@@ -1,4 +1,5 @@
 import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { joinKeycaps } from "@/lib/shortcuts";
 import { Check, ShieldAlert, MessageCircleQuestion, SquareTerminal } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/tooltip";
@@ -204,7 +205,7 @@ export function PermissionCard({
           {/* Return answers nothing for someone who may not answer. */}
           {primary && !blocked && <EnterKey />}
           {o.kind === "deny" && !primary && !blocked && takesKeys && o.id === deny?.id && escKeys.length > 0 && (
-            <Kbd className="ml-1.5 h-4 min-w-4 px-1 text-[10px] lowercase text-current">{escKeys.join("")}</Kbd>
+            <Kbd className="ml-1.5 h-4 min-w-4 px-1 text-[10px] lowercase text-current">{joinKeycaps(escKeys)}</Kbd>
           )}
         </Button>
       ))}

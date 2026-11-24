@@ -40,7 +40,7 @@ import { SessionOptions } from "./SessionOptions";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { usePromptTextProps } from "@/lib/autocorrect";
 import { openLocalProject } from "@/lib/projectStart";
-import { keycaps, matchesShortcut, useKeymap } from "@/lib/shortcuts";
+import { keycaps, matchesShortcut, useKeymap, joinKeycaps } from "@/lib/shortcuts";
 import { stopDictation } from "@/lib/dictation";
 import { cn } from "@/lib/cn";
 import { ORCHESTRATE_TITLE, orchestratePrompt, useOrchestrateOffered } from "@/lib/orchestrateStart";
@@ -949,12 +949,12 @@ export function NewSessionView({
                     onClick={() => void create()}
                     aria-label={createLabel}
                     data-testid="new-session-create"
-                    title={sendKeys ? `${createLabel} (${keycaps(sendKeys).join("")})` : createLabel}
+                    title={sendKeys ? `${createLabel} (${joinKeycaps(keycaps(sendKeys))})` : createLabel}
                     className="flex items-center gap-2 px-3 text-[12.5px] font-semibold transition-colors enabled:hover:bg-black/10 [&_svg]:size-3.5"
                   >
                     {busy && !orchestrating ? <Loader2 className="animate-spin" /> : null}
                     {createLabel}
-                    {sendKeys && !busy && <span className="rounded border border-current/30 px-1 font-sans text-[11px] font-medium leading-4">{keycaps(sendKeys).join("")}</span>}
+                    {sendKeys && !busy && <span className="rounded border border-current/30 px-1 font-sans text-[11px] font-medium leading-4">{joinKeycaps(keycaps(sendKeys))}</span>}
                   </button>
                   {orchestrateShown && (
                     <DropdownMenu {...createMenu.root}>
@@ -966,7 +966,7 @@ export function NewSessionView({
                       <DropdownMenuContent align="end" className="max-w-[20rem]">
                         <DropdownMenuItem onSelect={() => void create()}>
                           <span>Create</span>
-                          {sendKeys && <span className="ml-auto pl-3 text-[11px] text-faint">{keycaps(sendKeys).join("")}</span>}
+                          {sendKeys && <span className="ml-auto pl-3 text-[11px] text-faint">{joinKeycaps(keycaps(sendKeys))}</span>}
                         </DropdownMenuItem>
                         <DropdownMenuItem onSelect={() => void create(true)} className="flex-col items-start gap-0">
                           <span>Orchestrate</span>

@@ -12,7 +12,7 @@ import type { CheckLogEditorEntry } from "@/lib/editors";
 import { requestFixErrors } from "@/lib/fixCheckErrors";
 import { localGitSource } from "@/lib/gitSource";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
-import { isMac } from "@/lib/shortcuts";
+import { bindingText, joinKeycaps } from "@/lib/shortcuts";
 import { ansiSpans, plainLog } from "./AnsiLog";
 import { webUrl } from "./PrChecks";
 
@@ -156,7 +156,7 @@ export function CheckLogTab({ entry, visible }: { entry: CheckLogEditorEntry; vi
           }}
           className="min-w-0 flex-1 bg-transparent text-xs text-foreground outline-none placeholder:text-faint" />
         {needle ? <span className="shrink-0 tabular-nums" aria-live="polite">{matches.length ? `${Math.min(match, matches.length - 1) + 1}/${matches.length}` : "0"}</span>
-          : <kbd className="shrink-0 rounded border border-border px-1 font-mono text-[10.5px] leading-4">{isMac ? "⌘F" : "Ctrl F"}</kbd>}
+          : <kbd className="shrink-0 rounded border border-border px-1 font-mono text-[10.5px] leading-4">{bindingText("mod+f")}</kbd>}
       </label>
     </div>
     {notice && <p role="status" className="shrink-0 border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground">{notice}</p>}
@@ -177,7 +177,7 @@ export function CheckLogTab({ entry, visible }: { entry: CheckLogEditorEntry; vi
     {failed && <div className="flex min-h-14 shrink-0 items-center gap-3 border-t border-hairline bg-well px-4 py-2" data-testid="check-log-handoff">
       <p className="min-w-0 flex-1 text-xs text-muted-foreground">{handOffText(Math.max(1, entry.failures))}</p>
       <Button size="sm" onClick={() => requestFixErrors(entry.sessionId, check.prUrl)}>
-        <Wrench />Fix errors<kbd className="ml-1 font-mono text-[10.5px] opacity-70">{keycaps("session.fixErrors").join("")}</kbd>
+        <Wrench />Fix errors<kbd className="ml-1 font-mono text-[10.5px] opacity-70">{joinKeycaps(keycaps("session.fixErrors"))}</kbd>
       </Button>
     </div>}
   </div>;

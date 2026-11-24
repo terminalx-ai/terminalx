@@ -48,10 +48,10 @@ describe("agent logins in Settings (PRO-79)", () => {
     expect(within(row("codex")).getByTestId("agent-login-status").textContent).toMatch(/^Revoked \(API key\)/);
     expect(within(row("cursor")).getByTestId("agent-login-status").textContent).toBe("Not connected");
     // Claude Code's and Codex's sign-ins can be lent from this Mac; Cursor has none to lend.
-    expect(within(row("cursor")).queryByRole("button", { name: /this Mac/ })).toBeNull();
-    expect(within(row("codex")).getByRole("button", { name: "Replace with this Mac's Codex sign-in (temporary)" })).toBeTruthy();
+    expect(within(row("cursor")).queryByRole("button", { name: /this computer/ })).toBeNull();
+    expect(within(row("codex")).getByRole("button", { name: "Replace with this computer's Codex sign-in (temporary)" })).toBeTruthy();
     // A stored login is replaced, and the button says so.
-    expect(within(row("claude")).getByRole("button", { name: "Replace with this Mac's Claude Code sign-in (temporary)" })).toBeTruthy();
+    expect(within(row("claude")).getByRole("button", { name: "Replace with this computer's Claude Code sign-in (temporary)" })).toBeTruthy();
     expect(within(row("cursor")).queryByRole("button", { name: "Disconnect" })).toBeNull();
     expect(within(row("claude")).getByRole("button", { name: "Disconnect" })).toBeTruthy();
     cleanup();
@@ -69,13 +69,13 @@ describe("agent logins in Settings (PRO-79)", () => {
       return stored[0]!;
     });
     await show();
-    fireEvent.click(within(row("claude")).getByRole("button", { name: "Lend this Mac's Claude Code sign-in (temporary)" }));
+    fireEvent.click(within(row("claude")).getByRole("button", { name: "Lend this computer's Claude Code sign-in (temporary)" }));
     const panel = within(row("claude")).getByTestId("agent-login-consent");
     // Nothing is stored yet: there is nothing to replace and no such choice.
     expect(within(panel).queryByTestId("agent-login-replace")).toBeNull();
     // What is shared, who can use it, how to revoke it.
     expect(panel.textContent).toContain("lend its short-lived access token to Acme Robotics");
-    expect(panel.textContent).toContain("The refresh token stays on this Mac");
+    expect(panel.textContent).toContain("The refresh token stays on this computer");
     expect(panel.textContent).toContain("a confirmation from the app names the organization, the account and the expiry");
     expect(panel.textContent).toContain("every member's cloud workspaces of Acme Robotics");
     expect(panel.textContent).toContain("anyone who can drive a workspace can read it");
@@ -83,7 +83,7 @@ describe("agent logins in Settings (PRO-79)", () => {
     expect(panel.textContent).toContain("That reaches every workspace of Acme Robotics, running ones included");
     expect(panel.textContent).not.toContain("refuses while a workspace of the organization still uses the login");
     expect(panel.textContent).not.toMatch(/stop receiving it at once|does not change the login/);
-    const go = within(panel).getByRole("button", { name: "Read this Mac's sign-in and confirm" });
+    const go = within(panel).getByRole("button", { name: "Read this computer's sign-in and confirm" });
     expect(go.hasAttribute("disabled")).toBe(true);
     fireEvent.click(within(panel).getAllByRole("checkbox")[0]!);
     expect(go.hasAttribute("disabled")).toBe(true);
@@ -105,9 +105,9 @@ describe("agent logins in Settings (PRO-79)", () => {
       return stored[0]!;
     });
     await show();
-    fireEvent.click(within(row("claude")).getByRole("button", { name: "Lend this Mac's Claude Code sign-in (temporary)" }));
+    fireEvent.click(within(row("claude")).getByRole("button", { name: "Lend this computer's Claude Code sign-in (temporary)" }));
     consent(within(row("claude")).getByTestId("agent-login-consent"));
-    fireEvent.click(within(row("claude")).getByRole("button", { name: "Read this Mac's sign-in and confirm" }));
+    fireEvent.click(within(row("claude")).getByRole("button", { name: "Read this computer's sign-in and confirm" }));
     await waitFor(() => expect(screen.getByTestId("agent-logins-notice").textContent).toContain("Claude Code is connected"));
     expect(refreshCloudCatalog).toHaveBeenCalledWith("org-1");
     expect(screen.queryByRole("alert")).toBeNull();
@@ -130,12 +130,12 @@ describe("agent logins in Settings (PRO-79)", () => {
     await show();
     const failWith = async (code: string, text: RegExp) => {
       vi.mocked(api.cloudAgentLoginConnect).mockRejectedValueOnce({ code });
-      fireEvent.click(within(row("claude")).getByRole("button", { name: "Lend this Mac's Claude Code sign-in (temporary)" }));
+      fireEvent.click(within(row("claude")).getByRole("button", { name: "Lend this computer's Claude Code sign-in (temporary)" }));
       consent(within(row("claude")).getByTestId("agent-login-consent"));
-      fireEvent.click(within(row("claude")).getByRole("button", { name: "Read this Mac's sign-in and confirm" }));
+      fireEvent.click(within(row("claude")).getByRole("button", { name: "Read this computer's sign-in and confirm" }));
       await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(text));
     };
-    await failWith("cloud_agent_local_login_not_found", /No login for this agent was found on this Mac/);
+    await failWith("cloud_agent_local_login_not_found", /No login for this agent was found on this computer/);
     await failWith("cloud_agent_local_login_denied", /access to it was not allowed\. Nothing was sent/);
     await failWith("cloud_agent_local_login_cancelled", /Canceled in the confirmation\. Nothing was sent/);
     await failWith("cloud_agent_local_login_expired", /has expired or is about to/);
@@ -269,12 +269,12 @@ describe("agent logins in Settings (PRO-79)", () => {
     stored = [login({ authKind: "api-key" })];
     vi.mocked(api.cloudAgentLoginConnect).mockResolvedValue(login({}));
     await show();
-    fireEvent.click(within(row("claude")).getByRole("button", { name: "Replace with this Mac's Claude Code sign-in (temporary)" }));
+    fireEvent.click(within(row("claude")).getByRole("button", { name: "Replace with this computer's Claude Code sign-in (temporary)" }));
     const panel = within(row("claude")).getByTestId("agent-login-consent");
     const choice = within(panel).getByTestId("agent-login-replace");
     expect(choice.textContent).toContain("Replace the API key now stored for Claude Code.");
     expect(choice.textContent).toContain("When the lent sign-in expires, Claude Code agents in every workspace of Acme Robotics stop until a login is connected again.");
-    const go = within(panel).getByRole("button", { name: "Read this Mac's sign-in and confirm" });
+    const go = within(panel).getByRole("button", { name: "Read this computer's sign-in and confirm" });
     // Both consents without the replace choice: still not enough.
     const boxes = within(panel).getAllByRole("checkbox");
     expect(boxes).toHaveLength(3);
@@ -380,7 +380,7 @@ describe("agent logins in Settings (PRO-79)", () => {
     expect(lentUntil(login({ displayIdentity: "x · lent until yesterday" }))).toBeNull();
 
     const before = agentLoginStatus(lent, at - 3 * 60 * 60_000);
-    expect(before.text).toMatch(/^Connected · sign-in lent from a Mac · ada@example\.com · expires in 3 h \(/);
+    expect(before.text).toMatch(/^Connected · sign-in lent from a computer · ada@example\.com · expires in 3 h \(/);
     expect(before.warn).toBe(false);
     const soon = agentLoginStatus(lent, at - 20 * 60_000);
     expect(soon.text).toContain("expires in 20 min");
@@ -408,7 +408,7 @@ describe("agent logins in Settings (PRO-79)", () => {
     it("is the first and primary way for Claude, with the temporary lend after it; other agents have none", async () => {
       await show();
       const labels = within(row("claude")).getAllByRole("button").map((button) => button.textContent);
-      expect(labels).toEqual(["Log in with Claude", "Connect with an API key", "Lend this Mac's Claude Code sign-in (temporary)"]);
+      expect(labels).toEqual(["Log in with Claude", "Connect with an API key", "Lend this computer's Claude Code sign-in (temporary)"]);
       // Codex has its own, "Log in with ChatGPT"; Cursor has none.
       expect(within(row("cursor")).queryByRole("button", { name: /Log in with/ })).toBeNull();
     });
@@ -566,10 +566,10 @@ describe("agent logins in Settings (PRO-79)", () => {
     it("is the first way for Codex, with the lend of this Mac's sign-in as the second choice", async () => {
       await show();
       const labels = within(row("codex")).getAllByRole("button").map((button) => button.textContent);
-      expect(labels).toEqual(["Log in with ChatGPT", "Connect with an API key", "Lend this Mac's Codex sign-in (temporary)"]);
+      expect(labels).toEqual(["Log in with ChatGPT", "Connect with an API key", "Lend this computer's Codex sign-in (temporary)"]);
       fireEvent.click(within(row("codex")).getByRole("button", { name: "Log in with ChatGPT" }));
       const panel = within(row("codex")).getByTestId("agent-login-consent");
-      expect(panel.textContent).toContain("runs on this Mac in a separate, temporary home, so the Codex login you use here is not touched");
+      expect(panel.textContent).toContain("runs on this computer in a separate, temporary home, so the Codex login you use here is not touched");
       expect(panel.textContent).toContain("approve access for Acme Robotics");
       expect(panel.textContent).toContain("It is your own subscription");
       expect(panel.textContent).toContain("the login stays until an owner or admin disconnects it");
@@ -699,16 +699,16 @@ describe("agent logins in Settings (PRO-79)", () => {
       fireEvent.click(within(row("codex")).getByRole("button", { name: "Log in with ChatGPT" }));
       consent(within(row("codex")).getByTestId("agent-login-consent"));
       fireEvent.click(within(row("codex")).getByRole("button", { name: "Get a code to sign in with ChatGPT" }));
-      expect((await screen.findByRole("alert")).textContent).toBe("Codex is not installed on this Mac, so its sign-in cannot run here. Install Codex, or connect with an API key.");
+      expect((await screen.findByRole("alert")).textContent).toBe("Codex is not installed on this computer, so its sign-in cannot run here. Install Codex, or connect with an API key.");
       expect(screen.queryByTestId("codex-sign-in")).toBeNull();
 
       vi.mocked(api.cloudAgentLoginConnect).mockRejectedValueOnce({ code: "cloud_agent_local_login_expired" });
-      fireEvent.click(within(row("codex")).getByRole("button", { name: "Lend this Mac's Codex sign-in (temporary)" }));
+      fireEvent.click(within(row("codex")).getByRole("button", { name: "Lend this computer's Codex sign-in (temporary)" }));
       const panel = within(row("codex")).getByTestId("agent-login-consent");
-      expect(panel.textContent).toContain("TerminalX will read the Codex sign-in on this Mac and lend its short-lived access token to Acme Robotics");
+      expect(panel.textContent).toContain("TerminalX will read the Codex sign-in on this computer and lend its short-lived access token to Acme Robotics");
       consent(panel);
-      fireEvent.click(within(row("codex")).getByRole("button", { name: "Read this Mac's sign-in and confirm" }));
-      expect((await screen.findByRole("alert")).textContent).toBe("The Codex sign-in on this Mac has expired or is about to. Run codex once so it renews, then try again.");
+      fireEvent.click(within(row("codex")).getByRole("button", { name: "Read this computer's sign-in and confirm" }));
+      expect((await screen.findByRole("alert")).textContent).toBe("The Codex sign-in on this computer has expired or is about to. Run codex once so it renews, then try again.");
       expect(api.cloudAgentLoginConnect).toHaveBeenCalledWith("codex", "local-login", expect.objectContaining({ organizationSharing: true, machineInstallation: true }));
     });
 

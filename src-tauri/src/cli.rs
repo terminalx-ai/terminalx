@@ -2807,7 +2807,7 @@ mod tests {
     #[test]
     fn local_targets_keep_their_commands_and_refuse_cloud_only_options() {
         assert_eq!(rpc_of(&["projects", "list"]).0, "projects.list");
-        assert_eq!(rpc_of(&["projects", "add", "/code/api", "--json"]), ("projects.add".into(), json!({"path": "/code/api", "refuseExisting": true}), Duration::from_secs(30)));
+        assert_eq!(rpc_of(&["projects", "add", "/code/api", "--json"]), ("projects.add".into(), json!({"path": std::path::absolute("/code/api").unwrap(), "refuseExisting": true}), Duration::from_secs(30)));
         // A relative folder is this shell's, not the runtime's.
         let relative = rpc_of(&["projects", "add", "api"]).1;
         assert_eq!(relative["path"], json!(std::env::current_dir().unwrap().join("api")));

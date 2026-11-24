@@ -647,6 +647,34 @@ impl Job {
         Ok(info.ActiveProcesses)
     }
 
+    /// The ids of the processes in the job now.
+    pub(crate) fn process_ids(&self) -> io::Result<Vec<u32>> {
+        use windows_sys::Win32::System::JobObjects::{JobObjectBasicProcessIdList, QueryInformationJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST};
+        const MOST: usize = 1024;
+        // Word-aligned, with room for the header and `MOST` ids after it.
+        let mut storage = vec![0usize; MOST + 2];
+        let list = storage.as_mut_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>();
+        // SAFETY: `list` points at a buffer of the size given, aligned for this struct.
+        if unsafe {
+            QueryInformationJobObject(
+                self.raw(),
+                JobObjectBasicProcessIdList,
+                list.cast(),
+                (storage.len() * std::mem::size_of::<usize>()) as u32,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the call filled the header and that many ids, within the buffer.
+        let ids = unsafe {
+            let count = ((*list).NumberOfProcessIdsInList as usize).min(MOST);
+            std::slice::from_raw_parts(std::ptr::addr_of!((*list).ProcessIdList).cast::<usize>(), count)
+        };
+        Ok(ids.iter().map(|&id| id as u32).collect())
+    }
+
     /// Kill every process in the job now.
     pub(crate) fn terminate(&self, code: u32) -> io::Result<()> {
         // SAFETY: a live job handle.
@@ -682,17 +710,106 @@ pub(crate) fn tie_to_this_process(child: &std::process::Child) -> io::Result<()>
     Ok(())
 }
 
+/// Start `command` with creation `flags`, tied to this process (as
+/// [`tie_to_this_process`]) before it runs anything: it is created
+/// suspended, put in its job, and only then let go. A process tied after
+/// it was already running could have started another in between, which
+/// would be in no job and outlive it. A process that cannot be tied, or
+/// let go, is ended without having run, and that is the error.
+pub(crate) fn spawn_tied(command: &mut std::process::Command, flags: u32) -> io::Result<std::process::Child> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+    let mut child = command.creation_flags(flags | CREATE_SUSPENDED).spawn()?;
+    if let Err(error) = tie_to_this_process(&child).and_then(|()| resume(child.id())) {
+        kill_tree(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    Ok(child)
+}
+
+/// Let a process created suspended run: resume each of its threads (one,
+/// in a process that has not run yet).
+fn resume(pid: u32) -> io::Result<()> {
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32};
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+    // SAFETY: returns an owned snapshot handle or INVALID_HANDLE_VALUE.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a fresh handle, closed by OwnedHandle.
+    let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot as RawHandle) };
+    let raw = snapshot.as_raw_handle() as HANDLE;
+    let mut entry = THREADENTRY32 { dwSize: std::mem::size_of::<THREADENTRY32>() as u32, ..Default::default() };
+    let mut resumed = false;
+    // SAFETY: `entry.dwSize` is set as the API requires.
+    let mut more = unsafe { Thread32First(raw, &mut entry) } != 0;
+    while more {
+        if entry.th32OwnerProcessID == pid {
+            // SAFETY: OpenThread returns an owned handle or NULL.
+            let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+            if thread.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: a fresh handle nobody else owns.
+            let thread = unsafe { OwnedHandle::from_raw_handle(thread as RawHandle) };
+            // SAFETY: the handle carries THREAD_SUSPEND_RESUME.
+            if unsafe { ResumeThread(thread.as_raw_handle() as HANDLE) } == u32::MAX {
+                return Err(io::Error::last_os_error());
+            }
+            resumed = true;
+        }
+        // SAFETY: as above.
+        more = unsafe { Thread32Next(raw, &mut entry) } != 0;
+    }
+    if resumed {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("process {pid} has no thread to start")))
+    }
+}
+
 /// End process `pid` and everything it started, when it was tied to this
-/// process; `false` when it was not.
+/// process, and return once none of it runs (or after a few seconds): a
+/// caller may be about to remove the folder they were writing in. `false`
+/// when it was not tied.
 pub(crate) fn kill_tree(pid: u32) -> bool {
+    const EXIT_WAIT: Duration = Duration::from_secs(5);
     let job = owned_jobs().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&pid);
     match job {
         Some(job) => {
-            let _ = job.terminate(1);
+            if job.terminate(1).is_ok() {
+                let deadline = std::time::Instant::now() + EXIT_WAIT;
+                while job.active().is_ok_and(|running| running > 0) && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
             true
         }
         None => false,
     }
+}
+
+/// What is in the job of a process tied to this one; `None` for one that isn't.
+pub(crate) fn tied_members(pid: u32) -> Option<io::Result<Vec<u32>>> {
+    owned_jobs().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&pid).map(Job::process_ids)
+}
+
+/// What is in the tied job that `pid` is a member of, whichever process the
+/// job was recorded under; `None` when no tied job holds it.
+#[cfg(test)]
+pub(crate) fn members_of_job_holding(pid: u32) -> Option<Vec<u32>> {
+    let jobs = owned_jobs().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    jobs.values().filter_map(|job| job.process_ids().ok()).find(|members| members.contains(&pid))
+}
+
+/// Let go of `pid`'s job without ending it first, as this process ending
+/// would: closing the last handle kills what is in it.
+#[cfg(test)]
+pub(crate) fn release_job(pid: u32) {
+    owned_jobs().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&pid);
 }
 
 /// Close a raw handle someone gave up ownership of.
@@ -731,6 +848,35 @@ mod tests {
         assert!(terminate_verified(pid, &image, Duration::from_secs(5)).unwrap());
         child.wait().unwrap();
         assert!(!is_running(pid));
+    }
+
+    #[test]
+    fn a_process_started_tied_runs_in_its_job_from_the_start() {
+        // Let go after it was tied: it runs to its own exit code.
+        let mut quick = Command::new("cmd");
+        quick.args(["/c", "exit", "7"]).stdout(Stdio::null());
+        let mut quick = spawn_tied(&mut quick, 0).unwrap();
+        assert_eq!(quick.wait().unwrap().code(), Some(7));
+        kill_tree(quick.id());
+
+        // What it starts is in the job with it, and goes with it.
+        let mut shell = Command::new("cmd");
+        shell.args(["/c", "ping", "-n", "30", "127.0.0.1"]).stdout(Stdio::null());
+        let mut shell = spawn_tied(&mut shell, 0).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let started = loop {
+            let members = tied_members(shell.id()).unwrap().unwrap();
+            assert!(members.contains(&shell.id()), "{members:?}");
+            if let Some(other) = members.into_iter().find(|pid| *pid != shell.id() && image_path(*pid).is_ok_and(|image| image.file_name().is_some_and(|name| name.eq_ignore_ascii_case("ping.exe")))) {
+                break other;
+            }
+            assert!(std::time::Instant::now() < deadline, "the shell started nothing");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(kill_tree(shell.id()));
+        shell.wait().unwrap();
+        assert!(!is_running(started));
+        assert!(tied_members(shell.id()).is_none());
     }
 
     #[test]

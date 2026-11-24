@@ -577,7 +577,7 @@ fn quick_chat_folder(path: &str) -> Result<String> {
 
 /// Create a quick chat and tell listeners. Like any session, its index entry
 /// is written before an agent is started in it.
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 pub(crate) fn create_quick_chat_blocking(sink: &dyn EventSink, req: NewQuickChat) -> Result<SessionEntry> {
     create_quick_chat_blocking_on(sink, req, None)
 }
@@ -726,7 +726,7 @@ fn carry_conversations(entry: &SessionEntry, to: &str, preserve_source: bool) {
 /// when `cwd` is `None`. The folder is used as it is and is not registered as
 /// a project. `stop` ends what the session's tabs run: they start again, in
 /// the new directory, the next time they are opened.
-#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
+#[cfg_attr(not(test), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
 pub(crate) fn set_quick_chat_cwd(sink: &dyn EventSink, session_id: &str, cwd: Option<&str>, stop: &dyn Fn(&SessionEntry)) -> Result<SessionEntry> {
     set_quick_chat_cwd_fallible(sink, session_id, cwd, &|entry| { stop(entry); Ok(()) })
 }
@@ -771,7 +771,7 @@ pub(crate) fn set_quick_chat_cwd_fallible(sink: &dyn EventSink, session_id: &str
 /// attached it yet. An empty scratch directory goes; one that holds files is
 /// kept until the session is deleted, since the conversation may refer to
 /// them.
-#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
+#[cfg_attr(not(test), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
 pub(crate) fn move_quick_chat_to_project(sink: &dyn EventSink, session_id: &str, project_path: &str, stop: &dyn Fn(&SessionEntry)) -> Result<SessionEntry> {
     move_quick_chat_to_project_fallible(sink, session_id, project_path, &|entry| { stop(entry); Ok(()) })
 }
@@ -832,7 +832,7 @@ pub(crate) fn has_shell_in_use(session: &SessionEntry, live: &[&str], running: i
 /// purpose) unless it was the idle sweep that archived it (#718), and so is
 /// one `busy` says is running. `stop` ends what an idle
 /// one still has open. Returns what was deleted.
-#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
+#[cfg_attr(not(test), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
 pub(crate) fn sweep_idle_quick_chats(sink: &dyn EventSink, days: u32, busy: &dyn Fn(&SessionEntry) -> bool, stop: &dyn Fn(&SessionEntry)) -> Result<Vec<SessionEntry>> {
     sweep_idle_quick_chats_fallible(sink, days, busy, &|entry| { stop(entry); Ok(()) })
 }
@@ -1767,9 +1767,8 @@ pub(crate) fn sole_workspace_of(session_id: &str) -> Result<Option<String>> {
     Ok(sessions_sharing_worktree(session_id)?.is_empty().then(|| root.to_string_lossy().into_owned()))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
-    #[cfg(unix)]
     use crate::paths::Canonical;
     #[test]
     fn pull_request_sessions_require_an_isolated_target() {
@@ -1831,6 +1830,7 @@ mod tests {
         assert!(!has_shell_in_use(&session, &[], |pane| pane == "tab:agent"));
         assert!(has_shell_in_use(&session, &[], |pane| pane == "tab:was-agent"));
     }
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
 
@@ -2254,17 +2254,31 @@ mod tests {
 
     /// Makes a directory read-only for the length of a test, so nothing in it
     /// can be unlinked, and writable again afterwards so the temp dir can go.
-    struct ReadOnly(PathBuf);
+    struct ReadOnly(
+        #[cfg_attr(windows, allow(dead_code))] PathBuf,
+        // On Windows a file held open with no sharing can't be removed, nor the folder around it.
+        #[cfg(windows)] #[allow(dead_code)] std::fs::File,
+    );
 
     impl ReadOnly {
         fn new(dir: &Path) -> Self {
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-            Self(dir.to_path_buf())
+            #[cfg(unix)]
+            {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+                Self(dir.to_path_buf())
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(dir.join("a.txt")).unwrap();
+                Self(dir.to_path_buf(), held)
+            }
         }
     }
 
     impl Drop for ReadOnly {
         fn drop(&mut self) {
+            #[cfg(unix)]
             let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
         }
     }
@@ -2985,7 +2999,7 @@ mod tests {
         assert!(index::get(&second.id).is_ok());
         assert_eq!(std::fs::read_to_string(history).unwrap(), "keep this work");
         assert!(Path::new(&first.cwd).join("a.txt").is_file());
-        assert!(git::run(dir.path(), &["worktree", "list", "--porcelain"]).unwrap().contains(&first.cwd));
+        assert!(git::run(dir.path(), &["worktree", "list", "--porcelain"]).unwrap().contains(&first.cwd.replace('\\', "/")));
     }
 
     #[test]
@@ -3178,7 +3192,7 @@ mod tests {
         std::fs::remove_dir_all(&nested).unwrap();
         git::run(dir.path(), &["worktree", "prune"]).unwrap();
         std::fs::create_dir_all(&sub).unwrap();
-        assert_eq!(git::run(&sub, &["rev-parse", "--show-toplevel"]).unwrap().trim(), root.to_str().unwrap());
+        assert_eq!(crate::paths::canonicalize(git::run(&sub, &["rev-parse", "--show-toplevel"]).unwrap().trim()).unwrap(), crate::paths::canonicalize(&root).unwrap());
         for path in [&root, &nested, &sub] {
             assert!(workspace_disposition(dir.path(), path, false).unwrap_err().contains("Cannot establish the checkout"));
             for fate in [SessionsFate::Delete, SessionsFate::Keep] {

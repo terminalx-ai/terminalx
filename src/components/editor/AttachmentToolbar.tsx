@@ -1,3 +1,4 @@
+import { revealInFileManager } from "@/lib/platform";
 import { useEffect, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -119,7 +120,7 @@ export function AttachmentToolbar({ path, name, sentAt, markdown = false, viewMo
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuItem onSelect={() => void revealItemInDir(path).catch((e) => setError(`Could not reveal ${name}: ${String(e)}`))}>
-                  <FolderOpen /> Reveal in Finder
+                  <FolderOpen /> {revealInFileManager}
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => void copyText(path).then(() => flash("copied"), (e) => setError(`Could not copy the path: ${String(e)}`))}>
                   <Copy /> Copy path

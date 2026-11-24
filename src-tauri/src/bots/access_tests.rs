@@ -66,6 +66,7 @@ fn is_refused(gate: &Gate) -> bool {
 /// The ticket's "done when": a change of access changes what the bot's next
 /// call may do, in a chat already open. One level at a time, and back.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn each_access_level_gates_the_next_call_of_the_bots_chat() {
     let (_home, sink) = bots_on();
     let bot = super::super::create(sink.as_ref(), "security-auditor", "Sentry").unwrap();
@@ -137,6 +138,7 @@ fn manager() -> (crate::session::SessionManager, Arc<BroadcastSink>) {
 /// runs in (#1430's `enforce`) and what its next call may do (this gate), and
 /// a session the chat started is held the same way.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn an_access_change_limits_the_bots_chat_and_what_it_started() {
     let (_home, _) = bots_on();
     let (manager, sink) = manager();
@@ -168,6 +170,7 @@ fn an_access_change_limits_the_bots_chat_and_what_it_started() {
 
 /// A paused bot reads and nothing else: what Read and report would ask about is refused too.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_paused_bot_only_reads() {
     let (_home, sink) = bots_on();
     let bot = super::super::create(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -192,6 +195,7 @@ fn a_paused_bot_only_reads() {
 /// goes to the model provider's search, stays a read. Full access runs it,
 /// and a paused bot makes none.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_web_fetch_asks_below_full_access() {
     let (_home, sink) = bots_on();
     let url = "https://some.host/?d=c2VjcmV0";
@@ -225,6 +229,7 @@ fn a_web_fetch_asks_below_full_access() {
 
 /// Native Codex runs no hooks: its approval requests meet the same gate.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn native_codex_approvals_meet_the_gate() {
     let (_home, sink) = bots_on();
     let bot = super::super::create(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -245,6 +250,7 @@ fn native_codex_approvals_meet_the_gate() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn nothing_is_gated_outside_a_bot_chat_while_bots_are_off_or_for_a_bot_that_is_gone() {
     let (_home, sink) = bots_on();
     let bot = super::super::create(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -265,6 +271,7 @@ fn nothing_is_gated_outside_a_bot_chat_while_bots_are_off_or_for_a_bot_that_is_g
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn bots_that_cannot_be_read_hold_their_chats_to_read_and_report() {
     let (_home, sink) = bots_on();
     let bot = super::super::create(sink.as_ref(), "cto", "Atlas").unwrap();
@@ -605,6 +612,7 @@ fn a_terminalx_found_through_a_relative_folder_of_the_path_is_not_the_apps() {
 /// PRO-494: a skill's inline command runs when it loads, which no hook sees; a bot's Claude
 /// sessions are launched with it off, and nothing changes for anyone else or while Bots is off.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bots_claude_sessions_run_no_skills_inline_command() {
     let (_home, _sink) = bots_on();
     let mut settings = json!({"hooks": {}});

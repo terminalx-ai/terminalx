@@ -1,4 +1,5 @@
 import * as React from "react";
+import { joinKeycaps } from "@/lib/shortcuts";
 import { ContextMenu as Ctx, DropdownMenu as Prim } from "radix-ui";
 import { Check, ChevronRight } from "@/icons";
 import { cn } from "@/lib/cn";
@@ -145,7 +146,7 @@ export function MenuShortcut({ keys }: { keys: string[] }) {
 
 /** A key hint at an item's end, drawn as one keycap ("R", "⌘N") as the designed menus have them (02.13). */
 export function MenuKbd({ keys }: { keys: string | string[] }) {
-  const text = Array.isArray(keys) ? keys.join("") : keys;
+  const text = Array.isArray(keys) ? joinKeycaps(keys) : keys;
   if (!text) return null;
   return (
     <kbd aria-hidden data-menu-kbd="" className="ml-auto inline-flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-[4px] px-1 pl-1 font-sans text-[10.5px] font-medium text-faint hairline">

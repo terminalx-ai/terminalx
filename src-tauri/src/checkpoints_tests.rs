@@ -9,6 +9,84 @@ fn read(repo: &tempfile::TempDir, path: &str) -> Option<String> {
     std::fs::read_to_string(repo.path().join(path)).ok()
 }
 
+fn bytes(repo: &tempfile::TempDir, path: &str) -> Vec<u8> {
+    std::fs::read(repo.path().join(path)).unwrap()
+}
+
+/// With `core.autocrlf` on, a turn that changes only a file's line endings.
+fn ending_only_turn(repo: &tempfile::TempDir, session: &index::SessionEntry) {
+    git::run(repo.path(), &["config", "core.autocrlf", "true"]).unwrap();
+    std::fs::write(repo.path().join("a.txt"), "one\ntwo\n").unwrap();
+    git::run(repo.path(), &["add", "a.txt"]).unwrap();
+    git::run(repo.path(), &["commit", "-qm", "Two lines"]).unwrap();
+    std::fs::write(repo.path().join("a.txt"), "one\ntwo\n").unwrap();
+    observe_in(session, 1, prompt(false));
+    std::fs::write(repo.path().join("a.txt"), "one\r\ntwo\r\n").unwrap();
+    observe_in(session, 2, done());
+}
+
+#[test]
+fn a_turn_that_only_changes_line_endings_is_listed_and_undone_exactly() {
+    let _home = store::temp_home();
+    let (repo, session) = fixture();
+    let tab = &session.tabs[0].id;
+    ending_only_turn(&repo, &session);
+    let turn = get(&session.id, tab, 1).unwrap().unwrap();
+    assert_eq!(turn.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(), ["a.txt"]);
+    let undone = undo(&session.id, tab, 1, None).unwrap();
+    assert!(undone.undone, "overlap: {:?}", undone.overlap);
+    assert_eq!(bytes(&repo, "a.txt"), b"one\ntwo\n");
+    let restored = restore_undo(&session.id, tab, 1, None).unwrap();
+    assert!(restored.undone, "overlap: {:?}", restored.overlap);
+    assert_eq!(bytes(&repo, "a.txt"), b"one\r\ntwo\r\n");
+}
+
+#[test]
+fn a_hand_edit_of_line_endings_alone_needs_confirmation_and_a_later_one_voids_it() {
+    let _home = store::temp_home();
+    let (repo, session) = fixture();
+    let tab = &session.tabs[0].id;
+    ending_only_turn(&repo, &session);
+    std::fs::write(repo.path().join("a.txt"), "one\r\ntwo\n").unwrap();
+    let asked = undo(&session.id, tab, 1, None).unwrap();
+    assert!(!asked.undone);
+    assert_eq!(asked.overlap, ["a.txt"]);
+    std::fs::write(repo.path().join("a.txt"), "one\ntwo\r\n").unwrap();
+    let stale = undo(&session.id, tab, 1, Some(&asked.token)).unwrap();
+    assert!(!stale.undone, "the token named the file as it was");
+    assert_eq!(bytes(&repo, "a.txt"), b"one\ntwo\r\n");
+    assert!(undo(&session.id, tab, 1, Some(&stale.token)).unwrap().undone);
+    assert_eq!(bytes(&repo, "a.txt"), b"one\ntwo\n");
+}
+
+#[test]
+fn a_reset_and_its_undo_put_back_exact_line_endings() {
+    let _home = store::temp_home();
+    let (repo, session) = fixture();
+    let tab = &session.tabs[0].id;
+    ending_only_turn(&repo, &session);
+    observe_in(&session, 3, prompt(false));
+    std::fs::write(repo.path().join("a.txt"), "one\ntwo\r\n").unwrap();
+    observe_in(&session, 4, done());
+    let plan = plan_reset(&session.id, tab, 2).unwrap();
+    assert_eq!(plan.paths, ["a.txt"]);
+    apply_reset(&session.id, tab, &plan, "55555555-5555-4555-8555-555555555555").unwrap();
+    assert_eq!(bytes(&repo, "a.txt"), b"one\r\ntwo\r\n");
+    let back = plan_reset_undo(&session.id, tab, "55555555-5555-4555-8555-555555555555").unwrap().unwrap();
+    assert!(back.overlap.is_empty());
+    apply_reset(&session.id, tab, &back, "unused").unwrap();
+    assert_eq!(bytes(&repo, "a.txt"), b"one\ntwo\r\n");
+}
+
+#[test]
+fn a_checkpoint_saved_before_exact_bytes_loads_and_saves_the_same_shape() {
+    let saved = serde_json::json!({ "seq": 1, "number": 1, "cwd": "/repo", "start": "aaaaaaa", "index": null, "end": "bbbbbbb", "endIndex": null, "reviewed": false, "undone": false, "files": [] });
+    let turn: Checkpoint = serde_json::from_value(saved).unwrap();
+    assert_eq!((turn.start_kept.as_deref(), turn.end_kept.as_deref()), (None, None));
+    let written = serde_json::to_value(&turn).unwrap();
+    assert!(written.get("startKept").is_none() && written.get("endKept").is_none());
+}
+
 /// Turn 1 writes a.txt; turn 2 rewrites it, stages it and adds b.txt.
 fn two_turns(repo: &tempfile::TempDir, session: &index::SessionEntry) {
     observe_in(session, 1, prompt(false));

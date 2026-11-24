@@ -107,7 +107,7 @@ describe("the header chip (21.09)", () => {
     render(<MachineChip machine={CI_BOX} name="ci-box" state={{ state: "needsUpdate", version: "0.2.27", side: "machine" }} />);
     expect(screen.getByTestId("machine-chip").textContent).toContain("Needs update");
     expect(screen.getByTestId("machine-chip").getAttribute("title")).toBe("Runs an older TerminalX");
-    expect(machineStateHint({ state: "needsUpdate", version: "0.2.40", side: "thisMac" }, "ci-box")).toBe("Runs a newer TerminalX than this Mac");
+    expect(machineStateHint({ state: "needsUpdate", version: "0.2.40", side: "thisMac" }, "ci-box")).toBe("Runs a newer TerminalX than this computer");
   });
 });
 
@@ -132,7 +132,7 @@ describe("Settings → Machines card (21.02)", () => {
     attach(CI_BOX, LIVE, fakeClient(ALL.filter((name) => name !== "machine/3"), "0.2.27", updateStatus()));
     const card = renderCard();
     await waitFor(() => expect(card.getAttribute("data-needs-update")).toBe("true"));
-    expect(screen.getByTestId("paired-machine-update-note").textContent).toBe("ci-box runs a TerminalX this Mac cannot update. Update it on ci-box.");
+    expect(screen.getByTestId("paired-machine-update-note").textContent).toBe("ci-box runs a TerminalX this computer cannot update. Update it on ci-box.");
     expect(screen.queryByRole("button", { name: "Update" })).toBeNull();
   });
 
@@ -141,7 +141,7 @@ describe("Settings → Machines card (21.02)", () => {
     const card = renderCard();
     expect(card.getAttribute("data-needs-update")).toBe("true");
     expect(card.textContent).toContain("Needs update");
-    expect(screen.getByTestId("paired-machine-update-note").textContent).toBe("ci-box runs a TerminalX this Mac cannot update. Update it on ci-box.");
+    expect(screen.getByTestId("paired-machine-update-note").textContent).toBe("ci-box runs a TerminalX this computer cannot update. Update it on ci-box.");
     expect(screen.queryByRole("button", { name: "Update" })).toBeNull();
   });
 
@@ -175,7 +175,7 @@ describe("the machine page (21.10)", () => {
     render(<MachinePage machineId="ci" onBack={() => undefined} />);
     const banner = await screen.findByTestId("machine-version-banner");
     await waitFor(() => expect(banner.textContent).toContain("TerminalX 0.2.40 there, 0.2.33 here"));
-    fireEvent.click(within(banner).getByRole("button", { name: "Update this Mac" }));
+    fireEvent.click(within(banner).getByRole("button", { name: "Update this computer" }));
     await waitFor(() => expect(mocks.installUpdate).toHaveBeenCalledTimes(1));
     expect(mocks.checkForUpdate).toHaveBeenCalledTimes(1);
   });

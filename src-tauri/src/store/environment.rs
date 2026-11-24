@@ -604,6 +604,7 @@ thread_local! {
 
 /// The next `launch` on this thread resolves to `values` (tests only).
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn set_test_launch(values: BTreeMap<String, String>) {
     TEST_LAUNCH.with(|slot| *slot.borrow_mut() = Some(Launch { values, stamp: Stamp::default() }));
 }
@@ -1489,6 +1490,7 @@ mod tests {
         assert!(terminals.panes().is_empty());
     }
 
+    #[cfg_attr(windows, ignore = "Windows does not allow a file name that ends in a space")]
     #[test]
     fn a_git_dir_whose_name_ends_in_a_space_names_the_repository() {
         let dir = tempfile::tempdir().unwrap();

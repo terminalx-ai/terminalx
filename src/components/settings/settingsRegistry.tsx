@@ -1,4 +1,5 @@
 import { cloneElement, createContext, useContext, type ComponentProps, type ReactElement, type ReactNode } from "react";
+import { ThisComputer, thisComputer, secretStore, secretStoreShort, secretStoreThe, secretStoreWord } from "@/lib/platform";
 import { createPortal } from "react-dom";
 import { SETTING_ROW_CLASS, type SettingRow } from "@/components/ui/controls";
 import { cn } from "@/lib/cn";
@@ -27,16 +28,16 @@ export type SettingsGroup = (typeof SETTINGS_GROUPS)[number];
 // PRO-374: Personal is ordered as designed (General first, Settings opens there); each page has one introductory description.
 export const SETTINGS_SECTIONS = {
   general: { title: "General", group: "Personal", entry: "general.websiteLinks", subtitle: "How TerminalX opens links, shows its work, and where your settings live." },
-  account: { title: "Account", group: "Personal", entry: "account.identity", subtitle: "Your TerminalX account, this Mac’s name and what it shares." },
+  account: { title: "Account", group: "Personal", entry: "account.identity", subtitle: `Your TerminalX account, ${thisComputer}’s name and what it shares.` },
   appearance: { title: "Appearance", group: "Personal", entry: "appearance.theme", subtitle: "Theme, text size, the sidebar and the status bar." },
   shortcuts: { title: "Keyboard shortcuts", group: "Personal", entry: "shortcuts.systemWide", subtitle: "Keys for every action. Change one by recording a new key." },
-  devices: { title: "Devices", group: "Personal", entry: "devices.pairing", subtitle: "Phones paired with this Mac." },
-  machines: { title: "Machines", group: "Personal", entry: "machines.allowOperating", subtitle: "Operate TerminalX on your other computers from this Mac, and let them operate it. Sessions, terminals and files stay on the machine that runs them." },
+  devices: { title: "Devices", group: "Personal", entry: "devices.pairing", subtitle: `Phones paired with ${thisComputer}.` },
+  machines: { title: "Machines", group: "Personal", entry: "machines.allowOperating", subtitle: `Operate TerminalX on your other computers from ${thisComputer}, and let them operate it. Sessions, terminals and files stay on the machine that runs them.` },
   // PRO-463, design 09.44: reference information, looked at now and then, so a page of Settings rather than a view of the main window.
   stats: { title: "Stats & usage", group: "Personal", entry: "stats.activity", subtitle: "TerminalX activity plus local Claude and Codex token analytics. Cloud histories are not scanned here." },
-  agents: { title: "Agents", group: "Agents & environment", entry: "agents.setup", subtitle: "The agent CLIs TerminalX runs on this Mac, their sign-ins, and how they work while you wait. Each keeps its own login; local work needs no TerminalX account." },
+  agents: { title: "Agents", group: "Agents & environment", entry: "agents.setup", subtitle: `The agent CLIs TerminalX runs on ${thisComputer}, their sign-ins, and how they work while you wait. Each keeps its own login; local work needs no TerminalX account.` },
   orchestrator: { title: "Orchestrator", group: "Agents & environment", entry: "orchestrator.requireApproval", subtitle: "How a lead session splits a goal across workers." },
-  environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables", subtitle: "Variables for new agent and shell tabs, kept in the Keychain." },
+  environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables", subtitle: `Variables for new agent and shell tabs, kept in ${secretStoreShort}.` },
   localVms: { title: "Local VMs", group: "Agents & environment", entry: "localVms.tasks", subtitle: "Virtual machines an agent can use as its computer." },
   transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model", subtitle: "Dictation: the model, your microphone and your words." },
   integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github", subtitle: "GitHub and Linear, for issues and pull requests." },
@@ -180,7 +181,7 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "account.workStatus", section: "account", title: "Show my team what I’m working on",
-    description: "Teammates in an organization that connected a repository see which of its issues you have a session on: your name, the session’s title and branch, and whether an agent is working. Your other machines always see it, with this Mac’s name. Prompts, transcripts, paths and code never leave this Mac.",
+    description: `Teammates in an organization that connected a repository see which of its issues you have a session on: your name, the session’s title and branch, and whether an agent is working. Your other machines always see it, with ${thisComputer}’s name. Prompts, transcripts, paths and code never leave ${thisComputer}.`,
     searchTerms: ["account", "show", "my", "team", "what", "i’m", "working", "on"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#workStatus.shareWithTeam" },
   }),
@@ -188,16 +189,16 @@ export const SETTINGS_ROWS = [
     id: "account.identity", section: "account", title: "TerminalX account",
     description: "Sign in or out of the optional TerminalX account.",
     searchTerms: ["account", "terminalx", "account"], scope: "user",
-    storage: { kind: "system", location: "macOS Keychain" }, layout: "content",
+    storage: { kind: "system", location: secretStore }, layout: "content",
   }),
   defineSetting({
-    id: "account.machineName", section: "account", title: "This Mac’s name",
+    id: "account.machineName", section: "account", title: `${ThisComputer}’s name`,
     description: "Name this computer for your paired devices.",
     searchTerms: ["account", "this", "mac’s", "name"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#machineName" }, layout: "content",
   }),
   defineSetting({
-    id: "account.sharing", section: "account", title: "What this Mac shares",
+    id: "account.sharing", section: "account", title: `What ${thisComputer} shares`,
     description: "Inspect the fields sent to the account directory.",
     searchTerms: ["account", "what", "this", "mac", "shares"], scope: "user",
     storage: { kind: "action", location: "Account binding status" }, layout: "content",
@@ -259,9 +260,9 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "agents.setup", section: "agents", title: "Installed agents",
-    description: "Install, sign in to, and re-check local agents, and choose between an agent's subscription login and an API key kept in the Keychain.",
+    description: `Install, sign in to, and re-check local agents, and choose between an agent's subscription login and an API key kept in ${secretStoreShort}.`,
     searchTerms: ["agents", "installed", "sign in", "login", "api key", "keychain", "anthropic_api_key", "openai_api_key", "custom provider"], scope: "user",
-    storage: { kind: "system", location: "Agent CLI installations and credentials; API keys in the macOS Keychain, $TERMINALX_HOME/agent-logins.json names which login each agent uses" }, layout: "content",
+    storage: { kind: "system", location: `Agent CLI installations and credentials; API keys in ${secretStoreThe}, $TERMINALX_HOME/agent-logins.json names which login each agent uses` }, layout: "content",
   }),
   defineSetting({
     id: "appearance.theme", hideDescription: true, hideRowMenu: true, section: "appearance", title: "Theme",
@@ -342,20 +343,20 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#statusBar.usageRefreshMinutes" },
   }),
   defineSetting({
-    id: "machines.allowOperating", section: "machines", title: "Let other computers operate this Mac",
+    id: "machines.allowOperating", section: "machines", title: `Let other computers operate ${thisComputer}`,
     description: "Computers you approve can start sessions, open terminals and change files here. Connections are end-to-end encrypted; the relay only passes sealed messages.",
     searchTerms: ["machines", "operate", "remote", "allow", "computers", "host"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#machines.allowOperating" },
   }),
   defineSetting({
-    id: "machines.listen", section: "machines", title: "Where this Mac listens",
+    id: "machines.listen", section: "machines", title: `Where ${thisComputer} listens`,
     description: "Relay only opens no port. Tailscale, Local network and All interfaces open TCP 6768 on those addresses for paired computers and phones. Callers from public addresses are refused unless you allow them.",
     searchTerms: ["machines", "listen", "listening", "port", "6768", "relay", "tailscale", "local network", "lan", "all interfaces", "public", "address", "bind", "firewall", "root", "sudo"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#machines.listen, machines.allowPublic" }, layout: "content",
   }),
   defineSetting({
-    id: "machines.thisMac", section: "machines", title: "This Mac",
-    description: "The name other computers see for this Mac (the same as Account → This Mac’s name), and the label of its key.",
+    id: "machines.thisMac", section: "machines", title: ThisComputer,
+    description: `The name other computers see for ${thisComputer} (the same as Account → ${ThisComputer}’s name), and the label of its key.`,
     searchTerms: ["machines", "this", "mac", "name", "rename", "fingerprint", "key"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#machineName" },
   }),
@@ -367,12 +368,12 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "machines.yours", section: "machines", title: "Your machines",
-    description: "Computers this Mac can operate, each a section in the sidebar: add one from your account, by pairing code or as a headless server, open it, update it, or remove it. Agents in this Mac's sessions can operate the paired machines with the terminalx command line.",
+    description: `Computers ${thisComputer} can operate, each a section in the sidebar: add one from your account, by pairing code or as a headless server, open it, update it, or remove it. Agents in ${thisComputer}'s sessions can operate the paired machines with the terminalx command line.`,
     searchTerms: ["machines", "add", "a", "machine", "pair", "operate", "mac mini", "server", "headless", "account", "route", "relay", "remove", "connected", "offline", "update", "needs update", "version", "guide", "help", "cli", "terminalx"], scope: "user",
-    storage: { kind: "file", location: "$TERMINALX_HOME/machines.json; Keychain (device tokens)" }, layout: "content",
+    storage: { kind: "file", location: `$TERMINALX_HOME/machines.json; ${secretStoreWord} (device tokens)` }, layout: "content",
   }),
   defineSetting({
-    id: "machines.computers", section: "machines", title: "Computers that can operate this Mac",
+    id: "machines.computers", section: "machines", title: `Computers that can operate ${thisComputer}`,
     description: "Each has its own credential. Revoking one closes its connection at once.",
     searchTerms: ["machines", "computers", "revoke", "operate", "paired", "credential"], scope: "user",
     storage: { kind: "service", location: "TerminalX runtime: paired computers" }, layout: "content",
@@ -409,9 +410,9 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "environment.variables", section: "environment", title: "Environment variables",
-    description: "Variables for new local agent and shell tabs. Repository values override user values. All values are stored in Keychain on this Mac.",
+    description: `Variables for new local agent and shell tabs. Repository values override user values. All values are stored in ${secretStoreShort} on ${thisComputer}.`,
     searchTerms: ["environment", "variables", "env", "dotenv", "secrets", "keychain", "repository", "overrides", "import"], scope: "user",
-    storage: { kind: "system", location: "macOS Keychain (values); $TERMINALX_HOME/environment.json (names and revisions)" }, layout: "content",
+    storage: { kind: "system", location: `${secretStore} (values); $TERMINALX_HOME/environment.json (names and revisions)` }, layout: "content",
   }),
   defineSetting({
     id: "experimental.nativeCodex", section: "experimental", title: "Native Codex",
@@ -560,7 +561,7 @@ export const SETTINGS_ROWS = [
   // PRO-375: data privacy mode moved from General to Account; links to its old id still open it (MOVED_ROWS).
   defineSetting({
     id: "account.dataPrivacy", section: "account", title: "Data privacy mode",
-    description: "Keep TerminalX cloud and remote features off on this Mac. Your agents still use their own network connections. Your sign-in stays saved.",
+    description: `Keep TerminalX cloud and remote features off on ${thisComputer}. Your agents still use their own network connections. Your sign-in stays saved.`,
     searchTerms: ["privacy", "cloud", "remote", "organisations", "organizations", "pairing", "MCP", "logging", "managed"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/data-privacy.json#enabled; macOS managed DataPrivacyMode preference" },
   }),
@@ -641,6 +642,18 @@ export const SETTINGS_ROWS = [
     description: "Your keyboard's spelling correction, smart quotes and dashes, and text replacements apply in prompts, answers to an agent's questions, and notes. Off leaves what you type exactly as typed.",
     searchTerms: ["general", "autocorrect"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.autocorrect" },
+  }),
+  defineSetting({
+    id: "general.aiEditor", section: "general", title: "AI Editor",
+    description: "A button in the composer that fixes, restyles or translates your draft with your Claude Code login. Your text is sent only when you ask, and nothing changes until you apply it.",
+    searchTerms: ["general", "ai", "editor", "grammar", "spelling", "fix", "rewrite", "style", "translate", "prompt"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.aiEditor" },
+  }),
+  defineSetting({
+    id: "general.snippets", section: "general", title: "Prompt snippets",
+    description: "Saved prompts offered under / in the composer, with {{name}} values to fill in.",
+    searchTerms: ["general", "snippets", "prompts", "templates", "saved", "variables"], scope: "user",
+    storage: { kind: "localStorage", location: "raccoon.prefs#promptSnippets" }, layout: "content",
   }),
   defineSetting({
     id: "general.useWorktree", section: "general", title: "New sessions use a worktree",
@@ -875,7 +888,7 @@ export const SETTINGS_ROWS = [
     id: "repositories.environment", section: "repositories", title: "Environment",
     description: "Environment variables for this repository's agents and shells, and the ones its settings file documents.",
     searchTerms: ["repository", "environment", "variables", "env", "secrets", "keychain", "dotenv"], scope: "repository",
-    storage: { kind: "system", location: "macOS Keychain (values); $TERMINALX_HOME/environment.json (names, repository scope)" }, layout: "content",
+    storage: { kind: "system", location: `${secretStore} (values); $TERMINALX_HOME/environment.json (names, repository scope)` }, layout: "content",
   }),
   defineSetting({
     id: "shortcuts.systemWide", section: "shortcuts", title: "System-wide shortcut",
@@ -927,7 +940,7 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "storage.recoveryIncidents", section: "storage", title: "Record recovery incidents",
-    description: "When a session warns that it needs attention, TerminalX notes on this Mac when the warning was raised, how long it was on screen, what you pressed and what became of the turn, so a false warning can be reported with evidence. Only labels, counts and times are kept: never a message, code, a command's output or a file path. Export it to attach to a report; sessions are named by codes that change with every export.",
+    description: `When a session warns that it needs attention, TerminalX notes on ${thisComputer} when the warning was raised, how long it was on screen, what you pressed and what became of the turn, so a false warning can be reported with evidence. Only labels, counts and times are kept: never a message, code, a command's output or a file path. Export it to attach to a report; sessions are named by codes that change with every export.`,
     searchTerms: ["storage", "record", "recovery", "incidents", "diagnostics", "needs attention", "warnings", "privacy", "export"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#diagnostics.recoveryIncidents, $TERMINALX_HOME/diagnostics/recovery-incidents.jsonl" },
   }),
@@ -1016,8 +1029,8 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/transcription-personalization.json#options.composer" }, layout: "row",
   }),
   defineSetting({
-    id: "transcription.remoteContext", hideDescription: true, section: "transcription", title: "Allow remote workspace context on this Mac",
-    description: "Allow context from a remote workspace to be used for dictation on this Mac.",
+    id: "transcription.remoteContext", hideDescription: true, section: "transcription", title: `Allow remote workspace context on ${thisComputer}`,
+    description: `Allow context from a remote workspace to be used for dictation on ${thisComputer}.`,
     searchTerms: ["transcription", "allow", "remote", "workspace", "context", "on", "this", "mac"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/transcription-personalization.json#options.remoteContext" }, layout: "row",
   }),
@@ -1091,7 +1104,7 @@ export const SETTINGS_ROWS = [
   defineSetting({
     id: "account.signOut", section: "account", title: "Sign out",
     description: "Sign out after confirming which account pairings will be removed.", searchTerms: ["account", "organization", "membership"], scope: "user",
-    storage: { kind: "system", location: "macOS Keychain" }, layout: "content",
+    storage: { kind: "system", location: secretStore }, layout: "content",
   }),
   defineSetting({
     id: "account.organizationSettings", section: "account", title: "Organization settings",

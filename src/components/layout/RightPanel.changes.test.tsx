@@ -72,13 +72,13 @@ it("shows workspace work after a status-only turn, and commits from its Uncommit
   expect(invoke).toHaveBeenCalledWith("working_change_sets", { cwd, hideWhitespace: false });
 
   // History and back keep a commit draft.
-  fireEvent.change(screen.getByPlaceholderText("Commit message (⌘⏎ to commit)"), { target: { value: "Keep my draft" } });
+  fireEvent.change(screen.getByPlaceholderText("Commit message (Ctrl+⏎ to commit)"), { target: { value: "Keep my draft" } });
   fireEvent.click(screen.getByRole("button", { name: "Changes scope" }));
   fireEvent.click(screen.getByRole("button", { name: /^All commits/ }));
   expect(await screen.findByText("No commits yet.")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Changes scope" }));
   fireEvent.click(screen.getByRole("button", { name: /^Uncommitted changes/ }));
-  expect(screen.getByPlaceholderText("Commit message (⌘⏎ to commit)")).toHaveProperty("value", "Keep my draft");
+  expect(screen.getByPlaceholderText("Commit message (Ctrl+⏎ to commit)")).toHaveProperty("value", "Keep my draft");
 });
 
 it("offers workspace changes before there is a turn snapshot", async () => {

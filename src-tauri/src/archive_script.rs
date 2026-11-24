@@ -325,7 +325,7 @@ pub(crate) fn last_line(log: &str) -> Option<String> {
     Some(if line.chars().count() > 200 { format!("{}…", line.chars().take(199).collect::<String>()) } else { line.to_string() })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -340,14 +340,16 @@ mod tests {
         let (terminals, sink) = runtime();
         let runner = Runner { terminals: &terminals, sink: &sink, unattended: false };
         let env = vec![("PRO149_VALUE".into(), "spaces ' and $literal".into())];
-        let failure = run(runner, &path, "printf '%s\\n' \"$PWD\" \"$PRO149_VALUE\"; exit 17", &env, Duration::from_secs(10), &|| {}).unwrap().unwrap();
+        let failure = run(runner, &path, "printf '%s\\n' \"$(pwd -W 2>/dev/null || printf %s \"$PWD\")\" \"$PRO149_VALUE\"; exit 17", &env, Duration::from_secs(10), &|| {}).unwrap().unwrap();
         assert_eq!(failure.code, Some(17));
         assert!(!failure.timed_out);
         assert_eq!(failure.detail.as_deref(), Some("spaces ' and $literal"));
         assert_eq!(failure.timeout_minutes, Some(1));
         assert_eq!(failure.message(), "Archive script failed (exit 17). Remove anyway?");
         let output = String::from_utf8_lossy(&terminals.read_output(&failure.pane).unwrap()).into_owned();
-        assert!(output.contains(path.to_str().unwrap()), "{output}");
+        // Git for Windows' `pwd -W` prints the Windows path with forward slashes.
+        let shown = if cfg!(windows) { path.to_string_lossy().replace('\\', "/") } else { path.to_string_lossy().into_owned() };
+        assert!(output.contains(&shown), "{output}");
         assert!(output.contains("spaces ' and $literal"), "{output}");
         assert!(run(runner, &path, "exit 0", &[], Duration::from_secs(10), &|| {}).unwrap().is_none());
         terminals.kill_all();

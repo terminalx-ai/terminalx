@@ -149,7 +149,7 @@ describe("Git in a cloud workspace", () => {
     expect(fake.calls("git.workingChanges").every((params) => params.repo === "libs/core")).toBe(true);
     await screen.findByText("Committing as Ada Lovelace <ada@example.com>");
 
-    fireEvent.change(screen.getByPlaceholderText("Commit message (⌘⏎ to commit)"), { target: { value: "Fix core" } });
+    fireEvent.change(screen.getByPlaceholderText("Commit message (Ctrl+⏎ to commit)"), { target: { value: "Fix core" } });
     fireEvent.click(screen.getByRole("button", { name: /Commit/ }));
     await waitFor(() => expect(fake.calls("git.commit")).toHaveLength(1));
     expect(fake.calls("git.commit")[0]).toMatchObject({ repo: "libs/core", message: "Fix core", author: { name: "Ada Lovelace", email: "ada@example.com" } });
@@ -210,6 +210,6 @@ describe("Git in a cloud workspace", () => {
     expect(screen.getAllByTestId("cloud-unpublished-repo")).toHaveLength(1);
     expect(screen.getByText("1 agent turn is running.")).toBeTruthy();
     await screen.findByText("app.txt");
-    expect(screen.queryByPlaceholderText("Commit message (⌘⏎ to commit)")).toBeNull();
+    expect(screen.queryByPlaceholderText("Commit message (Ctrl+⏎ to commit)")).toBeNull();
   });
 });

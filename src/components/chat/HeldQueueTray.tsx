@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import type { HeldFollowUp, HeldQueue } from "@/types/events";
 import type { HeldQueueChange } from "@/lib/heldQueue";
 import { usePromptTextProps } from "@/lib/autocorrect";
-import { chordOf, isMac } from "@/lib/shortcuts";
+import { ariaKeyShortcut, bindingText, chordOf } from "@/lib/shortcuts";
 import { cn } from "@/lib/cn";
 import { dismissErrorKey, showError } from "@/lib/errorToasts";
 
@@ -221,7 +221,7 @@ export function HeldQueueTray({ queue, onChange, disabled, busy, scope = "held",
             <div className="flex flex-wrap items-center justify-end gap-2">
               <EditButton label="Cancel" keycap="esc" shortcut="Escape" disabled={locked} onClick={() => void finishEdit(false)} />
               <EditButton label="Save" keycap="↵" shortcut="Enter" outline disabled={locked || empty} onClick={() => void finishEdit(true)} />
-              <EditButton label="Save and send now" keycap={isMac ? "⌘↵" : "Ctrl+↵"} shortcut={isMac ? "Meta+Enter" : "Control+Enter"} primary disabled={locked || empty} onClick={() => void finishEdit(true, true)} />
+              <EditButton label="Save and send now" keycap={bindingText("mod+enter")} shortcut={ariaKeyShortcut("mod+enter") ?? ""} primary disabled={locked || empty} onClick={() => void finishEdit(true, true)} />
             </div>
           </li>;
         }

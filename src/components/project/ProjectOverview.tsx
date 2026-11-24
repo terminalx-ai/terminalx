@@ -1,3 +1,4 @@
+import { revealInFileManager } from "@/lib/platform";
 import { PrivacyImage } from "@/components/ui/privacy-image";
 import { SessionStatus } from "@/components/ui/SessionStatus";
 import { useEffect, useState } from "react";
@@ -79,8 +80,8 @@ export function ProjectOverview({ path }: { path: string }) {
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
-            <WithTooltip label="Reveal in Finder">
-              <Button variant="ghost" size="icon-sm" aria-label="Reveal in Finder" onClick={() => void revealItemInDir(path)}>
+            <WithTooltip label={revealInFileManager}>
+              <Button variant="ghost" size="icon-sm" aria-label={revealInFileManager} onClick={() => void revealItemInDir(path)}>
                 <FolderOpen />
               </Button>
             </WithTooltip>

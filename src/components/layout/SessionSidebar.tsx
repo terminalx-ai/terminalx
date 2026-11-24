@@ -1,5 +1,6 @@
 import { ArchiveRowButton, DraftPreview, SessionRowExtras, useSessionDraft } from "./SessionRowExtras";
 import { BotsSidebarSection } from "@/components/bots/BotsSidebarSection";
+import { thisComputer, fileManager } from "@/lib/platform";
 import { isUnread } from "@/lib/dashboard";
 import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
 import { GroupHeader, LocalSidebarSections, MoveToLocalSectionItems } from "./LocalSidebarSections";
@@ -403,7 +404,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
                 id="projects"
                 label={sectioned ? "Local" : "Projects"}
                 mark={sectioned ? <Laptop className="size-3.5 shrink-0 text-muted-foreground" /> : undefined}
-                note={sectioned ? "this Mac" : undefined}
+                note={sectioned ? thisComputer : undefined}
                 heading={sectioned || hasSections}
                 actions={sectioned ? addProjectMenu : undefined}
               >
@@ -884,8 +885,8 @@ function ProjectGroup({
               <ExternalLink /> Open in
             </DropdownMenuSubTrigger>
             <DropdownMenuSubContent className="w-52">
-              <DropdownMenuItem onSelect={() => void Promise.resolve().then(() => revealItemInDir(group.path)).catch(reportError(`Couldn't reveal “${group.name}” in Finder`))}>
-                <FolderOpen /> Finder
+              <DropdownMenuItem onSelect={() => void Promise.resolve().then(() => revealItemInDir(group.path)).catch(reportError(`Couldn't reveal “${group.name}” in ${fileManager}`))}>
+                <FolderOpen /> {fileManager}
               </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => void copyText(group.path).catch(reportError(`Couldn't copy the path of “${group.name}”`))}>
                 <Copy /> Copy path
@@ -1337,8 +1338,8 @@ export function ConversationMenuItems({ session, branch, rename, renameBranch, i
           <ExternalLink /> Open in
         </SubTrigger>
         <SubContent className="w-56">
-          <Item onSelect={() => void Promise.resolve().then(() => revealItemInDir(session.cwd)).catch(reportError(`Couldn't reveal “${title}” in Finder`))}>
-            <FolderOpen /> Finder
+          <Item onSelect={() => void Promise.resolve().then(() => revealItemInDir(session.cwd)).catch(reportError(`Couldn't reveal “${title}” in ${fileManager}`))}>
+            <FolderOpen /> {fileManager}
           </Item>
           {session.tabs.length > 0 && (
             <Item onSelect={() => void showFloatingWindow(session.id, session.activeTab).catch(reportError(`Couldn't open “${title}” in a floating window`))}>

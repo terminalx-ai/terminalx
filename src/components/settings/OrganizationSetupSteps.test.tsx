@@ -255,13 +255,13 @@ describe("the agent logins step", () => {
     await waitFor(() => expect(record.step).toBe("logins"));
     shown.rerender(view());
     const step = screen.getByTestId("organization-setup-logins");
-    expect(step.textContent).toContain("Claude Code (Log in with Claude or an API key), Codex (Log in with ChatGPT or an API key) or Cursor (an API key), or lend this Mac's sign-in");
+    expect(step.textContent).toContain("Claude Code (Log in with Claude or an API key), Codex (Log in with ChatGPT or an API key) or Cursor (an API key), or lend this computer's sign-in");
     expect(screen.getByTestId("agent-logins-title").textContent).toBe("Agent logins for Team");
     // Every way to connect each agent is offered here, as on the organization's page.
     await screen.findAllByTestId("agent-login");
     expect(screen.getByRole("button", { name: "Log in with Claude" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Log in with ChatGPT" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Lend this Mac's Codex sign-in (temporary)" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Lend this computer's Codex sign-in (temporary)" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Continue" }).hasAttribute("disabled")).toBe(true);
 
     key("codex");

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { revealInFileManager } from "@/lib/platform";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -71,7 +72,7 @@ describe("the file tree on a cloud workspace", () => {
     // A local-only action is not offered for a remote file.
     fireEvent.contextMenu(screen.getByText("README.md"));
     await screen.findByRole("menuitem", { name: "Copy relative path" });
-    expect(screen.queryByRole("menuitem", { name: "Reveal in Finder" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: revealInFileManager })).toBeNull();
     expect(screen.queryByRole("menuitem", { name: "Copy path" })).toBeNull();
     fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
 

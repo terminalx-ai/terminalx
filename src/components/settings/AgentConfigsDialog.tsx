@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
+import { bindingText } from "@/lib/shortcuts";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogScrollArea, DialogTitle } from "@/components/ui/dialog";
 import { Kbd } from "@/components/ui/tooltip";
@@ -344,7 +345,7 @@ export function AgentConfigsDialog({ onClose }: { onClose: () => void }) {
             <Button variant="outline" disabled={applying} onClick={onClose}>Cancel</Button>
             <Button disabled={!ready || applying} onClick={() => void apply()} aria-keyshortcuts="Meta+Enter Control+Enter">
               {applying ? "Applying…" : `Apply ${count} ${count === 1 ? "change" : "changes"}`}
-              <Kbd className="ml-0.5 bg-transparent text-xs text-current opacity-70">⌘↵</Kbd>
+              <Kbd className="ml-0.5 bg-transparent text-xs text-current opacity-70">{bindingText("mod+enter")}</Kbd>
             </Button>
           </div>
         </div>

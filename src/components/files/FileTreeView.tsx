@@ -1,3 +1,4 @@
+import { revealInFileManager } from "@/lib/platform";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AppWindow, AtSign, ChevronDown, ChevronRight, Copy, ExternalLink, Eye, FileDiff, FilePlus, FileSearch, Folder, FolderOpen, FolderSearch, FolderTree,
@@ -22,7 +23,7 @@ import type { ChangeStatus } from "@/types/session";
 import { FileTypeIcon } from "./FileTypeIcon";
 import { copyText } from "@/lib/clipboard";
 import { openProjectSearch } from "@/lib/projectSearch";
-import { isMac, keycaps, useKeymap } from "@/lib/shortcuts";
+import { isMac, keycaps, useKeymap, bindingText } from "@/lib/shortcuts";
 import { Button } from "@/components/ui/button";
 import { KbdGroup } from "@/components/ui/tooltip";
 
@@ -518,12 +519,12 @@ function RootedFileTreeView({
             <button
               type="button"
               aria-label="Open file by name"
-              title={quickOpenKeys ? `Open file by name (${shortcutText(quickOpenKeys)})` : "Open file by name"}
+              title={quickOpenKeys ? `Open file by name (${bindingText(quickOpenKeys)})` : "Open file by name"}
               onClick={() => runShortcut("files.quickOpen")}
               className={cn(headerButton, "font-sans text-[11.5px]")}
               data-testid="file-tree-quick-open"
             >
-              {quickOpenKeys ? <span aria-hidden>{shortcutText(quickOpenKeys)}</span> : <FileSearch className="size-3.5" />}
+              {quickOpenKeys ? <span aria-hidden>{bindingText(quickOpenKeys)}</span> : <FileSearch className="size-3.5" />}
             </button>
           )}
         </div>
@@ -742,7 +743,7 @@ function RootedFileTreeView({
                   {!source && (
                     <ContextMenuItem onSelect={() => copy(abs(row.path))}>
                       <Copy /> Copy path
-                      <Keys text={isMac ? "⌥⌘C" : shortcutText("mod+alt+c")} />
+                      <Keys text={bindingText("mod+alt+c")} />
                     </ContextMenuItem>
                   )}
                   <ContextMenuItem onSelect={() => copy(row.path)}>
@@ -750,7 +751,7 @@ function RootedFileTreeView({
                   </ContextMenuItem>
                   {!source && (
                     <ContextMenuItem onSelect={() => void revealItemInDir(abs(row.path)).catch(() => {})}>
-                      <FolderSearch /> Reveal in Finder
+                      <FolderSearch /> {revealInFileManager}
                     </ContextMenuItem>
                   )}
                   {!row.isDir && git?.discard && (
@@ -781,9 +782,6 @@ function RootedFileTreeView({
     </div>
   );
 }
-
-/** A binding as one run of text: "⌘P" on a Mac, "Ctrl+P" elsewhere. */
-const shortcutText = (binding: string) => keycaps(binding).join(isMac ? "" : "+");
 
 /** A menu item's keys at its end; kept out of the item's accessible name. */
 function Keys({ text }: { text: string }) {

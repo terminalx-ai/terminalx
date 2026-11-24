@@ -70,9 +70,15 @@ pub fn exchange(path: &Path, bytes: Vec<u8>, timeout: Duration) -> io::Result<St
     .map_err(|_| io::Error::other("pipe client thread panicked"))?
 }
 
+/// Serve `path`: each connection sends one frame, which `handler` answers on
+/// a blocking thread, told the frame and the process that sent it. Windows
+/// records that process when the client connects (what `SO_PEERCRED` is on a
+/// Unix socket), so it is whoever opened the pipe, whatever the frame says. A
+/// connection whose process cannot be read is closed unanswered: its frame
+/// is never handled as if nobody in particular had sent it.
 pub fn serve(
     path: PathBuf,
-    handler: impl Fn(String) -> String + Send + Sync + 'static,
+    handler: impl Fn(String, u32) -> String + Send + Sync + 'static,
 ) -> io::Result<()> {
     let (started, ready) = std::sync::mpsc::sync_channel(1);
     let handler = Arc::new(handler);
@@ -103,6 +109,17 @@ pub fn serve(
                             break;
                         }
                     };
+                    let client = {
+                        use std::os::windows::io::AsRawHandle;
+                        crate::win::process::pipe_client_pid(connected.as_raw_handle() as _)
+                    };
+                    let client = match client {
+                        Ok(client) => client,
+                        Err(error) => {
+                            log::warn!("refused a frame on {}: its sender could not be read: {error}", path.display());
+                            continue;
+                        }
+                    };
                     let handler = handler.clone();
                     tokio::spawn(async move {
                         let (read, mut write) = tokio::io::split(connected);
@@ -120,7 +137,7 @@ pub fn serve(
                         {
                             return;
                         }
-                        let Ok(reply) = tokio::task::spawn_blocking(move || handler(line)).await
+                        let Ok(reply) = tokio::task::spawn_blocking(move || handler(line, client)).await
                         else {
                             return;
                         };
@@ -145,7 +162,7 @@ mod tests {
     #[test]
     fn concurrent_requests_and_timeouts() {
         let path = PathBuf::from(format!(r"\\.\pipe\terminalx-test-{}", uuid::Uuid::new_v4()));
-        serve(path.clone(), |line| {
+        serve(path.clone(), |line, _client| {
             if line == "slow\n" {
                 std::thread::sleep(Duration::from_millis(200));
             }
@@ -163,5 +180,14 @@ mod tests {
             "fast\n"
         );
         assert_eq!(slow.join().unwrap(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn the_handler_is_told_which_process_sent_the_frame() {
+        let path = PathBuf::from(format!(r"\\.\pipe\terminalx-test-{}", uuid::Uuid::new_v4()));
+        serve(path.clone(), |_line, client| format!("{client}\n")).unwrap();
+        // Whatever the frame claims, the sender is the process that opened the pipe.
+        let answer = exchange(&path, b"from process 1\n".to_vec(), Duration::from_secs(2)).unwrap();
+        assert_eq!(answer, format!("{}\n", std::process::id()));
     }
 }

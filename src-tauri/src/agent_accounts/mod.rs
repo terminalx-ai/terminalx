@@ -310,7 +310,7 @@ fn view(root: &Path, agent: Agent, entry: &Entry) -> AgentAccounts {
         id: LOCAL.into(),
         agent: agent.id(),
         kind: Kind::Subscription,
-        label: "This Mac's login".into(),
+        label: crate::platform_profile::localize("This Mac's login"),
         email: None,
         plan: None,
         organization: None,
@@ -401,7 +401,7 @@ fn clean_label(label: &str) -> Result<Option<String>> {
 
 /// Give account `id` the label `label`; an empty one goes back to the default.
 pub(crate) fn relabel_in(store: &Store<'_>, agent: Agent, id: &str, label: &str) -> Result<AgentAccounts> {
-    ensure!(id != LOCAL, "This Mac's login keeps its name.");
+    ensure!(id != LOCAL, "{}", crate::platform_profile::localize("This Mac's login keeps its name."));
     let label = clean_label(label)?;
     store.update(agent, |entry| {
         if id == SAVED_KEY && entry.key.is_some() {
@@ -606,7 +606,7 @@ pub(crate) trait SignOut {
 /// removed as a link, never followed. A key account's item is deleted
 /// after the index lets go of it.
 pub(crate) fn remove_in(store: &Store<'_>, agent: Agent, id: &str, sign_out: &dyn SignOut) -> Result<AgentAccounts> {
-    ensure!(id != LOCAL, "This Mac's login cannot be removed here. Sign out with {}'s own logout instead.", agent.label());
+    ensure!(id != LOCAL, "{}", crate::platform_profile::localize(&format!("This Mac's login cannot be removed here. Sign out with {}'s own logout instead.", agent.label())));
     let entry = store.entry(agent)?;
     ensure!(exists(&entry, id) && valid_id(id), "That account is no longer listed.");
     let forget = |entry: &mut Entry| {

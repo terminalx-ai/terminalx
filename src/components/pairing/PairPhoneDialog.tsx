@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { thisComputer } from "@/lib/platform";
 import QRCode from "qrcode";
 import { Check, Copy, Loader2, RefreshCw, Smartphone, X } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -20,8 +21,8 @@ const MODE_OPTIONS = [
 ];
 
 const MODE_COPY: Record<PairingConnectionMode, string> = {
-  automatic: "Phone can be on cellular or any Wi-Fi. Nearby, it tries this Mac directly first, then falls back to Relay. Every path is end-to-end encrypted.",
-  "local-only": "Phone must be on this Wi-Fi or reach this Mac through Tailscale. No Relay invite is made. The connection is end-to-end encrypted.",
+  automatic: `Phone can be on cellular or any Wi-Fi. Nearby, it tries ${thisComputer} directly first, then falls back to Relay. Every path is end-to-end encrypted.`,
+  "local-only": `Phone must be on this Wi-Fi or reach ${thisComputer} through Tailscale. No Relay invite is made. The connection is end-to-end encrypted.`,
 };
 
 const sectionLabel = "text-[11px] uppercase tracking-[.08em] text-faint";
@@ -54,7 +55,7 @@ function PairPhoneDialog() {
           <div className="min-w-0 leading-4">
             <DialogTitle className="text-sm font-semibold">Pair a phone</DialogTitle>
             <DialogDescription className="truncate text-[11.5px] text-faint">
-              Drive this Mac's sessions and your cloud workspaces from TerminalX for iPhone
+              Drive {thisComputer}'s sessions and your cloud workspaces from TerminalX for iPhone
             </DialogDescription>
           </div>
           <DialogClose asChild>
@@ -115,9 +116,9 @@ function PairPhoneBody() {
           )}
         </div>
         <div className="grid min-w-0 content-start gap-3 p-5">
-          <div className={sectionLabel} id="pair-path-label">How the phone reaches this Mac</div>
+          <div className={sectionLabel} id="pair-path-label">How the phone reaches {thisComputer}</div>
           <Segmented
-            aria-label="How the phone reaches this Mac"
+            aria-label={`How the phone reaches ${thisComputer}`}
             value={mode}
             onChange={changeMode}
             options={MODE_OPTIONS}
@@ -134,10 +135,10 @@ function PairPhoneBody() {
             <li>Approve here when the phone asks</li>
           </ol>
           <label className="mt-1 flex items-center gap-3">
-            <span className="text-[12.5px]">Keep this Mac awake while a phone is connected</span>
+            <span className="text-[12.5px]">Keep {thisComputer} awake while a phone is connected</span>
             <Switch
               className="ml-auto"
-              aria-label="Keep this Mac awake while a phone is connected"
+              aria-label={`Keep ${thisComputer} awake while a phone is connected`}
               checked={status.keepAwake}
               onCheckedChange={(enabled) => void setKeepAwake(enabled)}
             />

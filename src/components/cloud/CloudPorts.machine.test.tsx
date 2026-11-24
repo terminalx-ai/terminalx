@@ -302,12 +302,12 @@ describe("the forward chip and its popover (14.10 on 21.08)", () => {
     ];
     announce({ forwards });
     expect(screen.getByTestId("port-forward-count").textContent).toBe("2");
-    expect(screen.getByRole("button", { name: "2 ports forwarded to this Mac" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "2 ports forwarded to this computer" })).toBeTruthy();
 
     fireEvent.click(screen.getByTestId("port-forward-chip"));
     const popover = await screen.findByTestId("ports-popover");
     expect(popover.textContent).toContain("Forward ports");
-    expect(popover.textContent).toContain("to this Mac");
+    expect(popover.textContent).toContain("to this computer");
     expect(popover.textContent).toContain("Ports detected");
     expect(popover.textContent).toContain("Forwards listen on 127.0.0.1 only and travel inside your encrypted connection to Mac mini. Auto-forwarding skips 32768–60999.");
     expect(popover.textContent).not.toMatch(/preview link/i);

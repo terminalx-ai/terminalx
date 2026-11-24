@@ -57,7 +57,7 @@ describe("Add a machine: Headless server (screen 21.06)", () => {
     const { dialog } = openHeadless();
     expect(within(dialog).getByRole("tab", { name: "Headless server" }).getAttribute("aria-selected")).toBe("true");
     expect(within(dialog).getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["On your account", "Pairing code", "Headless server"]);
-    expect(within(dialog).getByText(/^A server runs TerminalX without a window\. This Mac connects to it directly, on this network or over Tailscale, so its TCP port 6768 must be reachable from here\.$/)).toBeTruthy();
+    expect(within(dialog).getByText(/^A server runs TerminalX without a window\. This computer connects to it directly, on this network or over Tailscale, so its TCP port 6768 must be reachable from here\.$/)).toBeTruthy();
 
     const steps = within(within(dialog).getByTestId("headless-server").querySelector("ol")!).getAllByRole("listitem");
     expect(steps.map((step) => step.querySelector(".font-medium")?.textContent)).toEqual(["Install TerminalX on the server", "Create a pairing code there", "Paste the code here"]);
@@ -149,7 +149,7 @@ describe("Add a machine: Headless server (screen 21.06)", () => {
     fireEvent.click(await within(dialog).findByRole("button", { name: "Continue" }));
     await within(dialog).findByText("Waiting for approval on build-01…");
     await act(async () => pairAnswer.resolve({ paired: false, reason: "unreachable", message: "no endpoint" }));
-    expect((await within(dialog).findByRole("alert")).textContent).toContain("This Mac could not reach build-01");
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("This computer could not reach build-01");
 
     pairAnswer = deferred<MachinePairResult>();
     fireEvent.click(within(dialog).getByRole("button", { name: "Try again" }));
@@ -157,7 +157,7 @@ describe("Add a machine: Headless server (screen 21.06)", () => {
     expect(pairCalls()).toHaveLength(2);
 
     await act(async () => pairAnswer.resolve({ paired: false, reason: "not-approved", message: "no" }));
-    expect((await within(dialog).findByRole("alert")).textContent).toContain("build-01 did not allow this Mac");
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("build-01 did not allow this computer");
     expect(within(dialog).queryByRole("button", { name: "Try again" })).toBeNull();
     expect(field(dialog).readOnly).toBe(false);
   });

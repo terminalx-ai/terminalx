@@ -212,7 +212,7 @@ pub struct Scope {
 pub type PullRequests<'a> = &'a dyn Fn(&Path, &[String]) -> anyhow::Result<HashMap<String, BranchPr>>;
 
 /// Everything one pass reads about its host.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub struct Sweep<'a> {
     pub host: &'a Host<'a>,
     pub sink: &'a dyn EventSink,
@@ -726,7 +726,7 @@ fn delete_remote_branch(project: &Path, branch: &str, merged: &str) -> BranchFat
 /// One pass over the projects in `scope`: see what merged, keep what is not
 /// safe and say why, and remove what is safe and due. With no project in
 /// scope it removes nothing and forgets what it had seen.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub fn sweep(run: &Sweep<'_>, scope: &Scope) -> anyhow::Result<Swept> {
     sweep_fallible(&FallibleSweep { host: run.host, sink: run.sink,
         stop: &|entry| { (run.stop)(entry); Ok(()) }, pull_requests: run.pull_requests, now: run.now }, scope)
@@ -949,7 +949,7 @@ pub fn restore(host: &Host<'_>, sink: &dyn EventSink, id: &str, now: DateTime<Ut
     Ok(Restored { record: restored.unwrap_or(record), notes })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     include!("merged_cleanup_tests.rs");
     include!("local_runtime/merged_stop_regression.rs");

@@ -125,6 +125,7 @@ struct Recognised { process: (i32, u64), proven: bool }
 static KNOWN_WINDOW: Mutex<Option<(i32, u64)>> = Mutex::new(None);
 
 /// The window's process as this runtime knows it now: for the handover record.
+#[cfg(unix)]
 pub(crate) fn known_window() -> Option<(i32, u64)> {
     *KNOWN_WINDOW.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -236,6 +237,7 @@ impl Registry {
     /// live process, so one that ended, or a later one given its pid, is not
     /// it. Where the window's key is pinned, only a registrant that proved it
     /// is recognised (`control`, PRO-489).
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn window_process(&self) -> Option<(i32, u64)> {
         self.1.lock().unwrap_or_else(|e| e.into_inner()).map(|recognised| recognised.process)
     }
@@ -243,6 +245,7 @@ impl Registry {
     /// Recognise `process` as the window, after it registered. The caller
     /// leaves out a registrant that runs in a pane or under this runtime.
     /// `proven`: it proved it with the window's key here.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn recognise(&self, process: (i32, u64), proven: bool) {
         *self.1.lock().unwrap_or_else(|e| e.into_inner()) = Some(Recognised { process, proven });
         *KNOWN_WINDOW.lock().unwrap_or_else(|e| e.into_inner()) = Some(process);
@@ -255,6 +258,7 @@ impl Registry {
     /// carried over, which registers here itself and is judged then. Where
     /// the sender cannot be told, only one this runtime never saw prove it is
     /// unseated.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn unproven_from(&self, caller: Option<i32>) {
         let mut recognised = self.1.lock().unwrap_or_else(|e| e.into_inner());
         if recognised.is_some_and(|window| caller.map_or(!window.proven, |caller| caller == window.process.0)) {
@@ -264,6 +268,7 @@ impl Registry {
     }
 
     /// The window's process the runtime this one replaced knew, until a window registers here.
+    #[cfg(any(unix, test))]
     pub(crate) fn handed_over(&self, process: Option<(i32, u64)>) {
         let mut known = self.1.lock().unwrap_or_else(|e| e.into_inner());
         if known.is_none() {
@@ -511,6 +516,7 @@ mod tests {
     /// while Bots is on; a window service asked for meanwhile says why, not
     /// that no window is open.
     #[test]
+    #[cfg_attr(windows, ignore = "Bots are off on Windows")]
     fn an_unproven_window_serves_only_with_bots_off_and_gives_way_to_a_proven_one() {
         let _home = crate::store::temp_home();
         let bots = |on: bool| {

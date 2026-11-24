@@ -1,4 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
+import { ThisComputer, thisComputer } from "@/lib/platform";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { WorkspaceRpcError, machineUpdateStatus, type WorkspaceConnectionState, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
@@ -201,7 +202,7 @@ export function updateRefusalText(error: unknown, name: string): string {
   if (error instanceof WorkspaceRpcError) {
     if (error.code === "update_unavailable") return `${name} cannot update from here. Update it the way it was installed, or open TerminalX on it.`;
     if (error.code === "update_busy") return `${name} is already updating.`;
-    if (error.code === "capability_not_granted") return `${name} runs a TerminalX that cannot be updated from this Mac. Update it on ${name}.`;
+    if (error.code === "capability_not_granted") return `${name} runs a TerminalX that cannot be updated from ${thisComputer}. Update it on ${name}.`;
   }
   return errorMessage(error);
 }
@@ -288,13 +289,13 @@ export async function answerAppUpdateRequest(): Promise<void> {
     if (found.kind === "none") return void (await reportAppUpdate({ phase: "upToDate" }));
     if (found.kind === "error") return void (await reportAppUpdate({ phase: "failed", message: found.message }));
     if (found.kind === "installing") return void (await reportAppUpdate({ phase: "installing", step: found.version, available: found.version }));
-    if (found.kind === "choosing") return void (await reportAppUpdate({ phase: "installing", step: found.update.version, available: found.update.version, message: "Waiting for someone at this Mac: updating now would stop work that is running." }));
-    if (found.kind !== "available") return void (await reportAppUpdate({ phase: "failed", message: "This Mac could not check for an update." }));
+    if (found.kind === "choosing") return void (await reportAppUpdate({ phase: "installing", step: found.update.version, available: found.update.version, message: `Waiting for someone at ${thisComputer}: updating now would stop work that is running.` }));
+    if (found.kind !== "available") return void (await reportAppUpdate({ phase: "failed", message: `${ThisComputer} could not check for an update.` }));
     await reportAppUpdate({ phase: "downloading", step: found.update.version, available: found.update.version });
     await installUpdate();
     const after = getUpdateState();
     if (after.kind === "error") await reportAppUpdate({ phase: "failed", message: after.message });
-    else if (after.kind === "choosing") await reportAppUpdate({ phase: "installing", step: after.update.version, message: "Waiting for someone at this Mac: updating now would stop work that is running." });
+    else if (after.kind === "choosing") await reportAppUpdate({ phase: "installing", step: after.update.version, message: `Waiting for someone at ${thisComputer}: updating now would stop work that is running.` });
     else if (after.kind === "installing" && !restarting) await reportAppUpdate({ phase: "installing", step: after.version });
   } finally {
     stop();

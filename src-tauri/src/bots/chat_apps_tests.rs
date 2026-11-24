@@ -58,6 +58,7 @@ fn a_code_is_read_the_ways_people_type_it() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_code_links_the_chat_it_is_sent_from_and_nothing_else_reaches_the_bot() {
     let _home = bots_on();
     let bot = bot_with(json!([]));
@@ -102,6 +103,7 @@ fn a_code_links_the_chat_it_is_sent_from_and_nothing_else_reaches_the_bot() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_code_that_is_old_or_tried_too_often_links_nothing() {
     let _home = bots_on();
     let bot = bot_with(json!([]));
@@ -134,6 +136,7 @@ fn a_code_that_is_old_or_tried_too_often_links_nothing() {
 /// PRO-509: a member of a linked group who guesses codes there uses up that chat's tries like anyone: a right guess
 /// would link the group again with them as its owner.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_linked_chat_guessing_codes_uses_up_its_tries_too() {
     let _home = bots_on();
     let bot = bot_with(json!([]));
@@ -149,6 +152,7 @@ fn a_linked_chat_guessing_codes_uses_up_its_tries_too() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_view_never_shows_a_waiting_code() {
     let _home = bots_on();
     let bot = bot_with(json!([]));
@@ -160,6 +164,7 @@ fn the_view_never_shows_a_waiting_code() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_message_is_known_again_by_its_login_not_only_its_bot() {
     let _home = bots_on();
     let bot = bot_with(json!([]));
@@ -180,6 +185,7 @@ fn a_message_is_known_again_by_its_login_not_only_its_bot() {
 /// where the first was read up to. Its poll starts from nothing, its first update (a link code) is taken in, and
 /// the first bot's offset goes.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_second_telegram_bot_with_lower_update_ids_is_read_from_its_first_update() {
     use crate::bots::chat_app_test_server as server;
     let _home = bots_on();
@@ -232,6 +238,7 @@ fn a_second_telegram_bot_with_lower_update_ids_is_read_from_its_first_update() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn in_a_linked_channel_others_ask_only_when_listed_by_their_email() {
     let _home = bots_on();
     let bot = bot_with(json!([{"kind": "person", "id": "u-ankit", "name": "Ankit Kumar", "may": "ask", "email": "ankit@example.com"}]));
@@ -254,6 +261,7 @@ fn in_a_linked_channel_others_ask_only_when_listed_by_their_email() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn on_telegram_only_the_person_who_linked_a_group_asks_there() {
     let _home = bots_on();
     let bot = bot_with(json!([{"kind": "person", "id": "u-ankit", "name": "Ankit Kumar", "may": "ask", "email": "ankit@example.com"}]));
@@ -265,6 +273,7 @@ fn on_telegram_only_the_person_who_linked_a_group_asks_there() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_agent_is_given_the_words_fenced_as_a_request_and_the_app_is_their_author() {
     let _home = bots_on();
     let bot = bot_with(json!([]));
@@ -336,6 +345,7 @@ fn linked(store: &mut Store, bot: &str, service: &str, chat: &str, direct: bool)
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn reports_and_questions_go_to_the_owners_direct_chats_and_an_approval_has_no_buttons() {
     let _home = bots_on();
     let bot = bot_with(json!([]));
@@ -407,6 +417,7 @@ fn also_sends_to_takes_only_services_with_a_direct_chat_linked() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn tokens_stay_in_the_logins_file_owner_only_and_out_of_every_answer() {
     let _home = bots_on();
     let bot = bot_with(json!([]));
