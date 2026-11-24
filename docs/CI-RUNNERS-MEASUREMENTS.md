@@ -570,3 +570,14 @@ parts 2 to 4 7 min 21 s to 7 min 57 s and the binaries 8 min 27 s,
 `webkit-layout` 29 min 38 s. `linux-rust` 27 min 19 s and part 1 (cancelled
 at 30 min 16 s) were the slow mirror. `macos-native` was cancelled at
 32 min 9 s. The Linux WebKit trial failed in all four parts.
+
+### Seen on #1525's run (45344630294, head `a51b839f`), neither from that change
+
+| Test or check | Where | What it said |
+| --- | --- | --- |
+| `machine_host::security_tests::the_listen_choice_decides_what_is_bound_and_relay_only_opens_no_port` | `linux-rust-tests (3)`, `src-tauri/src/machine_host/security_tests.rs:567` | "the port is closed": the test connects to the old port number after the listener closed and expects a refusal; under nextest another test's process can be given that port. On PRO-513, with a retry entry. |
+| `setup check coach (dark): the coach mark sits wholly above the composer` | `webkit-layout` on macOS | 128 of 129 in 538 s, on a runner that ran 4 at once. |
+
+`macos-native` on that head (a pull request that selects it): Clippy took
+21 min 39 s for its two steps and the library's test build 32 min 54 s
+(07:31:38 to 08:04:32); the job was still running when this was written.
