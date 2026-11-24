@@ -58,7 +58,9 @@ try {
     assert.notEqual(backgrounds.at(-1), "rgba(0, 0, 0, 0)", "the popover is opaque in the actual app theme");
     await page.keyboard.press("Escape");
     await panel.waitFor({ state: "hidden" });
-    assert(await trigger.evaluate((node) => node === document.activeElement), "focus returns on dismissal");
+    // Radix's FocusScope gives focus back in a zero-delay timer set by its unmount effect, both after the panel is
+    // hidden: read at once, a busy runner found it not back yet. Waited for; it fails as before if it never comes back.
+    await page.waitForFunction((node) => node === document.activeElement, await trigger.elementHandle()).catch(() => assert.fail("focus returns on dismissal"));
     await trigger.click();
     await panel.getByText("24.22.1", { exact: true }).first().waitFor();
     await page.evaluate(() => window.setAuthority("participate"));
