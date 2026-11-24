@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccountStatus, CloudWorkspaceListItem } from "@/lib/api";
 import { getPrefs, setPrefs } from "@/lib/prefs";
-import { organizationRunningCount, organizationVisibility, reconcileOrganizationPrefs, setOrganizationHidden } from "./organizationVisibility";
+import { ONLY_THIS_MAC, organizationRunningCount, organizationSwitchTargets, organizationVisibility, reconcileOrganizationPrefs, setOrganizationHidden } from "./organizationVisibility";
 import { getCloudCatalog } from "@/lib/cloudCatalog";
 
 const mocks = vi.hoisted(() => ({ status: null as unknown as AccountStatus, ask: vi.fn() }));
@@ -46,6 +46,29 @@ describe("organization visibility", () => {
     expect(revealed.temporaryOrganization).toBe("a");
     expect(organizationVisibility(account, before, "local-session").visibleIds.has("a")).toBe(false);
     expect(getPrefs()).toBe(before);
+  });
+
+  it("keeps Only this Mac across roster refreshes and suppresses temporary organization sections", () => {
+    setPrefs({ organizationDisplay: "one", selectedOrganization: ONLY_THIS_MAC, hiddenOrganizations: ["c"] });
+    reconcileOrganizationPrefs(account, true);
+    const visibility = organizationVisibility(account, getPrefs(), "cloud:a:ws:session", true);
+    expect(visibility.orgs).toEqual([]);
+    expect(visibility.temporaryOrganization).toBeNull();
+    expect(visibility.selectedOrganization).toBe(ONLY_THIS_MAC);
+    expect(getPrefs().selectedOrganization).toBe(ONLY_THIS_MAC);
+    expect(ids(organizationVisibility(account, getPrefs()).orgs)).toEqual(["b"]);
+
+    setPrefs({ organizationDisplay: "all" });
+    expect(ids(organizationVisibility(account, getPrefs(), null, true).orgs)).toEqual(["b", "a"]);
+  });
+
+  it("orders all memberships, including non-cloud organizations, with Only this Mac last", () => {
+    const status = { ...account, organizations: [...account.organizations!, { id: "none", name: "Community", role: "member" }] };
+    expect(ids(organizationSwitchTargets(status))).toEqual(["b", "a", "none", "c", ONLY_THIS_MAC]);
+    setPrefs({ organizationDisplay: "one", selectedOrganization: "none" });
+    reconcileOrganizationPrefs(status, true);
+    expect(organizationVisibility(status, getPrefs(), null, true).selectedOrganization).toBe("none");
+    expect(ids(organizationVisibility(status, getPrefs(), null, true).orgs)).toEqual(["none"]);
   });
 
   it("shows new memberships in All and preserves a chosen organization in One", () => {

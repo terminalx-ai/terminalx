@@ -5,7 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Segmented, Switch } from "@/components/ui/controls";
 import { signIn, useAccount } from "@/lib/account";
 import { useCloudCatalog } from "@/lib/cloudCatalog";
-import { organizationName, organizationRunningCount, setOrganizationHidden, useOrganizationVisibility } from "@/lib/organizationVisibility";
+import { organizationName, organizationRunningCount, organizationSwitchTargets, setOrganizationHidden, switchOrganization, useOrganizationVisibility } from "@/lib/organizationVisibility";
+import { useOrganizationSwitchingEnabled } from "@/lib/organizationVisibilityGate";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { forgetAgentLoginsRequest } from "@/lib/settingsLinks";
 import { OrganizationSettings, type OrganizationPage } from "./OrganizationSettings";
@@ -29,6 +30,8 @@ function OrganizationsTabContent({ organizationId, page, onOpenOrganization }: O
   const { status, busy } = useAccount();
   const { all, selectedOrganization, temporaryOrganization } = useOrganizationVisibility();
   const catalog = useCloudCatalog();
+  const switchingEnabled = useOrganizationSwitchingEnabled();
+  const switchTargets = switchingEnabled ? organizationSwitchTargets(status) : all.map((org) => ({ id: org.id, org }));
   // Organizations whose full-window setup was left unfinished on this Mac.
   const email = status.state === "signed-in" ? (status.identity?.email ?? "") : "";
   const unfinished = new Set(email ? loadSetups(email).filter(unfinishedFlow).map((record) => record.organizationId!) : []);
@@ -61,8 +64,11 @@ function OrganizationsTabContent({ organizationId, page, onOpenOrganization }: O
           <div className="flex flex-wrap items-center justify-end gap-2">
             <Segmented aria-label="Organizations in sidebar" value={prefs.organizationDisplay} onChange={(organizationDisplay) => setPrefs({ organizationDisplay, selectedOrganization })} options={[{ value: "all", label: "All organizations" }, { value: "one", label: "One organization" }]} />
             {prefs.organizationDisplay === "one" && (
-              <select aria-label="Organization in sidebar" value={selectedOrganization ?? ""} disabled={!all.length} onChange={(event) => setPrefs({ selectedOrganization: event.target.value })} className="h-7 max-w-56 rounded-md border border-hairline bg-well px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
-                {all.map((org) => <option key={org.id} value={org.id}>{organizationName(org)}</option>)}
+              <select aria-label="Organization in sidebar" value={selectedOrganization ?? ""} disabled={!switchTargets.length} onChange={(event) => {
+                if (switchingEnabled) switchOrganization(event.target.value);
+                else setPrefs({ selectedOrganization: event.target.value });
+              }} className="h-7 max-w-56 rounded-md border border-hairline bg-well px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
+                {switchTargets.map(({ id, org }) => <option key={id} value={id}>{org ? organizationName(org) : "Only this Mac"}</option>)}
               </select>
             )}
           </div>

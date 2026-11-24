@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "./prefs";
 import {
+  ORGANIZATION_SHORTCUTS,
   SHORTCUT_ACTIONS,
   ariaKeyShortcut,
   bindingKind,
@@ -34,12 +35,29 @@ beforeEach(() => {
 
 describe("the shortcut registry", () => {
   it("lists every action once, each default binding owned by one action", () => {
-    const ids = SHORTCUT_ACTIONS.map((action) => action.id);
+    const actions = [...SHORTCUT_ACTIONS, ...ORGANIZATION_SHORTCUTS];
+    const ids = actions.map((action) => action.id);
     expect(new Set(ids).size).toBe(ids.length);
     for (const mac of [true, false]) {
-      const all = SHORTCUT_ACTIONS.flatMap((action) => defaultBindings(action.id, mac));
+      const all = actions.flatMap((action) => defaultBindings(action.id, mac));
       expect(new Set(all).size).toBe(all.length);
     }
+  });
+
+  it.each([true, false])("keeps organization bindings separate from tab defaults and gates their overrides (mac=%s)", (mac) => {
+    const enabled = resolveKeymap({}, mac, true);
+    const disabled = resolveKeymap({ "organization.switch1": ["mod+1"] }, mac, false);
+    ORGANIZATION_SHORTCUTS.forEach(({ id }, index) => {
+      const digit = index + 1;
+      const binding = mac ? `ctrl+${digit}` : `mod+alt+shift+${digit}`;
+      expect(enabled[id]).toEqual([binding]);
+      expect(disabled[id]).toEqual([]);
+      expect(bindingProblem(id, binding, mac)).toBeNull();
+    });
+    expect(disabled["app.agentDashboard"]).toEqual(["mod+1"]);
+    expect(enabled["session.tab2"]).toEqual(["mod+2"]);
+    expect(saveShortcut("organization.switch1", ["mod+shift+9"], { mac })).toEqual({ ok: true });
+    expect(resolveKeymap(getPrefs().shortcuts, mac, true)["organization.switch1"]).toEqual(["mod+shift+9"]);
   });
 
   // PRO-362: the drafts drew ⇧⌘R for the Run view, which Automations has. Its own keys are free on every platform,

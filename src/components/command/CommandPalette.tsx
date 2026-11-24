@@ -54,6 +54,7 @@ import {
   PanelRight,
   Palette,
   Plug,
+  Plus,
   Search,
   Settings,
   Smartphone,
@@ -73,6 +74,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import { HighlightedText } from "@/components/ui/HighlightedText";
 import { SETTINGS_SECTIONS as SETTINGS_PAGES, settingsSectionOffered } from "@/lib/settingsSections";
 import { searchSettings } from "@/lib/settingsSearch";
+import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { requestProjectSettings } from "@/lib/projectAdded";
 import type { SettingsSection } from "@/components/settings/settingsRegistry";
@@ -83,6 +85,8 @@ import {
   indexPaletteItem,
   movePaletteSelection,
   orderPaletteItems,
+  organizationSwitchQuery,
+  ORGANIZATIONS_TAB,
   PALETTE_TABS,
   paletteScopeShows,
   palettePlaceholder,
@@ -108,9 +112,13 @@ import { openFile } from "@/lib/editors";
 import { runShortcut, useHotkey } from "@/lib/hotkeys";
 import { issuePromptWithComments, issueWorktreeName, pullRequestPrompt } from "@/lib/issueSession";
 import { pipelineSettings, startPipeline } from "@/lib/issuePipeline";
-import { getPrefs } from "@/lib/prefs";
+import { getPrefs, usePrefs } from "@/lib/prefs";
 import { START_ACTIONS, type StartAction } from "@/lib/projectStart";
-import { useOrganizationVisibility } from "@/lib/organizationVisibility";
+import { ONLY_THIS_MAC, organizationName, organizationSwitchTargets, switchOrganization, useOrganizationVisibility } from "@/lib/organizationVisibility";
+import { useOrganizationSwitchingEnabled } from "@/lib/organizationVisibilityGate";
+import { readOrganizationRoster } from "@/lib/organizationRoster";
+import { openOrganizationSettings } from "@/lib/settingsLinks";
+import { parseCloudWorkspaceKey } from "@/types/target";
 import { visiblePaletteSessions } from "@/lib/organizationSessions";
 import {
   openNewIssue,
@@ -123,7 +131,7 @@ import {
   upsertSession,
   useSessionStore,
 } from "@/lib/sessions";
-import { SHORTCUT_ACTIONS, isMac, keycaps, useKeymap, type ShortcutAction } from "@/lib/shortcuts";
+import { ORGANIZATION_SHORTCUTS, SHORTCUT_ACTIONS, defaultBindings, isMac, keycaps, useKeymap, type ShortcutAction } from "@/lib/shortcuts";
 import { openCloudSession, useCloudDashboard } from "@/lib/cloudDashboard";
 import { updateCloudSession, useCloudSessionForStatus } from "@/lib/cloudSessions";
 import { openNewCloudWorkspace } from "@/components/cloud/NewCloudWorkspaceDialog";
@@ -251,6 +259,7 @@ interface PaletteRow {
   primaryRanges: MatchRange[];
   secondaryRanges: MatchRange[];
   chord?: string;
+  current?: boolean;
   icon?: LucideIcon;
   agentId?: string;
   project?: Project;
@@ -282,6 +291,7 @@ interface PaletteGroup {
   divider?: boolean;
   /** Said above the group in place of rows that are not there: no section matches. */
   note?: { title: string; detail: string };
+  emptyText?: string;
   rows: PaletteRow[];
 }
 
@@ -594,6 +604,30 @@ export function CommandPalette({
   const keymap = useKeymap();
   // What of the cloud this account is offered from here: its live organizations' sessions, and a new workspace in the default one.
   const { status: account } = useAccount();
+  const switchingEnabled = useOrganizationSwitchingEnabled();
+  const privacy = useDataPrivacy();
+  const switchTargets = useMemo(() => switchingEnabled ? organizationSwitchTargets(account) : [], [account, switchingEnabled, privacy.enabled]);
+  const tabs = switchTargets.length ? [...PALETTE_TABS, ORGANIZATIONS_TAB] : PALETTE_TABS;
+  useEffect(() => {
+    if (!switchTargets.length && scope === "organizations") setScope("all");
+  }, [scope, switchTargets.length]);
+  const switchQuery = organizationSwitchQuery(deferredQuery);
+  const organizationMode = switchTargets.length > 0 && (scope === "organizations" || (scope === "all" && switchQuery !== null));
+  const [rosterCounts, setRosterCounts] = useState<{ account: typeof account; counts: Record<string, number> } | null>(null);
+  useEffect(() => {
+    if (!organizationMode) return;
+    let current = true;
+    for (const { org } of switchTargets) {
+      if (!org) continue;
+      void readOrganizationRoster(org.id).then((roster) => {
+        if (current) setRosterCounts((previous) => ({
+          account,
+          counts: { ...(previous?.account === account ? previous.counts : {}), [org.id]: roster.members.length },
+        }));
+      }).catch(() => {});
+    }
+    return () => { current = false; };
+  }, [account, organizationMode, switchTargets]);
   const cloud = useMemo(() => {
     const live = liveCloudOrgIds(account);
     const defaultOrg = defaultOrgId(account);
@@ -801,7 +835,9 @@ export function CommandPalette({
 
   // Cloud sessions of every live organization sit among the sessions (PRO-23 CS-19).
   const cloudSessions = useCloudDashboard();
-  const { visibleIds } = useOrganizationVisibility();
+  const { visibleIds, selectedOrganization, defaultOrg } = useOrganizationVisibility();
+  const { organizationDisplay } = usePrefs();
+  const currentOrganization = organizationDisplay === "one" ? selectedOrganization : defaultOrg ?? switchTargets.find((target) => target.org)?.id;
   // And their projects among the projects, each named with its organization (a hidden organization's only when searched for, like its sessions).
   const cloudProjects = useCloudProjectChoices();
   const paletteIndex = useMemo(() => {
@@ -1060,6 +1096,49 @@ export function CommandPalette({
       restoreFocus: !!match.item.shortcut,
     });
 
+    if (organizationMode) {
+      const organizationRows = switchTargets.flatMap(({ id, org }, position) => {
+        const members = org && rosterCounts?.account === account ? rosterCounts.counts[id] : undefined;
+        const entry = indexPaletteItem({
+          id: `palette:organization:${id}`, group: "organizations",
+          primary: org ? `Switch to ${organizationName(org)}` : "Only this Mac",
+          secondary: org ? (members === undefined ? "" : `${members} member${members === 1 ? "" : "s"}`) : "Local sessions, nothing shared",
+          recentAt: 0,
+        });
+        const [match] = rankPaletteItems([entry], switchQuery ?? deferredQuery);
+        if (!match) return [];
+        const shortcut = ORGANIZATION_SHORTCUTS[position];
+        return [entityRow(match, "command", () => { switchOrganization(id); }, {
+          icon: org ? Users : Laptop,
+          chord: shortcut && keymap[shortcut.id][0],
+          current: id === currentOrganization,
+          closeBefore: false,
+        })];
+      });
+      const local = currentOrganization === ONLY_THIS_MAC;
+      const scopedSessions = entityMatches.sessions.flatMap(({ item }, index) => {
+        const workspace = item.cloudKey && parseCloudWorkspaceKey(item.cloudKey);
+        return (local ? !item.cloudKey : workspace && workspace.orgId === currentOrganization) ? [sessionRows[index]] : [];
+      });
+      const currentName = switchTargets.find((target) => target.id === currentOrganization)?.org;
+      return [
+        { id: "organizations", label: "Organizations", rows: organizationRows, emptyText: "No organizations match" },
+        { id: "organization-actions", label: "Actions", divider: true, rows: [
+          {
+            id: "palette:organizations:create", kind: "command", layout: "line", icon: Plus,
+            primary: "Create organization…", secondary: "", primaryRanges: [], secondaryRanges: [],
+            run: () => onOpenSettings("organizations.create"),
+          },
+          {
+            id: "palette:organizations:settings", kind: "command", layout: "line", icon: Settings,
+            primary: "Organization settings", secondary: "", primaryRanges: [], secondaryRanges: [],
+            run: () => { if (currentName) openOrganizationSettings(currentName.id); else onOpenSettings("organizations"); },
+          },
+        ] },
+        { id: "sessions", label: local ? "Sessions on this Mac" : "Sessions", labelDetail: currentName ? organizationName(currentName) : undefined, divider: true,
+          rows: scopedSessions, emptyText: local ? "No sessions on this Mac match" : "No sessions on the server match" },
+      ];
+    }
     if (scope === "cloud") {
       const cloudRows = entityMatches.sessions.flatMap((match, index) => (match.item.cloudKey ? [sessionRows[index]] : []));
       return [{ id: "sessions", label: "Cloud sessions", rows: cloudRows }];
@@ -1080,14 +1159,14 @@ export function CommandPalette({
       { id: "files", label: activeProject ? `Files · ${activeProject.name}` : "Files", rows: fileRows },
       ...(settingsFirst ? [settingsGroup, ...commandGroups] : [...commandGroups, settingsGroup]),
     ].filter((group) => paletteScopeShows(scope, group.id));
-  }, [moveIds, movedSession, moveTitle, moveTo, sections, query, sessionTitle, statusSessionId, statusTarget, settingStatus, setOpen, scope, onOpenSettings, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading, orchestratorRuns, localVmTasks]);
+  }, [moveIds, movedSession, moveTitle, moveTo, sections, query, sessionTitle, statusSessionId, statusTarget, settingStatus, setOpen, scope, onOpenSettings, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading, orchestratorRuns, localVmTasks, organizationMode, switchTargets, switchQuery, rosterCounts, account, currentOrganization, keymap]);
 
   const renderedGroups = useMemo(() => {
     let offset = 0;
     return groups.flatMap((group) => {
-      if (!group.rows.length && !group.note) return [];
+      if (!group.rows.length && !group.note && !group.emptyText) return [];
       // The Actions tab is the whole list, scrolled (design 07.04); elsewhere a group shows its first few.
-      const cap = expanded[group.id] || scope === "actions" ? group.rows.length : (GROUP_CAPS[group.id] ?? 8);
+      const cap = expanded[group.id] || scope === "actions" || group.id === "organizations" ? group.rows.length : (GROUP_CAPS[group.id] ?? 8);
       const rows = group.rows.slice(0, cap);
       const rendered = { ...group, rows, offset, more: group.rows.length - rows.length };
       offset += rows.length;
@@ -1143,15 +1222,18 @@ export function CommandPalette({
     } else if (event.key === "Tab" && !subview && !event.altKey && !event.ctrlKey && !event.metaKey) {
       // Tab switches tabs (design 07.04); the query is kept.
       event.preventDefault();
-      setScope(stepPaletteTab(paletteTabOf(scope), event.shiftKey ? -1 : 1));
+      setScope(stepPaletteTab(organizationMode ? "organizations" : paletteTabOf(scope), event.shiftKey ? -1 : 1, tabs));
     } else if (event.key === "Backspace" && scope !== "all" && !query) {
       // Backspace on an empty search returns to every group.
       setScope("all");
     }
   };
 
-  const searching = (scope === "all" || scope === "cloud") && (fileLoading || workItemLoading || reposLoading);
-  const tab = paletteTabOf(scope);
+  const orgFooter = organizationMode && !subview;
+  const defaultOrgChords = ORGANIZATION_SHORTCUTS.every(({ id }) => keymap[id][0] === defaultBindings(id)[0]);
+  const orgChordHint = isMac ? "Ctrl+1–Ctrl+9" : "Ctrl+Alt+Shift+1–9";
+  const searching = !organizationMode && (scope === "all" || scope === "cloud") && (fileLoading || workItemLoading || reposLoading);
+  const tab = organizationMode ? "organizations" : paletteTabOf(scope);
   const empty = !selectableRows.length && !searching;
 
   return (
@@ -1208,8 +1290,8 @@ export function CommandPalette({
             {subview === "move" && <span className="shrink-0 text-faint">to a section</span>}
           </div>
         ) : (
-          <div role="tablist" aria-label="Search in" className="flex h-10 items-center gap-1 border-b border-hairline px-2.5">
-            {PALETTE_TABS.map((item) => (
+          <div role="tablist" aria-label="Search in" className="flex h-10 items-center gap-1 overflow-x-auto border-b border-hairline px-2.5">
+            {tabs.map((item) => (
               <button
                 key={item.id}
                 type="button"
@@ -1250,6 +1332,7 @@ export function CommandPalette({
                   {group.labelDetail && <> · <span className="normal-case tracking-normal">{group.labelDetail}</span></>}
                 </h2>
               )}
+              {group.emptyText && !group.rows.length && <p role="status" className="px-2.5 pb-2 pt-1 text-xs text-faint">{group.emptyText}</p>}
               {group.rows.map((row, index) => {
                 const paletteIndex = group.offset + index;
                 return (
@@ -1286,13 +1369,20 @@ export function CommandPalette({
           )}
         </div>
 
-        <div className="flex h-9 shrink-0 items-center gap-4 whitespace-nowrap border-t border-hairline px-4 text-xs text-faint">
+        <div className={cn("flex shrink-0 items-center border-t border-hairline px-4 text-xs text-faint",
+          orgFooter ? "min-h-9 flex-wrap gap-x-4 gap-y-1 py-1.5" : "h-9 gap-4 whitespace-nowrap")}>
           {subview === "move" ? (
             // Design 07.13 and 07.14: what Enter does to the row under the cursor, and the way back.
             <>
               <span>{selectableRows[selected]?.id === "palette:section-create-named" ? "↵ create and move" : "↵ move"}</span>
               <span>{query ? "⌫ edits the query" : "⌫ on an empty query goes back"}</span>
               <span className="ml-auto">esc closes</span>
+            </>
+          ) : orgFooter ? (
+            <>
+              <span>↵ {selectableRows[selected]?.current !== undefined ? "switch" : "open"}</span>
+              <span>{defaultOrgChords ? `${orgChordHint} switch from anywhere` : "Organization shortcuts switch from anywhere"}</span>
+              <span className="sm:ml-auto">Your open sessions keep running</span>
             </>
           ) : subview === "status" ? (
             <>
@@ -1348,6 +1438,7 @@ function PaletteResultRow({
       type="button"
       role="option"
       aria-selected={selected}
+      aria-current={row.current ? "true" : undefined}
       data-palette-index={index}
       onMouseMove={() => onHover(index)}
       onFocus={() => onHover(index)}
@@ -1398,6 +1489,7 @@ function PaletteResultRow({
           <HighlightedText text={row.secondary} ranges={row.secondaryRanges} />
         </span>
       </span>
+      {row.current && <span className="shrink-0 text-xs text-muted-foreground">current</span>}
       {row.chord && <Keycap>{chordCap(row.chord)}</Keycap>}
       </>}
     </button>

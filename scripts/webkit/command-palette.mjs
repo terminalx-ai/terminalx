@@ -264,6 +264,86 @@ try {
     );
     await page.close();
   }
+
+  // The minimum desktop width is 760px. The narrower viewport also exercises the footer's wrapping.
+  for (const width of [760, 360]) {
+    const extra = `(() => {
+      const { answers } = window.__PW_STUB__;
+      const cloud = { enabled: true, flags: {} };
+      answers.phase2_desktop_contracts_available = true;
+      answers.account_status.organizations = [
+        { id: "org-a", name: "Demo", role: "owner", cloud },
+        { id: "o0", name: "Acme", role: "member", cloud },
+        { id: "community", name: "Community", role: "member" },
+      ];
+      answers.account_status.multiOrg = true;
+      answers.organization_members = { members: [{}, {}] };
+      answers.organization_members_in = { members: [{}] };
+      window.__PRO300_RUNTIME_CALLS__ = [];
+      const { invoke } = window.__TAURI_INTERNALS__;
+      window.__TAURI_INTERNALS__.invoke = (command, args) => {
+        if (/cloud_workspace_resume|stop_tab|cloud_remote_attach|organization_select/.test(command)) window.__PRO300_RUNTIME_CALLS__.push(command);
+        return invoke(command, args);
+      };
+    })()`;
+    const page = await open(browser, server.url, { cloud: true, localProjects: 1 }, { width, height: 700 }, { extra });
+    await sidebar(page);
+    await page.keyboard.press("Meta+K");
+    const dialog = page.getByRole("dialog", { name: "Command palette" });
+    const input = dialog.getByLabel("Command palette search");
+    await input.fill("switch");
+    const local = dialog.getByRole("option", { name: /Only this Mac/ });
+    await local.waitFor();
+    await settled(page);
+
+    const footer = await dialog.getByText("Your open sessions keep running").locator("..").evaluate((element) => {
+      const dialog = element.closest('[role="dialog"]').getBoundingClientRect();
+      const lines = [...element.children].map((child) => {
+        const range = document.createRange();
+        range.selectNodeContents(child);
+        return [...range.getClientRects()].map((rect) => ({ left: rect.left, right: rect.right, bottom: rect.bottom, top: rect.top }));
+      }).flat();
+      const inside = lines.every((rect) => rect.left >= dialog.left && rect.right <= dialog.right && rect.top >= dialog.top && rect.bottom <= dialog.bottom);
+      const overlap = lines.some((a, index) => lines.slice(index + 1).some((b) =>
+        a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom));
+      return { inside, overlap, hints: [...element.children].map((child) => child.textContent) };
+    });
+    const choices = dialog.getByRole("group", { name: "Organizations" }).getByRole("option");
+    const keys = await choices.locator("kbd").allTextContents();
+    await dialog.getByRole("option", { name: /Switch to Demo/ }).getByText("2 members").waitFor();
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    const keyboardSelection = await dialog.getByRole("option", { name: /Switch to Acme/ }).getAttribute("aria-current");
+    await dialog.getByRole("tab", { name: "Organizations" }).click();
+    await input.fill("Session 0");
+    const emptyForAcme = dialog.getByText("No sessions on the server match", { exact: true });
+    await emptyForAcme.waitFor();
+    await page.keyboard.press("Control+1");
+    const demoResults = dialog.getByRole("group", { name: "Sessions · Demo" });
+    const demoMatch = demoResults.getByRole("option", { name: /Session 0/ });
+    await demoMatch.waitFor();
+    const scopedMatch = await demoMatch.isVisible();
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+
+    // The hotkeys also work with the palette closed, including a membership with no cloud workspaces.
+    await page.keyboard.press("Control+3");
+    const community = page.locator('[data-testid="cloud-org-list"][data-org="community"]');
+    await community.getByText("Cloud workspaces unavailable").waitFor();
+    await page.keyboard.press("Control+4");
+    await page.waitForFunction(() => window.__PW_STUB__.settingsFile.preferences.selectedOrganization === "@only-this-mac");
+    const sidebarOrganizations = await page.getByTestId("cloud-org-list").count();
+    const runtimeCalls = await page.evaluate(() => window.__PRO300_RUNTIME_CALLS__);
+
+    failed += report(`organization palette at ${width}px`, {
+      "footer hints fit without overlap": footer.inside && !footer.overlap && footer.hints.join("|") === "↵ switch|Ctrl+1–Ctrl+9 switch from anywhere|Your open sessions keep running",
+      "rows show the effective positional shortcuts": keys.join("|") === "⌃1|⌃2|⌃3|⌃4",
+      "Enter marks the chosen organization current": keyboardSelection === "true",
+      "the session group is scoped to the chosen organization": scopedMatch,
+      "Ctrl+4 hides every organization without stopping a session or waking a workspace": sidebarOrganizations === 0 && runtimeCalls.length === 0,
+    }, { footer, keys, keyboardSelection, sidebarOrganizations, runtimeCalls });
+    await page.close();
+  }
 } finally {
   await browser.close();
   server.close();

@@ -447,7 +447,7 @@ export function parseSmartInput(raw: string): SmartInput | null {
  * scope; "cloud" ("Go to cloud session…") is narrower than any tab and is
  * shown under Sessions.
  */
-export type PaletteScope = "all" | "sessions" | "projects" | "actions" | "settings" | "cloud";
+export type PaletteScope = "all" | "sessions" | "projects" | "actions" | "settings" | "cloud" | "organizations";
 
 /** The tab strip, in its order on screen. */
 export const PALETTE_TABS = [
@@ -458,7 +458,9 @@ export const PALETTE_TABS = [
   { id: "settings", label: "Settings" },
 ] as const satisfies readonly { id: PaletteScope; label: string }[];
 
-export type PaletteTab = (typeof PALETTE_TABS)[number]["id"];
+export const ORGANIZATIONS_TAB = { id: "organizations", label: "Organizations" } as const;
+export type PaletteTab = (typeof PALETTE_TABS)[number]["id"] | typeof ORGANIZATIONS_TAB.id;
+type PaletteTabItem = { id: PaletteTab; label: string };
 
 /** The tab a scope is shown under: the cloud sessions are among the Sessions. */
 export function paletteTabOf(scope: PaletteScope): PaletteTab {
@@ -479,6 +481,7 @@ export const PALETTE_SCOPE_GROUPS: Record<Exclude<PaletteScope, "all">, readonly
   projects: ["projects", "workspaces"],
   actions: ["session-actions", "commands"],
   settings: ["settings", "settings-pages", "settings-projects"],
+  organizations: ["organizations", "organization-actions", "sessions"],
 };
 
 /** Whether a scope shows a result group. */
@@ -490,6 +493,7 @@ export function paletteScopeShows(scope: PaletteScope, group: string): boolean {
 export function palettePlaceholder(scope: PaletteScope): string {
   switch (scope) {
     case "settings": return "Search settings…";
+    case "organizations": return "Search organizations…";
     case "cloud": return "Search cloud sessions…";
     case "sessions": return "Search sessions…";
     case "projects": return "Search projects and workspaces…";
@@ -499,9 +503,14 @@ export function palettePlaceholder(scope: PaletteScope): string {
 }
 
 /** The tab Tab moves to from `tab` (Shift+Tab goes the other way), round the strip. */
-export function stepPaletteTab(tab: PaletteTab, by: 1 | -1): PaletteTab {
-  const at = PALETTE_TABS.findIndex((item) => item.id === tab);
-  return PALETTE_TABS[(at + by + PALETTE_TABS.length) % PALETTE_TABS.length].id;
+export function stepPaletteTab(tab: PaletteTab, by: 1 | -1, tabs: readonly PaletteTabItem[] = PALETTE_TABS): PaletteTab {
+  const at = tabs.findIndex((item) => item.id === tab);
+  return tabs[(at + by + tabs.length) % tabs.length].id;
+}
+
+export function organizationSwitchQuery(query: string): string | null {
+  const match = /^switch(?:\s+(.*))?$/i.exec(query.trim());
+  return match ? match[1] ?? "" : null;
 }
 
 /**
