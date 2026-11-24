@@ -8,10 +8,9 @@ import { useRead } from "@mobile/cloud/setup/read";
 import { useHeldLaunch, useLaunchSnapshot } from "@mobile/cloud/setup/launch/flow";
 import { readLogins } from "@mobile/cloud/setup/launch/form";
 import { parseRepository } from "@mobile/cloud/setup/launch/repository";
-import { LaunchPage, LinkRow } from "@mobile/cloud/setup/launch/parts";
+import { LaunchHeader, LaunchPage, LinkRow } from "@mobile/cloud/setup/launch/parts";
 import { REPOSITORY_HELPER, REPOSITORY_INTRO } from "@mobile/cloud/setup/launch/words";
 import { Button, Card } from "@mobile/ui/primitives";
-import { ScreenHeader } from "@mobile/ui/SessionChrome";
 import { TextField } from "@mobile/ui/TextField";
 import { useTheme } from "@mobile/ui/theme";
 
@@ -57,13 +56,13 @@ export default function LaunchRepositoryScreen() {
 
   return <>
     <Stack.Screen options={{ title: "Repository", headerLargeTitle: false, headerShown: false }} />
-    <ScreenHeader title="Repository" onBack={() => router.back()} />
+    <LaunchHeader title="Repository" onBack={() => router.back()} />
     <LaunchPage foot={<>
       <Button testID="launch-use-repository" label="Use this repository" disabled={!flow || !usable} accessibilityState={{ disabled: !flow || !usable }} onPress={use} />
       {draft.repository ? <Button testID="launch-without-repository" label="Launch without a repository" kind="secondary" onPress={without} /> : null}
     </>}>
       <Text style={[styles.intro, { color: palette.muted }]}>{REPOSITORY_INTRO}</Text>
-      <TextField label="GitHub repository URL" value={url} onChangeText={setUrl} placeholder="github.com/owner/repository" error={urlError} autoFocus={!draft.repository} paste
+      <TextField label="GitHub repository URL" value={url} onChangeText={setUrl} placeholder="github.com/owner/repository" error={urlError} autoFocus={!draft.repository}
         autoCapitalize="none" autoCorrect={false} spellCheck={false} keyboardType="url" returnKeyType="next" testID="launch-repository-url" />
       <View style={styles.gap}>
         <TextField label="Branch or tag" hint="optional" value={ref} onChangeText={setRef} placeholder="main" error={refMissing ? refusalText(refused) : null}

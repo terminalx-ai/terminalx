@@ -3,14 +3,13 @@ import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { refusalText } from "@mobile/cloud/words";
 import { useHeldLaunch, useLaunchSnapshot } from "@mobile/cloud/setup/launch/flow";
-import { LaunchPage } from "@mobile/cloud/setup/launch/parts";
+import { LaunchHeader, LaunchPage } from "@mobile/cloud/setup/launch/parts";
 import { reviewFacts } from "@mobile/cloud/setup/launch/review";
 import { billingNote, priceChangedText, SPEND_TITLE, spendSentence } from "@mobile/cloud/setup/launch/words";
 import { FactRows } from "@mobile/ui/FactRows";
 import { Notice } from "@mobile/ui/Notice";
 import { PriceLines } from "@mobile/ui/PriceLines";
 import { Button, SectionTitle } from "@mobile/ui/primitives";
-import { HeaderLine, ScreenHeader } from "@mobile/ui/SessionChrome";
 
 /**
  * The review and the spend confirmation (25.05 row 4): the configuration,
@@ -28,7 +27,7 @@ export default function LaunchReviewScreen() {
   const { review } = useLaunchSnapshot(flow);
   const header = <>
     <Stack.Screen options={{ title: "Review", headerLargeTitle: false, headerShown: false }} />
-    <ScreenHeader title="Review" onBack={() => router.back()} subtitle={<HeaderLine text={organizationName} />} />
+    <LaunchHeader title="Review" subtitle={organizationName} onBack={() => router.back()} />
   </>;
   // Opened without a form behind it: there is nothing priced to review.
   if (!flow || !review) return header;

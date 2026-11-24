@@ -35,10 +35,6 @@ vi.mock("expo-router", () => ({
 }));
 vi.mock("expo-crypto", () => ({ randomUUID: () => `launch-key-${++mocks.keys}` }));
 vi.mock("expo-clipboard", () => ({ getStringAsync: async () => "" }));
-vi.mock("@mobile/ui/SessionChrome", () => ({
-  ScreenHeader: ({ title, subtitle, onBack }: { title: string; subtitle?: unknown; onBack(): void }) => <header><button aria-label="Back" onClick={onBack} /><h1>{title}</h1>{subtitle as never}</header>,
-  HeaderLine: ({ text }: { text: string }) => <span data-testid="header-line">{text}</span>,
-}));
 vi.mock("@mobile/cloud/CloudProvider", () => ({
   useCloudCatalog: () => mocks.catalog,
   useCatalogSnapshot: () => ({ organizations: [{ organization: { orgId: "org-northwind", name: "Northwind", role: "admin" }, workspaces: [], error: null, loaded: true }], loading: false, error: null, refreshedAt: 1, saved: false, titles: {} }),
@@ -136,7 +132,7 @@ describe("Set it up", () => {
   it("01 the form, on Boat: the provider's defaults chosen, Region a fact, Provider hidden with one to launch on", async () => {
     server();
     await openForm();
-    expect(page.byId("header-line")?.textContent).toBe("Northwind");
+    expect(page.byId("launch-header-subtitle")?.textContent).toBe("Northwind");
     expect(row("launch-size").getAttribute("aria-label")).toBe("Size: Small · $0.018 / hour");
     expect(row("launch-region").getAttribute("role")).toBeNull();
     expect(row("launch-region").textContent).toBe("RegionAutomatic EU placement");
