@@ -239,7 +239,16 @@ cargo's reason, unless a second `cargo test --no-run -v` finds every unit
 fresh. The folder is the `out_dir` cargo reports for the crate's build script,
 not a path searched for: cargo 1.100 keeps every unit's output, the test binary
 among them, under `build/raccoon/<hash>/out`, and dating those back makes them
-stale. `main`'s `cargo test --locked` still builds the ordinary
+stale.
+
+A cold run of `macos-native` on a manual run (45448416407, 24 November 2026,
+every dependency built) took 1 h 52 min: Clippy 15 min 41 s and 15 min 6 s,
+the test build 34 min 52 s (the freshness check in it 2 s), the cache save
+30 s, and the full suite 41 min 39 s (the ordinary library, the binary and the
+integration tests built in 8 min 27 s, the library's 5,886 tests in 1,969 s,
+the doc-tests, of which there are none, 17 s). The limit is 150 minutes. Before
+this, main's job reached its limit during the doc-tests, after an hour of the
+second compile. `main`'s `cargo test --locked` still builds the ordinary
 library once, which the binary, the integration tests and the doc-tests need.
 
 No macOS runner is taken on a pull request unless the selector asks for one.

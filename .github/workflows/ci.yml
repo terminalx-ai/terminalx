@@ -517,8 +517,11 @@ jobs:
       group: ci-macos-native-${{ github.event_name == 'push' && 'main' || github.run_id }}
       cancel-in-progress: false
     runs-on: macos-latest
-    # Raised to measure a cold run whole; set from its step times before review.
-    timeout-minutes: 180
+    # A cold run, every dependency built, took 1 h 52 min (run 45448416407:
+    # Clippy 15 + 15, the test build 35, the full suite 42 with the ordinary
+    # library's build in it). A warm one builds only this crate. The limit
+    # leaves a third over the cold run for a slow runner.
+    timeout-minutes: 150
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
