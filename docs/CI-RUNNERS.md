@@ -431,7 +431,9 @@ A selected pull request runs the Swift tests, the icon checks, the helper
 build, Clippy over every target (so every Apple-only line of the library, the
 binaries and the integration tests is checked), one build of the library's
 tests, and the tests of the Apple-only and system-dependent modules:
-`cargo test --locked --lib -- $(macos-rust.py --filters)`, 51 name filters
+the test binary that one build made, run with `$(macos-rust.py --filters)`
+(a second `cargo test` would compile the crate again: see the comment on the
+build step in `ci.yml`), 51 name filters
 that match 1,889 of the 5,871 tests. They are the modules with any Apple
 `cfg`, and the ones whose behaviour is the system's without one (terminals,
 process groups, the keychain, sockets). A test fails when a file with an
