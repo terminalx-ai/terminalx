@@ -1,6 +1,6 @@
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { leaseLive, type Participant, type TabLease } from "@terminalx/portable/workspaceCollab";
-import type { CloudRole } from "./api";
+import type { CloudRefusal, CloudRole } from "./api";
 import type { CloudLinkProblem } from "./link";
 import type { OutboxEntry } from "./outbox";
 
@@ -126,6 +126,101 @@ export function codeText(code: string | null | undefined): string | null {
   if (!code) return null;
   // A code this app has no sentence for is never shown as it is.
   return CODES[code] ?? "That did not work. Try again in a moment.";
+}
+
+/**
+ * A sentence for each kind of refusal the cloud setup screens tell apart
+ * (`CloudApiError.refusal`). Where boards 25.01 to 25.06 give the refusal a
+ * sentence it is that sentence, with the provider or agent left unnamed since
+ * the kind does not say which; the rest are said in the same plain words.
+ * Every kind has one, so a code is never shown.
+ */
+const REFUSAL_SENTENCES: Readonly<Record<CloudRefusal, string>> = {
+  "signed-out": "Sign in to see your cloud workspaces.",
+  // 25.01, said to a member: only an owner or admin sets up compute and agent logins.
+  "admin-required": "Only an organization owner or admin can do that.",
+  "manager-required": "Only this workspace's creator or an organization owner or admin can do that.",
+  "not-found": "That is no longer there. It may have been removed.",
+  // 25.05, cloud_provider_connection_required.
+  "provider-not-connected": "Connect a compute provider first.",
+  // 25.03 and 25.05, cloud_provider_connection_attention_required.
+  "provider-needs-attention": "The provider rejected the stored key on its last check. Replace the key to continue.",
+  // 25.03, cloud_provider_credential_invalid.
+  "provider-key-invalid": "The provider rejected that key. Paste it again, or make a new one.",
+  "provider-key-other-account": "That key is for a different provider account than the one connected here. Use a key from the same account.",
+  // 25.03, cloud_provider_permission_denied.
+  "provider-permission-denied": "The key is valid but not allowed to do something TerminalX needs. Check the permissions of the key.",
+  // 25.03, cloud_provider_billing_required.
+  "provider-billing-required": "The provider needs billing set up on that account before it will act.",
+  "provider-not-offered": "That provider is not offered for new cloud workspaces here.",
+  // 25.03, cloud_provider_disposition_required.
+  "provider-has-machines": "The provider still holds this organization's workspaces. Delete them first, then disconnect. Nothing was changed.",
+  "provider-busy": "Something else is still under way with this provider. Try again when it has finished.",
+  // 25.03, cloud_provider_rate_limited.
+  "provider-rate-limited": "The cloud provider is not answering right now. Try again in a moment.",
+  // 25.05, cloud_provider_unavailable.
+  "provider-unavailable": "The cloud provider is not answering right now.",
+  // 25.05, terminalx_pro_required.
+  "plan-required": "An active TerminalX Pro license is required to start machines TerminalX hosts.",
+  "limit-reached": "This organization has reached a limit on cloud workspaces. Stop or delete one, then try again.",
+  // 25.05, cloud_provisioning_paused.
+  "provisioning-paused": "New cloud workspaces are paused for this organization.",
+  // 25.05, cloud_workspace_policy_denied.
+  "policy-denied": "That size, region or idle setting is not allowed by this organization’s limits.",
+  // 25.05, cloud_workspace_quote_expired.
+  "quote-expired": "That estimate expired. Nothing was launched. Get a new price to carry on.",
+  "idempotency-key-reused": "That request was already sent with other details. Start it again.",
+  // 25.06, cloud_workspace_operation_in_progress.
+  "workspace-busy": "Something else is still under way on this workspace. Try again when it has finished.",
+  "workspace-archived": "This workspace is archived.",
+  "operation-not-found": "The service no longer knows that operation. Read the workspace again to see where it is.",
+  // 25.05, cloud_workspace_credential_required.
+  "login-missing": "Connect at least one AI agent.",
+  // 25.04, cloud_workspace_credential_invalid.
+  "login-invalid": "The login failed verification. It may have expired. Paste a fresh key, or sign in again.",
+  // 25.04, cloud_workspace_credential_in_use.
+  "login-in-use": "A workspace that is running was set up with this login. Delete that workspace first, or replace the login instead.",
+  // 25.04, cloud_workspace_credential_verification_unavailable.
+  "login-check-unavailable": "Verification is temporarily unavailable. The key was not saved. Try again in a moment.",
+  // 25.05, cloud_workspace_repository_credential_required.
+  "repository-login-required": "This repository needs a GitHub personal access token.",
+  "repository-not-accessible": "That repository could not be reached with this organization's GitHub login.",
+  "repository-check-unavailable": "The repository could not be checked right now. Try again in a moment.",
+  // 25.04, cloud_workspace_device_auth_unavailable.
+  "device-login-unavailable": "OpenAI’s device sign-in is not answering right now. Try again in a moment, or use an API key.",
+  // 25.04: a device login the server no longer has is one whose code expired.
+  "device-login-not-found": "The code expired. Start device login again.",
+  "rate-limited": "Too many requests just now. Try again in a moment.",
+  "invalid-request": "The service did not accept that. Check what was entered and try again.",
+  "invalid-response": "The service answered in a way this app does not understand. Update the app.",
+  "unreachable": "The service could not be reached. Try again in a moment.",
+  "unknown": "That did not work. Try again in a moment.",
+};
+
+/**
+ * Codes whose kind is shared with others but that the boards give a sentence
+ * of their own (25.05's table of refusals, 25.06's delete page).
+ */
+const REFUSAL_CODE_SENTENCES: Readonly<Record<string, string>> = {
+  cloud_workspace_quota_exceeded: "This organization has reached its limit on cloud workspaces, stopped ones included. Delete one, then try again.",
+  cloud_workspace_concurrency_exceeded: "Your organization is running as many cloud workspaces as its limit allows.",
+  cloud_workspace_member_concurrency_exceeded: "You already have as many cloud workspaces running as your organization allows one person. Stop one of yours first.",
+  cloud_workspace_create_budget_exceeded: "You have created as many cloud workspaces as your organization allows one person for now. Try again later.",
+  cloud_provider_creation_disabled: "New cloud workspaces are paused for this organization.",
+  cloud_workspace_runtime_not_ready: "Cloud workspaces are not available yet: the server has not installed a compatible TerminalX runtime. Try again later.",
+  cloud_workspace_active_work: "An agent is working here, or is waiting for an answer. Stop it or answer it, then delete.",
+  cloud_workspace_repository_ref_not_found: "That branch or tag was not found in the repository.",
+  cloud_agent_credential_reauth_required: "This login is no longer accepted. Sign in again to keep the agent working.",
+};
+
+/**
+ * What a refusal says, as one sentence. Given the error itself rather than
+ * only its kind, a code the boards say more precisely is said that way. Never
+ * a code: a kind this app does not know reads as `unknown`.
+ */
+export function refusalText(refusal: CloudRefusal | { refusal: CloudRefusal; code: string }): string {
+  if (typeof refusal !== "string") return REFUSAL_CODE_SENTENCES[refusal.code] ?? refusalText(refusal.refusal);
+  return REFUSAL_SENTENCES[refusal] ?? REFUSAL_SENTENCES.unknown;
 }
 
 /**
