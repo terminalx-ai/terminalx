@@ -6,7 +6,6 @@ const mocks = vi.hoisted(() => ({
   list: vi.fn(),
   detail: vi.fn(),
   repositories: vi.fn(),
-  available: vi.fn(),
   openRun: vi.fn(),
   estimate: vi.fn(),
   create: vi.fn(),
@@ -22,7 +21,6 @@ vi.mock("@/lib/api", () => ({
     cloudAutomations: mocks.list,
     cloudAutomation: mocks.detail,
     cloudWorkspaceRepositories: mocks.repositories,
-    phase2DesktopContractsAvailable: mocks.available,
     cloudAutomationEstimate: mocks.estimate,
     cloudAutomationCreate: mocks.create,
     cloudAutomationRotateWebhookSecret: mocks.rotate,
@@ -31,6 +29,11 @@ vi.mock("@/lib/api", () => ({
     cloudSchedulesPauseAll: mocks.pauseAll,
   },
 }));
+const automationFeatures = [
+  "cloud.automations.fresh-workspace.v1",
+  "cloud.automations.github-trigger.v1",
+  "cloud.automations.webhook-trigger.v1",
+];
 const scope = vi.hoisted(() => ({
   status: {} as AccountStatus,
   privacy: { enabled: false, ready: true, managed: false },
@@ -105,7 +108,6 @@ beforeEach(() => {
   scope.privacy = { enabled: false, ready: true, managed: false };
   listed = [schedule()];
   for (const mock of Object.values(mocks)) mock.mockReset();
-  mocks.available.mockResolvedValue(false);
   mocks.repositories.mockResolvedValue({ configured: true, repositories: [] });
   mocks.detail.mockImplementation(async () => ({ schedule: listed[0], runs: [] }));
   mocks.list.mockImplementation(async () => ({ schedules: listed }));
@@ -564,7 +566,7 @@ describe("accepted raw cloud automations", () => {
   });
 
   it("sends one exact GitHub trigger with five AND filters and explicit fork consent; estimate excludes create-only data", async () => {
-    mocks.available.mockResolvedValue(true); // Test service only; production remains false.
+    scope.status.phase2Readiness = { "org-1": automationFeatures };
     mocks.estimate.mockResolvedValue(quote({ estimate: { ...quote().estimate, monthlyRuns: 720 } }));
     await githubForm();
     expect(screen.queryByLabelText("Time")).toBeNull();
@@ -588,7 +590,7 @@ describe("accepted raw cloud automations", () => {
   });
 
   it("quotes fresh mode without prompt/cleanup, includes creation once, and saves 365-day plus PR cleanup", async () => {
-    mocks.available.mockResolvedValue(true);
+    scope.status.phase2Readiness = { "org-1": automationFeatures };
     mocks.estimate.mockResolvedValue(quote({ estimate: { ...quote().estimate, createPerRunMinutes: 20, perRunMaxMinutes: 105, perRunMaxMicros: 210_000 } }));
     open(); await fillForm();
     fireEvent.change(screen.getByLabelText("Time zone"), { target: { value: "Europe/Berlin" } });
@@ -638,7 +640,7 @@ describe("accepted raw cloud automations", () => {
   });
 
   it("invalidates an agreed quote across a mode A-B-A change immediately and excludes hidden cleanup on existing mode", async () => {
-    mocks.available.mockResolvedValue(true);
+    scope.status.phase2Readiness = { "org-1": automationFeatures };
     open(); await fillForm(); agreeToCost();
     const old = deferred<CloudScheduleQuote>();
     mocks.estimate.mockReturnValue(old.promise);
@@ -760,7 +762,7 @@ describe("automation React scope fences", () => {
 
 describe("automation hold and selected repository refusals", () => {
   it("never quotes or creates GitHub without a selected accessible row ID", async () => {
-    mocks.available.mockResolvedValue(true);
+    scope.status.phase2Readiness = { "org-1": automationFeatures };
     mocks.repositories.mockResolvedValue({ configured: true, repositories: [selectedRepository({ id: null })] });
     open();
     fireEvent.click(await screen.findByRole("button", { name: /New scheduled task/ }));
@@ -775,14 +777,12 @@ describe("automation hold and selected repository refusals", () => {
     expect(mocks.create).not.toHaveBeenCalled();
   });
 
-  it("does not apply a stale readiness true to the new account and keeps emergency stop independent of readiness failure", async () => {
-    const old = deferred<boolean>();
-    mocks.available.mockReturnValueOnce(old.promise).mockRejectedValue({ code: "cloud_workspace_unavailable" });
-    listed = [githubAutomation({ state: "paused" })];
+  it("disables resume on a readiness kill and keeps emergency stop available", async () => {
+    scope.status.phase2Readiness = { "org-1": ["cloud.automations.github-trigger.v1"] };
+    listed = [githubAutomation({ state: "paused", workspaceMode: "existing" })];
     open(); await row();
-    act(() => publishAccount({ context: { ...scope.status.context!, account: "b", revision: "b" } }));
-    await row();
-    await act(async () => old.resolve(true));
+    expect((within(await row()).getByRole("button", { name: /Resume…/ }) as HTMLButtonElement).disabled).toBe(false);
+    act(() => publishAccount({ phase2Readiness: { "org-1": ["cloud.automations.fresh-workspace.v1"] } }));
     expect((within(await row()).getByRole("button", { name: /Resume…/ }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: /Pause all in the organization/ }));
     fireEvent.click(within(screen.getByTestId("cloud-schedules-pause-all-confirm")).getByRole("button", { name: "Pause all" }));
@@ -810,7 +810,7 @@ describe("webhook automations", () => {
     { role: "owner", flag: true, contracts: false },
   ])("keeps existing triggers for $role with flag=$flag and contracts=$contracts", async ({ role, flag, contracts }) => {
     setOrganization(role, flag);
-    mocks.available.mockResolvedValue(contracts);
+    scope.status.phase2Readiness = contracts ? { "org-1": automationFeatures } : {};
     listed = [webhookSchedule()];
     open();
     expect(within(await row()).queryByRole("button", { name: "Show webhook details" })).toBeNull();
@@ -823,7 +823,7 @@ describe("webhook automations", () => {
 
   it("quotes and creates a webhook for an admin, disclosing the secret once", async () => {
     setOrganization("admin", true);
-    mocks.available.mockResolvedValue(true);
+    scope.status.phase2Readiness = { "org-1": automationFeatures };
     mocks.create.mockImplementation(async () => {
       const created = webhookSchedule();
       listed = [created];
@@ -854,7 +854,7 @@ describe("webhook automations", () => {
 
   it("confirms rotation and clears the new secret when details close", async () => {
     setOrganization("owner", true);
-    mocks.available.mockResolvedValue(true);
+    scope.status.phase2Readiness = { "org-1": automationFeatures };
     listed = [webhookSchedule()];
     mocks.rotate.mockResolvedValue({
       ...listed[0],

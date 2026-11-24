@@ -525,7 +525,7 @@ export function currentKeymap(): Keymap {
 
 /** The keymap, re-read when the preference changes (in this window or another). */
 export function useKeymap(): Keymap {
-  return cachedKeymap(usePrefs().shortcuts, useOrganizationSwitchingEnabled({ requestCapability: false }));
+  return cachedKeymap(usePrefs().shortcuts, useOrganizationSwitchingEnabled());
 }
 
 export function bindingsOf(id: ShortcutId): string[] {

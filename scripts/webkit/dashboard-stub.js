@@ -84,6 +84,7 @@
   answers.list_sessions = [session("local", "Local task", "idle", 120_000)];
   answers.session_summaries = [];
   answers.account_status = { ...answers.account_status, multiOrg: true, catalogFeed: true,
+    phase2Readiness: { [orgId]: ["team.events.v1", "team.presence.v1", "team.follow-reassign.v1"] },
     context: { account: "account-a", scope: "account-a", revision: "account-a:1" }, organizations: answers.account_status.organizations.slice(0, 1) };
   answers.cloud_catalog_load = { version: 1, createMemory: {}, orgs: { [orgId]: { workspaces: state.rows, sessions, quota, repositories: [], fetchedAt: now } } };
   answers.cloud_catalog_feed = () => ({ viewerUserId: state.viewer, changed: true, cursor: String(++state.cursor), reset: true,

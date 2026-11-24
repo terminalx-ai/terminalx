@@ -21,8 +21,7 @@ const held = params.has('held');
 const webhookEnabled = params.has('webhook');
 const estimate = {currency:'USD',hourlyMicros:120000,perRunMaxMinutes:105,createPerRunMinutes:20,perRunMaxMicros:210000,monthlyRuns:720,monthlyMaxMicros:151200000,keepsMachineRunning:false,runningSlots:1,maxRunsPerDay:24};
 let schedule = {id:'a1',workspaceId:'w1',name:'PR triage',createdBy:'u1',agent:'claude',mode:'acceptEdits',promptBytes:12,workspaceMode:'fresh',githubTrigger:{repositoryId:'row1',event:'opened',filters:[],allowForkPullRequests:false},schedule:null,missedRunPolicy:'skip',completionPolicy:'suspend',maxRunMinutes:60,state:'active',nextRunAt:null,estimate,lastRun:null};
-api.accountStatus = async () => ({state:'signed-in',identity:{email:'fixture@example.test',name:'Fixture',organization:'Automation lab',organizationId:'o1'},context:{account:'fixture',scope:'profile',revision:'r1'},organizations:[{id:'o1',name:'Automation lab',role:'owner',isPersonal:false,cloud:{enabled:true,flags:{'organization.setup-flow.v1':webhookEnabled}}}],expiresAt:null,lastError:null});
-api.phase2DesktopContractsAvailable = async () => !held;
+api.accountStatus = async () => ({state:'signed-in',identity:{email:'fixture@example.test',name:'Fixture',organization:'Automation lab',organizationId:'o1'},context:{account:'fixture',scope:'profile',revision:'r1'},organizations:[{id:'o1',name:'Automation lab',role:'owner',isPersonal:false,cloud:{enabled:true,flags:{'organization.setup-flow.v1':webhookEnabled}}}],phase2Readiness:held?{}:{o1:['cloud.automations.fresh-workspace.v1','cloud.automations.github-trigger.v1','cloud.automations.webhook-trigger.v1']},expiresAt:null,lastError:null});
 api.cloudAutomations = async () => ({schedules:[schedule]});
 api.cloudAutomation = async () => {
   calls.push({kind:'detail'});

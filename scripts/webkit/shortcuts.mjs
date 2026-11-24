@@ -234,7 +234,8 @@ const fits = (layout) => ({
 // PRO-300: rebind a positional organization shortcut through Settings itself.
 {
   const page = await open(browser, server.url, { cloud: true, localProjects: 1 }, { width: 960, height: 700 }, {
-    extra: `window.__PW_STUB__.answers.phase2_desktop_contracts_available = true;`,
+    extra: `const status = window.__PW_STUB__.answers.account_status;
+      status.phase2Readiness = { [status.identity.organizationId]: ["team.events.v1"] };`,
   });
   await openShortcuts(page);
   const organizationGroup = page.getByRole("region", { name: "Organizations shortcuts" });

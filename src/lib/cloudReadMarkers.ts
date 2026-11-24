@@ -1,6 +1,6 @@
 import type { ReadMarker } from "@/lib/cloudInbox";
 
-type Writer = (orgId: string, workspaceId: string, readAt: string, sessionId?: string) => Promise<ReadMarker>;
+type Writer = (orgId: string, workspaceId: string, readAt: string, sessionId?: string) => Promise<ReadMarker | undefined>;
 const markers = new Map<string, number>();
 const workspaceRevisions = new Map<string, number>();
 const listeners = new Set<() => void>();
@@ -53,6 +53,6 @@ export async function writeCloudReadMarker(org: string, workspace: string, sessi
   const revision = workspaceRevisions.get(workspace);
   try {
     const marker = await writer(org, workspace, new Date(at).toISOString(), session);
-    if (token === generation && revision === workspaceRevisions.get(workspace)) reconcileCloudReadMarker(org, workspace, marker);
+    if (marker && token === generation && revision === workspaceRevisions.get(workspace)) reconcileCloudReadMarker(org, workspace, marker);
   } catch { /* Local/runtime unread behavior survives unavailable or denied SaaS writes. */ }
 }

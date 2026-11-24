@@ -1,3 +1,4 @@
+import { phase2Ready } from "@/lib/phase2Readiness";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { CalendarClock, Loader2, Pause, Play, Plus, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -25,7 +26,7 @@ import {
   whenText,
   type AutomationForm,
 } from "@/lib/cloudSchedules";
-import { getAccount } from "@/lib/account";
+import { getAccount, subscribeAccount } from "@/lib/account";
 import { featureFlags, useFeatureFlag } from "@/lib/featureFlags";
 import { managesOrganization } from "@/lib/multiOrg";
 import { WebhookSecretDialog, WebhookDetails, WebhookPayloadHint } from "./WebhookDetails";
@@ -79,13 +80,18 @@ export function CloudSchedulesDialog(props: SchedulesTarget & { onClose: () => v
 function ScopedSchedulesDialog({ orgId, workspaceId, name, onClose }: SchedulesTarget & { onClose: () => void }) {
   const capture = useAutomationFence();
   const listRequest = useRef(0);
-  const [contractsAvailable, setContractsAvailable] = useState(false);
-  useEffect(() => {
-    const current = capture();
-    api.phase2DesktopContractsAvailable().then((available) => { if (current()) setContractsAvailable(available === true); }, () => {});
-  }, [capture]);
+  const status = useSyncExternalStore(subscribeAccount, () => getAccount().status);
   const flagEnabled = useFeatureFlag(featureFlags.organizationSetup, orgId);
-  const webhookAvailable = contractsAvailable && flagEnabled && managesOrganization(getAccount().status, orgId) === true;
+  const readiness = {
+    fresh: phase2Ready(status, orgId, "freshWorkspace"),
+    github: phase2Ready(status, orgId, "githubTrigger"),
+    webhook: phase2Ready(status, orgId, "webhookTrigger"),
+  };
+  const webhookAvailable = readiness.webhook && flagEnabled && managesOrganization(status, orgId) === true;
+  const scheduleHeld = (schedule: CloudAutomationDto) =>
+    (schedule.workspaceMode === "fresh" && !readiness.fresh)
+    || (!!schedule.githubTrigger && !readiness.github)
+    || (!!schedule.webhookTrigger && !readiness.webhook);
   const [createdSecret, setCreatedSecret] = useState<string | null>(null);
   const [schedules, setSchedules] = useState<CloudAutomationDto[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -130,7 +136,7 @@ function ScopedSchedulesDialog({ orgId, workspaceId, name, onClose }: SchedulesT
 
   const pause = (schedule: CloudAutomationDto) => act(schedule.id, async () => (await api.cloudAutomationSetActive(schedule.id, false, orgId), null));
   const resume = (schedule: CloudAutomationDto) => {
-    if ((schedule.workspaceMode === "fresh" || schedule.githubTrigger || schedule.webhookTrigger) && !contractsAvailable) return;
+    if (scheduleHeld(schedule)) return;
     return act(schedule.id, async () => (await api.cloudAutomationSetActive(schedule.id, true, orgId), null));
   };
   const remove = (schedule: CloudAutomationDto) => act(schedule.id, async () => (await api.cloudScheduleDelete(schedule.id, orgId), null));
@@ -181,7 +187,7 @@ function ScopedSchedulesDialog({ orgId, workspaceId, name, onClose }: SchedulesT
               </span>
             )}
           </div>
-          {!contractsAvailable && <p role="note">{AUTOMATION_HOLD}</p>}
+          {(!readiness.fresh || !readiness.github) && <p role="note">{AUTOMATION_HOLD}</p>}
           {error && (
             <p className="text-destructive" role="alert">
               {error}
@@ -193,7 +199,8 @@ function ScopedSchedulesDialog({ orgId, workspaceId, name, onClose }: SchedulesT
             <NewScheduleForm
               orgId={orgId}
               workspaceId={workspaceId}
-              contractsAvailable={contractsAvailable}
+              freshAvailable={readiness.fresh}
+              githubAvailable={readiness.github}
               webhookAvailable={webhookAvailable}
               onCancel={() => setCreating(false)}
               onCreated={(secret) => {
@@ -220,7 +227,7 @@ function ScopedSchedulesDialog({ orgId, workspaceId, name, onClose }: SchedulesT
                   orgId={orgId}
                   busy={busy !== null}
                   webhookAvailable={webhookAvailable}
-                  resumeBlocked={(schedule.workspaceMode === "fresh" || schedule.githubTrigger || schedule.webhookTrigger) && !contractsAvailable ? AUTOMATION_HOLD : resumeBlocked(schedule)}
+                  resumeBlocked={scheduleHeld(schedule) ? AUTOMATION_HOLD : resumeBlocked(schedule)}
                   confirming={confirming && "id" in confirming && confirming.id === schedule.id ? confirming.kind : null}
                   onPause={() => void pause(schedule)}
                   onAskResume={() => setConfirming({ kind: "resume", id: schedule.id })}
@@ -381,7 +388,7 @@ function CloudAutomationRuns({ schedule, orgId, webhookAvailable }: { schedule: 
   })}</ul>;
 }
 
-function NewScheduleForm({ orgId, workspaceId, contractsAvailable, webhookAvailable, onCancel, onCreated }: { orgId: string; workspaceId: string; contractsAvailable: boolean; webhookAvailable: boolean; onCancel: () => void; onCreated: (secret?: string) => void }) {
+function NewScheduleForm({ orgId, workspaceId, freshAvailable, githubAvailable, webhookAvailable, onCancel, onCreated }: { orgId: string; workspaceId: string; freshAvailable: boolean; githubAvailable: boolean; webhookAvailable: boolean; onCancel: () => void; onCreated: (secret?: string) => void }) {
   const capture = useAutomationFence();
   const [form, setForm] = useState<AutomationForm>(blankAutomationForm);
   const [repositories, setRepositories] = useState<CloudSelectedRepository[]>([]);
@@ -428,8 +435,9 @@ function NewScheduleForm({ orgId, workspaceId, contractsAvailable, webhookAvaila
   const errors = automationFormErrors(form, repositories);
   const shown = touched ? errors : {};
 
-  const advanced = form.workspaceMode === "fresh" || form.triggerKind !== "timer";
-  const held = (advanced && !contractsAvailable) || (form.triggerKind === "webhook" && !webhookAvailable);
+  const held = (form.workspaceMode === "fresh" && !freshAvailable)
+    || (form.triggerKind === "github" && !githubAvailable)
+    || (form.triggerKind === "webhook" && !webhookAvailable);
   const estimateInput = automationEstimateInput(form, workspaceId, repositories);
   const estimateKey = estimateInput ? JSON.stringify(estimateInput) : null;
   // Revision prevents A → B → A from reviving a previous quote/agreement.

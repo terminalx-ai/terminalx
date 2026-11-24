@@ -18,7 +18,7 @@ vi.mock("@/lib/organizationRoster", () => ({ useOrganizationRoster: () => f.rost
 vi.mock("@/lib/dataPrivacy", () => ({ useDataPrivacy: () => ({ enabled: false }) }));
 vi.mock("@/components/people/MemberProfile", () => ({ MemberProfile: () => null }));
 import { ownerStorageKey, useTeamOverview, PresenceFaces, type TeamRow } from "./TeamOverview";
-import { OrganizationPresenceCount } from "@/components/layout/WorkspaceFollowingSection";
+import { OrganizationPresenceCount, WorkspaceFollowingSection } from "@/components/layout/WorkspaceFollowingSection";
 vi.mock("@/lib/sessions", () => ({ selectCloudWorkspace: vi.fn() }));
 function Overview({ org = "org", rows = [{ id: "local", ownerId: "me" }] }: { org?: string; rows?: TeamRow[] }) {
   const team = useTeamOverview(rows, org, new Map([["me", "You"]]));
@@ -27,7 +27,11 @@ function Overview({ org = "org", rows = [{ id: "local", ownerId: "me" }] }: { or
 beforeEach(() => {
   vi.clearAllMocks(); localStorage.clear();
   f.presence = { state: "unavailable", activeMembers: [], workspaces: [] };
-  f.status = { state: "signed-in", context: { account: "a", scope: "org", revision: "1" } } as AccountStatus;
+  f.status = {
+    state: "signed-in", identity: null, expiresAt: null, lastError: null,
+    context: { account: "a", scope: "org", revision: "1" },
+    phase2Readiness: { org: ["team.follow-reassign.v1"] },
+  };
   f.catalog = { viewerUserId: "me", orgs: { org: { source: "live", error: null, workspaces: [] }, other: { source: "live", error: null, workspaces: [] } } } as unknown as CloudCatalogState;
   f.roster = { roster: null, loading: false, error: null };
   f.load.mockImplementation(() => new Promise(() => {}));
@@ -143,5 +147,18 @@ it("requires workspace presence coverage before Active now can report authoritat
   f.presence.workspaces[0].activeMembers = [bob];
   view.rerender(<Overview rows={cloudRows} />);
   expect(active().textContent).toBe("Active now1");
+  expect(screen.getByLabelText("Visible rows").textContent).toBe("cloud-one");
+});
+
+
+it("stops displaying followed workspaces when follow readiness is killed", () => {
+  f.catalog.orgs.org!.workspaces = [{ ...catalogWorkspace("me"), following: true }];
+  const view = render(<><Overview rows={cloudRows} /><WorkspaceFollowingSection orgId="org" /></>);
+  fireEvent.click(screen.getByRole("button", { name: /^Following/ }));
+  expect(screen.getByRole("region", { name: "Following" })).toBeTruthy();
+  f.status.phase2Readiness = { org: ["team.presence.v1"] };
+  view.rerender(<><Overview rows={cloudRows} /><WorkspaceFollowingSection orgId="org" /></>);
+  expect(screen.queryByRole("region", { name: "Following" })).toBeNull();
+  expect((screen.getByRole("button", { name: /Following/ }) as HTMLButtonElement).disabled).toBe(true);
   expect(screen.getByLabelText("Visible rows").textContent).toBe("cloud-one");
 });

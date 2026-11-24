@@ -2,13 +2,13 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { CloudWorkspaceListItem } from "@/lib/api";
 const m = vi.hoisted(() => ({
-  openUrl: vi.fn(), invoke: vi.fn(), details: vi.fn(), copy: vi.fn(), ready: vi.fn(), client: {} as object | null, generation: 1,
+  openUrl: vi.fn(), invoke: vi.fn(), details: vi.fn(), copy: vi.fn(), client: {} as object | null, generation: 1,
   listeners: new Set<() => void>(), accountListeners: new Set<() => void>(), resources: vi.fn(),
-  status: { state: "signed-in", context: { account: "me", scope: "org", revision: "1" }, identity: { email: "me", organizationId: "org" } },
+  status: { state: "signed-in", context: { account: "me", scope: "org", revision: "1" }, identity: { email: "me", organizationId: "org" }, phase2Readiness: {} as Record<string, string[]> },
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: m.openUrl }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: m.invoke }));
-vi.mock("@/lib/api", async (original) => ({ ...(await original<any>()), api: { cloudWorkspaceDetails: m.details, phase2DesktopContractsAvailable: m.ready, cloudWorkspaceRestart: vi.fn(), cloudWorkspaceOperationDto: vi.fn() }, projectCloudWorkspaceSnapshot: vi.fn() }));
+vi.mock("@/lib/api", async (original) => ({ ...(await original<any>()), api: { cloudWorkspaceDetails: m.details, cloudWorkspaceRestart: vi.fn(), cloudWorkspaceOperationDto: vi.fn() }, projectCloudWorkspaceSnapshot: vi.fn() }));
 vi.mock("@/lib/account", () => ({ useAccount: () => ({ status: m.status }), getAccount: () => ({ status: m.status }), subscribeAccount: (cb: () => void) => { m.accountListeners.add(cb); return () => m.accountListeners.delete(cb); } }));
 vi.mock("@/lib/clipboard", () => ({ copyText: m.copy }));
 vi.mock("@/lib/cloudConnections", () => ({ connectedCloudClient: () => m.client, cloudConnectionInfo: () => ({ connects: m.generation }), subscribeCloudConnections: (cb: () => void) => { m.listeners.add(cb); return () => m.listeners.delete(cb); } }));
@@ -16,11 +16,10 @@ vi.mock("@terminalx/portable/workspaceGit", async (original) => ({ ...(await ori
 import { CloudWorkspaceDetails, CloudWorkspaceDetailsCard } from "./CloudWorkspaceDetails";
 const item = { workspace: { id: "ws", orgId: "org", name: "Docs", state: "ready", createdAt: 1700000000000 }, latestOperation: null } as CloudWorkspaceListItem;
 const response = { workspace: item.workspace, details: { workspaceId: "ws", organizationId: "org", createdBy: "creator", provider: "machine0", machineId: "machine", environmentVersion: { id: "env", versionNumber: 3, toolchainVersion: 8 }, repositories: [{ fullName: "org/repo", ref: "main", cloneUrl: "secret" }], runtime: { sha256: "artifact-sha", installedAt: 1700000000000, protocol: 1 }, provisioningLog: null } };
-beforeEach(() => { vi.clearAllMocks(); m.client = {}; m.generation = 1; m.status.context.account = "me"; m.ready.mockResolvedValue(false); m.details.mockResolvedValue(response); m.copy.mockResolvedValue(undefined); m.resources.mockImplementation(async () => ({ v: 1, memory: { totalBytes: 1024 ** 3, availableBytes: 512 * 1024 ** 2 }, storage: null, observedAt: Date.now() })); });
+beforeEach(() => { vi.clearAllMocks(); m.client = {}; m.generation = 1; m.status.context.account = "me"; m.status.phase2Readiness = {}; m.details.mockResolvedValue(response); m.copy.mockResolvedValue(undefined); m.resources.mockImplementation(async () => ({ v: 1, memory: { totalBytes: 1024 ** 3, availableBytes: 512 * 1024 ** 2 }, storage: null, observedAt: Date.now() })); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 it("hides the production entrypoint under the native activation hold", async () => {
   render(<CloudWorkspaceDetails item={item} />);
-  await waitFor(() => expect(m.ready).toHaveBeenCalled());
   expect(screen.queryByRole("button", { name: "Workspace details" })).toBeNull();
   expect(m.details).not.toHaveBeenCalled(); expect(m.resources).not.toHaveBeenCalled();
 });
@@ -147,7 +146,7 @@ it.each([false, true])("uses the real native-first clipboard helper with browser
 });
 
 it("mounts metadata/resources only while the fixture-enabled popover is open", async () => {
-  m.ready.mockResolvedValue(true);
+  m.status.phase2Readiness = { org: ["cloud.workspaces.restart-details.v1"] };
   render(<CloudWorkspaceDetails item={item} />);
   fireEvent.click(await screen.findByRole("button", { name: "Workspace details" }));
   await screen.findByText("artifact-sha");

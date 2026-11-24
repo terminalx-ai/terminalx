@@ -298,6 +298,7 @@ describe("personal named sections", () => {
   it("classifies and counts real ownership, preserves Following, and prevents built-in rename/delete", async () => {
     const rows = [item("owned", { createdBy: "me", you: { role: "manager" } }), item("shared", { createdBy: "teammate", you: { role: "viewer" } }), item("administered", { createdBy: "teammate", you: { role: "manager" } }), item("unknown")];
     rows[1].following = true;
+    mocks.status.phase2Readiness = { [ORG]: ["team.follow-reassign.v1"] };
     mocks.status.catalogFeed = true;
     mocks.api.cloudCatalogFeed.mockResolvedValue({ viewerUserId: "me", changed: true, cursor: "1", reset: true, organizations: [{ orgId: ORG, workspaces: rows, quota: null }], deletedWorkspaceIds: [] });
     await act(async () => { await catalog.refreshCloudFeed(); });

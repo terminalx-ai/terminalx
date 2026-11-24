@@ -913,6 +913,7 @@ export interface AccountStatus {
   agentCommandWake?: boolean;
   /** True only when the account service reports account.work-claims.v1. */
   workClaims?: boolean;
+  phase2Readiness?: Record<string, string[]>;
 }
 
 /** One organization of the catalog feed: its list, or why it was not listed (the others are unaffected). */

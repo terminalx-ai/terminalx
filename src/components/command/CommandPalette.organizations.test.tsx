@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   roster: vi.fn(async () => ({ members: [{}, {}] })),
   status: null as unknown as AccountStatus,
   enabled: true,
+  accountListeners: new Set<() => void>(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke, convertFileSrc: (path: string) => path }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
@@ -22,7 +23,10 @@ vi.mock("@/lib/organizationRoster", async (importOriginal) => ({
 vi.mock("@/lib/account", () => ({
   useAccount: () => ({ status: mocks.status }),
   getAccount: () => ({ status: mocks.status }),
-  subscribeAccount: () => () => {},
+  subscribeAccount: (listener: () => void) => {
+    mocks.accountListeners.add(listener);
+    return () => { mocks.accountListeners.delete(listener); };
+  },
 }));
 
 const { CommandPalette } = await import("./CommandPalette");
@@ -67,18 +71,24 @@ function mount(query = "switch") {
 }
 
 describe("organization switching from the palette", () => {
-  it("requires the native Phase 2 capability before offering the switcher", async () => {
+  it("enables and disables switching on capability refresh without remounting", async () => {
     const gate = await vi.importActual<typeof import("@/lib/organizationVisibilityGate")>("@/lib/organizationVisibilityGate");
-    const { api } = await import("@/lib/api");
-    const probe = vi.spyOn(api, "phase2DesktopContractsAvailable").mockResolvedValue(true);
-    try {
-      const { result } = renderHook(gate.useOrganizationSwitchingEnabled);
-      expect(result.current).toBe(false);
-      await waitFor(() => expect(result.current).toBe(true));
-      expect(probe).toHaveBeenCalledTimes(1);
-    } finally {
-      probe.mockRestore();
-    }
+    const { result } = renderHook(gate.useOrganizationSwitchingEnabled);
+    const refresh = (phase2Readiness: AccountStatus["phase2Readiness"]) => act(() => {
+      mocks.status = { ...mocks.status, phase2Readiness };
+      for (const listener of mocks.accountListeners) listener();
+    });
+
+    expect(result.current).toBe(false);
+    refresh({ a: ["team.presence.v1"] });
+    expect(result.current).toBe(false);
+    refresh({ a: ["team.events.v1"] });
+    expect(result.current).toBe(true);
+    expect(gate.organizationSwitchingEnabled()).toBe(true);
+    refresh({});
+    expect(result.current).toBe(false);
+    expect(gate.organizationSwitchingEnabled()).toBe(false);
+    expect(mocks.invoke.mock.calls.flat()).not.toContain("phase2_desktop_contracts_available");
   });
 
   it("lists every membership in shortcut order and changes the current row on Enter", async () => {
