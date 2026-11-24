@@ -73,7 +73,7 @@ try {
   assert.equal(await dialog.getByTestId('automation-run-archived').getByRole('button',{name:'Open run workspace',exact:true}).count(),1,'observed archival retains its own workspace link');
   await dialog.getByRole('button',{name:'New scheduled task',exact:true}).click();
   await dialog.getByLabel('Name',{exact:true}).fill('PR report');await dialog.getByLabel('Prompt',{exact:true}).fill('Review the change.');
-  await dialog.getByLabel('Trigger',{exact:true}).selectOption('github');
+  await dialog.getByRole('radio',{name:'GitHub event',exact:true}).click();
   await dialog.getByLabel('GitHub repository',{exact:true}).selectOption('row1');
   const missingId = dialog.getByRole('option',{name:'acme/no-id (repository ID unavailable)',exact:true});
   assert(await missingId.evaluate(el=>el instanceof HTMLOptionElement && el.disabled && el.hasAttribute('disabled')), 'missing authoritative repository ID disables native option');
@@ -97,7 +97,7 @@ try {
   await dialog.getByRole('button',{name:'New scheduled task',exact:true}).click();
   await dialog.getByLabel('Name',{exact:true}).fill('Webhook report');
   await dialog.getByLabel('Prompt',{exact:true}).fill('Report on {{payload.ref}}.');
-  await dialog.getByLabel('Trigger',{exact:true}).selectOption('webhook');
+  await dialog.getByRole('radio',{name:'Webhook',exact:true}).click();
   await dialog.getByText('{{payload.*}}',{exact:true}).waitFor();
   const checkLayout = async (panel, name) => {
     assert(await panel.evaluate(el=>{const r=el.getBoundingClientRect();return r.left>=-1&&r.right<=innerWidth+1&&el.scrollWidth<=el.clientWidth+1;}),width+'px '+name+' stays inside the viewport');
