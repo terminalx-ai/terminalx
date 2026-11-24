@@ -333,10 +333,26 @@ try {
     await dialog.getByRole("textbox", { name: "Find a teammate", exact: true }).fill("Bob");
     await dialog.getByRole("radio").check();
     await dialog.getByRole("textbox", { name: "Note to the new owner", exact: true }).fill("Away until Monday");
-    await success.evaluate(() => { window.__PW_TEAM__.refusal = null; });
+    await success.evaluate(() => {
+      const fixture = window.__PW_TEAM__;
+      fixture.refusal = null;
+      const answers = window.__PW_STUB__.answers;
+      const reassign = answers.cloud_workspace_reassign;
+      answers.cloud_workspace_reassign = (args) => new Promise((resolve) => {
+        fixture.finishReassignment = () => resolve(reassign(args));
+      });
+    });
+    const confirmation = success.getByRole("status").filter({ hasText: "Reassigned Owned workspace to Bob" });
     await dialog.getByRole("button", { name: "Reassign", exact: true }).click();
-    await dialog.getByRole("status").filter({ hasText: "Reassignment recorded." }).waitFor();
-    await dialog.getByRole("button", { name: "Done", exact: true }).click();
+    await success.waitForFunction(() => !!window.__PW_TEAM__.finishReassignment);
+    assert.equal(await dialog.getByRole("button", { name: "Reassigning…", exact: true }).isDisabled(), true);
+    assert.equal(await confirmation.count(), 0, "no sender feedback before the server confirms");
+    await success.evaluate(() => window.__PW_TEAM__.finishReassignment());
+    await dialog.waitFor({ state: "detached" });
+    await confirmation.waitFor();
+    await reachable(confirmation, "confirmed sender feedback");
+    await success.getByRole("button", { name: "Dismiss reassignment confirmation", exact: true }).click();
+    await confirmation.waitFor({ state: "detached" });
     const following = success.getByRole("region", { name: "Following", exact: true });
     await following.getByRole("button", { name: "Owned workspace", exact: true }).waitFor();
     await success.getByRole("button", { name: /^Overview/ }).click();
@@ -349,8 +365,7 @@ try {
   const privatePage = await fresh(390, { privateWorkspace: true });
   try {
     const dialog = await reassign(privatePage);
-    await dialog.getByRole("textbox", { name: "Find a teammate", exact: true }).fill("Bob");
-    await dialog.getByRole("radio").check();
+    assert.equal(await dialog.getByRole("radio").count(), 0);
     await dialog.getByText("Private cross-owner handover is unavailable. Confirmation cannot grant a teammate access.", { exact: true }).waitFor();
     assert.equal(await dialog.getByRole("button", { name: "Reassign", exact: true }).isDisabled(), true);
     assert.equal(await privatePage.evaluate(() => window.__PW_TEAM__.calls.filter((c) => c.command === "cloud_workspace_reassign").length), 0);
