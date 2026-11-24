@@ -666,7 +666,16 @@ fn a_duty_deleted_mid_run_ends_its_run_then() {
     // One a scheduler tick wrote just after the delete, still open in the log.
     automation_store::insert_run(run(&status.id, 2, "pending", &kept.deleted_at, json!({"endedAt": null}))).unwrap();
 
-    let week = rig.bots("dutyWeek", json!({"week": began.date_naive().format("%Y-%m-%d").to_string(), "timezone": "UTC"})).unwrap();
+    // The run and its deletion lie on one day of the week asked for, as what follows reads them: the week is
+    // asked for in the zone where it is about noon now, so the half hour before now never crosses its midnight.
+    // Asked for in UTC, a run begun at 23:49 and deleted at 00:19 is rightly drawn on both days, the second
+    // block `continued` (PRO-513). An `Etc/GMT` zone has no daylight saving, and its sign is the reverse of
+    // the offset's: `Etc/GMT-5` is five hours ahead of UTC.
+    let ahead = 12 - i64::from(chrono::Timelike::hour(&began));
+    let zone: chrono_tz::Tz = format!("Etc/GMT{:+}", -ahead).parse().unwrap();
+    let local = began.with_timezone(&zone);
+    assert_eq!(chrono::Timelike::hour(&local), 12, "began at {local}");
+    let week = rig.bots("dutyWeek", json!({"week": local.date_naive().format("%Y-%m-%d").to_string(), "timezone": zone.name()})).unwrap();
     let blocks: Vec<&Value> = week["blocks"].as_array().unwrap().iter().filter(|block| block["dutyId"] == status.id.as_str()).collect();
     assert!(!blocks.is_empty(), "{week}");
     assert!(blocks.iter().all(|block| block["state"] != "running" && block["continued"].is_null()), "nothing goes on: {week}");
