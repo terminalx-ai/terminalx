@@ -100,7 +100,10 @@ export function LaunchProgress({ catalog, title, lifecycle, role, provider, offl
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
     <Stack.Screen options={{ title, headerShown: false }} />
     <ScreenHeader title={title} onBack={onBack} subtitle={line ? <HeaderLine testID="workspace-state-line" text={line} /> : undefined} />
-    {!view ? <EmptyState title={LAUNCH.reading} detail={LAUNCH.readingDetail} busy />
+    {!view ? <>
+        {offline ? <View style={styles.content}><Notice tone="warning" text={LAUNCH.offline} icon={(color) => <WifiOff size={16} color={color} />} testID="launch-offline" /></View> : null}
+        <EmptyState title={LAUNCH.reading} detail={LAUNCH.readingDetail} busy />
+      </>
       : <>
         <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
           {offline ? <Notice tone="warning" text={LAUNCH.offline} icon={(color) => <WifiOff size={16} color={color} />} testID="launch-offline" /> : null}

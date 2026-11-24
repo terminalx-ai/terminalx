@@ -1047,6 +1047,8 @@ describe("a launch on the workspace page (25.05)", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(9_000); });
       expect(mocks.catalog.api.operation).toHaveBeenCalledTimes(1);
       await focusAll();
+      // Its first focus is not a coming back: the read on opening is not asked again.
+      expect(mocks.catalog.api.operation).toHaveBeenCalledTimes(1);
       mocks.catalog.api.operation.mockImplementation(async () => lifecycle(operation({ state: "succeeded", stage: "ready", cancelable: false }), { state: "ready" }));
       await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
       expect(text()).toContain("fix-login is running");
@@ -1063,6 +1065,24 @@ describe("a launch on the workspace page (25.05)", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
       expect(text()).not.toContain("fix-login is running");
       expect(text()).toContain("run the tests");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("asks at once on coming back into view while it runs, and not while it is out of view", async () => {
+    vi.useFakeTimers();
+    try {
+      launching(operation({ stage: "creating-machine" }));
+      await show(<CloudWorkspaceScreen />);
+      let leave: (void | (() => void))[] = [];
+      await act(async () => { leave = [...mocks.focus].map((run) => run()); });
+      expect(mocks.catalog.api.operation).toHaveBeenCalledTimes(1);
+      await act(async () => { for (const blur of leave) if (blur) blur(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(9_000); });
+      expect(mocks.catalog.api.operation).toHaveBeenCalledTimes(1);
+      await focusAll();
+      expect(mocks.catalog.api.operation).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }

@@ -42,11 +42,18 @@ export function useOperation(catalog: { refresh(): Promise<void> } | null, orgId
     const timer = setInterval(() => void refresh(), OPERATION_POLL_MS);
     return () => clearInterval(timer);
   }, [open, shown, orgId, operationId, refresh]);
-  // Coming back into view, or to the foreground, while it runs: read at once.
-  const wasShown = useRef(shown);
+  // Coming back into view, or to the foreground, while it runs: read at once. The page's first focus is
+  // not a coming back: the read on opening is already under way, and a second would overtake it.
+  const seen = useRef(false);
+  const away = useRef(false);
   useEffect(() => {
-    if (shown && !wasShown.current && open) void refresh();
-    wasShown.current = shown;
+    if (!shown) {
+      if (seen.current) away.current = true;
+      return;
+    }
+    if (away.current && open) void refresh();
+    seen.current = true;
+    away.current = false;
   }, [shown, open, refresh]);
   // It ended while this page followed it: the list is read again.
   const followed = useRef(false);
