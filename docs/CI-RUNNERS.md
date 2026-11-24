@@ -321,10 +321,34 @@ saved, built every dependency on every run.
 
 ## macOS Rust coverage
 
-The full macOS suite runs on pushes to `main`, nightly at 02:23 UTC, manual
-workflow dispatch, and selected pull requests. The nightly trigger takes effect
-once the workflow is on the default branch. Non-PR runs have unique concurrency
-groups, so rapid main pushes and nightly runs cannot replace pending push runs.
+The full macOS suite runs on pushes to `main`, nightly at 02:23 UTC and on
+manual workflow dispatch. A selected pull request runs the filtered part of it
+(below).
+
+**Not every commit on `main` gets a macOS result.** Each run of the workflow
+has a concurrency group of its own, but the two macOS jobs share one group for
+all pushes to `main` (`ci-macos-native-main`, `ci-machine-compat-main`), with
+`cancel-in-progress: false`: one job runs, one waits, and a newer push replaces
+the one that waits. GitHub cancels the replaced job ("Canceling since a higher
+priority waiting request for ci-macos-native-main exists"), and that commit's
+`check` is red although nothing failed. The rule is older than step 1. What it
+means since 23 November 2026:
+
+- The full macOS suite, the other test binaries and the doc tests on macOS run
+  nowhere before merge, so `main` is the first place a failure in them shows.
+  When pushes arrive faster than the suite runs (about 90 minutes), only the
+  commit that was running and the last one waiting are tested; the commits
+  between them are not, on macOS, by any run.
+- A failure found on the last commit of such a burst belongs to any of the
+  commits since the previous macOS result. Finding which takes a manual run on
+  each (`gh workflow run ci.yml --ref <commit>`), or the nightly run, which
+  tests the head only.
+- A red `check` on `main` therefore means "failed" or "replaced while waiting".
+  Read the macOS job's own conclusion (cancelled, with that message) before
+  treating it as a failure.
+- `release-serve.yml` publishes from a green run only. A replaced commit is not
+  published; the next green commit is a descendant and carries its changes, so
+  the runtime release is later by one macOS cycle, not lost.
 
 `infra/ci-runners/macos-rust.py` selects a pull request, from **both** the
 merge base and its head, when it changes:
