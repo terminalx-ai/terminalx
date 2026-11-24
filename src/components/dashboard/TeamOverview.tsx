@@ -19,7 +19,7 @@ export const TEAM_VIEWS: { id: TeamView; label: string }[] = [{ id: "everyone", 
 export interface TeamRow { id: string; kind?: string; ownerId?: string | null; orgId?: string; workspaceId?: string }
 /** Same authorized dataset for rows and counts. Local ownership is presentation only. */
 export function teamPredicate(row: TeamRow, view: TeamView, catalog: CloudCatalogState, active: (org: string, workspace: string) => boolean) {
-  const local = !row.orgId && row.kind !== "machine";
+  const local = !row.orgId;
   const org = row.orgId ? catalog.orgs[row.orgId] : undefined;
   const item = org?.source === "live" && !org.error ? org.workspaces.find((item) => item.workspace.id === row.workspaceId) : undefined;
   const mine = local || (!!catalog.viewerUserId && item?.workspace.createdBy === catalog.viewerUserId);
@@ -36,7 +36,7 @@ export function readOwners(key: string | null): string[] {
   if (!key) return [];
   try { const value: unknown = JSON.parse(localStorage.getItem(key) ?? "[]"); return Array.isArray(value) ? [...new Set(value.filter((id): id is string => typeof id === "string" && id.length <= 128))] : []; } catch { return []; }
 }
-export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | null, rowOwners: Map<string, string>, legacy = false) {
+export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | null, rowOwners: Map<string, string>, legacy = false, scopeOwnersToOrg = false) {
   const { status } = useAccount();
   const privacy = useDataPrivacy();
   const catalog = useCloudCatalog();
@@ -87,7 +87,8 @@ export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | nu
       && snapshot.workspaces.some((row) => row.workspaceId === workspace && row.activeMembers.length > 0);
   };
   const byRows = rows.filter((row) => {
-    const owner = legacy && !row.orgId ? catalog.viewerUserId ?? "local" : row.ownerId;
+    if (scopeOwnersToOrg && row.orgId !== orgId) return true;
+    const owner = !row.orgId && (legacy || row.kind === "machine") ? catalog.viewerUserId ?? "local" : row.ownerId;
     return !selected.length || selected.includes(owner ?? "");
   });
   const matches = (row: TeamRow, candidate: TeamView) =>
