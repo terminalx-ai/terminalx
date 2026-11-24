@@ -1,3 +1,5 @@
+import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
+
 export const ENVIRONMENT_TOOLS = [
   ["node", "Node.js"], ["npm", "npm"], ["pnpm", "pnpm"], ["python", "Python"],
   ["git", "Git"], ["gh", "GitHub CLI"], ["jq", "jq"], ["rg", "ripgrep"],
@@ -8,6 +10,11 @@ export type EnvironmentTool = { id: EnvironmentToolId; status: "installed"; vers
   | { id: EnvironmentToolId; status: "missing" | "error" | "timeout" };
 export interface EnvironmentReport { version: 1; observedAt: number; tools: EnvironmentTool[] }
 export const ENVIRONMENT_STALE_MS = 60_000;
+
+export function canReadEnvironment(state: WorkspaceConnectionState): boolean {
+  return state.state === "connected" && state.authority === "manage"
+    && (!state.you || (state.you.listed !== false && state.you.role === "manager"));
+}
 
 export function environmentReport(value: unknown): EnvironmentReport {
   const invalid = () => { throw new Error("Invalid environment report"); };

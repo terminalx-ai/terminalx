@@ -3,7 +3,9 @@ import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, ty
 import { Popover as PopoverPrimitive } from "radix-ui";
 import { FileLock, Info, Lock, Play, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { EnvironmentInfo } from "@/components/cloud/EnvironmentInfo";
 import { errorMessage } from "@/lib/api";
+import { useEnvironmentInfoRuntime } from "@/lib/environmentInfoRuntime";
 import { configuration, type Configuration, type ConfigurationLayer } from "@/lib/configuration";
 import { updateProject, useSessionStore } from "@/lib/sessions";
 import { rerunSetup, useWorkspaceSetups } from "@/lib/workspaceSetup";
@@ -215,7 +217,7 @@ function ScriptCard({ kind, project, resolved, reload, untrusted, environmentId 
         {!locked && (dirty || busy) && <Button size="sm" variant="outline" disabled={busy} onClick={() => void save()}>{busy ? "Saving…" : `Save ${kind} script`}</Button>}
         {locked && <Lock className="size-3.5 shrink-0 text-warning" aria-label="Locked" />}
         {chip && <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded bg-mention/10 px-1.5 py-0.5 text-[11px] text-mention"><FileLock className="size-3" aria-hidden />{chip}</span>}
-        {kind === "setup" ? <EnvironmentInfo environmentId={environmentId} /> : <label className="flex shrink-0 items-center gap-2 text-xs text-faint" title="If it fails or times out, TerminalX asks before removing the worktree.">timeout
+        {kind === "setup" ? <SetupEnvironmentInfo projectPath={project.path} environmentId={environmentId} /> : <label className="flex shrink-0 items-center gap-2 text-xs text-faint" title="If it fails or times out, TerminalX asks before removing the worktree.">timeout
           <select aria-label="Archive timeout" disabled={busy || timeoutLocked} value={draftTimeout} onChange={(event) => {
             const minutes = Number(event.target.value);
             setEdited(true); setDraftTimeout(minutes); setMessage(null);
@@ -303,21 +305,27 @@ function RunCard({ project }: { project: Project }) {
   </div>;
 }
 
-function EnvironmentInfo({ environmentId }: { environmentId: string }) {
+function SetupEnvironmentInfo({ projectPath, environmentId }: { projectPath: string; environmentId: string }) {
+  const { enabled, scopeKey, target } = useEnvironmentInfoRuntime({ projectPath });
+  const trigger = <button type="button" className="flex h-6 shrink-0 items-center gap-1.5 rounded-md border border-hairline-strong px-2 text-xs text-muted-foreground outline-none hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-veil-raised">
+    <Info className="size-3.5" aria-hidden /> Environment info
+  </button>;
+  const help = <ul className="flex list-disc flex-col gap-1.5 pl-4 text-xs leading-5 text-muted-foreground marker:text-faint">
+    <li>Runs in the new workspace’s folder, in a visible Setup tab.</li>
+    <li>Loads <PopoverPrimitive.Close asChild><button type="button" className="text-foreground underline underline-offset-2 hover:opacity-80" onClick={() => document.getElementById(environmentId)?.scrollIntoView({ block: "start", behavior: "smooth" })}>your and the project’s variables</button></PopoverPrimitive.Close>.</li>
+    <li><span className="font-mono">$TERMINALX_REPO_ROOT</span> is the project root; <span className="font-mono">$TERMINALX_WORKSPACE_PATH</span> the workspace.</li>
+  </ul>;
+
+  if (enabled) return <EnvironmentInfo scopeKey={scopeKey} trigger={trigger} {...target}>
+    <div className="mt-3 border-t border-hairline pt-3">{help}</div>
+  </EnvironmentInfo>;
+
   return <PopoverPrimitive.Root>
-    <PopoverPrimitive.Trigger asChild>
-      <button type="button" className="flex h-6 shrink-0 items-center gap-1.5 rounded-md border border-hairline-strong px-2 text-xs text-muted-foreground outline-none hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-veil-raised">
-        <Info className="size-3.5" aria-hidden /> Environment info
-      </button>
-    </PopoverPrimitive.Trigger>
+    <PopoverPrimitive.Trigger asChild>{trigger}</PopoverPrimitive.Trigger>
     <PopoverPrimitive.Portal>
       <PopoverPrimitive.Content side="bottom" align="end" sideOffset={6} aria-label="Environment info"
         className="z-(--z-menu) w-[20.5rem] max-w-[calc(100vw-2rem)] rounded-lg bg-popover px-4 py-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in">
-        <ul className="flex list-disc flex-col gap-1.5 pl-4 text-xs leading-5 text-muted-foreground marker:text-faint">
-          <li>Runs in the new workspace’s folder, in a visible Setup tab.</li>
-          <li>Loads <PopoverPrimitive.Close asChild><button type="button" className="text-foreground underline underline-offset-2 hover:opacity-80" onClick={() => document.getElementById(environmentId)?.scrollIntoView({ block: "start", behavior: "smooth" })}>your and the project’s variables</button></PopoverPrimitive.Close>.</li>
-          <li><span className="font-mono">$TERMINALX_REPO_ROOT</span> is the project root; <span className="font-mono">$TERMINALX_WORKSPACE_PATH</span> the workspace.</li>
-        </ul>
+        {help}
       </PopoverPrimitive.Content>
     </PopoverPrimitive.Portal>
   </PopoverPrimitive.Root>;
