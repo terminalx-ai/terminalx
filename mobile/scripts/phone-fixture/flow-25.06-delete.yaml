@@ -1,0 +1,66 @@
+# 25.06, Delete: the page and its acknowledgement, sending, the list while it is deleted, an old link, and each refusal.
+appId: com.terminalx.phone.fixture
+name: Delete workspace (25.06)
+---
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: delete-pending, openRoute: /cloud, openWorkspace: ws-checkout }
+- tapOn: { id: "workspace-actions" }
+- tapOn: "Delete workspace…"
+- assertVisible: "Delete Checkout redesign permanently?"
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-12-the-confirmation
+- tapOn: "I understand this cannot be undone.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-13-acknowledged
+- tapOn: "Delete permanently"
+- assertVisible: "Deleting…"
+- takeScreenshot: 25.06-14-sending
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: manage-being-deleted, openRoute: /cloud }
+- assertVisible: ".*Being deleted.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-15-being-deleted
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: manage-old-link, openRoute: "/cloud/ws-gone?orgId=org-acme" }
+- assertVisible: "This workspace was deleted"
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-16-opened-from-an-old-link
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: delete-active-work, openRoute: /cloud, openWorkspace: ws-checkout }
+- tapOn: { id: "workspace-actions" }
+- tapOn: "Delete workspace…"
+- tapOn: "I understand this cannot be undone.*"
+- tapOn: "Delete permanently"
+- assertVisible: "An agent is working here.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-17-an-agent-is-working
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: delete-busy, openRoute: /cloud, openWorkspace: ws-checkout }
+- tapOn: { id: "workspace-actions" }
+- tapOn: "Delete workspace…"
+- tapOn: "I understand this cannot be undone.*"
+- tapOn: "Delete permanently"
+- assertVisible: "Something else is still under way.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-18-something-else-is-under-way
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: delete-offline, openRoute: /cloud, openWorkspace: ws-checkout }
+- tapOn: { id: "workspace-actions" }
+- tapOn: "Delete workspace…"
+- tapOn: "I understand this cannot be undone.*"
+- tapOn: "Delete permanently"
+- assertVisible: "No connection. Nothing was deleted.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-19-no-network
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: manage-provider-refused, openRoute: /cloud, openWorkspace: ws-checkout }
+- assertVisible: "Boat refused to delete this machine.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-20-the-provider-refused

@@ -1,0 +1,34 @@
+# 25.06, where the actions are: ••• beside Sharing for a manager, its sheet running and stopped, and none for anyone else.
+appId: com.terminalx.phone.fixture
+name: Workspace actions (25.06)
+---
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: manage-running, openRoute: /cloud, openWorkspace: ws-checkout }
+- assertVisible: { id: "workspace-actions" }
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-01-a-running-workspace
+- tapOn: { id: "workspace-actions" }
+- assertVisible: "Stop workspace"
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-02-its-actions
+- tapOn: "Cancel"
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: manage-stopped, openRoute: /cloud, openWorkspace: ws-warm-up }
+- assertVisible: "What's the latest status?"
+- assertVisible: "This workspace is stopped"
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-09-stopped
+- tapOn: { id: "workspace-actions" }
+- assertVisible: "Start workspace"
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-03-a-stopped-one
+- tapOn: "Cancel"
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: manage-not-manager, openRoute: /cloud, openWorkspace: ws-checkout }
+- assertVisible: ".*You can send.*"
+- assertNotVisible: { id: "workspace-actions" }
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-05-someone-who-may-not-manage

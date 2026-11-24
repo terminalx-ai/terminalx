@@ -1,16 +1,24 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
+import { Stack, useFocusEffect, useLocalSearchParams, useRouter, type Href } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { MessageSquareDashed, Play, Send, Square, Users } from "lucide-react-native";
+import { MessageSquareDashed, Play, Send, Square, Trash2, Users } from "lucide-react-native";
 import { interruptUnanswered } from "@terminalx/portable/events";
 import { buildTranscript, type PendingAsk } from "@terminalx/portable/transcript";
 import { leaseHeldBy, NOTE_MAX_CHARS } from "@terminalx/portable/workspaceCollab";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { workspaceTitle, type CloudCatalog } from "@mobile/cloud/catalog";
 import { resumeFailure, resumeRetryable, type ResumeFailure } from "@mobile/cloud/resume";
-import type { CloudRole } from "@mobile/cloud/api";
-import { accessText, attentionDetail, codeText, connectionLine, leaseLine, outboxLine, presenceLine, rolePhrase, whoCanStart } from "@mobile/cloud/words";
+import type { CloudLifecycle, CloudRole, CloudWorkspaceItem } from "@mobile/cloud/api";
+import { accessText, attentionDetail, codeText, connectionLine, leaseLine, outboxLine, presenceLine, roleLabel, rolePhrase, stateLabel, whoCanStart } from "@mobile/cloud/words";
+import { askToStop, deleteHref, mayManage, workspaceRowActions } from "@mobile/cloud/setup/workspace/actions";
+import { DeletionFailed } from "@mobile/cloud/setup/workspace/DeletionFailed";
+import { useOperation, useProvider } from "@mobile/cloud/setup/workspace/hooks";
+import { listedLaunch, operationOpen } from "@mobile/cloud/setup/workspace/launch";
+import { LaunchProgress } from "@mobile/cloud/setup/workspace/LaunchProgress";
+import { STOP, stopCause } from "@mobile/cloud/setup/workspace/sentences";
+import { StopBar } from "@mobile/cloud/setup/workspace/StopBar";
+import { WorkspaceActionsButton } from "@mobile/ui/WorkspaceActionsButton";
 import type { CloudWorkspaceSession } from "@mobile/cloud/workspace";
 import { useConversationState } from "@mobile/state/conversation-state";
 import { useKeyboardShown } from "@mobile/ui/keyboard";
@@ -55,15 +63,50 @@ export default function CloudWorkspaceScreen() {
   }, [catalog, access, checked, key]);
   const checking = access === "not-shared" && checked !== key;
   const closed = !checking && (access === "not-shared" || access === "deleted" || access === "gone") ? accessText(access) : null;
+  const router = useRouter();
+  const item = orgId ? snapshot.organizations.find((entry) => entry.organization.orgId === orgId)?.workspaces.find((entry) => entry.workspace.id === params.workspaceId) ?? null : null;
+
+  // A launch (25.05): shown while it runs, and once it failed or was canceled. One this page saw running stays
+  // shown as it ends, even if the workspace then leaves the list, until the person opens the workspace.
+  const launching = listedLaunch(item);
+  const [watched, setWatched] = useState<string | null>(null);
+  const [openedLaunch, setOpenedLaunch] = useState<string | null>(null);
+  const launchId = launching?.id ?? watched;
+  const launch = useOperation(catalog, orgId, launchId, operationOpen(launching));
+  const launchLifecycle = launch.lifecycle;
+  if (launchLifecycle && operationOpen(launchLifecycle.operation) && watched !== launchLifecycle.operation.id) setWatched(launchLifecycle.operation.id);
+  const showLaunch = launchId !== null && openedLaunch !== launchId && (launching !== null || watched === launchId) && (launchLifecycle !== null || launch.reading || launch.offline);
+  const workspaceNow = item?.workspace ?? launchLifecycle?.workspace ?? null;
+  const provider = useProvider(orgId, workspaceNow?.provider ?? null, workspaceNow?.providerDescriptor?.label);
+
+  // A delete the provider did not confirm (25.06): its cleanup report, and Delete again.
+  const deleteFailed = item?.latestOperation?.action === "delete" && item.latestOperation.state === "failed" && item.workspace.state !== "destroyed" ? item.latestOperation : null;
+  const deletion = useOperation(catalog, orgId, deleteFailed?.id ?? null, false);
+
+  const title = (listed ? workspaceTitle(snapshot, listed) : null) ?? launchLifecycle?.workspace.name ?? params.title ?? "Workspace";
+  const backToCloud = () => router.dismissTo("/cloud");
+  if (catalog && orgId && showLaunch) {
+    return <LaunchProgress catalog={catalog} title={title} lifecycle={launchLifecycle} role={workspaceNow?.you?.role ?? null} provider={provider} offline={launch.offline}
+      refresh={launch.refresh} onOpen={() => setOpenedLaunch(launchId)} onBack={() => router.back()} onBackToCloud={backToCloud} push={(href) => router.push(href as Href)} />;
+  }
+  if (catalog && orgId && item && deleteFailed && !closed && access === "ok") {
+    const actions = workspaceRowActions(item, { catalog, push: (href) => router.push(href as Href) });
+    const line = [stateLabel(item.workspace.state), actions.length ? roleLabel(item.workspace.you?.role) : rolePhrase(item.workspace.you?.role)].filter(Boolean).join(" · ");
+    return <DeletionFailed title={title} line={line} operation={deletion.lifecycle?.operation ?? null} provider={provider?.label ?? "The provider"} actions={<WorkspaceActionsButton title={title} actions={actions} />}
+      onBack={() => router.back()} onDeleteAgain={mayManage(item.workspace) ? () => router.push(deleteHref(item.workspace) as Href) : undefined} />;
+  }
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
-    <Stack.Screen options={{ title: (listed ? workspaceTitle(snapshot, listed) : null) ?? params.title ?? "Workspace" }} />
+    <Stack.Screen options={{ title }} />
     {!catalog ? <EmptyState title="Workspace unavailable" detail="Sign in, then open it again from the Cloud tab." />
       // Access ended, also while this screen was open: the conversation goes at once, with the reason.
-      : closed ? <EmptyState title={closed.title} detail={closed.detail} />
-      : session && orgId ? <Workspace key={`${orgId}/${params.workspaceId}`} catalog={catalog} session={session} orgId={orgId} workspaceId={params.workspaceId} listedState={listed?.state ?? null} initialTabId={params.tabId ?? null} />
+      : closed ? <EmptyState title={closed.title} detail={closed.detail} icon={access === "deleted" ? (color) => <Trash2 size={34} color={color} strokeWidth={1.6} /> : undefined} />
+      : session && orgId ? <Workspace key={`${orgId}/${params.workspaceId}`} catalog={catalog} session={session} orgId={orgId} workspaceId={params.workspaceId} listedState={listed?.state ?? null} item={item} initialTabId={params.tabId ?? null} />
       : <EmptyState title="Checking access…" detail="Reading the list of workspaces from your account." busy />}
   </View>;
 }
+
+/** The agent of a tab, by the harness its events carry, as the Stop alert names it. */
+const AGENTS: Readonly<Record<string, string>> = { claude: "Claude Code", codex: "Codex", cursor: "Cursor" };
 
 /** Names for user ids, re-read whenever one is learned. */
 function useNames(catalog: CloudCatalog) {
@@ -82,7 +125,7 @@ function useNowUntil(at: number | null): number {
   return now;
 }
 
-function Workspace({ catalog, session, orgId, workspaceId, listedState, initialTabId }: { catalog: CloudCatalog; session: CloudWorkspaceSession; orgId: string; workspaceId: string; listedState: string | null; initialTabId: string | null }) {
+function Workspace({ catalog, session, orgId, workspaceId, listedState, item, initialTabId }: { catalog: CloudCatalog; session: CloudWorkspaceSession; orgId: string; workspaceId: string; listedState: string | null; item: CloudWorkspaceItem | null; initialTabId: string | null }) {
   const { palette } = useTheme();
   const router = useRouter();
   const nameOf = useNames(catalog);
@@ -99,14 +142,34 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
   const listing = useCatalogSnapshot(catalog);
   // The runtime's word on the role, else the list's while nothing is running.
   const roleNow: CloudRole | null = snapshot.role ?? listed?.you?.role ?? null;
-  const line = connectionLine(snapshot.connection, listedState, snapshot.problem, starting, { role: roleNow, checking: snapshot.checkingAccess });
+  // A stop (25.06): the one this phone asked for, else the one the list says is under way or did not go through.
+  const [stopAnswer, setStopAnswer] = useState<CloudLifecycle | null>(null);
+  const listedStop = item?.latestOperation?.action === "suspend" ? item.latestOperation : null;
+  const stopId = stopAnswer?.operation.id ?? listedStop?.id ?? null;
+  const stopRead = useOperation(catalog, orgId, stopId, stopAnswer ? operationOpen(stopAnswer.operation) : operationOpen(listedStop));
+  const stopOperation = stopRead.lifecycle?.operation ?? stopAnswer?.operation ?? listedStop;
+  const stoppingNow = listedState === "suspending" || operationOpen(stopOperation) || (stopAnswer !== null && stopOperation?.state === "succeeded" && listedState !== "suspended");
+  const stopFailed = !stoppingNow && stopOperation?.state === "failed" && listedState !== "suspended";
+  // Who is in the middle of a turn, for the alert that asks before stopping.
+  const busyTab = unshared ? null : snapshot.tabs.find((entry) => entry.status === "in_progress") ?? null;
+  const busyHarness = busyTab?.events?.[busyTab.events.length - 1]?.harness;
+  // Not connected, the runtime says nothing: the list's activity says whether an agent is in a turn, not which.
+  const working = busyTab ? { agent: (busyHarness && AGENTS[busyHarness]) ?? null } : !live && !unshared && (item?.workspace.runtimeActivity?.activeTurns ?? 0) > 0 ? { agent: null } : null;
+  // The runtime's word on the role decides, as it does for everything else here.
+  const managed = item && roleNow ? { ...item, workspace: { ...item.workspace, you: { canApprove: false, ...item.workspace.you, role: roleNow } } } : item;
+  const actions = managed && !unshared ? workspaceRowActions(managed, { catalog, push: (href) => router.push(href as Href), working, onStopping: setStopAnswer }).filter((action) => !(stoppingNow && action.name === "stop-workspace")) : [];
+  const line = stoppingNow ? { tone: "idle" as const, text: STOP.stoppingShort, short: STOP.stoppingShort } : connectionLine(snapshot.connection, listedState, snapshot.problem, starting, { role: roleNow, checking: snapshot.checkingAccess });
   // The link stopped trying by itself, or was refused: it tries again only when asked.
   const canReconnect = snapshot.connection.state === "stopped" && listedState === "ready";
-  const role = unshared ? null : rolePhrase(roleNow);
+  // Beside Sharing and •••, the role is said in one word (25.07, question 17); everyone else keeps the phrase.
+  const role = unshared ? null : actions.length ? roleLabel(roleNow) : rolePhrase(roleNow);
   const subtitle = [line.short, role].filter(Boolean).join(" · ");
   const title = listed ? workspaceTitle(listing, listed) : "Workspace";
   const sharing = listedState !== null && !unshared;
   const stopped = listedState === "suspended";
+  const bar: ReactNode = stoppingNow ? <StopBar state="stopping" />
+    : stopFailed && managed ? <StopBar state="failed" cause={stopCause(stopOperation?.errorCode)} onRetry={mayManage(managed.workspace) ? () => void askToStop(catalog, managed.workspace, working, setStopAnswer) : undefined} />
+    : null;
 
   useEffect(() => (tabId ? session.view(tabId) : undefined), [session, tabId]);
   // The names behind the user ids the runtime reports; without them a short id is shown.
@@ -118,7 +181,10 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
     <Stack.Screen options={{ title, headerShown: false }} />
     <ScreenHeader title={title} onBack={() => router.back()}
       subtitle={<HeaderLine testID="workspace-state-line" text={subtitle} label={[line.tone === "live" ? line.text : line.short, role].filter(Boolean).join(", ")} />}
-      trailing={sharing ? <GlassIconButton label="Sharing" size={40} icon={<Users size={19} color={palette.ink} strokeWidth={1.9} />} onPress={() => router.push({ pathname: "/cloud/shares", params: { orgId, workspaceId } })} /> : null} />
+      trailing={<>
+        {sharing ? <GlassIconButton label="Sharing" size={40} icon={<Users size={19} color={palette.ink} strokeWidth={1.9} />} onPress={() => router.push({ pathname: "/cloud/shares", params: { orgId, workspaceId } })} /> : null}
+        <WorkspaceActionsButton title={title} actions={actions} />
+      </>} />
     {/* A warning says more than fits under the title, here, with what can be done about it. */}
     {line.tone === "warn" ? <View accessibilityRole="summary" style={[styles.banner, { backgroundColor: `${palette.warning}18` }]}>
       <StatusDot color={palette.warning} />
@@ -129,13 +195,13 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
     {snapshot.error ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.warning }]}>{codeText(snapshot.error)}</Text> : null}
     {snapshot.tabs.length > 1 && !unshared ? <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabs} contentContainerStyle={styles.tabsContent}>{snapshot.tabs.map((entry, index) => <Pressable key={entry.tabId} accessibilityRole="tab" accessibilityState={{ selected: entry.tabId === tabId }} onPress={() => setChosen(entry.tabId)} style={[styles.tab, { backgroundColor: entry.tabId === tabId ? palette.selected : palette.raised }]}><Text numberOfLines={1} style={[styles.tabText, { color: palette.ink }]}>{entry.title ?? `Agent ${index + 1}`}</Text></Pressable>)}</ScrollView> : null}
     {unshared ? <EmptyState title={accessText("not-shared").title} detail={accessText("not-shared").detail} />
-      : tab ? <Conversation key={tab.tabId} catalog={catalog} session={session} scope={`${orgId}/${workspaceId}`} orgId={orgId} workspaceId={workspaceId} tabId={tab.tabId} live={live} listedState={listedState} />
+      : tab ? <Conversation key={tab.tabId} catalog={catalog} session={session} scope={`${orgId}/${workspaceId}`} orgId={orgId} workspaceId={workspaceId} tabId={tab.tabId} live={live} listedState={listedState} bar={bar} />
       : <View style={styles.flex}>
         <View style={[styles.flex, styles.centred]}>{live ? <EmptyState title="No agent tabs" detail="This workspace has no agent conversation." />
           : stopped || starting || listedState === "attention-required" ? <EmptyState icon={(color) => <MessageSquareDashed size={34} color={color} strokeWidth={1.6} />} title="No conversation yet" detail={listedState === "attention-required" ? "Nothing has been saved in this workspace yet." : "Nothing was said in this workspace before it stopped."} />
           : listedState === "archived" ? <EmptyState title="No conversation yet" detail="Nothing was saved in this workspace before it was archived." />
           : <EmptyState title="Connecting…" detail="The conversation shows once this phone reaches the workspace." busy />}</View>
-        {startBarShown(listedState, starting, live) ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={roleNow} creatorId={listed?.createdBy ?? null} starting={starting} /> : null}
+        {bar ?? (startBarShown(listedState, starting, live) ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={roleNow} creatorId={listed?.createdBy ?? null} starting={starting} /> : null)}
       </View>}
   </>;
 }
@@ -198,7 +264,7 @@ function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { 
   </View>;
 }
 
-function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live, listedState }: { catalog: CloudCatalog; session: CloudWorkspaceSession; scope: string; orgId: string; workspaceId: string; tabId: string; live: boolean; listedState: string | null }) {
+function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live, listedState, bar }: { catalog: CloudCatalog; session: CloudWorkspaceSession; scope: string; orgId: string; workspaceId: string; tabId: string; live: boolean; listedState: string | null; /** In the composer's place: a stop under way, or one that did not go through. */ bar: ReactNode }) {
   const { palette } = useTheme();
   // Docked at the bottom: clear of the home indicator and the screen's rounded corners, as the session screen's composer is.
   const insets = useSafeAreaInsets();
@@ -356,7 +422,8 @@ function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live
         {held.length && mayWrite ? <Button label={held.length === 1 ? "Send it and start the workspace" : `Send ${held.length} messages and start the workspace`} kind="secondary" disabled={sending} onPress={sendHeld} style={styles.held} /> : null}
       </>} />
     {failure ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.danger }]}>{failure}</Text> : null}
-    {startBarShown(listedState, starting, live) && !sendStarts
+    {bar ? bar
+      : startBarShown(listedState, starting, live) && !sendStarts
       ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={roleHere} creatorId={catalog.workspace(orgId, workspaceId)?.createdBy ?? null} starting={starting} />
       : mayWrite && listedState !== "archived" && listedState !== null
       ? <View style={[styles.composer, dockBottom, { backgroundColor: palette.card, borderTopColor: palette.border }]}>

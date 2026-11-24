@@ -1,0 +1,12 @@
+# Fresh state, then the Den theme the light boards (25.05, 25.06) are drawn in, chosen in Settings as a person would.
+appId: com.terminalx.phone.fixture
+name: Setup (Den theme)
+---
+- launchApp:
+    clearState: true
+    arguments:
+      fixtureScenario: connected
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "Den theme"
+- tapOn: "Den theme"
