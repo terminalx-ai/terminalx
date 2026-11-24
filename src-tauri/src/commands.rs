@@ -1676,6 +1676,19 @@ pub async fn cloud_workspace_shares(
 }
 
 #[tauri::command]
+pub async fn cloud_workspace_general_access_put(
+    workspace_id: String,
+    org_id: Option<String>,
+    access_revision: String,
+    general_access: crate::cloud_workspaces::GeneralAccess,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::GeneralAccessChange, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>|
+        service.general_access_put(org_id.as_deref(), &workspace_id, &access_revision, general_access, &context_revision))
+}
+
+#[tauri::command]
 pub async fn cloud_workspace_share_put(
     workspace_id: String,
     user_id: String,

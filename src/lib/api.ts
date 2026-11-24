@@ -576,6 +576,9 @@ export const api = {
   /** Who the workspace is shared with, and what the caller may do (PRO-30, docs/CLOUD-SHARING.md). */
   cloudWorkspaceShares: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceShares>("cloud_workspace_shares", { workspaceId, orgId: orgId ?? null }),
+
+  cloudWorkspaceGeneralAccessPut: (workspaceId: string, orgId: string, change: CloudWorkspaceGeneralAccessChange, contextRevision: string) =>
+    invoke<CloudWorkspaceGeneralAccessChange>("cloud_workspace_general_access_put", { workspaceId, orgId, ...change, contextRevision }),
   /** Grant or change a member's share; only managers and the workspace's creator may. */
   cloudWorkspaceSharePut: (workspaceId: string, userId: string, role: CloudShareRole, canApprove: boolean, orgId?: string | null) =>
     invoke<{ share: CloudWorkspaceShare; created?: boolean }>("cloud_workspace_share_put", { workspaceId, userId, role, canApprove, orgId: orgId ?? null }),
@@ -1660,9 +1663,23 @@ function requireLegacyCloudSchedule(value: CloudAutomationDto): CloudSchedule {
   return schedule;
 }
 
-export interface CloudWorkspaceShares {
+export type CloudWorkspaceGeneralAccess =
+  | { mode: "invited_only" }
+  | { mode: "organisation"; role: "read" };
+
+export interface CloudWorkspaceGeneralAccessChange {
+  generalAccess: CloudWorkspaceGeneralAccess;
+  accessRevision: string;
+}
+
+export interface CloudWorkspaceShares extends Partial<CloudWorkspaceGeneralAccessChange> {
   shares: CloudWorkspaceShare[];
   you: { role: CloudCollaborationRole; canApprove: boolean; canManageShares: boolean };
+  capabilities?: {
+    canChangeGeneralAccess: boolean;
+    canGrantAdmin: boolean;
+    canUseOrganisationWrite: boolean;
+  };
 }
 
 export type CloudWorkspaceLaunchPhase =
@@ -2058,6 +2075,8 @@ export type CloudWorkspaceSafeErrorCode =
   | "cloud_workspace_share_requires_organization_access"
   | "cloud_workspace_share_limit"
   | "cloud_workspace_share_forbidden"
+  | "cloud_workspace_general_access_unavailable"
+  | "cloud_workspace_access_revision_conflict"
   | "cloud_workspace_collaboration_forbidden"
   | "cloud_workspace_name_invalid"
   | "cloud_workspace_repositories_too_many"

@@ -13,7 +13,7 @@ use url::Url;
 
 use crate::account::{
     AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN,
-    PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_PRESENCE, PHASE2_RESTART_DETAILS,
+    PHASE2_FRESH_WORKSPACE, PHASE2_GENERAL_ACCESS, PHASE2_GITHUB_TRIGGER, PHASE2_PRESENCE, PHASE2_RESTART_DETAILS,
     PHASE2_WEBHOOK_TRIGGER,
 };
 
@@ -1652,9 +1652,51 @@ pub struct ShareViewer {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct CloudWorkspaceShares {
     pub shares: Vec<CloudWorkspaceShare>,
     pub you: ShareViewer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub general_access: Option<GeneralAccess>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<ShareCapabilities>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GeneralAccess {
+    InvitedOnly,
+    Organisation { role: GeneralAccessRole },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GeneralAccessRole {
+    Read,
+    Write,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareCapabilities {
+    pub can_change_general_access: bool,
+    pub can_grant_admin: bool,
+    pub can_use_organisation_write: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneralAccessChange {
+    pub access_revision: String,
+    pub general_access: GeneralAccess,
+}
+
+fn valid_access_revision(value: &str) -> bool {
+    !value.is_empty() && (value == "0" || !value.starts_with('0'))
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value.parse::<i64>().is_ok()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -3744,15 +3786,18 @@ impl CloudWorkspaceService {
         })
     }
 
-    /// Only explicit shares use the accepted target-membership contract here.
+    /// Share routes use the accepted target-membership contract here.
     /// Keep the initiating active context as well as target membership: neither
     /// a late success nor an HTTP error may escape into a replacement session.
-    fn run_share_in<T>(&self, org: Option<&str>, risk: RequestRisk,
+    fn run_share_in<T>(&self, org: Option<&str>, risk: RequestRisk, expected_revision: Option<&str>,
         operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
         if org.is_some_and(|org| !valid_resource_id(org)) { return Err(inbox_invalid()); }
         // An explicit member target does not require an active organization.
         let active = self.account.context()
             .ok_or_else(|| CloudWorkspaceClientError::local("account_signed_out", false))?;
+        if expected_revision.is_some_and(|revision| AccountManager::context_revision(&active) != revision) {
+            return Err(context_changed_error(risk));
+        }
         if org.is_none() && active.organization_id.is_empty() {
             return Err(CloudWorkspaceClientError::local("account_organization_unavailable", false));
         }
@@ -3828,8 +3873,8 @@ impl CloudWorkspaceService {
         if !valid_resource_id(workspace_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        self.run_share_in(org, RequestRisk::Read, |client, context| {
-            let result: CloudWorkspaceShares = client.request(
+        self.run_share_in(org, RequestRisk::Read, None, |client, context| {
+            let mut result: CloudWorkspaceShares = client.request(
                 context,
                 &["cloud-workspaces", workspace_id, "shares"],
                 None,
@@ -3839,6 +3884,43 @@ impl CloudWorkspaceService {
             )?;
             if result.shares.iter().any(|share| !valid_resource_id(&share.user_id)) {
                 return Err(invalid_response());
+            }
+            if !self.phase2_ready(PHASE2_GENERAL_ACCESS, Some(&context.organization_id), Some(context))
+                || matches!(result.general_access, Some(GeneralAccess::Organisation { role: GeneralAccessRole::Write }))
+                || !result.access_revision.as_deref().is_some_and(valid_access_revision) {
+                result.general_access = None;
+                result.capabilities = None;
+            }
+            Ok(result)
+        })
+    }
+
+    pub fn general_access_put(
+        &self,
+        org: Option<&str>,
+        workspace_id: &str,
+        access_revision: &str,
+        general_access: GeneralAccess,
+        context_revision: &str,
+    ) -> Result<GeneralAccessChange, CloudWorkspaceClientError> {
+        if !valid_resource_id(workspace_id) || !valid_access_revision(access_revision) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        if matches!(general_access, GeneralAccess::Organisation { role: GeneralAccessRole::Write }) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_runtime_unsupported", false));
+        }
+        self.run_share_in(org, RequestRisk::Mutation, Some(context_revision), |client, context| {
+            self.phase2_gate(
+                PHASE2_GENERAL_ACCESS, Some(&context.organization_id), Some(context),
+                "cloud_workspace_general_access_unavailable",
+            )?;
+            let result: GeneralAccessChange = client.request_as(
+                "PUT", context, &["cloud-workspaces", workspace_id, "general-access"], None,
+                Some(json!({ "accessRevision": access_revision, "generalAccess": general_access })),
+                None, RequestRisk::Mutation,
+            )?;
+            if result.general_access != general_access || !valid_access_revision(&result.access_revision) {
+                return Err(post_send_error(RequestRisk::Mutation));
             }
             Ok(result)
         })
@@ -3871,7 +3953,7 @@ impl CloudWorkspaceService {
                 return Err(CloudWorkspaceClientError::local("cloud_workspace_runtime_not_ready", true));
             }
         }
-        self.run_share_in(org, RequestRisk::Mutation, |client, context| {
+        self.run_share_in(org, RequestRisk::Mutation, None, |client, context| {
             let result: CloudWorkspaceShareChange = client.request_as(
                 "PUT",
                 context,
@@ -3899,7 +3981,7 @@ impl CloudWorkspaceService {
         if !valid_resource_id(workspace_id) || !valid_resource_id(user_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        self.run_share_in(org, RequestRisk::Mutation, |client, context| {
+        self.run_share_in(org, RequestRisk::Mutation, None, |client, context| {
             let result: CloudWorkspaceShareChange = client.request_as(
                 "DELETE",
                 context,
@@ -4363,6 +4445,8 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_share_requires_organization_access"
             | "cloud_workspace_share_limit"
             | "cloud_workspace_share_forbidden"
+            | "cloud_workspace_general_access_unavailable"
+            | "cloud_workspace_access_revision_conflict"
             | "cloud_workspace_share_credential_restricted"
             | "cloud_workspace_share_personal_route"
             | "cloud_workspace_collaboration_forbidden"
@@ -8440,6 +8524,83 @@ mod tests {
                 assert!(!request.join().unwrap().extra_request);
             }
         }
+    }
+
+    #[test]
+    fn general_access_contract_uses_member_route_and_preserves_revision_errors() {
+        let access = GeneralAccess::Organisation { role: GeneralAccessRole::Read };
+        let revision = "9007199254740993";
+        for (status, code, expected) in [
+            ("200 OK", "", None),
+            ("409 Conflict", "cloud_workspace_access_revision_conflict", Some(409)),
+            ("403 Forbidden", "cloud_workspace_share_forbidden", Some(403)),
+            ("503 Service Unavailable", "cloud_workspace_general_access_unavailable", Some(503)),
+        ] {
+            let body = if code.is_empty() {
+                json!({"accessRevision": "9007199254740994", "generalAccess": access })
+            } else {
+                json!({"error": code })
+            };
+            let (base, _, request) = serve_once(response(status, &body.to_string(), ""), Duration::ZERO);
+            let (account, service) = test_service(&base);
+            account.set_memberships_for_test(&["org-1", "org-2"], false);
+            account.apply_phase2_readiness_for_test(json!({
+                "version": 1, "organizations": { "org-2": { (PHASE2_GENERAL_ACCESS): true } }
+            }));
+            let context_revision = AccountManager::context_revision(&context());
+            let reply = service.general_access_put(Some("org-2"), "workspace-1", revision, access, &context_revision);
+            if let Some(expected) = expected {
+                let error = reply.unwrap_err();
+                assert_eq!(error.status, Some(expected));
+                assert_eq!(error.code, code);
+            } else {
+                assert_eq!(reply.unwrap(), GeneralAccessChange {
+                    general_access: access, access_revision: "9007199254740994".into(),
+                });
+            }
+            let captured = request.join().unwrap();
+            assert!(captured.text.starts_with("PUT /v1/desktop/orgs/org-2/cloud-workspaces/workspace-1/general-access HTTP/"));
+            phase2_headers(&captured.text);
+            let body: Value = serde_json::from_str(captured.text.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body, json!({"accessRevision": revision, "generalAccess": {"mode": "organisation", "role": "read"}}));
+            assert!(!captured.extra_request);
+        }
+    }
+
+    #[test]
+    fn general_access_contract_refuses_write_stale_account_and_invalid_revision_before_http() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (_, service) = test_service(&format!("http://{}", listener.local_addr().unwrap()));
+        let current = AccountManager::context_revision(&context());
+        let invited = GeneralAccess::InvitedOnly;
+        for (token, policy, scope, code) in [
+            ("1", invited, current.as_str(), "cloud_workspace_general_access_unavailable"),
+            ("1", invited, "stale", "account_context_changed"),
+            ("1", GeneralAccess::Organisation { role: GeneralAccessRole::Write }, current.as_str(), "cloud_workspace_runtime_unsupported"),
+            ("9223372036854775808", invited, current.as_str(), "cloud_workspace_request_invalid"),
+            ("01", invited, current.as_str(), "cloud_workspace_request_invalid"),
+        ] {
+            assert_eq!(service.general_access_put(None, "workspace-1", token, policy, scope).unwrap_err().code, code);
+        }
+        assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn general_access_contract_fences_late_receipts_after_signout() {
+        let access = GeneralAccess::InvitedOnly;
+        let body = json!({"accessRevision": "2", "generalAccess": access });
+        let (base, accepted, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::from_millis(150));
+        let (account, service) = phase2_service(&base);
+        let pending = thread::spawn(move || service.general_access_put(
+            Some("org-1"), "workspace-1", "1", access, &AccountManager::context_revision(&context()),
+        ));
+        accepted.recv_timeout(Duration::from_secs(2)).unwrap();
+        account.set_context_for_test(None);
+        let error = pending.join().unwrap().unwrap_err();
+        assert_eq!(error.code, "account_context_changed");
+        assert!(error.requires_original_account_context);
+        assert!(!request.join().unwrap().extra_request);
     }
 
     #[test]
