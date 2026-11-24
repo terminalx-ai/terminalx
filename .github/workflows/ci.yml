@@ -544,7 +544,7 @@ jobs:
         working-directory: src-tauri
         run: |
           cargo clippy --locked --test serde_field_naming -- -D warnings
-          find target/debug/build -path '*/raccoon-*/out/*' -type f -exec touch -t 200001010000 {} +
+          find target/debug/build \( -path '*/raccoon-*/out/*' -o -path '*/raccoon/*/out/*' \) -type f -exec touch -t 200001010000 {} +
 
       - name: clippy
         if: ${{ !cancelled() && steps.helper.outcome == 'success' }}
@@ -560,8 +560,10 @@ jobs:
       # before the first test on main. The files are named by a checksum of
       # their content, so an old date says nothing false; tauri-codegen 2.7
       # dates them back itself, and this step does it until the lock file has
-      # that release. The second `--no-run` must find every unit fresh: if the
-      # crate is compiled a second time again, the job fails here and says so.
+      # that release. Cargo puts OUT_DIR at build/raccoon-<hash>/out or, in its
+      # newer layout, build/raccoon/<hash>/out: both are dated. The second
+      # `--no-run` must find every unit fresh: if the crate is compiled a second
+      # time again, the job fails here and prints cargo's reasons.
       - name: build the library's tests by themselves
         id: build
         if: ${{ !cancelled() && steps.helper.outcome == 'success' }}
@@ -570,8 +572,8 @@ jobs:
         shell: bash
         run: |
           cargo test --locked --lib --no-run
-          find target/debug/build -path '*/raccoon-*/out/*' -type f -exec touch -t 200001010000 {} +
-          cargo test --locked --lib --no-run --message-format=json | jq -s -e '[.[] | select(.reason == "compiler-artifact")] | (length > 0) and all(.fresh)'
+          find target/debug/build \( -path '*/raccoon-*/out/*' -o -path '*/raccoon/*/out/*' \) -type f -exec touch -t 200001010000 {} +
+          CARGO_LOG=cargo::core::compiler::fingerprint=info cargo test --locked --lib --no-run --message-format=json 2> "$RUNNER_TEMP/fresh.log" | jq -s -e '[.[] | select(.reason == "compiler-artifact")] | (length > 0) and all(.fresh)' || { grep -E 'dirty|stale' "$RUNNER_TEMP/fresh.log" | cut -c1-400 | head -40; exit 1; }
 
       # Saved as soon as the dependencies are built, before any test runs: a
       # suite that fails or runs out of time must not leave every later run to

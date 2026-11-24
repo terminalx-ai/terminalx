@@ -54,11 +54,11 @@ ASIDE = f'mv target "$RUNNER_TEMP/target"\ncp -cpR "$RUNNER_TEMP/target" target\
 PUT_BACK = 'test -d "$RUNNER_TEMP/target"\nrm -rf target && mv "$RUNNER_TEMP/target" target\n'
 # The macOS build dates the crate's OUT_DIR files back (tauri::generate_context! writes them during the compile),
 # then proves a second cargo command finds every unit fresh.
-BACKDATE = "find target/debug/build -path '*/raccoon-*/out/*' -type f -exec touch -t 200001010000 {} +\n"
+BACKDATE = "find target/debug/build \\( -path '*/raccoon-*/out/*' -o -path '*/raccoon/*/out/*' \\) -type f -exec touch -t 200001010000 {} +\n"
 MACOS_BUILD = (
     "cargo test --locked --lib --no-run\n"
     + BACKDATE +
-    "cargo test --locked --lib --no-run --message-format=json | jq -s -e '[.[] | select(.reason == \"compiler-artifact\")] | (length > 0) and all(.fresh)'\n"
+    "CARGO_LOG=cargo::core::compiler::fingerprint=info cargo test --locked --lib --no-run --message-format=json 2> \"$RUNNER_TEMP/fresh.log\" | jq -s -e '[.[] | select(.reason == \"compiler-artifact\")] | (length > 0) and all(.fresh)' || { grep -E 'dirty|stale' \"$RUNNER_TEMP/fresh.log\" | cut -c1-400 | head -40; exit 1; }\n"
 )
 # The cache each job restores. serve-tests builds what headless-serve builds: it restores that job's and saves none.
 CACHES = {
