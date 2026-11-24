@@ -1214,6 +1214,41 @@ pub enum RetryReason {
     RateLimited,
 }
 
+// Project only the member-safe fields the desktop presents.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudStartProgress {
+    organization_id: String,
+    workspace_id: String,
+    operation: CloudStartProgressOperation,
+    steps: Vec<CloudStartProgressStep>,
+    events: Vec<CloudStartProgressEvent>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct CloudStartProgressOperation {
+    id: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudStartProgressStep {
+    key: String,
+    started_at: Option<u64>,
+    finished_at: Option<u64>,
+    duration_ms: Option<u64>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudStartProgressEvent {
+    id: String,
+    state: String,
+    stage: String,
+    milestone: Option<String>,
+    occurred_at: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudWorkspaceDetailsResponse {
@@ -2861,6 +2896,25 @@ impl CloudWorkspaceService {
                 return Err(post_send_error(RequestRisk::Read));
             }
             Ok(value)
+        })
+    }
+
+    pub fn start_progress(&self, org: &str, workspace: &str, operation: &str) -> Result<CloudStartProgress, CloudWorkspaceClientError> {
+        let risk = RequestRisk::Read;
+        let unavailable = "cloud_workspace_start_progress_unavailable";
+        let feature = "cloud.workspaces.start-progress.v1";
+        if !valid_resource_id(operation) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        self.phase2_gate(feature, Some(org), None, unavailable)?;
+        self.member_phase2_workspace(Some(org), workspace, risk, |client, context| {
+            self.phase2_gate(feature, Some(org), Some(context), unavailable)?;
+            let reply: CloudStartProgress = client.request(context, &["cloud-workspaces", workspace, "start-progress", operation], None, None, None, risk)?;
+            self.phase2_gate(feature, Some(org), Some(context), unavailable)?;
+            if reply.organization_id != org || reply.workspace_id != workspace || reply.operation.id != operation {
+                return Err(post_send_error(risk));
+            }
+            Ok(reply)
         })
     }
 
@@ -6907,6 +6961,38 @@ mod tests {
         ] {
             assert!(!claude_login_page(page), "{page}");
         }
+    }
+
+    #[test]
+    fn start_progress_checks_target_readiness_and_projects_member_safe_fields() {
+        let payload = json!({
+            "organizationId": "org-2", "workspaceId": "workspace-1",
+            "operation": { "id": "op-1", "state": "running" },
+            "steps": [{ "key": "preflight", "startedAt": 1000, "finishedAt": null, "durationMs": null }],
+            "events": [{ "id": "event-1", "state": "running", "stage": "preflight", "milestone": null, "occurredAt": 1000, "output": "raw" }],
+            "setup": null
+        });
+        let (base, _, request) = serve_once(response("200 OK", &payload.to_string(), ""), Duration::ZERO);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        let feature = "cloud.workspaces.start-progress.v1";
+        for org in ["org-1", "org-2"] {
+            account.apply_phase2_readiness_for_test(json!({
+                "version": 1, "organizations": { (org): { (feature): true } }
+            }));
+            let result = service.start_progress("org-2", "workspace-1", "op-1");
+            if org == "org-1" {
+                assert_eq!(result.err().unwrap().code, "cloud_workspace_start_progress_unavailable");
+            } else {
+                let projected = serde_json::to_value(result.unwrap()).unwrap();
+                assert_eq!(projected["steps"][0]["durationMs"], Value::Null);
+                assert!(projected["events"][0].get("output").is_none());
+                assert!(projected.get("setup").is_none());
+            }
+        }
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-2/cloud-workspaces/workspace-1/start-progress/op-1 HTTP/1.1"));
+        assert!(!captured.extra_request);
     }
 
     #[test]

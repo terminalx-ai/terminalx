@@ -523,6 +523,8 @@ export const api = {
     invoke<DesktopReadMarker>("cloud_workspace_read_marker", { orgId, workspaceId, readAt, sessionId: sessionId ?? null }),
   cloudWorkspaceRestart: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshotDto>("cloud_workspace_restart", { workspaceId, orgId: orgId ?? null }),
+  cloudWorkspaceStartProgress: (orgId: string, workspaceId: string, operationId: string) =>
+    invoke<CloudWorkspaceStartProgress>("cloud_workspace_start_progress", { orgId, workspaceId, operationId }),
   cloudWorkspaceDetails: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceDetailsResponse>("cloud_workspace_details", { workspaceId, orgId: orgId ?? null }),
   cloudWorkspaceSuspend: (workspaceId: string, orgId?: string | null) =>
@@ -1707,6 +1709,14 @@ export interface CloudWorkspaceLaunch {
     runningAt: number | null;
     failedAt: number | null;
   };
+}
+
+export interface CloudWorkspaceStartProgress {
+  organizationId: string;
+  workspaceId: string;
+  operation: { id: string };
+  steps: { key: string; startedAt: number | null; finishedAt: number | null; durationMs: number | null }[];
+  events: { id: string; state: string; stage: string; milestone: string | null; occurredAt: number }[];
 }
 
 export interface CloudWorkspaceOperation {
