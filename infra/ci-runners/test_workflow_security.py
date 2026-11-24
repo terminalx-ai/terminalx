@@ -239,13 +239,15 @@ def validate(workflow):
     for steps in [rust, tests["steps"], native["steps"], jobs["serve-tests"]["steps"]]:
         assert any("command -v rg && command -v zsh" in s.get("run", "") for s in steps), "security fixtures must not skip missing tools"
     assert any(s.get("run") == "cargo test --locked" and s.get("if") == "${{ !cancelled() && steps.build.outcome == 'success' && github.event_name != 'pull_request' }}" for s in native["steps"]), "macOS full suite on main, nightly and manual runs"
-    assert any(s.get("run") == "cargo test --locked --lib -- $(python3 ../infra/ci-runners/macos-rust.py --filters)" and s.get("if") == "${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'pull_request' }}" for s in native["steps"]), "the Apple-only and system-dependent tests on a selected pull request"
+    assert any(s.get("run") == '"$BINARY" $(python3 ../infra/ci-runners/macos-rust.py --filters)' and s.get("env") == {"BINARY": "${{ steps.build.outputs.binary }}"} and s.get("if") == "${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'pull_request' }}" for s in native["steps"]), "the Apple-only and system-dependent tests on a selected pull request"
     # Clippy on every run of the job, a pull request's too, ahead of the tests; and a Clippy failure does not stop
     # the build or the suite: they wait only on the last step before Clippy, and nothing continues on error.
     after_helper = "${{ !cancelled() && steps.helper.outcome == 'success' }}"
     names = [s.get("run", "") for s in native["steps"]]
     clippy = [i for i, run in enumerate(names) if run.startswith("cargo clippy")]
-    build = names.index("cargo test --locked --lib --no-run")
+    build = next(i for i, run in enumerate(names) if run.startswith("cargo test --locked --lib --no-run --message-format=json-render-diagnostics > "))
+    # The build names the binary and a pull request runs it: another `cargo test` compiles the crate again.
+    assert 'echo "binary=$binary" >> "$GITHUB_OUTPUT"' in names[build] and 'test -x "$binary"' in names[build], "the build says which binary a pull request runs"
     assert [names[i] for i in clippy] == ["cargo clippy --locked --test serde_field_naming -- -D warnings", "cargo clippy --locked --all-targets -- -D warnings"] and max(clippy) < build, "both macOS Clippy runs, ahead of the tests"
     assert "if" not in native["steps"][clippy[0]] and native["steps"][clippy[1]].get("if") == after_helper, "macOS Clippy on a pull request too"
     assert native["steps"][build].get("if") == after_helper and native["steps"][build].get("id") == "build", "macOS builds the library's tests whenever it runs, also after a lint"
@@ -492,7 +494,9 @@ class WorkflowSecurity(unittest.TestCase):
         self.rejects(lambda w: w["jobs"]["macos-native"]["concurrency"].update({"cancel-in-progress": "true"}))
 
     def test_narrowed_macos_run_is_rejected(self):
-        self.rejects(lambda w: self.step(w, "macos-native", run="cargo test --locked --lib -- $(").update({"run": "cargo test --locked --lib -- dictation::"}))
+        self.rejects(lambda w: self.step(w, "macos-native", run='"$BINARY" $(').update({"run": '"$BINARY" dictation::'}))
+        # Back to cargo test, a pull request compiles the crate a second time.
+        self.rejects(lambda w: self.step(w, "macos-native", run='"$BINARY" $(').update({"run": "cargo test --locked --lib -- $(python3 ../infra/ci-runners/macos-rust.py --filters)"}))
         self.rejects(lambda w: self.step(w, "macos-native", name="cargo test (main").update({"if": "github.event_name == 'schedule'"}))
         self.rejects(lambda w: self.step(w, "macos-native", name="cargo test (main").update({"run": "cargo test --locked --lib"}))
         self.rejects(lambda w: self.step(w, "macos-native", run="cargo test --locked --lib --no-run").update({"if": "github.event_name != 'pull_request'"}))
@@ -663,6 +667,84 @@ class WebKitOnLinux(unittest.TestCase):
         self.rejects(lambda w: self.job(w).update({"if": "matrix.part != '4'"}))
         self.rejects(lambda w: self.job(w)["steps"][-1].update({"run": "node scripts/webkit/run-all.mjs --shard ${{ matrix.part }}/5"}))
         self.rejects(lambda w: self.job(w)["steps"][-1].update({"run": "node scripts/webkit/run-all.mjs settings-navigation"}))
+
+
+STOP = ROOT / ".github/workflows/stop-closed-pr-runs.yml"
+PULL_REF = "refs/pull/${{ github.event.pull_request.number }}/merge"
+
+
+def pull_request_group(workflow):
+    """The concurrency group a workflow gives a pull request's run, with the ref written as the stop workflow writes it."""
+    group = workflow.get("concurrency", {}).get("group", "")
+    for expression, value in (
+        ("${{ github.event_name }}", "pull_request"),
+        ("${{ github.event_name == 'pull_request' && github.ref || github.run_id }}", PULL_REF),
+        ("${{ github.ref }}", PULL_REF),
+    ):
+        group = group.replace(expression, value)
+    assert group.endswith("-" + PULL_REF) and "${{" not in group[: -len(PULL_REF)], f"a pull request's runs need a group of their own that ends in the pull request's ref: {group!r}"
+    return group
+
+
+def validate_stop(stop, workflows):
+    """`workflows` are all the others, by file name."""
+    assert stop["on"] == {"pull_request": {"types": ["closed"]}}, "it runs when a pull request is closed and at no other time"
+    assert stop.get("permissions") == {}, "it needs no token at all"
+    assert "secrets" not in str(stop) and "env" not in stop, "no secret and nothing shared"
+    assert list(stop["jobs"]) == ["stop"], "one job, which holds the groups"
+    job = stop["jobs"]["stop"]
+    assert "permissions" not in job and "needs" not in job and "if" not in job and "continue-on-error" not in job
+    assert job["runs-on"] == "ubuntu-latest" and int(job["timeout-minutes"]) <= 2, "a hosted runner for a minute or two"
+    assert job["name"] == "stop ${{ matrix.workflow }}" and not {"check", "frontend", "webkit-layout"} & {job["name"], "stop"}, "it must not report under a required name"
+    assert all("uses" not in step for step in job["steps"]), "no checkout and no action: it runs nothing from the pull request"
+    for step in job["steps"]:
+        assert "${{" not in step.get("run", ""), "an expression inside a script"
+    assert job["concurrency"] == {"group": "${{ matrix.workflow }}-" + PULL_REF, "cancel-in-progress": "true"}, "it joins each group by the pull request's number and cancels what holds it"
+    named = {f"{prefix}-{PULL_REF}" for prefix in job["strategy"]["matrix"]["workflow"]}
+    assert job["strategy"].get("fail-fast") == "false", "one group's job must not stop the others"
+    # Every group it names contains refs/pull/: a run on main (a run id, or `main`) cannot hold one.
+    held = {name: pull_request_group(w) for name, w in workflows.items() if "pull_request" in w["on"]}
+    assert named == set(held.values()), f"every workflow a pull request starts is stopped when it closes, and nothing else is named: {held}"
+    for name, w in workflows.items():
+        groups = [w.get("concurrency", {}).get("group", "")] + [j.get("concurrency", {}).get("group", "") for j in w["jobs"].values()]
+        if "pull_request" not in w["on"]:
+            assert not any("refs/pull/" in g or "github.ref" in g and "pull_request" in g for g in groups), f"{name} does not run on a pull request and must not take a pull request's group"
+        assert not any(g in named for g in groups[1:]), f"a job of {name} holds a group the stop workflow cancels"
+
+
+class StopClosedPullRequestRuns(unittest.TestCase):
+    def setUp(self):
+        self.stop = load(STOP)
+        self.workflows = {path.name: load(path) for path in sorted(STOP.parent.glob("*.yml")) if path != STOP}
+
+    def test_it_stops_every_pull_request_workflow_and_nothing_else(self):
+        validate_stop(self.stop, self.workflows)
+
+    def rejects(self, mutate):
+        stop, workflows = deepcopy(self.stop), deepcopy(self.workflows)
+        mutate(stop, workflows)
+        with self.assertRaises(AssertionError):
+            validate_stop(stop, workflows)
+
+    def test_a_pull_request_workflow_it_does_not_name_is_rejected(self):
+        self.rejects(lambda s, w: s["jobs"]["stop"]["strategy"]["matrix"]["workflow"].remove("webkit-linux"))
+        self.rejects(lambda s, w: w.update({"new.yml": {"on": {"pull_request": ""}, "concurrency": {"group": "new-${{ github.ref }}"}, "jobs": {}}}))
+        self.rejects(lambda s, w: w.update({"new.yml": {"on": {"pull_request": ""}, "jobs": {}}}))
+        self.rejects(lambda s, w: w["ci.yml"]["concurrency"].update(group="ci-${{ github.head_ref }}"))
+
+    def test_a_group_a_run_on_main_could_hold_is_rejected(self):
+        self.rejects(lambda s, w: s["jobs"]["stop"]["concurrency"].update(group="${{ matrix.workflow }}-${{ github.ref }}"))
+        self.rejects(lambda s, w: s["jobs"]["stop"]["strategy"]["matrix"]["workflow"].append("ci-macos-native-main"))
+        self.rejects(lambda s, w: s["jobs"]["stop"]["strategy"]["matrix"]["workflow"].append("ci-push"))
+
+    def test_more_than_holding_the_groups_is_rejected(self):
+        self.rejects(lambda s, w: s.update(permissions={"actions": "write"}))
+        self.rejects(lambda s, w: s["on"].update(push={"branches": ["main"]}))
+        self.rejects(lambda s, w: s["on"]["pull_request"]["types"].append("synchronize"))
+        self.rejects(lambda s, w: s["jobs"]["stop"]["steps"].append({"uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"}))
+        self.rejects(lambda s, w: s["jobs"]["stop"].update(name="check"))
+        self.rejects(lambda s, w: s["jobs"]["stop"]["concurrency"].update({"cancel-in-progress": "false"}))
+        self.rejects(lambda s, w: s["jobs"]["stop"]["steps"][0].update(run="echo ${{ github.event.pull_request.title }}"))
 
 
 class NextestProfile(unittest.TestCase):
