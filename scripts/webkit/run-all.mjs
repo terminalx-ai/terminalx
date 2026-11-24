@@ -119,11 +119,23 @@ const startsVite = (name) => {
 // check to run for it until only Vite checks remain.
 const viteAtOnce = 2;
 
-// These measure against the clock, so other checks competing for the processor
-// would be what they measured: they run after the rest, one at a time.
-// pr-conversation samples frame times while a list scrolls. cloud-history must
-// see a loading line that its fixture replaces 2.5 s after the page subscribes.
-const alone = new Set(["pr-conversation", "cloud-history"]);
+/**
+ * The checks that run alone, each with why: they measure against the clock, so other checks competing for the
+ * processor would be what they measured. They run after the rest of their part has ended, one at a time. Being here
+ * does not move a check to another part (`dealtApart`, below).
+ */
+export const alone = new Map([
+  ["pr-conversation", "samples frame times while a list scrolls"],
+  ["cloud-history", "must see a loading line that its fixture replaces 2.5 s after the page subscribes"],
+  // Step 2's Linux probe (run 45403430912, attempt 2): 124 ms with the runner at load 11.7 and 3 WebKit at once.
+  ["machine-session", "a sent message must be drawn within 100 ms of the Enter key, timed in the page"],
+]);
+
+/**
+ * The checks `shard` deals as a kind of their own: those `alone` held when the parts were dealt this way (2026-11).
+ * One added to `alone` since keeps the part it had, so that a check moved to run alone changes no part's list.
+ */
+const dealtApart = new Set(["pr-conversation", "cloud-history"]);
 
 const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
 // The slowest check takes about five minutes on a slow runner. Past this one
@@ -183,12 +195,12 @@ function run(name) {
 
 /**
  * Part `index` (from 1) of `count` of `names`, each name in exactly one part. Each kind is dealt out in turn, in the
- * list's order: the Vite checks first, so every part gets its share of them (they start slowest); then the `alone`
- * ones, which still run alone, after the rest of their part; then the others. Which part a check is in does not
+ * list's order: the Vite checks first, so every part gets its share of them (they start slowest); then the
+ * `dealtApart` ones, which run alone, after the rest of their part; then the others. Which part a check is in does not
  * depend on the host: the checks left out on Linux are left out after the parts are dealt.
  */
 export function shard(names, index, count) {
-  const kinds = [names.filter((name) => startsVite(name) && !alone.has(name)), names.filter((name) => alone.has(name)), names.filter((name) => !startsVite(name) && !alone.has(name))];
+  const kinds = [names.filter((name) => startsVite(name) && !dealtApart.has(name)), names.filter((name) => dealtApart.has(name)), names.filter((name) => !startsVite(name) && !dealtApart.has(name))];
   const parts = Array.from({ length: count }, () => []);
   let next = 0;
   for (const kind of kinds) for (const name of kind) parts[next++ % count].push(name);
@@ -304,7 +316,10 @@ async function main() {
     }
   }
   await pool(selected.filter((name) => !alone.has(name)), jobs, async (name) => { results.push(await run(name)); });
-  for (const name of selected.filter((name) => alone.has(name))) results.push(await run(name));
+  for (const name of selected.filter((name) => alone.has(name))) {
+    console.log(`alone, after the others: ${name}: ${alone.get(name)}`);
+    results.push(await run(name));
+  }
 
   const failed = results.filter((result) => !result.ok);
   const slowest = [...results].sort((a, b) => b.ms - a.ms).slice(0, 10);
