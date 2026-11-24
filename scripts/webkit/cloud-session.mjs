@@ -103,6 +103,15 @@ for (const ready of [false, true]) {
         agent: "claude", workBranch: "tx/share-demo", hasPrompt: true,
         timings: { requestedAt: 1000, bootingAt: 4000 },
       };
+      row.latestOperation = { id: "op-1", workspaceId: row.workspace.id, type: "create", action: null, state: "running", stage: "bootstrapping" };
+      answers.cloud_workspace_start_progress = {
+        organizationId: "org-a", workspaceId: row.workspace.id, operation: { id: "op-1" },
+        steps: [
+          { key: "preflight", startedAt: 1000, finishedAt: 4000, durationMs: 3000 },
+          { key: "runtime-installation", startedAt: 5000, finishedAt: null, durationMs: null },
+        ],
+        events: [{ id: "event-1", state: "running", stage: "bootstrapping", milestone: "credentials-ready", occurredAt: 5000 }],
+      };
       if (${ready}) answers.account_status.phase2Readiness = { "org-a": ["cloud.workspaces.start-progress.v1"] };
       answers.cloud_remote_attach = () => {
         setTimeout(() => emit("cloud_remote_event", { kind: "state", connectionId: "conn-1", state: { state: "waitingForRuntime" } }), 0);
@@ -123,6 +132,7 @@ for (const ready of [false, true]) {
   } else {
     await card.waitFor();
     await page.getByTestId("cloud-start-panel").waitFor();
+    await card.getByText("3s", { exact: true }).waitFor();
     const conversation = await page.locator("[data-conversation-column]").boundingBox();
     const cardBox = await card.boundingBox();
     const log = page.getByTestId("cloud-start-log");
@@ -131,8 +141,8 @@ for (const ready of [false, true]) {
       "the checklist fits the conversation column": !!cardBox && !!conversation && cardBox.x >= conversation.x &&
         cardBox.x + cardBox.width <= conversation.x + conversation.width + SLACK,
       "the start log stays at the bottom of the conversation": !!dockBox && dockBox.y + dockBox.height <= viewport.height + SLACK,
-      "the dock shows the runtime wait": await log.getByText("Waiting for the workspace runtime…").isVisible(),
-      "the current phase and finished duration are visible": await card.locator('[aria-current="step"]').getByText("Start the machine").isVisible() &&
+      "the dock shows member-safe events": await log.getByText("Workspace credentials ready", { exact: false }).isVisible(),
+      "the current phase and finished duration are visible": await card.locator('[aria-current="step"]').getByText("Install the workspace runtime").isVisible() &&
         await card.getByText("3s", { exact: true }).isVisible(),
       "the right panel has its empty state": await page.getByTestId("cloud-start-panel").getByText("Nothing to show yet").isVisible(),
       "a viewer has no cancel or follow-up composer": (await card.getByRole("button", { name: "Cancel" }).count()) === 0 &&

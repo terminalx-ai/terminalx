@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentPr
 import { CloudStartLog } from "@/components/cloud/CloudStartLog";
 import { CloudStartProgress } from "@/components/cloud/CloudStartProgress";
 import { getAccount, useAccount } from "@/lib/account";
-import { api, type AccountStatus, type CloudWorkspaceOperation } from "@/lib/api";
+import { api, type AccountStatus, type CloudWorkspaceOperation, type CloudWorkspaceStartProgress } from "@/lib/api";
 import { cloudOrgArg, findCloudWorkspace, liveCloudOrgIds, useCloudCatalog } from "@/lib/cloudCatalog";
 import type { CloudSessionModel } from "@/lib/cloudSession";
 import { cloudProviderLabel } from "@/lib/cloudProviders";
@@ -12,6 +12,8 @@ import { managesOrganization } from "@/lib/multiOrg";
 import { parseCloudWorkspaceKey } from "@/types/target";
 
 const POLL_MS = 2000;
+// The timing route takes a row lock. Wait after each response and never overlap requests.
+const TIMING_POLL_MS = 12000;
 
 function accountScope(status: AccountStatus) {
   return status.identity && JSON.stringify([status.identity.email, status.context?.account, status.context?.scope, status.context?.revision]);
@@ -30,6 +32,7 @@ interface CloudStartView {
   card: ComponentProps<typeof CloudStartProgress>;
   logs: CloudWorkspaceOperation["logs"];
   connected: boolean;
+  events?: CloudWorkspaceStartProgress["events"];
 }
 
 export function useCloudStart(
@@ -65,10 +68,12 @@ export function useCloudStart(
   const scopeKey = phase ? JSON.stringify([account, orgId, workspaceId, sessionId, launch?.launchId, operationId, mayCancel, mayReadLogs]) : null;
   const scope = useMemo<StartScope | null>(() => scopeKey ? { cancelInFlight: false } : null, [scopeKey]);
   const [update, setUpdate] = useState<{ scope: StartScope; operation?: CloudWorkspaceOperation; busy?: boolean; error?: string } | null>(null);
+  const [timing, setTiming] = useState<{ scope: StartScope; reply: CloudWorkspaceStartProgress } | null>(null);
   const current = useRef<StartScope | null>(null);
   useLayoutEffect(() => {
     current.current = scope;
     setUpdate(null);
+    setTiming(null);
     return () => { current.current = null; };
   }, [scope]);
   const active = scope && update?.scope === scope ? update : null;
@@ -107,6 +112,35 @@ export function useCloudStart(
     return () => { closed = true; clearTimeout(timer); };
   }, [account, mayReadLogs, operationId, orgId, polling, scope, workspaceId]);
 
+  const readTiming = displayedPhase !== "canceled" && displayedPhase !== "canceling" && !active?.busy && !org?.error;
+  useEffect(() => {
+    if (!scope || !operationId || !readTiming) return;
+    let closed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const canRead = () => {
+      const status = getAccount().status;
+      return !closed && current.current === scope && accountScope(status) === account && startAccess(status, orgId);
+    };
+    const poll = async () => {
+      if (!canRead()) return;
+      try {
+        const reply = await api.cloudWorkspaceStartProgress(orgId, workspaceId, operationId);
+        if (!canRead()) return;
+        setTiming(reply.organizationId === orgId && reply.workspaceId === workspaceId && reply.operation.id === operationId
+          ? { scope, reply } : null);
+      } catch (error) {
+        if (!canRead()) return;
+        setTiming(null);
+        const status = (error as { status?: number } | null)?.status;
+        if (status === 401 || status === 403 || status === 404) return;
+      }
+      timer = setTimeout(() => void poll(), TIMING_POLL_MS);
+    };
+    void poll();
+    return () => { closed = true; clearTimeout(timer); };
+  }, [account, operationId, orgId, readTiming, scope, workspaceId]);
+
+  const progress = readTiming && timing?.scope === scope ? timing?.reply : undefined;
   if (!scope || !displayedPhase || !item) return null;
   const canUseCancel = () => {
     const now = getAccount().status;
@@ -139,7 +173,7 @@ export function useCloudStart(
     card: {
       name: cloud?.workspaceName ?? item.workspace.name,
       phase: displayedPhase,
-      steps: cloudStartSteps(item, displayedPhase, cloud?.location.provider ?? cloudProviderLabel(item.workspace.provider)),
+      steps: cloudStartSteps(item, displayedPhase, cloud?.location.provider ?? cloudProviderLabel(item.workspace.provider), progress),
       hasPrompt: launch?.hasPrompt === true,
       cancel: canCancel ? () => void cancel() : undefined,
       cancelBusy: active?.busy === true,
@@ -147,6 +181,7 @@ export function useCloudStart(
     },
     logs: mayReadLogs ? active?.operation?.logs : undefined,
     connected: cloud?.connected ?? false,
+    events: progress?.events,
   };
 }
 
@@ -156,7 +191,7 @@ export function CloudStartSession({ start }: { start: CloudStartView }) {
       <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto p-4 sm:p-6">
         <CloudStartProgress {...start.card} />
       </div>
-      {start.card.phase !== "canceled" && <CloudStartLog logs={start.logs} connected={start.connected} />}
+      {start.card.phase !== "canceled" && <CloudStartLog logs={start.logs} events={start.events} connected={start.connected} />}
     </div>
   );
 }

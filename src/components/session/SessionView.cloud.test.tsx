@@ -1166,10 +1166,10 @@ describe("the session header's location and connection chips", () => {
       expect(screen.getByTestId("cloud-panel-offline").textContent).toContain("Changes, Files and Git appear once the workspace is connected.");
       expect(screen.queryByTestId("cloud-start-progress")).toBeNull();
       expect(screen.queryByTestId("cloud-start-log")).toBeNull();
-      expect(guard.calls.some(({ command }) => command.startsWith("cloud_workspace_operation"))).toBe(false);
+      expect(guard.calls.some(({ command }) => command.startsWith("cloud_workspace_operation") || command === "cloud_workspace_start_progress")).toBe(false);
     });
 
-    it("tracks reported phases and durations and returns to live chat when the launch completes", async () => {
+    it("tracks lifecycle phases when timing is unavailable and returns to live chat when the launch completes", async () => {
       mocks.readiness = { [ORG]: [feature] };
       const item = starting("allocating", "participate");
       setCatalog(item);
@@ -1198,7 +1198,7 @@ describe("the session header's location and connection chips", () => {
         expect(card.querySelector('[aria-current="step"]')?.textContent).toContain(label);
         const completed = card.querySelectorAll<HTMLElement>('[data-state="done"]');
         expect(completed).toHaveLength(index + 1);
-        expect(within(completed[index]).getByText(duration, { exact: true })).toBeTruthy();
+        expect(within(completed[index]).queryByText(duration, { exact: true })).toBeNull();
       }
       await act(async () => runtime.connect("participate"));
       expect(screen.getByTestId("cloud-start-panel")).toBeTruthy();
@@ -1212,6 +1212,32 @@ describe("the session header's location and connection chips", () => {
       await screen.findByTestId("composer");
       expect(screen.queryByTestId("cloud-start-progress")).toBeNull();
       expect(screen.queryByTestId("cloud-start-panel")).toBeNull();
+    });
+
+    it("shows recorded durations and member-safe milestones for the active create only", async () => {
+      mocks.readiness = { [ORG]: [feature] };
+      setCatalog(starting("booting", "participate"));
+      guard.handlers.cloud_workspace_start_progress = () => ({
+        organizationId: ORG, workspaceId: WS, operation: { id: "op-1" },
+        steps: [
+          { key: "preflight", startedAt: 1000, finishedAt: 4000, durationMs: 3000 },
+          { key: "runtime-installation", startedAt: 5000, finishedAt: null, durationMs: null },
+        ],
+        events: [
+          { id: "event-1", state: "running", stage: "bootstrapping", milestone: "credentials-ready", occurredAt: 5000 },
+          { id: "event-2", state: "running", stage: "bootstrapping", milestone: "unexpected diagnostic text", occurredAt: 5001 },
+        ],
+      });
+      render(wrap(<CloudHarness />));
+      const card = screen.getByTestId("cloud-start-progress");
+      expect(await within(card).findByText("3s", { exact: true })).toBeTruthy();
+      expect(card.querySelector('[aria-current="step"]')?.textContent).toContain("Install the workspace runtime");
+      const dock = screen.getByTestId("cloud-start-log");
+      expect(within(dock).getByText("Workspace credentials ready", { exact: false })).toBeTruthy();
+      expect(dock.textContent).not.toContain("unexpected diagnostic text");
+      expect(guard.calls.filter(({ command }) => command === "cloud_workspace_start_progress")).toEqual([
+        { command: "cloud_workspace_start_progress", args: { orgId: ORG, workspaceId: WS, operationId: "op-1" } },
+      ]);
     });
 
     it("shows an unpublished launch only for its explicit draft workspace", async () => {

@@ -1598,6 +1598,11 @@ pub async fn cloud_workspace_details(workspace_id: String, org_id: Option<String
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.details(org_id.as_deref(), &workspace_id))
 }
 
+#[tauri::command]
+pub async fn cloud_workspace_start_progress(workspace_id: String, operation_id: String, org_id: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::CloudStartProgress, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.start_progress(&org_id, &workspace_id, &operation_id))
+}
+
 async fn cloud_workspace_lifecycle(
     state: tauri::State<'_, crate::AppState>,
     org_id: Option<String>,
