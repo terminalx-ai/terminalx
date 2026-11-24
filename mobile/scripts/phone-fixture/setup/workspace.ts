@@ -91,12 +91,13 @@ const REFUSED_DELETE = operation(DELETE_ID, CHECKOUT, {
   ] },
 });
 
-/** How many times the launch was read in this run: `launch-running` is done from the second read on. */
-let launchReads = 0;
+/** When the launch was first read in this run: `launch-running` is done, and `launch-offline` loses the network, 3.5 seconds later. */
+let firstRead: number | null = null;
+const later = () => firstRead !== null && Date.now() - firstRead > 3_500;
 
 function launchAnswer(scenario: string) {
   const launch = LAUNCHES[scenario]!;
-  const done = scenario === "launch-running" && launchReads > 1;
+  const done = scenario === "launch-running" && later();
   const op = operation("op-launch", LAUNCH, done ? { state: "succeeded", stage: "ready", cancelable: false, events: [...(launch.operation.events as unknown[]), { code: "workspace-ready", occurredAt: Date.now() }] } : launch.operation);
   return { workspace: workspace(LAUNCH, "Checkout redesign", done ? "ready" : launch.state), operation: op };
 }
@@ -145,8 +146,8 @@ export const handle: SetupHandler = (request: SetupRequest) => {
   if (operationRead) {
     const id = decodeURIComponent(operationRead[1]!);
     if (id === "op-launch" && LAUNCHES[scenario]) {
-      launchReads += 1;
-      if (scenario === "launch-offline" && launchReads > 1) return offline();
+      firstRead ??= Date.now();
+      if (scenario === "launch-offline" && later()) return offline();
       return json(200, launchAnswer(scenario));
     }
     if (id === STOP_ID) {

@@ -1182,6 +1182,14 @@ describe("a launch on the workspace page (25.05)", () => {
     }
   });
 
+  it("says Offline, not Reading forever, when the launch was never read for want of a network", async () => {
+    launching(operation({ stage: "creating-machine" }));
+    mocks.catalog.api.operation.mockImplementation(async () => { throw new CloudApiError("cloud_workspace_unavailable", null, "network"); });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Offline. The launch carries on without the phone; this page catches up when it is back online.");
+    expect(text()).not.toContain("Reading the launch…");
+  });
+
   it("gives someone who may not manage it no Cancel and no Delete", async () => {
     launching(operation({ state: "failed", stage: "creating-machine", cancelable: false, errorCode: "cloud_workspace_provisioning_timeout" }), { state: "attention-required" }, "driver");
     await show(<CloudWorkspaceScreen />);
