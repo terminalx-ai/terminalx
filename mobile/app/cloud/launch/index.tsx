@@ -8,12 +8,11 @@ import { refusalText } from "@mobile/cloud/words";
 import { useCloudApi, useRead } from "@mobile/cloud/setup/read";
 import { holdLaunch, LaunchFlow, useLaunchSnapshot } from "@mobile/cloud/setup/launch/flow";
 import { agentLogins, defaultSelection, launchableProviders, nothingToLaunchOn, readFailure, readLogins, type BlockedPage } from "@mobile/cloud/setup/launch/form";
-import { ChoiceSheet, LaunchPage, LoginRow, SettingRow } from "@mobile/cloud/setup/launch/parts";
+import { ChoiceSheet, LaunchHeader, LaunchPage, LoginRow, SettingRow } from "@mobile/cloud/setup/launch/parts";
 import { repositoryShown } from "@mobile/cloud/setup/launch/repository";
 import { idleChoice, idleChoices, idleValue, loginDetail, loginName, machineDetail, OPEN_TO_ORGANIZATION, IDLE_NOTE, problemsTitle, sizeSheetNote, sizeValue } from "@mobile/cloud/setup/launch/words";
 import { priceText } from "@mobile/ui/PriceLines";
 import { Button, Card, EmptyState, SectionTitle } from "@mobile/ui/primitives";
-import { HeaderLine, ScreenHeader } from "@mobile/ui/SessionChrome";
 import { Notice } from "@mobile/ui/Notice";
 import { TextField } from "@mobile/ui/TextField";
 import { useTheme } from "@mobile/ui/theme";
@@ -69,7 +68,7 @@ export default function LaunchScreen() {
   const [sheet, setSheet] = useState<"provider" | "size" | "region" | "idle" | null>(null);
   const header = <>
     <Stack.Screen options={{ title: "New workspace", headerLargeTitle: false, headerShown: false }} />
-    <ScreenHeader title="New workspace" onBack={() => router.back()} subtitle={<HeaderLine text={organizationName} />} />
+    <LaunchHeader title="New workspace" subtitle={organizationName} onBack={() => router.back()} />
   </>;
 
   const tryAgain = () => {

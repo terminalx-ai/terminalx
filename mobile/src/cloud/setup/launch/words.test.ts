@@ -33,6 +33,8 @@ describe("prices", () => {
     expect(billingNote({ billing: "Per second, billed by Boat" }, "USD")).toBe("Per second, billed by Boat. Prices are estimates, in US dollars.");
     expect(billingNote({ billing: "Billed by TerminalX." }, "USD")).toBe("Billed by TerminalX. Prices are estimates, in US dollars.");
     expect(sizeSheetNote("Boat", "USD")).toBe("Boat · prices are estimates, in US dollars");
+    expect(billingNote({ billing: "Billed by Example" }, "EUR")).toBe("Billed by Example. Prices are estimates, in euros.");
+    expect(billingNote({ billing: "Billed by Example" }, "XTS")).toMatch(/^Billed by Example\. Prices are estimates, in /);
   });
 
   it("says what a different new price was", () => {

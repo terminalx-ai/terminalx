@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
 import { KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { Check, ChevronRight } from "lucide-react-native";
+import { Check, ChevronLeft, ChevronRight } from "lucide-react-native";
+import { GlassIconButton } from "@mobile/ui/glass";
 import { Card } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
 
@@ -12,6 +13,20 @@ import { useTheme } from "@mobile/ui/theme";
  */
 
 const divider = (color: string, divided?: boolean) => (divided ? { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: color } : null);
+
+/** The launch pages' bar (25.05): back, then the page's title centred over the organization's name. */
+export function LaunchHeader({ title, subtitle, onBack }: { title: string; subtitle?: string; onBack(): void }) {
+  const { palette } = useTheme();
+  const insets = useSafeAreaInsets();
+  return <View style={[styles.header, { paddingTop: insets.top + 4 }]}>
+    <GlassIconButton label="Back" size={40} icon={<ChevronLeft size={24} color={palette.ink} strokeWidth={2.2} style={styles.chevron} />} onPress={onBack} />
+    <View style={styles.titles}>
+      <Text accessibilityRole="header" numberOfLines={1} style={[styles.title, { color: palette.ink }]}>{title}</Text>
+      {subtitle ? <Text testID="launch-header-subtitle" numberOfLines={1} style={[styles.subtitle, { color: palette.muted }]}>{subtitle}</Text> : null}
+    </View>
+    <View style={styles.balance} />
+  </View>;
+}
 
 /** A setting: its name, what is chosen, and a chevron when a tap opens its sheet. A failed check marks its value. */
 export function SettingRow({ label, value, onPress, marked, divided, disabled, testID }: { label: string; value: string; onPress?(): void; marked?: boolean; divided?: boolean; disabled?: boolean; testID?: string }) {
@@ -125,6 +140,12 @@ export function ChoiceSheet({ title, note, choices, chosen, footer, onChoose, on
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
+  header: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 16, paddingBottom: 8 },
+  chevron: { marginLeft: -2 },
+  titles: { flex: 1, alignItems: "center", gap: 1 },
+  title: { fontSize: 17, fontWeight: "600", letterSpacing: -0.4 },
+  subtitle: { fontSize: 13, letterSpacing: -0.1 },
+  balance: { width: 40 },
   grow: { flex: 1, minWidth: 0 },
   page: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 24, gap: 8 },
   row: { minHeight: 48, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14, paddingVertical: 12 },

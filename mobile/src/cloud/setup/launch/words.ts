@@ -69,11 +69,16 @@ export function idleChoices(setup: Pick<CloudProviderSetup, "allowedIdleSuspendM
   return [...allowed.filter((minutes) => minutes > 0), ...allowed.filter((minutes) => minutes === 0)];
 }
 
+// A currency's name in the price notes. Hermes leaves `currencyDisplay: "name"` out, so the common ones are named here.
+const CURRENCY_WORDS: Readonly<Record<string, string>> = { USD: "US dollars", EUR: "euros", GBP: "British pounds", CAD: "Canadian dollars", AUD: "Australian dollars", JPY: "Japanese yen", CHF: "Swiss francs" };
+
 /** The currency as words for the price notes ("US dollars"), else its code. */
 function currencyWords(currency: string): string {
+  const known = CURRENCY_WORDS[currency.toUpperCase()];
+  if (known) return known;
   try {
     const named = new Intl.NumberFormat("en", { style: "currency", currency, currencyDisplay: "name" }).formatToParts(2).find((part) => part.type === "currency")?.value;
-    return named || currency;
+    return named && named.toUpperCase() !== currency.toUpperCase() ? named : currency;
   } catch {
     return currency;
   }

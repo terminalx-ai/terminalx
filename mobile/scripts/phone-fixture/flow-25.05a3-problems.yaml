@@ -1,0 +1,76 @@
+# 25.05 row 3, Preflight problems: two things to fix on the form, a private repository, and a branch that is not there.
+appId: com.terminalx.phone.fixture
+name: Launch, preflight problems (25.05)
+---
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: problems, openRoute: "/cloud/launch?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "Review price"
+    timeout: 15000
+- tapOn:
+    id: "launch-repository"
+- inputText: "github.com/acme/app"
+- tapOn: "Use this repository"
+- tapOn:
+    id: "launch-name"
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- tapOn: "Review price"
+- extendedWaitUntil:
+    visible: "Two things to fix before this can be priced"
+    timeout: 10000
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-11-two-things-to-fix
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: private, openRoute: "/cloud/launch?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "Review price"
+    timeout: 15000
+- tapOn:
+    id: "launch-repository"
+- inputText: "https://github.com/acme/app"
+- tapOn:
+    id: "launch-repository-ref"
+- inputText: "main"
+- tapOn: "Use this repository"
+- tapOn:
+    id: "launch-name"
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- tapOn: "Review price"
+- extendedWaitUntil:
+    visible: "One thing to fix before this can be priced"
+    timeout: 10000
+- tapOn:
+    id: "launch-repository"
+- assertVisible: "This repository needs a GitHub personal access token."
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-12-private-repository
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: branch, openRoute: "/cloud/launch?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "Review price"
+    timeout: 15000
+- tapOn:
+    id: "launch-repository"
+- inputText: "https://github.com/acme/app"
+- tapOn:
+    id: "launch-repository-ref"
+- inputText: "release/2.14"
+- tapOn: "Use this repository"
+- tapOn:
+    id: "launch-name"
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- tapOn: "Review price"
+- extendedWaitUntil:
+    visible: "One thing to fix before this can be priced"
+    timeout: 10000
+- tapOn:
+    id: "launch-repository"
+- assertVisible: "That branch or tag was not found in the repository."
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-13-branch-not-found

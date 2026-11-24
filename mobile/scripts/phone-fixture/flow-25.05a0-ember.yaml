@@ -1,0 +1,12 @@
+# 25.05 launch, before its flows: fresh state, then the Ember theme its dark board is drawn in, chosen in Settings as a person would.
+appId: com.terminalx.phone.fixture
+name: Launch setup (Ember theme)
+---
+- launchApp:
+    clearState: true
+    arguments:
+      fixtureScenario: connected
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "Ember theme"
+- tapOn: "Ember theme"
