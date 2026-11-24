@@ -1,8 +1,10 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Check, CheckCircle2, Pencil, X } from "@/icons";
-import { displayNameError, updateDisplayName } from "@/lib/account";
+import { DISPLAY_NAME_UNSUPPORTED, displayNameError, updateDisplayName } from "@/lib/account";
 import { errorMessage, type AccountIdentity } from "@/lib/api";
+
+const unsupportedMessage = "This server does not support editing display names yet.";
 
 export function AccountDisplayName({ identity, revision, children }: {
   identity: AccountIdentity;
@@ -11,6 +13,7 @@ export function AccountDisplayName({ identity, revision, children }: {
 }) {
   const [draft, setDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [unsupported, setUnsupported] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [notice, setNotice] = useState<Awaited<ReturnType<typeof updateDisplayName>> | null>(null);
@@ -39,18 +42,26 @@ export function AccountDisplayName({ identity, revision, children }: {
 
   async function save(event: FormEvent) {
     event.preventDefault();
-    if (draft === null || saving) return;
+    if (draft === null || saving || unsupported) return;
     const invalid = displayNameError(draft);
     setError(invalid);
     if (invalid) return;
     setSaving(true);
     try {
       const updated = await updateDisplayName(draft, revision);
-      setSaved(true);
-      setNotice(updated);
+      if (updated) {
+        setSaved(true);
+        setNotice(updated);
+      }
       closeEditor();
     } catch (failure) {
-      setError(errorMessage(failure));
+      const message = errorMessage(failure);
+      if (message === DISPLAY_NAME_UNSUPPORTED) {
+        setUnsupported(true);
+        setError(unsupportedMessage);
+      } else {
+        setError(message);
+      }
     } finally {
       setSaving(false);
     }
@@ -65,6 +76,7 @@ export function AccountDisplayName({ identity, revision, children }: {
         setSaved(false);
         setNotice(null);
         setDraft(identity.name ?? "");
+        if (unsupported) setError(unsupportedMessage);
       }}><Pencil aria-hidden /> Edit name</Button>
     </>, saved)}
     {draft !== null && (
@@ -77,13 +89,13 @@ export function AccountDisplayName({ identity, revision, children }: {
       }} className="mb-4 flex max-w-lg flex-col gap-2">
         <label htmlFor={fieldId} className="text-[13px] font-medium">Display name</label>
         <div className="flex flex-wrap items-center gap-2">
-          <input id={fieldId} value={draft} autoFocus readOnly={saving} aria-invalid={!!error}
+          <input id={fieldId} value={draft} autoFocus readOnly={saving || unsupported} aria-invalid={!!error}
             aria-describedby={error ? `${fieldId}-error` : undefined}
-            onChange={(event) => { setDraft(event.target.value); setError(null); }}
+            onChange={(event) => { setDraft(event.target.value); if (!unsupported) setError(null); }}
             className="h-8 min-w-32 flex-1 rounded-md border border-border bg-background px-2.5 text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
           />
           <Button size="sm" variant="ghost" disabled={saving} onClick={closeEditor}>Cancel</Button>
-          <Button type="submit" size="sm" disabled={saving}>{saving ? "Saving…" : "Save"}</Button>
+          <Button type="submit" size="sm" disabled={saving || unsupported}>{saving ? "Saving…" : "Save"}</Button>
         </div>
         {error && <p id={`${fieldId}-error`} role="alert" className="text-xs text-destructive">{error}</p>}
       </form>

@@ -18,6 +18,7 @@ import { resetPeople } from "@/lib/cloudPeople";
 import { dropEditors } from "@/lib/editors";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { pruneCloudPins } from "@/lib/cloudPins";
+import { showError } from "@/lib/errorToasts";
 import { resetCloudFiles, resetCloudFilesIn } from "@/lib/workspaceFiles";
 
 interface AccountState {
@@ -142,7 +143,17 @@ export function displayNameError(name: string): string | null {
   return null;
 }
 
-export async function updateDisplayName(name: string, contextRevision: string): Promise<{ name: string; organization: string | null }> {
+export const DISPLAY_NAME_UNSUPPORTED = "display_name_unsupported";
+
+function reportDisplayNameSavedForPreviousAccount() {
+  showError("", "", {
+    title: "Your display name was saved for your previous account.",
+    tone: "success",
+  });
+  return null;
+}
+
+export async function updateDisplayName(name: string, contextRevision: string): Promise<{ name: string; organization: string | null } | null> {
   const invalid = displayNameError(name);
   if (invalid) throw new Error(invalid);
   if (privacyEnabled()) throw new Error("Turn off data privacy mode to edit your display name.");
@@ -150,13 +161,24 @@ export async function updateDisplayName(name: string, contextRevision: string): 
   const before = reported;
   if (before.context?.revision !== contextRevision) throw new Error(changed);
 
-  const result = await invoke<AccountStatus>("account_update_display_name", { name: name.trim(), contextRevision });
+  let result: AccountStatus;
+  try {
+    result = await invoke<AccountStatus>("account_update_display_name", { name: name.trim(), contextRevision });
+  } catch (failure) {
+    if (errorMessage(failure) === "display_name_saved_for_previous_account") {
+      return reportDisplayNameSavedForPreviousAccount();
+    }
+    throw failure;
+  }
   const latest = reported;
-  if (!result.identity?.name || result.context?.revision !== contextRevision ||
-      !latest.identity || latest.context?.revision !== contextRevision) throw new Error(changed);
+  if (!latest.identity || latest.context?.account !== before.context.account) {
+    return reportDisplayNameSavedForPreviousAccount();
+  }
+  if (!result.identity?.name || result.context?.account !== before.context.account) throw new Error(changed);
   // The native event usually arrived first. If it hasn't, update only the name
   // so newer roles, capabilities or other account details stay intact.
-  if (latest.identity.name === before.identity?.name && latest.identity.name !== result.identity.name) {
+  if (latest.context?.revision === result.context?.revision &&
+      latest.identity.name === before.identity?.name && latest.identity.name !== result.identity.name) {
     applyStatus({ ...latest, identity: { ...latest.identity, name: result.identity.name } });
   }
   const status = state.status;

@@ -24,6 +24,7 @@ vi.mock("./DataPrivacySettings", () => ({ DataPrivacySettings: () => null }));
 const { AccountTab } = await import("./AccountTab");
 const { AccountSidebarEntry } = await import("@/components/account/AccountSidebarEntry");
 const { bootAccount } = await import("@/lib/account");
+const { dismissError, useErrorToasts } = await import("@/lib/errorToasts");
 
 function signedIn(organization: "team" | "personal" | null = "team"): AccountStatus {
   const name = organization === "team" ? "Acme" : "Personal";
@@ -142,4 +143,48 @@ it("keeps the Edit name control hidden with the default-off gate", async () => {
   render(<AccountTab />);
   await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("phase2_desktop_contracts_available"));
   expect(screen.queryByRole("button", { name: "Edit name" })).toBeNull();
+});
+
+it("keeps the draft and disables retry when the server lacks the endpoint", async () => {
+  mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "phase2_desktop_contracts_available") return true;
+    if (command === "account_update_display_name") throw "display_name_unsupported";
+    return undefined;
+  });
+  render(<AccountTab />);
+  const input = await openEditor();
+  fireEvent.change(input, { target: { value: "Jordan Lee" } });
+  save();
+  expect((await screen.findByRole("alert")).textContent).toBe("This server does not support editing display names yet.");
+  expect(input.value).toBe("Jordan Lee");
+  expect(screen.getByRole<HTMLButtonElement>("button", { name: "Save" }).disabled).toBe(true);
+});
+
+it("reports a completed save after the account changes without applying it to the new account", async () => {
+  let finishSave!: (status: AccountStatus) => void;
+  function Notices() {
+    return useErrorToasts().map((notice) => (
+      <button key={notice.id} onClick={() => dismissError(notice.id)}>{notice.title}</button>
+    ));
+  }
+  mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "phase2_desktop_contracts_available") return true;
+    if (command === "account_update_display_name") {
+      return new Promise<AccountStatus>((resolve) => { finishSave = resolve; });
+    }
+    return undefined;
+  });
+  const saved = { ...status, identity: { ...status.identity!, name: "Jordan Lee" } };
+  render(<><AccountTab /><Notices /></>);
+  fireEvent.change(await openEditor(), { target: { value: "Jordan Lee" } });
+  save();
+  status = {
+    ...status,
+    identity: { ...status.identity!, name: "Other Account" },
+    context: { account: "other-account", scope: "other-scope", revision: "other-scope:2" },
+  };
+  publish();
+  await act(async () => finishSave(saved));
+  expect(within(screen.getByTestId("account-identity")).getByText("Other Account")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Your display name was saved for your previous account." }));
 });
