@@ -12,8 +12,9 @@ import { accessibilityPress, mouseClick } from "@/test/press";
 // workspace, or creates one at once: Create is the confirmation (PRO-409).
 // No local path command runs for a cloud draft.
 
-const { invoke, flow, draft, mayStart, noLocal, modelConnection, catalog } = vi.hoisted(() => ({
+const { invoke, flow, draft, mayStart, noLocal, modelConnection, catalog, launchAccount } = vi.hoisted(() => ({
   invoke: vi.fn(),
+  launchAccount: { value: null as import("@/lib/api").AccountStatus | null },
   /** What the form reads as the cloud catalog: the new workspace's start is followed there. */
   catalog: { value: { orgs: {} } as unknown },
   modelConnection: { client: null as import("@terminalx/portable/workspace").WorkspaceRpcClient | null, targets: vi.fn() },
@@ -83,6 +84,17 @@ vi.mock("./CloudNewSession", async (importOriginal) => ({
   useCloudProjectChoices: () => [{ orgId: "org-a", orgName: "Acme", mayStart: mayStart.value, projects: [project, { ...project, key: "cloud:org-a:blank/scratch", identity: "blank/scratch", fullName: "scratch", blank: true }] }],
 }));
 vi.mock("@/lib/cloudNewSession", () => flow);
+vi.mock("@/lib/account", async (original) => {
+  const account = await original<typeof import("@/lib/account")>();
+  return {
+    ...account,
+    getAccount: () => ({ ...account.getAccount(), status: launchAccount.value ?? account.getAccount().status }),
+    useAccount: () => {
+      const current = account.useAccount();
+      return { ...current, status: launchAccount.value ?? current.status };
+    },
+  };
+});
 vi.mock("@/lib/cloudCatalog", async (original) => ({
   ...(await original<typeof import("@/lib/cloudCatalog")>()),
   useCloudCatalog: () => catalog.value,
@@ -229,6 +241,36 @@ describe("new session in a cloud project", () => {
     catalog.value = listed({ phase: "running", sessionId: "s-1" });
     view.rerender(form());
     await waitFor(() => expect(screen.queryByTestId("cloud-start-status")).toBeNull());
+  });
+
+  it("shows gated launch progress immediately after Create, before a runtime session ID exists", async () => {
+    launchAccount.value = {
+      state: "signed-in", identity: { email: "creator@example.test", name: "Creator", organization: "Acme", organizationId: "org-a" },
+      context: { account: "account", scope: "org-a", revision: "1" }, expiresAt: null, lastError: null,
+      organizations: [{ id: "org-a", name: "Acme", role: "owner", isPersonal: false, cloud: { enabled: true, flags: {} } }],
+      phase2Readiness: { "org-a": ["cloud.workspaces.start-progress.v1"] },
+    };
+    try {
+      flow.planCloudStart.mockReturnValue({ kind: "create" });
+      flow.prepareCloudCreate.mockResolvedValue(prepared);
+      flow.confirmCloudCreate.mockResolvedValue({ workspace: { id: "ws-new" } });
+      const view = render(form());
+      type("Start the API");
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+      await waitFor(() => expect(flow.confirmCloudCreate).toHaveBeenCalledTimes(1));
+      catalog.value = {
+        owner: "creator@example.test",
+        orgs: { "org-a": { source: "live", workspaces: [{ workspace: {
+          id: "ws-new", orgId: "org-a", provider: "local-docker", name: "Start the API", state: "provisioning",
+          launch: { launchId: "launch-one", phase: "booting", hasPrompt: true },
+        } }] } },
+      };
+      view.rerender(form());
+      expect(await screen.findByText("Start the machine")).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Create" })).toBeNull();
+    } finally {
+      launchAccount.value = null;
+    }
   });
 
   it("releases Create and says why when the new workspace's start fails", async () => {

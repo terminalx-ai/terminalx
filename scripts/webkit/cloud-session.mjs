@@ -93,6 +93,57 @@ let failed = 0;
 
 for (const ready of [false, true]) {
   const viewport = { width: 960, height: 450 };
+  const page = await open(browser, server.url, { cloud: true, localProjects: 0, session: { role: "viewer", lines: 4, title: "share-demo" } }, viewport, {
+    extra: `(() => {
+      const { answers, emit } = window.__PW_STUB__;
+      const row = answers.cloud_catalog_load.orgs["org-a"].workspaces[0];
+      row.workspace.state = "provisioning";
+      row.workspace.launch = {
+        launchId: "launch-1", phase: "booting", state: "pending", sessionId: "s1", tabId: null,
+        agent: "claude", workBranch: "tx/share-demo", hasPrompt: true,
+        timings: { requestedAt: 1000, bootingAt: 4000 },
+      };
+      if (${ready}) answers.account_status.phase2Readiness = { "org-a": ["cloud.workspaces.start-progress.v1"] };
+      answers.cloud_remote_attach = () => {
+        setTimeout(() => emit("cloud_remote_event", { kind: "state", connectionId: "conn-1", state: { state: "waitingForRuntime" } }), 0);
+        return "conn-1";
+      };
+    })()`,
+  });
+  await openCloudSession(page, await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle));
+  if (!(await page.locator("main aside").count())) await page.getByRole("button", { name: "Toggle panel" }).click();
+  const card = page.getByTestId("cloud-start-progress");
+  if (!ready) {
+    await page.getByTestId("cloud-session-loading").waitFor();
+    await page.getByTestId("cloud-panel-offline").waitFor();
+    failed += report("In-session cloud start held", {
+      "the old loading view and panel still render": await page.getByTestId("cloud-panel-offline").isVisible() && (await card.count()) === 0,
+      "the dock is absent": (await page.getByTestId("cloud-start-log").count()) === 0,
+    });
+  } else {
+    await card.waitFor();
+    await page.getByTestId("cloud-start-panel").waitFor();
+    const conversation = await page.locator("[data-conversation-column]").boundingBox();
+    const cardBox = await card.boundingBox();
+    const log = page.getByTestId("cloud-start-log");
+    const dockBox = await log.boundingBox();
+    failed += report("In-session cloud start at narrow chat width", {
+      "the checklist fits the conversation column": !!cardBox && !!conversation && cardBox.x >= conversation.x &&
+        cardBox.x + cardBox.width <= conversation.x + conversation.width + SLACK,
+      "the start log stays at the bottom of the conversation": !!dockBox && dockBox.y + dockBox.height <= viewport.height + SLACK,
+      "the dock shows the runtime wait": await log.getByText("Waiting for the workspace runtime…").isVisible(),
+      "the current phase and finished duration are visible": await card.locator('[aria-current="step"]').getByText("Start the machine").isVisible() &&
+        await card.getByText("3s", { exact: true }).isVisible(),
+      "the right panel has its empty state": await page.getByTestId("cloud-start-panel").getByText("Nothing to show yet").isVisible(),
+      "a viewer has no cancel or follow-up composer": (await card.getByRole("button", { name: "Cancel" }).count()) === 0 &&
+        (await page.locator("main textarea[placeholder]").count()) === 0,
+    });
+  }
+  await page.close();
+}
+
+for (const ready of [false, true]) {
+  const viewport = { width: 960, height: 450 };
   const page = await open(browser, server.url, { cloud: true, localProjects: 0, session: { role: "manager", lines: 4 } }, viewport, {
     extra: `(() => {
       const { answers, emit } = window.__PW_STUB__;
