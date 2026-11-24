@@ -313,8 +313,22 @@ macOS job (`--only mac-only`) and runs on a Mac make none.
 A check that passed only alone is not hidden. The log prints `<name> FAILED
 under load, passed alone` with the output of its first run, the part's last
 lines name it again, and the job summary (`GITHUB_STEP_SUMMARY`) lists it under
-the heading "FAILED under load, passed alone", with that output. It is a check
-to fix: it failed once, on a runner like the next one.
+the heading "FAILED under load, passed alone", with that output. A check on
+run-all's `alone` list ran by itself the first time too, so it is said to have
+"failed, passed when run again", in the same list. It is a check to fix: it
+failed once, on a runner like the next one.
+
+Nobody opens the summary of a green job, so each such check also gets one
+warning annotation, titled `WebKit check passed only when run again: <name>,
+part <i>/4`. It shows on the run's page and among the pull request's checks,
+and the API returns it without the log.
+
+**The list is read with `node scripts/webkit/rerun-tally.mjs`.** For the last
+completed CI runs (30 by default, `--runs N` up to 100, `--branch main` for
+one branch, `--json` for JSON), it reads those annotations for every attempt
+of every Linux part, through `gh api`, and prints each check that passed only
+when run again, with in how many runs and which (link, branch, commit, part).
+A run counts once for a check, however many of its attempts said so.
 
 A rerun takes the check's own time again, after the part. A check that timed
 out (ten minutes) and is rerun can take the part past its 25-minute limit; the

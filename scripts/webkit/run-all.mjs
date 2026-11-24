@@ -28,8 +28,11 @@
 // On Linux (the CI parts), a check that failed runs once more by itself after
 // the part's other checks have ended (`reruns`, below). The part passes only if
 // each of them passes then; one that passed only alone is printed as "FAILED
-// under load, passed alone" with its first output, and listed in the job's
-// summary, so it is still fixed. macOS and `--only mac-only` run each check once.
+// under load, passed alone" with its first output ("failed, passed when run
+// again" for a check that ran alone the first time too), listed in the job's
+// summary and given a warning annotation, so it is still fixed:
+// rerun-tally.mjs counts those over the last CI runs. macOS and `--only
+// mac-only` run each check once.
 import { execFileSync, spawn } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism, freemem, loadavg } from "node:os";
@@ -286,13 +289,43 @@ export async function rerunFailed(results, run, times = reruns) {
     const again = await run(first.name);
     if (again.ok) {
       // Said with what it printed the first time: that output is what has to be fixed.
-      console.log(`\n── ${first.name} FAILED under load, passed alone; its first run:${first.report}`);
+      console.log(`\n── ${first.name} ${passedAgain(first)}; its first run:${first.report}`);
       after.push({ ...again, first, passedAlone: true });
     } else {
       after.push({ ...again, first });
     }
   }
   return after;
+}
+
+/**
+ * What a check that passed only when run again did, truthfully: one in `alone` ran by itself the first time too, so
+ * it did not fail under load.
+ */
+export function passedAgain(first) {
+  return first.alone ? "failed, passed when run again" : "FAILED under load, passed alone";
+}
+
+/** The title of the warning annotation for a check that passed only when run again; rerun-tally.mjs reads it back. */
+export function annotationTitle(name, part) {
+  return `WebKit check passed only when run again: ${name}${part ? `, part ${part}` : ""}`;
+}
+
+/** `annotationTitle`'s check and part (null when it gave none), or null for any other title. */
+export function annotationCheck(title) {
+  const match = /^WebKit check passed only when run again: ([a-z0-9-]+(?::\d+)?)(?:, part (\d+\/\d+))?$/.exec(title ?? "");
+  return match ? { name: match[1], part: match[2] ?? null } : null;
+}
+
+/**
+ * GitHub Actions' workflow commands for these results: a warning annotation for each check that passed only when run
+ * again, shown on the run's page and the pull request's checks without opening the job, and counted through the API.
+ */
+export function annotations(results, part) {
+  // The escapes GitHub's workflow commands take: in a property also ":" and ","; in the message "%", CR and LF.
+  const data = (text) => text.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+  const property = (text) => data(text).replace(/:/g, "%3A").replace(/,/g, "%2C");
+  return results.filter((result) => result.passedAlone).map((result) => `::warning title=${property(annotationTitle(result.name, part))}::${data(`${result.name} ${passedAgain(result.first)}${part ? ` in part ${part}` : ""}. The part passed; the check is still to be fixed (its first output is in the log and the job summary).`)}`);
 }
 
 /** A check's output for the job summary: no terminal colours, its last `lines` lines, in a fence it cannot close. */
@@ -315,8 +348,8 @@ export function stepSummary(results, part) {
   const failed = results.filter((result) => !result.ok);
   const said = [];
   if (passedAlone.length) {
-    said.push(`### ${title}: FAILED under load, passed alone`, "", "Each failed with the part's other checks running, then passed when run again by itself. The part passed, but each is still to be fixed: its first output is below.", "");
-    for (const result of passedAlone) said.push(`<details><summary><code>${result.name}</code>: failed in ${seconds(result.first.ms)}, passed alone in ${seconds(result.ms)}</summary>`, "", fenced(result.first.report), "", "</details>", "");
+    said.push(`### ${title}: FAILED under load, passed alone`, "", "Each failed, then passed when run again by itself: with the part's other checks running the first time, or, for a check that always runs alone, by itself both times. The part passed, but each is still to be fixed: its first output is below.", "");
+    for (const result of passedAlone) said.push(`<details><summary><code>${result.name}</code>: ${passedAgain(result.first)} (${seconds(result.first.ms)}, then ${seconds(result.ms)})</summary>`, "", fenced(result.first.report), "", "</details>", "");
   }
   if (failed.length) {
     said.push(`### ${title}: failed`, "");
@@ -399,7 +432,7 @@ async function main() {
   await pool(selected.filter((name) => !alone.has(name)), jobs, async (name) => { results.push(await run(name)); });
   for (const name of selected.filter((name) => alone.has(name))) {
     console.log(`alone, after the others: ${name}: ${alone.get(name)}`);
-    results.push(await run(name));
+    results.push({ ...await run(name), alone: true });
   }
   const firstRuns = results.splice(0);
   results.push(...await rerunFailed(firstRuns, run, rerunsHere({ only })));
@@ -411,7 +444,8 @@ async function main() {
   console.log(`\n${results.length - failed.length} of ${results.length} checks passed${passedAlone.length ? ` (${passedAlone.length} only when run again alone)` : ""} in ${seconds(Date.now() - started)} (${seconds(checkTime)} of checks).`);
   console.log(`Slowest: ${slowest.map((result) => `${result.name} ${seconds(result.ms)}`).join(", ")}`);
   if (leftOut.length) console.log(`Left out on Linux (run-all.mjs macOnly): ${leftOut.join(", ")}`);
-  if (passedAlone.length) console.log(`FAILED under load, passed alone (still to be fixed; first output above): ${passedAlone.map((result) => result.name).join(", ")}`);
+  if (passedAlone.length) console.log(`Passed only when run again alone (still to be fixed; first output above): ${passedAlone.map((result) => `${result.name} (${passedAgain(result.first)})`).join(", ")}`);
+  if (process.env.GITHUB_ACTIONS === "true") for (const line of annotations(results, parsed.values.shard)) console.log(line);
   const summary = stepSummary(results, parsed.values.shard);
   if (summary && process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
   if (failed.length || failedSetup.length) {
