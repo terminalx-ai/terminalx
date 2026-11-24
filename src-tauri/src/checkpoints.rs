@@ -164,6 +164,7 @@ fn workspace_states(cwd: &str) -> Result<Vec<(String, String, State)>> {
 fn workspace_states_in(cwd: &str, sessions: &[index::SessionEntry]) -> Result<Vec<(String, String, State)>> {
     let mut states = Vec::new();
     let directory = store::root()?.join("sessions");
+    let wanted = serde_json::to_string(cwd)?;
     for session in sessions {
         trees::reference(&session.id, "validate", "start")?;
         let entries = match std::fs::read_dir(directory.join(&session.id)) {
@@ -178,13 +179,36 @@ fn workspace_states_in(cwd: &str, sessions: &[index::SessionEntry]) -> Result<Ve
             let Some(tab) = name.strip_prefix("checkpoints-").and_then(|n| n.strip_suffix(".json")) else {
                 continue;
             };
-            let state = load(&session.id, tab)?;
+            let bytes = match std::fs::read(file(&session.id, tab)?) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            // Every turn start and end reads every session's files, and most
+            // are of other workspaces: those are not parsed at all.
+            if !may_name(&bytes, &wanted) {
+                continue;
+            }
+            let state: State = serde_json::from_slice(&bytes)?;
             if state.turns.iter().any(|turn| turn.cwd == cwd) {
                 states.push((session.id.clone(), tab.to_string(), state));
             }
         }
     }
     Ok(states)
+}
+
+/// Whether a checkpoint file can hold a turn in the workspace whose path is
+/// `encoded` as a JSON string. `serde_json` writes these files and writes a
+/// given string the same way every time, so a file naming that workspace
+/// holds those exact bytes. A file with a `\u` escape was written some other
+/// way, where the same path could be spelled differently: it may, and is read.
+fn may_name(bytes: &[u8], encoded: &str) -> bool {
+    contains(bytes, encoded.as_bytes()) || contains(bytes, b"\\u")
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty() || haystack.windows(needle.len()).any(|window| window == needle)
 }
 
 pub(crate) struct RetentionState {
@@ -1186,6 +1210,25 @@ mod reset_tests;
 mod tests {
     use super::*;
     use crate::events::TurnStatus;
+
+    #[test]
+    fn a_checkpoint_file_of_another_workspace_is_skipped_unread() {
+        let file = |cwd: &str| serde_json::to_vec_pretty(&serde_json::json!({ "turns": [{ "cwd": cwd, "number": 1 }] })).unwrap();
+        let here = serde_json::to_string("/work/app").unwrap();
+        assert!(may_name(&file("/work/app"), &here));
+        assert!(!may_name(&file("/work/other"), &here), "another workspace's file is not parsed");
+        assert!(!may_name(b"{\"turns\":[]}", &here), "nor an empty one");
+    }
+
+    #[test]
+    fn a_workspace_path_needing_json_escapes_is_still_matched() {
+        let file = |cwd: &str| serde_json::to_vec(&serde_json::json!({ "turns": [{ "cwd": cwd }] })).unwrap();
+        for cwd in [r"D:\repos\app","/work/a \"quoted\" name", "/work/naïve/ünïcode", "/work/tab\there"] {
+            assert!(may_name(&file(cwd), &serde_json::to_string(cwd).unwrap()), "{cwd}");
+        }
+        // Written some other way, with the same path escaped: read rather than skipped.
+        assert!(may_name(br#"{"turns":[{"cwd":"/work/na\u00efve"}]}"#, &serde_json::to_string("/work/naïve").unwrap()));
+    }
 
     pub(super) fn fixture() -> (tempfile::TempDir, index::SessionEntry) {
         let dir = tempfile::tempdir().unwrap();
