@@ -7,7 +7,7 @@
 // windows, dark and light: nothing spills past the main slot or sideways off
 // the page, the choice cards and list rows stay inside their sections, no two
 // controls overlap, and a long bot name truncates. The header's menu, its
-// three dialogs, a person's GitHub login dialog and the Add a person or a bot list are opened at the largest
+// three dialogs, the Runs on move dialogs (PRO-482), a person's GitHub login dialog and the Add a person or a bot list are opened at the largest
 // and the smallest window and measured the same way. Picking an access level
 // saves it through the stubbed `bot_update`.
 //
@@ -151,6 +151,14 @@ async function popups(page, main) {
     results[`the ${name} dialog`] = await measurePopup(page, "[role=dialog], [role=alertdialog]");
     await close("[role=dialog], [role=alertdialog]");
     if (item !== "bot-menu-delete") await menu();
+  }
+  // PRO-482: the place pickers Runs on opens (the cloud workspaces listed, or how to get one; the paired machines).
+  for (const [card, name] of [["bot-runs-on-cloud", "cloud workspace"], ["bot-runs-on-machine", "machine"]]) {
+    await main.getByTestId(card).scrollIntoViewIfNeeded();
+    await main.getByTestId(card).click();
+    await page.locator("[role=dialog][data-testid=bot-move-dialog]").waitFor();
+    results[`the move to a ${name} dialog`] = await measurePopup(page, "[role=dialog]");
+    await close("[role=dialog]");
   }
   // PRO-480: a person's GitHub login, from their row's menu.
   const person = main.getByTestId("bot-asker").nth(1);

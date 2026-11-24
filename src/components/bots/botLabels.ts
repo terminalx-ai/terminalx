@@ -1,10 +1,20 @@
 import type { Bot, BotAccess, BotDutyWake, BotRunsOn } from "@/types/bots";
-import { effectiveAccess } from "@/types/bots";
+import { effectiveAccess, runsOnPlace } from "@/types/bots";
 import { doingLine, type BotDoing } from "@/lib/botChats";
 
-/** Where a bot runs, in words. A place a newer app wrote is shown as its own text. */
+/** Where a bot runs, in words, without its workspace's or machine's name (`usePlaceName` has that). A place a newer app wrote is shown as its own text. */
 export function runsOnLabel(runsOn: BotRunsOn): string {
-  return runsOn === "thisMac" ? "This Mac" : runsOn;
+  const place = runsOnPlace(runsOn);
+  switch (place.kind) {
+    case "thisMac":
+      return "This Mac";
+    case "cloud":
+      return "Cloud workspace";
+    case "machine":
+      return "Another machine";
+    default:
+      return runsOn;
+  }
 }
 
 /**

@@ -666,6 +666,9 @@ fn phase2_collaboration_v2_deferred_settings_recheck_provenance_at_actual_pty_la
         rig.pane = index::get(SESSION).unwrap().tab(TAB).unwrap().pane_id();
         index::update_tab(SESSION, TAB, |tab| { tab.permission_mode = "plan".into(); Ok(()) }).unwrap();
         let program = rig._dir.path().join("codex");
+        // Every other app-server ask (the launch's hooks/list) is refused at
+        // once, as the CLI does for a method it lacks: unanswered, each of
+        // the seven launches waited out appserver::TIMEOUT before going on.
         executable(&program, r#"#!/bin/sh
 case "$1" in
   --help) printf '  --no-daemon  Run without the daemon\n'; exit 0;;
@@ -673,6 +676,7 @@ case "$1" in
     while IFS= read -r line; do
       case "$line" in
         *'"method":"model/list"'*) printf '%s\n' '{"id":2,"result":{"data":[{"id":"original-model","isDefault":true},{"id":"remote-model"}]}}'; exit 0;;
+        *'"id":2'*) printf '%s\n' '{"id":2,"error":{"message":"Unsupported fixture method"}}'; exit 0;;
       esac
     done
     exit 0;;

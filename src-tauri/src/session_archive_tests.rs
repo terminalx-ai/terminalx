@@ -438,7 +438,7 @@ fn a_bots_chat_is_never_archived_for_being_quiet() {
     let facts = Facts::default();
     for home in [true, false] {
         let mut chat = session("bot", Some(90), now());
-        crate::bots::chat::set_session_bot(&mut chat, &crate::bots::chat::BotRef { id: "b".into(), home });
+        crate::bots::chat::set_session_bot(&mut chat, &crate::bots::chat::BotRef { id: "b".into(), home, org: None });
         assert_eq!(facts.kept(&chat, 7), Some(Kept::Bot));
     }
 }

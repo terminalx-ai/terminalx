@@ -1,6 +1,6 @@
 import type { ComponentType } from "react";
-import { BookOpen, Bot as BotIcon, ClipboardList, Compass, Eye, FlaskConical, Laptop, MapPin, PenTool, Rocket, ShieldCheck } from "@/icons";
-import type { BotRunsOn } from "@/types/bots";
+import { BookOpen, Bot as BotIcon, ClipboardList, Cloud, Compass, Eye, FlaskConical, Laptop, MapPin, PenTool, Rocket, Server, ShieldCheck } from "@/icons";
+import { runsOnPlace, type BotRunsOn } from "@/types/bots";
 import { cn } from "@/lib/cn";
 
 /** A role's mark: its icon and colour. A role this build does not know gets the plain bot mark. */
@@ -44,5 +44,9 @@ export function BotAvatar({ roleTemplateId, size = "sm", paused = false, classNa
 
 /** Where a bot runs, as an icon: this Mac, or a neutral place mark for a place a newer app wrote. */
 export function RunsOnIcon({ runsOn, className }: { runsOn: BotRunsOn; className?: string }) {
-  return runsOn === "thisMac" ? <Laptop className={className} /> : <MapPin className={className} />;
+  const kind = runsOnPlace(runsOn).kind;
+  if (kind === "thisMac") return <Laptop className={className} />;
+  if (kind === "cloud") return <Cloud className={className} />;
+  if (kind === "machine") return <Server className={className} />;
+  return <MapPin className={className} />;
 }

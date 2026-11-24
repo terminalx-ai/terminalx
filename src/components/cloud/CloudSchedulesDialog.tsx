@@ -55,8 +55,8 @@ const AGENTS = [
   { id: "codex", label: "Codex" },
 ];
 const inputClass = "min-w-0 rounded-md border border-hairline bg-transparent px-2 py-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/40";
-/** How long the form rests before its cost is asked for again. */
-const ESTIMATE_DELAY_MS = 400;
+/** How long the form rests before its cost is asked for again. Exported for its test, which lets exactly this pass. */
+export const ESTIMATE_DELAY_MS = 400;
 
 export interface SchedulesTarget {
   orgId: string;

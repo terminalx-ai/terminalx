@@ -361,6 +361,48 @@ export class CloudCatalog {
     return "started";
   }
 
+  /**
+   * Show what the server answered to a launch, a stop or a delete at once:
+   * the workspace as it now stands, with the operation acting on it. A
+   * workspace the list does not hold yet (just launched) joins it. The list is
+   * then read again, and followed while the workspace changes.
+   */
+  adopt(orgId: string, answer: Pick<CloudWorkspaceItem, "workspace"> & { operation: NonNullable<CloudWorkspaceItem["latestOperation"]> }): void {
+    if (this.closed) return;
+    const item: CloudWorkspaceItem = { workspace: answer.workspace, latestOperation: answer.operation };
+    const show = () => {
+      this.organizations = this.organizations.map((entry) => entry.organization.orgId !== orgId ? entry : {
+        ...entry,
+        workspaces: entry.workspaces.some((held) => held.workspace.id === item.workspace.id)
+          ? entry.workspaces.map((held) => (held.workspace.id === item.workspace.id ? { ...held, ...item } : held))
+          : [item, ...entry.workspaces],
+      });
+      this.publish();
+      this.sessions.get(sessionKey(orgId, item.workspace.id))?.listChanged();
+    };
+    show();
+    this.followChanges();
+    // A read that started before the server's answer lists the workspace as it was: when it lands, the
+    // answer is shown again over it, and only a read begun after the answer replaces it.
+    const earlier = this.flight;
+    if (!earlier) return void this.refresh();
+    void earlier.catch(() => undefined).then(() => {
+      if (this.closed) return;
+      show();
+      return this.refresh();
+    });
+  }
+
+  /** Stop a running workspace, as the person asked (only its managers may). A refusal throws and changes nothing here. */
+  async stop(orgId: string, workspaceId: string): Promise<void> {
+    this.adopt(orgId, await this.options.api.suspend(orgId, workspaceId));
+  }
+
+  /** Delete a workspace and release its machine, as the person confirmed. The list drops it once the server has. */
+  async remove(orgId: string, workspaceId: string): Promise<void> {
+    this.adopt(orgId, await this.options.api.deleteWorkspace(orgId, workspaceId));
+  }
+
   private item(orgId: string, workspaceId: string): CloudWorkspaceItem | null {
     return this.organizations.find((entry) => entry.organization.orgId === orgId)?.workspaces.find((item) => item.workspace.id === workspaceId) ?? null;
   }

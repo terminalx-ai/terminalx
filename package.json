@@ -23,7 +23,7 @@
     "tauri": "tauri",
     "clean:build": "node scripts/clean-build.mjs",
     "tauri:dev": "node scripts/clean-build.mjs --quiet && tauri dev --config src-tauri/tauri.dev.conf.json",
-    "test:webkit-layout": "node scripts/webkit/run-all.mjs && node scripts/webkit/team-presence-following.mjs",
+    "test:webkit-layout": "node scripts/webkit/run-all.mjs",
     "test:webkit-roster": "node scripts/webkit/organization-roster.mjs",
     "test:webkit-pair-phone": "node scripts/webkit/pair-phone.mjs",
     "test:webkit-terminal-search": "node scripts/webkit/terminal-search.mjs",

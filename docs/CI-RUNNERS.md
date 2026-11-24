@@ -34,26 +34,84 @@ machine, a pull request's edited workflow included.
 
 ## What runs where
 
-| Job | Runner | Checks |
-| --- | --- | --- |
-| `frontend` | GitHub-hosted Ubuntu | Desktop/mobile TypeScript, frontend build, portable icon tests, CI policy/selector/measurement tests. |
-| `vitest` | GitHub-hosted Ubuntu, four at once | The full Vitest run in four parts (`--shard=N/4`): every test file is in exactly one. |
-| `webkit-layout` | GitHub-hosted macOS | All WebKit layout checks, permission-details among them, after the frontend build. `scripts/webkit/run-all.mjs` runs several at once. |
-| `linux-rust` | GitHub-hosted Ubuntu on **every PR** | `cargo clippy --locked --all-targets -- -D warnings`; GTK/WebKit/audio dependencies installed. Main push/nightly/manual runs alone may use the owner-approved `CI_LINUX_RUNNER` label; unset/empty falls back to Ubuntu. |
-| `linux-rust-tests` | GitHub-hosted Ubuntu, three at once, on **every PR** | Full default-feature `cargo test --locked` in three exact parts (below). |
-| `macos-native` | GitHub-hosted macOS, **when selected** | Full Apple/source/packaged/compiled icon checks, Swift tests, helper build, macOS Clippy, and the full macOS Rust suite. |
-| `machine-compat` | GitHub-hosted macOS, **when selected** | This build against the previous two released runtimes (PRO-354). |
-| `desktop-platforms` | GitHub-hosted Ubuntu | Off-macOS helper build, local UI control, Linux renderer/launcher tests. The platform build, computer contract and input safety steps run off Linux only: on Linux they are `linux-rust`'s Clippy and full suite and `frontend`'s Vitest run. Disabled Windows steps retained. |
-| `headless-serve` | GitHub-hosted Ubuntu | Existing headless build, dependency exclusions, Clippy, integration tests and self-test. |
-| `legacy-runtime-probe` | GitHub-hosted Ubuntu | Existing legacy AppImage diagnostics. Its tests set the operating system themselves, so one runner covers Linux and macOS. |
-| `macos-rust-changes` / `check` | GitHub-hosted Ubuntu | Coverage selector / aggregate status requiring **every** other job to succeed. Failure, cancellation or a skipped dependency fails `check`; the two macOS jobs alone may be skipped, and only when the selector succeeded and did not select them. |
+| Job | Runner | Runs | Checks |
+| --- | --- | --- | --- |
+| `macos-rust-changes` | Ubuntu | always | The selector: what this change needs (next section). |
+| `frontend` | Ubuntu | always | Portable icon tests and the CI policy, selector and measurement tests, whatever changed. `tsc` and `vite build` when the frontend changed. The one place `tsc` runs. |
+| `vitest` | Ubuntu, four at once | frontend | The full Vitest run in four parts (`--shard=N/4`): every test file is in exactly one. |
+| `webkit-layout` | **macOS** | frontend | All WebKit layout checks after `vite build`, the machine-screen scripts among them; the screens are kept as an artifact. `scripts/webkit/run-all.mjs` runs several at once. |
+| `phone-app` | Ubuntu | phone | The phone app's `tsc` and its Vitest run (`pnpm --dir mobile test`). |
+| `linux-rust` | Ubuntu on **every PR** | Rust | `cargo clippy --locked --all-targets -- -D warnings`; GTK/WebKit/audio dependencies installed. Main push/nightly/manual runs alone may use the owner-approved `CI_LINUX_RUNNER` label; unset/empty falls back to Ubuntu. |
+| `linux-rust-tests` | Ubuntu, five at once | Rust | The library's tests under cargo-nextest in four parts, and a fifth with the other test binaries, the doc tests and the local owner path without desktop features (below). |
+| `headless-serve` | Ubuntu | Rust | Headless build, dependency exclusions, Clippy, the named integration tests and the self-tests. |
+| `serve-tests` | Ubuntu | Rust | Every other test binary under `src-tauri/serve/tests`. |
+| `macos-native` | **macOS** | macOS | Icon checks, Swift tests, helper build, one build of the library's tests. On a pull request the Apple-only and system-dependent tests; on main, nightly and manual runs macOS Clippy and the full suite. |
+| `machine-compat` | **macOS** | machines | This build against the previous two released runtimes (PRO-354). |
+| `machines-e2e` | Ubuntu | always; decides in a step | Two machines end to end (PRO-358). |
+| `desktop-platforms` | Ubuntu | always | Off-macOS helper build, Linux renderer and launcher tests. No Rust on Linux: that is `linux-rust` and `linux-rust-tests`. Disabled Windows steps retained. |
+| `legacy-runtime-probe` | Ubuntu | always | Legacy AppImage diagnostics. Its tests set the operating system themselves, so one runner covers Linux and macOS. |
+| `check` | Ubuntu | always | The aggregate. Every other job must succeed. A job in the "Runs" column's frontend, phone, Rust, macOS or machines rows may be skipped instead, and only when the selector succeeded and answered "false" for it. |
 
-Every command from main's split is retained. `check` becomes the aggregate so
-its existing required status still gates Rust and native checks. The separate
-required `frontend` and `webkit-layout` names stay unchanged; no ruleset edit is
-needed. All auxiliary Linux jobs also use GitHub-hosted runners, replacing
-`instabox-medium`. No tests are dropped or newly ignored. Portable source icon
-tests run on Linux; macOS retains all source and Apple decoder checks.
+All runners are GitHub-hosted. `.github/workflows/webkit-linux.yml` is a second
+workflow: the WebKit checks on Linux in four parts, not required and not part
+of `check` ("macOS runner time" below).
+
+## What a pull request runs
+
+`infra/ci-runners/macos-rust.py` reads the paths a pull request changes, from
+both sides of its merge base, and answers four questions. `check` accepts a
+skipped job only on its answer. Pushes to `main`, nightly and manual runs
+answer "true" to all four.
+
+| Answer | True when the change touches | Jobs |
+| --- | --- | --- |
+| `rust` | `src-tauri/`, `native/`, the toolchain, and each path outside them that a Rust test or build script reads (`packages/portable/src/`, the shared fixtures under `src/lib/`, `scripts/remote-runtime/`, `skill-guides/`, `schemas/` and others) | `linux-rust`, `linux-rust-tests`, `headless-serve`, `serve-tests` |
+| `frontend` | `src/`, `packages/`, `scripts/`, `mobile/src/` (a desktop test imports from it, and the root Vitest run includes its tests), the package and Vite files, and each Rust or other file a frontend test reads by path (`src-tauri/src/remote/protocol.rs`, `src-tauri/src/fixtures/` and others) | `tsc` and the build in `frontend`, `vitest`, `webkit-layout` |
+| `phone` | `mobile/`, `packages/`, the package files, the desktop types the phone app imports | `phone-app` |
+| `required` | the macOS rules ("macOS Rust coverage" below) | `macos-native` |
+
+A change to `.github/workflows/ci.yml` or `infra/ci-runners/` answers "true" to
+all four. A documentation-only pull request runs `macos-rust-changes`,
+`frontend` (the policy tests and the icon check), `machines-e2e` (which decides
+in a step), `desktop-platforms`, `legacy-runtime-probe` and `check`.
+
+The lists are written by hand and tests hold them to the source:
+`test_macos_rust.py` fails when a Rust source names a tracked path outside
+`src-tauri` that `rust` does not cover, when a frontend test names a tracked
+path that `frontend` does not cover, and when an Apple-only module or a file
+with an Apple `cfg` is missing from the macOS rules. A path built at run time
+from parts (`root.join("..")` and then a name) is not found by that check;
+`schemas/` is such a one and is listed. Of the last 400 commits on `main`, 8
+would have run none of the selected jobs, 94 the frontend jobs alone, 44 the
+Rust jobs alone, 2 the phone app alone, and 118 the macOS job.
+
+**What a skipped job leaves to `main`:** a pull request that changes no Rust
+input runs no Rust job before merge, and one that changes no frontend input
+runs no Vitest or WebKit check. A dependency the rules do not name (a test
+that reads a file through a path the check cannot see) is first tested on
+`main`, where every run is whole.
+
+`check` is the aggregate, so its required status gates Rust and native checks.
+The separate required `frontend` and `webkit-layout` names stay unchanged; no
+ruleset edit is needed. GitHub reports a job skipped by its `if` as passing, so
+a skipped `webkit-layout` does not hold a pull request; `check` is what refuses
+a skip the selector did not ask for. No tests are dropped or newly ignored.
+Portable source icon tests run on Linux; macOS retains all source and Apple
+decoder checks.
+
+What a selected pull request ran on macOS before 23 November 2026 and now
+runs there on `main`, nightly and manual runs only (all of it still runs on
+Linux on the pull request):
+
+- the library's tests outside the 51 filters (3,982 of 5,871);
+- the other test binaries: `--bins` and the three in `src-tauri/tests/`;
+- the doc tests.
+
+macOS Clippy still runs on a selected pull request, both invocations. `tsc`
+runs in `frontend` alone (it ran four times). The serve crate's test binaries
+run for the first time (`serve-tests`). The phone app's tests have a job of
+their own (`phone-app`); the root Vitest run already ran the phone's
+`.test.ts` files and still does, so those run twice.
 
 The Linux build also exposed unused macOS-only secure-dialog and dictation
 code. Those implementations and real-model evaluation types now compile only
@@ -160,27 +218,37 @@ reported a day later. `macos-native` was 70% of those minutes and
 compiler on this crate needs more, so a build that takes under four minutes on
 Linux takes 20 to 33 there.
 
-`webkit-layout` takes a macOS runner on every run. Two more take one only
-when they are selected:
+`webkit-layout` takes a macOS runner whenever the frontend changed. Two more
+take one only when they are selected:
 
 - `macos-native`: pushes to `main`, nightly, manual runs, and pull requests
-  selected by `infra/ci-runners/macos-rust.py` (next section). An unselected
-  pull request no longer runs macOS Clippy, the Swift tests or the Apple icon
-  checks before merge: they run on `main` after it.
+  selected by `infra/ci-runners/macos-rust.py` ("macOS Rust coverage"). An
+  unselected pull request runs no Swift tests or Apple icon checks before
+  merge, and no pull request runs macOS Clippy: they run on `main` after it.
 - `machine-compat`: the same events, and pull requests that touch the machines
   (`scripts/machine-e2e/relevant.py`, the list `machines-e2e` uses).
 
-`macos-rust-changes` decides both and `check` accepts a skipped macOS job on
-its word alone. On `main`, each of the two jobs keeps the run in progress and
+`macos-rust-changes` decides all three and `check` accepts a skipped macOS job
+on its word alone. On `main`, each of the two jobs keeps the run in progress and
 the newest waiting commit: an older commit still waiting when a newer one
 arrives is cancelled and its `check` fails. The newest commit of a burst of
 merges is always tested.
 
-The WebKit layout checks stay on macOS. They were tried on Linux on 19
-November 2026, in the WebKit build Playwright ships there: 40 of the 107
-failed, against 6 on macOS that day. The fixtures use macOS paths
-(`/private/...`), the app shows Ctrl where the checks read ⌘, and others
-time out. Moving them needs those checks made portable first.
+The required WebKit layout checks stay on macOS for now. They were tried on
+Linux on 19 November 2026, in the WebKit build Playwright ships there: 40 of
+the 107 failed, against 6 on macOS that day. The fixtures used macOS paths
+(`/private/...`), the app showed Ctrl where the checks read ⌘, and others
+timed out. Since then the harness gives every page the macOS platform, the
+host-dependent key presses and paths are fixed, and `run-all.mjs` names the
+five checks it leaves out on Linux, each with its reason.
+
+`.github/workflows/webkit-linux.yml` runs them on Linux on every pull request,
+in four parts on four runners (`run-all.mjs --shard N/4`; every check is in
+exactly one part). It is not a required status and not part of `check`: it
+shows whether the checks pass there and how long each part takes. When they
+do, `webkit-layout` can move to Linux and the last macOS runner an ordinary
+pull request waits for is gone. Policy tests hold that workflow to the same
+rules as CI: read-only token, no secrets, pinned actions, hosted runners.
 
 The legacy runtime diagnostic's macOS leg is gone: its tests patch
 `platform.system` to Linux and to Darwin themselves.
@@ -191,26 +259,65 @@ Linux runners start at once, so the two long suites run in parts on several:
 
 - **Vitest**, four parts: `pnpm vitest run --shard=N/4`. Vitest deals each test
   file to exactly one part.
-- **The Linux Rust suite**, three parts of the library's tests, by name. A
-  filter matches every test whose name contains it:
-  `session::watch_tests::prompts`; the other names containing `session::` or
-  `remote::`; and every name containing neither. The last part also runs the
-  other test binaries (`--bins --test '*'`) and the doc tests. Together they
-  are `cargo test --locked`. A renamed module moves tests between runners; it
-  cannot leave one out.
+- **The Linux Rust suite**, five parts. Four are the library's tests under
+  [cargo-nextest](https://nexte.st), `cargo nextest run --locked --lib
+  --profile ci --partition count:N/4`: nextest sorts the tests and deals them
+  out in turn, so every test is in exactly one part and the parts are the same
+  size (on Linux 1,443 a part: 5,791 tests are listed there and 18 are
+  `#[ignore]`d; a Mac lists 5,871 with 26 ignored). The fifth, `binaries`, is the rest of `cargo test
+  --locked`: the other test binaries (`--bins --test '*'`) and the doc tests
+  under `cargo test`, then `control::issue_tests` built without the desktop
+  features. A new or renamed test moves tests between runners; it cannot leave
+  one out.
 
-`infra/ci-runners/test_workflow_security.py` holds both to these shapes.
+nextest runs each test in a process of its own. About 2,000 of the library's
+tests take `store::temp_home()`'s lock, which is one per process: under `cargo
+test` they ran one at a time whatever the thread count, and here they do not
+wait for each other. A test that relied on sharing a process with another
+would fail here; none of the 85 tried did, the ones that run the test binary
+again among them.
+
+The `ci` profile is `src-tauri/.config/nextest.toml`: every test runs after a
+failure, a failed test fails the run, a test is stopped at ten
+minutes, and the JUnit report is kept as the `rust-junit-N` artifact. No
+profile leaves a test out, and a policy test fails if one is made to.
+The only retries are the file's overrides: one known flaky test each, by its
+exact name, run again up to twice, with its ticket on the line above; a policy
+test fails on any other override, and on a workflow that sets a `NEXTEST_`
+variable or `--retries`. A test that passed on a retry, or left a process
+open, is named in the job's summary. Two global retries would have let a new
+race that fails half the time pass seven runs in eight.
+nextest is installed as one release by version, its archive checked against a
+SHA-256 in the workflow before it is opened.
+
+The Rust jobs on Linux do not install or build the frontend. `tauri-build`
+needs the folder the frontend builds into, so a step writes a one-line
+`dist/index.html`; no Rust test reads what is in it.
+
+`infra/ci-runners/test_workflow_security.py` holds both suites to these shapes.
 
 ## Cargo caches
 
-A cache holds the built dependencies. Its key is the job, the trust scope, the
-platform, `Cargo.lock` and the compiler version, not the commit: this crate
-is rebuilt on every checkout whatever is restored. A job saves a cache only
-when it restored none, so `main` keeps one per job and a pull request writes
-its own only when it changes the lock file. A job whose build was whole saves
-even when a test then failed. Keyed by commit, every run saved a new cache,
-the repository's 10 GB limit evicted them within hours, and the macOS jobs,
-which failed and so never saved, built every dependency on every run.
+A cache holds the built dependencies and nothing of this crate: before a job
+saves, `cargo clean -p raccoon -p terminalx-serve` removes the crate's own
+output, which is rebuilt on every checkout whatever is restored. Its key is
+the job, the trust scope, the platform, the compiler version and then
+`Cargo.lock`, not the commit.
+
+A job restores, in order: its own scope's cache for this lock file; `main`'s
+for this lock file; `main`'s newest for the same job, platform and compiler.
+The last is new: a pull request that changes the lock file used to build every
+dependency, and now builds the ones that changed. A job saves only when what
+it restored was not built from its lock file, so `main` keeps one per job and
+lock file and a pull request writes its own only when it changes the lock
+file. A job whose build was whole saves even when a test then failed.
+`serve-tests` builds what `headless-serve` builds: it restores that job's
+cache and saves none. In `linux-rust-tests` the `binaries` part saves, and
+the four library parts restore what it saved.
+
+Keyed by commit, every run saved a new cache, the repository's 10 GB limit
+evicted them within hours, and the macOS jobs, which failed and so never
+saved, built every dependency on every run.
 
 ## macOS Rust coverage
 
@@ -219,33 +326,64 @@ workflow dispatch, and selected pull requests. The nightly trigger takes effect
 once the workflow is on the default branch. Non-PR runs have unique concurrency
 groups, so rapid main pushes and nightly runs cannot replace pending push runs.
 
-`infra/ci-runners/macos-rust.py` derives the PR path set from **both** the merge
-base and PR head, including files containing `target_os = "macos"` or
-`target_vendor = "apple"`, macOS-named Rust files, and `native/`. It includes
-companion module directories conservatively (for example `computer/`,
-`transcription/`, `local_runtime/`, `browser/`, `pairing/`, `status/`, and
-`harness/codex/`). Rust manifests/locks, build scripts, toolchain/configuration,
-crate roots, workflow and helper scripts also select the suite. Approval wrapper
-code/tests (`harness/read_only*`) always select it too, because shell and loader
-semantics differ even without an Apple cfg. Deletions and
-renames are checked at their old paths too. Adding a new macOS cfg automatically
-adds its file to coverage; no hand-maintained file list can silently go stale.
+`infra/ci-runners/macos-rust.py` selects a pull request, from **both** the
+merge base and its head, when it changes:
 
-Print the exact current list:
+- an Apple-only module: a file or folder behind `#[cfg(target_os = "macos")]
+  mod …`, a file holding such a module inline, or one named for macOS
+  (`APPLE_ONLY` in the script, 13 today);
+- any Rust file that holds an Apple `cfg`, before or after the change. A
+  change anywhere in such a file can break its Apple branch, which Linux never
+  compiles. File names are git's own, and a file that cannot be read on either
+  side selects the job;
+- a path dependency Cargo builds for an Apple target alone
+  (`transcription/native-detector`), the scripts the job runs and the ones
+  those import, `.nvmrc` and `src-tauri/capabilities/`;
+- `native/`, the Tauri configuration, entitlements and property lists, the
+  icons, `Cargo.toml`, `Cargo.lock`, `build.rs`, the toolchain files and the
+  crate roots;
+- the approval wrapper and its tests (`harness/read_only*`), because shell and
+  loader semantics differ even without an Apple `cfg`;
+- `.github/workflows/ci.yml` or `infra/ci-runners/`.
+
+Deletions and renames are checked at their old paths too. Before 23 November
+2026 a file in the same folder as one with an Apple `cfg` selected the job as
+well, and so did everything under `scripts/` and `.github/`. Of the last 400
+commits on `main` this rule selects 152.
+
+On `main` a Clippy failure fails the job and the suite still runs after it.
+`release-serve.yml` publishes only from a green `main`, so a red macOS Clippy
+holds back the runtime release until it is fixed, as a red suite does.
+
+A selected pull request runs the Swift tests, the icon checks, the helper
+build, Clippy over every target (so every Apple-only line of the library, the
+binaries and the integration tests is checked), one build of the library's
+tests, and the tests of the Apple-only and system-dependent modules:
+`cargo test --locked --lib -- $(macos-rust.py --filters)`, 51 name filters
+that match 1,889 of the 5,871 tests. They are the modules with any Apple
+`cfg`, and the ones whose behaviour is the system's without one (terminals,
+process groups, the keychain, sockets). A test fails when a file with an
+Apple `cfg` is under none of the filters.
+
+Print the rules and the filters:
 
 ```sh
-python3 infra/ci-runners/macos-rust.py --base HEAD --list
+python3 infra/ci-runners/macos-rust.py --list
+python3 infra/ci-runners/macos-rust.py --filters
+python3 infra/ci-runners/macos-rust.py --base origin/main --head HEAD
 python3 -m unittest discover -s infra/ci-runners -p 'test_*.py'
 ```
 
-**Coverage no longer provided on every PR:** frontend-only, documentation-only,
-and shared Rust changes outside those paths no longer take a macOS runner
-before merge: no macOS Rust tests, Clippy, Swift tests or Apple icon checks.
-They still run the full Linux Rust suite, Linux Clippy and the WebKit checks
-(on macOS). Platform differences in otherwise shared Rust code
-can therefore be detected only by main/nightly macOS tests; use manual dispatch
-on the PR branch when that risk is relevant. macOS-selected PRs retain the full
-suite, so their latency can exceed the ordinary PR target.
+**Coverage no longer provided on a pull request:** frontend-only,
+documentation-only and shared Rust changes outside those rules take no macOS
+runner before merge: no macOS Rust tests, Clippy, Swift tests or Apple icon
+checks. A selected pull request does not run, on macOS, the other 3,982 of the
+library's tests, the other test binaries (`--bins` and the three in
+`src-tauri/tests/`) or the doc tests. All of it runs on `main` after the merge, nightly and on manual
+dispatch; use manual dispatch on the branch when a platform difference in
+shared Rust code is the risk. `src-tauri/serve/tests/local_platform.rs` is
+compiled only for macOS and no job builds the serve crate's tests there, so
+its two tests run in no workflow, as before.
 
 ## Threat model and enforced controls
 
@@ -261,13 +399,13 @@ access, future jobs and repository integrity are the assets to protect.
 | Fork edits YAML to target a private runner | Every PR uses literal GitHub-hosted labels; the sole custom-runner expression accepts only main push/schedule/dispatch. Regression tests reject unguarded labels, including matrices. | **GitHub runner-group workflow access restriction**, detailed below. YAML guards, obscure labels and maintainer approval alone cannot enforce this routing against an edited workflow. |
 | Approved PR or another workflow steals a newly registered runner | PRs never opt into the pool, including same-repository PRs. | Selected repository **and selected protected-main workflow** in the runner group; no unrestricted matching runners. Controller admission rejects PRs/other refs/workflows, but is defense in depth: it does not bind a registered runner to one queued job. |
 | Job writes repository state or steals checkout credentials | Top-level `permissions: contents: read`, no job permission overrides, no secret expressions, every checkout has `persist-credentials: false`; no `pull_request_target` or `workflow_run`. | Owner sets read-only workflow default; do not opt into fork write tokens/secrets. Negative token-write canary must return 403. |
-| Action tag changes after review | All `uses:` actions pinned to full 40-character commit SHAs, including GitHub actions; policy tests reject mutable references. | Review SHA updates and snapshot/toolchain upgrades. Lockfiles remain enforced; pins do not certify dependencies as harmless. |
+| Action tag changes after review | All `uses:` actions pinned to full 40-character commit SHAs, including GitHub actions; policy tests reject mutable references. The one downloaded tool, cargo-nextest, is a named release whose archive is checked against a SHA-256 in the workflow. | Review SHA updates and snapshot/toolchain upgrades. Lockfiles remain enforced; pins do not certify dependencies as harmless. |
 | One job persists into the next or escapes through host privileges | Self-hosted job preflight rejects root, passwordless sudo and standard Docker/Podman sockets. No shared disk cache configured. | Fresh VM and runner registration for exactly one job; non-root user, no sudo rights/capabilities/privileged sockets or host mounts. Controller deletes VMs on all outcomes and reconciles orphans. Preflight is diagnostic, not a sandbox. |
 | Runner steals cloud, controller or release credentials | CI references no secrets; release/notarization/signing workflows are not moved here. | Long-lived GitHub/cloud tokens only on a separate controller, never in runner images, environment, user-data or checkout. No deploy keys or operator SSH keys on runners. |
-| Cache poisoning crosses a trust boundary | Job + PR-number/main/run namespace + OS + architecture + lockfile write keys. Restores try the run's own namespace, then matching public main artifacts. No other-PR or broad fallback and no implicit pnpm cache. | No shared volumes or writable object-store caches. Native GitHub merge-ref cache write scope must remain in use. All cached content must be public and credential-free. |
+| Cache poisoning crosses a trust boundary | Job + PR-number/main/run namespace + OS + architecture + compiler + lockfile write keys. Restores try the run's own namespace, then main's for the same lock file, then main's newest for the same job, OS, architecture and compiler. No other-PR fallback, none across jobs or platforms, and no implicit pnpm cache. | No shared volumes or writable object-store caches. Native GitHub merge-ref cache write scope must remain in use. All cached content must be public and credential-free. |
 | Runner reaches production, metadata or controller | No network/cloud setup performed by this PR. | CI-only cloud project, no private network, no inbound firewall rules, external egress controls denying private/link-local/metadata/controller destinations. Allow only required build/GitHub traffic. |
 | Resource abuse, failed deletion or controller compromise | Default remains GitHub-hosted. | Controller concurrency/cost/lifetime caps, bounded deletion grace, independent cleanup reconciliation, patched separate controller with minimal credentials and private operational logs. |
-| Security policy regresses in a later edit | `test_workflow_security.py` exercises violations and is run by required `frontend`. `check` gates every job. | Normal branch protection and review of workflow/runner changes. PR-authored policy tests cannot authorize access to private runners. |
+| Security policy regresses in a later edit | `test_workflow_security.py` exercises violations, for CI and for the Linux WebKit workflow, and is run by required `frontend` in a step no selector answer skips. `check` gates every job and accepts a skip only on the selector's answer. | Normal branch protection and review of workflow/runner changes. PR-authored policy tests cannot authorize access to private runners. |
 
 GitHub cautions against self-hosted runners in public repositories because PR
 code can compromise them. Read-only tokens and ephemeral VMs reduce impact;
@@ -302,20 +440,21 @@ gates; this change does not modify those gates.
 
 ### Cache scope and limits
 
-Caches use `ci-v3-<job>-<scope>-<os>-<arch>-<lock>-<sha>`, with restore prefixes
-ending after the lock hash. Scope is `pr-<number>`, `main`, or `run-<id>` for a
-manual non-main run. Successful jobs may save only to their selected key; a PR
-cannot overwrite a main cache under GitHub's native cache write rules. There
-is no shared local Cargo/pnpm directory between VMs. All four Cargo jobs first
-restore their own namespace, then fall back to `main` with the same job, OS,
-architecture and lockfile hash. This lets a fresh PR reuse warm main builds.
-Saving always uses the original scoped primary key, never the matched fallback
-key. GitHub stores PR writes under the PR merge ref: main and other PRs cannot
-read them, even if a fork changes the YAML to name its key `main`. Main runs
-restore only main-scoped keys. Cache reuse is one-way across the trust boundary;
-its elapsed-time benefit remains unmeasured. The new job namespaces need a
-successful main run to populate them after merge; this fallback does not restore
-legacy unscoped caches.
+Caches use `ci-v5-<job>-<scope>-<os>-<arch>-<rustc>-<lock>`. Scope is
+`pr-<number>`, `main`, or `run-<id>` for a manual non-main run. A job may save
+only to its own scoped key; a PR cannot overwrite a main cache under GitHub's
+native cache write rules. There is no shared local Cargo/pnpm directory
+between VMs. Every Cargo job first restores its own namespace, then falls back
+to `main` with the same job, OS, architecture, compiler and lockfile hash, then
+to `main`'s newest with the same job, OS, architecture and compiler. The last
+fallback is a prefix of `main`'s keys only: it never names another pull
+request's scope, another job or another platform, and policy tests reject one
+that does. Saving always uses the original scoped primary key, never the
+matched fallback key. GitHub stores PR writes under the PR merge ref: main and
+other PRs cannot read them, even if a fork changes the YAML to name its key
+`main`. Main runs restore only main-scoped keys. Cache reuse is one-way across
+the trust boundary. The `ci-v5` names need a successful main run to populate
+them after merge: until then every job builds its dependencies once.
 
 Namespaces are not a confidentiality boundary: a malicious fork can request
 other readable caches by modifying its YAML. GitHub permits PRs to read base

@@ -56,7 +56,7 @@ const fixture = `
   const undelivered = [
     { id: "m1", at, from: "b2", to: "b1", kind: "answer", handoff: 4, tries: 3, error: "the chat could not take the message because its tab is gone", held: true },
   ];
-  backend.answers.bot_handoffs = () => ({ revision: 3, handoffs, waitingMessages: 1, undelivered, unreadable: 0, maxDepth: 3, maxTries: 3 });
+  backend.answers.bot_handoffs = () => ({ revision: 3, handoffs, waitingMessages: 1, undelivered, unreadable: 0, maxDepth: 3, maxRetries: 2 });
   backend.answers.bot_brief = () => ({ text: "- Ask before anything leaves this Mac.\\n", hash: "h1", lines: 1, modified: at, outside: false, cut: false, unreadable: null, limit: 8192 });
   const item = (number, title, state, extra = {}) => ({ number, title, state, askedBy: "owner", addedBy: "b1", created: at, modified: at, spentUsd: 1.25, ...extra });
   backend.answers.bot_items = ({ id }) => ({ botId: id, revision: 2, unreadable: 0, items: [item(3, "Check the runner's secrets", "inProgress", { links: [{ kind: "ticket", target: "PRO-516" }] }), item(12, "Phase 2: merge main into phase-2", "inProgress")] });

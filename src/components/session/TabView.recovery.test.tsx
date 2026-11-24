@@ -11,7 +11,7 @@ vi.mock("@/lib/mobileDriver", () => ({ useMobileDrivenTabs: () => new Set<string
 vi.mock("@/lib/changes", () => ({ changeRange: () => ({}), useChanges: () => ({ files: [] }) }));
 vi.mock("@/lib/tabViews", () => ({
   useTabViews: () => mocks.views, isPtyFirst: () => true, startTabAgent: vi.fn(), terminalPaneId: (id: string) => id,
-  clearTabViewError: vi.fn(), forgetTabView: vi.fn(), leaveTerminalView: vi.fn(),
+  clearTabViewError: vi.fn(), forgetTabView: vi.fn(), forgetClosedTabViews: vi.fn(), leaveTerminalView: vi.fn(),
   enterTerminalView: mocks.enterTerminalView,
 }));
 vi.mock("@/lib/terminal", async importOriginal => {
@@ -40,7 +40,7 @@ import { TabView } from "./TabView";
 import { ProjectNavigation } from "@/components/layout/SidebarTree";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { applyEvent, setTabStatus } from "@/lib/agentEvents";
-import { upsertSession, useSessionStore, selectSession } from "@/lib/sessions";
+import { getSessionStore, removeSessions, upsertSession, useSessionStore, selectSession } from "@/lib/sessions";
 import { bucketSessions } from "@/lib/dashboard";
 import { getDraft, setDraft } from "@/lib/drafts";
 import { CONTINUE_PROMPT, RECOVERY_PROMPT } from "@/lib/recovery";
@@ -92,7 +92,12 @@ beforeEach(() => {
   selectSession(session.id);
   setDraft(session.tabs[0].id, "Keep this unsent prompt");
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  // Each test adds its own session; left in the store, every later test's sidebar draws them all.
+  removeSessions(getSessionStore().sessions.map(s => s.id));
+});
 
 describe("TabView recovery lifecycle", () => {
   const signedIn = async (harness = "codex") => {

@@ -62,7 +62,13 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 /// Streams whose data arrived before their `ports.open` answer.
 const MAX_EARLY_STREAMS: usize = 64;
 /// How often auto-forward reads `ports.list`.
+#[cfg(not(test))]
 pub const AUTO_POLL: Duration = Duration::from_secs(2);
+/// Under test the poller keeps its order (one list at a time, each answered
+/// before the next wait); the tests read every list and wait one period to
+/// show that none follows, so a shorter one proves the same, sooner.
+#[cfg(test)]
+pub const AUTO_POLL: Duration = Duration::from_millis(250);
 /// Ports auto-forward leaves alone: the ephemeral range, where clients bind,
 /// not servers (`AUTO_FORWARD_SKIPPED` in src/lib/api.ts).
 pub const AUTO_SKIPPED: std::ops::RangeInclusive<u16> = 32768..=60999;

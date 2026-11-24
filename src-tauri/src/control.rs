@@ -1228,7 +1228,7 @@ impl ControlService {
             }),
             None => None,
         };
-        let (bot, by, source) = match (&caller.bot, named) {
+        let (bot, by, source, working) = match (&caller.bot, named) {
             (Some(own), Some(bot)) if bot.id != *own => return Err(ControlError::new("forbidden", "A bot reads and writes only its own memory.", None::<String>)),
             (Some(own), _) => {
                 // The session it runs in: where the kernel placed it, else the one its proved claim names.
@@ -1243,14 +1243,18 @@ impl ControlService {
                     duty,
                     unknown: Default::default(),
                 };
-                (bots::get(own).map_err(failed)?, own.clone(), source)
+                let bot = bots::get(own).map_err(failed)?;
+                // The place its conversation works in (PRO-483); a session that cannot be read keeps the bot's own notes only.
+                let working = entry.as_ref().map_or(memory::Place::Bot, |entry| crate::bots::chat::session_place(&bot, entry));
+                (bot, own.clone(), source, working)
             }
             (None, Some(bot)) => {
                 // The owner's writes come from a person: not from a process outside every pane with no terminal of its own.
                 if command != "bots.memory.list" {
                     caller.person_only("change a bot's memory")?;
                 }
-                (bot, bots::OWNER.to_string(), crate::bots::changes::Source::of("cli"))
+                let working = memory::working_place(&bot);
+                (bot, bots::OWNER.to_string(), crate::bots::changes::Source::of("cli"), working)
             }
             (None, None) => return Err(ControlError::invalid("Name the bot with --bot BOT.")),
         };
@@ -1260,19 +1264,26 @@ impl ControlService {
             if bot.memory_off {
                 return Err(ControlError::new("forbidden", "Your owner turned your memory off: nothing is kept, and there is nothing to read or forget.", None::<String>));
             }
-            // A conversation reaches its own notes and those of the place it works in; the others are the owner's to manage.
-            let working = memory::working_place(&bot);
+            // A conversation reaches its own notes and those of the place it works in; the others are the owner's to
+            // manage, and another organisation's are never read from here (PRO-483).
             if place != memory::Place::Bot && place != working {
-                return Err(ControlError::new(
-                    "forbidden",
-                    format!("This conversation works in {}; the notes of other places are not yours to read or change from here.", working.key()),
-                    Some(format!("Use --place bot or --place {}, or leave --place out.", working.key())),
-                ));
+                return Err(match working {
+                    memory::Place::Bot => ControlError::new(
+                        "forbidden",
+                        format!("This conversation was started in a place {} no longer works in; only the notes that go with you are yours from here.", bot.name),
+                        Some("Use --place bot, or leave --place out.".into()),
+                    ),
+                    _ => ControlError::new(
+                        "forbidden",
+                        format!("This conversation works in {}; the notes of other places are not yours to read or change from here.", working.key()),
+                        Some(format!("Use --place bot or --place {}, or leave --place out.", working.key())),
+                    ),
+                });
             }
         }
         match command {
             "bots.memory.add" => {
-                let recorded = memory::add(sink, &bot, &place, &required_string(&params, "text")?, &by, source).map_err(failed)?;
+                let recorded = memory::add_from(sink, &bot, &place, &working, &required_string(&params, "text")?, &by, source).map_err(failed)?;
                 Ok(json!({"bot": bot.id, "place": place.key(), "changes": memory::shown(&recorded)}))
             }
             "bots.memory.tidy" => {
@@ -1280,7 +1291,7 @@ impl ControlService {
                     ControlError::invalid(format!("The tidy plan is not one TerminalX reads: {error}. It is {{\"merge\": [{{\"lines\": [{{\"line\": N, \"note\": TEXT}}, …], \"into\": TEXT}}], \"remove\": [{{\"line\": N, \"note\": TEXT}}]}}."))
                 })?;
                 // The owner may tidy every place; a bot, its own notes and its working place's.
-                let places = if by == bots::OWNER { memory::places(&bot) } else { memory::conversation_places(&bot) };
+                let places = if by == bots::OWNER { memory::places(&bot) } else { memory::conversation_places(&working) };
                 // One tidy is one change: a run of the built-in Tidy memory makes one (PRO-477). Said as forbidden here
                 // when it plainly already tidied; `memory::tidy` judges it again under the history's lock, so two tidies
                 // sent at once still record one.
@@ -1321,7 +1332,8 @@ impl ControlService {
                     // Earlier notes of this place that could not be moved to it (PRO-512); null when there are none.
                     "notice": shown.and_then(|shown| shown.notice.clone()),
                     "budget": memory::BUDGET,
-                    "places": view.memory.places.iter().map(|shown| json!({"place": shown.key, "lines": shown.lines.len(), "read": shown.read})).collect::<Vec<_>>(),
+                    // A bot is told of its own places only: not which other organisations it keeps notes in (PRO-483).
+                    "places": view.memory.places.iter().filter(|shown| by == bots::OWNER || memory::conversation_places(&working).iter().any(|place| place.key() == shown.key)).map(|shown| json!({"place": shown.key, "lines": shown.lines.len(), "read": shown.read})).collect::<Vec<_>>(),
                 }))
             }
         }
@@ -1381,7 +1393,10 @@ impl ControlService {
         if !reads {
             caller.refuse_while_paused("change its work items")?;
         }
-        crate::bots::items::cli(self.sink.as_ref(), &bot, caller.session.clone(), action, &params).map_err(failed)
+        // A bot's conversation sees and changes only the items of the place it works in (PRO-483); a session that
+        // cannot be read, none. The owner's read (`--bot`) sees them all.
+        let place = caller.verified_bot().map(|_| caller.session.as_deref().and_then(|session| index::get(session).ok()).map_or(crate::bots::memory::Place::Bot, |entry| crate::bots::chat::session_place(&bot, &entry)));
+        crate::bots::items::cli(self.sink.as_ref(), &bot, caller.session.clone(), place.as_ref(), action, &params).map_err(failed)
     }
 
     /// Switch one of a bot's duties off (`terminalx bots duty-off`, PRO-492).
@@ -3740,6 +3755,10 @@ impl Caller {
         if let Some(mode) = cloud::hold(&limit) {
             hold.insert("mode".into(), mode);
         }
+        // The organisation its conversation works in (PRO-483): cloud time is billed to the organisation the work is
+        // for, so the window takes only that one's workspaces. `personal` is the account's personal organisation;
+        // empty (a place the bot no longer works in, a session that cannot be read) is none.
+        hold.insert("org".into(), json!(cloud::hold_org(bot, self.session.as_deref())));
         match action {
             "sessions.create" => {
                 let agent = optional_string(&params, "agent").unwrap_or_else(|| "claude".into());
@@ -3753,6 +3772,7 @@ impl Caller {
                         object.remove("resolveConflicts");
                     }
                 }
+                params[cloud::HOLD_PARAM] = Value::Object(hold);
                 let mut result = run(params)?;
                 let workspace = result["workspace"].as_str().map(str::to_owned);
                 let session = result["session"].as_str().map(str::to_owned);
@@ -4997,10 +5017,11 @@ mod tests {
         assert_eq!(ask("bots.memory.add", json!({"text": "x"})).unwrap_err().code, "invalid_arguments");
         let owned = ask("bots.memory.add", json!({"bot": "iris", "text": "Prefers the 8/9 frames", "place": "personal"})).unwrap();
         assert_eq!((owned["changes"][0]["by"].as_str(), owned["changes"][0]["source"]["kind"].as_str(), owned["place"].as_str()), (Some("owner"), Some("cli"), Some("personal")));
-        // A conversation reaches its own notes and its place's: Atlas works in Acme, so not personal nor Kestrel's.
+        // A conversation reaches its own notes and its place's. The home chat was made while Atlas worked for its owner
+        // alone, so it works in personal even once Acme comes first (PRO-483): not Acme's notes nor Kestrel's.
         crate::bots::update(service.sink.as_ref(), &atlas, crate::bots::BotPatch { works_in: Some(vec!["Acme".into(), "Kestrel".into(), "personal".into()]), ..Default::default() }).unwrap();
-        assert!(from_chat("bots.memory.add", json!({"text": "Acme ships on Tuesdays", "place": "Acme"}), proved).is_ok());
-        for place in ["personal", "Kestrel"] {
+        assert!(from_chat("bots.memory.add", json!({"text": "Ships on Tuesdays", "place": "personal"}), proved).is_ok());
+        for place in ["Acme", "Kestrel"] {
             assert_eq!(from_chat("bots.memory.list", json!({"place": place}), proved).unwrap_err().code, "forbidden", "{place}");
             assert_eq!(from_chat("bots.memory.add", json!({"text": "Copied over", "place": place}), proved).unwrap_err().code, "forbidden", "{place}");
             assert_eq!(from_chat("bots.memory.forget", json!({"line": "Acme", "place": place}), proved).unwrap_err().code, "forbidden", "{place}");
@@ -7293,6 +7314,10 @@ mod wait_tests;
 #[cfg(test)]
 #[path = "control_bot_items_tests.rs"]
 mod bot_items_tests;
+
+#[cfg(test)]
+#[path = "control_bot_orgs_tests.rs"]
+mod bot_orgs_tests;
 
 #[cfg(test)]
 #[path = "control_bot_runs_tests.rs"]

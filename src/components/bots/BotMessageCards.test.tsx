@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   openBot: vi.fn(),
   selectSession: vi.fn(),
   openBotItem: vi.fn(),
+  showBotsHandoffs: vi.fn(),
   openUrl: vi.fn(async () => undefined),
   bots: [] as unknown[],
   items: {} as Record<string, unknown>,
@@ -31,6 +32,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 vi.mock("@/lib/bots", () => ({ useBotStore: () => ({ loaded: true, bots: mocks.bots, revision: 1, unreadable: 0, error: null, templates: null }) }));
 vi.mock("@/lib/sessions", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/sessions")>()), openBot: mocks.openBot, selectSession: mocks.selectSession }));
+vi.mock("@/lib/botsPage", () => ({ showBotsHandoffs: mocks.showBotsHandoffs }));
 vi.mock("@/lib/botItems", () => ({ useBotItems: (botId: string) => ({ list: mocks.items[botId] ?? null, error: null }), openBotItem: mocks.openBotItem }));
 vi.mock("@/components/machines/MachineHostError", () => ({
   MachineHostError: ({ error }: { error: string }) => <div role="alert">{error}</div>,
@@ -81,7 +83,7 @@ beforeEach(() => {
   mocks.listeners.clear();
   mocks.bots = [atlas, sentry];
   mocks.items = {};
-  list = { revision: 1, waitingMessages: 0, unreadable: 0, handoffs: [handoff()], maxDepth: 3, maxTries: 3 };
+  list = { revision: 1, waitingMessages: 0, unreadable: 0, handoffs: [handoff()], maxDepth: 3, maxRetries: 2 };
   mocks.invoke.mockReset();
   mocks.invoke.mockImplementation((command: string, args: Record<string, unknown> = {}) => {
     if (command === "bot_handoffs") return Promise.resolve(list);
@@ -89,7 +91,7 @@ beforeEach(() => {
     if (command === "bot_handoff_resend") return Promise.resolve({ delivery: { sent: 1 } });
     return Promise.reject(new Error(`unexpected ${command}`));
   });
-  for (const mock of [mocks.openBot, mocks.selectSession, mocks.openBotItem, mocks.openUrl]) mock.mockClear();
+  for (const mock of [mocks.openBot, mocks.selectSession, mocks.openBotItem, mocks.openUrl, mocks.showBotsHandoffs]) mock.mockClear();
 });
 afterEach(cleanup);
 
@@ -133,7 +135,7 @@ describe("a hand-off, a tell and an answer from another bot (23.14)", () => {
     fireEvent.click(within(card).getByTestId("bot-card-item"));
     expect(mocks.openBotItem).toHaveBeenCalledWith("b2", 1, mocks.openBot);
     fireEvent.click(within(card).getByTestId("bot-card-chain"));
-    expect(mocks.selectSession).toHaveBeenCalledWith("atlas-home");
+    expect(mocks.showBotsHandoffs).toHaveBeenCalledWith(2);
   });
 
   it("draws a tell as a message or a status, and an answer about its hand-off", () => {
@@ -169,8 +171,9 @@ describe("a hand-off, a tell and an answer from another bot (23.14)", () => {
     expect(card.textContent).not.toContain("CTO");
     expect(within(card).getAllByTestId("bot-avatar").every((avatar) => avatar.getAttribute("data-role") === "")).toBe(true);
     await waitFor(() => expect(within(card).getByTestId("bot-card-state").textContent).toBe("Stopped · its sender was deleted"));
-    // With no sender to open, the chain is a label, not a link.
-    expect(within(card).getByTestId("bot-card-chain").tagName).toBe("SPAN");
+    // Its sender is gone, its thread is not: the chain still opens on the Hand-offs page.
+    fireEvent.click(within(card).getByTestId("bot-card-chain"));
+    expect(mocks.showBotsHandoffs).toHaveBeenCalledWith(handoffCard.handoff);
   });
 
   it("shows both access levels when the sender may do less than the receiver, and no sentence about it (23.17)", () => {
@@ -254,6 +257,8 @@ describe("the sending card: Handed to (23.15)", () => {
     expect(!!within(card).queryByTestId("bot-handed-stop")).toBe(stop);
     expect(within(card).getByTestId("bot-handed-number").textContent).toBe("Hand-off 2");
     expect(within(card).getByTestId("bot-handed-chain").textContent).toBe("2 of 3 in its chain");
+    fireEvent.click(within(card).getByTestId("bot-handed-number"));
+    expect(mocks.showBotsHandoffs).toHaveBeenCalledWith(2);
     // No "stop the whole chain": the one Stop names the one bot.
     expect(within(card).queryAllByRole("button", { name: /chain/i })).toEqual([]);
   });

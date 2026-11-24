@@ -30,18 +30,18 @@ describe("quoting a dropped path", () => {
 
   // On Windows `bash` on PATH is the WSL launcher, which rewrites backslashes
   // in its arguments before any shell reads them: no POSIX shell to ask.
-  const installed = (shell: string) => {
-    if (process.platform === "win32") return false;
+  // Anywhere else a missing shell is a failure that names it, not a pass.
+  const requireShell = (shell: string) => {
     try {
       execFileSync(shell, ["-c", "true"], { stdio: "ignore" });
-      return true;
-    } catch {
-      return false;
+    } catch (error) {
+      throw new Error(`${shell} could not be run (${(error as Error).message}): this test reads the quoted paths back with ${shell}, so ${shell} must be installed`);
     }
   };
 
   it.each(["bash", "zsh"])("is read back by %s as the same path, and runs nothing", (shell) => {
-    if (!installed(shell)) return;
+    if (process.platform === "win32") return;
+    requireShell(shell);
     const paths =["/tmp/plain.txt", "/tmp/my shot's \"x\" $HOME `id` $(id).png", "/tmp/a\nb\tc;rm -rf ~&|<>*?[]{}!#\\.txt", "/tmp/日本語 é.png", "-rf", "~/x", "/tmp/c1\u009b31m.txt"];
     const out = execFileSync(shell, ["-c", `printf '%s\\0' ${droppedPathsText(paths, "posix")}`], { encoding: "utf8" });
     expect(out.split("\0").slice(0, -1)).toEqual(paths);

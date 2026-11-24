@@ -179,7 +179,7 @@ fn an_update_changes_what_it_names_and_refuses_what_cannot_be() {
     assert!(update(sink.as_ref(), "missing", patch(json!({"name": "X"}))).is_err());
     assert!(serde_json::from_value::<BotPatch>(json!({"budget": 5})).is_err());
     // A value this build does not offer is refused as the caller's mistake, and changes nothing.
-    for (odd, said) in [(json!({"runsOn": "cloudWorkspace"}), "runs on thisMac for now"), (json!({"access": "root"}), "Unknown access root")] {
+    for (odd, said) in [(json!({"runsOn": "cloudWorkspace"}), "with Move in its settings"), (json!({"access": "root"}), "Unknown access root")] {
         let error = update(sink.as_ref(), &iris.id, patch(odd.clone())).unwrap_err();
         assert!(matches!(refusal(&error), Some(BotError::Refused(message)) if message.contains(said)), "{odd}: {error}");
     }

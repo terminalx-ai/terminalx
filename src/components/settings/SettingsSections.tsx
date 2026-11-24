@@ -121,6 +121,9 @@ export function GeneralTab() {
       <RegisteredSetting setting="general.turnChanges"
         control={<Switch aria-label="Show files changed" checked={prefs.turnChanges} onCheckedChange={(v) => setPrefs({ turnChanges: v })} />}
       />
+      <RegisteredSetting setting="general.secondOpinionButton"
+        control={<Switch aria-label="Second opinion button" checked={prefs.secondOpinionButton} onCheckedChange={(v) => setPrefs({ secondOpinionButton: v })} />}
+      />
       <RegisteredSetting setting="general.promptMap"
         control={<Switch aria-label="Prompt map" checked={prefs.promptMap} onCheckedChange={(v) => setPrefs({ promptMap: v })} />}
       />

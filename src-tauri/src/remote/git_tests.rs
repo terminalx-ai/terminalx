@@ -75,6 +75,30 @@ impl Fixture {
     }
 }
 
+/// Write the stand-in `gh` (or any program a test then runs) from a child
+/// shell, so this test process never holds a writable descriptor on it.
+/// Every test in this binary forks; one that forks while such a descriptor
+/// is open hands its child a copy, which close-on-exec closes only at that
+/// child's exec, and Linux refuses to run the file meanwhile ("gh: Text file
+/// busy"). The child shell's descriptor is its own, closed when it exits,
+/// before the file is run.
+#[cfg(unix)]
+fn write_executable(path: &Path, text: &str) {
+    let mut writer = Command::new("/bin/sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    writer.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
+    assert!(writer.wait().unwrap().success(), "write {}", path.display());
+}
+
+#[cfg(not(unix))]
+fn write_executable(path: &Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+}
+
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let base = crate::paths::canonicalize(dir.path()).unwrap();
@@ -84,12 +108,7 @@ fn fixture() -> Fixture {
     std::fs::create_dir_all(&state).unwrap();
     let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/remote-runtime/fake-gh");
     let shim = base.join("gh");
-    std::fs::write(&shim, format!("#!/bin/sh\nFAKE_GH_STATE='{}' exec '{}' \"$@\"\n", state.display(), fake.display())).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    write_executable(&shim, &format!("#!/bin/sh\nFAKE_GH_STATE='{}' exec '{}' \"$@\"\n", state.display(), fake.display()));
     let mut workspace = WorkspaceGit::new(root.clone(), Arc::new(WorkspaceFiles::new(root.clone())));
     workspace.set_gh(shim);
     workspace.github_origin_fixture = Some("github.test/octo/repo".into());
@@ -785,10 +804,10 @@ fn machine_enterprise_pr_creation_retains_verified_repository_routing() {
     std::fs::write(alternate.join("repo-url"), "https://github.test/other/repo").unwrap();
     std::fs::write(alternate.join("pr-1.json"), alternate_pr.to_string()).unwrap();
     let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/remote-runtime/fake-gh");
-    std::fs::write(f.base.join("gh"), format!(
+    write_executable(&f.base.join("gh"), &format!(
         "#!/bin/sh\nstate='{}'\nif [ \"$(pwd -P)\" = '{}' ] && [ \"$3\" != '{}' ]; then state='{}'; fi\nFAKE_GH_STATE=\"$state\" exec '{}' \"$@\"\n",
         f.state.display(), f.root.display(), url, alternate.display(), fake.display(),
-    )).unwrap();
+    ));
     let root_rows = f.call("git.prAssociations", json!({ "sessionId": "root-association" })).unwrap();
     let resolved = &root_rows["associations"][0]["repo"];
     assert_eq!(resolved, locator);
@@ -899,7 +918,7 @@ fn recorded_pull_request_checkouts_are_probed_before_any_fallback_scan() {
     let shim = f.base.join("gh");
     let script = std::fs::read_to_string(&shim).unwrap();
     let log = f.state.join("checkouts");
-    std::fs::write(&shim, script.replacen("#!/bin/sh\n", &format!("#!/bin/sh\npwd -P >> '{}'\n", log.display()), 1)).unwrap();
+    write_executable(&shim, &script.replacen("#!/bin/sh\n", &format!("#!/bin/sh\npwd -P >> '{}'\n", log.display()), 1));
     let rows = f.call("git.prAssociations", json!({ "sessionId": "recorded" })).unwrap();
     assert!(rows["associations"][0]["repo"].is_null());
     assert_eq!(rows["associations"][1]["repo"], "z-recorded");
@@ -927,7 +946,7 @@ fn a_stalled_recorded_batch_cannot_skip_the_next_checkout() {
     git(&checkout, &["config", "terminalx.testGithubRepoUrl", "https://github.com/acme/valid"]);
     let shim = f.base.join("gh");
     let script = std::fs::read_to_string(&shim).unwrap();
-    std::fs::write(&shim, script.replacen("#!/bin/sh\n", "#!/bin/sh\ncase \"$(pwd -P)\" in */slow-*) exec sleep 30 ;; esac\n", 1)).unwrap();
+    write_executable(&shim, &script.replacen("#!/bin/sh\n", "#!/bin/sh\ncase \"$(pwd -P)\" in */slow-*) exec sleep 30 ;; esac\n", 1));
     let rows = f.call("git.prAssociations", json!({ "sessionId": "recorded" })).unwrap();
     let valid = rows["associations"].as_array().unwrap().iter().find(|row| row["url"] == valid_url).unwrap();
     assert_eq!(valid["repo"], "valid");
@@ -955,10 +974,10 @@ fn a_rebound_pull_request_url_cannot_redirect_a_verified_write() {
     let rebound = f.base.join("rebound");
     let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/remote-runtime/fake-gh");
     // The URL resolves to a second PR as soon as the verification view finishes.
-    std::fs::write(f.base.join("gh"), format!(
+    write_executable(&f.base.join("gh"), &format!(
         "#!/bin/sh\nstate='{}'\nif [ \"$1\" = pr ] && [ -f '{}' ]; then state='{}'; fi\nFAKE_GH_STATE=\"$state\" '{}' \"$@\"\nstatus=$?\nif [ \"$1\" = pr ] && [ \"$2\" = view ]; then touch '{}'; fi\nexit \"$status\"\n",
         f.state.display(), rebound.display(), replacement_state.display(), fake.display(), rebound.display(),
-    )).unwrap();
+    ));
     assert_eq!(f.call("git.prReady", json!({ "repo": "app", "url": url })).unwrap()["pr"]["isDraft"], false);
     std::fs::remove_file(rebound).unwrap();
     assert_eq!(f.call("git.prMerge", json!({ "repo": "app", "url": url, "method": "squash" })).unwrap()["pr"]["state"], "MERGED");
@@ -1013,10 +1032,10 @@ fn machine_pr_creation_records_the_native_session_association() {
     // GitHub's initial lookup may outlast the checkout that started the request.
     let shim = f.git.gh.as_ref().unwrap();
     let original = std::fs::read_to_string(shim).unwrap();
-    std::fs::write(shim, original.replacen("#!/bin/sh\n", "#!/bin/sh\ngit checkout -q --detach || exit\n", 1)).unwrap();
+    write_executable(shim, &original.replacen("#!/bin/sh\n", "#!/bin/sh\ngit checkout -q --detach || exit\n", 1));
     assert_eq!(f.code("git.prCreateForSession", publish(repo, "feature/pr", &head)), "conflict");
     assert!(git(&remote, &["branch", "--list", "feature/pr"]).is_empty());
-    std::fs::write(shim, original).unwrap();
+    write_executable(shim, &original);
     git(&checkout, &["checkout", "-q", "feature/pr"]);
 
     let created = f.call("git.prCreateForSession", publish(repo, "feature/pr", &head)).unwrap();
@@ -1723,10 +1742,10 @@ fn machine_pr_creation_requires_a_confirmed_url_and_the_original_worktree() {
             let original = std::fs::read_to_string(shim).unwrap();
             let command = original.strip_prefix("#!/bin/sh\n").unwrap();
             let backup = f.base.join("original-checkout");
-            std::fs::write(shim, format!(
+            write_executable(shim, &format!(
                 "#!/bin/sh\nif [ \"$1 $2\" = 'pr create' ]; then\n({command}) || exit\nmv '{repo}' '{}' && mv '{}' '{repo}'\nelse\n{command}fi\n",
                 backup.display(), replacement.display()
-            )).unwrap();
+            ));
         } else {
             f.fault("drop-after-create");
         }

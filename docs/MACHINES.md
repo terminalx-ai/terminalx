@@ -768,6 +768,14 @@ the pull request that adds it.
 | `session.decide` | `agent-commands/1` | Served | Answers the named permission request or question once (decision 3) |
 | `session.followUp` | `follow-ups/1` | Served | Edits, withdraws or releases a held follow-up, by the mailbox's rules with the receipts of `agent-commands/1` (#1328) |
 | `runtime.agents` | `agents/1` | Served | Machine-wide; with each agent's version and sign-in, and the agents with no CLI there (PRO-350) |
+| `bots.list` | `bots/1` | Served | The connected person's bots that live there, what needs them and what each is doing (PRO-482) |
+| `bots.home` | `bots/1` | Served | One of the person's bots there: its list, chats, duties and role (PRO-482) |
+| `bots.answer` | `bots/1` | Served | Answers one of the person's bots' questions there (PRO-482) |
+| `bots.importPart` | `bots/1` | Served | One part of a bot moved there, held for this connection only (PRO-482) |
+| `bots.import` | `bots/1` | Served | Takes in a bot moved there, owned by the person who connected (PRO-482) |
+| `bots.export` | `bots/1` | Served | Reads out one of the person's bots there to bring it back (PRO-482) |
+| `bots.exportPart` | `bots/1` | Served | One part of that read (PRO-482) |
+| `bots.remove` | `bots/1` | Served | Lets go of one of the person's bots there once it is brought back (PRO-482) |
 | `session.commands` | `composer/1` | Served | |
 | `session.files` | `composer/2` | Served | |
 | `session.attach` | `composer/3` | Served | Needs its store without the cloud agents layer (decision 3); `kind: "file"` with `composer/4` (PRO-407) |

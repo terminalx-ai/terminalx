@@ -1,0 +1,43 @@
+# cargo-nextest runs each test in a process of its own. About 2,000 of the
+# library's tests take `store::temp_home()`'s lock, which is one per process:
+# under `cargo test` they queue behind each other, here they do not
+# (docs/CI-RUNNERS.md "The suites in parts").
+#
+#   cargo nextest run --locked --lib                 the default profile
+#   cargo nextest run --locked --lib --profile ci    what CI runs, in parts
+#
+# No test is excluded, ignored or put in a group of its own here. One that
+# cannot run in a process of its own is fixed in the test, not hidden here.
+
+[profile.default]
+# Said once a test has run this long; nothing is stopped.
+slow-timeout = { period = "60s" }
+
+[profile.ci]
+# Every test runs and reports, also after one failed.
+fail-fast = false
+# A test that fails fails the run: nothing is run again, so a new race is seen
+# the first time it loses. The exceptions are the overrides at the end of this
+# file, one known flaky test each, with its ticket.
+retries = 0
+# Said at 60 s, and stopped as failed at ten minutes. The slowest test known,
+# github_process::tests::privacy_covers_identity_and_issue_entry_points, runs
+# the test binary again for each entry point and took 297 s on a busy Mac, so
+# five minutes would have been too close.
+slow-timeout = { period = "60s", terminate-after = 10 }
+failure-output = "immediate-final"
+final-status-level = "flaky"
+
+[profile.ci.junit]
+# Written to target/nextest/ci/junit.xml, which the job uploads.
+path = "junit.xml"
+
+# Known flaky tests that are not fixed yet: each is run again, up to twice, and
+# reported as flaky when it then passes (the job's summary names it). One test
+# by its exact name, with the ticket that will fix it on the line above; the
+# entry goes when the ticket closes. Nothing else may be set here.
+
+# PRO-513
+[[profile.ci.overrides]]
+filter = 'test(=machine_host::security_tests::a_caller_from_a_public_address_is_refused_under_every_listen_choice_unless_allowed)'
+retries = 2

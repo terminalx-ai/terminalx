@@ -1870,6 +1870,9 @@ impl WorkspaceRpc {
             "session.addTab" => self.session_add_tab(peer, params),
             "session.delete" => self.session_delete(peer, params),
             "runtime.agents" => self.runtime_agents(peer, &params),
+            "bots.list" | "bots.home" | "bots.answer" | "bots.importPart" | "bots.import" | "bots.export" | "bots.exportPart" | "bots.remove" => {
+                super::bots::call(self.manager()?, method, &params, peer.user_id.as_deref(), &peer.device_id)
+            }
             "session.nudge" => {
                 self.agents()?.poll.raise();
                 Ok(json!({}))

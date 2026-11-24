@@ -201,6 +201,8 @@ export interface SessionParent {
 export interface SessionBotRef {
   id: string;
   home?: boolean;
+  /** The place the chat works in (PRO-483): "personal" or an organisation's id. Absent: the bot's first place. */
+  org?: string;
 }
 
 export interface SessionEntry {
@@ -215,7 +217,7 @@ export interface SessionEntry {
   /** The bot this session is a chat of (PRO-468): its id, and whether it is the bot's home chat. */
   bot?: SessionBotRef | null;
   /** A session that works for a bot without being its chat (PRO-468): one its chats started, or what those started in turn. */
-  botStarted?: { id: string } | null;
+  botStarted?: { id: string; org?: string } | null;
   /** Started as an orchestration run's worker (`store::index::RUN_WORKER`). Never unmarked: its limits outlive the run. */
   runWorker?: boolean;
   /** A run of one of its bot's duties (PRO-471): the duty's automation id. Listed under its bot apart from its chats. */

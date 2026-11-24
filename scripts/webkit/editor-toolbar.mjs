@@ -3,8 +3,9 @@
 // pnpm test:webkit-editor-toolbar
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { createServer, transformWithEsbuild } from "vite";
-import { launch } from "./harness.mjs";
+import { transformWithEsbuild } from "vite";
+import { createCheckServer } from "./vite-page.mjs";
+import { FOCUS_NEXT, launch } from "./harness.mjs";
 
 const entry = `
 import React, { useState } from 'react';
@@ -83,10 +84,9 @@ await refreshDataPrivacy();
 await bootAccount();
 createRoot(document.getElementById('root')).render(<App/>);
 `;
-const server = await createServer({
-  server: { port: 0, strictPort: false, host: '127.0.0.1' },
+const server = await createCheckServer({
+  server: { host: '127.0.0.1' },
   plugins: [{
-    name: 'editor-toolbar-regression',
     resolveId(id) { if (id === '/toolbar-regression.tsx') return '\0toolbar-regression.tsx'; },
     async load(id) {
       if (id === '\0toolbar-regression.tsx') return (await transformWithEsbuild(entry, 'toolbar-regression.tsx', { loader: 'tsx', jsx: 'automatic' })).code;
@@ -183,11 +183,11 @@ try {
       // Key delivery can finish before React commits the selection in WebKit.
       // Wait for the expected state; a missing keyboard update must still fail.
       await group.getByRole('radio', { name: selected === 'Preview' ? 'Source' : 'Preview', exact: true, checked: true }).waitFor({ state: 'attached', timeout: 3000 });
-      // WebKit on macOS uses Option-Tab to include buttons in keyboard navigation.
-      await page.keyboard.press('Alt+Tab');
+      // WebKit on macOS uses Option-Tab to include buttons in keyboard navigation (FOCUS_NEXT).
+      await page.keyboard.press(FOCUS_NEXT);
       assert.equal(await page.evaluate(() => document.activeElement.getAttribute('aria-label')), width >= 400 ? 'Copy file contents' : 'View options');
       if (width >= 220 && width < 400) {
-        await page.keyboard.press('Alt+Tab');
+        await page.keyboard.press(FOCUS_NEXT);
         assert.equal(await page.evaluate(() => document.activeElement.getAttribute('aria-label')), 'Reveal in Finder');
       }
     }
@@ -342,7 +342,7 @@ try {
   await attachment.getByRole('radiogroup', { name: 'View' }).focus();
   const order = [];
   for (let i = 0; i < 3; i++) {
-    await page.keyboard.press('Alt+Tab');
+    await page.keyboard.press(FOCUS_NEXT);
     order.push(await page.evaluate(() => document.activeElement.getAttribute('aria-label')));
   }
   assert.deepEqual(order, ['Copy', 'Download', 'More']);

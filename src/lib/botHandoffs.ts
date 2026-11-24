@@ -10,6 +10,8 @@ import type { Handoff, HandoffList, TeamBrief } from "@/types/botHandoffs";
 export const botHandoffsApi = {
   /** The hand-offs a bot gave or was given, newest first. */
   list: (id: string) => invoke<HandoffList>("bot_handoffs", { id }),
+  /** Every bot's hand-offs, newest first: the same call with no bot named (PRO-540). */
+  listAll: () => invoke<HandoffList>("bot_handoffs", {}),
   /** Stop one hand-off: only the receiving bot's work on it stops. */
   stop: (number: number) => invoke<{ handoff: Handoff }>("bot_handoff_stop", { number }),
   /** Send a message that did not reach its chat again, now. */
@@ -116,6 +118,12 @@ export function useSharedBotHandoffs(botId: string | null): { list: HandoffList 
   const subscribe = useCallback((watcher: () => void) => (botId ? watch(botId, watcher) : () => undefined), [botId]);
   const snapshot = useCallback(() => (botId ? shared.get(botId)?.snapshot ?? NOTHING : NOTHING), [botId]);
   return useSyncExternalStore(subscribe, snapshot);
+}
+
+/** Every bot's hand-offs, read again whenever any changes (PRO-540). Reads nothing while not `enabled`. */
+export function useAllBotHandoffs(enabled = true) {
+  const { value, error, reload } = useReadOn(enabled ? "all" : null, "bot_handoffs_changed", () => botHandoffsApi.listAll());
+  return { list: value, error, reload };
 }
 
 export function useTeamBrief(enabled = true) {

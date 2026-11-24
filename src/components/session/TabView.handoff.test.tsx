@@ -28,6 +28,7 @@ import { refreshHarnesses, upsertSession } from "@/lib/sessions";
 import { closeAgentHandoff, useDialogs } from "@/lib/dialogs";
 import { HANDOFF_OLD_RUNTIME, localSessionBackend, REMOTE_UNAVAILABLE, RESEND_ATTACHMENTS, type HandoffActions, type SessionBackend } from "@/lib/sessionBackend";
 import { getErrorToasts } from "@/lib/errorToasts";
+import { setPrefs } from "@/lib/prefs";
 import { getDraft, setDraft } from "@/lib/drafts";
 
 let seq = 0;
@@ -40,6 +41,7 @@ function Harness({ dialogs = false }: { dialogs?: boolean }) {
 const request = () => JSON.parse(screen.getByTestId("request").textContent!);
 
 beforeEach(async () => {
+  setPrefs({ secondOpinionButton: true });
   closeAgentHandoff();
   vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
   session = { id: `session-${++seq}`, projectPath: "/repo", cwd: "/repo/.worktrees/feature", title: "Work", created: "", modified: "", archived: false, pinned: false, worktreeRemoved: false,
@@ -53,7 +55,7 @@ beforeEach(async () => {
   await refreshHarnesses();
   setDraft(session.tabs[0].id, "Keep my draft");
 });
-afterEach(() => { cleanup(); closeAgentHandoff(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); setPrefs({ secondOpinionButton: false }); closeAgentHandoff(); vi.unstubAllGlobals(); });
 
 it.each([undefined, "experimentalCodexStdio"] as const)("hands off a %s source and reviews its historical turn without touching its draft or sending to it", async (transport) => {
   session.tabs[0].transport = transport;

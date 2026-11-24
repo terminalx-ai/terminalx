@@ -29,6 +29,11 @@ export interface Handoff {
   depth: number;
   retryOf?: number;
   attempt?: number;
+  /**
+   * The hand-off this one was handed on from (PRO-540), recorded when it was made and only where that was known. One
+   * without it may still have a `depth` above 1: `depth` is what the limit counts, not where it sits in a chain.
+   */
+  parent?: number;
   fromSession?: string;
   fromItem?: number;
   toSession?: string;
@@ -64,10 +69,14 @@ export interface HandoffList {
   waitingMessages: number;
   /** To or from the bot, and not delivered after at least one try. */
   undelivered?: UndeliveredMessage[];
+  /** Every record this build cannot read: hand-offs and messages together. */
   unreadable: number;
-  /** How deep a chain of hand-offs may go, and how many tries one gets: "2 of 3 in its chain", "try 2 of 3". Absent from an older runtime. */
+  /** How many of those are hand-offs, and how many are messages (PRO-540). A runtime from before it sends neither. */
+  unreadableHandoffs?: number;
+  unreadableMessages?: number;
+  /** How deep a chain may grow, and how often a failed hand-off may be handed again: what `depth` and `attempt` are counted against. */
   maxDepth?: number;
-  maxTries?: number;
+  maxRetries?: number;
 }
 
 export interface TeamBrief {

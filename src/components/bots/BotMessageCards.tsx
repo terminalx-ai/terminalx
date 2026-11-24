@@ -15,6 +15,7 @@ import { botHandoffsApi, handoffOpen, handoffStateLabel, useSharedBotHandoffs } 
 import { openBotItem, useBotItems } from "@/lib/botItems";
 import { useBotStore } from "@/lib/bots";
 import { cn } from "@/lib/cn";
+import { showBotsHandoffs } from "@/lib/botsPage";
 import { openBot, selectSession } from "@/lib/sessions";
 import type { Bot, BotAccess } from "@/types/bots";
 import { effectiveAccess } from "@/types/bots";
@@ -244,7 +245,7 @@ function IncomingCard({ card, text, seq, ts, queued, className }: { card: BotMes
                 <ChipButton className={linkChip} onClick={() => openBotItem(card.to, card.item!, openBot)} data-testid="bot-card-item"><ListTodo className="size-3 shrink-0" />Item #{card.item}</ChipButton>
               )}
               {isHandoff && card.item !== undefined && <ItemLinks botId={card.to} item={card.item} />}
-              {isHandoff && card.handoff !== undefined && <ChainChip card={card} session={live?.fromSession} fromId={card.from} fromName={fromName} />}
+              {isHandoff && card.handoff !== undefined && <ChainChip card={card} />}
               {!isHandoff && card.handoff !== undefined && (
                 <Chip className={linkChip} data-testid="bot-card-about"><ArrowRightLeft className="size-3 shrink-0" />About hand-off {card.handoff}</Chip>
               )}
@@ -259,15 +260,13 @@ function IncomingCard({ card, text, seq, ts, queued, className }: { card: BotMes
 }
 
 /**
- * "Hand-off 2 · 2 of 3 in its chain". It opens the chat the work was handed from, when that chat is known; the
- * Hand-offs page that would hold the whole chain is not in this build.
+ * "Hand-off 2 · 2 of 3 in its chain". It opens the Hand-offs page (PRO-540) at this hand-off's step in its thread,
+ * whoever sent it: the page holds a chain whose sender is gone too.
  */
-function ChainChip({ card, session, fromId, fromName }: { card: BotMessage; session?: string; fromId: string; fromName: string }) {
+function ChainChip({ card }: { card: BotMessage }) {
   const words = <><ArrowRightLeft className="size-3 shrink-0" />Hand-off {card.handoff}{card.depth && card.maxDepth ? ` · ${card.depth} of ${card.maxDepth} in its chain` : ""}</>;
-  const known = useBot(fromId);
-  if (!known) return <Chip className={linkChip} data-testid="bot-card-chain">{words}</Chip>;
   return (
-    <ChipButton className={linkChip} title={`Open ${fromName}'s chat`} onClick={() => (session ? selectSession(session) : openBot(fromId))} data-testid="bot-card-chain">{words}</ChipButton>
+    <ChipButton className={linkChip} title={`Open hand-off ${card.handoff} in its thread`} onClick={() => showBotsHandoffs(card.handoff)} data-testid="bot-card-chain">{words}</ChipButton>
   );
 }
 
@@ -535,7 +534,7 @@ function HandedCard({ note, ts, className }: { note: HandoffNote; ts?: string; c
           {retry && (
             <p className="mt-2 flex items-start gap-1.5 break-words text-[12px] text-muted-foreground" data-testid="bot-handed-retry">
               <RotateCw className="mt-0.5 size-3 shrink-0" />
-              {fromName} handed it again as hand-off {retry.number}{list?.maxTries ? ` · try ${(retry.attempt ?? 0) + 1} of ${list.maxTries}` : ""}
+              {fromName} handed it again as hand-off {retry.number}{list?.maxRetries !== undefined ? ` · try ${(retry.attempt ?? 0) + 1} of ${list.maxRetries + 1}` : ""}
             </p>
           )}
           {handoff?.state === "stopped" && handoff.stoppedBy === OWNER && (
@@ -546,7 +545,7 @@ function HandedCard({ note, ts, className }: { note: HandoffNote; ts?: string; c
           {error && !list && <p role="alert" className="mt-2 break-words text-[12px] text-destructive" data-testid="bot-handed-error">Couldn't read {fromName}'s hand-offs: {error}</p>}
         </div>
         <footer className="flex flex-wrap items-center gap-x-1.5 gap-y-1.5 border-t border-hairline px-4 py-2 @max-[24rem]/botcard:px-3">
-          <Chip className={linkChip} data-testid="bot-handed-number"><ArrowRightLeft className="size-3 shrink-0" />Hand-off {note.number}</Chip>
+          <ChipButton className={linkChip} title={`Open hand-off ${note.number} in its thread`} onClick={() => showBotsHandoffs(note.number)} data-testid="bot-handed-number"><ArrowRightLeft className="size-3 shrink-0" />Hand-off {note.number}</ChipButton>
           {depth && list?.maxDepth ? <Chip className={linkChip} data-testid="bot-handed-chain"><GitCommitVertical className="size-3 shrink-0" />{depth} of {list.maxDepth} in its chain</Chip> : null}
           {handoff?.item !== undefined && <ItemLinks botId={note.to} item={handoff.item} />}
           {handoff?.toSession && to && (
