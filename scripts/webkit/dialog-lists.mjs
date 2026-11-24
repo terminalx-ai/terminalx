@@ -108,9 +108,13 @@ const read = (page) =>
   });
 
 /** The dialog as it is; one too tall for its fixed parts is read scrolled to its foot, where the buttons are. */
-// A dialog rises and grows into place as it opens: measure it once it is there.
-const settled = (page) =>
-  page.evaluate(() => Promise.all([...document.querySelectorAll('[role="dialog"]')].flatMap((dialog) => dialog.getAnimations().map((animation) => animation.finished))));
+// A dialog rises and grows into place as it opens: measure it once it is there. It takes pointer events only once
+// Radix has re-rendered it after turning them off on <body>, a step after it opens; read before that (as on a busy
+// Linux runner), its buttons were hit-tested through to the overlay under it.
+const settled = async (page) => {
+  await page.evaluate(() => Promise.all([...document.querySelectorAll('[role="dialog"]')].flatMap((dialog) => dialog.getAnimations().map((animation) => animation.finished))));
+  await page.waitForFunction(() => getComputedStyle([...document.querySelectorAll('[role="dialog"]')].at(-1)).pointerEvents !== "none");
+};
 
 const measure = async (page) => {
   await settled(page);

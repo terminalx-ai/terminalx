@@ -108,7 +108,8 @@ try {
     const shot = async (name) => { if (shots) await page.screenshot({ path: join(shots, `${name}-${colorScheme}.png`) }); };
 
     // ---- The palette: All, Actions, Settings.
-    await page.keyboard.press("ControlOrMeta+k");
+    // ⌘, not ControlOrMeta: the page is the Mac app whatever the host (harness.mjs), and on Linux ControlOrMeta is Ctrl.
+    await page.keyboard.press("Meta+k");
     // Within the dialog: one that just closed leaves a fading copy of itself for a moment.
     const field = dialog.getByLabel("Command palette search");
     await field.waitFor();
@@ -170,7 +171,7 @@ try {
     await dialog.waitFor({ state: "detached" });
     const afterEnter = await page.evaluate(() => window.__PW_EDITS__.length);
 
-    await page.keyboard.press("ControlOrMeta+k");
+    await page.keyboard.press("Meta+k");
     await field.fill("Move to section");
     await dialog.locator('[id="command:local-section:move"]').click();
     await page.waitForFunction(() => document.querySelector('[role="dialog"] [aria-label="Command palette search"]')?.getAttribute("placeholder") === "Search sections…");
@@ -188,7 +189,7 @@ try {
     const edits = await page.evaluate(() => window.__PW_EDITS__);
 
     // ---- Open file.
-    await page.keyboard.press("ControlOrMeta+p");
+    await page.keyboard.press("Meta+p");
     const files = dialog.getByRole("listbox", { name: "Files" });
     await files.getByRole("option", { name: /tokens\.css/ }).waitFor();
     // The icon pack is fetched after first paint: wait for a drawn glyph.
@@ -208,7 +209,7 @@ try {
     await dialog.waitFor({ state: "detached" });
 
     // ---- Search in files.
-    await page.keyboard.press("ControlOrMeta+Shift+f");
+    await page.keyboard.press("Meta+Shift+f");
     const search = dialog.getByPlaceholder("Search in project");
     await search.waitFor();
     await settled(page);
