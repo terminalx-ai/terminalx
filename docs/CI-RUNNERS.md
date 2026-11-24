@@ -409,6 +409,46 @@ shared Rust code is the risk. `src-tauri/serve/tests/local_platform.rs` is
 compiled only for macOS and no job builds the serve crate's tests there, so
 its two tests run in no workflow, as before.
 
+## Runs of a closed pull request
+
+A pull request's runs stop when it is closed, merged or not
+(`.github/workflows/stop-closed-pr-runs.yml`). Before, a merged pull request's
+runs went on to the end: 13 minutes after one merge, its WebKit and macOS jobs
+still held two of the five macOS runners while three runs on `main` waited.
+
+How: a concurrency group is shared by every workflow in the repository, and a
+job that joins a group with `cancel-in-progress: true` cancels the run or job
+in progress that holds it, "regardless of the workflow" (GitHub's
+documentation, "Control the concurrency of workflows and jobs"). The stop
+workflow has one job per pull request workflow; each joins that workflow's
+group for the closed pull request, prints it, and ends. It has no token
+(`permissions: {}`), no checkout and no action, and reports as `stop <group>`,
+never as `check`, `frontend` or `webkit-layout`.
+
+- **The group is built from the pull request's number.** The other workflows
+  name their pull request groups after `github.ref`, which for a pull request
+  is `refs/pull/<number>/merge`. On the `closed` event that holds only when it
+  was closed without a merge; when it was merged, `github.ref` is the branch
+  it went into (GitHub's documentation, "Events that trigger workflows",
+  `pull_request`). So the stop workflow writes `refs/pull/<number>/merge`
+  itself.
+- **It cannot reach a run on `main`.** Every group it names contains
+  `refs/pull/`. A push, nightly or manual run's workflow groups end in its run
+  id, and the macOS jobs' groups in `main` or a run id. The policy tests fail
+  when a workflow that runs on a pull request has a group the stop workflow
+  does not name, or when a workflow that does not run on a pull request, or a
+  job's own group, could be one it names.
+- **Opened again, a pull request runs again:** `reopened` is one of the
+  default activity types the pull request workflows run on.
+- **A pull request with a merge conflict** starts no `pull_request` workflow,
+  this one included (GitHub's documentation). Its runs from before the
+  conflict are not stopped when it closes.
+- **No new way to cancel someone else's run.** A pull request can already put
+  a workflow file of its own on its branch that names any group, including
+  another pull request's, and that workflow runs on that pull request. The stop
+  workflow only does, for the pull request that closed, what any pull request
+  could already do to any group.
+
 ## Threat model and enforced controls
 
 Assume a fork author controls all PR source, dependencies and workflow YAML,
