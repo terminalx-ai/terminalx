@@ -267,7 +267,7 @@ pub(crate) fn pairing_refusal(reason: &str, message: &str) -> ControlError {
         "sign-in-required" => "Sign in to TerminalX on this Mac (the machine is reached through the relay), then pair again with a new code.",
         _ => "Try again with a new code.",
     };
-    let mut error = ControlError::new(&format!("pairing_{}", reason.replace('-', "_")), message.to_string(), Some(recovery.into()));
+    let mut error = ControlError::new(&format!("pairing_{}", reason.replace('-', "_")), message.to_string(), Some(crate::platform_profile::localize(recovery)));
     error.details = Some(json!({ "reason": reason }));
     error
 }

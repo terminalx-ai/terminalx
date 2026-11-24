@@ -654,7 +654,7 @@ fn share_listener(listener: std::io::Result<()>, direct_only: bool) -> Result<()
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => {
             if direct_only {
-                bail!("This Mac listens on no local network address (Settings → Machines → Where this Mac listens). Choose Local network there, or share through the relay.");
+                bail!("{}", crate::platform_profile::localize("This Mac listens on no local network address (Settings → Machines → Where this Mac listens). Choose Local network there, or share through the relay."));
             }
             Ok(())
         }
@@ -673,7 +673,7 @@ mod tests {
         let nothing_bound = || Err(std::io::Error::from(std::io::ErrorKind::AddrNotAvailable));
         share_listener(nothing_bound(), false).expect("a relay share goes on with no port open");
         let refused = share_listener(nothing_bound(), true).unwrap_err().to_string();
-        assert!(refused.contains("Where this Mac listens") && !refused.contains("firewall"), "{refused}");
+        assert!(refused.contains(&crate::platform_profile::localize("Where this Mac listens")) && !refused.contains("firewall"), "{refused}");
         share_listener(Ok(()), true).unwrap();
         let blocked = share_listener(Err(std::io::ErrorKind::PermissionDenied.into()), false).unwrap_err().to_string();
         assert!(blocked.contains("firewall"), "another failure is still the firewall's: {blocked}");
