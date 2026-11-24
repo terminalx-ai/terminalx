@@ -270,7 +270,7 @@ try {
     const extra = `(() => {
       const { answers } = window.__PW_STUB__;
       const cloud = { enabled: true, flags: {} };
-      answers.phase2_desktop_contracts_available = true;
+      answers.account_status.phase2Readiness = { "org-a": ["team.events.v1"] };
       answers.account_status.organizations = [
         { id: "org-a", name: "Demo", role: "owner", cloud },
         { id: "o0", name: "Acme", role: "member", cloud },

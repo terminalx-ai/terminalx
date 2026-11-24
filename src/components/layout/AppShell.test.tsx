@@ -171,7 +171,17 @@ vi.mock("@/lib/models", () => ({
   },
 }));
 vi.mock("@/lib/automations", () => ({ bootAutomations: vi.fn() }));
-vi.mock("@/lib/account", () => ({ bootAccount: vi.fn(), useAccount: () => ({ status: { state: "signed-out" }, ready: true, busy: false }), closePasteLink: vi.fn(), pasteSignInLink: vi.fn() }));
+vi.mock("@/lib/account", () => {
+  const account = { status: { state: "signed-out" }, ready: true, busy: false };
+  return {
+    bootAccount: vi.fn(),
+    getAccount: () => account,
+    useAccount: () => account,
+    subscribeAccount: () => () => {},
+    closePasteLink: vi.fn(),
+    pasteSignInLink: vi.fn(),
+  };
+});
 vi.mock("@/lib/desktopInbox", () => ({ bootDesktopInbox: vi.fn() }));
 vi.mock("@/lib/cloudCatalog", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/cloudCatalog")>()), bootCloudCatalog: vi.fn() }));
 vi.mock("@/lib/cloudPresence", () => ({ bootCloudPresence: vi.fn() }));
