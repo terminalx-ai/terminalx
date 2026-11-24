@@ -11,7 +11,8 @@
 // WEBKIT_LAYOUT_SCREENSHOTS=~/shots node scripts/webkit/composer-controls.mjs
 import assert from "node:assert/strict";
 import { mkdir, readFile } from "node:fs/promises";
-import { createServer, transformWithEsbuild } from "vite";
+import { transformWithEsbuild } from "vite";
+import { createCheckServer } from "./vite-page.mjs";
 import { launch } from "./harness.mjs";
 
 const entry = `
@@ -49,11 +50,10 @@ const models = [claude("claude-opus-5-5", "Opus 5.5", true), claude("claude-sonn
 const screenshots = process.env.WEBKIT_LAYOUT_SCREENSHOTS;
 if (screenshots) await mkdir(screenshots, { recursive: true });
 
-const server = await createServer({
+const server = await createCheckServer({
   logLevel: "error",
-  server: { port: 0, strictPort: false, host: "127.0.0.1" },
+  server: { host: "127.0.0.1" },
   plugins: [{
-    name: "composer-controls-check",
     resolveId(id) { if (id === "/composer-controls.tsx") return "\0composer-controls.tsx"; },
     async load(id) {
       if (id === "\0composer-controls.tsx") return (await transformWithEsbuild(entry, "composer-controls.tsx", { loader: "tsx", jsx: "automatic" })).code;
@@ -123,7 +123,7 @@ try {
         return { box, buttons, percent, options: !!document.querySelector('[aria-label="More options"]'), overflow: document.documentElement.scrollWidth - innerWidth };
       });
       const names = row.buttons.map((b) => b.name);
-      assert.deepEqual(names, ["model-picker", "permission-mode", "Context 12% used", "Mention a file", "Attach files", "Dictate", "Send"].filter((n) => n !== "Dictate" || names.includes("Dictate")), `${scheme}: toolbar order ${JSON.stringify(names)}`);
+      assert.deepEqual(names, ["model-picker", "permission-mode", "Context 12% used", "Mention a file", "Attach files", "ai-editor", "Dictate", "Send"].filter((n) => n !== "Dictate" || names.includes("Dictate")), `${scheme}: toolbar order ${JSON.stringify(names)}`);
       assert.ok(!row.options, `${scheme}: no More options menu`);
       const [modelChip, modeChip] = row.buttons;
       assert.equal(modelChip.text, "Opus 5.5High", `${scheme}: model chip reads 'Opus 5.5 High'`);

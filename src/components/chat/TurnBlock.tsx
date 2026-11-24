@@ -30,6 +30,7 @@ import { mediaMentions } from "@/lib/chatMedia";
 import { classifyRecovery } from "@/lib/recovery";
 import { useExposure, useInView, useRecoveryReporter } from "@/lib/recoveryReports";
 import { openImageViewer, type ViewerImage } from "@/lib/imageViewer";
+import { BotMessageCard, botAuthored, HandoffNoteRow } from "@/components/bots/BotMessageCards";
 
 /**
  * One exchange: the prompt, the work under it, the answer, and a footer.
@@ -143,7 +144,8 @@ function TurnBody({
   return (
     // A block formatting context: a last row's margin stays inside, so the turn's measured height is all the room it takes (#727).
     <div className="transcript-turn group/turn flow-root pb-8" data-turn={turn.key}>
-      {turn.prompt && <ReaderMessage message={turn.prompt} cwd={cwd} linkContext={linkContext} className="mb-4" onSendAgain={onSendAgain} />}
+      {/* What TerminalX put in a bot's chat is a card on the left, never the reader's bubble (PRO-539, PRO-518). */}
+      {turn.prompt && (botAuthored(turn.prompt) ? <BotMessageCard message={turn.prompt} className="mb-4" /> : <ReaderMessage message={turn.prompt} cwd={cwd} linkContext={linkContext} className="mb-4" onSendAgain={onSendAgain} />)}
 
       {foldable ? (
         <div className="mb-3">
@@ -203,7 +205,7 @@ function TurnBody({
 
       {prefs.turnChanges && turn.completed && <TurnChanges key={`${sessionId}:${checkpointTabId ?? ""}:${turn.checkpointSeq ?? turn.seq}`} changes={changes} cwd={cwd} linkContext={linkContext} checkpoint={checkpointTabId ? { sessionId, tabId: checkpointTabId, seq: turn.checkpointSeq ?? turn.seq, api: checkpoints } : undefined} range={turn.prompt?.baseline && turn.completed.head ? { base: turn.prompt.baseline, head: turn.completed.head } : null} />}
 
-      {(turn.completed || !turn.live) && <TurnFooter turn={turn} sessionId={sessionId} tabId={tabId} outcome={outcome} fallback={turnFallback} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} secondOpinionAgent={secondOpinionAgent} onReset={onReset} onFork={onFork} onSaveSnippet={onSaveSnippet}
+      {(turn.completed || !turn.live) && <TurnFooter showSecondOpinionButton={prefs.secondOpinionButton} turn={turn} sessionId={sessionId} tabId={tabId} outcome={outcome} fallback={turnFallback} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} secondOpinionAgent={secondOpinionAgent} onReset={onReset} onFork={onFork} onSaveSnippet={onSaveSnippet}
         unavailable={{ fork: forkUnavailable, reset: resetUnavailable, secondOpinion: turn.completed && !turn.live ? secondOpinionUnavailable : undefined }} />}
     </div>
   );
@@ -341,7 +343,8 @@ function OutcomeIcon({ tone }: { tone: Outcome["tone"] }) {
  * and output speed (PRO-378), a copy of the answer, read aloud on hover, a "…" menu with what can be done from this
  * turn (PRO-379), and a second opinion.
  */
-function TurnFooter({ turn, sessionId, tabId, outcome, fallback, onSecondOpinion, secondOpinionAgent, onReset, onFork, onSaveSnippet, unavailable }: {
+function TurnFooter({ showSecondOpinionButton, turn, sessionId, tabId, outcome, fallback, onSecondOpinion, secondOpinionAgent, onReset, onFork, onSaveSnippet, unavailable }: {
+  showSecondOpinionButton: boolean;
   turn: Turn;
   sessionId: string;
   tabId?: string;
@@ -437,7 +440,7 @@ function TurnFooter({ turn, sessionId, tabId, outcome, fallback, onSecondOpinion
           </DropdownMenuContent>
         </DropdownMenu>
       )}
-      {onSecondOpinion && (
+      {showSecondOpinionButton && onSecondOpinion && (
         <button type="button" onClick={() => onSecondOpinion(turn)} title={secondOpinionAgent ? `Second opinion from ${secondOpinionAgent}` : undefined}
           className="-mx-0.5 flex items-center gap-1 rounded-md px-1.5 py-1 text-muted-foreground hover:bg-veil-raised hover:text-foreground">
           <ArrowLeftRight className="size-3.5" />
@@ -503,8 +506,10 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain, agent }
       return <ToolGroupRow name={item.name} calls={item.calls} cwd={cwd} linkContext={linkContext} />;
     case "message":
       // Taken while the agent worked (#551): steering, said above the bubble (PRO-380, 03.12).
+      if (botAuthored(item)) return <BotMessageCard message={item} className="my-3" />;
       return <ReaderMessage message={item} cwd={cwd} linkContext={linkContext} className="my-3" onSendAgain={onSendAgain} steered={steeringNote(agent)} />;
     case "queued":
+      if (botAuthored(item)) return <BotMessageCard message={item} queued={!item.withdrawn} className="my-3" />;
       return (
         <QueuedCard
           label={item.withdrawn ? null : "Queued"}
@@ -521,6 +526,8 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain, agent }
         </QueuedCard>
       );
     case "status":
+      // A hand-off's line in a bot's chat is drawn from what it is about (PRO-539); one a card already says is not drawn.
+      if (item.handoff) return <HandoffNoteRow note={item.handoff} text={item.text} ts={item.ts} name={item.key} className="my-3" />;
       return (
         <div className="-mx-1.5 px-1.5 py-1 text-xs text-faint">
           <LinkedText text={item.text} context={linkContext} />

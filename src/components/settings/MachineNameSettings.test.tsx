@@ -23,14 +23,14 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("this Mac's name (#686)", () => {
-  it("says the name follows System Settings while nobody chose one", async () => {
+  it("says the name follows the system while nobody chose one", async () => {
     mocks.current = { name: "Paresh’s MacBook Pro", chosen: false, computerName: "Paresh’s MacBook Pro" };
     render(<MachineNameSettings />);
     await waitFor(() => expect((screen.getByTestId("machine-name") as HTMLInputElement).value).toBe("Paresh’s MacBook Pro"));
-    expect(screen.getByTestId("machine-name-settings").textContent).toContain("System Settings → General → About, and changes with it.");
+    expect(screen.getByTestId("machine-name-settings").textContent).toContain("It is the system’s own name for it, and changes with it.");
     expect(screen.queryByRole("button", { name: /^Use / })).toBeNull();
     // The name is an inline field beside its label (PRO-375), not a button that opens one.
-    expect(screen.getByRole("textbox", { name: "This Mac’s name" })).toBe(screen.getByTestId("machine-name"));
+    expect(screen.getByRole("textbox", { name: "This computer’s name" })).toBe(screen.getByTestId("machine-name"));
   });
 
   it("offers the computer's own name back once another was chosen", async () => {
@@ -38,7 +38,7 @@ describe("this Mac's name (#686)", () => {
     mocks.setMachineName.mockResolvedValue({ name: "Paresh’s Mac mini", chosen: false, computerName: "Paresh’s Mac mini" });
     render(<MachineNameSettings />);
     await waitFor(() => expect((screen.getByTestId("machine-name") as HTMLInputElement).value).toBe("Studio"));
-    expect(screen.getByTestId("machine-name-settings").textContent).toContain("In System Settings this Mac is called “Paresh’s Mac mini”.");
+    expect(screen.getByTestId("machine-name-settings").textContent).toContain("The system calls this computer “Paresh’s Mac mini”.");
     fireEvent.click(screen.getByRole("button", { name: "Use “Paresh’s Mac mini”" }));
     await waitFor(() => expect(mocks.setMachineName).toHaveBeenCalledWith(null));
     await waitFor(() => expect((screen.getByTestId("machine-name") as HTMLInputElement).value).toBe("Paresh’s Mac mini"));
@@ -50,7 +50,7 @@ describe("this Mac's name (#686)", () => {
     mocks.setMachineName.mockRejectedValue(new Error("machine name must contain 1 to 80 visible characters"));
     render(<MachineNameSettings />);
     await waitFor(() => expect((screen.getByTestId("machine-name") as HTMLInputElement).value).toBe("Studio"));
-    const input = screen.getByRole("textbox", { name: "This Mac’s name" }) as HTMLInputElement;
+    const input = screen.getByRole("textbox", { name: "This computer’s name" }) as HTMLInputElement;
 
     fireEvent.change(input, { target: { value: "Desk" } });
     fireEvent.keyDown(input, { key: "Escape" });
@@ -72,7 +72,7 @@ describe("this Mac's name (#686)", () => {
     mocks.setMachineName.mockResolvedValue({ name: "Desk", chosen: true, computerName: "Studio" });
     render(<MachineNameSettings />);
     await waitFor(() => expect((screen.getByTestId("machine-name") as HTMLInputElement).value).toBe("Studio"));
-    const input = screen.getByRole("textbox", { name: "This Mac’s name" });
+    const input = screen.getByRole("textbox", { name: "This computer’s name" });
     fireEvent.change(input, { target: { value: "  Desk " } });
     fireEvent.blur(input);
     await waitFor(() => expect(mocks.setMachineName).toHaveBeenCalledWith("Desk"));

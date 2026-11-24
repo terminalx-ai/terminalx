@@ -513,7 +513,7 @@ mod cursor_report {
 /// end with it, or with the runtime if that ends first, as a closed PTY
 /// hangs up its session on Unix.
 #[cfg(windows)]
-mod pane_jobs {
+pub(crate) mod pane_jobs {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock, PoisonError};
 
@@ -545,6 +545,11 @@ mod pane_jobs {
             jobs.remove(&pid);
         }
         Some(running)
+    }
+
+    /// What is in the job of the pane whose first process is `pid`.
+    pub(crate) fn members(pid: u32) -> Option<std::io::Result<Vec<u32>>> {
+        jobs().lock().unwrap_or_else(PoisonError::into_inner).get(&pid).map(Job::process_ids)
     }
 
     /// End everything in the pane's job; `false` for a pane with no job.
@@ -1044,6 +1049,11 @@ pub(crate) fn session_environment(overrides: &std::collections::BTreeMap<String,
     (set, &UNINHERITED_ENV)
 }
 
+/// A value in [`PaneSpec::env`] that removes the variable instead of setting
+/// it. A NUL can't be in a real environment value.
+#[cfg(windows)]
+pub(crate) const REMOVE_FROM_ENV: &str = "\0remove";
+
 /// What a pane runs and where.
 pub struct PaneSpec<'a> {
     pub cwd: &'a str,
@@ -1080,11 +1090,54 @@ pub(crate) fn direct_program(command: &str) -> Option<Vec<String>> {
     if !program.is_absolute() || !program.is_file() {
         return None;
     }
+    // The tests' stand-in CLIs are POSIX scripts, which Windows can't start itself.
+    #[cfg(test)]
+    {
+        // The script itself, or the one beside its `.cmd` (`binpath::runnable_for_tests`).
+        let script = program.with_extension("");
+        if std::fs::read(&script).is_ok_and(|bytes| bytes.starts_with(b"#!")) {
+            let mut argv = vec![crate::binpath::posix_sh()?.to_string_lossy().into_owned(), script.to_string_lossy().into_owned()];
+            argv.extend_from_slice(&words[1..]);
+            return Some(argv);
+        }
+    }
     let batch = program.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"));
-    if batch && words[1..].iter().any(|word| word.contains(['&', '|', '<', '>', '^', '%', '!', '"', '\n', '\r'])) {
-        return None;
+    if batch {
+        // An npm launcher only starts node on a script: doing that here keeps
+        // cmd from reading the arguments at all.
+        if let Some(mut argv) = npm_launcher_target(program) {
+            argv.extend_from_slice(&words[1..]);
+            return Some(argv);
+        }
+        if words[1..].iter().any(|word| word.contains(['&', '|', '<', '>', '^', '%', '!', '"', '\n', '\r'])) {
+            return None;
+        }
     }
     Some(words)
+}
+
+/// What an npm `.cmd` launcher runs: its `node`, then the script it names as
+/// `"%dp0%\...js" %*`. None for any other batch file.
+#[cfg(windows)]
+fn npm_launcher_target(launcher: &std::path::Path) -> Option<Vec<String>> {
+    const LARGEST_LAUNCHER: u64 = 64 * 1024;
+    if std::fs::metadata(launcher).ok()?.len() > LARGEST_LAUNCHER {
+        return None;
+    }
+    let text = std::fs::read_to_string(launcher).ok()?;
+    let (relative, rest) = text.rsplit_once("\"%dp0%\\")?.1.split_once('"')?;
+    if !rest.trim_start().starts_with("%*") {
+        return None;
+    }
+    let folder = launcher.parent()?;
+    let script = folder.join(relative);
+    let is_script = script.extension().is_some_and(|ext| ["js", "cjs", "mjs"].iter().any(|known| ext.eq_ignore_ascii_case(known)));
+    if !is_script || !script.is_file() {
+        return None;
+    }
+    let beside = folder.join("node.exe");
+    let node = if beside.is_file() { beside } else { crate::binpath::resolve("node")? };
+    Some(vec![node.to_string_lossy().into_owned(), script.to_string_lossy().into_owned()])
 }
 
 /// Split `command` into words as a POSIX shell would, for quoting only:
@@ -1181,6 +1234,23 @@ mod direct_program_tests {
         std::fs::write(&batch, b"").unwrap();
         assert!(direct_program(&format!("'{}' -m model", batch.display())).is_some());
         assert!(direct_program(&format!("'{}' '{{\"a\":1}}'", batch.display())).is_none());
+    }
+
+    #[test]
+    fn an_npm_launcher_starts_its_script_so_cmd_never_reads_the_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("node_modules").join("cli").join("bin.js");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, b"").unwrap();
+        let node = dir.path().join("node.exe");
+        std::fs::write(&node, b"").unwrap();
+        let launcher = dir.path().join("cli.cmd");
+        std::fs::write(&launcher, "@ECHO off\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\cli\\bin.js\" %*\r\n").unwrap();
+        let argv = direct_program(&format!("'{}' -c 'a=\"b & 100%\"'", launcher.display())).unwrap();
+        assert_eq!(argv, [node.to_string_lossy().as_ref(), script.to_string_lossy().as_ref(), "-c", "a=\"b & 100%\""]);
+        // A batch file that names something else is not taken for one.
+        std::fs::write(&launcher, "@\"%dp0%\\node_modules\\cli\\bin.js\" other %*\r\n").unwrap();
+        assert!(direct_program(&format!("'{}' '\"x\"'", launcher.display())).is_none());
     }
 }
 
@@ -1413,6 +1483,11 @@ impl Terminals {
             cmd.env_remove(name);
         }
         for (k, v) in env {
+            #[cfg(windows)]
+            if v == REMOVE_FROM_ENV {
+                cmd.env_remove(k);
+                continue;
+            }
             cmd.env(k, v);
         }
         let created = crate::store::index::now();
@@ -1721,6 +1796,8 @@ impl Terminals {
             let tap = tap.clone();
             let group = group.clone();
             let hold = hold.clone();
+            #[cfg(windows)]
+            let alive = alive.clone();
             std::thread::Builder::new().name(format!("pty-wait-{id}")).spawn(move || {
                 let code = waiter.wait(pid, &hold);
                 if let Some(startup) = &startup { startup.exited(code.and_then(|code| code.try_into().ok())); }
@@ -1737,6 +1814,13 @@ impl Terminals {
                     tap.1.notify_all();
                 }
                 let _ = emitted_all.recv_timeout(EXIT_AFTER_OUTPUT);
+                // A pseudoconsole keeps its output open until it is closed, so
+                // on Windows the end of output never says the program ended.
+                #[cfg(windows)]
+                {
+                    *alive.lock().unwrap() = false;
+                    sink.emit(crate::status::resources::CHANGED_EVENT, &());
+                }
                 sink.emit("pty_exit", &PtyExit { id, code });
                 while group.pid().is_some() { std::thread::sleep(Duration::from_millis(20)); }
             })?;
@@ -2425,7 +2509,14 @@ impl Terminals {
     /// pane was opened and not closed; a command that exited on its own leaves
     /// the pane in place so its last output stays on screen.
     pub fn is_running(&self, id: &str) -> bool {
-        self.panes.lock().unwrap().get(id).map(|p| *p.alive.lock().unwrap()).unwrap_or(false)
+        let panes = self.panes.lock().unwrap();
+        let Some(pane) = panes.get(id) else { return false };
+        let alive = *pane.alive.lock().unwrap();
+        // A program that has just ended is not running, though its exit is
+        // still being announced after the last of its output.
+        #[cfg(windows)]
+        let alive = alive && pane.pid.is_none_or(crate::win::process::is_running);
+        alive
     }
 
     /// [`Self::owned_groups`] whose only proof is a pid: not supervised
@@ -2987,16 +3078,23 @@ time.sleep(60)
         let home = tempfile::tempdir().unwrap();
         let path = home.path().to_str().unwrap();
         let env = vec![("HOME".to_string(),path.to_string()),("ZDOTDIR".to_string(),path.to_string())];
-        let spec = || PaneSpec { cwd:path,cols:80,rows:24,command:Some("exec /bin/cat"),env:&env };
+        // `spawn` puts its own `exec` before the command. With one written
+        // here too the shell was given `exec exec /bin/cat`, which zsh runs
+        // and bash and sh refuse (exit 127): under those the pane's program
+        // was gone within milliseconds, and a write that came after it was
+        // refused, whichever process it named (PRO-513).
+        let spec = || PaneSpec { cwd:path,cols:80,rows:24,command:Some("/bin/cat"),env:&env };
         terminals.spawn(sink.clone(),"mobile-process",spec()).unwrap();
         let original = terminals.panes().into_iter().find(|pane|pane.id == "mobile-process").unwrap().pid.unwrap();
-        assert!(terminals.write_for_process("mobile-process",original,b"first\n").is_ok());
+        let first = terminals.write_for_process("mobile-process",original,b"first\n");
+        assert!(first.is_ok(), "{first:?}");
         terminals.kill_all();
         terminals.spawn(sink,"mobile-process",spec()).unwrap();
         let replacement = terminals.panes().into_iter().find(|pane|pane.id == "mobile-process").unwrap().pid.unwrap();
         assert_ne!(original,replacement);
         assert!(terminals.write_for_process("mobile-process",original,b"stale\n").is_err());
-        assert!(terminals.write_for_process("mobile-process",replacement,b"current\n").is_ok());
+        let current = terminals.write_for_process("mobile-process",replacement,b"current\n");
+        assert!(current.is_ok(), "{current:?}; the pane: {:?}", terminals.panes().into_iter().find(|pane|pane.id == "mobile-process").map(|pane|(pane.pid,pane.running)));
         terminals.kill_all();
     }
 
@@ -3062,7 +3160,10 @@ time.sleep(60)
         let terminals=Terminals::new();
         let sink:Arc<dyn EventSink>=Arc::new(crate::sink::BroadcastSink::new(16));
         let dir=tempfile::tempdir().unwrap();
-        pane(&terminals,&sink,&dir,"proof-group","exec /bin/sleep 30");
+        // `spawn` puts its own `exec` before the command. Written here too it made `exec exec /bin/sleep 30`,
+        // which bash and sh refuse: under those the group's process was gone before the stop below, and the
+        // test passed with nothing left to stop (0.17 s under bash against 0.6 s under zsh).
+        pane(&terminals,&sink,&dir,"proof-group","/bin/sleep 30");
         let proof=terminals.group_handle("proof-group").unwrap();
         assert!(proof.pid().is_some());
         let stopping=terminals.begin_stop("proof-group").unwrap();

@@ -62,7 +62,13 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 /// Streams whose data arrived before their `ports.open` answer.
 const MAX_EARLY_STREAMS: usize = 64;
 /// How often auto-forward reads `ports.list`.
+#[cfg(not(test))]
 pub const AUTO_POLL: Duration = Duration::from_secs(2);
+/// Under test the poller keeps its order (one list at a time, each answered
+/// before the next wait); the tests read every list and wait one period to
+/// show that none follows, so a shorter one proves the same, sooner.
+#[cfg(test)]
+pub const AUTO_POLL: Duration = Duration::from_millis(250);
 /// Ports auto-forward leaves alone: the ephemeral range, where clients bind,
 /// not servers (`AUTO_FORWARD_SKIPPED` in src/lib/api.ts).
 pub const AUTO_SKIPPED: std::ops::RangeInclusive<u16> = 32768..=60999;
@@ -999,10 +1005,18 @@ fn release(counter: &AtomicUsize, bytes: usize) {
 /// that program's loopback traffic; that is why [`bind`] asks
 /// [`taken_elsewhere`] first, whose probes (also with `SO_REUSEADDR`) still see
 /// every listener on the IPv4 wildcard, IPv6 loopback and IPv6 wildcard. A
-/// program on `127.0.0.1` itself is refused by this bind.
+/// program on `127.0.0.1` itself is refused by this bind. On Windows the
+/// option would let two listeners share the port, and TIME_WAIT does not hold
+/// a listening port, so it is not set there. Windows also lets a later
+/// listener on the wildcard address, or one that asks to share, take the same
+/// port beside this one: the bind is made exclusive, so the port stays this
+/// forward's alone for as long as it listens.
 fn listen_on(port: u16) -> std::io::Result<TcpListener> {
     let socket = TcpSocket::new_v4()?;
+    #[cfg(not(windows))]
     socket.set_reuseaddr(true)?;
+    #[cfg(windows)]
+    crate::win::net::bind_exclusively(&socket)?;
     socket.bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))?;
     socket.listen(128)
 }
@@ -1011,9 +1025,18 @@ fn listen_on(port: u16) -> std::io::Result<TcpListener> {
 /// browser's `localhost`, or loopback traffic, could reach: the IPv4
 /// wildcard, IPv6 loopback or the IPv6 wildcard. A connection of ours in
 /// TIME_WAIT on the port does not count (`SO_REUSEADDR`); a listener does.
+/// Windows answers a bind over another listener with access denied as well.
 fn taken_elsewhere(port: u16) -> bool {
+    let taken = |error: std::io::Error| crate::listen::port_taken(&error);
     let in_use = |socket: std::io::Result<TcpSocket>, address: SocketAddr| {
-        socket.and_then(|socket| socket.set_reuseaddr(true).map(|()| socket)).and_then(|socket| socket.bind(address)).is_err_and(|error| error.kind() == std::io::ErrorKind::AddrInUse)
+        socket
+            .and_then(|socket| {
+                #[cfg(not(windows))]
+                socket.set_reuseaddr(true)?;
+                socket.bind(address)?;
+                Ok(())
+            })
+            .is_err_and(taken)
     };
     in_use(TcpSocket::new_v4(), SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))
         || in_use(TcpSocket::new_v6(), SocketAddr::from((Ipv6Addr::LOCALHOST, port)))

@@ -1,4 +1,5 @@
 import { RegisteredSetting, settingById } from "./settingsRegistry";
+import { thisComputer } from "@/lib/platform";
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -109,7 +110,7 @@ export function TranscriptionPersonalization() {
   }
 
   return <div className="flex flex-col gap-5 border-t border-hairline pt-5">
-    <div><div className="text-sm font-medium">Personalisation</div><p className="mt-1 text-xs text-muted-foreground">Stored on this Mac. Features start off; enable only what you want. Context is rebuilt for each recording and is not saved.</p></div>
+    <div><div className="text-sm font-medium">Personalisation</div><p className="mt-1 text-xs text-muted-foreground">Stored on {thisComputer}. Features start off; enable only what you want. Context is rebuilt for each recording and is not saved.</p></div>
     {error && <div className="flex items-center gap-2"><p role="alert" className="text-xs text-destructive">{error}</p><Button size="xs" variant="outline" disabled={busy} onClick={() => void reload()}>Reload settings</Button></div>}
     {!data ? <p className="text-xs text-muted-foreground">Loading personalisation…</p> : <>
       <div>{contextOptions.map(row)}<p className="text-xs text-muted-foreground">Whisper uses a bounded prompt; Apple uses contextual strings. Other models use dictionary repair after recognition. Context source switches require “Use context” above. Draft and terminal text can promote known file, tool and dictionary terms; arbitrary text and file contents are excluded.</p></div>

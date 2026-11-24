@@ -1,4 +1,5 @@
 import { useEffect, useSyncExternalStore } from "react";
+import { thisComputer } from "@/lib/platform";
 import type { RuntimeAgentSignIn, RuntimeAgentsReport, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { errorMessage } from "@/lib/api";
 import { refreshRuntimeModels } from "@/lib/cloudModels";
@@ -147,7 +148,7 @@ export function machineAgentRows(report: RuntimeAgentsReport | null): MachineAge
 /** Whose sign-in sessions there use: "this server’s", "this Mac’s", "this machine’s". */
 export function signInOwner(machine: { hasWindow?: boolean | null; os: { family: string } }): string {
   if (machine.hasWindow === false) return "this server’s";
-  return machine.os.family === "macos" ? "this Mac’s" : "this machine’s";
+  return machine.os.family === "macos" ? `${thisComputer}’s` : "this machine’s";
 }
 
 /**

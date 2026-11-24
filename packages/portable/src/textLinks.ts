@@ -7,9 +7,12 @@ const matcher = new LinkifyIt()
 export interface TextLinkPart { text: string; href?: string }
 
 /** Recognise links without changing any text, whitespace, or surrounding
- * punctuation. Both chat renderers use the same URL boundaries. */
+ * punctuation. Both chat renderers use the same URL boundaries. A bare name
+ * with no scheme links only when it starts with `www.`, as GitHub's own
+ * autolinks do: `mcp.rs` and `AGENTS.md` are file names, not the domains
+ * their country-code endings would make them. */
 export function textLinks(text: string): TextLinkPart[] {
-  const links = matcher.match(text)?.filter((link) => /^(https?:\/\/|mailto:|tel:|file:\/\/\/)/i.test(link.url));
+  const links = matcher.match(text)?.filter((link) => (link.schema !== "" || /^www\./i.test(link.raw)) && /^(https?:\/\/|mailto:|tel:|file:\/\/\/)/i.test(link.url));
   if (!links?.length) return [{ text }];
   const parts: TextLinkPart[] = [];
   let from = 0;

@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { thisComputer } from "@/lib/platform";
 import { Check, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
@@ -9,15 +10,15 @@ import type { PendingComputer } from "@/types/machines";
 import { FingerprintBox, PlatformIcon, sectionLabel } from "./machineText";
 
 const ABLE = [
-  "Start, steer and stop sessions in this Mac’s projects",
+  `Start, steer and stop sessions in ${thisComputer}’s projects`,
   "Open terminals and read or change files in those projects",
-  "Commit, push and open pull requests with this Mac’s git sign-in",
+  `Commit, push and open pull requests with ${thisComputer}’s git sign-in`,
 ];
 
 // Owner decision 2 (2026-11-15): what TerminalX offers it, and a plain line on what a shell can reach.
 const NOT_OFFERED = [
-  "Use this Mac’s built-in browser, computer use or dictation",
-  "Pair other computers or change who may operate this Mac",
+  `Use ${thisComputer}’s built-in browser, computer use or dictation`,
+  `Pair other computers or change who may operate ${thisComputer}`,
 ];
 
 /** Screen 21.05, app-wide: it opens by itself while a computer waits for Allow, and goes when the request ends. */
@@ -50,7 +51,7 @@ export function MachineApprovalDialog({ request }: { request: PendingComputer })
             <PlatformIcon platform={request.platform} className="size-[18px] text-muted-foreground" />
           </span>
           <div className="min-w-0">
-            <DialogTitle className="text-[15px] font-semibold leading-6">Let {request.label} operate this Mac?</DialogTitle>
+            <DialogTitle className="text-[15px] font-semibold leading-6">Let {request.label} operate {thisComputer}?</DialogTitle>
             <DialogDescription className="text-[12.5px] text-muted-foreground">
               It asked to pair a moment ago, {request.transport === "relay" ? "through TerminalX Relay" : "over this network"}.
             </DialogDescription>
@@ -82,10 +83,10 @@ export function MachineApprovalDialog({ request }: { request: PendingComputer })
             <p className="text-[12.5px] leading-[19px] text-muted-foreground">Its terminals and agents run as you, so they can reach anything your account can.</p>
           </section>
           <label className="flex items-center gap-3 border-t border-hairline pt-4">
-            <span className="text-[13px]">Keep this Mac awake while it is connected</span>
+            <span className="text-[13px]">Keep {thisComputer} awake while it is connected</span>
             <Switch
               className="ml-auto"
-              aria-label="Keep this Mac awake while it is connected"
+              aria-label={`Keep ${thisComputer} awake while it is connected`}
               checked={keepAwake}
               onCheckedChange={(enabled) => void setMachinesKeepAwake(enabled)}
             />

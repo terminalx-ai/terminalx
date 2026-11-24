@@ -132,6 +132,17 @@ pub fn sessions_in(bot: &str, workspace: &str) -> Result<(Vec<String>, bool)> {
     Ok((mine.into_iter().filter_map(|record| record.session).collect(), launch))
 }
 
+/// The organisation a cloud command of a session that works for bot `bot` is held to (PRO-483): the place the
+/// session works in (`chat::session_place`), as `personal` or an organisation's id, or empty for none (a place the bot
+/// no longer works in, a bot or session that cannot be read), which the window takes as no workspace at all.
+pub fn hold_org(bot: &str, session: Option<&str>) -> String {
+    let (Ok(Some(bot)), Some(entry)) = (bot_store::get(bot), session.and_then(|session| index::get(session).ok())) else { return String::new() };
+    match super::chat::session_place(&bot, &entry) {
+        super::memory::Place::Bot => String::new(),
+        place => place.key().to_owned(),
+    }
+}
+
 /// Whether the limit narrows nothing: full access, which runs as the
 /// owner's own sessions do.
 pub fn widest(limit: &ModeLimit) -> bool {

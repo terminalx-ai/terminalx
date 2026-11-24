@@ -176,10 +176,10 @@ describe("the Machines section", () => {
     expect(machineViewLabel({ state: "reconnecting", lostAt: 0, attempt: 0, retryInMs: 500, trying: [] })).toBe("Reconnecting");
     expect(machineViewLabel({ state: "relay", route: { kind: "relay", endpoint: null }, since: 0, rttMs: null })).toBe("Connecting");
     expect(machineViewStatus({ state: "connecting", trying: ["lan"] }, "Mac mini")).toBe("Connecting to Mac mini…");
-    expect(machineViewStatus({ state: "accessRemoved" }, "Studio")).toBe("Studio no longer allows this Mac. Pair again to reconnect.");
+    expect(machineViewStatus({ state: "accessRemoved" }, "Studio")).toBe("Studio no longer allows this computer. Pair again to reconnect.");
     // PRO-354's states: which side updates, and a machine handing its runtime over.
     expect(machineViewStatus({ state: "needsUpdate", version: "0.2.27", side: "machine" }, "Mac mini")).toBe("Mac mini runs an older TerminalX. Update TerminalX there to connect.");
-    expect(machineViewStatus({ state: "needsUpdate", version: "0.2.35", side: "thisMac" }, "Mac mini")).toBe("Mac mini runs a newer TerminalX than this Mac. Update this Mac to connect.");
+    expect(machineViewStatus({ state: "needsUpdate", version: "0.2.35", side: "thisMac" }, "Mac mini")).toBe("Mac mini runs a newer TerminalX than this computer. Update this computer to connect.");
     expect(machineViewStatus({ state: "updating", version: "0.2.33", since: 0 }, "Mac mini")).toBe("Mac mini is updating. Back in under a minute. Sessions there keep running.");
   });
 

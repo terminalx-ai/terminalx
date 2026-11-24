@@ -110,7 +110,7 @@ fn a_file_from_before_accounts_loads_as_this_macs_login_alone_and_keeps_what_it_
     let claude = list_in(&store, Agent::Claude).unwrap();
     assert_eq!(claude.accounts.iter().map(|account| account.id.as_str()).collect::<Vec<_>>(), [LOCAL]);
     assert_eq!(claude.default_account, LOCAL);
-    assert_eq!(claude.accounts[0].label, "This Mac's login");
+    assert_eq!(claude.accounts[0].label, crate::platform_profile::localize("This Mac's login"));
     let codex = list_in(&store, Agent::Codex).unwrap();
     assert_eq!(codex.accounts.iter().map(|account| (account.id.as_str(), account.kind)).collect::<Vec<_>>(), [(LOCAL, Kind::Subscription), (SAVED_KEY, Kind::ApiKey)]);
     assert_eq!(codex.default_account, SAVED_KEY, "the key in use is still the default");
@@ -451,7 +451,7 @@ fn removing_a_key_account_deletes_only_its_keychain_item() {
     let revision_of = |id: &str| store.entry(Agent::Codex).unwrap().accounts.iter().find(|account| account.id == id).unwrap().key.clone().unwrap().revision;
     let (kept, gone) = (revision_of(&second), revision_of(&first));
     let view = remove_in(&store, Agent::Codex, &first, &Recorded::default()).unwrap();
-    assert_eq!(view.accounts.iter().map(|account| account.label.as_str()).collect::<Vec<_>>(), ["This Mac's login", "Work"]);
+    assert_eq!(view.accounts.iter().map(|account| account.label.clone()).collect::<Vec<_>>(), [crate::platform_profile::localize("This Mac's login"), "Work".to_string()]);
     assert!(secrets.stored("dev.terminalx.agent-keys", &format!("codex/{gone}")).is_none());
     assert!(secrets.stored("dev.terminalx.agent-keys", &format!("codex/{kept}")).is_some());
     assert!(!std::fs::read_to_string(dir.path().join("agent-logins.json")).unwrap().contains("second-key"));

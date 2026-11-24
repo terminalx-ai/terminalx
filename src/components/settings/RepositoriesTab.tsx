@@ -1,3 +1,4 @@
+import { fileManager } from "@/lib/platform";
 import { useSettingsLeaveGuard } from "./settingsLeaveGuard";
 import { useEffect, useState, type ReactNode } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -111,7 +112,7 @@ function PathMenu({ label, path, onError }: { label: string; path: string; onErr
       </button>
     </DropdownMenuTrigger>
     <DropdownMenuContent align="start">
-      <DropdownMenuItem onSelect={() => run(() => revealItemInDir(path))}><FolderOpen />Show in Finder</DropdownMenuItem>
+      <DropdownMenuItem onSelect={() => run(() => revealItemInDir(path))}><FolderOpen />Show in {fileManager}</DropdownMenuItem>
       <DropdownMenuItem onSelect={() => run(() => copyText(path))}><Copy />Copy path</DropdownMenuItem>
     </DropdownMenuContent>
   </DropdownMenu>;

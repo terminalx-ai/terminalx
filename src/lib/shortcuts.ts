@@ -1,3 +1,4 @@
+import { PLATFORM_PROFILES, isMac, profile, type PlatformProfile } from "@/lib/platform";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { getExperimentalSettings } from "@/lib/experimentalSettings";
 
@@ -18,7 +19,7 @@ import { getExperimentalSettings } from "@/lib/experimentalSettings";
  * is an action with no keys). An id this build does not know is left alone.
  */
 
-export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+export { isMac };
 
 export type ShortcutGroup = "App" | "Session" | "Panel" | "Files" | "Issues" | "Composer";
 
@@ -159,6 +160,9 @@ const ACTIONS = [
   { id: "issues.comment", label: "Write a comment on the open issue", group: "Issues", keys: ["c"], scope: "context" },
   // Right Option is AltGr on many Windows and Linux layouts, so holding it to dictate is a macOS default only.
   { id: "composer.dictate", label: "Start or stop dictation", group: "Composer", keys: ["mod+shift+d"], macKeys: ["hold:AltRight", "mod+shift+d"], hold: true },
+  { id: "composer.aiEditor", label: "Open the AI Editor", group: "Composer", keys: ["mod+shift+e"], scope: "context" },
+  // Ctrl+Alt is AltGr on many Windows and Linux layouts, and ⌘⌥H hides the other apps on macOS, so neither carries Alt.
+  { id: "composer.historySearch", label: "Search this chat's messages", group: "Composer", keys: ["mod+shift+g"], scope: "context" },
   { id: "composer.send", label: "Send", group: "Composer", keys: ["enter"], scope: "context" },
   { id: "composer.sendAlternate", label: "Send the other way (hold or interrupt)", group: "Composer", keys: ["mod+enter"], scope: "context" },
   { id: "composer.newLine", label: "New line", group: "Composer", keys: ["shift+enter"], scope: "context" },
@@ -288,6 +292,16 @@ function holdCap(code: string, mac: boolean): string {
   return `${side} ${name}`;
 }
 
+/**
+ * How keys are drawn, from the platform profiles: a Mac's glyphs run together
+ * (⇧⌘D), other systems name the keys and join them (Ctrl+Shift+D). `mac`
+ * forces the Mac's way, as tests and the Mac-only key tables need.
+ */
+function keyProfile(mac: boolean): PlatformProfile {
+  if (mac) return PLATFORM_PROFILES.macos;
+  return profile.keyStyle === "words" ? profile : PLATFORM_PROFILES.linux;
+}
+
 /** The order macOS writes modifiers in, in its menus and its documentation: ⌃⌥⇧⌘, then the key. */
 const MAC_MODIFIER_ORDER = ["ctrl", "alt", "shift", "mod"];
 
@@ -300,7 +314,8 @@ export function keycaps(binding: string, mac = isMac): string[] {
   const code = holdCode(binding);
   if (code != null) return [holdCap(code, mac)];
   const parts = normalizeBinding(binding).split("+");
-  if (mac) {
+  const glyphs = keyProfile(mac).keyStyle === "symbols";
+  if (glyphs) {
     const rank = (part: string) => MAC_MODIFIER_ORDER.indexOf(part);
     const mods = parts.filter((part) => rank(part) >= 0).sort((a, b) => rank(a) - rank(b));
     parts.splice(0, parts.length, ...mods, ...parts.filter((part) => rank(part) < 0));
@@ -309,13 +324,13 @@ export function keycaps(binding: string, mac = isMac): string[] {
     .map((p) => {
       switch (p) {
         case "mod":
-          return mac ? "⌘" : "Ctrl";
+          return glyphs ? "⌘" : "Ctrl";
         case "shift":
-          return mac ? "⇧" : "Shift";
+          return glyphs ? "⇧" : "Shift";
         case "alt":
-          return mac ? "⌥" : "Alt";
+          return glyphs ? "⌥" : "Alt";
         case "ctrl":
-          return mac ? "⌃" : "Ctrl";
+          return glyphs ? "⌃" : "Ctrl";
         case "meta":
           return "⊞";
         case "enter":
@@ -351,9 +366,14 @@ export function ariaKeyShortcut(binding: string, mac = isMac): string | undefine
   return normalizeBinding(binding).split("+").map((key) => names[key] ?? (key.length === 1 ? key.toUpperCase() : key[0].toUpperCase() + key.slice(1))).join("+");
 }
 
+/** Keycaps as one label: "⇧⌘D" on a Mac, "Ctrl+Shift+D" elsewhere. */
+export function joinKeycaps(keys: readonly string[], mac = isMac): string {
+  return keys.join(keyProfile(mac).keyJoiner);
+}
+
 /** A binding in a sentence: "⇧⌘D", "Ctrl+Shift+D", "Right ⌥". */
 export function bindingText(binding: string, mac = isMac): string {
-  return keycaps(binding, mac).join(mac ? "" : "+");
+  return joinKeycaps(keycaps(binding, mac), mac);
 }
 
 // ---------------------------------------------------------------- what a binding may be

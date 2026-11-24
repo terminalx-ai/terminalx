@@ -6,7 +6,8 @@
 import assert from "node:assert/strict";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createServer, transformWithEsbuild } from "vite";
+import { transformWithEsbuild } from "vite";
+import { createCheckServer } from "./vite-page.mjs";
 import { launch } from "./harness.mjs";
 
 const shots = process.env.ROSTER_SHOTS;
@@ -88,10 +89,9 @@ function App() {
 createRoot(document.getElementById('root')).render(<App/>);
 `;
 
-const server = await createServer({
-  server: { port: 0, host: "127.0.0.1" },
+const server = await createCheckServer({
+  server: { host: "127.0.0.1" },
   plugins: [{
-    name: "organization-roster-regression",
     resolveId(id) { if (id === "/roster-regression.tsx") return "\0roster-regression.tsx"; },
     async load(id) {
       if (id === "\0roster-regression.tsx") return (await transformWithEsbuild(entry, "roster-regression.tsx", { loader: "tsx", jsx: "automatic" })).code;

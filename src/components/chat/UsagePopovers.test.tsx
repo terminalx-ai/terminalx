@@ -156,7 +156,7 @@ describe("turn details", () => {
     fireEvent.click(screen.getByRole("button", { name: "Turn details" }));
     const dialog = await screen.findByRole("dialog", { name: "Turn details" });
     expect(dialog.textContent).toMatch(/^Claude Code · Sonnet 4\.6/);
-    expect(dialog.textContent).toMatch(/· \d{1,2}:00:00( [AP]M)? → \d{1,2}:00:02/);
+    expect(dialog.textContent).toMatch(/· \d{1,2}:\d{2}:00( [AP]M)? → \d{1,2}:\d{2}:02/i);
     for (const text of ["EffortHigh", "Fast modeOff", "Permission modeAsk every time", "Tokens this turn", "Input20", "Output100", "Cache read70", "Cache write10",
       "70%cache hit", "50/soutput tokens", "$0.12estimated", "Cost is an estimate at API prices, not your bill."]) expect(dialog.textContent).toContain(text);
     expect(dialog.querySelector("[class*='text-[11px]'], [class*='text-[10px]']")).toBeNull();

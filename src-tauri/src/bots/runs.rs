@@ -693,7 +693,8 @@ fn wake(manager: &SessionManager, bot: &Bot, session: Option<&str>, text: String
     #[cfg(not(test))]
     {
         let author = crate::local_sharing::Person { user_id: BY_TERMINALX.into(), display_name: "TerminalX · check back".into(), email: String::new(), email_verified: false, organization_ids: Vec::new() };
-        manager.send_from_bot(&session, &tab, text, author)?;
+        let card = crate::events::BotMessage { kind: "checkBack".into(), from: BY_TERMINALX.into(), to: bot.id.clone(), to_name: bot.name.clone(), ..Default::default() };
+        manager.send_from_bot(&session, &tab, text, author, Some(card))?;
         Ok(session)
     }
 }

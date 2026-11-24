@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import { MachineHostError } from "@/components/machines/MachineHostError";
-import { ArrowLeft, BookUser, Calendar, Loader2, MessageCircleQuestion, Moon, Pause, Play, Plus, RotateCw, Settings2 } from "@/icons";
+import { ArrowLeft, ArrowLeftRight, BookUser, Calendar, Loader2, MessageCircleQuestion, Moon, Pause, Play, Plus, RotateCw, Settings2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { pauseAllBots, pauseBot, reloadBots, resumeAllBots, resumeBot, useBotStore } from "@/lib/bots";
 import { botMemoryApi, hasRoleDraft, keepRoleDraft } from "@/lib/botMemory";
-import { focusTaken, showBotRoleMemory, showBotSettings, showBotsDuties, showBotsTeam, showHireBot, useBotsPage } from "@/lib/botsPage";
+import { handoffChains } from "@/lib/botHandoffChains";
+import { useAllBotHandoffs } from "@/lib/botHandoffs";
+import { focusTaken, showBotRoleMemory, showBotSettings, showBotsDuties, showBotsHandoffs, showBotsTeam, showHireBot, useBotsPage } from "@/lib/botsPage";
 import { needsYouCount, needsYouTrouble, useNeedsYou, useNeedsYouError } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
 import { heldLine, usePauseHeld, usePauseHeldError, wasLine } from "@/lib/botPause";
@@ -18,6 +20,7 @@ import { accessLabel, reportsToLabel, runsOnLabel, statusLine, worksInLabel } fr
 import { unreadableText } from "./BotsSidebarSection";
 import { BotRoleMemory } from "./BotRoleMemory";
 import { BotsDuties } from "./BotsDuties";
+import { BotsHandoffs } from "./BotsHandoffs";
 import { BotsPaused, HeldList } from "./BotsPaused";
 import { BotsHeader } from "./BotsHeader";
 import { BotSettingsPage } from "./BotSettingsPage";
@@ -44,6 +47,7 @@ export function BotsView() {
   if (page.page === "settings") return <BotSettingsPage botId={page.botId} />;
   if (page.page === "roleMemory") return <BotRoleMemoryPage botId={page.botId} />;
   if (page.page === "duties") return <BotsDuties />;
+  if (page.page === "handoffs") return <BotsHandoffs />;
   if (store.loaded && !store.error && store.bots.length === 0 && store.unreadable === 0) return <FirstBot />;
   return <BotsTeam focus={page.page === "team" && !!page.focus} />;
 }
@@ -97,6 +101,7 @@ function BotsTeam({ focus }: { focus: boolean }) {
         <Button variant="outline" size="sm" disabled={bots.length === 0} onClick={() => showBotsDuties()} data-testid="bots-calendar">
           <Calendar /> Calendar
         </Button>
+        <HandoffsButton />
         {/* All paused (23.12): Hire a bot steps back, and Resume all is the way out. */}
         <Button variant={allPaused ? "outline" : "accent"} size="sm" onClick={() => showHireBot()} data-testid="bots-hire">
           <Plus /> Hire a bot
@@ -157,6 +162,21 @@ function BotsTeam({ focus }: { focus: boolean }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * The way to the Hand-offs page (PRO-540), beside Calendar, with how many chains are open. The count is left out
+ * until the hand-offs are read, and when they cannot be: the page itself says why.
+ */
+function HandoffsButton() {
+  const { list, error } = useAllBotHandoffs();
+  const open = list && !error ? handoffChains(list.handoffs).filter((chain) => chain.open).length : 0;
+  return (
+    <Button variant="outline" size="sm" onClick={() => showBotsHandoffs()} aria-label={open > 0 ? `Hand-offs, ${open} open` : "Hand-offs"} data-testid="bots-handoffs-open">
+      <ArrowLeftRight /> Hand-offs
+      {open > 0 && <span className="rounded-full bg-warning/15 px-1.5 text-[11px] font-medium tabular-nums text-warning" data-testid="bots-handoffs-open-count">{open}</span>}
+    </Button>
   );
 }
 

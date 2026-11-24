@@ -45,10 +45,10 @@ describe("agent route words (PRO-18)", () => {
     expect(listedModels(unsupported.lastCheck)).toBe("gw-sonnet, gw-haiku");
     expect(listedModels({ models: Array.from({ length: 15 }, (_, i) => `m${i}`) }, 12)).toMatch(/m11 and 3 more$/);
     expect(macCheckLine({ outcome: "failed", code: "model-unsupported", models: ["gw-sonnet"] }, "gw-opus")).toEqual({
-      text: "Checked from this Mac: the endpoint does not list the model gw-opus. It lists gw-sonnet.",
+      text: "Checked from this computer: the endpoint does not list the model gw-opus. It lists gw-sonnet.",
       warn: true,
     });
-    expect(macCheckLine({ outcome: "ok", httpStatus: 200, models: ["gw-sonnet"] })).toEqual({ text: "Reached from this Mac with the credential. It lists gw-sonnet.", warn: false });
+    expect(macCheckLine({ outcome: "ok", httpStatus: 200, models: ["gw-sonnet"] })).toEqual({ text: "Reached from this computer with the credential. It lists gw-sonnet.", warn: false });
   });
 
   it("shows codes as words and never a code it does not know", () => {

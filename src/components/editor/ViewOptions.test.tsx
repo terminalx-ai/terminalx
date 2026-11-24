@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { revealInFileManager } from "@/lib/platform";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { EditorView } from "@codemirror/view";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -156,7 +157,7 @@ it("downloads a cloud workspace's file as its text", async () => {
   try {
     vi.mocked(save).mockResolvedValue("/Users/me/Downloads/main.rs");
     await mount("src/main.rs", `cloud://${key}`, key);
-    expect(screen.queryByRole("button", { name: "Reveal in Finder" })).toBeNull();
+    expect(screen.queryByRole("button", { name: revealInFileManager })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Download" }));
     await waitFor(() => expect(fs.exportFile).toHaveBeenCalledWith("/Users/me/Downloads/main.rs", { content: "remote text\n" }));
   } finally {

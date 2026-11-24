@@ -62,7 +62,7 @@ impl Repo {
         std::fs::create_dir_all(&lead).unwrap();
         git(root.path(), &["init", "--bare", "-q", "origin.git"]);
         git(&lead, &["init", "-q", "-b", "main"]);
-        for (key, value) in [("user.name", "Lead"), ("user.email", "lead@example.test"), ("commit.gpgsign", "false")] {
+        for (key, value) in [("user.name", "Lead"), ("user.email", "lead@example.test"), ("commit.gpgsign", "false"), ("core.autocrlf", "false")] {
             git(&lead, &["config", key, value]);
         }
         std::fs::write(lead.join("shared.txt"), "one\ntwo\nthree\n").unwrap();
@@ -683,7 +683,7 @@ fn a_branch_others_build_on_is_refused_and_a_pushed_branch_of_the_leads_own_is_n
 
     // Someone else pushed to its upstream.
     let other = repo.root.path().join("other");
-    git(repo.root.path(), &["clone", "-q", "-b", "lead", repo.root.path().join("origin.git").to_str().unwrap(), other.to_str().unwrap()]);
+    git(repo.root.path(), &["clone", "-q", "-c", "core.autocrlf=false", "-b", "lead", repo.root.path().join("origin.git").to_str().unwrap(), other.to_str().unwrap()]);
     for (key, value) in [("user.name", "Someone"), ("user.email", "someone@example.test"), ("commit.gpgsign", "false")] {
         git(&other, &["config", key, value]);
     }

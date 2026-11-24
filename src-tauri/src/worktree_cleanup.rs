@@ -415,7 +415,19 @@ fn process_dirs() -> Vec<PathBuf> {
     out
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// Resolved, since a process may hold its folder under another spelling (a
+/// short name, a different case) and it is compared by path.
+#[cfg(windows)]
+fn process_dirs() -> Vec<PathBuf> {
+    let Ok(table) = crate::win::process::processes() else { return Vec::new() };
+    table
+        .iter()
+        .filter_map(|entry| crate::win::process::working_directory(entry.pid))
+        .map(|dir| crate::paths::canonicalize(&dir).unwrap_or(dir))
+        .collect()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn process_dirs() -> Vec<PathBuf> {
     Vec::new()
 }
@@ -1247,6 +1259,6 @@ pub fn estimate_size(host: &Host<'_>, jobs: &Jobs, job: &str, project_path: &str
     Ok(size)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "worktree_cleanup_tests.rs"]
 mod tests;

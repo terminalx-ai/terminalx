@@ -443,6 +443,28 @@ thread_local! {
     static CALLER: std::cell::RefCell<Option<std::sync::Arc<std::os::unix::net::UnixStream>>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(windows)]
+thread_local! {
+    /// The process whose frame this thread is answering, as the pipe names it.
+    static CALLER: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Answer one frame from process `client` with what `answer` makes of it.
+/// The thread is one of a pool: the sender is known on it only while its
+/// frame is answered, however the answering ends.
+#[cfg(windows)]
+fn answer_frame_from(client: u32, answer: impl FnOnce() -> Value) -> Value {
+    struct Answering;
+    impl Drop for Answering {
+        fn drop(&mut self) {
+            CALLER.with(|caller| caller.set(None));
+        }
+    }
+    CALLER.with(|caller| caller.set(Some(client)));
+    let _answering = Answering;
+    answer()
+}
+
 #[cfg(test)]
 thread_local! {
     /// The caller a test's in-process control request stands for.
@@ -457,7 +479,9 @@ pub(crate) enum Peer {
     /// The process at the other end, whatever it claims.
     Pid(i32),
     /// A transport whose other end cannot be read: on macOS, one the client
-    /// closed after sending. Who sent it cannot be told.
+    /// closed after sending. Who sent it cannot be told. A Windows pipe
+    /// that cannot name its client is never answered at all
+    /// (`pipe_transport::serve`).
     Unreadable,
 }
 
@@ -475,11 +499,19 @@ pub(crate) fn caller() -> Peer {
             Err(_) => Peer::Unreadable,
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        match CALLER.with(std::cell::Cell::get) {
+            None => Peer::InProcess,
+            Some(pid) => i32::try_from(pid).map_or(Peer::Unreadable, Peer::Pid),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     Peer::InProcess
 }
 
 /// [`caller`]'s process, when the kernel names one.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn caller_pid() -> Option<i32> {
     match caller() {
         Peer::Pid(pid) => Some(pid),
@@ -678,7 +710,7 @@ where
     {
         let _ = adopted;
         let dispatch = dispatch.clone();
-        crate::pipe_transport::serve(endpoint.socket.clone(), move |line| format!("{}\n", dispatch(&line)))?;
+        crate::pipe_transport::serve(endpoint.socket.clone(), move |line, client| format!("{}\n", answer_frame_from(client, || dispatch(&line))))?;
     }
     // Resolved once: the publisher outlives whatever the caller does to the
     // environment that names the home.
@@ -1482,7 +1514,7 @@ impl Publisher {
             // launch serves it, so a live launch is never replaced here.
             if !self.pipe_up {
                 let dispatch = self.dispatch.clone();
-                crate::pipe_transport::serve(self.socket.clone(), move |line| format!("{}\n", dispatch(&line))).context("serve the published pipe")?;
+                crate::pipe_transport::serve(self.socket.clone(), move |line, client| format!("{}\n", answer_frame_from(client, || dispatch(&line)))).context("serve the published pipe")?;
                 self.pipe_up = true;
             }
             crate::store::write_atomic(&self.token_file, self.token.as_bytes()).context("write the control token")?;
@@ -1701,6 +1733,35 @@ mod tests {
         assert_eq!(serde_json::from_str::<HookReply>(&response).unwrap().output.unwrap()["event"], "Stop");
     }
 
+    /// A frame over the pipe is answered as its client's, by the process the
+    /// pipe names; a call made inside this process has no sender.
+    #[cfg(windows)]
+    #[test]
+    fn a_frame_over_the_named_pipe_is_its_clients() {
+        let _home = crate::store::temp_home();
+        let endpoint = prepare_control().unwrap();
+        let said = |peer: Peer| match peer {
+            Peer::Pid(pid) => json!({"pid": pid}),
+            Peer::InProcess => json!({"pid": "in-process"}),
+            Peer::Unreadable => json!({"pid": "unreadable"}),
+        };
+        serve(endpoint.clone(), move |_frame| HookReply { output: Some(said(caller())), refused: None },
+            move |request| crate::control::ControlResponse::success(request.id, said(caller()))).unwrap();
+        let me = std::process::id() as i32;
+        for _ in 0..3 {
+            let response = crate::control::call("status", json!({}), Duration::from_secs(2)).unwrap();
+            assert_eq!(response.result.unwrap()["pid"], me);
+        }
+        let hook = HookFrame { tab: "t".into(), session: "s".into(), token: "token".into(), event: "Stop".into(), payload: Value::Null };
+        let response = crate::pipe_transport::exchange(&endpoint.socket, format!("{}\n", serde_json::to_string(&hook).unwrap()).into_bytes(), Duration::from_secs(2)).unwrap();
+        assert_eq!(serde_json::from_str::<HookReply>(&response).unwrap().output.unwrap()["pid"], me);
+        assert_eq!(caller(), Peer::InProcess);
+        assert_eq!(caller_pid(), None);
+        // The thread that answered keeps no sender once its frame is answered.
+        assert_eq!(answer_frame_from(7, || json!(caller_pid())), json!(7));
+        assert_eq!(caller(), Peer::InProcess);
+    }
+
     #[test]
     fn a_decision_hook_waits_as_long_as_the_app_keeps_the_card_open() {
         // The app parks a permission card for PERMISSION_WAIT; a hook that
@@ -1874,7 +1935,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(endpoint.socket.parent().unwrap());
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_refused_frame_says_why_and_still_leaves_the_cli_alone() {
         let reply = HookReply::refused("this TerminalX has no such tab");

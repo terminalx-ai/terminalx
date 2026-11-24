@@ -1,16 +1,17 @@
 import { ActionSheetIOS, Alert, Platform, type AccessibilityActionEvent } from "react-native";
 
 /** Something a list row offers beyond opening it: Pin or Unpin (#1403). */
-export interface RowAction { name: string; label: string; run(): void }
+export interface RowAction { name: string; label: string; run(): void; /** Drawn in red: it deletes something (25.06). */ destructive?: boolean }
 
-/** Offer a row's actions from the system's own sheet, under the row's title. */
-export function showRowActions(title: string, actions: readonly RowAction[]): void {
+/** Offer a row's actions from the system's own sheet, under the row's title and, when given, a line on what it can do now (25.10). */
+export function showRowActions(title: string, actions: readonly RowAction[], message?: string): void {
   if (!actions.length) return;
   if (Platform.OS === "ios") {
     const options = [...actions.map((action) => action.label), "Cancel"];
-    ActionSheetIOS.showActionSheetWithOptions({ options, cancelButtonIndex: actions.length, title }, (index) => { actions[index]?.run(); });
+    const destructive = actions.flatMap((action, index) => (action.destructive ? [index] : []));
+    ActionSheetIOS.showActionSheetWithOptions({ options, cancelButtonIndex: actions.length, ...(destructive.length ? { destructiveButtonIndex: destructive } : {}), title, ...(message ? { message } : {}) }, (index) => { actions[index]?.run(); });
   } else {
-    Alert.alert(title, undefined, [...actions.map((action) => ({ text: action.label, onPress: action.run })), { text: "Cancel", style: "cancel" as const }]);
+    Alert.alert(title, message, [...actions.map((action) => ({ text: action.label, onPress: action.run, ...(action.destructive ? { style: "destructive" as const } : {}) })), { text: "Cancel", style: "cancel" as const }]);
   }
 }
 

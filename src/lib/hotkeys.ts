@@ -7,6 +7,7 @@ import {
   holdBinding,
   isMac,
   isTerminalReserved,
+  joinKeycaps,
   keycaps,
   normalizeBinding,
   sendShortcut,
@@ -33,7 +34,7 @@ import {
  * closes it.
  */
 
-export { chordOf, isMac, keycaps };
+export { chordOf, isMac, joinKeycaps, keycaps };
 
 type Handler = (e: KeyboardEvent) => void | boolean;
 

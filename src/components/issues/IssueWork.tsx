@@ -1,4 +1,5 @@
 import { Cloud, Laptop, Link2, Users } from "@/icons";
+import { thisComputer } from "@/lib/platform";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -17,7 +18,7 @@ function PlaceIcon({ worker, className }: { worker: IssueWorker; className?: str
  * "Was working on this" line says so either way.
  */
 function WorkerRow({ worker, now, fade }: { worker: IssueWorker; now: number; fade: boolean }) {
-  const where = worker.place === "this" ? "this Mac" : worker.place === "machine" ? worker.machine : worker.place === "cloud" || worker.cloud ? "cloud" : null;
+  const where = worker.place === "this" ? thisComputer : worker.place === "machine" ? worker.machine : worker.place === "cloud" || worker.cloud ? "cloud" : null;
   return (
     <li className={cn("flex min-w-0 items-start gap-2", fade && worker.phase === "faded" && "opacity-70")} data-testid="issue-worker">
       <PlaceIcon worker={worker} className="mt-0.5" />

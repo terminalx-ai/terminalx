@@ -57,7 +57,7 @@ import { subscribeTabPty } from "@/lib/tabViews";
 import { MergedCleanupNotices } from "@/components/ui/MergedCleanupNotices";
 import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
 import { Toasts } from "@/components/ui/Toasts";
-import { ToastCorner } from "@/components/ui/ToastCorner";
+import { NoticeColumn } from "@/components/ui/NoticeColumn";
 import { ArchiveNotices } from "@/components/ui/ArchiveNotices";
 import { archiveWithUndo } from "@/lib/archiveNotices";
 import { reportError } from "@/lib/errorToasts";
@@ -405,14 +405,16 @@ export function AppShell() {
     <SettingsLeaveBoundaryContext.Provider value={settingsBoundary}>
     <div data-app-shell className="flex h-full w-full flex-col">
       <SelfUiAccess />
-      {/* Merged-workspace notices, top right under the tabs: a stack of them in the bottom corner covered the composer
-          and its send button. Toasts and close-undo notices, which answer what was just done there, stay below. */}
-      <div className="pointer-events-none fixed top-22 right-4 z-(--z-toast) flex max-h-[calc(100dvh-8rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
-        {/* It stays until notifications are allowed, so it is up here with the other notices that wait (PRO-327). */}
-        <NotificationsOffCard />
-        <MergedCleanupNotices />
-      </div>
-      <ToastCorner className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[380px] max-w-[calc(100vw-2rem)] flex-col gap-2">
+      {/* Merged-workspace notices wait top right, under the tabs: a stack of them in the bottom corner covered the
+          composer and its send button. The toasts take the bottom corner unless a composer reaches under it, and then
+          join them up there (#1499). The clean-up indicator is last, so the toasts stack above it. */}
+      <NoticeColumn
+        waiting={<>
+          {/* It stays until notifications are allowed, so it is up here with the other notices that wait (PRO-327). */}
+          <NotificationsOffCard />
+          <MergedCleanupNotices />
+        </>}
+      >
         <CloseUndoNotices />
         <ArchiveNotices />
         <Toasts />
@@ -420,9 +422,8 @@ export function AppShell() {
         <ProjectAddedNotice />
         <WorktreeCopyNotices />
         <WorkspaceReassignedNotices />
-        {/* Last, so it keeps the corner and the toasts stack above it. */}
         <CleanupIndicator onOpenStorage={openStorageSettings} />
-      </ToastCorner>
+      </NoticeColumn>
       <BypassDialog />
       <LinkSessionDialog />
       <ImageViewerHost />

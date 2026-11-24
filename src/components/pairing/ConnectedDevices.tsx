@@ -1,4 +1,5 @@
 import { Smartphone } from "@/icons";
+import { thisComputer } from "@/lib/platform";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
@@ -23,7 +24,7 @@ export function ConnectedDevices({ devices, busy, error, className }: { devices:
         <p className="text-xs text-muted-foreground">No devices connected</p>
       ) : (
         <>
-          <p className="text-xs text-muted-foreground">Connected phones can see and drive sessions on this Mac.</p>
+          <p className="text-xs text-muted-foreground">Connected phones can see and drive sessions on {thisComputer}.</p>
           <ul className="flex flex-col gap-1.5">
             {devices.map((device, index) => {
               const name = privacy.enabled ? `Phone ${index + 1}` : device.label;

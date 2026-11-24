@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { thisComputer } from "@/lib/platform";
 import { Check, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage, type AgentLogin, type AgentLoginProvider, type CloudProviderSummary, type CloudWorkspaceQuote } from "@/lib/api";
@@ -375,7 +376,7 @@ export function OrganizationSetupSteps({
         <div className="mt-2 text-xs text-muted-foreground" data-testid="organization-setup-logins">
           <p>
             Connect what the agents in {organizationName}'s cloud workspaces sign in with: Claude Code (Log in with Claude or an API key), Codex (Log in
-            with ChatGPT or an API key) or Cursor (an API key), or lend this Mac's sign-in. The logins belong to {organizationName} only. You can also set
+            with ChatGPT or an API key) or Cursor (an API key), or lend {thisComputer}'s sign-in. The logins belong to {organizationName} only. You can also set
             them up later on its page in Settings → Organizations.
           </p>
           <div className="mt-2">

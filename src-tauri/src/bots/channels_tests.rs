@@ -43,6 +43,7 @@ fn a_mention_is_a_word_of_its_own_outside_quotes() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_owner_and_listed_people_are_accepted_and_everyone_else_is_not() {
     let _home = bots_on();
     let bot = bot_with(
@@ -70,6 +71,7 @@ fn the_owner_and_listed_people_are_accepted_and_everyone_else_is_not() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bots_own_post_and_a_bot_account_start_nothing() {
     let _home = bots_on();
     let bot = bot_with(json!([]), &["personal"]);
@@ -85,6 +87,7 @@ fn a_bots_own_post_and_a_bot_account_start_nothing() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_read_takes_in_each_new_comment_once_and_nothing_from_before_the_start() {
     let _home = bots_on();
     let bot = bot_with(json!([{"kind": "person", "id": "u-ankit", "name": "Ankit", "may": "ask", "github": "ankit-k"}]), &["personal"]);
@@ -138,6 +141,7 @@ fn review_and_linear_comments_answer_in_their_own_threads() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn every_post_says_which_bot_wrote_it_and_on_whose_behalf() {
     let _home = bots_on();
     let bot = bot_with(json!([]), &["personal"]);
@@ -163,6 +167,7 @@ fn a_github_target_is_an_address_or_a_number_with_its_repository() {
 
 /// Done when: a bot's review appears on a pull request and its comment on a Linear issue, each signed.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_review_goes_on_the_pull_request_and_a_comment_on_the_linear_issue() {
     let _home = bots_on();
     let bot = bot_with(json!([]), &["personal"]);
@@ -212,6 +217,7 @@ fn unknown_records_are_kept_as_they_are() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_github_login_and_an_email_are_checked_when_a_person_is_listed() {
     let _home = bots_on();
     let sink = BroadcastSink::new(16);
@@ -230,6 +236,7 @@ fn a_github_login_and_an_email_are_checked_when_a_person_is_listed() {
 /// What reaches the agent outside the fence is the app's words: a listed person by the name the owner gave them,
 /// never the display name they chose on Linear; GitHub's login is kept apart to name them in the reply.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_mention_is_named_in_the_apps_words() {
     let _home = bots_on();
     let bot = bot_with(json!([{"kind": "person", "id": "u-ann", "name": "Ann Lee", "may": "ask", "github": "ann-k", "email": "ann@example.com"}]), &["personal"]);
@@ -252,6 +259,7 @@ fn a_mention_is_named_in_the_apps_words() {
 /// Without the owner's Linear user, their mentions could not be told from anyone's: Linear is not read at all, so
 /// none is marked seen and turned away.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn linear_is_not_read_while_the_owner_there_is_unknown() {
     let _home = bots_on();
     let bot = bot_with(json!([]), &["personal"]);
@@ -267,6 +275,7 @@ fn linear_is_not_read_while_the_owner_there_is_unknown() {
 /// does not recognise. The owner's mention written while no bot is at work is theirs; the same comment written while
 /// a Full-access bot is in a turn is kept as not accepted, and asked for again.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_owners_mention_during_a_full_access_bots_turn_is_not_accepted() {
     let _home = bots_on();
     let sink = BroadcastSink::new(16);
@@ -323,6 +332,7 @@ fn the_owners_mention_during_a_full_access_bots_turn_is_not_accepted() {
 /// a change the app saves is seen at once: a bot raised to Full access
 /// opens a spell on its next tool call, and one paused opens none.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bots_access_is_remembered_until_the_app_changes_it() {
     let _home = bots_on();
     let sink = BroadcastSink::new(16);

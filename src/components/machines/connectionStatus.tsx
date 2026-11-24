@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { thisComputer } from "@/lib/platform";
 import { Popover } from "radix-ui";
 import { LoaderCircle, Lock } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -104,7 +105,7 @@ export function machineStateHint(state: MachineConnectionState, name: string, no
     case "offline":
       return "Sessions there keep running";
     case "needsUpdate":
-      return state.side === "thisMac" ? "Runs a newer TerminalX than this Mac" : "Runs an older TerminalX";
+      return state.side === "thisMac" ? `Runs a newer TerminalX than ${thisComputer}` : "Runs an older TerminalX";
     case "updating":
       return "Back in under a minute";
     case "accessRemoved":
@@ -112,7 +113,7 @@ export function machineStateHint(state: MachineConnectionState, name: string, no
     case "disconnected":
       return "Disconnected on that Mac";
     default:
-      return "Not connected from this Mac";
+      return `Not connected from ${thisComputer}`;
   }
 }
 
@@ -142,13 +143,13 @@ export function machineViewStatus(state: MachineConnectionState, name: string): 
       return `${name} isn’t reachable. Sessions there keep running.`;
     case "needsUpdate":
       // PRO-354: the newer side says which computer updates.
-      return state.side === "thisMac" ? `${name} runs a newer TerminalX than this Mac. Update this Mac to connect.` : `${name} runs an older TerminalX. Update TerminalX there to connect.`;
+      return state.side === "thisMac" ? `${name} runs a newer TerminalX than ${thisComputer}. Update ${thisComputer} to connect.` : `${name} runs an older TerminalX. Update TerminalX there to connect.`;
     case "updating":
       return `${name} is updating. Back in under a minute. Sessions there keep running.`;
     case "accessRemoved":
-      return `${name} no longer allows this Mac. Pair again to reconnect.`;
+      return `${name} no longer allows ${thisComputer}. Pair again to reconnect.`;
     case "disconnected":
-      return `${name} disconnected this Mac. Try again once it lets this Mac back.`;
+      return `${name} disconnected ${thisComputer}. Try again once it lets ${thisComputer} back.`;
     case "idle":
       return `Not connected to ${name}.`;
     default:
@@ -391,10 +392,10 @@ function MachineConnectionDetails({ machine, state, onDone }: { machine: PairedM
 export function MachineLocation({ machine, name, state }: { machine: PairedMachine | null; name: string; state: MachineConnectionState }) {
   const path = machinePathText(state);
   return (
-    <div className="flex h-9 min-w-0 shrink-0 items-center gap-2 border-b border-hairline px-3 text-[12px]" data-testid="machine-location" title={`Commands run on ${name}, not on this Mac.`}>
+    <div className="flex h-9 min-w-0 shrink-0 items-center gap-2 border-b border-hairline px-3 text-[12px]" data-testid="machine-location" title={`Commands run on ${name}, not on ${thisComputer}.`}>
       <MachineIcon machine={machine} className="size-3.5 shrink-0 text-muted-foreground" />
       <span className="shrink-0 font-medium text-foreground">Runs on {name}</span>
-      <span className="min-w-0 truncate text-faint">· its files, terminals and git; this Mac can sleep</span>
+      <span className="min-w-0 truncate text-faint">· its files, terminals and git; {thisComputer} can sleep</span>
       {path && (
         <span className="ml-auto flex shrink-0 items-center gap-1 text-faint" data-testid="machine-path">
           <Lock className="size-3 shrink-0" aria-hidden />

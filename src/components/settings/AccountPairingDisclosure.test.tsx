@@ -91,10 +91,10 @@ describe("account binding disclosure", () => {
   it("shows and renames this Mac with Relay off", async () => {
     mocks.host = null;
     render(<AccountTab />);
-    expect(screen.queryByText("What this Mac shares")).toBeNull();
+    expect(screen.queryByText("What this computer shares")).toBeNull();
 
     const section = screen.getByTestId("machine-name-settings");
-    const input = within(section).getByRole("textbox", { name: "This Mac’s name" }) as HTMLInputElement;
+    const input = within(section).getByRole("textbox", { name: "This computer’s name" }) as HTMLInputElement;
     await waitFor(() => expect(input.value).toBe("Studio Mac"));
     fireEvent.change(input, { target: { value: "  Desk Mac " } });
     fireEvent.keyDown(input, { key: "Enter" });

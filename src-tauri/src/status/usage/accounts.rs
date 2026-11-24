@@ -335,7 +335,7 @@ mod tests {
     }
 
     fn local(agent: &'static str) -> Listed {
-        Listed { agent, id: LOCAL.into(), label: "This Mac's login".into(), kind: Kind::Subscription, dir: None, missing: false }
+        Listed { agent, id: LOCAL.into(), label: crate::platform_profile::localize("This Mac's login"), kind: Kind::Subscription, dir: None, missing: false }
     }
 
     fn key(agent: &'static str) -> Listed {
@@ -384,7 +384,7 @@ mod tests {
         refresh(&store, "claude", &listed, &[], false, &fake, NOW);
 
         let snapshot = store.snapshot_at(&HashSet::new(), NOW);
-        assert_eq!(snapshot.accounts.iter().map(|account| account.usage.label.as_str()).collect::<Vec<_>>(), ["This Mac's login", "Work", "Home"]);
+        assert_eq!(snapshot.accounts.iter().map(|account| account.usage.label.clone()).collect::<Vec<_>>(), [crate::platform_profile::localize("This Mac's login"), "Work".to_string(), "Home".to_string()]);
         assert_eq!(percents(usage_of(&snapshot, &work.id)), [12.0]);
         assert_eq!(percents(usage_of(&snapshot, &home.id)), [81.0]);
         // The top-level windows stay This Mac's login's.

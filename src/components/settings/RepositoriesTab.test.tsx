@@ -1,3 +1,4 @@
+import { fileManager } from "@/lib/platform";
 import { useState } from "react";
 import { SettingsLeaveGuardContext, useSettingsLeaveBoundary } from "./settingsLeaveGuard";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -68,7 +69,7 @@ describe("Project settings", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "Copy path" }));
     await waitFor(() => expect(mock.copy).toHaveBeenCalledWith("/repo"));
     fireEvent.pointerDown(worktrees, { button: 0, ctrlKey: false });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Show in Finder" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: `Show in ${fileManager}` }));
     await waitFor(() => expect(mock.reveal).toHaveBeenCalledWith("/repo/.raccoon/worktrees"));
   });
 

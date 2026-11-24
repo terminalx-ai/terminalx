@@ -124,7 +124,9 @@ describe("sending a message (#727)", () => {
   });
 
   // The report's tab held about 490 events; this one holds several thousand.
-  it("draws a sent message in a tab of several thousand events within its budget of reference work", async () => {
+  // Windows counts a thread's CPU time in steps of about 15 ms, longer than the
+  // reference work these two tests measure a send against.
+  it.skipIf(process.platform === "win32")("draws a sent message in a tab of several thousand events within its budget of reference work", async () => {
     const cost = await sendCost();
     expect(cost.sending, `drawn as sending: ${cost.said}`).toBeLessThan(SENDING_BUDGET);
     expect(cost.sent, `drawn as sent: ${cost.said}`).toBeLessThan(SENT_BUDGET);
@@ -132,7 +134,7 @@ describe("sending a message (#727)", () => {
 
   // PRO-334: the budgets are worth keeping only while they still catch a send
   // that has become twice the work. This one is made so on purpose.
-  it("is over that budget once a send is twice the work", async () => {
+  it.skipIf(process.platform === "win32")("is over that budget once a send is twice the work", async () => {
     const cost = await sendCost({ times: 2 });
     expect(cost.sending, `drawn as sending, twice the work: ${cost.said}`).toBeGreaterThan(SENDING_BUDGET);
     expect(cost.sent, `drawn as sent, twice the work: ${cost.said}`).toBeGreaterThan(SENT_BUDGET);

@@ -1,0 +1,21 @@
+# From a named form: writes the first task, prices it and launches.
+appId: com.terminalx.phone.fixture
+---
+- scrollUntilVisible:
+    element: "Permission mode.*"
+- scroll
+- tapOn:
+    id: first-task
+- inputText: "Fix the checkout test that fails on CI, then open a pull request"
+- tapOn:
+    id: review-price
+- extendedWaitUntil:
+    visible:
+      id: launch
+    timeout: 15000
+# The review lists the task as it will be sent.
+- scrollUntilVisible:
+    element: "Task: Fix the checkout test.*"
+- tapOn:
+    id: launch
+- tapOn: "Launch"

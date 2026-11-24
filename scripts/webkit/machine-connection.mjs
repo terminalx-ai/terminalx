@@ -59,7 +59,9 @@ const fixture = (paired) => `(() => {
   };
   answers.machines_connections = () => Object.entries(views).map(([machineId, state]) => ({ machineId, state }));
   // No machine paired (PRO-360): the app is as it was before Machines.
-  if (!${paired}) { answers.machines_list = []; answers.machines_connections = () => []; }
+  // It counts the times the app asks, so the check below knows the empty list has been given before it looks.
+  window.__PW_MACHINES_LISTED__ = 0;
+  if (!${paired}) { answers.machines_list = () => { window.__PW_MACHINES_LISTED__++; return []; }; answers.machines_connections = () => []; }
   // The transport state the native side sends on cloud_remote_event for each
   // machine state (docs/MACHINES.md "As built (PRO-345)"): connected carries
   // the link, offline is reconnecting, needs update and access removed end it.
@@ -267,7 +269,11 @@ for (const [viewportName, viewport] of [["small", { width: 760, height: 520 }], 
 {
   const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 1000, height: 620 }, { extra: fixture(false) });
   await sidebar(page);
-  await page.waitForTimeout(500);
+  // A section would come from the list of machines: wait until the app has asked for it and been given the empty one,
+  // and for two frames after, in which that answer is drawn. Then nothing more can add a section, and its absence is
+  // looked for. (It was a fixed half second, which the list could outlast on a loaded host.)
+  await page.waitForFunction(() => window.__PW_MACHINES_LISTED__ > 0, null, { timeout: 30_000 });
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   const sections = await page.locator('[data-testid="machines-section"]').count();
   failed += report("no machine paired", { "there is no Machines section": sections === 0, "there is no Development section": (await page.locator('[data-testid="dev-runtime-section"]').count()) === 0 });
   await page.screenshot({ path: join(shots, "no-machine-paired.png") });

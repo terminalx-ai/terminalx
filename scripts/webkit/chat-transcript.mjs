@@ -7,8 +7,8 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer as netServer } from 'node:net';
-import { createServer, transformWithEsbuild } from 'vite';
+import { transformWithEsbuild } from 'vite';
+import { createCheckServer } from './vite-page.mjs';
 import { launch } from './harness.mjs';
 
 const entry = `
@@ -63,7 +63,7 @@ const transcript = buildTranscript(events, true);
 const failedLast = buildTranscript(events.slice(0, events.findIndex((e) => e.payload.text === 'Now open a PR against main with a short summary.')), true);
 const root = createRoot(document.getElementById('root'));
 window.draw = ({ fold = true, reset = false, failed = false } = {}) => {
-  setPrefs({ foldToolCalls: fold, transcriptLayout: 'chat', promptMap: false, turnChanges: false });
+  setPrefs({ foldToolCalls: fold, transcriptLayout: 'chat', promptMap: false, turnChanges: false, secondOpinionButton: true });
   root.render(<TooltipProvider><div style={{ height: '100vh', display: 'flex' }} className="bg-chat">
     <Chat key={failed ? 'failed' : 'running'} cwd="/repo" sessionId="s" transcript={failed ? failedLast : transcript} stream={[]} live progressing answering={false} onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={<div className="h-24" />} onSendAgain={() => {}} onRetry={() => {}} onSecondOpinion={() => {}} onRetryInNewChat={() => {}} onReset={() => {}} />
     {reset && <ResetChatDialog sessionId="s" tabId="t" endSeq={9} target={{ turn: 2, removed: [3, 4], files: 3 }} agent="Claude Code" onClose={() => {}} onWarning={() => {}} />}
@@ -72,10 +72,8 @@ window.draw = ({ fold = true, reset = false, failed = false } = {}) => {
 window.draw();
 `;
 
-// A free port of its own: other checks' vite servers may hold the default one.
-const port = await new Promise((resolve) => { const s = netServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); }); });
-const server = await createServer({ logLevel: 'error', server: { port, strictPort: true, host: '127.0.0.1', hmr: false }, plugins: [{
-  name: 'chat-transcript',
+// A free port of its own (createCheckServer): other checks' vite servers may hold the default one.
+const server = await createCheckServer({ logLevel: 'error', server: { host: '127.0.0.1', hmr: false }, plugins: [{
   resolveId(id) { if (id === '/chat-transcript-test.tsx') return '\0chat-transcript-test.tsx'; },
   async load(id) { if (id === '\0chat-transcript-test.tsx') return (await transformWithEsbuild(entry, 'chat-transcript-test.tsx', { loader: 'tsx', jsx: 'automatic' })).code; },
   configureServer(server) { server.middlewares.use('/chat-transcript', async (_req, res) => {

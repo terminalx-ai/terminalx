@@ -18,6 +18,7 @@ fn look(run: &str) -> From {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_suggestion_is_one_line_once_and_says_so_to_the_window() {
     let _home = crate::store::temp_home();
     let sink = BroadcastSink::new(64);
@@ -36,6 +37,7 @@ fn a_suggestion_is_one_line_once_and_says_so_to_the_window() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn open_suggestions_are_capped_and_closed_ones_trimmed() {
     let _home = crate::store::temp_home();
     let sink = BroadcastSink::new(64);
@@ -63,6 +65,7 @@ fn open_suggestions_are_capped_and_closed_ones_trimmed() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn what_a_newer_build_wrote_is_kept_and_shown_by_none() {
     let _home = crate::store::temp_home();
     let sink = BroadcastSink::new(64);
@@ -85,6 +88,7 @@ fn what_a_newer_build_wrote_is_kept_and_shown_by_none() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_look_remembers_what_it_was_refused_and_its_suggestions_go_to_the_trash_with_its_bot() {
     let _home = crate::store::temp_home();
     let sink = BroadcastSink::new(64);

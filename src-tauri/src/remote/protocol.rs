@@ -107,12 +107,15 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   `session.followUp` with the receipts of `agent-commands/1`, and does not
 ///   serve that method without them.
 ///
+/// - `bots/1` (PRO-482): the bots that live on the runtime, for the person
+///   each belongs to, and moving one here or back (`super::bots`).
+///
 /// `machine/1` ([`super::machine::MACHINE`], PRO-340) is offered only by a
 /// runtime that serves every project of its machine, so it is not in this
 /// list, which every runtime of this build knows: see [`served`].
 pub const CAPABILITIES: &[&str] = &[
     "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "composer/5", "ports/1",
-    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1", "follow-ups/1",
+    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1", "follow-ups/1", "bots/1",
 ];
 
 /// The runtime edits, withdraws and releases its held follow-ups (#1328; spelled out in [`CAPABILITIES`]).
@@ -188,6 +191,7 @@ pub const METHODS: &[Method] = &[
     method("environment.cancel", "environment/1", Manage, false),
     method("session.list", "session/1", Participate, false),
     method("session.get", "session/1", Participate, false),
+    // A manager's phone may call it too, in a narrow form ([`MANAGER_START`]).
     method("session.create", "session/1", Manage, true),
     method("session.close", "session/1", Manage, true),
     // Participate may send only to sessions shared with it; the server checks.
@@ -208,7 +212,8 @@ pub const METHODS: &[Method] = &[
     method("keys.rotate", "keys/1", Manage, true),
     method("session.unsubscribe", "session/1", Participate, false),
     // CS-12: the session index, through the same `session_ops` as local.
-    // Participants never change it.
+    // Participants never change it, but for a manager's phone adding a tab
+    // ([`MANAGER_START`]).
     method("session.update", "session/2", Manage, true),
     method("session.addTab", "session/2", Manage, true),
     method("session.delete", "session/2", Manage, true),
@@ -237,6 +242,15 @@ pub const METHODS: &[Method] = &[
     // Its context is read for that handoff only, so by the same manager.
     method("session.handoff", "handoff/1", Manage, true),
     method("session.handoffContext", "handoff/1", Manage, false),
+    // PRO-482: the bots that live here, for the person they belong to (`remote::bots`).
+    method("bots.list", "bots/1", Participate, false),
+    method("bots.home", "bots/1", Participate, false),
+    method("bots.answer", "bots/1", Participate, true),
+    method("bots.importPart", "bots/1", Manage, false),
+    method("bots.import", "bots/1", Manage, true),
+    method("bots.export", "bots/1", Manage, false),
+    method("bots.exportPart", "bots/1", Manage, false),
+    method("bots.remove", "bots/1", Manage, true),
     // PRO-343: the mailbox's steer, stop and permission decision as live
     // calls, on a runtime with no mailbox. Each is decided by the mailbox's
     // own rules (a driver steers and stops, an approver decides) and
@@ -436,6 +450,8 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         // `agents/1` describes the runtime's agents: `runtime.agents`.
         "agents/1" => &["runtime.agents"],
         "environment/1" => &["environment."],
+        // The bots that live on the runtime (PRO-482, `remote::bots`).
+        "bots/1" => &["bots."],
         "keys/1" => &["keys."],
         "lifecycle/1" => &["lifecycle."],
         "mirror/1" => &["mirror."],
@@ -469,6 +485,28 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
 
 pub fn find_method(name: &str) -> Option<&'static Method> {
     METHODS.iter().find(|method| method.name == name)
+}
+
+/// PRO-546: the `manage` methods a `participate` connection may also call
+/// while its person is a workspace manager. A phone is always `participate`,
+/// whoever holds it, so without this a manager on a phone could start
+/// nothing in a workspace that has no conversation yet. Every other `manage`
+/// method stays with a `manage` attachment: this list is the whole exception,
+/// and a name taken out of it is refused as before.
+pub const MANAGER_START: [&str; 2] = ["session.create", "session.addTab"];
+
+/// What such a call may carry: the agent and its settings, and for a new
+/// session its title and first prompt. Any other field of the method (a
+/// worktree, a repository, an issue and its pipeline, the native Codex
+/// engine, a project) decides where code runs or what is carried on from
+/// it, and is a `manage` attachment's to send. `session.addTab` reads no
+/// title or prompt, so it takes none here rather than drop one unsaid.
+pub fn manager_start_fields(method: &str) -> Option<&'static [&'static str]> {
+    match method {
+        "session.create" => Some(&["agent", "model", "effort", "mode", "title", "prompt", "clientRequestId"]),
+        "session.addTab" => Some(&["sessionId", "agent", "model", "effort", "mode", "clientRequestId"]),
+        _ => None,
+    }
 }
 
 /// The error codes of the contract. Clients branch on `code`, never on text.
@@ -740,6 +778,36 @@ mod tests {
         assert!(CAPABILITIES.contains(&FOLLOW_UPS));
         assert!(find_method("runtime.exec").is_none());
         assert!(find_method("invoke").is_none());
+    }
+
+    /// PRO-546: the exception names two methods and no others. Both stay
+    /// `manage` in the table, so a runtime without the exception refuses
+    /// them, and both are answered from the cache when resent. What a
+    /// participate caller may send leaves out every field that says where
+    /// code runs or what is carried on from it.
+    #[test]
+    fn a_managers_participate_connection_starts_two_methods_with_narrow_fields() {
+        assert_eq!(MANAGER_START, ["session.create", "session.addTab"]);
+        for name in MANAGER_START {
+            let method = find_method(name).unwrap();
+            assert_eq!(method.authority, Manage, "{name}");
+            assert!(method.idempotent, "{name}");
+            let fields = manager_start_fields(name).unwrap();
+            for sent in ["agent", "model", "effort", "mode", "clientRequestId"] {
+                assert!(fields.contains(&sent), "{name}: {sent}");
+            }
+            for held_back in ["useWorktree", "worktreeName", "repository", "baseRef", "issue", "issueBody", "pipeline", "pipelineOptions", "pipelineSettings", "nativeCodex", "projectId"] {
+                assert!(!fields.contains(&held_back), "{name}: {held_back}");
+            }
+        }
+        assert!(manager_start_fields("session.create").unwrap().contains(&"prompt"));
+        assert!(manager_start_fields("session.create").unwrap().contains(&"title"));
+        assert!(manager_start_fields("session.addTab").unwrap().contains(&"sessionId"));
+        // A tab is added without a prompt: `session.handoff` sends one, and stays `manage`.
+        assert!(!manager_start_fields("session.addTab").unwrap().contains(&"prompt"));
+        for method in METHODS {
+            assert_eq!(manager_start_fields(method.name).is_some(), MANAGER_START.contains(&method.name), "{}", method.name);
+        }
     }
 
     /// docs/MACHINES.md says, for every method, whether a machine connection

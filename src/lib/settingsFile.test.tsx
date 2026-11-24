@@ -79,6 +79,19 @@ describe("user preference files", () => {
     expect(file.preferences.foldToolCalls).toBe(true);
   });
 
+  it("keeps the second opinion button off for an existing file until enabled, then restores the choice on startup", async () => {
+    file.exists = true;
+    await (await import("./settingsFile")).bootSettingsFile();
+    const prefs = await import("./prefs");
+    expect(prefs.getPrefs().secondOpinionButton).toBe(false);
+    prefs.setPrefs({ secondOpinionButton: true });
+    await waitFor(() => expect(file.preferences.secondOpinionButton).toBe(true));
+
+    vi.resetModules();
+    await (await import("./settingsFile")).bootSettingsFile();
+    expect((await import("./prefs")).getPrefs().secondOpinionButton).toBe(true);
+  });
+
   it("keeps every bundled default consistent with the existing preference defaults", async () => {
     const { getPrefs } = await import("./prefs");
     for (const [key, value] of Object.entries(defaults)) {

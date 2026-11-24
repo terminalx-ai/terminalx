@@ -50,6 +50,7 @@ fn refusal(error: anyhow::Error) -> String {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_phone_lists_what_needs_the_owner_and_answers_it_as_the_window_does() {
     let _home = bots_on();
     let (manager, sink) = manager();
@@ -83,6 +84,7 @@ fn the_phone_lists_what_needs_the_owner_and_answers_it_as_the_window_does() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_typed_reply_answers_and_an_empty_one_is_refused() {
     let _home = bots_on();
     let (manager, sink) = manager();
@@ -96,6 +98,7 @@ fn a_typed_reply_answers_and_an_empty_one_is_refused() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn pause_resume_and_pause_all_are_the_owners_and_say_so() {
     let _home = bots_on();
     let (manager, sink) = manager();
@@ -113,11 +116,12 @@ fn pause_resume_and_pause_all_are_the_owners_and_say_so() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bots_home_has_its_list_chats_duties_and_role_and_makes_nothing() {
     let _home = bots_on();
     let (manager, sink) = manager();
     let (bot, _) = asking(&sink);
-    let other = crate::bots::chat::new_chat(&*sink, &bot.id).unwrap();
+    let other = crate::bots::chat::new_chat(&*sink, &bot.id, None).unwrap();
     let before = index::load().unwrap().len();
     let home = call(&manager, "home", &json!({"id": bot.id})).unwrap();
     assert_eq!(home["bot"]["name"], "Sentry");
@@ -135,6 +139,7 @@ fn a_bots_home_has_its_list_chats_duties_and_role_and_makes_nothing() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn with_bots_off_the_phone_is_refused_everything() {
     let _home = bots_on();
     let (manager, sink) = manager();
@@ -155,6 +160,7 @@ fn only_reads_are_open_to_a_phone_that_cannot_drive() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_phone_reaches_the_bots_through_its_own_admitted_connection() {
     let _home = bots_on();
     let (manager, sink) = manager();
@@ -176,6 +182,7 @@ fn a_phone_reaches_the_bots_through_its_own_admitted_connection() {
 
 /// PRO-515: a bot whose chat is in a turn is sent as working on it, with no item saying so, and as nothing once the turn ends.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bot_whose_session_is_in_a_turn_is_listed_as_working_and_as_nothing_once_it_ends() {
     use crate::store::index::TabStatus;
     let _home = bots_on();

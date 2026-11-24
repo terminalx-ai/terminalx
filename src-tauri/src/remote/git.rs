@@ -1744,6 +1744,16 @@ impl WorkspaceGit {
             .clone()
             .or_else(|| crate::binpath::resolve("gh"))
             .ok_or_else(|| RpcError::new("unavailable", "the GitHub CLI is not installed in this workspace"))?;
+        // The tests' stand-in for `gh` is a POSIX script, which Windows can't start itself.
+        #[cfg(all(test, windows))]
+        let mut command = if bin.extension().is_none() {
+            let mut through_sh = Command::new(crate::binpath::posix_sh().expect("Git for Windows' sh"));
+            through_sh.arg(&bin);
+            through_sh
+        } else {
+            Command::new(bin)
+        };
+        #[cfg(not(all(test, windows)))]
         let mut command = Command::new(bin);
         // In the verified checkout, so the Git that gh runs finds that
         // checkout's remotes (see BoundCheckout).

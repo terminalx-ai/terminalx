@@ -40,8 +40,11 @@ impl Rig {
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("claude");
         std::fs::write(&program, "#!/bin/sh\nprintf 'CLAUDE_CONFIG_DIR=%s\\n' \"$(printenv CLAUDE_CONFIG_DIR)\" > \"$0.tmp\" && mv \"$0.tmp\" \"$0.env\"\nprintf 'ready\\n'\nstty -icanon\nexec cat\n").unwrap();
+        #[cfg(unix)]
         {
+            #[cfg(unix)]
             use std::os::unix::fs::PermissionsExt;
+            #[cfg(unix)]
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let claude = claude::pty::claude_program_for_tests(program.clone());
@@ -136,7 +139,7 @@ impl Rig {
 
     fn statuses(&self) -> Vec<String> {
         self.events().into_iter().filter_map(|event| match event.payload {
-            Payload::Status { text } => Some(text),
+            Payload::Status { text, .. } => Some(text),
             _ => None,
         }).collect()
     }
@@ -306,7 +309,7 @@ fn a_held_follow_up_goes_on_the_account_switched_to() {
     wait("the follow-up", || rig.sent("next task") == 1);
     assert_eq!(rig.account(), work);
     let events = rig.events();
-    let switched = events.iter().position(|event| matches!(&event.payload, Payload::Status { text } if text.starts_with("Switched from "))).expect("switched");
+    let switched = events.iter().position(|event| matches!(&event.payload, Payload::Status { text, .. } if text.starts_with("Switched from "))).expect("switched");
     let sent = events.iter().position(|event| matches!(&event.payload, Payload::UserMessage { text, .. } if text == "next task")).unwrap();
     assert!(switched < sent, "the switch comes before the follow-up");
     assert_eq!(rig.outcomes().len(), 1);

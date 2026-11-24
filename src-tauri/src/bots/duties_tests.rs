@@ -168,7 +168,7 @@ fn due_now(duty: &Automation) {
 fn status_lines(manager: &SessionManager, session: &str) -> Vec<String> {
     let entry = index::get(session).unwrap();
     manager.load_events(session, &entry.tabs[0].id).unwrap().into_iter().filter_map(|event| match event.payload {
-        Payload::Status { text } => Some(text),
+        Payload::Status { text, .. } => Some(text),
         _ => None,
     }).collect()
 }
@@ -178,6 +178,7 @@ fn home_chat(bot: &Bot) -> index::SessionEntry {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_roles_scheduled_duties_arrive_switched_off_at_hire() {
     let mut rig = rig();
     let bot = rig.hire("watcher", "Argus");
@@ -203,6 +204,7 @@ fn a_roles_scheduled_duties_arrive_switched_off_at_hire() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_quiet_check_spends_nothing_tells_nobody_and_is_logged_as_nothing_new() {
     let mut rig = rig();
     let bot = rig.hire("cto", "Atlas");
@@ -232,16 +234,10 @@ fn a_quiet_check_spends_nothing_tells_nobody_and_is_logged_as_nothing_new() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_check_that_prints_starts_the_bots_session_with_its_output_and_reports_where_told() {
     let mut rig = rig();
-    let dir = tempfile::tempdir().unwrap();
-    let program = dir.path().join("claude");
-    std::fs::write(&program, "#!/bin/sh\nprintf 'listening\\n'\nstty -icanon\nexec cat\n").unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let _claude = crate::harness::claude::pty::claude_program_for_tests(program);
+    let (_dir, _claude) = stand_in_claude();
     let _ready = AgentReady::on();
     let bot = rig.hire("watcher", "Argus");
     let home = super::super::home(&bot).unwrap();
@@ -256,7 +252,7 @@ fn a_check_that_prints_starts_the_bots_session_with_its_output_and_reports_where
     let run = wait_run(&duty, |run| run.session_id.is_some());
     let session = index::get(run.session_id.as_deref().unwrap()).unwrap();
     // One of the bot's chats, in its home, on its agent and in the mode its access maps to.
-    assert_eq!(chat::session_bot(&session), Some(BotRef { id: bot.id.clone(), home: false }));
+    assert_eq!(chat::session_bot(&session), Some(BotRef { id: bot.id.clone(), home: false, org: None }));
     assert_eq!(session.unknown[SESSION_KEY]["id"], duty.id);
     assert_eq!(std::fs::canonicalize(&session.cwd).unwrap(), std::fs::canonicalize(&home).unwrap());
     assert_eq!(session.automation.as_ref().map(|stamp| stamp.run_id.as_str()), Some(run.run_id.as_str()));
@@ -331,6 +327,7 @@ fn a_check_that_prints_starts_the_bots_session_with_its_output_and_reports_where
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_paused_bots_duties_do_not_run_and_due_runs_are_skipped_not_run_late() {
     let rig = rig();
     let bot = rig.hire("cto", "Atlas");
@@ -364,6 +361,7 @@ fn a_paused_bots_duties_do_not_run_and_due_runs_are_skipped_not_run_late() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn with_bots_off_duties_are_inert_and_every_duty_operation_refuses() {
     let rig = rig();
     let bot = rig.hire("cto", "Atlas");
@@ -386,6 +384,7 @@ fn with_bots_off_duties_are_inert_and_every_duty_operation_refuses() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_ordinary_automation_routes_refuse_a_duty() {
     let rig = rig();
     let bot = rig.hire("cto", "Atlas");
@@ -440,6 +439,7 @@ fn only_a_person_adds_runs_or_switches_on_a_duty_and_switching_off_is_open() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn unknown_values_are_kept_and_never_chosen_here() {
     let rig = rig();
     let bot = rig.hire("cto", "Atlas");
@@ -500,6 +500,7 @@ fn quiet_hours_cross_midnight_and_a_reply_is_read_as_people_write_it() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn deleting_a_bot_removes_its_duties_and_a_duty_left_without_its_bot_can_still_be_removed() {
     // No run here reaches an agent; the stand-in is held so none could start a real one.
     let rig = rig();
@@ -565,23 +566,55 @@ fn deleting_a_bot_removes_its_duties_and_a_duty_left_without_its_bot_can_still_b
     assert!(delete(&held.id).unwrap_err().to_string().contains(ELSEWHERE));
 }
 
+/// A stand-in for Claude Code that says it is listening and echoes its input.
+/// On Windows it has the shape npm installs: a `.cmd` starting a node script.
 /// Take it after [`rig`]: the temp home first and the stand-in second, as every other test does, or two deadlock.
 fn stand_in_claude() -> (tempfile::TempDir, crate::harness::claude::pty::TestProgram) {
     let dir = tempfile::tempdir().unwrap();
-    let program = dir.path().join("claude");
-    std::fs::write(&program, "#!/bin/sh\nprintf 'listening\\n'\nstty -icanon\nexec cat\n").unwrap();
-    {
+    #[cfg(unix)]
+    let program = {
         use std::os::unix::fs::PermissionsExt;
+        let program = dir.path().join("claude");
+        std::fs::write(&program, "#!/bin/sh\nprintf 'listening\\n'\nstty -icanon\nexec cat\n").unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+        program
+    };
+    #[cfg(windows)]
+    let program = {
+        std::fs::write(dir.path().join("claude.js"), "process.stdout.write('listening\\n');\nif (process.stdin.isTTY) process.stdin.setRawMode(true);\nprocess.stdin.on('data', (data) => process.stdout.write(data));\n").unwrap();
+        let program = dir.path().join("claude.cmd");
+        std::fs::write(&program, "@ECHO off\r\n\"%_prog%\" \"%dp0%\\claude.js\" %*\r\n").unwrap();
+        program
+    };
     let guard = crate::harness::claude::pty::claude_program_for_tests(program);
     (dir, guard)
 }
 
+/// A link to a folder: a symlink, or on Windows a junction, which needs no privilege.
+fn link_folder(target: &std::path::Path, link: &std::path::Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    crate::win::fs::junction(link, target).unwrap();
+}
+
+fn remove_folder_link(link: &std::path::Path) {
+    std::fs::remove_file(link).or_else(|_| std::fs::remove_dir(link)).unwrap();
+}
+
+/// The check's own folder as the shell prints it, in this system's form.
+const PRINT_FOLDER: &str = if cfg!(windows) { "pwd -W" } else { "pwd -P" };
+
+fn printed_folder(text: &str) -> String {
+    let text = text.trim();
+    if cfg!(windows) { text.replace('/', "\\").to_lowercase() } else { text.to_owned() }
+}
+
+#[test]
 /// H1 (PRO-471 review 1): a duty's first check, and its Try it, run in a
 /// folder of the duty's own, emptied and owner-only, never in the bot's home
 /// where the bot could leave a script; the home is only named, in a variable.
-#[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_duty_check_runs_in_its_own_folder_and_never_finds_what_the_bot_left_in_its_home() {
     // The run below prints, so it would go on to the agent: only ever the stand-in.
     let rig = rig();
@@ -594,15 +627,16 @@ fn a_duty_check_runs_in_its_own_folder_and_never_finds_what_the_bot_left_in_its_
     let folder = root.join(CHECKS_DIR).join(format!("new-{}", bot.id));
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join("left.sh"), "echo left behind\n").unwrap();
-    let probe = json!({"command": "sh check.sh 2>&1; echo \"in $(pwd -P)\"; echo \"home $TERMINALX_BOT_HOME\"; echo \"files $(ls -A | wc -l | tr -d ' ')\"; echo \"git $GIT_CEILING_DIRECTORIES\"", "timeoutSeconds": 30});
+    let probe = json!({"command": format!("sh check.sh 2>&1; echo \"in $({PRINT_FOLDER})\"; echo \"home $TERMINALX_BOT_HOME\"; echo \"files $(ls -A | wc -l | tr -d ' ')\"; echo \"git $GIT_CEILING_DIRECTORIES\""), "timeoutSeconds": 30});
     let trial = rig.bots("dutyTryCheck", json!({"id": bot.id, "precheck": probe})).unwrap();
     let out = trial["result"]["stdoutTail"].as_str().unwrap().to_owned();
     assert!(!out.contains("planted by the bot") && !out.contains("left behind"), "{out}");
-    let canonical = |path: &std::path::Path| std::fs::canonicalize(path).unwrap().to_string_lossy().into_owned();
-    assert!(out.contains(&format!("in {}", canonical(&folder))), "{out}");
-    assert!(out.contains(&format!("home {}", home.to_string_lossy())), "{out}");
+    let canonical = |path: &std::path::Path| printed_folder(&crate::paths::canonicalize(path).unwrap().to_string_lossy());
+    let compared = printed_folder(&out.replace('\n', "\u{1}")).replace('\u{1}', "\n");
+    assert!(compared.contains(&format!("in {}", canonical(&folder))), "{out}");
+    assert!(compared.contains(&printed_folder(&format!("home {}", home.to_string_lossy()))), "{out}");
     assert!(out.contains("files 0"), "{out}");
-    assert!(out.contains(&format!("git {}", folder.to_string_lossy())), "{out}");
+    assert!(compared.contains(&printed_folder(&format!("git {}", folder.to_string_lossy()))), "{out}");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -611,34 +645,29 @@ fn a_duty_check_runs_in_its_own_folder_and_never_finds_what_the_bot_left_in_its_
         }
     }
     // A run of a saved duty: in the duty's folder, which a link planted there does not redirect.
-    let duty = rig.add(&bot, Some("pwd -P"), false);
+    let duty = rig.add(&bot, Some(PRINT_FOLDER), false);
     std::fs::create_dir_all(root.join(CHECKS_DIR)).unwrap();
     let _ = std::fs::remove_dir_all(root.join(CHECKS_DIR).join(&duty.id));
-    // The link, and what is asserted of it, only where links are made (PRO-492).
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&home, root.join(CHECKS_DIR).join(&duty.id)).unwrap();
+    link_folder(&home, &root.join(CHECKS_DIR).join(&duty.id));
     run_now(&rig, &bot, &duty);
     let run = wait_run(&duty, |run| run.precheck.is_some());
-    let printed = run.precheck.as_ref().unwrap().stdout_tail.trim().to_owned();
+    let printed = printed_folder(&run.precheck.as_ref().unwrap().stdout_tail);
     assert_eq!(printed, canonical(&root.join(CHECKS_DIR).join(&duty.id)));
     #[cfg(unix)]
     assert!(home.is_dir() && home.join("check.sh").is_file(), "the link was removed, not what it pointed at");
     // Try it on a saved duty uses a folder apart: a run's check running at the same moment keeps its own.
     std::fs::write(root.join(CHECKS_DIR).join(&duty.id).join("run.marker"), "").unwrap();
-    let trial = rig.bots("dutyTryCheck", json!({"id": bot.id, "dutyId": duty.id, "precheck": {"command": "pwd -P", "timeoutSeconds": 30}})).unwrap();
-    assert_eq!(trial["result"]["stdoutTail"].as_str().unwrap().trim(), canonical(&root.join(CHECKS_DIR).join(format!("try-{}", duty.id))));
+    let trial = rig.bots("dutyTryCheck", json!({"id": bot.id, "dutyId": duty.id, "precheck": {"command": PRINT_FOLDER, "timeoutSeconds": 30}})).unwrap();
+    assert_eq!(printed_folder(trial["result"]["stdoutTail"].as_str().unwrap()), canonical(&root.join(CHECKS_DIR).join(format!("try-{}", duty.id))));
     assert!(root.join(CHECKS_DIR).join(&duty.id).join("run.marker").is_file());
     // A link or a file in place of the folder that holds them all: refused, never followed.
-    #[cfg(unix)]
-    {
-        std::fs::remove_dir_all(root.join(CHECKS_DIR)).unwrap();
-        let elsewhere = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(elsewhere.path(), root.join(CHECKS_DIR)).unwrap();
-        let refused = rig.bots("dutyTryCheck", json!({"id": bot.id, "precheck": {"command": "true", "timeoutSeconds": 5}})).unwrap_err().to_string();
-        assert!(refused.contains("is not a folder"), "{refused}");
-        assert!(std::fs::read_dir(elsewhere.path()).unwrap().next().is_none(), "nothing was made through the link");
-        std::fs::remove_file(root.join(CHECKS_DIR)).unwrap();
-    }
+    std::fs::remove_dir_all(root.join(CHECKS_DIR)).unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    link_folder(elsewhere.path(), &root.join(CHECKS_DIR));
+    let refused = rig.bots("dutyTryCheck", json!({"id": bot.id, "precheck": {"command": "true", "timeoutSeconds": 5}})).unwrap_err().to_string();
+    assert!(refused.contains("is not a folder"), "{refused}");
+    assert!(std::fs::read_dir(elsewhere.path()).unwrap().next().is_none(), "nothing was made through the link");
+    remove_folder_link(&root.join(CHECKS_DIR));
     // Not a bot's to ask: Try it needs a person, as a run does.
     assert!(crate::bots::enforce::needs_person("dutyTryCheck", &json!({})));
 }
@@ -647,6 +676,7 @@ fn a_duty_check_runs_in_its_own_folder_and_never_finds_what_the_bot_left_in_its_
 /// is ended and its agent stopped; finished runs past the newest few leave
 /// the bot's list.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_duty_never_overlaps_itself_times_out_and_archives_its_older_runs() {
     let rig = rig();
     let (_dir, _claude) = stand_in_claude();
@@ -712,6 +742,11 @@ fn a_duty_never_overlaps_itself_times_out_and_archives_its_older_runs() {
             .unwrap();
         }
     }
+    // A stand-in's launch can still report a status after its run ended: each chat is put as this test means it, then tidied.
+    for (at, session) in finished.iter().enumerate() {
+        settle(session, if at == 2 { index::TabStatus::Waiting } else { index::TabStatus::Completed });
+    }
+    tidy(&host, &duty.id);
     let archived: Vec<bool> = finished.iter().map(|id| index::get(id).unwrap().archived).collect();
     assert_eq!(archived, [false, true, false, false, false, false], "pinned, archived, waiting on a person, then the newest three");
 }
@@ -719,6 +754,7 @@ fn a_duty_never_overlaps_itself_times_out_and_archives_its_older_runs() {
 /// L6 (PRO-471 review 1): a save changes only what the duty editor owns, on
 /// the record as it is in the store.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_duty_save_keeps_what_the_editor_does_not_own() {
     let rig = rig();
     let bot = rig.hire("cto", "Atlas");
@@ -741,6 +777,7 @@ fn a_duty_save_keeps_what_the_editor_does_not_own() {
 /// L (PRO-471 review 2): when a copy of a deleted bot's duties cannot be kept
 /// in its home, they are removed all the same and the failure is said.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bots_duties_go_with_it_even_when_their_copy_cannot_be_kept() {
     let rig = rig();
     let bot = rig.hire("cto", "Atlas");
@@ -756,6 +793,7 @@ fn a_bots_duties_go_with_it_even_when_their_copy_cannot_be_kept() {
 /// PRO-492: a run past its time whose session was deleted (by hand, or with
 /// its project) still ends, once: the next tick does not time it out again.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_run_whose_session_is_gone_times_out_once() {
     let rig = rig();
     let (_dir, _claude) = stand_in_claude();
@@ -786,6 +824,7 @@ fn a_run_whose_session_is_gone_times_out_once() {
 
 /// PRO-492: a run that ends with no reply is reported as such, never taken for "nothing new".
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_run_with_no_reply_is_reported_not_dropped() {
     let mut rig = rig();
     let (_dir, _claude) = stand_in_claude();
@@ -810,6 +849,7 @@ fn a_run_with_no_reply_is_reported_not_dropped() {
 /// PRO-492: a pause that lands while a duty run's session opens sends it
 /// nothing: the run ends cancelled, and no turn runs, not even in plan mode.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_pause_while_the_session_opens_sends_nothing() {
     let rig = rig();
     let (_dir, _claude) = stand_in_claude();
@@ -843,6 +883,7 @@ fn a_pause_while_the_session_opens_sends_nothing() {
 /// held by its bot's quiet hours like any report; the window does not raise
 /// its own notice for it.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_failed_run_is_reported_within_quiet_hours() {
     let mut rig = rig();
     let bot = rig.hire("watcher", "Argus");

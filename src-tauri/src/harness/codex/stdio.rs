@@ -473,7 +473,7 @@ impl Stdio {
                 // delivered. A later duplicate sees neither state and emits nothing.
                 if queued || asking { out.push(Action::Emit(Payload::PermissionDecided { request_id: key, tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true })); }
             }
-            "error" if p["willRetry"].as_bool() == Some(true) => out.push(Action::Emit(Payload::Status { text: "Codex is retrying its request".into() })),
+            "error" if p["willRetry"].as_bool() == Some(true) => out.push(Action::Emit(Payload::Status { text: "Codex is retrying its request".into(), handoff: None })),
             "error" => out.push(Action::Emit(Payload::Error { message: p["error"]["message"].as_str().unwrap_or("Codex reported an error").to_owned(), fatal: false, detail: None })),
             _ => {},
         }

@@ -1,4 +1,5 @@
 import { EmptyView } from "@/components/start/EmptyView";
+import { thisComputer, revealInFileManager } from "@/lib/platform";
 import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, FileCode2, FolderOpen, Loader2, RefreshCw, Search } from "@/icons";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -101,7 +102,7 @@ export function SkillsView({ projectPath, initialAgent }: { projectPath: string 
         <div className="min-w-0 flex-1">
           <h1 className="text-[15px] font-semibold">Skills</h1>
           <p className="truncate text-[11px] text-faint">
-            {projectPath ? `Personal skills and ${projectPath.split("/").pop() ?? "this project"}` : "Personal skills on this Mac"}
+            {projectPath ? `Personal skills and ${projectPath.split("/").pop() ?? "this project"}` : `Personal skills on ${thisComputer}`}
           </p>
         </div>
         <span className="text-xs tabular-nums text-faint">{rows.length} found</span>
@@ -236,7 +237,7 @@ function SkillReader({ skill, onRefresh }: { skill: DiscoveredSkill | null; onRe
           </div>
           <div className="flex shrink-0 items-center gap-1">
             <Button variant="ghost" size="sm" onClick={() => void revealItemInDir(skill.dirPath).catch(() => {})}>
-              <FolderOpen /> Reveal in Finder
+              <FolderOpen /> {revealInFileManager}
             </Button>
             <Button variant="outline" size="sm" onClick={() => void openPath(skill.skillFilePath).catch(() => {})}>
               <FileCode2 /> Open in editor

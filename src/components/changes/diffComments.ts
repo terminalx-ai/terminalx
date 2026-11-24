@@ -1,4 +1,5 @@
 import { Compartment, Text, type EditorState, type Extension, type Range } from "@codemirror/state";
+import { bindingText } from "@/lib/shortcuts";
 import { Decoration, EditorView, GutterMarker, WidgetType, drawSelection, gutter, keymap } from "@codemirror/view";
 import { defaultKeymap } from "@codemirror/commands";
 import { getChunks, uncollapseUnchanged } from "@codemirror/merge";
@@ -24,7 +25,7 @@ function commentButton(side: LineCommentSide, line: number, add: (event: MouseEv
   button.className = "cm-review-add inline-block w-5 rounded select-none";
   button.dataset.line = String(line);
   button.setAttribute("aria-label", `Comment on ${side} line ${line}`);
-  button.title = "Add comment (Shift-click for a range; ⌘/Ctrl Shift M on a focused line)";
+  button.title = `Add comment (Shift-click for a range; ${bindingText("mod+shift+m")} on a focused line)`;
   button.onmousedown = (event) => event.preventDefault();
   button.onclick = (event) => { button.focus({ preventScroll: true }); add(event); };
   return button;

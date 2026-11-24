@@ -1808,6 +1808,7 @@ pub(crate) mod test_reads {
     type Queued = (super::Snapshot, Option<chrono::DateTime<chrono::Utc>>);
     static QUEUED: Mutex<BTreeMap<String, VecDeque<Queued>>> = Mutex::new(BTreeMap::new());
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn queue(automation_id: &str, snapshot: super::Snapshot) {
         queue_resuming(automation_id, snapshot, None);
     }
@@ -1821,6 +1822,7 @@ pub(crate) mod test_reads {
     static DURING: Mutex<BTreeMap<String, During>> = Mutex::new(BTreeMap::new());
 
     /// Something that happens while the next read of the automation is under way (the owner pausing its bot, say).
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn during_next_read(automation_id: &str, happen: impl FnOnce() + Send + 'static) {
         DURING.lock().unwrap_or_else(|error| error.into_inner()).insert(automation_id.to_owned(), Box::new(happen));
     }

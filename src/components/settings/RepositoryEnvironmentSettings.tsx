@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { secretStoreShort } from "@/lib/platform";
 import { EnvironmentTable } from "./EnvironmentSettings";
 import { SettingsHeaderSlotProvider } from "./settingsHeaderActions";
 import { Button } from "@/components/ui/button";
@@ -22,7 +23,7 @@ export function RepositoryEnvironmentSettings({ projectPath }: { projectPath: st
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="min-w-0 flex-1 basis-64">
         <h3 className="text-base font-semibold">Environment</h3>
-        <p className="text-xs text-muted-foreground">Variables for agents and terminals in {name}. These override your personal ones. Values that look like secrets stay in the Keychain.</p>
+        <p className="text-xs text-muted-foreground">Variables for agents and terminals in {name}. These override your personal ones. Values that look like secrets stay in {secretStoreShort}.</p>
       </div>
       <div ref={setSlot} className="flex flex-wrap justify-end gap-2 empty:hidden" />
     </div>

@@ -81,17 +81,19 @@ pub enum Refusal {
     RuntimeTerminal,
     NoTerminal,
     NotWindow,
+    OtherKey,
     UnsupportedDesktop,
 }
 
 impl Refusal {
-    fn says(self) -> &'static str {
+    pub(crate) fn says(self) -> &'static str {
         match self {
             Self::Runtime => "the runtime itself asked",
             Self::Descendant => "it was asked by a process this runtime started (an agent, or a terminal it runs)",
             Self::RuntimeTerminal => "it was asked from a terminal this runtime runs",
             Self::NoTerminal => "it was asked by a process with no terminal, on a server with no window",
             Self::NotWindow => "it was asked by a process with no terminal that is not the TerminalX window",
+            Self::OtherKey => "it proved it with a key other than the one this runtime was started with",
             Self::UnsupportedDesktop => "this desktop cannot verify its window's identity; pairing is unavailable",
         }
     }

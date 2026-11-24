@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { secretStoreShort, secretStoreWord } from "@/lib/platform";
 import { Loader2, Pencil, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { agentAccounts, SAVED_KEY_ACCOUNT, type AgentAccount, type AgentAccountAgent, type AgentAccounts, type AgentAccountRunningTab } from "@/lib/agentAccounts";
@@ -120,7 +121,7 @@ export function AgentAccountRow({ harness, agentName, account, localReadiness, l
 
   const detail = account.local
     ? [localReadiness?.state === "ready" ? localReadiness.account : null, planName(localReadiness?.plan)].filter(Boolean).join(" · ") || null
-    : account.kind === "apiKey" ? (account.id === SAVED_KEY_ACCOUNT && login?.variable ? `${login.variable} · Keychain` : "Keychain")
+    : account.kind === "apiKey" ? (account.id === SAVED_KEY_ACCOUNT && login?.variable ? `${login.variable} · ${secretStoreWord}` : secretStoreWord)
     : [account.email, planName(account.plan), account.organization].filter(Boolean).join(" · ") || null;
   const state = account.missing ? "Its folder is gone · sign in again"
     : account.local ? (localReadiness ? STATES[localReadiness.state] : "Checking…")
@@ -163,7 +164,7 @@ export function AgentAccountRow({ harness, agentName, account, localReadiness, l
     </div>
     {signIn.busy && <div className="ml-[18px]"><SignInProgress started={signIn.started} agentName={agentName} onCancel={signIn.cancel} /></div>}
     {confirming && <div role="group" aria-label={`Remove ${account.label}?`} className="ml-[18px] mt-2 rounded-md bg-muted/60 px-3 py-2.5 text-[12.5px]">
-      <p>Remove {account.label}? {subscription ? `${agentName} signs it out first, then its folder is deleted.` : "Its key is deleted from the Keychain."}</p>
+      <p>Remove {account.label}? {subscription ? `${agentName} signs it out first, then its folder is deleted.` : `Its key is deleted from ${secretStoreShort}.`}</p>
       {confirming.length > 0
         ? <>
           <p className="mt-1.5">{confirming.length === 1 ? "1 running tab uses it" : `${confirming.length} running tabs use it`} and stops working on it until restarted on another account:</p>

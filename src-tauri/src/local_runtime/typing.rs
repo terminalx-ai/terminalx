@@ -176,8 +176,11 @@ mod tests {
         let typing = Typing::default();
         let dir = tempfile::tempdir().unwrap();
         let received = dir.path().join("received");
-        // Reads nothing for its first moments, then everything.
-        raw(&terminals, &dir, "busy", &format!("sleep 3; head -c 200000 > {}; sleep 600", received.display()));
+        // Reads nothing for its first moments, then everything. Its silence
+        // is a fraction of the stall a write waits out, so delivery is held
+        // back by it but never gives up on it.
+        let silent = crate::pty::INPUT_STALL.as_secs_f64() / 4.0;
+        raw(&terminals, &dir, "busy", &format!("sleep {silent}; head -c 200000 > {}; sleep 600", received.display()));
         let paste: Vec<u8> = (0..200_000u32).map(|n| b'a' + (n % 26) as u8).collect();
         let sent = Instant::now();
         for piece in paste.chunks(40_000) {

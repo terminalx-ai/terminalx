@@ -12,6 +12,7 @@
  * workspace's link) is one more case of `followDesktopLink`.
  */
 import { invoke } from "@tauri-apps/api/core";
+import { thisComputer } from "@/lib/platform";
 import { listen } from "@tauri-apps/api/event";
 import { openBrowserTab } from "@/lib/browser";
 import { copyText } from "@/lib/clipboard";
@@ -211,7 +212,7 @@ export async function openBrowserLink(url: string): Promise<void> {
     ? store.sessions.find((candidate) => candidate.id === store.selectedSessionId && !candidate.archived && !candidate.worktreeRemoved)
     : undefined;
   if (!session) {
-    showError("Browser links open in the selected session's Browser tab. Select a session on this Mac, then open the link again", url, {
+    showError(`Browser links open in the selected session's Browser tab. Select a session on ${thisComputer}, then open the link again`, url, {
       title: "Open a session to see that page", key: "browser-link", tone: "warning", icon: "globe-lock", detail: "line", copy: false,
     });
     return;

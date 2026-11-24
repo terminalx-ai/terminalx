@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { thisComputer } from "@/lib/platform";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { dispositionFacts, gitErrorMessage, hasUnpublishedWork, RemoteGit, type DispositionFacts, type RepositoryFacts } from "@terminalx/portable/workspaceGit";
 import {
@@ -558,5 +559,5 @@ export function purgeNoticeText(notice: PurgeNotice): string {
   if (notice.unsentCommands) lost.push(`${notice.unsentCommands} agent message${notice.unsentCommands === 1 ? "" : "s"} that never reached it`);
   if (notice.unsavedFiles) lost.push(`unsaved edits in ${notice.unsavedFiles} file${notice.unsavedFiles === 1 ? "" : "s"}`);
   const tail = lost.length ? `, including ${lost.join(" and ")}` : "";
-  return `${what} was permanently deleted. TerminalX removed what this Mac kept of it${tail}.`;
+  return `${what} was permanently deleted. TerminalX removed what ${thisComputer} kept of it${tail}.`;
 }

@@ -35,6 +35,7 @@ import { LayeredConfiguration } from "./LayeredConfiguration";
 import { openStartupDiagnostics } from "@/lib/startupDiagnostics";
 import { QuickChatSettings } from "./FloatingWindowSettings";
 import { CopyAgentConfigsRow } from "./AgentConfigsDialog";
+import { SnippetManager } from "./SnippetManager";
 
 export function GeneralTab() {
   const prefs = usePrefs();
@@ -120,6 +121,9 @@ export function GeneralTab() {
       />
       <RegisteredSetting setting="general.turnChanges"
         control={<Switch aria-label="Show files changed" checked={prefs.turnChanges} onCheckedChange={(v) => setPrefs({ turnChanges: v })} />}
+      />
+      <RegisteredSetting setting="general.secondOpinionButton"
+        control={<Switch aria-label="Second opinion button" checked={prefs.secondOpinionButton} onCheckedChange={(v) => setPrefs({ secondOpinionButton: v })} />}
       />
       <RegisteredSetting setting="general.promptMap"
         control={<Switch aria-label="Prompt map" checked={prefs.promptMap} onCheckedChange={(v) => setPrefs({ promptMap: v })} />}
@@ -219,6 +223,10 @@ export function GeneralTab() {
       <RegisteredSetting setting="general.autocorrect"
         control={<Switch aria-label="Autocorrect" checked={prefs.autocorrect} onCheckedChange={(v) => setPrefs({ autocorrect: v })} />}
       />
+      <RegisteredSetting setting="general.aiEditor"
+        control={<Switch aria-label="AI Editor" checked={prefs.aiEditor} onCheckedChange={(v) => setPrefs({ aiEditor: v })} />}
+      />
+      <SnippetManager />
       <RegisteredSetting setting="general.useWorktree"
         control={<Switch checked={prefs.useWorktree} onCheckedChange={(v) => setPrefs({ useWorktree: v })} />}
       />

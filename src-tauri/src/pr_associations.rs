@@ -385,7 +385,7 @@ fn link_in<F: Fn(&str) -> bool>(path: &Path, session: &str, mut entry: Associati
     if entry.url.rsplit('/').next().and_then(|n| n.parse::<u64>().ok()) != Some(entry.number) {
         bail!("Pull request number does not match its URL");
     }
-    if !matches!(entry.scope, Scope::Local { .. }) { bail!("Only a session on this Mac can link a pull request"); }
+    if !matches!(entry.scope, Scope::Local { .. }) { bail!("{}", crate::platform_profile::localize("Only a session on this Mac can link a pull request")); }
     entry.linked = true;
     transaction(path, || {
         let mut all: Associations = crate::store::read_json(path)?.unwrap_or_default();

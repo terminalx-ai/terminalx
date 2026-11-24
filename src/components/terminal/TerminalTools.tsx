@@ -1,3 +1,4 @@
+import { isMac } from "@/lib/platform";
 import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { SearchAddon, type ISearchOptions, type ISearchResultChangeEvent } from "@xterm/addon-search";
 import type { Terminal } from "@xterm/xterm";
@@ -5,7 +6,7 @@ import { ChevronDown, ChevronUp, MessageSquarePlus, Search, X } from "@/icons";
 import { cn } from "@/lib/cn";
 import { useTheme } from "@/lib/theme";
 import { hasEscapeOverlay, useHotkey, useShortcut } from "@/lib/hotkeys";
-import { isMac } from "@/lib/shortcuts";
+import { ariaKeyShortcut, bindingText } from "@/lib/shortcuts";
 import { peekInstance } from "@/lib/terminal";
 import { TerminalChatContext } from "./TerminalChat";
 
@@ -25,10 +26,14 @@ const lightDecorations = {
  * same keys (the command palette, Pull, Copy contents), which still has them
  * everywhere else.
  */
+function terminalKey(chord: string) {
+  return { chord, label: bindingText(chord), aria: ariaKeyShortcut(chord) ?? "" };
+}
+
 export const TERMINAL_KEYS = {
-  clear: { chord: "mod+k", label: isMac ? "⌘K" : "Ctrl+K", aria: isMac ? "Meta+K" : "Control+K" },
-  addToChat: { chord: "mod+shift+l", label: isMac ? "⇧⌘L" : "Ctrl+Shift+L", aria: isMac ? "Meta+Shift+L" : "Control+Shift+L" },
-  matchCase: { chord: "mod+alt+c", label: isMac ? "⌥⌘C" : "Ctrl+Alt+C", aria: isMac ? "Alt+Meta+C" : "Control+Alt+C" },
+  clear: terminalKey("mod+k"),
+  addToChat: terminalKey("mod+shift+l"),
+  matchCase: terminalKey("mod+alt+c"),
 } as const;
 
 /** Run `action` for a terminal key only while the focus is inside `frame`; otherwise the key falls through. */
@@ -240,7 +245,7 @@ export function TerminalTools({ id, shown, frame }: { id: string; shown: boolean
         </div>
         <ul aria-label="Find keys" data-testid="terminal-find-keys" className="flex flex-wrap items-center gap-x-3 gap-y-0.5 border-t border-hairline px-1 pt-1 text-[11px] text-muted-foreground">
           <li><kbd className={kbd}>↵</kbd> next</li>
-          <li><kbd className={kbd}>⇧↵</kbd> previous</li>
+          <li><kbd className={kbd}>{isMac ? "⇧↵" : "Shift+Enter"}</kbd> previous</li>
           <li><kbd className={kbd}>{TERMINAL_KEYS.matchCase.label}</kbd> match case</li>
           <li><kbd className={kbd}>esc</kbd> closes</li>
         </ul>

@@ -143,10 +143,11 @@ try {
     await page.keyboard.press("Escape");
     await menu.waitFor({ state: "hidden" });
     await page.locator("[data-composer]:visible").first().click();
-    await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+t" : "Control+Shift+t");
+    // The page is the Mac app on any host (harness.mjs): ⇧⌘T.
+    await page.keyboard.press("Meta+Shift+t");
     const switched = await page.waitForFunction(() => window.__VIEW_REQUESTS__.includes("first:requested"), null, { timeout: 5_000 }).then(() => true, () => false);
     failed += report(`${name} shortcut`, {
-      "the menu shows ⇧⌘T for Open in terminal view": JSON.stringify(shown) === JSON.stringify(process.platform === "darwin" ? ["⇧", "⌘", "T"] : ["Ctrl", "Shift", "T"]),
+      "the menu shows ⇧⌘T for Open in terminal view": JSON.stringify(shown) === JSON.stringify(["⇧", "⌘", "T"]),
       "no shortcut lingers once the menu is closed": keys === 0,
       "pressing it asks to switch the tab to its terminal view": switched,
     }, { shown });

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { familyNow } from "@/lib/platform";
 
 /**
  * Glass mode (the desktop tinted through the window) and macOS Reduce
@@ -14,7 +15,7 @@ import { listen } from "@tauri-apps/api/event";
 export const REDUCE_TRANSPARENCY_CHANGED = "reduce_transparency_changed";
 
 /** Glass on a Mac unless Reduce transparency is on; with it on, nothing blurs (app.css). */
-export function applyReduceTransparency(root: HTMLElement, reduce: boolean, mac = navigator.platform.startsWith("Mac")) {
+export function applyReduceTransparency(root: HTMLElement, reduce: boolean, mac = familyNow() === "macos") {
   root.toggleAttribute("data-reduce-transparency", reduce);
   root.toggleAttribute("data-glass", mac && !reduce);
 }

@@ -2,6 +2,7 @@
 // Settings → Agents shows both on each agent's tab (screens 10.01, 10.02,
 // 10.14); Advanced shows the executables again (09.29). One stored value,
 // `agents.executables` in settings.json, backs every row.
+import { fileManager } from "@/lib/platform";
 import { useCallback, useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ChevronDown, Code, Copy, ExternalLink, Folder, FolderOpen, Loader2, MousePointer2, RotateCcw, Zap } from "@/icons";
@@ -135,7 +136,7 @@ function ExecutableNote({ value, error }: { value: AgentExecutable | null; error
 
 /** Open in, as the settings file button has it (11.10): Finder and the three editors. */
 const OPEN_IN = [
-  { label: "Finder", icon: Folder, tone: "text-info", editor: null },
+  { label: fileManager, icon: Folder, tone: "text-info", editor: null },
   { label: "Cursor", icon: MousePointer2, tone: "text-foreground", editor: "cursor" },
   { label: "VS Code", icon: Code, tone: "text-info", editor: "vscode" },
   { label: "Zed", icon: Zap, tone: "text-accent", editor: "zed" },
@@ -153,7 +154,7 @@ export function AgentConfigFileRow({ harness, title, last }: { harness: string; 
   if (!file) return null;
   const open = (editor: "cursor" | "vscode" | "zed" | null, label?: string) => void agentConfigFiles.open(harness, editor)
     .then(() => agentConfigFiles.get(harness).then(setFile), (e: unknown) => showError(label ? `Couldn’t open ${file.displayPath} in ${label}` : `Couldn’t open ${file.displayPath}`, e));
-  const reveal = () => void agentConfigFiles.reveal(harness).catch((e: unknown) => showError(`Couldn’t show ${file.displayPath} in Finder`, e));
+  const reveal = () => void agentConfigFiles.reveal(harness).catch((e: unknown) => showError(`Couldn’t show ${file.displayPath} in ${fileManager}`, e));
   return <div className={cn(SETTING_ROW_CLASS, last && "border-b-0")} data-testid={`agent-config-${harness}`}>
     <div className="flex items-center gap-6">
       <div className="min-w-0 flex-1">

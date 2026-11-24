@@ -1,3 +1,4 @@
+import { fileManager } from "@/lib/platform";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentExecutable } from "@/lib/api";
@@ -126,7 +127,7 @@ describe("Agent settings file row (PRO-157)", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "VS Code" }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("open_agent_config_file", { harness: "claude", editor: "vscode" }));
     fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Finder" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: fileManager }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("reveal_agent_path", { harness: "claude", what: "config" }));
     fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
     fireEvent.click(await screen.findByRole("menuitem", { name: "Open in its default app" }));

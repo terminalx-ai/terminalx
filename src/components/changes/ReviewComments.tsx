@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { ariaKeyShortcut, bindingText } from "@/lib/shortcuts";
 import { Button } from "@/components/ui/button";
 import { MessageSquarePlus } from "@/icons";
 import { useAccount } from "@/lib/account";
@@ -291,7 +292,7 @@ export function ReviewDraftCard({ inline = false }: { inline?: boolean }) {
     <div className="flex items-center gap-2 px-3 pb-2.5">
       <span className="text-[11.5px] text-faint">{d.original ? "Editing · not saved" : "Draft · not saved"}</span>
       <Button className="ml-auto" type="button" size="sm" variant="outline" aria-keyshortcuts="Escape" disabled={review.busy} onClick={() => review.cancel()}>Cancel<Kbd>esc</Kbd></Button>
-      <Button type="submit" size="sm" aria-keyshortcuts="Meta+Enter" disabled={review.busy || !d.note.trim()}>Comment<Kbd>⌘↵</Kbd></Button>
+      <Button type="submit" size="sm" aria-keyshortcuts={ariaKeyShortcut("mod+enter")} disabled={review.busy || !d.note.trim()}>Comment<Kbd>{bindingText("mod+enter")}</Kbd></Button>
     </div>
     {asking && <div role="alertdialog" aria-modal="false" aria-labelledby="review-discard-title" aria-describedby="review-discard-detail"
       className="absolute right-4 top-full z-30 mt-1.5 w-[300px] max-w-[calc(100%-2rem)] rounded-lg border border-hairline bg-popover p-3.5 shadow-lg">

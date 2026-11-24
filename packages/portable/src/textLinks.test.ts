@@ -8,6 +8,16 @@ describe("chat text links", () => {
     expect(parts.map((part) => part.text).join("")).toBe(text);
     expect(parts.filter((part) => part.href).map((part) => part.href)).toEqual(["https://example.com/a_(b)", "http://localhost:4173/path?q=a%20b#L2", "http://www.example.com"]);
   });
+  it("leaves file names whose extension is also a country-code domain as text", () => {
+    const text = "Edit mcp.rs and AGENTS.md, then voice-onboarding-plan.md and backend/src/voice/elevenlabs.rs; see example.com/path too.";
+    const parts = textLinks(text);
+    expect(parts.map((part) => part.text).join("")).toBe(text);
+    expect(parts.filter((part) => part.href)).toEqual([]);
+  });
+  it("still links schemed URLs, www addresses and bare email next to file names", () => {
+    const parts = textLinks("mcp.rs at https://mcp.example/docs, www.example.com, or me@example.com");
+    expect(parts.filter((part) => part.href).map((part) => part.href)).toEqual(["https://mcp.example/docs", "http://www.example.com", "mailto:me@example.com"]);
+  });
   it("recognises email, telephone, and file URLs but leaves executable schemes inert", () => {
     const parts = textLinks("Contact me@example.com or tel:+15551234567. Read file:///tmp/report.md#L12. javascript:alert(1) data:text/html,hello");
     expect(parts.filter((part) => part.href).map((part) => part.href)).toEqual(["mailto:me@example.com", "tel:+15551234567", "file:///tmp/report.md#L12"]);

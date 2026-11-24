@@ -302,7 +302,7 @@ impl SessionManager {
             self.sink.emit("session_share_changed", &serde_json::json!({"sessionId": session, "state": share.snapshot(chrono::Utc::now().timestamp_millis(), true)}));
             share.host.clone()
         });
-        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files, hold_if_busy, mobile: None, agent: text.clone(), display: text, author, shared_connection: None };
+        let prompt = PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files, hold_if_busy, mobile: None, agent: text.clone(), display: text, author, shared_connection: None };
         // As send_pressed does, hold sharing through admission for a shared tab.
         if prompt.author.is_none() { drop(sharing); }
         self.send_admitted(admission, session, tab, prompt, images, None, crate::recovery_log::Origin::Composer)

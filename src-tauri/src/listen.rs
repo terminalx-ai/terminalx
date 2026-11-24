@@ -364,8 +364,22 @@ pub fn runs_as_now(probe: bool) -> RunsAs {
     RunsAs { user, root, passwordless_sudo: None }
 }
 
+/// Whether a failed bind means another listener holds the port. Windows
+/// answers a bind over a listener with access denied as well as "in use".
+pub(crate) fn port_taken(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::AddrInUse || (cfg!(windows) && error.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_port_is_taken_when_the_system_says_so_in_its_own_words() {
+        use std::io::{Error, ErrorKind};
+        assert!(super::port_taken(&Error::from(ErrorKind::AddrInUse)));
+        assert_eq!(super::port_taken(&Error::from(ErrorKind::PermissionDenied)), cfg!(windows));
+        assert!(!super::port_taken(&Error::from(ErrorKind::AddrNotAvailable)));
+    }
+
     use super::*;
 
     fn v4(address: &str) -> Ipv4Addr {

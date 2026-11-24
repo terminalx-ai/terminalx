@@ -14,6 +14,7 @@ pub mod chat_apps;
 #[cfg(test)]
 pub(crate) mod chat_app_test_server;
 pub mod memory;
+pub mod moving;
 pub mod chat;
 pub mod cloud;
 pub mod calendar;
@@ -151,12 +152,22 @@ impl BotAccess {
     }
 }
 
-/// Where a bot runs. Only this Mac for now; a place a newer build wrote (a
-/// cloud workspace, another machine) is kept as [`BotRunsOn::Other`].
+/// Where a bot runs (PRO-482): here, in a cloud workspace
+/// (`cloud:<org>:<workspace>`), or on a paired machine
+/// (`machine:<machine id>`). A bot that lives elsewhere keeps its record
+/// here, so the app can show it and bring it back, and does nothing here: its
+/// duties wake where it lives, and a session of it here only reads.
+///
+/// A place a newer build wrote is kept as [`BotRunsOn::Other`] and also
+/// counts as elsewhere: this build never runs a bot it cannot place.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum BotRunsOn {
     #[default]
     ThisMac,
+    /// `cloud:<org>:<workspace>`.
+    Cloud(String),
+    /// `machine:<machine id>`.
+    Machine(String),
     Other(String),
 }
 
@@ -164,13 +175,50 @@ impl BotRunsOn {
     pub fn as_str(&self) -> &str {
         match self {
             Self::ThisMac => "thisMac",
-            Self::Other(value) => value,
+            Self::Cloud(value) | Self::Machine(value) | Self::Other(value) => value,
         }
     }
 
     fn parse(value: String) -> Self {
-        if value == "thisMac" { Self::ThisMac } else { Self::Other(value) }
+        if value == "thisMac" {
+            Self::ThisMac
+        } else if cloud_place(&value) {
+            Self::Cloud(value)
+        } else if machine_place(&value) {
+            Self::Machine(value)
+        } else {
+            Self::Other(value)
+        }
     }
+
+    /// Whether the bot lives on this runtime and works here.
+    pub fn here(&self) -> bool {
+        matches!(self, Self::ThisMac)
+    }
+
+    /// How the place is named to a person, without the app's catalog at hand.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::ThisMac => "this computer",
+            Self::Cloud(_) => "a cloud workspace",
+            Self::Machine(_) => "another machine",
+            Self::Other(_) => "a place a newer TerminalX set",
+        }
+    }
+}
+
+fn place_part(part: &str) -> bool {
+    !part.is_empty() && part.len() <= 128 && part.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// `cloud:<org>:<workspace>`, each a plain id.
+fn cloud_place(value: &str) -> bool {
+    value.strip_prefix("cloud:").and_then(|rest| rest.split_once(':')).is_some_and(|(org, workspace)| place_part(org) && place_part(workspace))
+}
+
+/// `machine:<machine id>`, a plain id.
+fn machine_place(value: &str) -> bool {
+    value.strip_prefix("machine:").is_some_and(place_part)
 }
 
 macro_rules! string_serde {
@@ -706,8 +754,8 @@ pub fn update_as(sink: &dyn EventSink, id: &str, patch: BotPatch, by_person: boo
             bot.access = access.clone();
         }
         if let Some(runs_on) = &patch.runs_on {
-            refuse_unless!(!matches!(runs_on, BotRunsOn::Other(_)), "A bot runs on thisMac for now; {} is not offered.", runs_on.as_str());
-            bot.runs_on = runs_on.clone();
+            // A bot moves with its role, memory, duties and items (`moving`), never by its record alone.
+            refuse_unless!(*runs_on == bot.runs_on, "A bot moves to another place with Move in its settings, which takes its role, memory, duties and items with it; {} is not set on its own.", runs_on.as_str());
         }
         if let Some(reports_to) = &patch.reports_to {
             refuse_unless!(reports_to != id, "A bot does not report to itself.");
@@ -972,6 +1020,9 @@ pub fn call(sink: &dyn EventSink, operation: &str, params: &Value) -> Result<Val
         return answer;
     }
     if let Some(answer) = chat::call(sink, operation, params) {
+        return answer;
+    }
+    if let Some(answer) = moving::call(sink, operation, params) {
         return answer;
     }
     let string = |key: &str| params[key].as_str().ok_or_else(|| refused(format!("{key} must be a string")));

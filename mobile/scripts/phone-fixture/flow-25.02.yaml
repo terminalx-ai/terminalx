@@ -1,0 +1,82 @@
+# 25.02 Organization: several to choose from, a member's, a server without the route, and creating one.
+appId: com.terminalx.phone.fixture
+# The boards are drawn in Ember when dark and in Den when light: MAESTRO_THEME=Den for the light run.
+env:
+  THEME: ${MAESTRO_THEME || "Ember"}
+name: Organization (25.02)
+# The steps are asserted by their rows: a step's button is there only when its page is in the app
+# (compute, agent logins and launching are PRO-528, PRO-529 and PRO-530).
+---
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureSetup: several }
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+- tapOn: "${THEME} theme"
+- tapOn: "Cloud"
+- tapOn: "Start setup"
+- assertVisible: "Choose the organization to set up."
+- tapOn: "Northwind"
+- assertVisible: "Continue with Northwind"
+- waitForAnimationToEnd
+- takeScreenshot: 25.02-2-an-account-with-several
+- tapOn: "Create an organization"
+- assertVisible: "Create organization"
+- waitForAnimationToEnd
+- takeScreenshot: 25.02-4-create-empty
+- inputText: "N"
+- assertVisible: "Use 2 to 60 characters."
+- takeScreenshot: 25.02-7-name-too-short
+- inputText: "orthwind Labs"
+- takeScreenshot: 25.02-5-create-named
+- tapOn: "Create organization"
+- assertVisible: "Step 2 of 4, next: Connect compute.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.02-9-created-back-on-the-steps
+# A member's organization, chosen: who can connect compute, and their own steps under it.
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureSetup: member }
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+- tapOn: "${THEME} theme"
+- tapOn: "Cloud"
+- tapOn: "Start setup"
+- tapOn: "Northwind"
+- tapOn: "Continue with Northwind"
+- assertVisible: "Northwind has no compute yet"
+- takeScreenshot: 25.01-6-a-member-not-an-admin
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureSetup: no-route }
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+- tapOn: "${THEME} theme"
+- tapOn: "Cloud"
+- tapOn: "Start setup"
+- assertVisible: "To create an organization for a team.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.02-3-a-server-without-the-route
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureSetup: first-run, fixtureCreate: slow }
+- tapOn: "Cloud"
+- tapOn: "Start setup"
+- tapOn: "Create an organization"
+- inputText: "Northwind"
+- tapOn: "Create organization"
+- assertVisible: "Creating…"
+- takeScreenshot: 25.02-6-creating
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureSetup: first-run, fixtureCreate: fail }
+- tapOn: "Cloud"
+- tapOn: "Start setup"
+- tapOn: "Create an organization"
+- inputText: "Northwind"
+- tapOn: "Create organization"
+- assertVisible: "The organization was not created. Check your connection and try again."
+- takeScreenshot: 25.02-8-could-not-be-created

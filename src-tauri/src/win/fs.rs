@@ -96,6 +96,43 @@ pub(crate) fn open_private(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// `ERROR_STOPPED_ON_SYMLINK`: what [`open_read_refusing_links`] answers for a link.
+pub(crate) const LINK_REFUSED: i32 = 681;
+
+/// Open `path` for reading unless it is itself a link or other reparse point,
+/// what `O_NOFOLLOW` does on Unix. A folder opens, for the caller to refuse.
+pub(crate) fn open_read_refusing_links(path: &Path) -> io::Result<File> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS};
+    let name = wide_path(path);
+    // SAFETY: `name` is NUL-terminated; the handle is owned by the File.
+    let handle = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            FILE_GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a fresh handle nobody else owns.
+    let file = unsafe { File::from_raw_handle(handle as RawHandle) };
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle is live for the call.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::from_raw_os_error(LINK_REFUSED));
+    }
+    Ok(file)
+}
+
 /// `path` itself, even when it is a link: the link is then what is opened.
 fn open_no_follow(path: &Path, access: u32) -> io::Result<File> {
     let name = wide_path(path);

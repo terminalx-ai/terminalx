@@ -5,6 +5,8 @@
  * would otherwise be an Enter in a program that has no bracketed paste.
  */
 
+import { isWindows } from "@/lib/platform";
+
 /** Characters a shell reads as themselves. Everything above ASCII is left alone too. */
 const SAFE = /[A-Za-z0-9_\-.,/:@+=%]/;
 const NAMED: Record<string, string> = { "\n": "\\n", "\r": "\\r", "\t": "\\t" };
@@ -57,8 +59,7 @@ export function cmdQuotePath(path: string): string | null {
 /** Which shell's quoting dropped paths get: the shell the terminals run. */
 export type QuoteStyle = "posix" | "powershell" | "cmd";
 
-export const defaultQuoteStyle: QuoteStyle =
-  typeof navigator !== "undefined" && /^Win/.test(navigator.platform) ? "powershell" : "posix";
+export const defaultQuoteStyle: QuoteStyle = isWindows ? "powershell" : "posix";
 
 /**
  * The text typed for dropped files: each path quoted, a space after each, no

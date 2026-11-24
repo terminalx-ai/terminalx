@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bot } from "@/types/bots";
 import type { BotItem, BotItemList, NeedsYou } from "@/types/botItems";
+import type { Handoff, HandoffList } from "@/types/botHandoffs";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -84,6 +85,8 @@ const future = item(7, { title: "From a newer build", state: "blocked" });
 
 let list: BotItemList;
 let needs: NeedsYou;
+/** Atlas's hand-offs, as the item's page reads them (PRO-540). */
+let handoffs: HandoffList | Error;
 
 function route(command: string, args: Record<string, unknown> = {}) {
   switch (command) {
@@ -104,6 +107,8 @@ function route(command: string, args: Record<string, unknown> = {}) {
     case "bot_item_resend":
     case "bot_item_reopen":
       return Promise.resolve({ item: { ...asking, state: "inProgress", question: undefined }, delivery: { sent: true, sessionId: "home" } });
+    case "bot_handoffs":
+      return handoffs instanceof Error ? Promise.reject(handoffs) : Promise.resolve(handoffs);
     case "bot_suggestions":
       return Promise.resolve({ suggestions: [], unreadable: 0, status: { lookAround: null, tidyMemory: null, paused: false, readOnly: false } });
     default:
@@ -115,6 +120,7 @@ beforeEach(async () => {
   items.resetBotItemsForTests();
   mocks.listeners.clear();
   mocks.sessions = [];
+  handoffs = { revision: 1, handoffs: [], waitingMessages: 0, unreadable: 0 };
   list = { botId: "b1", revision: 3, items: [asking, working, waiting, planned, doneToday, asleep, future], unreadable: 1 };
   needs = {
     entries: [
@@ -235,6 +241,40 @@ describe("a work item's page (PRO-469, 23.09)", () => {
     fireEvent.click(screen.getByTestId("bot-item-stop"));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_item_stop", { id: "b1", number: 12 }));
     expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({ title: "Stop item #12?", destructive: true }));
+  });
+
+  it("lists the hand-offs between bots the item belongs to among its links, and each opens the Hand-offs page at that step (PRO-540)", async () => {
+    const { getBotsPage, resetBotsPageForTests } = await import("@/lib/botsPage");
+    resetBotsPageForTests();
+    const handoff = (number: number, extra: Partial<Handoff>): Handoff => ({ number, from: "b2", to: "b1", by: "b2", title: `Hand-off ${number}`, state: "working", depth: 1, created: now, modified: now, started: now, waitingMessages: 0, ...extra });
+    handoffs = { revision: 2, waitingMessages: 0, unreadable: 0, handoffs: [
+      // Item 12 is the item made for hand-off 7, which Iris gave Atlas; the owner handed item 12 on to Iris as 9.
+      handoff(9, { from: "b1", to: "b2", by: "owner", fromItem: 12, state: "answered" }),
+      handoff(8, { item: 11 }),
+      handoff(7, { item: 12 }),
+      // Iris's own item 12 is not Atlas's.
+      handoff(6, { from: "b1", to: "b2", by: "b1", item: 12 }),
+    ] };
+    render(<BotItemPage bot={atlas} number={12} onBack={() => {}} />);
+    await screen.findByRole("heading", { name: "Phase 2: merge main" });
+    const links = within(screen.getByRole("region", { name: "Sessions and links" }));
+    const rows = await links.findAllByTestId("bot-item-handoff-link");
+    expect(rows.map((row) => row.dataset.number)).toEqual(["7", "9"]);
+    expect(rows[0].textContent).toMatch(/^Hand-off 7 · from a bot no longer hereWorking · /);
+    expect(rows[1].textContent).toBe("Hand-off 9 · to a bot no longer hereAnswered");
+    expect(links.queryByText("None yet.")).toBeNull();
+    fireEvent.click(rows[0]);
+    expect(getBotsPage()).toEqual({ page: "handoffs", number: 7 });
+    fireEvent.click(rows[1]);
+    expect(getBotsPage()).toEqual({ page: "handoffs", number: 9 });
+  });
+
+  it("says when the item's hand-offs could not be read, in place of showing none", async () => {
+    handoffs = new Error("bot-handoffs.json cannot be read");
+    render(<BotItemPage bot={atlas} number={12} onBack={() => {}} />);
+    await screen.findByRole("heading", { name: "Phase 2: merge main" });
+    expect((await screen.findByTestId("bot-item-handoffs-error")).textContent).toContain("Couldn't read this item's hand-offs:");
+    expect(screen.queryByTestId("bot-item-handoff-link")).toBeNull();
   });
 
   it("does nothing when you do not confirm the stop, and comments as you", async () => {

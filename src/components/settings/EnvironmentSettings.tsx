@@ -1,4 +1,5 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
+import { thisComputer, secretStoreShort, secretStoreWord } from "@/lib/platform";
 import { open } from "@tauri-apps/plugin-dialog";
 import { RegisteredSetting, resolveSetting } from "./settingsRegistry";
 import { RepositoryEnvironmentSettings } from "./RepositoryEnvironmentSettings";
@@ -27,10 +28,10 @@ export function EnvironmentSettings() {
   const repositoryId = useId();
   const local = environmentProjects(projects);
   return <RegisteredSetting setting="environment.variables"><div className="flex flex-col gap-5">
-    <p className="text-sm text-muted-foreground">{resolveSetting("environment.variables").description} Secrets live in the Keychain; settings files keep only their names.</p>
+    <p className="text-sm text-muted-foreground">{resolveSetting("environment.variables").description} Secrets live in {secretStoreShort}; settings files keep only their names.</p>
     <section className="flex flex-col gap-2" aria-label="Personal variables">
       <h3 className="text-sm font-medium">Personal</h3>
-      <p className="text-xs text-muted-foreground">Applied to every agent and terminal you start on this Mac. Project variables override these.</p>
+      <p className="text-xs text-muted-foreground">Applied to every agent and terminal you start on {thisComputer}. Project variables override these.</p>
       <EnvironmentTable project={null} projects={local} />
     </section>
     <TerminalXVariables />
@@ -113,7 +114,7 @@ export function EnvironmentTable({ project, projects = [], emptyText = "No varia
   };
   const changed = async (ready: boolean) => {
     // Clear all revealed values after any edit by replacing the table's rows.
-    setNotice(ready ? "Saved. Running tabs: Restart to apply. Nothing restarts automatically." : "Saved, but environment overrides are not ready for new tabs yet. Check Keychain access and the local runtime before starting a new tab. Running tabs are unchanged.");
+    setNotice(ready ? "Saved. Running tabs: Restart to apply. Nothing restarts automatically." : `Saved, but environment overrides are not ready for new tabs yet. Check ${secretStoreWord} access and the local runtime before starting a new tab. Running tabs are unchanged.`);
     window.dispatchEvent(new Event("local-environment-changed"));
     await refresh();
   };
@@ -152,7 +153,7 @@ export function EnvironmentTable({ project, projects = [], emptyText = "No varia
       {!shown.length && <p className="p-4 text-sm text-muted-foreground">{emptyText}</p>}
     </div>}
     {sheet && <Dialog open onOpenChange={(open) => { if (!open && !busy) setSheet(null); }}><DialogContent>
-      <DialogHeader><DialogTitle>{sheet.previous ? "Edit variable" : "Add variable"}</DialogTitle><DialogDescription>Applies to {where.toLowerCase()} · {secretFor(sheet) ? "kept in the Keychain" : "stored in TerminalX's settings"}</DialogDescription></DialogHeader>
+      <DialogHeader><DialogTitle>{sheet.previous ? "Edit variable" : "Add variable"}</DialogTitle><DialogDescription>Applies to {where.toLowerCase()} · {secretFor(sheet) ? `kept in ${secretStoreShort}` : "stored in TerminalX's settings"}</DialogDescription></DialogHeader>
       <form onSubmit={(e) => { e.preventDefault(); if (!busy && !nameError) saveInputs([{ name: sheet.name, value: sheet.value, secret: secretFor(sheet) }], sheet.previous, () => setSheet(null)); }}>
         <label className="mb-3 flex flex-col gap-2 text-sm">Name<input autoFocus={!sheet.name} autoComplete="off" spellCheck={false} className={`${inputClass} font-mono`} value={sheet.name} onChange={(e) => setSheet({ ...sheet, name: e.target.value })} /></label>
         <label className="flex flex-col gap-2 text-sm">Value<input autoFocus={!!sheet.name} type="password" autoComplete="new-password" spellCheck={false} className={inputClass} value={sheet.value} onChange={(e) => setSheet({ ...sheet, value: e.target.value })} /></label>
@@ -233,7 +234,7 @@ function KeychainCheckbox({ checked, disabled, onChange, className = "mt-3" }: {
   const id = useId();
   return <div className={`flex items-start gap-2.5 ${className}`}>
     <input type="checkbox" id={id} aria-describedby={`${id}-hint`} checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} className={`${checkboxClass} mt-[3px]`} />
-    <div className="min-w-0 text-[13px]"><label htmlFor={id}>Keep values that look like secrets in the Keychain</label>
+    <div className="min-w-0 text-[13px]"><label htmlFor={id}>Keep values that look like secrets in {secretStoreShort}</label>
       <p id={`${id}-hint`} className="mt-0.5 text-xs text-muted-foreground">Names with KEY, TOKEN, SECRET or PASSWORD, credential shapes and long random strings. {checked ? "Other values are stored plainly in TerminalX's settings." : "Unticked: every value is stored plainly in TerminalX's settings."}</p>
     </div>
   </div>;
@@ -271,7 +272,7 @@ function VariableRow({ row, label, project, editable, disabled, reset, run, edit
   const icon = "text-muted-foreground";
   return <tr className="h-10 border-b border-hairline last:border-0">
     <td className="px-3 py-1.5 align-middle">
-      <span className="flex min-w-0 items-center gap-1.5"><span className="truncate font-mono" title={row.name}>{row.name}</span>{own && secret && <Lock role="img" aria-label="Kept in the Keychain" className="size-3 shrink-0 text-faint" />}</span>
+      <span className="flex min-w-0 items-center gap-1.5"><span className="truncate font-mono" title={row.name}>{row.name}</span>{own && secret && <Lock role="img" aria-label={`Kept in ${secretStoreShort}`} className="size-3 shrink-0 text-faint" />}</span>
       <span aria-hidden className="block truncate text-[11px] text-muted-foreground @xl:hidden">{label}{row.overridden && " · Overridden"}</span>
     </td>
     <td className={`truncate px-3 py-1.5 align-middle ${own ? "font-mono" : "text-muted-foreground"}`} title={own && !secret ? row.value : undefined}>{shown}</td>

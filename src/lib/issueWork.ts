@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { thisComputer } from "@/lib/platform";
 import { workStatus, type Issue, type WorkClaim, type WorkClaimsAnswer } from "@/lib/api";
 import { sessionStatus, type IssueLinkSource, type IssueRef, type SessionEntry } from "@/types/session";
 import { getAccount, subscribeAccount, useAccount } from "@/lib/account";
@@ -139,7 +140,7 @@ export function localWorkers(sessions: SessionEntry[], issue: Pick<IssueRef, "pr
         place: "this" as const,
         you: true,
         person: "You",
-        machine: "this Mac",
+        machine: thisComputer,
         cloud: false,
         title: session.title,
         branch: session.branch ?? null,
@@ -414,7 +415,7 @@ export function at(time: number, now = Date.now()): string {
 
 /** Where, for the reader: "this Mac", "Studio", "the cloud"; nothing of a teammate's machine. */
 function where(worker: IssueWorker): string | null {
-  if (worker.place === "this") return "this Mac";
+  if (worker.place === "this") return thisComputer;
   if (worker.place === "machine") return worker.machine;
   if (worker.place === "cloud" || worker.cloud) return "the cloud";
   return null;
@@ -423,7 +424,7 @@ function where(worker: IssueWorker): string | null {
 /** The chip: "You · this Mac", "You · on Studio", "Alice · working", or a faded "Alice · 2 hours ago". */
 export function workerLabel(worker: IssueWorker, now = Date.now()): string {
   if (worker.phase === "faded" && worker.place !== "this") return `${worker.person} · ${ago(worker.lastActive, now)}`;
-  if (worker.place === "this") return "You · this Mac";
+  if (worker.place === "this") return `You · ${thisComputer}`;
   if (worker.place === "machine") return `You · on ${worker.machine}`;
   if (worker.place === "cloud") return "You · in the cloud";
   return `${worker.person} · ${worker.cloud ? "working in the cloud" : "working"}`;
@@ -463,7 +464,7 @@ export function warningText(worker: IssueWorker, now = Date.now()): string {
 /** Why the shared status cannot be shown, or null when it can. */
 export function unavailableText(answer: WorkClaimsAnswer | null, hasCloud = false): string | null {
   if (!answer || answer.available) return null;
-  const showing = hasCloud ? "Showing this Mac and your known cloud sessions." : "Showing this Mac only.";
+  const showing = hasCloud ? `Showing ${thisComputer} and your known cloud sessions.` : `Showing ${thisComputer} only.`;
   switch (answer.reason) {
     case "signed_out":
       return `Sign in to see work on your other machines and your team’s. ${showing}`;

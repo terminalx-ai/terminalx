@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
 import { errorMessage } from "@/lib/api";
 import { useBotStore } from "@/lib/bots";
+import { handoffStateLabel, useBotHandoffs } from "@/lib/botHandoffs";
+import { showBotsHandoffs } from "@/lib/botsPage";
 import { commentDraftKey, commentOnBotItem, reopenBotItem, resendBotItem, stopBotItem, useBotItem, useBotItemDraft } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
 import { confirmInApp } from "@/lib/confirm";
@@ -11,6 +13,7 @@ import { conversationTitle, selectSession, useSessionStore } from "@/lib/session
 import { relativeTime } from "@/lib/time";
 import { effectiveAccess, type Bot } from "@/types/bots";
 import type { BotItem, BotItemActivity, BotItemLink } from "@/types/botItems";
+import type { Handoff } from "@/types/botHandoffs";
 import type { SessionEntry } from "@/types/session";
 import { StateIcon } from "./BotHome";
 import { ItemQuestionCard } from "./NeedsYou";
@@ -64,6 +67,9 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
   // "Hand to another bot" (PRO-475).
   const [handing, setHanding] = useState(false);
   const [handed, setHanded] = useState<number | null>(null);
+  // The hand-offs this item belongs to (PRO-540): the one that made it, and the ones it was handed on by.
+  const handoffs = useBotHandoffs(bot.id);
+  const itemHandoffs = (handoffs.list?.handoffs ?? []).filter((handoff) => (handoff.to === bot.id && handoff.item === number) || (handoff.from === bot.id && handoff.fromItem === number)).sort((a, b) => a.number - b.number);
 
   if (!item) {
     return (
@@ -205,10 +211,13 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
             {!closed && checkBackText(item.checkBack) && <Fact label="Checks back">{checkBackText(item.checkBack)}</Fact>}
           </Panel>
           <Panel label="Sessions and links">
-            {otherLinks.length === 0 && runs.length === 0 ? (
+            {/* A failed read of the hand-offs is said: an item with none looks the same as one whose hand-offs were not read. */}
+            {handoffs.error && <p role="alert" className="text-[12.5px] text-destructive" data-testid="bot-item-handoffs-error">Couldn't read this item's hand-offs: {handoffs.error}</p>}
+            {otherLinks.length === 0 && runs.length === 0 && itemHandoffs.length === 0 ? (
               <p className="text-[12.5px] text-faint">None yet.</p>
             ) : (
               <ul className="flex flex-col divide-y divide-hairline">
+                {itemHandoffs.map((handoff) => <HandoffLinkRow key={handoff.number} handoff={handoff} bot={bot} bots={bots} />)}
                 <RunLinks runs={runs} />
                 {otherLinks.map((link) => <LinkRow key={`${link.kind}:${link.target}`} link={link} session={store.sessions.find((session) => session.id === link.target) ?? null} />)}
               </ul>
@@ -299,6 +308,29 @@ function LinkRow({ link, session }: { link: BotItemLink; session: SessionEntry |
       ) : (
         <div className="flex min-w-0 items-start gap-2">{content}</div>
       )}
+    </li>
+  );
+}
+
+/**
+ * A hand-off between bots that this item belongs to, among its links (PRO-540, 23.16's third way in): which hand-off,
+ * the other bot, and where it stands. It opens the Hand-offs page at that step.
+ */
+function HandoffLinkRow({ handoff, bot, bots }: { handoff: Handoff; bot: Bot; bots: Bot[] }) {
+  const given = handoff.to === bot.id;
+  const name = (id: string) => bots.find((other) => other.id === id)?.name ?? "a bot no longer here";
+  const to = bots.find((other) => other.id === handoff.to);
+  const title = `Hand-off ${handoff.number} · ${given ? (handoff.by === "owner" ? `you handed it on from ${name(handoff.from)}` : `from ${name(handoff.from)}`) : `to ${name(handoff.to)}`}`;
+  const sub = handoffStateLabel(handoff, name(handoff.to), Date.now(), !!to?.paused);
+  return (
+    <li className="py-1.5">
+      <button type="button" onClick={() => showBotsHandoffs(handoff.number)} aria-label={`Open hand-off ${handoff.number} in its thread`} className="flex w-full min-w-0 items-start gap-2 rounded-md text-left hover:bg-veil" data-testid="bot-item-handoff-link" data-number={handoff.number}>
+        <ArrowLeftRight className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[12.5px] text-foreground" title={title}>{title}</span>
+          <span className="block truncate text-[11.5px] text-faint" title={sub}>{sub}</span>
+        </span>
+      </button>
     </li>
   );
 }

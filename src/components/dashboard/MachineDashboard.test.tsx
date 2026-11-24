@@ -117,7 +117,7 @@ it("adds a Where column after Project: This Mac, the machine's name, or Cloud", 
   const headers = table.getAllByRole("columnheader").map((header) => header.textContent);
   expect(headers.slice(0, 3)).toEqual(["Session", "Project", "Where"]);
   const where = (name: string) => within(screen.getByRole("row", { name: new RegExp(name) })).getAllByRole("cell")[2];
-  expect(where("Notarize").textContent).toBe("This Mac");
+  expect(where("Notarize").textContent).toBe("This computer");
   expect(where("Bisect").textContent).toBe("Mac mini");
   expect(where("Bisect").querySelector('[data-icon="monitor"]')).not.toBeNull();
   expect(where("Nightly").textContent).toBe("dev-server");
@@ -135,8 +135,8 @@ it("filters by machine from the All machines menu, with a count for each", async
   openMenu(/All machines/);
   const menu = within(await screen.findByRole("menu"));
   const count = (name: string) => menu.getByRole("menuitem", { name: new RegExp(name) }).getAttribute("data-place-count");
-  expect(menu.getAllByRole("menuitem").map((item) => item.textContent?.replace(/\d+$/, ""))).toEqual(["All machines", "This Mac", "Mac mini", "dev-server", "Cloud"]);
-  expect([count("All machines"), count("This Mac"), count("Mac mini"), count("dev-server"), count("Cloud")]).toEqual(["5", "1", "2", "1", "1"]);
+  expect(menu.getAllByRole("menuitem").map((item) => item.textContent?.replace(/\d+$/, ""))).toEqual(["All machines", "This computer", "Mac mini", "dev-server", "Cloud"]);
+  expect([count("All machines"), count("This computer"), count("Mac mini"), count("dev-server"), count("Cloud")]).toEqual(["5", "1", "2", "1", "1"]);
   // Each machine shows its connection state.
   expect(menu.getByRole("menuitem", { name: /Mac mini/ }).querySelector('[data-testid="machine-state-mark"]')?.getAttribute("data-tone")).toBe("connected");
 

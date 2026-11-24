@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { usePrefs } from "@/lib/prefs";
 import { githubAvatarUrl, useGithubIdentity } from "@/lib/githubIdentity";
-import { ariaKeyShortcut, useKeymap, type ShortcutId } from "@/lib/shortcuts";
+import { ariaKeyShortcut, useKeymap, type ShortcutId, joinKeycaps } from "@/lib/shortcuts";
 import { runShortcut, useShortcutKeycaps } from "@/lib/hotkeys";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { needsYouCount, needsYouTrouble, useNeedsYou, useNeedsYouError } from "@/lib/botItems";
@@ -148,7 +148,7 @@ function DestinationList({ active, destinations }: { active: string | null; dest
               ) : destination.dot ? (
                 <span aria-hidden className={cn("size-1.5 rounded-full", destination.dot.tone === "warning" ? "bg-warning" : "bg-info animate-pulse-soft")} />
               ) : null}
-              {keys.length > 0 && <Kbd className="text-faint">{keys.join("")}</Kbd>}
+              {keys.length > 0 && <Kbd className="text-faint">{joinKeycaps(keys)}</Kbd>}
             </span>
           </Button>
         );

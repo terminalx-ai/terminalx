@@ -1,4 +1,5 @@
 import { PrivacyImage } from "@/components/ui/privacy-image";
+import { thisComputer } from "@/lib/platform";
 import { useDataPrivacy, PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
 import { PrivacyEmptyState } from "@/components/settings/DataPrivacySettings";
 import { useEffect, useState } from "react";
@@ -459,7 +460,7 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
               <span className="flex min-w-0 flex-col">
                 <DialogTitle className="text-[14px] font-semibold text-foreground">Share session</DialogTitle>
                 <DialogDescription className="truncate text-[12px] text-faint">
-                  {sessionTitle ? `${sessionTitle} · local on this Mac` : "Local on this Mac"}
+                  {sessionTitle ? `${sessionTitle} · local on ${thisComputer}` : `Local on ${thisComputer}`}
                 </DialogDescription>
               </span>
             </DialogHeader>

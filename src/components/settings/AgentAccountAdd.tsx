@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react";
+import { ThisComputer, secretStoreShort } from "@/lib/platform";
 import { Eye, EyeOff, KeyRound, Loader2, SquareTerminal } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { agentAccounts, type AgentAccount, type AgentAccountAgent, type AgentAccounts } from "@/lib/agentAccounts";
@@ -8,8 +9,8 @@ import { SignInProgress, signInMessage, useAccountSignIn } from "./AgentAccountS
 
 /** What adding an account of each agent says, per kind. */
 const SUBSCRIPTION: Record<AgentAccountAgent, { title: string; how: string }> = {
-  claude: { title: "Claude subscription", how: "Claude Code signs in with claude.ai in your browser, into a folder of its own. This Mac's login stays as it is." },
-  codex: { title: "ChatGPT", how: "Codex signs in with ChatGPT using a code you enter in your browser, into a folder of its own. This Mac's login stays as it is." },
+  claude: { title: "Claude subscription", how: `Claude Code signs in with claude.ai in your browser, into a folder of its own. ${ThisComputer}'s login stays as it is.` },
+  codex: { title: "ChatGPT", how: `Codex signs in with ChatGPT using a code you enter in your browser, into a folder of its own. ${ThisComputer}'s login stays as it is.` },
 };
 const KEY_LABEL: Record<AgentAccountAgent, string> = { claude: "Anthropic API key", codex: "OpenAI API key" };
 const KEY_PLACEHOLDER: Record<AgentAccountAgent, string> = { claude: "sk-ant-…", codex: "sk-proj-…" };
@@ -101,7 +102,7 @@ function KeyForm({ harness, agentName, onAdded, onClose }: { harness: AgentAccou
     </div>
     <input aria-label="Label (optional)" value={label} maxLength={60} placeholder="Label, such as Work key" onChange={(e) => setLabel(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void save(); }}
       className="h-8 min-w-0 rounded-md border border-hairline bg-card px-2.5 text-[12.5px] outline-none placeholder:text-faint focus-visible:ring-2 focus-visible:ring-ring/40" />
-    <p className="text-[12px] text-faint">Kept in the Keychain as an account of its own. {agentName} gets it only in tabs started on this account.</p>
+    <p className="text-[12px] text-faint">Kept in {secretStoreShort} as an account of its own. {agentName} gets it only in tabs started on this account.</p>
     <div className="flex gap-1.5">
       <Button size="sm" variant="outline" className="whitespace-nowrap" disabled={saving || !key.trim()} onClick={() => void save()}>
         {saving ? <Loader2 className="animate-spin" /> : null} Add key

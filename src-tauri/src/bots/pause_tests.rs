@@ -71,6 +71,7 @@ fn where_a_pause_came_from_is_read_from_the_call_and_anything_else_is_the_window
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_pause_says_where_it_came_from_and_what_it_stopped_and_a_second_keeps_the_first() {
     let _home = bots_on();
     let (manager, terminals, sink) = manager();
@@ -95,11 +96,12 @@ fn a_pause_says_where_it_came_from_and_what_it_stopped_and_a_second_keeps_the_fi
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_paused_bots_run_worker_finishes_the_step_it_is_on_and_takes_plan_mode_after_it() {
     let _home = bots_on();
     let (manager, terminals, sink) = manager();
     let atlas = chat::hire(sink.as_ref(), "cto", "Atlas").unwrap();
-    let worker = chat::new_chat(sink.as_ref(), &atlas.id).unwrap();
+    let worker = chat::new_chat(sink.as_ref(), &atlas.id, None).unwrap();
     mark_run_worker(&worker);
     let worker = index::get(&worker.id).unwrap();
     let pane = in_a_turn(&manager, &terminals, &sink, &worker);
@@ -126,6 +128,7 @@ fn a_paused_bots_run_worker_finishes_the_step_it_is_on_and_takes_plan_mode_after
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_owners_answer_to_a_paused_bot_is_kept_and_listed_as_held_and_nothing_is_dropped() {
     let _home = bots_on();
     let (manager, _terminals, sink) = manager();
@@ -163,6 +166,7 @@ fn the_owners_answer_to_a_paused_bot_is_kept_and_listed_as_held_and_nothing_is_d
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bot_whose_record_cannot_be_read_holds_its_runs_and_one_not_paused_holds_none() {
     let _home = bots_on();
     let (_manager, _terminals, sink) = manager();

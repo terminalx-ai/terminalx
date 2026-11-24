@@ -1,3 +1,4 @@
+import { revealInFileManager } from "@/lib/platform";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -232,7 +233,7 @@ describe("FileTreeView", () => {
         "Open in",
         "Copy path",
         "Copy relative path",
-        "Reveal in Finder",
+        revealInFileManager,
         "Discard changes",
       ]);
       const keys = (item: HTMLElement) => item.querySelector("span[aria-hidden]")?.textContent;

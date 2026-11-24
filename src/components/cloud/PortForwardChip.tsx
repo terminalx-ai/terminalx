@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { thisComputer } from "@/lib/platform";
 import { Popover } from "radix-ui";
 import { PlugZap } from "@/icons";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -27,7 +28,7 @@ export function PortForwardChip({ follow, ...inputs }: Omit<PortsInputs, "active
     if (follow && loaded) observe(workspaceKey, forwards);
   }, [follow, loaded, forwards, workspaceKey]);
   const count = openForwardCount(forwards);
-  const label = count ? `${count} port${count === 1 ? "" : "s"} forwarded to this Mac` : "Forward ports to this Mac";
+  const label = count ? `${count} port${count === 1 ? "" : "s"} forwarded to ${thisComputer}` : `Forward ports to ${thisComputer}`;
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
       <span className={cn("flex items-center px-1", count === 0 && !open && "@max-[480px]/session-header:hidden")}>
@@ -54,7 +55,7 @@ export function PortForwardChip({ follow, ...inputs }: Omit<PortsInputs, "active
           align="end"
           sideOffset={6}
           collisionPadding={12}
-          aria-label="Forward ports to this Mac"
+          aria-label={`Forward ports to ${thisComputer}`}
           className="z-(--z-menu) w-[430px] max-w-[calc(100vw-24px)] max-h-[var(--radix-popover-content-available-height)] overflow-auto rounded-xl bg-popover text-popover-foreground shadow-surface hairline outline-none animate-fade-in"
         >
           <PortsPopover {...inputs} active={open} />

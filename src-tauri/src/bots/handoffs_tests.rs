@@ -111,6 +111,7 @@ fn refusal_text(error: anyhow::Error) -> String {
 
 /// Labels say who sent it and what it is, and that it is no approval.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn labels_name_the_sender_and_say_it_is_no_approval() {
     let _home = bots_on();
     let sink = BroadcastSink::new(64);
@@ -128,4 +129,36 @@ fn labels_name_the_sender_and_say_it_is_no_approval() {
     assert!(on_line(&sentry, &atlas) && on_line(&atlas, &sentry));
     let iris = crate::bots::create(&sink, "ux-designer", "Iris").unwrap();
     assert!(!on_line(&atlas, &iris) && !on_line(&sentry, &iris));
+}
+
+/// PRO-540: the listing says how many of the records this build cannot read are hand-offs and how many are
+/// messages, beside the total it always gave, and carries the bounds `depth` and `attempt` are counted against. A
+/// hand-off saved before `parent` was recorded reads with none, and a save writes none into it.
+#[test]
+fn the_listing_splits_what_cannot_be_read_and_an_older_record_has_no_parent() {
+    let _home = bots_on();
+    let sink = BroadcastSink::new(64);
+    let mut child = record(2, "b", "c", "working", "b");
+    child["parent"] = json!(1);
+    child["depth"] = json!(2);
+    let sent = json!({"id": "m1", "at": "2026-11-21T10:00:00Z", "from": "a", "to": "b", "kind": "tell", "text": "x", "pending": false});
+    let file = json!({"handoffs": [record(1, "a", "b", "working", "a"), child, {"number": "not a number"}, {"number": -4}], "messages": [sent, {"id": 7}]});
+    std::fs::write(path().unwrap(), serde_json::to_vec(&file).unwrap()).unwrap();
+
+    let store = read().unwrap();
+    assert_eq!((store.unreadable, store.unreadable_handoffs), (3, 2));
+    assert_eq!((store.handoffs[0].parent, store.handoffs[1].parent), (None, Some(1)));
+
+    let listed = listing(None).unwrap();
+    assert_eq!((listed["unreadable"].clone(), listed["unreadableHandoffs"].clone(), listed["unreadableMessages"].clone()), (json!(3), json!(2), json!(1)));
+    assert_eq!((listed["maxDepth"].clone(), listed["maxRetries"].clone()), (json!(MAX_DEPTH), json!(MAX_RETRIES)));
+    // Newest first.
+    assert_eq!((listed["handoffs"][0]["number"].clone(), listed["handoffs"][0]["parent"].clone()), (json!(2), json!(1)));
+    assert!(listed["handoffs"][1].get("parent").is_none(), "an older record is given no parent: {}", listed["handoffs"][1]);
+
+    change(Some(&sink), BOT_WRITE_BYTES, |_| Ok(())).unwrap();
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(path().unwrap()).unwrap()).unwrap();
+    assert!(saved["handoffs"][0].get("parent").is_none(), "{}", saved["handoffs"][0]);
+    assert_eq!(saved["handoffs"][1]["parent"], json!(1));
+    assert_eq!(saved["handoffs"].as_array().unwrap().len(), 4, "what cannot be read is kept");
 }

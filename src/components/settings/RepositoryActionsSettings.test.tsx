@@ -43,7 +43,7 @@ describe("repository action editor", () => {
     expect(dialog.queryByText(/can run in/i)).toBeNull();
     expect(dialog.getByText("Starts once a new workspace finishes its setup script.")).toBeTruthy();
     expect(dialog.getByText("Off stops the running one before starting again.")).toBeTruthy();
-    expect(dialog.getByText(/⌘↵ saves/)).toBeTruthy();
+    expect(dialog.getByText(/Ctrl\+⏎ saves/)).toBeTruthy();
     // PRO-388: the icon tile left of the name opens the picker.
     fireEvent.click(dialog.getByRole("button", { name: /Change icon/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Rocket" }));

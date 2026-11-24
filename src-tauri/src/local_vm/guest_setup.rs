@@ -31,6 +31,12 @@ const MAX_OUTPUT: usize = 32 * 1024 * 1024;
 // receives literal argv, never interpolated guest/host data. Its watcher kills
 // only this helper group if the guest owner crashes. LaunchServices' Driver
 // app is outside this group and is never killed by this component.
+// Once the helper has ended, the shell's own stderr goes to /dev/null before
+// the watcher is killed. bash (macOS /bin/sh) reports a background job killed
+// by a signal ("line 8: 123 Terminated: 15 ( IFS= read …") at the next command
+// boundary: when the watcher dies before `wait` starts, that notice is not
+// under any one command's redirection and lands in the helper's stderr, which
+// callers compare byte for byte (the driver's "not running" answer).
 const WATCHDOG: &str = r#"exec 4<&0
 "$@" <&4 3<&- 4<&- &
 cli=$!
@@ -39,8 +45,9 @@ exec 4<&-
 watch=$!
 wait "$cli"
 result=$?
-kill "$watch" 2>/dev/null
-wait "$watch" 2>/dev/null
+exec 2>/dev/null
+kill "$watch"
+wait "$watch"
 exit "$result""#;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]

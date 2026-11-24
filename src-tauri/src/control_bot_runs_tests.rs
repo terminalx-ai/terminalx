@@ -122,6 +122,7 @@ fn woken() -> Vec<(String, String)> {
 /// Done when: from one message, a lead bot plans a run, asks for approval with a recommended answer, starts it on
 /// approval, and closes the item only when its done means lines are met.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_lead_bot_plans_a_run_asks_once_and_starts_it_only_on_its_owners_approval() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -176,6 +177,7 @@ fn a_lead_bot_plans_a_run_asks_once_and_starts_it_only_on_its_owners_approval() 
 /// "Start, but ask before merging" starts the run and holds the bot's merge until the owner says Merge; "Not now"
 /// starts nothing.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn start_but_ask_before_merging_holds_the_bots_merge_until_its_owner_says_merge() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -246,6 +248,7 @@ fn start_but_ask_before_merging_holds_the_bots_merge_until_its_owner_says_merge(
 /// "Approve and start" there would settle it, and the lead goes on steering the run with `runs start`. Before any
 /// start, and after "Not now", the run stays held for the lead and for a process no session places.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_run_its_owner_starts_from_the_run_view_settles_the_item_and_the_lead_steers_it_on() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -311,6 +314,7 @@ fn a_run_its_owner_starts_from_the_run_view_settles_the_item_and_the_lead_steers
 /// PRO-506: an item's own answer starts the run through the engine, and the engine's start does not settle the item
 /// as a Run view's start would. "Start, but ask before merging" keeps its merge hold and records its answer.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn start_but_ask_before_merging_answered_on_the_item_keeps_its_hold_through_the_real_start() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -337,6 +341,7 @@ fn start_but_ask_before_merging_answered_on_the_item_keeps_its_hold_through_the_
 /// PRO-506: "Approve and start" answered on the item, through the engine's real approve, records that answer once and
 /// not a Run view's start.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn approve_and_start_answered_on_the_item_records_the_answer_through_the_real_start() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -360,6 +365,7 @@ fn approve_and_start_answered_on_the_item_records_the_answer_through_the_real_st
 
 /// PRO-506: a Run view start settles only the items still open; a dropped one that links the run is left as it closed.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_run_view_start_leaves_a_closed_item_that_links_the_run_unchanged() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -387,6 +393,7 @@ fn a_run_view_start_leaves_a_closed_item_that_links_the_run_unchanged() {
 /// The switches and the bot's own rules hold: Orchestrator runs off, a run its bot does not lead, a run that started,
 /// a paused bot.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bot_asks_only_about_its_own_unstarted_run_with_both_switches_on() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -434,6 +441,7 @@ fn a_bot_asks_only_about_its_own_unstarted_run_with_both_switches_on() {
 /// A bot checks back at the time it set, or when a run its item links reports, and spends nothing meanwhile: the
 /// app wakes the chat, once, with TerminalX's note; a paused bot waits; a chat that cannot be reached is tried again.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bot_is_woken_to_check_back_at_its_time_or_when_its_run_reports() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -495,6 +503,7 @@ fn a_bot_is_woken_to_check_back_at_its_time_or_when_its_run_reports() {
 
 /// The item links its run and the run's workers, and its spend counts what they cost once.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn an_items_run_shows_each_hand_off_to_a_worker_with_its_cost_and_report() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -524,6 +533,7 @@ fn an_items_run_shows_each_hand_off_to_a_worker_with_its_cost_and_report() {
 /// A run's workers are sessions its lead started: they act for the lead's bot, so its access and its pause hold them,
 /// and as workers they create and steer no run.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_workers_of_a_bots_run_act_for_the_bot() {
     let _home = crate::store::temp_home();
     let _switches = Switches;

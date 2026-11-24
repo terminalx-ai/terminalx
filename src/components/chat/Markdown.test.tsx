@@ -73,6 +73,13 @@ describe("rendered chat links", () => {
     expect(document.querySelector("pre code")?.textContent).toBe('const url = "https://example.test/code?q=1#part";');
   });
 
+  it("leaves file names in inline and fenced code as text, not web links", async () => {
+    render(<Markdown text={"Edit `mcp.rs` and `AGENTS.md`.\n\n```\nsupervision.rs  92 KB\n```"} linkContext={context} />);
+    expect(await screen.findByText("mcp.rs")).toBeDefined();
+    expect(screen.getByText("AGENTS.md")).toBeDefined();
+    expect(screen.queryAllByRole("link")).toEqual([]);
+  });
+
   it("opens and copies links on cloud transcripts that have no local workspace", async () => {
     setPrefs({ linkBrowser: "terminalx" });
     render(<Markdown text="[Docs](https://example.test/cloud)" />);

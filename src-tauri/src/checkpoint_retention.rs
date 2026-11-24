@@ -246,6 +246,7 @@ mod tests {
         assert!(run_ok(cwd, &["show-ref", "--verify", &format!("{current}/start")]));
     }
 
+    #[cfg_attr(windows, ignore = "Windows does not allow a file name that ends in a space")]
     #[test]
     fn the_ledger_lives_in_a_git_dir_whose_name_ends_in_a_space() {
         let dir = tempfile::tempdir().unwrap();

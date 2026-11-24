@@ -602,6 +602,7 @@ mod tests {
         assert_eq!((objects(), repo.git(&["status", "--porcelain"])), (before, status));
     }
 
+    #[cfg_attr(windows, ignore = "Windows does not allow a file name that ends in a space")]
     #[test]
     fn grafts_are_found_in_a_git_dir_whose_name_ends_in_a_space() {
         let dir = tempfile::tempdir().unwrap();

@@ -15,6 +15,7 @@
     "./continuation": "./src/continuation.ts",
     "./dashboard": "./src/dashboard.ts",
     "./events": "./src/events.ts",
+    "./platformProfiles": "./src/platformProfiles.ts",
     "./textLinks": "./src/textLinks.ts",
     "./repositoryIdentity": "./src/repositoryIdentity.ts",
     "./recovery": "./src/recovery.ts",

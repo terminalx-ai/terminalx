@@ -1230,7 +1230,7 @@ describe("who is working on an issue (#441)", () => {
     fireEvent.click(await row("Repair session target"));
     await screen.findByText("Second issue body.");
     fireEvent.click(screen.getByRole("button", { name: "Start session" }));
-    expect((await screen.findByTestId("taken-issue-warning")).textContent).toMatch(/^You have been working on this on this Mac since .+, on branch raccoon\/12-repair\.$/);
+    expect((await screen.findByTestId("taken-issue-warning")).textContent).toMatch(/^You have been working on this on this computer since .+, on branch raccoon\/12-repair\.$/);
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByTestId("taken-issue-warning")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "Start session" }));
@@ -1318,7 +1318,7 @@ describe("who is working on an issue (#441)", () => {
     claims = { available: false, reason: "signed_out", now: NOW, liveForSeconds: 300, claims: [] };
     (sessionStore as { sessions: unknown[] }).sessions = [localSession()];
     render(<IssuesView />);
-    expect(await within(await row("Repair session target")).findByText("You · this Mac")).toBeTruthy();
+    expect(await within(await row("Repair session target")).findByText("You · this computer")).toBeTruthy();
     expect((await screen.findByTestId("issues-work-note")).textContent).toMatch(/^Sign in to see work on your other machines/);
   });
 
@@ -1327,7 +1327,7 @@ describe("who is working on an issue (#441)", () => {
     claims = { available: false, reason: "unsupported", now: NOW, liveForSeconds: 300, claims: [] };
     (sessionStore as { sessions: unknown[] }).sessions = [localSession()];
     render(<IssuesView />);
-    expect(await within(await row("Repair session target")).findByText("You · this Mac")).toBeTruthy();
+    expect(await within(await row("Repair session target")).findByText("You · this computer")).toBeTruthy();
     expect((await screen.findByTestId("issues-work-note")).textContent).toContain("your account service has not reported support for it");
     const first = await row("Fix login timeout");
     fireEvent.click(first);

@@ -247,8 +247,8 @@ describe("QuickOpen", () => {
     openQuickOpen();
     fireEvent.change(await input(), { target: { value: "zqx" } });
     await screen.findByText(/No files match/);
-    expect(await screen.findByText(/Only the first 250,000 files were searched; the rest of this worktree was not\./)).toBeTruthy();
-    expect(screen.getByText("Over 250,000 files in this worktree")).toBeTruthy();
+    expect(await screen.findByText(new RegExp(`Only the first ${(250_000).toLocaleString()} files were searched; the rest of this worktree was not\.`))).toBeTruthy();
+    expect(screen.getByText(`Over ${(250_000).toLocaleString()} files in this worktree`)).toBeTruthy();
   });
 
   it("starts each opening without ignored files", async () => {

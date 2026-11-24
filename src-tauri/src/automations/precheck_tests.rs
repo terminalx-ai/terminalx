@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use std::collections::BTreeMap;
 use crate::automations::{evaluate, AutomationTrigger};
 use crate::sink::EventSink;
@@ -9,13 +10,19 @@ fn run(command: &str, seconds: u64) -> PrecheckTrial {
 }
 
 /// Whether `pid` is gone, waiting a moment for the kill to land.
-#[cfg(unix)]
 fn gone(pid: &str) -> bool {
+    #[cfg(unix)]
     let pid: libc::pid_t = pid.trim().parse().unwrap();
+    #[cfg(windows)]
+    let pid: u32 = pid.trim().parse().unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         // SAFETY: signal 0 only asks whether the process exists.
-        if unsafe { libc::kill(pid, 0) } == -1 {
+        #[cfg(unix)]
+        let ended = unsafe { libc::kill(pid, 0) } == -1;
+        #[cfg(windows)]
+        let ended = !crate::win::process::is_running(pid);
+        if ended {
             return true;
         }
         if Instant::now() >= deadline {
@@ -64,22 +71,67 @@ fn a_hanging_check_times_out_and_fails() {
     assert!(trial.reason.unwrap().contains("did not finish within 1 seconds"));
 }
 
-#[cfg(unix)]
+/// Prints the id of the background process just started, as this system names it.
+const BACKGROUND_ID: &str = if cfg!(windows) { "cat /proc/$!/winpid" } else { "echo $!" };
+
 #[test]
 fn a_background_process_ends_with_the_check() {
     let started = Instant::now();
-    let trial = run("sleep 30 & echo $!", 10);
+    let trial = run(&format!("sleep 30 & {BACKGROUND_ID}"), 10);
     assert!(started.elapsed() < Duration::from_secs(10));
     assert_eq!(trial.outcome, PrecheckOutcome::Proceed);
     assert!(gone(&trial.result.stdout_tail));
 }
 
-#[cfg(unix)]
 #[test]
 fn a_background_process_ends_with_a_timed_out_check() {
-    let trial = run("sleep 30 & echo $!; sleep 30", 1);
+    let trial = run(&format!("sleep 30 & {BACKGROUND_ID}; sleep 30"), 1);
     assert!(trial.result.timed_out);
     assert!(gone(&trial.result.stdout_tail));
+}
+
+#[test]
+fn a_process_that_outlives_the_one_that_started_it_ends_with_the_check() {
+    // A subshell starts the process at once and exits: nothing the check
+    // itself started is its parent any more, whether the check ends or hangs.
+    for _ in 0..5 {
+        let trial = run(&format!("(sleep 30 & {BACKGROUND_ID})"), 10);
+        assert_eq!(trial.outcome, PrecheckOutcome::Proceed);
+        assert!(gone(&trial.result.stdout_tail), "{}", trial.result.stdout_tail);
+    }
+    let trial = run(&format!("(sleep 30 & {BACKGROUND_ID}); sleep 30"), 1);
+    assert!(trial.result.timed_out);
+    assert!(gone(&trial.result.stdout_tail), "{}", trial.result.stdout_tail);
+}
+
+/// The check's shell is in its job, with what it started, while it runs.
+#[cfg(windows)]
+#[test]
+fn a_running_check_and_what_it_started_are_in_one_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().to_path_buf();
+    let check = std::thread::spawn(move || execute("cat /proc/$$/winpid > pid; sleep 30 & sleep 30", Duration::from_secs(6), &folder, &[], &[]));
+    let sleeping = |pid: u32| crate::win::process::image_path(pid).is_ok_and(|image| image.file_name().is_some_and(|name| name.eq_ignore_ascii_case("sleep.exe")));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    // Both the background process and the one the shell waits on.
+    let (shell, started) = loop {
+        let shell = std::fs::read_to_string(dir.path().join("pid")).ok().and_then(|text| text.trim().parse::<u32>().ok());
+        if let Some(shell) = shell {
+            // Git for Windows' `bin\sh.exe` is a launcher, so the job is
+            // recorded under its id and the shell is a member of it.
+            let members = crate::win::process::members_of_job_holding(shell).expect("the check's shell is in a job tied to this process");
+            let started: Vec<u32> = members.into_iter().filter(|pid| sleeping(*pid)).collect();
+            if started.len() >= 2 {
+                break (shell, started);
+            }
+        }
+        assert!(Instant::now() < deadline, "the check's job never held what it started");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(check.join().unwrap().result.timed_out);
+    assert!(gone(&shell.to_string()));
+    assert!(started.iter().all(|pid| gone(&pid.to_string())), "{started:?}");
+    assert!(crate::win::process::members_of_job_holding(shell).is_none());
 }
 
 #[test]
@@ -137,10 +189,19 @@ fn the_check_gets_a_panes_environment_in_its_folder() {
         ("PATH".to_string(), "/nowhere".to_string()),
         ("CLAUDECODE".to_string(), "1".to_string()),
     ]));
-    let precheck = AutomationPrecheck { command: "pwd -P; printf '%s|%s|%s' \"$PRECHECK_PROBE\" \"$PATH\" \"${CLAUDECODE-unset}\"".into(), timeout_seconds: 10 };
+    // Git for Windows' sh shows its PATH in its own form (/c/...), and `pwd -W` is its Windows path.
+    let command = if cfg!(windows) { "pwd -W; printf '%s|%s' \"$PRECHECK_PROBE\" \"${CLAUDECODE-unset}\"" } else { "pwd -P; printf '%s|%s|%s' \"$PRECHECK_PROBE\" \"$PATH\" \"${CLAUDECODE-unset}\"" };
+    let precheck = AutomationPrecheck { command: command.into(), timeout_seconds: 10 };
     let trial = run_in(&project.path().to_string_lossy(), AutomationWorkspace::NewWorktree, None, &precheck).unwrap();
-    let folder = std::fs::canonicalize(project.path()).unwrap();
-    assert_eq!(trial.result.stdout_tail, format!("{}\nfrom-overrides|{}|unset", folder.display(), crate::binpath::login_path()));
+    let folder = crate::paths::canonicalize(project.path()).unwrap();
+    if cfg!(windows) {
+        let printed = trial.result.stdout_tail.replace('/', "\\");
+        let (shown, rest) = printed.split_once('\n').unwrap();
+        assert!(shown.eq_ignore_ascii_case(&folder.to_string_lossy()), "{shown}");
+        assert_eq!(rest, "from-overrides|unset");
+    } else {
+        assert_eq!(trial.result.stdout_tail, format!("{}\nfrom-overrides|{}|unset", folder.display(), crate::binpath::login_path()));
+    }
 }
 
 // The run paths: Run now, the scheduler (due and missed) and issue polls.

@@ -5,8 +5,18 @@
 // allowances there.
 #![cfg_attr(not(feature = "desktop"), allow(dead_code, unused_imports))]
 
+// The window libraries need Common Controls v6, which only a manifest selects.
+// Cargo gives the app's manifest to its binaries alone, so the unit tests name it.
+#[cfg(all(test, feature = "desktop", target_env = "msvc"))]
+#[link(name = "resource", kind = "dylib")]
+unsafe extern "C" {}
+
 #[cfg(feature = "desktop")]
 mod account;
+#[cfg(feature = "desktop")]
+mod ai_edit;
+#[cfg(feature = "desktop")]
+mod composer_drafts;
 mod agent_accounts;
 mod agent_configs;
 mod agent_data;
@@ -28,6 +38,7 @@ mod cleanup;
 #[cfg(feature = "desktop")]
 mod cloud_catalog;
 mod cloud_activity;
+mod cloud_wake;
 #[cfg(feature = "desktop")]
 mod cloud_mirror;
 mod mirror_rules;
@@ -87,6 +98,7 @@ mod win;
 mod ipc;
 mod paths;
 mod private_fs;
+pub(crate) mod platform_profile;
 #[cfg(feature = "desktop")]
 mod dictation;
 mod notification_permission;
@@ -447,6 +459,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(transparency::plugin())
+        .plugin(platform_profile::plugin())
         .plugin(tauri_plugin_window_state::Builder::default().with_filter(|label| !chat_windows::is_chat_window(label)).build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -883,6 +896,7 @@ pub fn run() {
             commands::bot_item_resend,
             commands::bot_item_reopen,
             commands::bot_spent_today,
+            commands::bot_move,
             commands::bot_suggestions,
             commands::bot_suggestion_start,
             commands::bot_suggestion_dismiss,
@@ -1028,6 +1042,10 @@ pub fn run() {
             commands::git_apply_hunk,
             commands::git_hunk_count,
             commands::generate_commit_message,
+            ai_edit::ai_edit,
+            ai_edit::ai_edit_cancel,
+            composer_drafts::composer_drafts_load,
+            composer_drafts::composer_draft_save,
             commands::git_identity,
             commands::cloud_mirror_status,
             commands::cloud_mirror_enable,

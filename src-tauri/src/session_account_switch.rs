@@ -554,7 +554,7 @@ impl SessionManager {
         }
         self.tab_account_changed(session_id);
         let text = format!("Switched from {from_label} to {to_label}: {}.", reason.text(false));
-        if let Err(error) = self.publish_external(session_id, tab_id, Payload::Status { text: text.clone() }) {
+        if let Err(error) = self.publish_external(session_id, tab_id, Payload::Status { text: text.clone(), handoff: None }) {
             log::warn!("note the account switch in {session_id}/{tab_id}: {error:#}");
         }
         log(Outcome::Switched, reason.text(false), Some((to, &to_label)));
@@ -598,7 +598,7 @@ impl SessionManager {
             self.switch_back(session_id, tab_id, &just, &from_label, &to_label);
             return;
         }
-        let _ = self.publish_external(session_id, tab_id, Payload::Status { text: format!("{to_label} needs signing in again, so this tab could not continue on it.") });
+        let _ = self.publish_external(session_id, tab_id, Payload::Status { text: format!("{to_label} needs signing in again, so this tab could not continue on it."), handoff: None });
         // The tab is on the failed account now: decide again as if from the
         // one it left, without the pause a switch starts.
         let _ = index::update_tab(session_id, tab_id, |tab| {
@@ -622,7 +622,7 @@ impl SessionManager {
             log::warn!("return {session_id}/{tab_id} to its account: {error:#}");
         }
         self.tab_account_changed(session_id);
-        let _ = self.publish_external(session_id, tab_id, Payload::Status { text: format!("{to_label} could not continue this conversation. Back on {from_label}.") });
+        let _ = self.publish_external(session_id, tab_id, Payload::Status { text: format!("{to_label} could not continue this conversation. Back on {from_label}."), handoff: None });
     }
 
     /// No account has room for a tab at its limit: say so once, with the
@@ -651,7 +651,7 @@ impl SessionManager {
             None => text.push('.'),
         }
         let reason = full.map_or_else(|| format!("{label} is full"), |full| auto_switch::Reason { from_label: label.clone(), full, most_room: false }.text(false));
-        let _ = self.publish_external(session_id, tab_id, Payload::Status { text: text.clone() });
+        let _ = self.publish_external(session_id, tab_id, Payload::Status { text: text.clone(), handoff: None });
         auto_switch::append_log(&auto_switch::LogEntry {
             at: now, agent: switching.agent.id().into(), session_id: session_id.into(), tab_id: tab_id.into(), title: Some(facts.title.clone()),
             from: facts.current.clone(), from_label: label, to: None, to_label: None, outcome: Outcome::NoneAvailable, reason,
@@ -721,6 +721,6 @@ impl SessionManager {
 }
 
 // Its Claude Code is a stand-in `#!/bin/sh` CLI.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "session_account_switch_tests.rs"]
 mod tests;

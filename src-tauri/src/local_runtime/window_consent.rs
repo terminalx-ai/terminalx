@@ -754,7 +754,7 @@ mod tests {
         let relaunch = |_: &Runtime| -> Result<Arc<Runtime>> { panic!("nothing to repair") };
         let denied = |_: &Runtime, _| Err(anyhow!(consent::KEYCHAIN_DENIED));
         let error = guarded(&Runtime("adopted"), crate::machine_wire::CREATE_CODE, serde_json::json!({}), denied, Some(&relaunch)).unwrap_err();
-        assert_eq!(error.to_string(), "TerminalX couldn’t access the window consent key in Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.");
+        assert_eq!(error.to_string(), consent::KEYCHAIN_DENIED);
         let agent = |_: &Runtime, _| Err(refused("person_required", Refusal::Descendant.says()));
         assert!(guarded(&Runtime("adopted"), crate::machine_wire::APPROVE, serde_json::json!({}), agent, Some(&relaunch)).is_err());
     }

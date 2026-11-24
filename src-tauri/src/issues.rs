@@ -32,7 +32,7 @@ thread_local! {
     static TEST_LINEAR_API: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) fn with_linear_api<T>(url: String, test: impl FnOnce() -> T) -> T {
     struct Reset(Option<String>);
     impl Drop for Reset {

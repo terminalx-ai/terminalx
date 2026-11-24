@@ -884,7 +884,7 @@ async fn roles_decide_what_a_participant_reads_types_and_holds() {
         { "userId": "bob", "role": "viewer", "canApprove": true },
     ])));
     let (admin, mut admin_events, hello) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
-    assert_eq!(hello["you"], json!({ "userId": "admin", "role": "manager", "canApprove": true, "listed": true }));
+    assert_eq!(hello["you"], json!({ "userId": "admin", "role": "manager", "canApprove": true, "listed": true, "canStart": true }));
     let (alice, _alice_events, hello) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
     assert_eq!(hello["you"]["role"], "driver");
     let (bob, _bob_events, _) = person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
@@ -2231,7 +2231,7 @@ async fn closing_a_session_leaves_its_idle_tabs_alone() {
     call(&f.rpc, &peer, "session.close", json!({ "sessionId": session.id, "tabId": tab_id, "clientRequestId": "close-idle" })).await.unwrap();
     assert_eq!(manager.status_for_test(&session.id, &tab_id), crate::store::index::TabStatus::Completed, "an unread reply stays unread");
     let closed = manager.load_events(&session.id, &tab_id).unwrap().into_iter()
-        .any(|event| matches!(&event.payload, crate::events::Payload::Status { text } if text == crate::recovery::SESSION_CLOSED_MESSAGE));
+        .any(|event| matches!(&event.payload, crate::events::Payload::Status { text, .. } if text == crate::recovery::SESSION_CLOSED_MESSAGE));
     assert!(!closed, "nothing was stopped, so nothing says the session closed");
 }
 

@@ -39,7 +39,7 @@ describe("pipeline row worker identity", () => {
     expect(titles()).toHaveLength(6);
     expect(titles().join(" ")).not.toContain("pipeline author");
     for (const title of ["other cloud", "other workspace", "other organization", "teammate", "other Mac"]) expect(titles().join(" ")).toContain(title);
-    expect(screen.getByTestId("issue-work-chip").getAttribute("aria-label")).toContain("You · this Mac");
+    expect(screen.getByTestId("issue-work-chip").getAttribute("aria-label")).toContain("You · this computer");
     expect(work[0].sessionId).toBeNull();
   });
 

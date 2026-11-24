@@ -554,6 +554,24 @@ fn report_activity(runtime: &Runtime, cloud: Arc<crate::cloud_bootstrap::Bootstr
         // its checks is work too, with no agent turn to show for it.
         Counts { active_turns: active_turns + crate::issue_pipeline::engine::holding(), pending_approvals }
     };
+    // A bot's duty wakes a suspended workspace at its time (PRO-482).
+    let waking = cloud.clone();
+    let wake_api = crate::cloud_bootstrap::HttpApi::new(origin);
+    crate::cloud_wake::spawn_reporter(move |report| {
+        use crate::cloud_wake::Sent;
+        if waking.is_rejected() {
+            return Sent::Failed;
+        }
+        match waking.report_wake_at(&wake_api, report) {
+            Ok(()) => Sent::Taken,
+            Err(error) => {
+                let described = crate::cloud_bootstrap::describe(&error);
+                log::debug!("report the next bot wake: {described}");
+                // An API from before terminalx-saas PRO-482 has no such endpoint.
+                if described.ends_with("HTTP 404") { Sent::Unserved } else { Sent::Failed }
+            }
+        }
+    });
     let api = crate::cloud_bootstrap::HttpApi::new(origin);
     spawn_reporter(counts, move |report| {
         // The refresh loop notices a revoked credential; until it is

@@ -132,11 +132,11 @@ impl SendIds {
         let mut state = self.state();
         state.prune((self.clock)());
         if let Some(first) = state.sending.get(&key) {
-            bail!(if *first == digest { STILL_SENDING } else { ID_REUSED });
+            bail!("{}", crate::platform_profile::localize(if *first == digest { STILL_SENDING } else { ID_REUSED }));
         }
         if let Some(sent) = state.find(&key) {
             if sent.digest != digest {
-                bail!(ID_REUSED);
+                bail!("{}", crate::platform_profile::localize(ID_REUSED));
             }
             if let Some(reply) = &sent.reply {
                 return Ok(reply.clone());
@@ -273,7 +273,7 @@ mod tests {
         assert_eq!(ids.once(key("a"), "d".into(), || panic!("settled: must not send")).unwrap(), sent());
         // Unsettled, the id is still held to its message.
         ids.once(key("b"), "first".into(), || Ok(Reply::Unsettled(queued()))).unwrap();
-        assert_eq!(ids.once(key("b"), "second".into(), || panic!("must not send")).unwrap_err().to_string(), ID_REUSED);
+        assert_eq!(ids.once(key("b"), "second".into(), || panic!("must not send")).unwrap_err().to_string(), crate::platform_profile::localize(ID_REUSED));
     }
 
     #[test]
@@ -291,7 +291,7 @@ mod tests {
         let ids = ids(dir.path().join("sends.json"));
         ids.once(key("a"), "first".into(), || Ok(Reply::Settled(sent()))).unwrap();
         let error = ids.once(key("a"), "second".into(), || panic!("must not send")).unwrap_err();
-        assert_eq!(error.to_string(), ID_REUSED);
+        assert_eq!(error.to_string(), crate::platform_profile::localize(ID_REUSED));
     }
 
     #[test]
@@ -310,8 +310,8 @@ mod tests {
         });
         wait_started.recv().unwrap();
         // No wait: the connection the repeat came over keeps answering.
-        assert_eq!(ids.once(key("a"), "d".into(), || panic!("must not send")).unwrap_err().to_string(), STILL_SENDING);
-        assert_eq!(ids.once(key("a"), "other".into(), || panic!("must not send")).unwrap_err().to_string(), ID_REUSED);
+        assert_eq!(ids.once(key("a"), "d".into(), || panic!("must not send")).unwrap_err().to_string(), crate::platform_profile::localize(STILL_SENDING));
+        assert_eq!(ids.once(key("a"), "other".into(), || panic!("must not send")).unwrap_err().to_string(), crate::platform_profile::localize(ID_REUSED));
         release.send(()).unwrap();
         first.join().unwrap().unwrap();
         // Once it has finished, the same id gets its reply.
@@ -341,7 +341,7 @@ mod tests {
         let restarted = ids(path.clone());
         assert_eq!(restarted.once(key("a"), "d".into(), || panic!("must not send")).unwrap(), sent());
         // A queued send stays unsettled, and held to its message.
-        assert_eq!(restarted.once(key("q"), "other".into(), || panic!("must not send")).unwrap_err().to_string(), ID_REUSED);
+        assert_eq!(restarted.once(key("q"), "other".into(), || panic!("must not send")).unwrap_err().to_string(), crate::platform_profile::localize(ID_REUSED));
         assert_eq!(restarted.once(key("q"), "d".into(), || Ok(Reply::Settled(sent()))).unwrap(), sent());
 
         // A file that cannot be read loses only what was in it.

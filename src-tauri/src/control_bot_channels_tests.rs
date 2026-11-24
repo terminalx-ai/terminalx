@@ -41,6 +41,7 @@ fn mention(bot: &str, id: &str, by: &str, from: &str) -> Mention {
         session: None,
         delivered: None,
         tries: 0,
+        org: None,
         unknown: Default::default(),
     }
 }
@@ -55,6 +56,7 @@ fn put(mention: Mention) {
 
 /// Done when: a mention on a pull request gets an answer in place.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_mention_starts_a_chat_with_its_source_and_the_reply_goes_to_its_thread() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -106,6 +108,7 @@ fn a_mention_starts_a_chat_with_its_source_and_the_reply_goes_to_its_thread() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn only_a_bot_posts_from_its_own_session_and_a_paused_one_posts_nothing() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -136,6 +139,7 @@ fn only_a_bot_posts_from_its_own_session_and_a_paused_one_posts_nothing() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_access_gate_asks_before_a_post_at_the_lower_levels() {
     use crate::bots::access::{gate, Gate};
     use crate::bots::BotAccess;
@@ -151,6 +155,7 @@ fn the_access_gate_asks_before_a_post_at_the_lower_levels() {
 /// (`guards_request`, which it asks before it signs) and the control socket's route without that proof is refused.
 /// Unlinking a chat cuts the owner's channel, so it needs one too; choosing no chat app gives nothing, and needs none.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_chat_app_link_code_unlinking_and_also_sends_to_need_the_windows_proof() {
     let _home = crate::store::temp_home();
     bots_on();
@@ -176,6 +181,7 @@ fn a_chat_app_link_code_unlinking_and_also_sends_to_need_the_windows_proof() {
 /// with no window's proof) says only that a code waits and until when, never the code: whoever sends it first has
 /// their chat linked as the owner's.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn an_agent_tabs_read_of_the_chat_apps_never_sees_a_waiting_code() {
     let _home = crate::store::temp_home();
     bots_on();

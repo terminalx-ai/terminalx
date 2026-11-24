@@ -3,7 +3,8 @@
 // Fixture-only availability exercises the editor; production availability is unchanged.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { createServer, transformWithEsbuild } from "vite";
+import { transformWithEsbuild } from "vite";
+import { createCheckServer } from "./vite-page.mjs";
 import { launch } from "./harness.mjs";
 const entry = `
 import React from 'react';
@@ -50,8 +51,7 @@ await refreshDataPrivacy();await bootAccount();
 createRoot(document.getElementById('root')).render(<><CloudSchedulesDialog orgId='o1' workspaceId='w1' name='Automation lab' onClose={()=>{}}/><Toasts /></>);
 `;
 const stub = readFileSync(new URL('./tauri-stub.js', import.meta.url), 'utf8');
-const server = await createServer({server:{host:'127.0.0.1',port:0},plugins:[{
- name:'cloud-automation-regression',
+const server = await createCheckServer({server:{host:'127.0.0.1' },plugins:[{
  resolveId(id){if(id==='/cloud-automation-regression.tsx')return '\0cloud-automation-regression.tsx';},
  async load(id){if(id==='\0cloud-automation-regression.tsx')return (await transformWithEsbuild(entry,'cloud-automation-regression.tsx',{loader:'tsx',jsx:'automatic'})).code;},
  configureServer(server){server.middlewares.use('/cloud-automation-test',async(_req,res)=>{res.setHeader('Content-Type','text/html');res.end(await server.transformIndexHtml('/cloud-automation-test','<div id="root"></div><script type="module" src="/cloud-automation-regression.tsx"></script>'));});}

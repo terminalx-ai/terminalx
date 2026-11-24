@@ -200,6 +200,8 @@ export type Payload =
   | {
       type: "user_message";
       author?: { userId: string; displayName: string };
+      /** What the message is, when TerminalX put it in a bot's chat (PRO-539). `text` stays what the agent was given. */
+      bot?: BotMessage;
       text: string;
       images?: ImageRef[];
       /** Files attached to the message besides its images (PRO-290). */
@@ -275,7 +277,8 @@ export type Payload =
   | { type: "compaction_summary"; text: string }
   | { type: "api_retry"; attempt: number; maxRetries: number; reason?: string }
   | { type: "rate_limited"; status?: string; resetsAt?: number; window?: string; message?: string }
-  | { type: "status"; text: string }
+  /** `handoff`: the hand-off the line is about, when it is one of the lines hand-offs leave in their two chats (PRO-539). */
+  | { type: "status"; text: string; handoff?: HandoffNote }
   /**
    * The tab's terminal changed hands (#437): the events from here to the next
    * marker belong to another of the tab's conversations. `id` is absent for
@@ -305,3 +308,77 @@ export function mergeAgentEvents(existing: readonly AgentEvent[], incoming: read
 export function interruptUnanswered(events: readonly AgentEvent[], interruptedAt: number | null): boolean {
   return interruptedAt !== null && !events.some((event) => event.seq > interruptedAt && event.payload.type === "turn_completed");
 }
+
+/**
+ * What a message TerminalX put in a bot's chat is (PRO-539, `events::BotMessage`): a hand-off, a tell or an answer from
+ * another bot, a mention from GitHub, Linear or a chat app, or the app's own note. It rides on the `user_message` beside
+ * the text the agent was given, so a card is drawn from these fields and never read back out of that text. A field
+ * with nothing to say is absent.
+ */
+export type BotMessage = {
+  /** `handoff`, `tell`, `answer`, `mention`, `stopped`, `failed`, `dropped` or `checkBack`; a newer runtime may send another. */
+  kind: string;
+  /** A bot's id, `owner` for the owner's own act in the window, `terminalx` for the app's own word, `person` for a mention. */
+  from: string;
+  /** The bot it went to, by id. */
+  to: string;
+  /** The two bots' names when it was sent. */
+  fromName?: string;
+  toName?: string;
+  /** A tell up the reporting line: "status to", not "message to". */
+  status?: boolean;
+  /** The hand-off it is, answers or is about. */
+  handoff?: number;
+  /** How far down its chain that hand-off is, and how deep a chain may go. */
+  depth?: number;
+  maxDepth?: number;
+  title?: string;
+  /** The sender's own words: a hand-off's scope, a message, an answer, what a mention says. */
+  body?: string;
+  due?: string;
+  /** The owner's own note, when they handed an item on. */
+  note?: string;
+  /** The bot whose words `title` and `body` are, when the owner handed its item on, and that item's number. */
+  wordsOf?: string;
+  fromItem?: number;
+  /** The receiving bot's item for a hand-off. */
+  item?: number;
+  /** An answer that says the work could not be done. */
+  failed?: boolean;
+  /** What the sender was to the receiver: `lead`, `report`, `listed` or `pointed`. */
+  relation?: string;
+  /** The two bots' access when it was sent, as the bots' records name it. */
+  fromAccess?: string;
+  toAccess?: string;
+  mention?: MentionSource;
+};
+
+/** Where a mention of a bot came from (`events::MentionSource`). */
+export type MentionSource = {
+  /** `github`, `linear`, `slack` or `telegram`. */
+  service: string;
+  by: string;
+  /** The owner's own account wrote it. */
+  owner?: boolean;
+  /** The pull request, issue, channel or group, as the app labels it. Absent for a direct chat. */
+  place?: string;
+  direct?: boolean;
+  /** The comment's address, when the service gives one. */
+  url?: string;
+  title?: string;
+};
+
+/** The hand-off a `status` line in a bot's chat is about, and what happened to it (`events::HandoffNote`). */
+export type HandoffNote = {
+  number: number;
+  /** `handed`, `answered`, `couldNot`, `stopped`, `notStarted` or `failed`. */
+  event: string;
+  /** Whose chat the line is in: `from`, the bot that handed the work on, or `to`. */
+  side: string;
+  from: string;
+  to: string;
+  /** Who handed it: the sending bot's id, or `owner`. */
+  by: string;
+  /** The hand-off's title, in its sender's words. */
+  title?: string;
+};

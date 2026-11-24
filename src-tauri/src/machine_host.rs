@@ -230,6 +230,7 @@ impl State {
     }
 
     /// The direct port, while something listens.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn port(&self) -> Option<u16> {
         self.listeners.first().map(|listening| listening.address.port())
     }
@@ -395,7 +396,7 @@ pub struct MachineHost {
 /// Refused while a window takes this Mac's phones: it pairs and removes them.
 #[cfg(unix)]
 fn window_takes_phones(recovery: &str) -> ControlError {
-    ControlError::new("window_takes_phones", "TerminalX is open on this Mac, so its window looks after phones.", Some(recovery.into()))
+    ControlError::new("window_takes_phones", &crate::platform_profile::localize("TerminalX is open on this Mac, so its window looks after phones."), Some(recovery.into()))
 }
 
 static INSTALLED: OnceLock<Arc<MachineHost>> = OnceLock::new();
@@ -913,7 +914,7 @@ impl MachineHost {
         }
         if hosting {
             if let Err(error) = self.clone().serve().await {
-                let busy = error.chain().any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse));
+                let busy = error.chain().any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(crate::listen::port_taken));
                 let mut state = self.state.lock().unwrap();
                 state.bind_error = Some(format!("{error:#}"));
                 state.port_busy = busy;
@@ -1352,7 +1353,7 @@ impl MachineHost {
         let mut state = self.state.lock().unwrap();
         let wanted = state.keep_awake && state.connections.values().any(|connections| !connections.is_empty());
         if wanted && state.awake.is_none() {
-            match crate::power::Assertion::hold(COMPUTER_CONNECTED) {
+            match crate::power::Assertion::hold(crate::power::Reason::new(crate::platform_profile::localize_static(COMPUTER_CONNECTED.text()))) {
                 Ok(assertion) => state.awake = Some(assertion),
                 Err(error) => log::warn!("machine host: keep awake: {error:#}"),
             }
@@ -1487,7 +1488,7 @@ impl MachineHost {
     }
 
     /// Note a phone passed to the window, unless the host is off.
-    #[cfg(unix)]
+    #[cfg(any(unix, test))]
     pub(crate) fn track_phone(&self, via: Option<Via>, cancel: mpsc::UnboundedSender<()>) -> Option<u64> {
         let id = self.next_connection.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut state = self.state.lock().unwrap();
@@ -1497,7 +1498,7 @@ impl MachineHost {
         })
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, test))]
     pub(crate) fn untrack_phone(&self, id: u64) {
         self.state.lock().unwrap().phones.remove(&id);
     }
@@ -1768,7 +1769,7 @@ impl MachineHost {
     pub fn create_code(&self, grant_request_id: Option<String>) -> Result<wire::CreatedCode, ControlError> {
         let (public_key_b64, machine_id) = {
             let state = self.state.lock().unwrap();
-            let not_enabled = |message: &str| ControlError::new("not_enabled", message, Some("Turn on \"Let other computers operate this Mac\".".into()));
+            let not_enabled = |message: &str| ControlError::new("not_enabled", message, Some(crate::platform_profile::localize("Turn on \"Let other computers operate this Mac\".")));
             if !state.enabled {
                 return Err(not_enabled("Other computers may not operate this machine now."));
             }

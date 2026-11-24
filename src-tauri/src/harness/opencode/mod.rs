@@ -325,7 +325,7 @@ impl OpenCode {
             "session_get" if !ok => {
                 self.resume = None;
                 vec![
-                    Action::Emit(Payload::Status { text: "The previous OpenCode session could not be resumed; starting a new one.".into() }),
+                    Action::Emit(Payload::Status { text: "The previous OpenCode session could not be resumed; starting a new one.".into(), handoff: None }),
                     self.open_session(),
                 ]
             }

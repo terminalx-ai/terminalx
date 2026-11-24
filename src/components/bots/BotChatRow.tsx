@@ -23,7 +23,15 @@ export function botChatTitle(chat: SessionEntry, home: boolean): string {
  * Rename… and a double-click open the app's one rename dialog, and Archive and Delete session… close it as they close
  * any session. The home chat is the bot's standing chat: it is renamed here, but not archived or deleted.
  */
-export function ChatRow({ chat, selected, home, onOpen, sub }: { chat: SessionEntry; selected: boolean; home: boolean; onOpen: (chat: SessionEntry) => void; sub?: string }) {
+export function ChatRow({ chat, selected, home, onOpen, sub, place }: {
+  chat: SessionEntry;
+  selected: boolean;
+  home: boolean;
+  onOpen: (chat: SessionEntry) => void;
+  sub?: string;
+  /** The place the chat works in, by name (PRO-483): shown only while the bot works in more than one. */
+  place?: string;
+}) {
   const working = chat.tabs.some((tab) => tab.status === "in_progress");
   const source = home ? null : chatSource(chat);
   const kind = chat.botChannel?.kind;
@@ -47,6 +55,7 @@ export function ChatRow({ chat, selected, home, onOpen, sub }: { chat: SessionEn
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-[13px] text-foreground" data-testid="bot-chat-title">{title}</span>
                   <span className="block truncate text-[11.5px] text-faint" data-testid={!sub && source ? "bot-chat-source" : undefined}>
+                    {place && <span data-testid="bot-chat-place">{place} · </span>}
                     {sub ?? (source ? `${source} · ${relativeTime(chat.modified || chat.created)}` : relativeTime(chat.modified || chat.created))}
                   </span>
                 </span>

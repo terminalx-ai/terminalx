@@ -2179,7 +2179,8 @@ export const botsApi = {
   /** The bot's home chat (PRO-468), made again when it is missing. */
   homeChat: (id: string) => invoke<SessionEntry>("bot_home_chat", { id }),
   /** Another conversation with the bot, in its home folder. */
-  newChat: (id: string) => invoke<SessionEntry>("bot_new_chat", { id }),
+  /** `org`: the place the chat works in (PRO-483), "personal" or an organisation's id; left out, the bot's first place. */
+  newChat: (id: string, org?: string) => invoke<SessionEntry>("bot_new_chat", { id, org: org ?? null }),
   /** Say no to a resume asked for from the `terminalx` CLI: the bot stays paused. */
   dismissResume: (id: string) => invoke<Bot>("bot_dismiss_resume", { id }),
   spentToday: (id: string) => invoke<{ usd: number; day: string }>("bot_spent_today", { id }),

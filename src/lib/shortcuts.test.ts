@@ -6,6 +6,7 @@ import {
   bindingKind,
   bindingProblem,
   bindingsOf,
+  joinKeycaps,
   chordOf,
   conflictOf,
   currentKeymap,
@@ -193,6 +194,14 @@ describe("the shortcut registry", () => {
     expect(keycaps("hold:AltRight", true)).toEqual(["Right ⌥"]);
     expect(keycaps("hold:AltRight", false)).toEqual(["Right Alt"]);
     expect(keycaps("escape", true)).toEqual(["Esc"]);
+  });
+
+  it("joins keycaps into one label as each platform writes them, never running names together", () => {
+    expect(joinKeycaps(["⌥", "⌘", "0"], true)).toBe("⌥⌘0");
+    expect(joinKeycaps(["Ctrl", "Alt", "0"], false)).toBe("Ctrl+Alt+0");
+    expect(joinKeycaps(keycaps("mod+1", false), false)).toBe("Ctrl+1");
+    expect(joinKeycaps([], false)).toBe("");
+    expect(bindingText("mod+enter", false)).toBe("Ctrl+⏎");
   });
 
   it("reads a chord from a key event, by the physical key where Shift or Option changes the glyph", () => {

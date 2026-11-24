@@ -126,7 +126,7 @@ fn revoke_phone(data: &Path, phone: &Phone) -> Result<i32> {
         match attachment.call(machine_wire::PHONE_REVOKE, json!({ "id": phone.id })) {
             Ok(answer) => answer["revoked"].as_bool().unwrap_or(false),
             Err(error) if control_client::refusal_code(&error) == Some("window_takes_phones") => {
-                eprintln!("TerminalX is open on this Mac and serves its phones: remove {} in Settings → Devices.", phone.label);
+                eprintln!("{}", crate::platform_profile::localize(&format!("TerminalX is open on this Mac and serves its phones: remove {} in Settings → Devices.", phone.label)));
                 return Ok(1);
             }
             Err(error) => return Err(error),

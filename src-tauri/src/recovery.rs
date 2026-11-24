@@ -396,7 +396,7 @@ pub fn from_history(events: &[crate::events::AgentEvent]) -> Option<RecoveryKind
                 if !open && recovery.is_none() { recovery = Some(RecoveryKind::DeliveryUnconfirmed); }
             }
             Payload::TurnCompleted { .. } => open = false,
-            Payload::Status { text } if text == SESSION_CLOSED_MESSAGE => { open = false; recovery = None; unconfirmed = false; }
+            Payload::Status { text, .. } if text == SESSION_CLOSED_MESSAGE => { open = false; recovery = None; unconfirmed = false; }
             // Another conversation took the tab's terminal (#437): whatever
             // was owed to the one before is not owed by this one.
             Payload::Conversation { .. } => { open = false; recovery = None; unconfirmed = false; }
@@ -628,7 +628,7 @@ mod lifecycle_tests {
     #[test]
     fn unconfirmed_withdrawal_does_not_restore_a_legacy_unsent_claim() {
         let events = vec![
-            event(Payload::UserMessage { author: None, text: "possibly delivered".into(), images: vec![], files: Vec::new(), baseline: None, queued: true, cwd: None }),
+            event(Payload::UserMessage { author: None, bot: None, text: "possibly delivered".into(), images: vec![], files: Vec::new(), baseline: None, queued: true, cwd: None }),
             event(Payload::PromptWithdrawn { prompt_seq: 1, unconfirmed: true }),
             event(Payload::Recovery { kind: Some(RecoveryKind::Unsent) }),
         ];
@@ -641,9 +641,9 @@ mod lifecycle_tests {
         assert_eq!(from_history(&events), Some(RecoveryKind::Capacity));
         events.push(event(Payload::Recovery { kind: None }));
         assert_eq!(from_history(&events), None);
-        events.push(event(Payload::UserMessage { author: None, text: "Continue".into(), images: vec![], files: Vec::new(), baseline: None, queued: false, cwd: None }));
+        events.push(event(Payload::UserMessage { author: None, bot: None, text: "Continue".into(), images: vec![], files: Vec::new(), baseline: None, queued: false, cwd: None }));
         assert_eq!(from_history(&events), Some(RecoveryKind::Disconnected));
-        events.push(event(Payload::Status { text: SESSION_CLOSED_MESSAGE.into() }));
+        events.push(event(Payload::Status { text: SESSION_CLOSED_MESSAGE.into(), handoff: None }));
         assert_eq!(from_history(&events), None);
         events.push(event(Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }));
         assert_eq!(from_history(&events), None);
@@ -655,7 +655,7 @@ mod lifecycle_tests {
         let moved_on = Payload::Conversation { id: Some("c2".into()), harness: "codex".into(), resumed: false };
         let lapsed = event(Payload::PermissionDecided { request_id: "r".into(), tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true });
         assert_eq!(from_history(&[lapsed.clone(), event(moved_on.clone())]), None);
-        let unfinished = event(Payload::UserMessage { author: None, text: "p".into(), images: vec![], files: Vec::new(), baseline: None, queued: false, cwd: None });
+        let unfinished = event(Payload::UserMessage { author: None, bot: None, text: "p".into(), images: vec![], files: Vec::new(), baseline: None, queued: false, cwd: None });
         assert_eq!(from_history(std::slice::from_ref(&unfinished)), Some(RecoveryKind::Disconnected));
         assert_eq!(from_history(&[unfinished, event(moved_on.clone())]), None);
         // What goes wrong in the new one is its own.
