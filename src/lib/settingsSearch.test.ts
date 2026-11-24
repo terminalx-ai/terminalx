@@ -20,6 +20,7 @@ describe("settings row search", () => {
   });
 
   it.each([
+    ["second opinion", "general.secondOpinionButton"],
     ["font size", "general.textSize"],
     ["zoom", "general.textSize"],
     ["transcript layout", "general.transcriptLayout"],

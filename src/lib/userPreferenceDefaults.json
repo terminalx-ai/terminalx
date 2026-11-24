@@ -11,6 +11,7 @@
   "transcriptLayout": "chat",
   "foldToolCalls": true,
   "turnChanges": true,
+  "secondOpinionButton": false,
   "writeCommitMessagesWithAgent": false,
   "promptMap": true,
   "autocorrect": false,

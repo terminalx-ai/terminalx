@@ -617,6 +617,12 @@ export const SETTINGS_ROWS = [
     linkable: { enable: async () => setPrefs({ turnChanges: true }) },
   }),
   defineSetting({
+    id: "general.secondOpinionButton", section: "general", title: "Second opinion button",
+    description: "Show a Second opinion button under each finished turn to ask another agent to review it. Off by default. You can also ask for a second opinion from the turn’s … menu.",
+    searchTerms: ["chat", "footer", "review"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.secondOpinionButton" },
+  }),
+  defineSetting({
     id: "general.fixErrorsInstructions", section: "general", title: "Fix errors instructions",
     description: "Extra instructions sent to the agent with failed CI logs when you choose Fix errors.",
     searchTerms: ["CI", "checks", "GitHub", "fix", "errors", "prompt", "instructions"], scope: "user",

@@ -78,6 +78,10 @@ try {
     await footers.first().waitFor();
     await page.evaluate(() => document.fonts.ready);
     const first = footers.first();
+    const opinion = first.getByRole("button", { name: "Second opinion", exact: true });
+    failed += report(`default footer ${colorScheme}`, { "Second opinion is hidden": await opinion.count() === 0 });
+    await page.evaluate(() => window.__PW_STUB__.answers.update_user_preferences({ patch: { secondOpinionButton: true }, migrate: false }));
+    await opinion.waitFor();
 
     // The footer: the duration and time chip, then copy, read aloud, "…" and Second opinion.
     await first.hover();
