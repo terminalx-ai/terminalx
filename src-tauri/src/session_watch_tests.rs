@@ -3476,9 +3476,10 @@ fn stop_retry_keeps_its_detached_launch_and_does_not_stop_a_replacement() {
     let first = rig.manager.stop(SESSION, TAB);
     assert!(first.as_ref().is_err_and(|error| error.to_string().contains("PTY process exit could not be confirmed")), "{first:?}");
     assert!(!rig.manager.terminals.is_live(&rig.pane));
+    // A replacement that waits for a line: Windows panes run commands in PowerShell, which has no `sh`.
     rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, pty::PaneSpec {
         cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24,
-        command: Some("sh -c 'read line'"), env: &[],
+        command: Some(if cfg!(windows) { "Read-Host" } else { "sh -c 'read line'" }), env: &[],
     }).unwrap();
     let replacement = rig.manager.terminals.pid(&rig.pane).unwrap();
     let retry = rig.manager.stop(SESSION, TAB);
