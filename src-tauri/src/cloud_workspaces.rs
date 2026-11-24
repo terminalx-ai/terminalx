@@ -14,7 +14,7 @@ use url::Url;
 use crate::account::{
     AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_PRESENCE, PHASE2_RESTART_DETAILS,
-    PHASE2_WEBHOOK_TRIGGER,
+    PHASE2_AFFECTED_WORKSPACES, PHASE2_WEBHOOK_TRIGGER,
 };
 
 const CONTRACT: &str = "providers-v1";
@@ -489,6 +489,21 @@ pub struct AgentLogin {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentLoginList {
     pub credentials: Vec<AgentLogin>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AffectedWorkspace {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLoginAffectedWorkspaces {
+    pub workspaces: Vec<AffectedWorkspace>,
+    pub count: usize,
+    pub has_more: bool,
+    pub has_hidden: bool,
 }
 
 /// A sign-in the account service has begun: the page to approve it on, and
@@ -3122,6 +3137,42 @@ impl CloudWorkspaceService {
     /// `organization_admin_required`.
     pub fn agent_logins(&self, organization: Option<&str>) -> Result<AgentLoginList, CloudWorkspaceClientError> {
         self.run_in(organization, RequestRisk::Read, Self::read_agent_logins)
+    }
+
+    pub fn agent_login_affected_workspaces(
+        &self,
+        provider: AgentLoginProvider,
+        context_revision: &str,
+        organization: Option<&str>,
+    ) -> Result<AgentLoginAffectedWorkspaces, CloudWorkspaceClientError> {
+        let risk = RequestRisk::Read;
+        let unavailable = "cloud_agent_login_affected_workspaces_unavailable";
+        let (context, access) = self.agent_login_context(organization, context_revision, risk)?;
+        let org = Some(context.organization_id.as_str());
+        self.phase2_gate(PHASE2_AFFECTED_WORKSPACES, org, Some(&context), unavailable)?;
+        if !self.account.is_current_in(&context, access) {
+            return Err(context_changed_error(risk));
+        }
+        let result: Result<AgentLoginAffectedWorkspaces, _> = self.client.request_as(
+            "GET",
+            &context,
+            &["cloud-workspace-credentials", provider.as_str(), "affected-workspaces"],
+            None,
+            None,
+            None,
+            risk,
+        );
+        if !self.account.is_current_in(&context, access) {
+            return Err(context_changed_error(risk));
+        }
+        self.phase2_gate(PHASE2_AFFECTED_WORKSPACES, org, Some(&context), unavailable)?;
+        let preview = result?;
+        if preview.count != preview.workspaces.len() || preview.count > 100
+            || preview.workspaces.iter().any(|workspace| !valid_resource_id(&workspace.id))
+        {
+            return Err(post_send_error(risk));
+        }
+        Ok(preview)
     }
 
     /// The context a change to agent logins is made in: `organization` (the
@@ -6847,6 +6898,43 @@ mod tests {
         ] {
             assert!(!claude_login_page(page), "{page}");
         }
+    }
+
+    #[test]
+    fn agent_login_impact_reads_only_the_gated_preview() {
+        let body = r#"{"workspaces":[{"id":"workspace_123","name":"API verification"}],"count":1,"hasMore":false,"hasHidden":true}"#;
+        let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1"], true);
+        let context_revision = AccountManager::context_revision(&context());
+        let read = |revision: &str| {
+            service.agent_login_affected_workspaces(AgentLoginProvider::Cursor, revision, Some("org-1"))
+        };
+        assert_eq!(read(&context_revision).unwrap_err().code, "cloud_agent_login_affected_workspaces_unavailable");
+        account.apply_phase2_readiness_for_test(json!({
+            "version": 1,
+            "organizations": { "org-1": { (PHASE2_AFFECTED_WORKSPACES): true } }
+        }));
+        assert_eq!(read("previous-account").unwrap_err().code, "account_context_changed");
+        let preview = read(&context_revision).unwrap();
+        assert_eq!(preview.count, 1);
+        assert_eq!(preview.workspaces[0].name, "API verification");
+        assert!(preview.has_hidden && !preview.has_more);
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/cloud-workspace-credentials/cursor/affected-workspaces HTTP/1.1"));
+        assert!(!captured.extra_request);
+    }
+
+    #[test]
+    fn agent_login_impact_rejects_an_inconsistent_server_count() {
+        let body = r#"{"workspaces":[],"count":1,"hasMore":false,"hasHidden":false}"#;
+        let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
+        let (_, mut service) = test_service(&base);
+        service.force_phase2_for_test = true;
+        assert!(service.agent_login_affected_workspaces(
+            AgentLoginProvider::Claude, &AccountManager::context_revision(&context()), None,
+        ).is_err());
+        request.join().unwrap();
     }
 
     #[test]

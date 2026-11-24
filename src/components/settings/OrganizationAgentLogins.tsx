@@ -3,6 +3,10 @@ import { ThisComputer, thisComputer } from "@/lib/platform";
 import { ExternalLink, Loader2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { getAccount, useAccount } from "@/lib/account";
+import { privacyEnabled, useDataPrivacy } from "@/lib/dataPrivacy";
+import { phase2Ready } from "@/lib/phase2Readiness";
+import { DisconnectCloudLoginDialog } from "./DisconnectCloudLoginDialog";
 import { refreshCloudCatalog } from "@/lib/cloudCatalog";
 import { onOpenOrganizationSettings, takeAgentLoginsRequest, takeAgentLoginsSignIn } from "@/lib/settingsLinks";
 import { api, type AgentLogin, type AgentLoginConsent, type AgentLoginProvider, type AgentLoginSource, type ClaudeLoginOutcome, type CodexLoginStatus } from "@/lib/api";
@@ -44,7 +48,8 @@ export function memberLoginStatus(agent: string, usable: boolean | null | undefi
   return `${agent}: the service did not say.`;
 }
 
-type Pending = { agent: AgentLoginProvider; source: AgentLoginSource | "sign-in" } | { agent: AgentLoginProvider; source: "disconnect" };
+type Pending = { agent: AgentLoginProvider; source: AgentLoginSource | "sign-in" } | { agent: AgentLoginProvider; source: "disconnect" }
+  | { agent: AgentLoginProvider; source: "disconnect-preview"; loginVersion: number };
 
 /** A sign-in that has begun: the attempt to finish, its page, and what the person agreed to when starting it. */
 interface SignIn {
@@ -423,6 +428,10 @@ export function OrganizationAgentLogins({
   /** Each time the list is read: the logins, or null when they could not be listed (refused to a member, or failed). */
   onLogins?: (logins: AgentLogin[] | null) => void;
 }) {
+  const { status } = useAccount();
+  const privacy = useDataPrivacy();
+  const previewReady = !privacy.enabled && status.context?.revision === contextRevision
+    && phase2Ready(status, organizationId, "agentLoginAffectedWorkspaces");
   const organization = organizationName?.trim() || "this organization";
   const refreshWorkspaces = useCallback(() => {
     // Reconcile the server's current workspace state after credentials change.
@@ -439,6 +448,9 @@ export function OrganizationAgentLogins({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
+  useEffect(() => {
+    if (!previewReady) setPending((previous) => previous?.source === "disconnect-preview" ? null : previous);
+  }, [previewReady]);
   const [sharing, setSharing] = useState(false);
   const [machines, setMachines] = useState(false);
   const [replace, setReplace] = useState(false);
@@ -770,7 +782,8 @@ export function OrganizationAgentLogins({
               const storedKind = login?.authKind === "api-key" ? "API key" : "login";
               const open = pending?.agent === agent.id ? pending : null;
               // An API key is one kind of login; the sign-in and the lent sign-in are the other.
-              const reach = open && open.source !== "disconnect" ? agentLoginReach(login, open.source === "api-key" ? "api-key" : "oauth-credentials-json", organization) : null;
+              const connecting = open && open.source !== "disconnect" && open.source !== "disconnect-preview";
+              const reach = connecting ? agentLoginReach(login, open.source === "api-key" ? "api-key" : "oauth-credentials-json", organization) : null;
               return (
                 <li key={agent.id} className="rounded-md bg-well p-2" data-testid="agent-login" data-agent={agent.id}>
                   {/* The status has the row's full width; the actions go under it, so neither squeezes the other. */}
@@ -803,7 +816,9 @@ export function OrganizationAgentLogins({
                         </Button>
                       )}
                       {stored && (
-                        <Button size="xs" variant="ghost" disabled={busy || !!signIn || !!codex} onClick={() => choose({ agent: agent.id, source: "disconnect" })}>
+                        <Button size="xs" variant="ghost" disabled={busy || !!signIn || !!codex} onClick={() => choose(previewReady && login?.authKind === "api-key"
+                          ? { agent: agent.id, source: "disconnect-preview", loginVersion: login.version }
+                          : { agent: agent.id, source: "disconnect" })}>
                           Disconnect
                         </Button>
                       )}
@@ -845,7 +860,7 @@ export function OrganizationAgentLogins({
                     </div>
                   )}
 
-                  {open && open.source !== "disconnect" && !(open.source === "sign-in" && (signIn || codex)) && (
+                  {connecting && !(open.source === "sign-in" && (signIn || codex)) && (
                     <div className="mt-2 space-y-2 rounded-md border border-hairline bg-background p-2" data-testid="agent-login-consent">
                       <p>
                         {open.source === "sign-in" && agent.id === "codex"
@@ -920,6 +935,27 @@ export function OrganizationAgentLogins({
                     </div>
                   )}
 
+                  {open?.source === "disconnect-preview" && previewReady && login?.version === open.loginVersion && (
+                    <DisconnectCloudLoginDialog
+                      key={JSON.stringify([organizationId, contextRevision, agent.id, login.version])}
+                      login={login}
+                      agent={agent.name}
+                      organization={organization}
+                      organizationId={organizationId}
+                      contextRevision={contextRevision}
+                      busy={busy}
+                      onClose={() => choose(null)}
+                      onConfirm={() => {
+                        const current = getAccount().status;
+                        if (privacyEnabled() || current.context?.revision !== contextRevision
+                          || !phase2Ready(current, organizationId, "agentLoginAffectedWorkspaces")) {
+                          choose(null);
+                          return;
+                        }
+                        void run(() => api.cloudAgentLoginRemove(agent.id, contextRevision, organizationId), `${agent.name} is disconnected from ${organization}.`);
+                      }}
+                    />
+                  )}
                   {open?.source === "disconnect" && (
                     <div className="mt-2 space-y-2 rounded-md border border-destructive/25 bg-background p-2" data-testid="agent-login-disconnect">
                       <p>

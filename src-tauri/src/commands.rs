@@ -775,6 +775,18 @@ pub async fn cloud_agent_logins(
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.agent_logins(org_id.as_deref()))
 }
 
+#[tauri::command]
+pub async fn cloud_agent_login_affected_workspaces(
+    provider: crate::cloud_workspaces::AgentLoginProvider,
+    context_revision: String,
+    org_id: Option<String>,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::AgentLoginAffectedWorkspaces, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| {
+        service.agent_login_affected_workspaces(provider, &context_revision, org_id.as_deref())
+    })
+}
+
 /// Store an agent's login for the organization's cloud workspaces. The
 /// order matters: consent and the owner-or-admin check first, and only then
 /// is a key asked for or this computer's login read.

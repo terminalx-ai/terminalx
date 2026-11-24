@@ -262,6 +262,57 @@ try {
   await shoot("opencode");
   await check("an agent without a key choice", ({ text }) => ({ "shows its status and setup": text.includes("Not installed") && !text.includes("API key") }));
   await page.close();
+  for (const ready of [false, true]) {
+    const cloud = await open(browser, server.url, { cloud: true, localProjects: 1 }, { width: 960, height: 600 }, {
+      locale: "en-US",
+      extra: `(() => {
+        const stub = window.__PW_STUB__;
+        const status = stub.answers.account_status;
+        if (${ready}) status.phase2Readiness = { "org-a": ["cloud.agent-logins.affected-workspaces.v1"] };
+        let removed = false;
+        const login = { provider: "claude", authKind: "api-key", fingerprint: "sha256:0123456789abcdef",
+          version: 1, updatedAt: 1790000000000, state: "connected", sharedUse: "organization" };
+        stub.answers.cloud_agent_logins = () => ({ credentials: removed ? [] : [login] });
+        stub.answers.cloud_agent_login_remove = () => { removed = true; };
+        stub.answers.cloud_agent_login_affected_workspaces = () => new Promise((resolve) => {
+          window.__DISCONNECT_PREVIEW__ = () => resolve({ count: 2, hasMore: false, hasHidden: true,
+            workspaces: [{ id: "workspace-a", name: "API verification" }, { id: "workspace-b", name: "Deployment tests" }] });
+        });
+      })();`,
+    });
+    await cloud.getByRole("button", { name: "Settings", exact: true }).click();
+    const nav = cloud.getByRole("navigation", { name: "Settings sections" });
+    await nav.getByRole("button", { name: /^Organizations [0-9]+$/ }).click();
+    await nav.getByRole("group", { name: "Organizations", exact: true }).getByRole("button", { name: /^Demo/ }).click();
+    await nav.getByRole("button", { name: "Agent logins", exact: true }).click();
+    await cloud.getByTestId("agent-logins").getByRole("button", { name: "Disconnect", exact: true }).click();
+    if (!ready) {
+      await cloud.getByTestId("agent-login-disconnect").waitFor();
+      failed += report("cloud login disconnect held", {
+        "the inline legacy confirmation is unchanged": await cloud.getByRole("dialog", { name: "Disconnect API key?" }).count() === 0,
+      });
+    } else {
+      const dialog = cloud.getByRole("dialog", { name: "Disconnect API key?" });
+      const confirm = dialog.getByRole("button", { name: "Disconnect key" });
+      await dialog.getByRole("status").waitFor();
+      const disabledWhileLoading = await confirm.isDisabled();
+      await cloud.waitForFunction(() => typeof window.__DISCONNECT_PREVIEW__ === "function");
+      await cloud.evaluate(() => window.__DISCONNECT_PREVIEW__());
+      await dialog.getByText("Deployment tests").waitFor();
+      const bounds = await dialog.boundingBox();
+      await cloud.screenshot({ path: `${shots}/pro-309-cloud-login-disconnect.png` });
+      failed += report("cloud login disconnect preview", {
+        "confirmation waits for the preview": disabledWhileLoading && await confirm.isEnabled(),
+        "both visible names and the hidden-workspace warning are shown": await dialog.getByText("API verification").count() === 1
+          && await dialog.getByText(/Other running workspaces/).count() === 1,
+        "the dialog fits 960 × 600": !!bounds && bounds.x >= 0 && bounds.y >= 0
+          && bounds.x + bounds.width <= 960 && bounds.y + bounds.height <= 600,
+      });
+      await dialog.getByRole("button", { name: "Cancel" }).click();
+      await dialog.waitFor({ state: "hidden" });
+    }
+    await cloud.close();
+  }
 } finally {
   await browser.close();
   server.close();
