@@ -23,6 +23,7 @@ use crate::desktop_links::DesktopLinks;
 use crate::keychain::{Keychain, SecretStore};
 
 pub(crate) mod organization_delete;
+mod profile;
 
 pub const STATUS_EVENT: &str = "account_status";
 
@@ -1784,8 +1785,17 @@ fn post_json<T: DeserializeOwned>(
     body: serde_json::Value,
     access_token: Option<&str>,
 ) -> Result<T, CloudError> {
+    request_json("POST", &endpoint(path), body, access_token)
+}
+
+fn request_json<T: DeserializeOwned>(
+    method: &str,
+    url: &str,
+    body: serde_json::Value,
+    access_token: Option<&str>,
+) -> Result<T, CloudError> {
     let mut request = cloud_agent()
-        .post(&endpoint(path))
+        .request(method, url)
         .set("content-type", "application/json");
     if let Some(token) = access_token {
         request = request.set("authorization", &format!("Bearer {token}"));
