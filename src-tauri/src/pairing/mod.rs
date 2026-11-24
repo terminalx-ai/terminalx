@@ -2219,16 +2219,49 @@ mod tests {
     /// revoked phone none.
     #[test]
     fn a_phone_starts_sessions_and_changes_settings_only_as_its_scope_allows() {
-        use std::os::unix::process::CommandExt;
+        use std::os::{fd::FromRawFd, unix::process::CommandExt};
         let root = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(root.path().join("router.log")).unwrap();
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        // The fixture stands where the desktop's window would, relaying the
+        // phones' calls to its runtime. Once it turns Bots on, that runtime
+        // lets such a relayed call through only from the window or a person:
+        // a process in a TerminalX pane, or with a terminal of its own. Run
+        // from a terminal, the fixture had the developer's; under CI it had
+        // none, and passed only while the runtime still thought Bots off
+        // (`bots::enabled_cached` looks again after a second; PRO-513). So it
+        // is given one here: a pseudo-terminal, the controlling terminal of a
+        // session of its own. Neither end is inherited past this (the runtime
+        // the fixture starts must not hold it, or the terminal would be one of
+        // the runtime's), and both stay open here until it is done: macOS takes
+        // a session's controlling terminal back when its last open closes.
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: two out-pointers to ints; no name, termios or size.
+        let opened = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());
+        // SAFETY: openpty just returned both descriptors, owned here from now on.
+        let (_master, _slave) = unsafe { (std::os::fd::OwnedFd::from_raw_fd(master), std::os::fd::OwnedFd::from_raw_fd(slave)) };
+        for end in [master, slave] {
+            // SAFETY: an open descriptor of this process.
+            assert_eq!(unsafe { libc::fcntl(end, libc::F_SETFD, libc::FD_CLOEXEC) }, 0, "{}", std::io::Error::last_os_error());
+        }
+        let mut fixture = std::process::Command::new(std::env::current_exe().unwrap());
+        fixture
             .args(["--exact", "pairing::tests::phone_router_child_fixture", "--nocapture"])
             .env("TERMINALX_TEST_PHONE_ROUTER", "1")
             .env("TERMINALX_HOME", root.path().join("store"))
             .env("CLAUDE_CONFIG_DIR", root.path().join("claude"))
-            .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log)
-            .process_group(0).spawn().unwrap();
+            .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log);
+        // SAFETY: setsid and ioctl are async-signal-safe. The new session is
+        // also the process group the deadline below kills.
+        unsafe {
+            fixture.pre_exec(move || {
+                if libc::setsid() < 0 || libc::ioctl(slave, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = fixture.spawn().unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let result = loop {
             if let Some(status) = child.try_wait().unwrap() { break status; }
