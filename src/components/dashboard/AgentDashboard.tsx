@@ -1,8 +1,8 @@
 import { PresenceFaces, OwnerProfile, useTeamOverview } from "./TeamOverview";
 import { ThisComputer } from "@/lib/platform";
 import { useCloudCatalog } from "@/lib/cloudCatalog";
-import { usePeople } from "@/lib/cloudPeople";
-import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
+import { loadRosterIn, usePeople, userIdForEmail } from "@/lib/cloudPeople";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown, Cloud, Laptop, Monitor, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
@@ -37,7 +37,7 @@ import { usePref } from "@/lib/prefs";
 import { DEFAULT_DASHBOARD_PREFERENCES } from "@terminalx/portable/dashboard";
 import { useDashboardPrs } from "@/lib/dashboardPrs";
 import { SessionTable, type SessionPlace, type SessionTableRow, type SessionTableHandle } from "./SessionTable";
-import { DisplayMenu, FilterChip, InclusionChip, NewSessionButton, SearchField, SortChip } from "./OverviewToolbar";
+import { ActiveNow, PeopleChip, type OverviewPerson, DisplayMenu, FilterChip, InclusionChip, NewSessionButton, SearchField, SortChip } from "./OverviewToolbar";
 import { cn } from "@/lib/cn";
 import { isCloudDashboardSession, openCloudSession, attentionTab, useCloudDashboard, type CloudDashboardSession } from "@/lib/cloudDashboard";
 import { isMachineDashboardSession, machineAttentionTab, openMachineSession, useMachineDashboard, type MachineDashboardSession } from "@/lib/machineDashboard";
@@ -97,16 +97,18 @@ export function AgentDashboard() {
   const catalog = useCloudCatalog();
   const presenceVersion = useCloudPresenceVersion();
   const personName = usePeople(false);
-  const localOwner = catalog.viewerUserId ?? "local";
 
   const cloud = useCloudDashboard(true);
   const { visibleIds, selectedOrganization } = useOrganizationVisibility();
+  const readyOrgs = [...visibleIds].filter((org) => !privacy.enabled && phase2Ready(status, org, "presence"));
+  const presenceReady = readyOrgs.length > 0;
+  const localOwner = catalog.viewerUserId ?? (!presenceReady ? userIdForEmail(status.identity?.email) : null) ?? "local";
   const visibleCloud = useMemo(() => visibleDashboardSessions(cloud, visibleIds, query), [cloud, visibleIds, query]);
   // Sessions on paired machines (PRO-346): none while no machine is paired.
   const machineSessions = useMachineDashboard(true);
   const { machines: pairedMachines, states: machineStates } = useMachineConnections();
   const hasPairedMachines = pairedMachines.length > 0;
-  const showWhere = hasPairedMachines || [...visibleIds].some((org) => !privacy.enabled && phase2Ready(status, org, "presence"));
+  const showWhere = hasPairedMachines || presenceReady;
   const [placeChoice, setPlace] = useState<Place>("all");
   const place: Place = hasPairedMachines && (placeChoice === "all" || placeChoice === "local" || placeChoice === "cloud" || pairedMachines.some((m) => machineSectionKey(m.machineId) === placeChoice)) ? placeChoice : "all";
   const localFacts = useSessionRowFacts(store.sessions);
@@ -153,22 +155,23 @@ export function AgentDashboard() {
   // The filter holds project paths; choosing "Quick chats" stands for every quick chat's own path.
   const pathFilters = useMemo(
     // The key itself stays in the list: with no quick chat left it still matches nothing, rather than turning the filter off.
-    () => ({ ...filters, projects: filters.projects.includes(QUICK_CHATS_FILTER) ? [...filters.projects, ...quickPaths] : filters.projects }),
-    [filters, quickPaths],
+    () => ({ ...filters, ...(!presenceReady && { owners: preferences.owners }), projects: filters.projects.includes(QUICK_CHATS_FILTER) ? [...filters.projects, ...quickPaths] : filters.projects }),
+    [filters, quickPaths, presenceReady, preferences.owners],
   );
   const cloudOwners = useMemo(() => {
     const owners = new Map<string, { userId: string; name: string | null; photoUrl: string | null }>();
     if (privacy.enabled) return owners;
     for (const session of visibleCloud) {
       const org = catalog.orgs[session.orgId];
-      const workspace = org?.source === "live" && !org.error
-        ? org.workspaces.find((item) => item.workspace.id === session.workspaceId)?.workspace : undefined;
-      if (!workspace?.createdBy) continue;
+      const workspace = org?.workspaces.find((item) => item.workspace.id === session.workspaceId)?.workspace;
+      const userId = workspace?.createdBy ?? session.ownerId;
+      if (!userId) continue;
       const presence = cloudPresence.snapshot(session.orgId);
-      const projectedOwner = phase2Ready(status, session.orgId, "presence") && presence.state === "live"
-        ? presence.workspaces.find((row) => row.workspaceId === workspace.id)?.owner : undefined;
-      const person = [workspace.creator, projectedOwner].find((person) => person?.userId === workspace.createdBy);
-      owners.set(session.id, { userId: workspace.createdBy, name: person?.displayName?.trim() || null, photoUrl: person?.photoUrl ?? null });
+      const projectedOwner = org?.source === "live" && !org.error
+        && phase2Ready(status, session.orgId, "presence") && presence.state === "live"
+        ? presence.workspaces.find((row) => row.workspaceId === session.workspaceId)?.owner : undefined;
+      const person = [workspace?.creator, projectedOwner].find((person) => person?.userId === userId);
+      owners.set(session.id, { userId, name: person?.displayName?.trim() || null, photoUrl: person?.photoUrl ?? null });
     }
     return owners;
   }, [catalog, visibleCloud, presenceVersion, privacy.enabled, status]);
@@ -177,19 +180,21 @@ export function AgentDashboard() {
   for (const { userId, name } of cloudOwners.values()) {
     ownerLabels.set(userId, userId === catalog.viewerUserId ? "You" : name ?? ownerLabels.get(userId) ?? personName(userId));
   }
-  const ownerNames = JSON.stringify([...ownerLabels]);
+  const ownerNames = JSON.stringify(presenceReady ? [...ownerLabels] : [...new Set(sessions.flatMap((session) => session.ownerId ? [session.ownerId] : []))].map((id) =>
+    [id, id === "local" || id === catalog.viewerUserId ? "You" : ownerLabels.get(id) ?? personName(id)]));
   const owners = useMemo(() => new Map<string, string>(JSON.parse(ownerNames)), [ownerNames]);
   const baseFiltered = useMemo(
     () => filterSessions(sessions, { query, filters: pathFilters, projectName }).map((session) =>
-      isCloudDashboardSession(session) ? { ...session, ownerId: cloudOwners.get(session.id)?.userId ?? null } : session),
-    [sessions, query, pathFilters, projectName, cloudOwners],
+      presenceReady && isCloudDashboardSession(session) ? { ...session, ownerId: cloudOwners.get(session.id)?.userId ?? session.ownerId } : session),
+    [sessions, query, pathFilters, projectName, cloudOwners, presenceReady],
   );
-  const team = useTeamOverview(baseFiltered, selectedOrganization ?? null, owners);
+  const team = useTeamOverview(baseFiltered, selectedOrganization ?? null, owners, !presenceReady);
   const hiddenWorkingAutomations = (filters.automations ?? "hide") === "hide" && bucketSessions(everywhere).working.some((session) => !!session.automation);
-  const scoped = !!query.trim() || hasFilters(filters) || place !== "all" || team.scoped || filters.automations === "only" || filters.archived === "only" || hiddenWorkingAutomations;
+  const scoped = !!query.trim() || hasFilters(filters) || (!presenceReady && preferences.owners.length > 0) || place !== "all" || team.scoped || filters.automations === "only" || filters.archived === "only" || hiddenWorkingAutomations;
   const clearScope = () => {
     setQuery("");
     setFilters({ ...NO_FILTERS, automations: "show", archived: "show" });
+    if (!presenceReady) setPreferences({ ...preferences, owners: [] });
     setPlace("all");
     team.clearScope();
   };
@@ -201,6 +206,17 @@ export function AgentDashboard() {
   const archivedState = DASHBOARD_STATES.filter((state) => state.id === "archived");
   const boardColumns = filters.archived === "only" ? archivedState : filters.archived === "show" ? [...COLUMNS, ...archivedState] : COLUMNS;
   const shown = useMemo(() => ({ ...buckets, done: buckets.done.slice(0, doneLimit) }), [buckets, doneLimit]);
+  // Everyone with a session here, and how recently they worked: the people picker and Active now.
+  const people = useMemo<OverviewPerson[]>(() => presenceReady ? [] : [...owners].map(([id, name]) => {
+    const theirs = sessions.filter((session) => session.ownerId === id && !session.archived);
+    const activeAt = theirs.map((session) => session.lastMessageAt ?? session.modified).sort().at(-1) ?? null;
+    return { id, name, you: id === localOwner, activeAt, working: theirs.some((session) => session.tabs.some((tab) => tab.status === "in_progress")) };
+  }).sort((a, b) => Number(b.you) - Number(a.you) || a.name.localeCompare(b.name)), [owners, sessions, localOwner, presenceReady]);
+  const orgs = JSON.stringify([...new Set(visibleCloud.map((session) => session.orgId))].sort());
+  useEffect(() => {
+    if (presenceReady) return;
+    for (const orgId of JSON.parse(orgs) as string[]) void loadRosterIn(orgId).catch(() => undefined);
+  }, [orgs, presenceReady]);
   // Pull requests are this Mac's index: a machine's sessions are not in it.
   const prSessions = useMemo(() => filtered.filter((s) => !isMachineDashboardSession(s)), [filtered]);
   const prs = useDashboardPrs(prSessions, preferences.view === "table");
@@ -231,6 +247,7 @@ export function AgentDashboard() {
       : isMachineDashboardSession(session) ? { kind: "machine", machine: machineById.get(session.machineId) ?? null } : { kind: "local" };
     const owner = cloudOwners.get(session.id);
     const ownerName = owner ? owner.name ?? owners.get(owner.userId) ?? null : null;
+    const showPresence = isCloudDashboardSession(session) && !privacy.enabled && phase2Ready(status, session.orgId, "presence");
     const workspace = local && !session.worktreeRemoved ? workspaceByPath.get(session.cwd) : undefined;
     const recorded = [...(prs.get(session.id) ?? [])].sort((a, b) => a.number - b.number || a.url.localeCompare(b.url));
     const additions = workspace ? workspace.branchAdditions ?? workspace.additions : null;
@@ -250,17 +267,17 @@ export function AgentDashboard() {
       prs: recorded,
       additions, deletions,
       changes: additions === null || deletions === null ? null : additions + deletions,
-      owner: local || (owner && owner.userId === catalog.viewerUserId) ? "You" : ownerName,
-      ownerCell: isCloudDashboardSession(session) ? (owner
-        ? <OwnerProfile orgId={session.orgId} userId={owner.userId} name={ownerName} photoUrl={owner.photoUrl} avatarOnly />
+      owner: presenceReady ? (local || (owner && owner.userId === catalog.viewerUserId) ? "You" : ownerName) : session.ownerId ? owners.get(session.ownerId) ?? null : null,
+      ownerCell: isCloudDashboardSession(session) ? (session.ownerId
+        ? <OwnerProfile orgId={session.orgId} userId={session.ownerId} name={showPresence ? ownerName : owners.get(session.ownerId) ?? "Owner unavailable"} photoUrl={showPresence ? owner?.photoUrl : undefined} avatarOnly={showPresence} />
         : "Owner unavailable") : undefined,
-      locationCell: isCloudDashboardSession(session) ? <span className="flex min-w-0 items-center gap-1.5 text-[12.5px] text-muted-foreground"><Cloud aria-hidden className="size-[13px] shrink-0 text-info" /><span className="min-w-0 truncate">Cloud</span><PresenceFaces orgId={session.orgId} workspaceId={session.workspaceId} quiet /></span> : undefined,
+      locationCell: showPresence ? <span className="flex min-w-0 items-center gap-1.5 text-[12.5px] text-muted-foreground"><Cloud aria-hidden className="size-[13px] shrink-0 text-info" /><span className="min-w-0 truncate">Cloud</span><PresenceFaces orgId={session.orgId} workspaceId={session.workspaceId} quiet /></span> : undefined,
       // A cloud row's last activity is its workspace's own lastActivityAt and nothing else:
       // absent or invalid stays unknown rather than borrowing another time (docs/PHASE2-PRESENCE-UI.md).
       updated: isCloudDashboardSession(session) ? cloudLastActive(catalog.orgs[session.orgId]?.workspaces.find((item) => item.workspace.id === session.workspaceId)?.workspace.lastActivityAt) : session.lastMessageAt ?? session.modified,
       created: session.created ?? null,
     };
-  }), sort) : [], [filtered, workspaceByPath, harnessNames, prs, cloudOwners, owners, projectName, sort, preferences.view, showWhere, machineById, catalog]);
+  }), sort) : [], [filtered, workspaceByPath, harnessNames, prs, cloudOwners, owners, projectName, sort, preferences.view, showWhere, machineById, catalog, status, privacy.enabled, presenceReady]);
 
   // Keep selection by identity when rows reorder, filters change, or the view switches.
   const move = (dColumn: number, dRow: number) => {
@@ -315,7 +332,7 @@ export function AgentDashboard() {
     <div className="@container flex min-h-0 flex-1 flex-col">
       <header className="flex min-h-[52px] shrink-0 flex-wrap items-center gap-1.5 @min-[1100px]:flex-nowrap border-b border-hairline px-4 py-2.5">
         <SearchField inputRef={searchRef} query={query} onQuery={setQuery} />
-        {team.controls}
+        {presenceReady ? team.controls : <PeopleChip people={people} selected={preferences.owners} onChange={(owners) => setPreferences({ ...preferences, owners })} />}
         <InclusionChip kind="automations" value={filters.automations ?? "hide"} onChange={(automations) => setFilters((f) => ({ ...f, automations }))} />
         <InclusionChip kind="archived" value={filters.archived ?? "hide"} onChange={(archived) => setFilters((f) => ({ ...f, archived }))} />
         <SortChip sort={sort} columns={columns} onChange={(sort) => setPreferences({ ...preferences, sort })} />
@@ -409,7 +426,11 @@ export function AgentDashboard() {
           )}
         </FilterChip>
         <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center gap-x-3 gap-y-1.5 @min-[1100px]:shrink-0 @min-[1100px]:flex-nowrap">
-          {[...visibleIds].map((orgId) => <PresenceFaces key={orgId} orgId={orgId} />)}
+          {presenceReady ? readyOrgs.map((orgId) => <PresenceFaces key={orgId} orgId={orgId} />) : <>
+            {[...visibleIds].map((orgId) => <PresenceFaces key={orgId} orgId={orgId} />)}
+            {team.controls}
+            <ActiveNow people={people} />
+          </>}
           <NewSessionButton onClick={() => openNewSession()} />
         </div>
       </header>

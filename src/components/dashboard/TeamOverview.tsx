@@ -36,7 +36,7 @@ export function readOwners(key: string | null): string[] {
   if (!key) return [];
   try { const value: unknown = JSON.parse(localStorage.getItem(key) ?? "[]"); return Array.isArray(value) ? [...new Set(value.filter((id): id is string => typeof id === "string" && id.length <= 128))] : []; } catch { return []; }
 }
-export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | null, rowOwners: Map<string, string>) {
+export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | null, rowOwners: Map<string, string>, legacy = false) {
   const { status } = useAccount();
   const privacy = useDataPrivacy();
   const catalog = useCloudCatalog();
@@ -86,7 +86,10 @@ export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | nu
     return !privacy.enabled && phase2Ready(status, org, "presence") && snapshot.state === "live"
       && snapshot.workspaces.some((row) => row.workspaceId === workspace && row.activeMembers.length > 0);
   };
-  const byRows = rows.filter((row) => !selected.length || selected.includes(row.ownerId ?? ""));
+  const byRows = rows.filter((row) => {
+    const owner = legacy && !row.orgId ? catalog.viewerUserId ?? "local" : row.ownerId;
+    return !selected.length || selected.includes(owner ?? "");
+  });
   const matches = (row: TeamRow, candidate: TeamView) =>
     (candidate !== "following" || (!!row.orgId && followReady(row.orgId))) && teamPredicate(row, candidate, catalog, active);
   const counts = Object.fromEntries(TEAM_VIEWS.map(({ id }) => [id, byRows.filter((row) => matches(row, id)).length])) as Record<TeamView, number>;
@@ -115,7 +118,16 @@ export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | nu
   const peopleOptions = [...owners]
     .filter(([, name]) => name.toLowerCase().includes(peopleQuery.trim().toLowerCase()))
     .sort((a, b) => a[1].localeCompare(b[1]));
-  const controls = (
+  const controls = legacy ? <>
+    <DropdownMenu onOpenChange={(open) => { if (!open) setPeopleQuery(""); }}><DropdownMenuTrigger asChild><Button variant={selected.length ? "secondary" : "ghost"} size="sm">{selected.length ? `By ${selected.length} ${selected.length === 1 ? "person" : "people"}` : "By Anyone"}</Button></DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-64"><DropdownMenuLabel>Filter people</DropdownMenuLabel>
+        <input aria-label="Filter people" placeholder="Filter people" value={peopleQuery} onChange={(event) => setPeopleQuery(event.target.value)} onKeyDown={(event) => { if (event.key !== "Escape") event.stopPropagation(); }} className="mx-2 mb-2 w-[calc(100%-1rem)] rounded bg-well px-2 py-1 text-xs" />
+        <DropdownMenuItem onSelect={() => choose([])}>Anyone</DropdownMenuItem>
+        {[...owners].filter(([, name]) => name.toLowerCase().includes(peopleQuery.toLowerCase())).sort((a, b) => a[1].localeCompare(b[1])).map(([id, name]) => <DropdownMenuCheckboxItem key={id} checked={selected.includes(id)} onSelect={(event) => event.preventDefault()} onCheckedChange={() => choose(selected.includes(id) ? selected.filter((value) => value !== id) : [...selected, id])}>{name}</DropdownMenuCheckboxItem>)}
+        <p className="px-2 py-2 text-[10px] text-muted-foreground">Owner filter is saved on {thisComputer}. Local sessions count as yours.</p>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  </> : (
     <DropdownMenu key={peopleScope} onOpenChange={(open) => { if (!open) setPeopleQuery(""); }}>
       <DropdownMenuTrigger asChild>
         <Button variant={selected.length ? "secondary" : "ghost"} size="sm">{byLabel}</Button>
@@ -159,13 +171,16 @@ export function PresenceFaces({ orgId, workspaceId, othersOnly = false, compact 
   if (!people) return unavailable("Presence unavailable");
   const visible = othersOnly ? people.filter((person) => person.userId !== catalog.viewerUserId) : people;
   if (quiet && !visible.length) return null;
-  return <span className="inline-flex min-w-0 flex-wrap items-center gap-1" aria-label={workspaceId ? "People here" : "Active now"}>
+  const limit = compact || quiet ? 3 : visible.length;
+  const extra = visible.length - limit;
+  return <span className={compact || quiet ? "inline-flex shrink-0 items-center gap-1 whitespace-nowrap" : "inline-flex min-w-0 flex-wrap items-center gap-1"} aria-label={workspaceId ? "People here" : "Active now"}>
     {!workspaceId && <span className="mr-1 text-xs text-faint">Active now</span>}
-    {visible.map((person: PresencePerson) => {
+    {visible.slice(0, limit).map((person: PresencePerson) => {
       const member = (!error ? roster?.members.find((member) => member.userId === person.userId) : undefined) ?? { userId: person.userId, displayName: person.displayName ?? undefined, photoUrl: person.photoUrl ?? undefined, email: "", role: "" };
       const label = quiet ? { "aria-label": `View profile: ${memberName(member)} in this workspace` } : {};
       return <MemberProfile key={person.userId} member={member} online {...label} onClick={(event) => event.stopPropagation()} className="size-5" />;
     })}
+    {extra > 0 && <span className="text-[10px] text-faint" aria-label={`${extra} more people`}>+{extra}</span>}
     {!visible.length && !othersOnly && <span className="text-[10px] text-faint">No one online</span>}
   </span>;
 }

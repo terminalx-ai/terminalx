@@ -320,11 +320,11 @@ it("isolates this Mac's multi-person By preference by account and organization",
   localStorage.removeItem(a);
 });
 
-it("offers one By picker and ignores a legacy unscoped owner preference", () => {
+it("keeps the legacy owner preference when presence is held", () => {
   setPrefs({ dashboard: { ...DEFAULT_DASHBOARD_PREFERENCES, view: "table", owners: ["another-account"] } });
   state.sessions = [session("Local task")];
   render(<AgentDashboard />);
   expect(screen.getAllByRole("button", { name: "By Anyone" })).toHaveLength(1);
-  expect(screen.queryByRole("button", { name: /^People:/ })).toBeNull();
-  expect(rowNames()).toEqual(["Local task"]);
+  expect(screen.getByRole("button", { name: /^People:/ })).toBeTruthy();
+  expect(screen.queryByText("Local task")).toBeNull();
 });
