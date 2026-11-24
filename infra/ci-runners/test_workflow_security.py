@@ -40,6 +40,7 @@ SELECTED = {
 }
 ANSWERS = ["required", "rust", "frontend", "phone", "machines"]
 # Only these may take a macOS runner.
+MACOS_NATIVE = {"macos-native"}
 MACOS = {"macos-native", "machine-compat", "webkit-layout"}
 # The Linux Rust suite: the library's tests in four parts, then the rest of `cargo test`.
 PARTS = ["1", "2", "3", "4", "binaries"]
@@ -48,6 +49,17 @@ VITEST_PARTS = ["1", "2", "3", "4"]
 LOCK = "${{ hashFiles('src-tauri/Cargo.lock') }}"
 CACHE_MISS = "!endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock'))"
 CLEAN = "cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental"
+# macos-native saves its cache before the tests, which need this crate's output: it cleans a clone and puts the build back.
+ASIDE = f'mv target "$RUNNER_TEMP/target"\ncp -cpR "$RUNNER_TEMP/target" target\n{CLEAN}\n'
+PUT_BACK = 'test -d "$RUNNER_TEMP/target"\nrm -rf target && mv "$RUNNER_TEMP/target" target\n'
+# The macOS build dates the crate's OUT_DIR files back (tauri::generate_context! writes them during the compile),
+# then proves a second cargo command finds every unit fresh.
+BACKDATE = "find target/debug/build -path '*/raccoon-*/out/*' -type f -exec touch -t 200001010000 {} +\n"
+MACOS_BUILD = (
+    "cargo test --locked --lib --no-run\n"
+    + BACKDATE +
+    "cargo test --locked --lib --no-run --message-format=json | jq -s -e '[.[] | select(.reason == \"compiler-artifact\")] | (length > 0) and all(.fresh)'\n"
+)
 # The cache each job restores. serve-tests builds what headless-serve builds: it restores that job's and saves none.
 CACHES = {
     "linux-rust": "linux-rust", "linux-rust-tests": "linux-rust-tests", "macos-native": "macos-native",
@@ -183,7 +195,7 @@ def validate(workflow):
                     assert restored and name not in RESTORE_ONLY, "save without a restore, or by a job that only restores"
                     assert inputs["key"] == "${{ steps.cargo-cache.outputs.cache-primary-key }}", "save must use restored scope"
                     assert CACHE_MISS in step["if"], "a cache is saved only when none built from this lock file was restored"
-                    assert previous.get("run") == CLEAN and previous.get("if") == step["if"] and previous.get("working-directory") == "src-tauri", "a cache must not hold this crate's own output"
+                    assert previous.get("run") == (ASIDE if name in MACOS_NATIVE else CLEAN) and previous.get("if") == step["if"] and previous.get("working-directory") == "src-tauri", "a cache must not hold this crate's own output"
                 else:
                     assert "/restore@" in action, "a cache action that saves by itself"
                     assert step["id"] == "cargo-cache", "cache step name"
@@ -234,16 +246,24 @@ def validate(workflow):
     for steps in [rust, tests["steps"], native["steps"], jobs["serve-tests"]["steps"]]:
         assert any("command -v rg && command -v zsh" in s.get("run", "") for s in steps), "security fixtures must not skip missing tools"
     assert any(s.get("run") == "cargo test --locked" and s.get("if") == "${{ !cancelled() && steps.build.outcome == 'success' && github.event_name != 'pull_request' }}" for s in native["steps"]), "macOS full suite on main, nightly and manual runs"
-    assert any(s.get("run") == '"$BINARY" $(python3 ../infra/ci-runners/macos-rust.py --filters)' and s.get("env") == {"BINARY": "${{ steps.build.outputs.binary }}"} and s.get("if") == "${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'pull_request' }}" for s in native["steps"]), "the Apple-only and system-dependent tests on a selected pull request"
+    assert any(s.get("run") == "cargo test --locked --lib -- $(python3 ../infra/ci-runners/macos-rust.py --filters)" and s.get("if") == "${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'pull_request' }}" for s in native["steps"]), "the Apple-only and system-dependent tests on a selected pull request"
     # Clippy on every run of the job, a pull request's too, ahead of the tests; and a Clippy failure does not stop
     # the build or the suite: they wait only on the last step before Clippy, and nothing continues on error.
     after_helper = "${{ !cancelled() && steps.helper.outcome == 'success' }}"
     names = [s.get("run", "") for s in native["steps"]]
     clippy = [i for i, run in enumerate(names) if run.startswith("cargo clippy")]
-    build = next(i for i, run in enumerate(names) if run.startswith("cargo test --locked --lib --no-run --message-format=json-render-diagnostics > "))
-    # The build names the binary and a pull request runs it: another `cargo test` compiles the crate again.
-    assert 'echo "binary=$binary" >> "$GITHUB_OUTPUT"' in names[build] and 'test -x "$binary"' in names[build], "the build says which binary a pull request runs"
-    assert [names[i] for i in clippy] == ["cargo clippy --locked --test serde_field_naming -- -D warnings", "cargo clippy --locked --all-targets -- -D warnings"] and max(clippy) < build, "both macOS Clippy runs, ahead of the tests"
+    assert MACOS_BUILD in names, "the macOS build dates its OUT_DIR back and proves the next cargo command compiles nothing"
+    build = names.index(MACOS_BUILD)
+    steps = native["steps"]
+    assert steps[build].get("shell") == "bash", "pipefail: a failed cargo in the freshness check fails the build"
+    # The cache is saved once the dependencies are built, before any test: a suite that fails or runs out of time
+    # still leaves it. The crate's own output is cleaned from a clone, and the build is put back for the tests.
+    save = next(i for i, s in enumerate(steps) if "/save@" in s.get("uses", ""))
+    tests = [i for i, s in enumerate(steps) if s.get("name", "").startswith("cargo test")]
+    assert tests and build < save - 1 and steps[save - 1].get("id") == "aside" and steps[save - 1]["if"].startswith("${{ !cancelled() && steps.build.outcome == 'success' && "), "the cache is saved right after the build"
+    assert steps[save + 1].get("run") == PUT_BACK and steps[save + 1].get("if") == "${{ !cancelled() && steps.aside.outcome != 'skipped' }}" and steps[save + 1].get("working-directory") == "src-tauri", "the build is put back after the save"
+    assert save + 1 < min(tests), "the cache is saved before the tests"
+    assert [names[i] for i in clippy] == ["cargo clippy --locked --test serde_field_naming -- -D warnings\n" + BACKDATE, "cargo clippy --locked --all-targets -- -D warnings"] and max(clippy) < build, "both macOS Clippy runs, ahead of the tests; the first dates OUT_DIR back so the second checks the library once"
     assert "if" not in native["steps"][clippy[0]] and native["steps"][clippy[1]].get("if") == after_helper, "macOS Clippy on a pull request too"
     assert native["steps"][build].get("if") == after_helper and native["steps"][build].get("id") == "build", "macOS builds the library's tests whenever it runs, also after a lint"
     assert any(s.get("id") == "helper" and s.get("run") == "node scripts/build-computer-macos.mjs" for s in native["steps"][: clippy[0]]), "the step the build waits on"
@@ -387,7 +407,7 @@ class WorkflowSecurity(unittest.TestCase):
     def test_cache_holding_this_crates_output_is_rejected(self):
         def change(w):
             steps = w["jobs"]["macos-native"]["steps"]
-            steps.remove(next(s for s in steps if s.get("run") == CLEAN))
+            steps.remove(next(s for s in steps if s.get("run") == ASIDE))
         self.rejects(change)
         self.rejects(lambda w: self.step(w, "headless-serve", run="cargo clean").update({"run": "cargo clean --locked -p terminalx-serve"}))
         self.rejects(lambda w: self.step(w, "linux-rust", run="cargo clean").update({"if": "always()"}))
@@ -485,13 +505,30 @@ class WorkflowSecurity(unittest.TestCase):
     def test_missing_phone_checks_are_rejected(self):
         self.rejects(lambda w: w["jobs"]["phone-app"]["steps"].pop())
 
+    def test_macos_cache_saved_after_the_tests_or_left_out_is_rejected(self):
+        def save_last(w):
+            steps = w["jobs"]["macos-native"]["steps"]
+            i = next(i for i, s in enumerate(steps) if s.get("id") == "aside")
+            moved = steps[i : i + 3]
+            del steps[i : i + 3]
+            steps.extend(moved)
+        self.rejects(save_last)
+        # The crate's output cleaned from the build itself, not a clone: the tests would build it again.
+        self.rejects(lambda w: self.step(w, "macos-native", name="Leave this crate").update({"run": CLEAN}))
+        self.rejects(lambda w: w["jobs"]["macos-native"]["steps"].remove(self.step(w, "macos-native", name="Put this crate")))
+        self.rejects(lambda w: self.step(w, "macos-native", name="Put this crate").update({"if": "always()"}))
+
+    def test_macos_second_compile_is_rejected(self):
+        # Without the dates put back, every cargo command after the build compiles the crate again.
+        self.rejects(lambda w: self.step(w, "macos-native", name="build the library").update({"run": "cargo test --locked --lib --no-run\n"}))
+        self.rejects(lambda w: self.step(w, "macos-native", name="build the library").update({"run": MACOS_BUILD.replace(" and all(.fresh)", "")}))
+        self.rejects(lambda w: self.step(w, "macos-native", name="build the library").pop("shell"))
+
     def test_cancelling_a_running_main_job_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["macos-native"]["concurrency"].update({"cancel-in-progress": "true"}))
 
     def test_narrowed_macos_run_is_rejected(self):
-        self.rejects(lambda w: self.step(w, "macos-native", run='"$BINARY" $(').update({"run": '"$BINARY" dictation::'}))
-        # Back to cargo test, a pull request compiles the crate a second time.
-        self.rejects(lambda w: self.step(w, "macos-native", run='"$BINARY" $(').update({"run": "cargo test --locked --lib -- $(python3 ../infra/ci-runners/macos-rust.py --filters)"}))
+        self.rejects(lambda w: self.step(w, "macos-native", run="cargo test --locked --lib -- $(").update({"run": "cargo test --locked --lib -- dictation::"}))
         self.rejects(lambda w: self.step(w, "macos-native", name="cargo test (main").update({"if": "github.event_name == 'schedule'"}))
         self.rejects(lambda w: self.step(w, "macos-native", name="cargo test (main").update({"run": "cargo test --locked --lib"}))
         self.rejects(lambda w: self.step(w, "macos-native", run="cargo test --locked --lib --no-run").update({"if": "github.event_name != 'pull_request'"}))
