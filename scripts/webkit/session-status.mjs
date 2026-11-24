@@ -57,6 +57,11 @@ try {
   assert.equal(await search.evaluate((input) => input === document.activeElement), true);
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("ArrowDown");
+  // From one item to the next, Radix moves focus from a timer (react-roving-focus: setTimeout(focusFirst)). Enter
+  // pressed before it ran chose All projects (a Linux runner: 2 ms between the keys, five groups). Enter once local-0
+  // has focus; the field's own ArrowDown and the first item's ArrowUp move focus at once.
+  const project = page.getByRole("menuitemradio", { name: "local-0", exact: true });
+  await page.waitForFunction((item) => item === document.activeElement, await project.elementHandle());
   await page.keyboard.press("Enter");
   await rail.getByRole("button", { name: "In review 2", exact: true }).waitFor();
   assert.equal(await rail.locator("[data-status-group]").count(), 2);
