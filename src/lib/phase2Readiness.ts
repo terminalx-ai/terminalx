@@ -7,6 +7,7 @@ export const phase2Features = {
   restartDetails: "cloud.workspaces.restart-details.v1",
   freshWorkspace: "cloud.automations.fresh-workspace.v1",
   githubTrigger: "cloud.automations.github-trigger.v1",
+  workspaceAccessRequest: "cloud.workspaces.access-request-copy.v1",
   agentLoginAffectedWorkspaces: "cloud.agent-logins.affected-workspaces.v1",
   webhookTrigger: "cloud.automations.webhook-trigger.v1",
 } as const;
