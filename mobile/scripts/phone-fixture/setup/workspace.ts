@@ -20,7 +20,8 @@ import type { SetupHandler, SetupRequest } from "./types";
  * | `manage-being-deleted` | "Checkout redesign" being deleted in the list |
  * | `manage-old-link` | `ws-gone`, deleted: only its tombstone is listed |
  * | `delete-pending`, `delete-active-work`, `delete-busy`, `delete-offline` | Delete gets no answer, is refused (an agent is working, something else is under way), or finds no network |
- * | `manage-stopped`, `manage-not-manager` | The fixture's own list; only the provider is answered here |
+ * | `manage-not-manager` | "Checkout redesign" running, with this person a driver: no actions |
+ * | `manage-stopped` | The fixture's own list; only the provider is answered here |
  */
 
 const MINUTE = 60_000;
@@ -111,6 +112,7 @@ function acmeList(scenario: string) {
   }
   const checkout = (state: string, fields: Record<string, unknown> = {}, latestOperation: Record<string, unknown> | null = null) => ({ workspace: workspace(CHECKOUT, "Checkout redesign", state, fields), latestOperation });
   switch (scenario) {
+    case "manage-not-manager": return [checkout("ready", { you: { role: "driver", canApprove: true, canManageShares: false } }), stopped];
     case "manage-working": return [checkout("ready", { runtimeActivity: { online: true, activeTurns: 1, pendingApprovals: 0, reportedAt: Date.now(), stale: false } }), stopped];
     case "manage-failed-stop": return [checkout("attention-required", {}, { id: STOP_ID, state: "failed", action: "suspend", type: "create", errorCode: "cloud_provider_unavailable" }), stopped];
     case "manage-provider-refused": return [checkout("attention-required", {}, { id: DELETE_ID, state: "failed", action: "delete", type: "create", errorCode: "cloud_provider_permission_denied" }), stopped];
@@ -131,8 +133,8 @@ export const handle: SetupHandler = (request: SetupRequest) => {
   const orgId = decodeURIComponent(org);
 
   if (method === "GET" && new RegExp(`${base("[^/]+")}/cloud-providers$`).test(path)) return json(200, { providers: [BOAT] });
-  // The fixture's own lists serve `manage-stopped` and `manage-not-manager`.
-  if (scenario === "manage-stopped" || scenario === "manage-not-manager" || orgId !== ACME) return undefined;
+  // The fixture's own list serves `manage-stopped`.
+  if (scenario === "manage-stopped" || orgId !== ACME) return undefined;
 
   if (method === "GET" && new RegExp(`${base(ACME)}/cloud-workspaces$`).test(path)) {
     return json(200, { workspaces: acmeList(scenario), tombstones: scenario === "manage-old-link" ? [{ id: "ws-gone", orgId: ACME, deletedAt: at(60), expiresAt: Date.now() + 30 * 24 * 60 * MINUTE }] : [] });

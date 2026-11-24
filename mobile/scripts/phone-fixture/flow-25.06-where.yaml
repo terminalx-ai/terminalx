@@ -27,7 +27,7 @@ name: Workspace actions (25.06)
 - tapOn: "Cancel"
 - launchApp:
     stopApp: true
-    arguments: { fixtureScenario: connected, fixtureWorkspace: manage-not-manager, openRoute: /cloud, openWorkspace: ws-billing }
+    arguments: { fixtureScenario: connected, fixtureWorkspace: manage-not-manager, openRoute: /cloud, openWorkspace: ws-checkout }
 - assertVisible: ".*You can send.*"
 - assertNotVisible: { id: "workspace-actions" }
 - waitForAnimationToEnd
