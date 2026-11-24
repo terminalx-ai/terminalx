@@ -47,7 +47,7 @@ export function ProviderScreen({ orgId, providerId, replacing }: { orgId: string
     setJustConnected(null);
   }, [list.value]);
 
-  const header = (title: string, subtitle: string | null) => <Stack.Screen options={{ title, headerLargeTitle: false, headerTitle: () => <HeaderTitle title={title} subtitle={subtitle} /> }} />;
+  const header = (title: string, subtitle: string | null) => <Stack.Screen options={{ title, headerLargeTitle: false, headerBackButtonDisplayMode: "minimal", headerTitle: () => <HeaderTitle title={title} subtitle={subtitle} /> }} />;
 
   if (!api) return <>{header("Compute", organization)}<EmptyState title="Compute unavailable" detail={refusalText("signed-out")} /></>;
   if (list.value === null) {

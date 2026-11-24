@@ -26,7 +26,7 @@ export function ComputeList({ orgId }: { orgId: string }) {
   const organization = useOrganizationName(orgId);
   const router = useRouter();
   const list = useRead((client) => client.providers(orgId), [orgId], { refreshOnFocus: true });
-  const header = <Stack.Screen options={{ title: TITLE, headerLargeTitle: false, headerTitle: () => <HeaderTitle title={TITLE} subtitle={organization} /> }} />;
+  const header = <Stack.Screen options={{ title: TITLE, headerLargeTitle: false, headerBackButtonDisplayMode: "minimal", headerTitle: () => <HeaderTitle title={TITLE} subtitle={organization} /> }} />;
 
   if (!api) return <>{header}<EmptyState title="Compute unavailable" detail={refusalText("signed-out")} /></>;
 

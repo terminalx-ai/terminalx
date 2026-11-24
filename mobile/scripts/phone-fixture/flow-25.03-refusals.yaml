@@ -1,0 +1,99 @@
+# 25.03 Connect compute: when it does not work. Each refusal is one sentence, under the field or the form.
+appId: com.terminalx.phone.fixture
+# The boards are drawn in Ember when dark and in Den when light: MAESTRO_THEME=Den for the light run.
+env:
+  THEME: ${MAESTRO_THEME || "Ember"}
+name: Connect compute, refusals (25.03)
+---
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected }
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+- tapOn: "${THEME} theme"
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute/agent37?orgId=org-northwind", fixtureCompute: nothing, fixtureConnect: invalid }
+- setClipboard: "a37_fixture_placeholder_key_0000"
+- tapOn: "Paste Agent37 API key"
+# iOS asks before an app reads what another put on the pasteboard.
+- tapOn:
+    text: "Allow Paste"
+    optional: true
+- tapOn:
+    text: "I understand Agent37 bills.*"
+- tapOn: "Connect"
+- extendedWaitUntil:
+    visible: "Agent37 rejected that key.*"
+    timeout: 10000
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-13-rejected
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute/agent37?orgId=org-northwind", fixtureCompute: nothing, fixtureConnect: permission }
+- setClipboard: "a37_fixture_placeholder_key_0000"
+- tapOn: "Paste Agent37 API key"
+# iOS asks before an app reads what another put on the pasteboard.
+- tapOn:
+    text: "Allow Paste"
+    optional: true
+- tapOn:
+    text: "I understand Agent37 bills.*"
+- tapOn: "Connect"
+- extendedWaitUntil:
+    visible: "The key is valid but not allowed.*"
+    timeout: 10000
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-14-lacks-permission
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute/agent37?orgId=org-northwind", fixtureCompute: nothing, fixtureConnect: billing }
+- setClipboard: "a37_fixture_placeholder_key_0000"
+- tapOn: "Paste Agent37 API key"
+# iOS asks before an app reads what another put on the pasteboard.
+- tapOn:
+    text: "Allow Paste"
+    optional: true
+- tapOn:
+    text: "I understand Agent37 bills.*"
+- tapOn: "Connect"
+- extendedWaitUntil:
+    visible: "Agent37 needs billing set up.*"
+    timeout: 10000
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-15-billing-required
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute/agent37?orgId=org-northwind", fixtureCompute: nothing, fixtureConnect: unavailable }
+- setClipboard: "a37_fixture_placeholder_key_0000"
+- tapOn: "Paste Agent37 API key"
+# iOS asks before an app reads what another put on the pasteboard.
+- tapOn:
+    text: "Allow Paste"
+    optional: true
+- tapOn:
+    text: "I understand Agent37 bills.*"
+- tapOn: "Connect"
+- extendedWaitUntil:
+    visible: "Agent37 is not answering right now.*"
+    timeout: 10000
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-16-not-answering
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute/agent37?orgId=org-northwind", fixtureCompute: nothing, fixtureConnect: network }
+- setClipboard: "a37_fixture_placeholder_key_0000"
+- tapOn: "Paste Agent37 API key"
+# iOS asks before an app reads what another put on the pasteboard.
+- tapOn:
+    text: "Allow Paste"
+    optional: true
+- tapOn:
+    text: "I understand Agent37 bills.*"
+- tapOn: "Connect"
+- extendedWaitUntil:
+    visible: "No connection. The key was not sent.*"
+    timeout: 10000
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-17-no-network
