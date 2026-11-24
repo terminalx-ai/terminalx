@@ -64,6 +64,8 @@ export const checks = [
   // `pnpm test:webkit-layout`, the four machine screens from CI's own step.
   "team-presence-following",
   "machines-pairing", "machine-connection", "machine-page", "machine-update",
+  // Split from dictation-edits (2026-11): its Right Option case, which only a Mac can make.
+  "dictation-hold-to-talk",
 ];
 
 /**
@@ -79,8 +81,10 @@ const entryArguments = new Map([
 ]);
 
 /**
- * The checks that are left out on a Linux host, each with why. They run on macOS as before. These are judgements made
- * on a Mac (2026-11), not seen failing on Linux: WEBKIT_MAC_ONLY_TOO=1 runs them on Linux too, to find out.
+ * The checks that are left out on a Linux host, each with why. CI runs them in its macOS job (`--only mac-only`) and
+ * every other check in its Linux parts: infra/ci-runners/test_workflow_security.py fails when a check is in neither or
+ * in both. The first five are judgements made on a Mac (2026-11), not seen failing on Linux; WEBKIT_MAC_ONLY_TOO=1 runs
+ * them on Linux too, to find out. The others were moved here from what a Linux run showed, each reason from that run.
  */
 export const macOnly = new Map([
   ["chat-scrollbar", "measures macOS's overlay scrollbars (they take no width and fade); WebKit on Linux draws GTK's own"],
@@ -88,6 +92,7 @@ export const macOnly = new Map([
   ["run-sidebar", "part of it checks the Mac's glass sidebar (backdrop blur through the window), which WebKit on Linux does not composite the same"],
   ["readable-panels", "measures text contrast through the Mac's glass panels (backdrop blur), which WebKit on Linux does not composite the same"],
   ["pr-conversation", "samples frame times while a list scrolls, against the Mac runner's frame rate"],
+  ["dictation-hold-to-talk", "holds Right Option (the Mac's key, hold:AltRight) and presses Option+Backspace to delete a word; WebKit on Linux has no editing key while Alt is held, so the edit is never made"],
 ]);
 
 /**

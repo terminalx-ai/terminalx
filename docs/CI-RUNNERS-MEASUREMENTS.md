@@ -581,3 +581,47 @@ at 30 min 16 s) were the slow mirror. `macos-native` was cancelled at
 `macos-native` on that head (a pull request that selects it): Clippy took
 21 min 39 s for its two steps and the library's test build 32 min 54 s
 (07:31:38 to 08:04:32); the job was still running when this was written.
+
+## Step 2: the WebKit layout checks become required Linux jobs (2026-11-24)
+
+The Linux trial workflow (`webkit-linux.yml`, not required) on draft pull
+request #1530, whose two WebKit pieces fixed the checks that failed only on
+Linux. Times are each job's start to its end, from `gh run view`.
+
+| Run | Head | Part 1 | Part 2 | Part 3 | Part 4 |
+| --- | --- | --- | --- | --- | --- |
+| 45361220945 (pull request) | `0350c08a0` | 8 min 3 s, failed | 5 min 28 s, failed | 5 min 1 s, failed | 4 min 13 s, failed |
+| 45362750128 (by hand, next) | `0350c08a0` | 7 min 11 s, failed | 5 min 30 s, ok | 4 min 55 s, failed | 6 min 59 s, failed |
+| 45372204285 (pull request) | `880f19ca4` | 8 min 36 s, ok | 6 min 33 s, ok | 4 min 14 s, failed | 6 min 42 s, failed |
+| 45373848579 (by hand, next) | `880f19ca4` | 9 min 23 s, ok | 5 min 18 s, failed | 5 min 6 s, failed | 5 min 37 s, failed |
+
+The macOS `webkit-layout` job on the same runs: 33 min 28 s (job
+138331629037, CI run 45361221006) and 35 min 42 s (CI run 45372204348), each
+ending "126 of 129 checks passed".
+
+Every check the two pieces changed passed in both trial runs of its piece and
+on macOS (the pieces' reports: sidebar-order, sidebar-extras, file-tab,
+editor-toolbar, review-threads; command-palette, quick-open, chat-controls,
+dictation-edits, dialog-lists, machine-session, cloud-setup). What failed in
+the parts was not theirs:
+
+| Check | Where | Cause, as far as known |
+| --- | --- | --- |
+| `repository-scripts`, `review-tab`, `composer-controls` | the Linux runs (45372204285 parts 3 and 4, 45373848579 parts 3 and 4) and macOS | main's own at `45280a95` (run 45358840151, job 138324967922): #1529 merged before its CI had a result; fixed on main by a separate worker |
+| `organization-roster` | 45372204285 part 4 | once; being fixed on `raccoon/webkit-linux-flaky` |
+| `sparse-checkout`, `agent-dashboard:3`, `create-project` | once each on 24 November, by the lead's count (the run of each not read here) | being fixed on `raccoon/webkit-linux-flaky` |
+
+The failed parts of 45361220945, 45362750128 and 45373848579 part 2 were not
+read check by check for this table.
+
+So no run above had all four parts green. The gate below is not yet shown
+green on Linux in CI; the step 2 pull request goes to the owner after five
+full Linux runs in a row on the final branch with every check green, and one
+green macOS run of the mac-only checks.
+
+What changed in `ci.yml`: the four parts became `webkit-layout-linux`, counted
+in `check`; `webkit-layout` became a Linux job that passes only when every part
+did (its limit 10 minutes, down from 50); the macOS job became
+`webkit-mac-only`, six checks, run on main, nightly, by hand and on a pull
+request the selector's new `mac-webkit` answer picks. `run-all.mjs --list`
+lists 130 checks: 124 run in the Linux parts, 6 on macOS.
