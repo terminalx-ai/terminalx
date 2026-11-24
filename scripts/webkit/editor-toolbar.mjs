@@ -106,9 +106,12 @@ try {
   const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
   page.on('pageerror', error => console.error(error));
   await page.addInitScript(await readFile(new URL('./tauri-stub.js', import.meta.url), 'utf8'));
-  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/toolbar-test`);
+  // The page is Vite's dev server's: its "load" waits for every module the page imports (the app's CSS and six
+  // screens) to be transformed on demand, which on a busy runner outlasted goto's 30 s (#1515, run 45260136134).
+  // What the check reads first is the toolbar, so wait for that, as long as a cold transform takes (chat-transcript.mjs).
+  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/toolbar-test`, { waitUntil: 'commit' });
   const toolbar = page.locator('#pane').getByTestId('editor-toolbar');
-  await toolbar.waitFor();
+  await toolbar.waitFor({ timeout: 120_000 });
   for (const width of [700, 600, 520, 519, 440, 439, 400, 399, 360, 359, 300, 290, 289, 260, 220, 219, 180, 120, 80]) {
     await page.locator('#pane').evaluate((pane, width) => { pane.style.width = `${width}px`; }, width);
     for (const selected of ['Preview', 'Source']) {
@@ -120,7 +123,14 @@ try {
       // center between pointer-down and pointer-up. Click its uncovered top edge.
       await toolbar.getByRole('radio', { name: selected, exact: true }).click({ position: { x: 5, y: 5 } });
       await group.getByRole('radio', { name: selected, exact: true, checked: true }).waitFor({ state: 'attached', timeout: 3000 });
-      await page.waitForTimeout(180);
+      // The thumb slides to the chosen radio (Segmented's 150 ms transform transition); measure once it has stopped.
+      // A fixed 180 ms was not always enough on a runner running four checks at once: #1527's run 45353183657 read
+      // the thumb mid-slide at 360/Source. A transition replaced by a newer one is cancelled, so look again until
+      // none is left running; one that ends leaves getAnimations().
+      await group.evaluate(async (group) => {
+        const thumb = group.firstElementChild;
+        for (let running = thumb.getAnimations(); running.length; running = thumb.getAnimations()) await Promise.allSettled(running.map((animation) => animation.finished));
+      });
       const result = await toolbar.evaluate((toolbar) => {
         const box = el => el.getBoundingClientRect();
         const visible = el => el && box(el).width > 0 && box(el).height > 0;
