@@ -88,11 +88,23 @@ try {
     const viewer = page.getByRole('dialog',{name:'Table fullscreen'});
     await viewer.waitFor();
     assert.equal(await page.getByRole('menu').count(),0,`${label}: inline menu dismissed`);
-    const bounds = await viewer.evaluate(el=> {
-     const r=el.getBoundingClientRect();
-     return {x:r.x,y:r.y,width:r.width,height:r.height,viewport:[innerWidth,innerHeight],focus:el.contains(document.activeElement),covers:[[4,100],[innerWidth/2,innerHeight/2],[innerWidth-4,innerHeight-4]].every(([x,y])=>el.contains(document.elementFromPoint(x,y)))};
-    });
-    assert.ok(Math.abs(bounds.x)<1 && Math.abs(bounds.y)<1 && Math.abs(bounds.width-bounds.viewport[0])<2 && Math.abs(bounds.height-bounds.viewport[1])<2 && bounds.focus && bounds.covers,`${label}: fullscreen covers viewport ${JSON.stringify(bounds)}`);
+    const measureCoverage = el => {
+     const {x,y,width,height}=el.getBoundingClientRect();
+     const hits=[[4,100],[innerWidth/2,innerHeight/2],[innerWidth-4,innerHeight-4]].map(([x,y])=>document.elementFromPoint(x,y));
+     const focus=el.contains(document.activeElement);
+     const covers=hits.every(hit=>el.contains(hit));
+     const ready=Math.abs(x)<1 && Math.abs(y)<1 && Math.abs(width-innerWidth)<2 && Math.abs(height-innerHeight)<2 && focus && covers;
+     return {x,y,width,height,viewport:[innerWidth,innerHeight],focus,covers,ready,hitTargets:hits.map(hit=>hit?.tagName)};
+    };
+    // The portal can have its final bounds before WebKit updates hit testing.
+    const deadline = Date.now()+5000;
+    let bounds;
+    do {
+     bounds = await viewer.evaluate(measureCoverage);
+     if (bounds.ready) break;
+     await page.evaluate(()=>new Promise(requestAnimationFrame));
+    } while (Date.now()<deadline);
+    assert.ok(bounds.ready,`${label}: fullscreen covers viewport ${JSON.stringify(bounds)}`);
     assert.equal(await viewer.locator('table').innerText(),await wrapper.locator('table').innerText());
     assert.equal(await viewer.getByRole('link',{name:'Example task'}).getAttribute('href'),await wrapper.locator('a').first().getAttribute('href'));
     await viewer.getByRole('link',{name:'Example task'}).click();

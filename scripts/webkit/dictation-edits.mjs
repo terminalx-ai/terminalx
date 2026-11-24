@@ -346,19 +346,48 @@ for (const close of [false, true]) {
 // Hold Right Option to talk: another key ends the dictation, and still edits the draft.
 {
   const { page, field } = await sessionComposer();
-  await page.keyboard.down("AltRight");
+  const nativeOption = process.platform === "darwin";
+  if (nativeOption) {
+    await page.keyboard.down("AltRight");
+  } else {
+    // The app sees a Mac keymap, but GTK WebKit does not use Alt+Backspace
+    // to delete a word. Start the app's hold without changing native editing.
+    await field.dispatchEvent("keydown", { key: "Alt", code: "AltRight", altKey: true, bubbles: true });
+  }
   await page.getByText("Listening. Speak, then release the key.", { exact: true }).waitFor();
   await hear(page, "Fix the build");
-  const dictated = await settled(page, field);
+  const dictatedText = "Fix the build";
+  const editedText = "Fix the ";
+  const haveValue = (value) => page.waitForFunction(
+    ({ field, value }) => field.value === value, { field: fieldHandle, value },
+  );
+  const fieldHandle = await field.elementHandle();
+  await haveValue(dictatedText);
+  const dictated = await field.inputValue();
+  await field.evaluate((el, { nativeOption, editedText }) => {
+    el.setSelectionRange(nativeOption ? el.value.length : editedText.length, el.value.length);
+  }, { nativeOption, editedText });
+
+  // Deliver the recognizer's final result after the edit, as a slow recognizer would.
   await page.evaluate(() => {
-    window.__settled = "Fix the build.";
+    const { answers, emit } = window.__PW_STUB__;
+    answers.dictation_stop = () => {
+      window.__finishHeldDictation = () => {
+        emit("dictation", { kind: "final", text: "Fix the build.", segment: 0 });
+        emit("dictation", { kind: "stopped" });
+      };
+      return null;
+    };
   });
-  // Option+Backspace: the word before the caret.
   await page.keyboard.press("Backspace");
-  await page.keyboard.up("AltRight");
-  await page.getByText(/^Listening\./).waitFor({ state: "detached" });
+  await page.waitForFunction(() => typeof window.__finishHeldDictation === "function");
+  await haveValue(editedText);
+  if (nativeOption) await page.keyboard.up("AltRight");
+  await page.getByText("Finishing…", { exact: true }).waitFor();
+  await page.evaluate(() => window.__finishHeldDictation());
   await page.getByText("Finishing…", { exact: true }).waitFor({ state: "detached" });
-  const afterDelete = await settled(page, field);
+  const afterDelete = await field.inputValue();
+  await fieldHandle.dispose();
   failed += report(
     "a key pressed while holding Right Option to talk",
     {
