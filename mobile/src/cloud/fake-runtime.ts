@@ -91,6 +91,9 @@ export class Runtime {
       return this.encrypted({ id: value.id, ok: true, result: { protocol: "terminalx-workspace-rpc/1", runtime: { version: "0.2.7", runtimeGeneration: this.generation, epoch: "e1" }, capabilities: (value.params.want as string[]).filter((capability) => !this.withheld.includes(capability)), authority: this.authority, limits: {}, you: this.you } });
     }
     const answer = this.methods[value.method]?.(value.params ?? {});
+    // A method can refuse as the runtime does, with a code and its data, or say nothing at all.
+    if (answer instanceof Refusal) return this.encrypted({ id: value.id, ok: false, error: { code: answer.code, message: answer.message, ...(answer.data ? { data: answer.data } : {}) } });
+    if (answer === SILENT) return;
     if (answer !== undefined) return this.encrypted({ id: value.id, ok: true, result: answer });
     this.encrypted({ id: value.id, ok: false, error: { code: "method_not_found", message: value.method } });
   }
@@ -105,3 +108,11 @@ export class Runtime {
     this.onclose?.({ code });
   }
 }
+
+/** What a fake runtime method returns to refuse as the runtime does (`forbidden`, `invalid_params` with a reason). */
+export class Refusal {
+  constructor(readonly code: string, readonly message: string, readonly data?: Record<string, unknown>) {}
+}
+
+/** What a fake runtime method returns to send no answer at all. */
+export const SILENT = Symbol("no answer");

@@ -66,3 +66,13 @@ it("opens nothing while the workspace cannot be acted on", async () => {
   await page.press(button());
   expect(sheet).not.toHaveBeenCalled();
 });
+
+it("puts a line under the title when it has one to say (25.10: a runtime too old to start a conversation from a phone)", async () => {
+  const old = "This workspace needs a newer runtime before a phone can start a conversation. Stop it and start it again.";
+  await page.show(<WorkspaceActionsButton title="Checkout redesign" actions={actions} message={old} />);
+  await page.press(button());
+  expect(sheet.mock.calls[0][0]).toEqual({ title: "Checkout redesign", message: old, options: ["Stop workspace", "Delete workspace…", "Cancel"], cancelButtonIndex: 2, destructiveButtonIndex: [1] });
+  (Platform as { OS: string }).OS = "android";
+  await page.press(button());
+  expect(alert.mock.calls[0][1]).toBe(old);
+});

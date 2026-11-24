@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   push: vi.fn(),
   alert: vi.fn(),
   focus: [] as (() => void | (() => void))[],
+  sheet: null as any,
 }));
 vi.mock("expo-router", () => ({
   // The header as the stack draws it: its title, or the screen's own title view, and what is on its right.
@@ -46,6 +47,11 @@ vi.mock("react-native", () => {
     SectionList: ({ sections, renderItem, renderSectionHeader, renderSectionFooter, ListHeaderComponent, ListEmptyComponent, ListFooterComponent, contentContainerStyle }: any) => (mocks.listProps = { sections, contentContainerStyle }) && <div>{ListHeaderComponent}{sections.length ? sections.map((section: any) => <div key={section.key} data-testid="cloud-section">{renderSectionHeader({ section })}{section.data.map((item: any, index: number) => <div key={item.workspace.id}>{renderItem({ item, index, section })}</div>)}{renderSectionFooter?.({ section })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>,
   };
 });
+// The start sheet has its own tests (StartAgentSheet.test.tsx); here, what the screen opens it with, and what it does with its answer.
+vi.mock("@mobile/ui/StartAgentSheet", () => ({
+  StartAgentSheet: (props: any) => (mocks.sheet = props) && <div data-testid="start-sheet">{`${props.kind}|${props.initialText ?? ""}|${props.waking ? "waking" : ""}`}</div>,
+}));
+vi.mock("@mobile/ui/Notice", () => ({ Notice: ({ text, testID }: any) => <div data-testid={testID}>{text}</div> }));
 vi.mock("@mobile/ui/primitives", () => ({
   Button: ({ label, onPress, disabled, accessibilityLabel }: any) => <button disabled={disabled} aria-label={accessibilityLabel} onClick={onPress}>{label}</button>,
   Card: ({ children }: any) => <div>{children}</div>,
@@ -62,7 +68,7 @@ const item = (id: string, fields: Record<string, unknown> = {}) => ({ workspace:
 
 const NAMES: Record<string, string> = { "u-alice": "Alice", "u-bob": "Bob" };
 
-function world(options: { state?: string | null; role?: string | null; canApprove?: boolean; hasKey?: boolean; events?: unknown[]; outbox?: unknown[]; connection?: string; noKey?: boolean; continuous?: boolean; tabs?: number; access?: string; problem?: unknown; collab?: Record<string, unknown>; interrupts?: boolean } = {}) {
+function world(options: { state?: string | null; role?: string | null; canApprove?: boolean; hasKey?: boolean; events?: unknown[]; outbox?: unknown[]; connection?: string; noKey?: boolean; continuous?: boolean; tabs?: number; access?: string; problem?: unknown; collab?: Record<string, unknown>; interrupts?: boolean; startOffer?: string | null; gone?: boolean } = {}) {
   const state = options.state === undefined ? "ready" : options.state;
   const snapshot = {
     connection: { state: options.connection ?? (state === "ready" ? "connected" : "suspended") },
@@ -72,7 +78,8 @@ function world(options: { state?: string | null; role?: string | null; canApprov
     canApprove: options.canApprove ?? false,
     hasKey: options.hasKey ?? true,
     interrupts: options.interrupts ?? false,
-    tabs: Array.from({ length: options.tabs ?? 1 }, (_, index) => ({ tabId: index ? `t${index + 1}` : "t1", sessionId: "s1", title: index ? `Second ${index}` : "Fix login", status: "in_progress", source: "live", pendingPermissions: [], events: index ? [] : (options.events ?? [event(1, { type: "user_message", text: "run the tests", queued: false })]), truncated: false, noKey: options.noKey ?? false, continuous: options.continuous ?? false })),
+    startOffer: options.startOffer === undefined ? null : options.startOffer,
+    tabs: Array.from({ length: options.tabs ?? 1 }, (_, index) => ({ tabId: index ? `t${index + 1}` : "t1", sessionId: "s1", title: index ? `Second ${index}` : "Fix login", status: "in_progress", source: "live", pendingPermissions: [], events: index ? [] : (options.events ?? [event(1, { type: "user_message", text: "run the tests", queued: false })]), truncated: false, noKey: options.noKey ?? false, continuous: options.continuous ?? false, gone: !index && !!options.gone })),
     outbox: options.outbox ?? [],
     error: null,
   };
@@ -85,6 +92,7 @@ function world(options: { state?: string | null; role?: string | null; canApprov
     interrupt: vi.fn(async () => true),
     decide: vi.fn(async () => ({})),
     cancel: vi.fn(async () => undefined),
+    dismiss: vi.fn(async () => undefined),
     typingIn: vi.fn(),
     postNote: vi.fn(async () => ({})),
     takeWheel: vi.fn(async () => undefined),
@@ -96,7 +104,7 @@ function world(options: { state?: string | null; role?: string | null; canApprov
   };
   const release = vi.fn();
   const unwatch = vi.fn();
-  const listed = state === null ? null : item(mocks.params.workspaceId, { name: "fix-login", state }).workspace;
+  const listed = state === null ? null : item(mocks.params.workspaceId, { name: "fix-login", state, ...(options.startOffer !== undefined ? { you: { role: options.role, canApprove: options.canApprove ?? false } } : {}) }).workspace;
   const organizations = [{ organization: { orgId: "org-1", name: "Acme", role: "member" }, workspaces: listed ? [{ workspace: listed, latestOperation: null }] : [], error: null, loaded: true }];
   mocks.catalog = {
     getSnapshot: () => ({ organizations, loading: false, error: null, refreshedAt: 1, saved: false, titles: {} }),
@@ -349,7 +357,8 @@ describe("a cloud workspace screen", () => {
     world({ state: "suspended", role: "manager", tabs: 0 });
     await show(<CloudWorkspaceScreen />);
     expect(stateLine().textContent).toBe("Stopped · You are a manager");
-    expect(text()).toContain("No conversation yet Nothing was said in this workspace before it stopped.");
+    // A manager is offered a conversation there too (25.10), over the same Start.
+    expect(text()).toContain("No conversation yet Start one with an agent.");
     expect(text()).not.toMatch(/saved conversation|Nothing saved/);
     expect(startBar().textContent).toBe("This workspace is stoppedStart it to send a message.Start");
     await click("Start");
@@ -1076,5 +1085,101 @@ describe("the sharing screen", () => {
     mocks.catalog.api.shares.mockResolvedValue({ shares: [], you: { role: "viewer", canApprove: false, canManageShares: false } });
     await click("Try again");
     expect(text()).toContain("This workspace is not shared with anyone yet.");
+  });
+});
+
+describe("starting a conversation from the phone (25.10)", () => {
+  const sheet = () => container.querySelector('[data-testid="start-sheet"]')?.textContent ?? null;
+  const offered = () => (mocks.alert.mock.calls.at(-1)?.[2] as { text: string }[]).map((entry) => entry.text);
+
+  it("an empty running workspace: a manager gets Start a conversation, and New conversation in the •••", async () => {
+    world({ role: "manager", tabs: 0, startOffer: "yes" });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("No conversation yet Start one with an agent.");
+    await click("Start a conversation");
+    expect(sheet()).toBe("conversation||");
+    await act(async () => mocks.sheet.onClose());
+    await click("Workspace actions");
+    // No tab to add one beside: Add agent tab is not offered.
+    expect(offered()).toEqual(["New conversation", "Stop workspace", "Delete workspace…", "Cancel"]);
+  });
+
+  it("a running workspace with a tab offers both, above Stop and Delete", async () => {
+    world({ role: "manager", startOffer: "yes" });
+    await show(<CloudWorkspaceScreen />);
+    await click("Workspace actions");
+    expect(offered()).toEqual(["New conversation", "Add agent tab", "Stop workspace", "Delete workspace…", "Cancel"]);
+    mocks.alert.mock.calls.at(-1)![2][1].onPress();
+    await act(async () => undefined);
+    expect(sheet()).toBe("tab||");
+  });
+
+  it("someone who may not start one is told who can, with no button and nothing new in the •••", async () => {
+    world({ role: "driver", tabs: 0, startOffer: "no" });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("No conversation yet Only this workspace's creator or an organization owner or admin can start one.");
+    expect(() => button("Start a conversation")).toThrow();
+    expect(() => button("Workspace actions")).toThrow();
+  });
+
+  it("a runtime too old: the sentence to restart it, no Stop workspace under it until the live check, and the same line in the •••", async () => {
+    world({ role: "manager", tabs: 0, startOffer: "old" });
+    await show(<CloudWorkspaceScreen />);
+    const old = "This workspace needs a newer runtime before a phone can start a conversation. Stop it and start it again.";
+    expect(text()).toContain(`No conversation yet ${old}`);
+    expect(() => button("Start a conversation")).toThrow();
+    expect(() => button("Stop workspace")).toThrow();
+    await click("Workspace actions");
+    expect(mocks.alert.mock.calls.at(-1)![1]).toBe(old);
+    expect(offered()).toEqual(["Stop workspace", "Delete workspace…", "Cancel"]);
+  });
+
+  it("a stopped empty workspace: the same sentence and button over the Start bar; it asks first, starts the workspace, and opens the sheet at once", async () => {
+    world({ state: "suspended", role: "manager", tabs: 0 });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("No conversation yet Start one with an agent.");
+    expect(startBar().textContent).toContain("This workspace is stopped");
+    await click("Start a conversation");
+    expect(mocks.alert).toHaveBeenLastCalledWith("Start this workspace?", "It is stopped. A new conversation starts it, and it is billed to the organization while it runs.", expect.any(Array));
+    expect(mocks.catalog.start).not.toHaveBeenCalled();
+    await act(async () => mocks.alert.mock.calls.at(-1)![2][1].onPress());
+    expect(mocks.catalog.start).toHaveBeenCalledWith("org-1", mocks.params.workspaceId);
+    expect(sheet()).toBe("conversation||waking");
+  });
+
+  it("someone else's stopped empty workspace keeps today's sentence", async () => {
+    world({ state: "suspended", role: "viewer", tabs: 0 });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Nothing was said in this workspace before it stopped.");
+    expect(() => button("Start a conversation")).toThrow();
+  });
+
+  it("a tab that is gone: its message not sent, and for a manager New conversation with that message", async () => {
+    const { session } = world({ role: "manager", startOffer: "yes", gone: true, events: [], outbox: [{ clientCommandId: "c1", tabId: "t1", kind: "send", text: "Run the tests", state: "rejected", category: "tab-unknown" }] });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Not sent: this agent tab is no longer in the workspace.");
+    await click("New conversation");
+    expect(sheet()).toBe("conversation|Run the tests|");
+    await act(async () => mocks.sheet.onStarted({ tabId: "t1", promptNotSent: false, text: "Run the tests" }));
+    expect(session.cancel).toHaveBeenCalledWith("c1");
+    await vi.waitFor(() => expect(session.dismiss).toHaveBeenCalledWith("c1"));
+  });
+
+  it("a tab that is gone, for someone who cannot start one, says who can", async () => {
+    world({ role: "driver", startOffer: "no", gone: true, events: [], outbox: [{ clientCommandId: "c1", tabId: "t1", kind: "send", text: "Run the tests", state: "rejected", category: "tab-unknown" }] });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Ask the workspace's creator or an organization owner or admin to start a new one.");
+    expect(() => button("New conversation")).toThrow();
+  });
+
+  it("opens the new tab, and when its first message may not have reached the agent, says so with the message back in the composer", async () => {
+    world({ role: "manager", startOffer: "yes", tabs: 2 });
+    await show(<CloudWorkspaceScreen />);
+    await click("Workspace actions");
+    await act(async () => mocks.alert.mock.calls.at(-1)![2][0].onPress());
+    await act(async () => mocks.sheet.onStarted({ tabId: "t2", promptNotSent: true, text: "Fix the login bug" }));
+    expect(sheet()).toBeNull();
+    expect((container.querySelector("input[placeholder='Message the agent']") as HTMLInputElement).value).toBe("Fix the login bug");
+    expect(container.querySelector('[data-testid="prompt-not-sent"]')!.textContent).toBe("The agent started, but the first message may not have reached it.");
   });
 });

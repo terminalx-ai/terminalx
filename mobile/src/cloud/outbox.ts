@@ -277,6 +277,19 @@ export class CloudOutbox {
     this.publish();
   }
 
+  /**
+   * Let go of a command that was refused for good or cancelled: it is no
+   * longer shown. One still on its way is never dropped here (that is `cancel`).
+   */
+  async dismiss(clientCommandId: string): Promise<void> {
+    await this.load();
+    const item = this.items.find((entry) => entry.envelope.clientCommandId === clientCommandId);
+    if (!item || (item.state !== "rejected" && item.state !== "cancelled")) return;
+    this.items = this.items.filter((entry) => entry !== item);
+    await this.save();
+    this.publish();
+  }
+
   /** Forget everything of this workspace (deleted, access removed, signed out). */
   async clear(): Promise<void> {
     this.items = [];
