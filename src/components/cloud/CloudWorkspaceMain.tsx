@@ -30,6 +30,7 @@ import { useAccount } from "@/lib/account";
 import { computerColorCss, computerNameOf } from "@/lib/computerIdentity";
 import { cloudSessionKey, cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 
+const UNRESPONSIVE_DELAY_MS = 15_000;
 const NOT_CONNECTED: WorkspaceConnectionState = { state: "idle" };
 
 /** Connect to a running or stopped workspace without waking it, including a recovered launch whose server state still lags. */
@@ -192,12 +193,23 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   const saved = item ? lastSavedText(item) : null;
   const deleting = item ? deletion(item) : null;
   const [healthAction, setHealthAction] = useState<{ key: string; scope: string; action: "restart" | "diagnostics" } | null>(null);
-  const activeHealthAction = detailsAvailable && !locked && healthAction?.key === workspaceKey && healthAction.scope === detailsScope()
+  const healthScope = detailsScope();
+  useEffect(() => { setHealthAction(null); }, [workspaceKey, healthScope]);
+  const activeHealthAction = detailsAvailable && !locked && healthAction?.key === workspaceKey && healthAction.scope === healthScope
     ? healthAction.action : null;
-  const unresponsive = detailsAvailable && !locked && !refusedNow && !restarting && item?.workspace.state === "ready"
+  const recovering = detailsAvailable && !locked && !refusedNow && !restarting && item?.workspace.state === "ready"
     && (state.state === "waitingForRuntime" || state.state === "reconnecting");
+  const [unresponsiveKey, setUnresponsiveKey] = useState<string | null>(null);
+  const recoveryKey = recovering ? JSON.stringify([healthScope, workspaceKey]) : null;
+  useEffect(() => {
+    setUnresponsiveKey(null);
+    if (!recoveryKey) return;
+    const timer = setTimeout(() => setUnresponsiveKey(recoveryKey), UNRESPONSIVE_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [recoveryKey]);
+  const unresponsive = !!item && recoveryKey !== null && unresponsiveKey === recoveryKey;
   const diagnosticsOffered = !!item && offersCloudDiagnostics(accountStatus, item.workspace.orgId);
-  const health = (action: "restart" | "diagnostics") => setHealthAction({ key: workspaceKey, scope: detailsScope(), action });
+  const health = (action: "restart" | "diagnostics") => setHealthAction({ key: workspaceKey, scope: healthScope, action });
 
   return (
     <main className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-clip" data-testid="cloud-workspace-main">

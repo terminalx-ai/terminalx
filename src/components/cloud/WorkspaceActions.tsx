@@ -2,13 +2,12 @@ import { mayReassign, useWorkspacePreferencesAvailable, WorkspaceReassignDialog 
 import { useAccount } from "@/lib/account";
 import { useCloudCatalog } from "@/lib/cloudCatalog";
 import { useState } from "react";
-import { Archive, ArchiveRestore, CalendarClock, Clock, Loader2, Copy, ExternalLink, Info, Lock, RotateCcw, Pause, Play, Trash2, Users } from "@/icons";
+import { Archive, ArchiveRestore, CalendarClock, Clock, Loader2, Copy, Info, Lock, RotateCcw, Pause, Play, Trash2, Users } from "@/icons";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { CloudWorkspaceDetailsCard } from "./CloudWorkspaceDetails";
 import { WorkspaceRestartDialog } from "./WorkspaceActionsRestart";
-import { canRestartWorkspace, detailsScope, loadWorkspaceDetails, provisioningLogUrl, useWorkspaceDetailsAvailable } from "@/lib/cloudWorkspaceDetails";
+import { canRestartWorkspace, detailsScope, useWorkspaceDetailsAvailable } from "@/lib/cloudWorkspaceDetails";
 import { showError } from "@/lib/errorToasts";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -82,17 +81,6 @@ export function WorkspaceActionItems({
   const shareable = present && (authority.manageShares || (authority.viewShares && workspace.accessMode === "organization"));
   const sharedWith = workspace.sharedWith ?? 0;
   const lifecycle = authority.lifecycle;
-  const openProvisioningLog = async () => {
-    const scope = detailsScope();
-    try {
-      const { details } = await loadWorkspaceDetails(item);
-      const url = provisioningLogUrl(details);
-      if (!url) throw new Error("No provisioning log is available for this workspace.");
-      if (scope === detailsScope()) await openUrl(url);
-    } catch (error) {
-      if (scope === detailsScope()) showError("Couldn't open the provisioning log", error);
-    }
-  };
   // Sharing a private workspace means making it organization-visible first,
   // which takes managing it. Against a server from before PRO-73 a creator
   // who is a plain member manages shares only: they are told so here,
@@ -114,7 +102,6 @@ export function WorkspaceActionItems({
         <DropdownMenuItem onSelect={() => onLifecycle({ item, action: "copy-info" })}><Copy /> Copy workspace info</DropdownMenuItem>
         <DropdownMenuItem onSelect={() => onLifecycle({ item, action: "copy-machine" })}><Copy /> Copy machine ID</DropdownMenuItem>
         {canRestartWorkspace(item) && <DropdownMenuItem onSelect={() => onLifecycle({ item, action: "restart" })}><RotateCcw /> Restart workspace…</DropdownMenuItem>}
-        {lifecycle && <DropdownMenuItem onSelect={() => void openProvisioningLog()}><ExternalLink /> Open provisioning log</DropdownMenuItem>}
         <DropdownMenuSeparator />
       </>}
       {present && reassign && current && <DropdownMenuItem onSelect={() => onLifecycle({ item: current, action: "reassign" })}><Users /> Reassign to…</DropdownMenuItem>}

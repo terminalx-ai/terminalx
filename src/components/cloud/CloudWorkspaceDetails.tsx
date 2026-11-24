@@ -118,8 +118,8 @@ export function CloudWorkspaceDetailsCard({ item, initialCopy, onInitialCopy, on
         <dl className="divide-y divide-hairline rounded-lg border border-hairline">
           <DetailsRow label="Repository">{d.repositories.map((repo) => [repo.fullName ?? repo.identity ?? "Repository", repo.ref].filter(Boolean).join(" · ")).join(", ") || "None"}</DetailsRow>
           <DetailsRow label="Owner">{currentOwner?.createdBy
-            ? <OwnerProfile orgId={w.orgId} userId={currentOwner.createdBy} name={currentOwner.creator?.displayName ?? `User ${currentOwner.createdBy.slice(0, 8)}`} />
-            : d.createdBy}</DetailsRow>
+            ? <OwnerProfile orgId={w.orgId} userId={currentOwner.createdBy} name={currentOwner.creator?.displayName ?? "Owner"} />
+            : "Unavailable"}</DetailsRow>
           <DetailsRow label="Environment">{d.environmentVersion ? `Version ${d.environmentVersion.versionNumber} · Toolchain ${d.environmentVersion.toolchainVersion}` : "Unavailable"}</DetailsRow>
           <DetailsRow label="Provider">{cloudProviderLabel(d.provider)}</DetailsRow>
           <DetailsRow label="Created">{new Date(result.workspace.createdAt).toLocaleString()}</DetailsRow>

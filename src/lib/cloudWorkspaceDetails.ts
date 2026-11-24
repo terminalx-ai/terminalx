@@ -126,6 +126,9 @@ export function canRestartWorkspace(item: CloudWorkspaceListItem): boolean {
 
 const restarts = new Set<string>();
 export class RestartOperationError extends Error {}
+export class RestartAlreadyPendingError extends Error {
+  constructor() { super("A restart is already pending."); }
+}
 
 /** Queued is pending. Keep held leases, then replace their transport using connect only. */
 export async function restartCloudWorkspace(item: CloudWorkspaceListItem): Promise<void> {
@@ -133,7 +136,7 @@ export async function restartCloudWorkspace(item: CloudWorkspaceListItem): Promi
   const scope = detailsScope();
   const w = item.workspace;
   const key = JSON.stringify([scope, w.orgId, w.id]);
-  if (restarts.has(key)) throw new Error("A restart is already pending.");
+  if (restarts.has(key)) throw new RestartAlreadyPendingError();
   restarts.add(key);
   const current = () => { if (detailsScope() !== scope) throw new Error("The account changed. Check the workspace in the current account."); };
   try {

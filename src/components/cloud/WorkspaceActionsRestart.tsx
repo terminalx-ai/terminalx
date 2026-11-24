@@ -6,7 +6,7 @@ import type { CloudWorkspaceListItem } from "@/lib/api";
 import { getCloudCatalog, useCloudCatalog } from "@/lib/cloudCatalog";
 import { lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import { errorCode } from "@/lib/cloudTerminals";
-import { canRestartWorkspace, detailsScope, restartCloudWorkspace, RestartOperationError, useWorkspaceDetailsAvailable } from "@/lib/cloudWorkspaceDetails";
+import { canRestartWorkspace, detailsScope, restartCloudWorkspace, RestartAlreadyPendingError, RestartOperationError, useWorkspaceDetailsAvailable } from "@/lib/cloudWorkspaceDetails";
 import { showError } from "@/lib/errorToasts";
 import { selectCloudWorkspace } from "@/lib/sessions";
 import { cloudWorkspaceKey } from "@/types/target";
@@ -30,8 +30,11 @@ export function WorkspaceRestartDialog({ item, onClose }: { item: CloudWorkspace
   };
   const current = currentItem(catalog);
   const eligible = current && canRestartWorkspace(current);
+  const [alreadyPending, setAlreadyPending] = useState(false);
+  const unavailableReason = alreadyPending ? "A restart is already pending."
+    : eligible ? null : "Restart is unavailable while this workspace is busy or you lack permission.";
   const submit = async () => {
-    if (!confirmed || pending || !available || owner !== detailsScope()) return;
+    if (!confirmed || pending || alreadyPending || !available || owner !== detailsScope()) return;
     const latest = currentItem(getCloudCatalog());
     if (!latest || !canRestartWorkspace(latest)) return;
     setPending(true);
@@ -44,6 +47,10 @@ export function WorkspaceRestartDialog({ item, onClose }: { item: CloudWorkspace
       if (mounted.current) onClose();
     } catch (error) {
       if (owner !== detailsScope()) return;
+      if (error instanceof RestartAlreadyPendingError) {
+        if (mounted.current) setAlreadyPending(true);
+        return;
+      }
       const message = error instanceof Error ? error.message : lifecycleErrorMessage(errorCode(error));
       const terminal = error instanceof RestartOperationError;
       showError(name, message, {
@@ -66,18 +73,19 @@ export function WorkspaceRestartDialog({ item, onClose }: { item: CloudWorkspace
     }
   };
   if (!available || owner !== detailsScope()) return null;
-  return <Dialog open onOpenChange={(open) => !open && !pending && onClose()}>
-    <DialogContent showClose={!pending} onEscapeKeyDown={(event) => { if (pending) event.preventDefault(); }} onPointerDownOutside={(event) => { if (pending) event.preventDefault(); }}>
+  return <Dialog open onOpenChange={(open) => !open && onClose()}>
+    <DialogContent showClose={!pending && !alreadyPending}>
       <DialogHeader>
         <DialogTitle>Restart {name}?</DialogTitle>
         <DialogDescription>The workspace keeps its disk, pinned setup and saved conversations. Running processes will be interrupted. A checkpoint can time out and unsaved in-memory work may be lost.</DialogDescription>
       </DialogHeader>
       <label className="my-4 flex gap-2 text-sm"><input type="checkbox" checked={confirmed} disabled={pending} onChange={(event) => setConfirmed(event.target.checked)} />I understand running work may be interrupted</label>
-      {pending && <p role="status" className="flex items-center gap-2 text-sm"><Loader2 className="size-4 animate-spin" /> Restart pending… Waiting for the workspace operation.</p>}
+      {pending && <p role="status" className="flex items-center gap-2 text-sm"><Loader2 className="size-4 animate-spin" /> Restart pending… You can close this dialog and keep working.</p>}
+      {!pending && unavailableReason && <p role="status" className="text-xs text-muted-foreground">{unavailableReason}</p>}
       {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
       <DialogFooter>
-        <Button variant="outline" disabled={pending} onClick={onClose}>Cancel</Button>
-        <Button disabled={!confirmed || pending || !eligible} onClick={() => void submit()}>{error ? "Try again" : "Restart workspace"}</Button>
+        <Button variant="outline" onClick={onClose}>{pending || alreadyPending ? "Close" : "Cancel"}</Button>
+        <Button disabled={!confirmed || pending || !!unavailableReason} onClick={() => void submit()}>{error ? "Try again" : "Restart workspace"}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>;
