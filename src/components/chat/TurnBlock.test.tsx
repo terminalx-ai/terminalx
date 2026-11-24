@@ -14,7 +14,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke } from "@tauri-apps/api/core";
 import { setPrefs } from "@/lib/prefs";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); setPrefs({ secondOpinionButton: false }); });
 
 const turn = (images: { url: string; name?: string }[]): Turn =>
   ({ key: "t1", prompt: { text: "what is this?", images, ts: "2026-10-03T00:00:00Z", seq: 1 }, work: [], live: false }) as unknown as Turn;
@@ -23,12 +23,18 @@ it("offers a second opinion only for a finished turn with an available action", 
   const value = { ...turn([]), completed: { status: "ok", ts: "" } };
   const review = vi.fn();
   const { rerender } = render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} onSecondOpinion={review} />);
+  const button = () => screen.queryByRole("button", { name: "Second opinion" });
+  expect(button()).toBeNull();
+  act(() => setPrefs({ secondOpinionButton: true }));
   fireEvent.click(screen.getByRole("button", { name: "Second opinion" }));
   expect(review).toHaveBeenCalledExactlyOnceWith(value);
+  act(() => setPrefs({ secondOpinionButton: false }));
+  expect(button()).toBeNull();
+  act(() => setPrefs({ secondOpinionButton: true }));
   rerender(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} />);
-  expect(screen.queryByRole("button", { name: "Second opinion" })).toBeNull();
+  expect(button()).toBeNull();
   rerender(<TurnBlock turn={{ ...value, live: true, completed: undefined }} sessionId="s" stream={[]} working onSecondOpinion={review} />);
-  expect(screen.queryByRole("button", { name: "Second opinion" })).toBeNull();
+  expect(button()).toBeNull();
 });
 
 it("shows verified sender attribution on prompts and queued inputs", () => {
@@ -328,7 +334,7 @@ describe("a settled turn's header and footer", () => {
     }) as unknown as Turn;
 
   it("leads the folded header with its chevron and the kinds of tools, and puts duration · time in the footer (PRO-378)", () => {
-    setPrefs({ foldToolCalls: true });
+    setPrefs({ foldToolCalls: true, secondOpinionButton: true });
     render(<TurnBlock turn={{ ...worked("ok"), usage: { inputTokens: 66, cacheReadTokens: 720, cacheWriteTokens: 214, outputTokens: 574 } }} sessionId="s" stream={[]} working={false} onSecondOpinion={vi.fn()} />);
     const header = screen.getByTestId("turn-fold");
     expect(header.textContent).toBe("2 tool calls");
@@ -462,7 +468,8 @@ describe("the turn's menu (PRO-379)", () => {
     work: [{ kind: "text", key: "a5", seq: 5, text: "**Done.**", messageTs: "2026-11-07T00:00:00Z" }],
   }) as unknown as Turn;
 
-  it("forks to a tab or a session, copies the answer, keeps the prompt and asks the other agent", () => {
+  it.each([false, true])("forks, copies, saves and asks the other agent with the footer button set to %s", (secondOpinionButton) => {
+    setPrefs({ secondOpinionButton });
     const onFork = vi.fn();
     const onSaveSnippet = vi.fn();
     const onSecondOpinion = vi.fn();
@@ -483,6 +490,7 @@ describe("the turn's menu (PRO-379)", () => {
   });
 
   it("shows what a session cannot take here off, with why, where it would be (#1289)", () => {
+    setPrefs({ secondOpinionButton: true });
     render(<TurnBlock turn={answered()} sessionId="s" stream={[]} working={false} forkUnavailable="no fork here" resetUnavailable="no reset here" secondOpinionUnavailable="no second opinion here" />);
     openMenu(screen.getByRole("button", { name: "Turn actions" }));
     for (const [name, reason] of [[/^Fork/, "no fork here"], [/^Reset chat to here/, "no reset here"], [/^Second opinion/, "no second opinion here"]] as const) {

@@ -541,6 +541,10 @@
           "description": "A mark for each of your prompts down the right edge of a conversation. Hover one to read it, click to go back to it.",
           "type": "boolean"
         },
+        "secondOpinionButton": {
+          "description": "Show a Second opinion button under each finished turn to ask another agent to review it. Off by default. You can also ask for a second opinion from the turn’s … menu.",
+          "type": "boolean"
+        },
         "selectedOrganization": {
           "description": "Local is always shown. These display preferences are saved on this desktop. Showing or switching organizations never wakes a workspace.",
           "type": [

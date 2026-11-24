@@ -63,7 +63,7 @@ const transcript = buildTranscript(events, true);
 const failedLast = buildTranscript(events.slice(0, events.findIndex((e) => e.payload.text === 'Now open a PR against main with a short summary.')), true);
 const root = createRoot(document.getElementById('root'));
 window.draw = ({ fold = true, reset = false, failed = false } = {}) => {
-  setPrefs({ foldToolCalls: fold, transcriptLayout: 'chat', promptMap: false, turnChanges: false });
+  setPrefs({ foldToolCalls: fold, transcriptLayout: 'chat', promptMap: false, turnChanges: false, secondOpinionButton: true });
   root.render(<TooltipProvider><div style={{ height: '100vh', display: 'flex' }} className="bg-chat">
     <Chat key={failed ? 'failed' : 'running'} cwd="/repo" sessionId="s" transcript={failed ? failedLast : transcript} stream={[]} live progressing answering={false} onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={<div className="h-24" />} onSendAgain={() => {}} onRetry={() => {}} onSecondOpinion={() => {}} onRetryInNewChat={() => {}} onReset={() => {}} />
     {reset && <ResetChatDialog sessionId="s" tabId="t" endSeq={9} target={{ turn: 2, removed: [3, 4], files: 3 }} agent="Claude Code" onClose={() => {}} onWarning={() => {}} />}

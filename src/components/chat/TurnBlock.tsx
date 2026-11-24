@@ -203,7 +203,7 @@ function TurnBody({
 
       {prefs.turnChanges && turn.completed && <TurnChanges key={`${sessionId}:${checkpointTabId ?? ""}:${turn.checkpointSeq ?? turn.seq}`} changes={changes} cwd={cwd} linkContext={linkContext} checkpoint={checkpointTabId ? { sessionId, tabId: checkpointTabId, seq: turn.checkpointSeq ?? turn.seq, api: checkpoints } : undefined} range={turn.prompt?.baseline && turn.completed.head ? { base: turn.prompt.baseline, head: turn.completed.head } : null} />}
 
-      {(turn.completed || !turn.live) && <TurnFooter turn={turn} sessionId={sessionId} tabId={tabId} outcome={outcome} fallback={turnFallback} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} secondOpinionAgent={secondOpinionAgent} onReset={onReset} onFork={onFork} onSaveSnippet={onSaveSnippet}
+      {(turn.completed || !turn.live) && <TurnFooter showSecondOpinionButton={prefs.secondOpinionButton} turn={turn} sessionId={sessionId} tabId={tabId} outcome={outcome} fallback={turnFallback} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} secondOpinionAgent={secondOpinionAgent} onReset={onReset} onFork={onFork} onSaveSnippet={onSaveSnippet}
         unavailable={{ fork: forkUnavailable, reset: resetUnavailable, secondOpinion: turn.completed && !turn.live ? secondOpinionUnavailable : undefined }} />}
     </div>
   );
@@ -341,7 +341,8 @@ function OutcomeIcon({ tone }: { tone: Outcome["tone"] }) {
  * and output speed (PRO-378), a copy of the answer, read aloud on hover, a "…" menu with what can be done from this
  * turn (PRO-379), and a second opinion.
  */
-function TurnFooter({ turn, sessionId, tabId, outcome, fallback, onSecondOpinion, secondOpinionAgent, onReset, onFork, onSaveSnippet, unavailable }: {
+function TurnFooter({ showSecondOpinionButton, turn, sessionId, tabId, outcome, fallback, onSecondOpinion, secondOpinionAgent, onReset, onFork, onSaveSnippet, unavailable }: {
+  showSecondOpinionButton: boolean;
   turn: Turn;
   sessionId: string;
   tabId?: string;
@@ -437,7 +438,7 @@ function TurnFooter({ turn, sessionId, tabId, outcome, fallback, onSecondOpinion
           </DropdownMenuContent>
         </DropdownMenu>
       )}
-      {onSecondOpinion && (
+      {showSecondOpinionButton && onSecondOpinion && (
         <button type="button" onClick={() => onSecondOpinion(turn)} title={secondOpinionAgent ? `Second opinion from ${secondOpinionAgent}` : undefined}
           className="-mx-0.5 flex items-center gap-1 rounded-md px-1.5 py-1 text-muted-foreground hover:bg-veil-raised hover:text-foreground">
           <ArrowLeftRight className="size-3.5" />
