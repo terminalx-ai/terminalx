@@ -13,11 +13,16 @@ const f = vi.hoisted(() => ({
 vi.mock("@/lib/account", () => ({ useAccount: () => ({ status: f.status }) }));
 vi.mock("@/lib/cloudCatalog", () => ({ useCloudCatalog: () => f.catalog }));
 vi.mock("@/lib/cloudPresence", () => ({ useCloudPresence: () => f.presence, useCloudPresenceVersion: () => 0, cloudPresence: { snapshot: () => f.presence } }));
-vi.mock("@/lib/cloudPeople", () => ({ loadRosterIn: f.load }));
+vi.mock("@/lib/cloudPeople", () => ({ loadRosterIn: f.load, initials: (name: string) => name.slice(0, 2) }));
 vi.mock("@/lib/organizationRoster", () => ({ useOrganizationRoster: () => f.roster }));
 vi.mock("@/lib/dataPrivacy", () => ({ useDataPrivacy: () => ({ enabled: false }) }));
-vi.mock("@/components/people/MemberProfile", () => ({ MemberProfile: () => null }));
-import { ownerStorageKey, useTeamOverview, PresenceFaces, type TeamRow } from "./TeamOverview";
+vi.mock("@/components/people/MemberProfile", () => ({
+  memberName: (member: OrganizationMember) => member.displayName,
+  MemberProfile: ({ member, online }: { member: OrganizationMember; online?: boolean }) => (
+    <button type="button" aria-label={`View profile: ${member.displayName}`} data-online={online} />
+  ),
+}));
+import { ownerStorageKey, useTeamOverview, PresenceFaces, OwnerProfile, type TeamRow } from "./TeamOverview";
 import { OrganizationPresenceCount, WorkspaceFollowingSection } from "@/components/layout/WorkspaceFollowingSection";
 vi.mock("@/lib/sessions", () => ({ selectCloudWorkspace: vi.fn() }));
 function Overview({ org = "org", rows = [{ id: "local", ownerId: "me" }] }: { org?: string; rows?: TeamRow[] }) {
@@ -30,7 +35,7 @@ beforeEach(() => {
   f.status = {
     state: "signed-in", identity: null, expiresAt: null, lastError: null,
     context: { account: "a", scope: "org", revision: "1" },
-    phase2Readiness: { org: ["team.follow-reassign.v1"] },
+    phase2Readiness: { org: ["team.follow-reassign.v1", "team.presence.v1"] },
   };
   f.catalog = { viewerUserId: "me", orgs: { org: { source: "live", error: null, workspaces: [] }, other: { source: "live", error: null, workspaces: [] } } } as unknown as CloudCatalogState;
   f.roster = { roster: null, loading: false, error: null };
@@ -161,4 +166,28 @@ it("stops displaying followed workspaces when follow readiness is killed", () =>
   expect(screen.queryByRole("region", { name: "Following" })).toBeNull();
   expect((screen.getByRole("button", { name: /Following/ }) as HTMLButtonElement).disabled).toBe(true);
   expect(screen.getByLabelText("Visible rows").textContent).toBe("cloud-one");
+});
+
+it("uses only authorized live presence for the By menu and profiles, and drops it when readiness is held", () => {
+  const bob = { userId: "bob", displayName: "Bob", photoUrl: null };
+  f.roster.roster = { members: [{ ...bob, photoUrl: undefined, email: "bob@example.test", role: "member" }] } as OrganizationRoster;
+  f.presence = { state: "live", activeMembers: [bob], workspaces: [] };
+  const demo = () => <><Overview /><PresenceFaces orgId="org" /><OwnerProfile orgId="org" userId="bob" name="Bob" photoUrl={null} /></>;
+  const view = render(demo());
+  const open = () => fireEvent.pointerDown(screen.getByRole("button", { name: "By Anyone" }), { button: 0, ctrlKey: false });
+  open();
+  expect(screen.getByRole("menuitemcheckbox", { name: "Bob" }).getAttribute("aria-description")).toBe("Active now");
+  expect(screen.getAllByRole("button", { name: "View profile: Bob", hidden: true }).map((button) => button.dataset.online)).toEqual(["true", "true"]);
+
+  f.presence = { state: "live", activeMembers: [], workspaces: [] };
+  view.rerender(demo());
+  expect(screen.getByRole("menuitemcheckbox", { name: "Bob" }).hasAttribute("aria-description")).toBe(false);
+  expect(screen.getByRole("button", { name: "View profile: Bob", hidden: true }).dataset.online).toBe("false");
+
+  f.presence = { state: "live", activeMembers: [bob], workspaces: [] };
+  f.status.phase2Readiness = { org: ["team.follow-reassign.v1"] };
+  view.rerender(demo());
+  expect(screen.getByRole("menuitemcheckbox", { name: "Bob" }).hasAttribute("aria-description")).toBe(false);
+  expect(screen.getByRole("button", { name: "View profile: Bob", hidden: true }).dataset.online).toBeUndefined();
+  expect(screen.getByText("Presence unavailable")).toBeTruthy();
 });

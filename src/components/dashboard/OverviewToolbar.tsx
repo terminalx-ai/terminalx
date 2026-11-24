@@ -1,49 +1,20 @@
-import { useMemo, useState, type ReactNode, type RefObject } from "react";
-import { thisComputer } from "@/lib/platform";
-import { Popover } from "radix-ui";
-import { Archive, ArrowDownWideNarrow, ArrowUpNarrowWide, CalendarClock, Check, ChevronDown, ListFilter, Plus, Search, SlidersHorizontal, UserRound, Users, X } from "@/icons";
+import { type ReactNode, type RefObject } from "react";
+import { Archive, ArrowDownWideNarrow, ArrowUpNarrowWide, CalendarClock, ChevronDown, ListFilter, Plus, Search, SlidersHorizontal, UserRound, X } from "@/icons";
 import {
   DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem,
   DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import { initials } from "@/lib/cloudPeople";
 import { cn } from "@/lib/cn";
-import { relativeTime } from "@/lib/time";
 import { keycaps, useKeymap, joinKeycaps } from "@/lib/shortcuts";
 import { TABLE_COLUMNS, REQUIRED_COLUMN, type DashboardPreferences, type DashboardSort, type Inclusion, type TableColumn, type TableColumnId } from "@terminalx/portable/dashboard";
 
-/** Someone who owns a session on the overview, with how recently they worked. */
-export interface OverviewPerson {
-  id: string;
-  name: string;
-  you: boolean;
-  /** Their latest session activity. */
-  activeAt: string | null;
-  /** One of their agents is working now. */
-  working: boolean;
-}
-
-/** Active means an agent of theirs is working, or they touched a session in the last five minutes. */
-const ACTIVE_MS = 5 * 60_000;
-export function isActive(person: OverviewPerson, now = Date.now()): boolean {
-  if (person.working) return true;
-  const at = person.activeAt ? Date.parse(person.activeAt) : NaN;
-  return Number.isFinite(at) && now - at < ACTIVE_MS;
-}
-function presence(person: OverviewPerson): string {
-  // Signed out, your name is already "You".
-  if (person.you) return person.name === "You" ? "" : "You";
-  if (isActive(person)) return "active";
-  return person.activeAt ? `idle ${relativeTime(person.activeAt)}` : "";
-}
-
-/** Initials in a round face; the dot says they are active now. */
-export function PersonFace({ name, size = 22, active = false, className }: { name: string; size?: number; active?: boolean; className?: string }) {
+/** Initials in a round face. */
+export function PersonFace({ name, size = 22, className }: { name: string; size?: number; className?: string }) {
   return (
     <span aria-hidden className={cn("relative inline-grid shrink-0 place-items-center rounded-full bg-veil-strong font-semibold leading-none text-foreground", className)}
       style={{ width: size, height: size, fontSize: Math.round(size * 0.4) }}>
       {name === "You" ? <UserRound className="size-[60%]" /> : initials(name)}
-      {active && <span className="absolute -bottom-px -right-px size-[7px] rounded-full border-2 border-background bg-add" />}
     </span>
   );
 }
@@ -82,61 +53,6 @@ export function SearchField({ inputRef, query, onQuery }: { inputRef: RefObject<
         </button>
       ) : <kbd aria-hidden className="shrink-0 rounded border border-hairline px-1.5 font-sans text-[11px] leading-4 text-faint">/</kbd>}
     </div>
-  );
-}
-
-/** The people chip and its picker (02.05): one person, several, or anyone. */
-export function PeopleChip({ people, selected, onChange }: { people: OverviewPerson[]; selected: string[]; onChange: (owners: string[]) => void }) {
-  const [filter, setFilter] = useState("");
-  const chosen = selected.filter((id) => people.some((person) => person.id === id));
-  const shown = useMemo(() => {
-    const words = filter.trim().toLowerCase();
-    return people.filter((person) => !words || person.name.toLowerCase().includes(words));
-  }, [people, filter]);
-  const label = !chosen.length ? `Everyone · ${people.length}`
-    : chosen.length === 1 ? (people.find((person) => person.id === chosen[0])?.you ? "Mine" : people.find((person) => person.id === chosen[0])!.name)
-      : `By ${chosen.length} people`;
-  const toggle = (id: string) => onChange(chosen.includes(id) ? chosen.filter((item) => item !== id) : [...chosen, id]);
-  return (
-    <Popover.Root onOpenChange={(open) => { if (!open) setFilter(""); }}>
-      <Popover.Trigger asChild>
-        <Chip icon={chosen.length ? <UserRound aria-hidden /> : <Users aria-hidden />} active={chosen.length > 0} aria-label={`People: ${label}`}>{label}</Chip>
-      </Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Content align="start" sideOffset={6} collisionPadding={8} aria-label="Filter by people"
-          className="z-(--z-menu) w-[270px] rounded-xl bg-popover p-1.5 text-popover-foreground shadow-surface hairline animate-fade-in">
-          <div className="mx-0.5 mb-1 flex h-8 items-center gap-2 rounded-md border border-hairline px-2.5">
-            <Search aria-hidden className="size-[13px] shrink-0 text-faint" />
-            <input autoFocus value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter people" aria-label="Filter people"
-              onKeyDown={(e) => { if (e.key !== "Escape") e.stopPropagation(); }}
-              className="min-w-0 flex-1 bg-transparent text-[12.5px] outline-none placeholder:text-faint" />
-          </div>
-          <div role="group" aria-label="People" className="max-h-72 overflow-y-auto scrollbar-thin">
-            <PersonRow checked={!chosen.length} onToggle={() => onChange([])} label="Anyone" />
-            {shown.map((person) => (
-              <PersonRow key={person.id} checked={chosen.includes(person.id)} onToggle={() => toggle(person.id)} label={person.name}
-                face={<PersonFace name={person.name} size={20} active={isActive(person)} />} note={presence(person)} />
-            ))}
-            {!shown.length && <div className="px-2.5 py-2 text-[12px] text-faint">No one matches.</div>}
-          </div>
-          <p className="mx-2.5 mb-1 mt-1.5 border-t border-hairline pt-2 text-[11.5px] leading-4 text-faint">Owner filter is saved on {thisComputer}. Local sessions count as yours.</p>
-        </Popover.Content>
-      </Popover.Portal>
-    </Popover.Root>
-  );
-}
-
-function PersonRow({ checked, onToggle, label, face, note }: { checked: boolean; onToggle: () => void; label: string; face?: ReactNode; note?: string }) {
-  return (
-    <button type="button" role="checkbox" aria-checked={checked} onClick={onToggle}
-      className={cn("flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[12.5px] outline-none hover:bg-veil-strong focus-visible:bg-veil-strong", checked && face && "bg-selected")}>
-      <span aria-hidden className={cn("grid size-4 shrink-0 place-items-center rounded-[4px]", checked ? "bg-accent" : "border border-muted-foreground/60")}>
-        {checked && <Check className="size-[11px] text-accent-foreground" />}
-      </span>
-      {face}
-      <span className="min-w-0 flex-1 truncate">{label}</span>
-      {note && <span className="shrink-0 text-faint">{note}</span>}
-    </button>
   );
 }
 
@@ -239,20 +155,6 @@ export function FilterChip({ count, children }: { count: number; children: React
         {children}
       </DropdownMenuContent>
     </DropdownMenu>
-  );
-}
-
-/** Others with an agent working or a session touched in the last few minutes. */
-export function ActiveNow({ people }: { people: OverviewPerson[] }) {
-  const active = people.filter((person) => !person.you && isActive(person));
-  if (!active.length) return null;
-  return (
-    <div className="flex shrink-0 items-center gap-2 whitespace-nowrap text-[12px]" aria-label={`Active now: ${active.map((person) => person.name).join(", ")}`} role="group">
-      <span className="text-faint">Active now</span>
-      <span className="flex items-center -space-x-1">
-        {active.slice(0, 4).map((person) => <span key={person.id} title={person.name}><PersonFace name={person.name} size={24} active className="ring-2 ring-background" /></span>)}
-      </span>
-    </div>
   );
 }
 

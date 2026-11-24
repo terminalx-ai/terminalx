@@ -492,13 +492,13 @@ export function WorkspaceRows({ node, named, open, onLifecycle, extraActions, fl
         >
           <GitBranch className="size-3.5 shrink-0 text-faint" />
           <span className="min-w-0 flex-1 truncate text-[13px]">{workspace.name}</span>
-          <PresenceFaces orgId={workspace.orgId} workspaceId={workspace.id} othersOnly compact />
           {extra && <Chip data-testid="cloud-extra-repositories">{extra.label}</Chip>}
           <span className={cn("flex shrink-0 items-center gap-1 text-[11px] text-faint", activity.tone === "attention" && "text-destructive", yieldsToRowActions)} data-testid="cloud-workspace-row-state">
             <span aria-hidden className={cn("size-1.5 rounded-full", DOT[activity.tone])} />
             {NAMED_TONES.has(activity.tone) ? activity.label : every.length > 0 && <span className="tabular-nums">{every.length}</span>}
           </span>
         </button>
+        <PresenceFaces orgId={workspace.orgId} workspaceId={workspace.id} othersOnly compact />
         <ShareBadge you={workspace.you} sharedWith={workspace.sharedWith} className={yieldsToRowActions} />
         <RowActions persistent className={menu.open ? "not-sr-only" : undefined}>
           <DropdownMenu {...menu.root}>
@@ -648,6 +648,7 @@ function CloudSessionItem({ row, node, activity, status, projectedTabs, manage, 
             )}
           </button>
         )}
+        <PresenceFaces orgId={node.item.workspace.orgId} workspaceId={node.item.workspace.id} othersOnly compact quiet />
         <CloudSessionOwner node={node} />
         {manage && !renaming && (
           <RowActions persistent className={menu.open ? "not-sr-only" : undefined}>

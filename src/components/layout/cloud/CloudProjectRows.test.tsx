@@ -17,8 +17,12 @@ vi.mock("@/lib/organizationRoster", async (original) => ({
   useOrganizationRoster: (_org: string, enabled: boolean) => ({ roster: enabled ? { members: owners.members } : null, error: owners.error }),
 }));
 const checkpointRows = vi.hoisted(() => ({ value: [] as CloudSessionRow[] }));
+const presence = vi.hoisted(() => ({ ready: false, workspaces: [] as import("@/lib/api").PresenceReadResponse["workspaces"] }));
+vi.mock("@/lib/cloudPresence", () => ({
+  useCloudPresence: () => ({ state: "live", activeMembers: [], workspaces: presence.workspaces }),
+}));
 
-vi.mock("@/lib/account", () => ({ useAccount: () => ({ status: { state: "signed-out" } }), getAccount: () => ({ status: { state: "signed-out" } }), subscribeAccount: () => () => undefined }));
+vi.mock("@/lib/account", () => ({ useAccount: () => ({ status: presence.ready ? { state: "signed-in", phase2Readiness: { "workspace-org": ["team.presence.v1"] } } : { state: "signed-out" } }), getAccount: () => ({ status: { state: "signed-out" } }), subscribeAccount: () => () => undefined }));
 vi.mock("@/lib/cloudSessions", async (original) => ({ ...await original<typeof import("@/lib/cloudSessions")>(), useCloudAgentRan: () => false, useCloudWorkspaceSessions: (node: { item: CloudWorkspaceListItem }) => ({ sessions: node.item.workspace.id === "one" ? checkpointRows.value : [], capabilities: null, manage: false, known: false }) }));
 vi.mock("@/lib/cloudDashboard", async (original) => ({ ...await original<typeof import("@/lib/cloudDashboard")>(), useCloudDashboard: () => [] }));
 vi.mock("@/lib/sidebarFilter", () => ({ useSidebarFilter: () => ({ active: false }) }));
@@ -28,7 +32,7 @@ function project(grouped: boolean): CloudProject {
   const item = { workspace: { id: "one", orgId: "workspace-org", name: "One", state: "ready", provider: "box", authority: "participate", launch: { state: "failed", phase: "failed", category: "agent-sign-in-required", timings: { failedAt: 10 } } }, latestOperation: null } as unknown as CloudWorkspaceListItem;
   return { key: "cloud:workspace-org:github.com/acme/api", orgId: "workspace-org", identity: "github.com/acme/api", fullName: "acme/api", selected: true, pinned: false, blank: false, workspaces: [{ key: "cloud:workspace-org:one", item, placedBy: "server" }, ...(grouped ? [{ key: "cloud:workspace-org:two" as const, item: { workspace: { ...item.workspace, id: "two", name: "Two", launch: null }, latestOperation: null }, placedBy: "server" as const }] : [])] };
 }
-afterEach(() => { owners.enabled = false; owners.members = []; owners.error = null; checkpointRows.value = []; cleanup(); takeOrganizationRequest(); takeAgentLoginsRequest("workspace-org"); });
+afterEach(() => { owners.enabled = false; owners.members = []; owners.error = null; checkpointRows.value = []; presence.ready = false; presence.workspaces = []; cleanup(); takeOrganizationRequest(); takeAgentLoginsRequest("workspace-org"); });
 describe("attention under the workspace's sidebar row", () => {
   it.each([false, true])("shows a visible reason and separate accessible button (grouped=%s)", (grouped) => {
     render(<CloudProjectGroup project={project(grouped)} onLifecycle={() => undefined} />);
@@ -130,6 +134,22 @@ describe("flat cloud session rows and authorized owner identity", () => {
     expect(rows[1].querySelector('[data-row-meta="time"]')).toBeTruthy();
     expect(screen.getAllByTestId("cloud-workspace-group").map((row) => row.getAttribute("data-workspace"))).toEqual(["two"]);
     expect(screen.getByRole("button", { name: "Open to load sessions" })).toBeTruthy();
+  });
+  it("puts gated presence profiles outside the navigation buttons on flat and named rows", () => {
+    const active = { userId: "bob", displayName: "Bob", photoUrl: null };
+    presence.ready = true;
+    presence.workspaces = ["one", "two"].map((workspaceId) => ({ workspaceId, owner: active, activeMembers: [active] }));
+    const value = loaded();
+    const view = render(<CloudProjectGroup project={value} onLifecycle={() => undefined} />);
+    const row = screen.getAllByTestId("cloud-session-row")[0];
+    const group = screen.getByTestId("cloud-workspace-group");
+    for (const surface of [row, group]) {
+      const profile = within(surface).getByRole("button", { name: /^View profile: Bob/ });
+      expect(profile.parentElement?.closest("button")).toBeNull();
+    }
+    presence.ready = false;
+    view.rerender(<CloudProjectGroup project={value} onLifecycle={() => undefined} />);
+    expect(screen.queryByRole("button", { name: /^View profile: Bob/ })).toBeNull();
   });
   it.each(["missing", "no-creator", "disabled", "refused", "no-access"])("uses a neutral owner when %s", (condition) => {
     const value = loaded();
