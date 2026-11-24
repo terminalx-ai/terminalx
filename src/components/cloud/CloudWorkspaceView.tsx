@@ -287,7 +287,7 @@ function WorkspaceViewBody({ opened, state, agentRequest = 0, initialAgent = fal
             </Button>
           </div>
         )}
-        <NotSharedNotice />
+        <NotSharedNotice requestTarget={cloudTarget ? { orgId: cloudTarget.organizationId, workspaceId: cloudTarget.workspaceId } : undefined} />
         {sharing && cloudTarget && <CloudShareDialog orgId={cloudTarget.organizationId} workspaceId={cloudTarget.workspaceId} name={opened.name} onClose={() => setSharing(false)} />}
       </div>
     );

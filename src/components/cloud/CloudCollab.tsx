@@ -1,4 +1,5 @@
 import { useEffect, useReducer, useState } from "react";
+import { CloudAccessRequest, type AccessRequestTarget } from "./CloudAccessRequest";
 import { Keyboard, Loader2, Lock, StickyNote, Trash2, Users, X } from "@/icons";
 import type { WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { leaseHeldBy, leaseLive, type TabLease } from "@terminalx/portable/workspaceCollab";
@@ -223,9 +224,15 @@ const TEST_IDS: Record<SessionLock, string> = {
  * deleted (`deleted`). With `onBack` it replaces a whole session, so it
  * offers the way out.
  */
-export function NotSharedNotice({ kind = "not-shared", onBack, onRecheck }: { kind?: SessionLock; onBack?: () => void; onRecheck?: () => void } = {}) {
+export function NotSharedNotice({ kind = "not-shared", onBack, onOverview, onRecheck, requestTarget }: {
+  kind?: SessionLock;
+  onBack?: () => void;
+  onOverview?: () => void;
+  onRecheck?: () => void;
+  requestTarget?: AccessRequestTarget;
+} = {}) {
   const copy = LOCK_COPY[kind];
-  return (
+  const fallback = (
     <div
       className="flex flex-1 flex-col items-center justify-center gap-1 p-6 text-center text-xs text-muted-foreground"
       data-testid={TEST_IDS[kind]}
@@ -251,6 +258,9 @@ export function NotSharedNotice({ kind = "not-shared", onBack, onRecheck }: { ki
       )}
     </div>
   );
+  return kind === "not-shared" && requestTarget
+    ? <CloudAccessRequest target={requestTarget} fallback={fallback} onBack={onOverview ?? onBack} onRecheck={onRecheck} />
+    : fallback;
 }
 
 /** Who drives an agent tab, and the controls to take, release or take over the wheel. */
