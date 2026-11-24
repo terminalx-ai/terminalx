@@ -524,3 +524,10 @@ async fn a_handoff_opens_one_tab_with_its_first_prompt_and_reads_the_context_it_
 fn code(result: Result<Value, (String, String)>) -> String {
     result.expect_err("refused").0
 }
+
+/// PRO-546: a workspace manager's `participate` connection starts a session
+/// or an agent tab. Its tests use this file's runtime, whose stand-in Claude
+/// is what a first prompt launches.
+#[cfg(unix)]
+#[path = "manager_start_tests.rs"]
+mod manager_start_tests;
