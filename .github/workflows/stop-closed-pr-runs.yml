@@ -1,0 +1,49 @@
+name: Stop a closed pull request's runs
+
+# When a pull request is closed, merged or not, the runs it started stop. They
+# went on to the end before: 13 minutes after one merge its WebKit and macOS
+# jobs still held two of the five macOS runners while three runs on main waited.
+#
+# No API call and no write permission: a concurrency group is shared by every
+# workflow in the repository, so a job that joins a group with
+# `cancel-in-progress: true` cancels the run that holds it. Each job below
+# joins the group one pull request workflow gives its runs, and does nothing
+# else. infra/ci-runners/test_workflow_security.py fails when a workflow that
+# runs on a pull request has a group this file does not name.
+#
+# The group is built from the pull request's number, not from `github.ref`: on
+# this event a merged pull request's ref is the branch it went into, not
+# `refs/pull/<number>/merge`, which is what the other workflows' groups hold.
+#
+# It cannot reach a run on main. Every group here contains `refs/pull/`; a
+# push, nightly or manual run's groups end in a run id or in `main`
+# (docs/CI-RUNNERS.md "Runs of a closed pull request").
+#
+# A pull request closed and opened again starts new runs: `reopened` is one of
+# the default activity types the other workflows run on.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions: {}
+
+jobs:
+  stop:
+    strategy:
+      fail-fast: false
+      matrix:
+        workflow: [ci-pull_request, repeat-flaky-tests]
+    name: stop ${{ matrix.workflow }}
+    concurrency:
+      group: ${{ matrix.workflow }}-refs/pull/${{ github.event.pull_request.number }}/merge
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Say which group this job took
+        env:
+          GROUP: ${{ matrix.workflow }}-refs/pull/${{ github.event.pull_request.number }}/merge
+          MERGED: ${{ github.event.pull_request.merged }}
+          REF: ${{ github.ref }}
+        run: echo "took the group $GROUP (merged $MERGED, this event's ref $REF)"
