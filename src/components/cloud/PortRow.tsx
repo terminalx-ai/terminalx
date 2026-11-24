@@ -62,6 +62,7 @@ function TextAction({ children, onClick, disabled, busy }: { children: string; o
 
 export function PortRow({
   row,
+  failure,
   where,
   busy,
   locked,
@@ -72,6 +73,7 @@ export function PortRow({
   onForward,
 }: {
   row: PortRowModel;
+  failure?: string;
   /** "on Mac mini", "in the workspace": where the port listens. */
   where: string;
   /** A change to this port is under way. */
@@ -85,7 +87,7 @@ export function PortRow({
   onForward: (port: number) => void;
 }) {
   const { port, label, state } = row;
-  const dot = state.kind === "open" ? "bg-add" : state.kind === "listening" ? "bg-faint" : "bg-warning";
+  const dot = failure ? "bg-destructive" : state.kind === "open" ? "bg-add" : state.kind === "listening" ? "bg-faint" : "bg-warning";
   return (
     <div className="px-3 py-1.5" data-testid="cloud-port" data-port={port} data-state={state.kind}>
       <div className="flex h-8 items-center gap-2.5 text-[12.5px]">
@@ -113,7 +115,8 @@ export function PortRow({
               <span className="font-mono text-faint line-through">{forwardAddress(state.localPort)}</span> <span className="text-warning">closed when the connection dropped</span>
             </span>
           )}
-          {state.kind === "listening" && <span className="text-faint">not forwarded</span>}
+          {failure && <span className="text-destructive">couldn’t forward</span>}
+          {state.kind === "listening" && !failure && <span className="text-faint">not forwarded</span>}
         </span>
         {state.kind === "open" && (
           <span className="flex shrink-0 items-center gap-1">
@@ -135,17 +138,21 @@ export function PortRow({
             </IconAction>
           </span>
         )}
-        {state.kind === "expired" && (
+        {failure ? (
+          <TextAction busy={busy} disabled={locked} onClick={() => onForward(port)}>
+            Retry
+          </TextAction>
+        ) : state.kind === "expired" ? (
           <TextAction busy={busy} disabled={locked} onClick={() => onForward(port)}>
             Start again
           </TextAction>
-        )}
-        {state.kind === "listening" && (
+        ) : state.kind === "listening" && (
           <TextAction busy={busy} disabled={locked} onClick={() => onForward(port)}>
             Forward
           </TextAction>
         )}
       </div>
+      {failure && <p className="ml-4 border-l border-destructive/30 pl-2 text-xs text-destructive" role="alert">{failure}</p>}
     </div>
   );
 }
