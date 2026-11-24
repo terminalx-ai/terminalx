@@ -1,6 +1,6 @@
-# Runtime Environment info foundation (PRO-203)
+# Runtime Environment info (PRO-203)
 
-This change supplies the runtime report and an unplaced, reusable popover. It does not complete PRO-203 or claim a curated image is installed. It selectively adapts `origin/raccoon/pro-203-curated-provider-images` and the owned-file foundation from `raccoon/pro-203-pro-203-runtime-environment-repo`, without merging either branch; current privacy, RPC and collaboration behavior is retained.
+Environment info shows tool versions observed on a connected cloud workspace. The organization’s Environment settings place it beside Machine install script. The project’s Scripts settings open it from the existing Environment info control on the Setup card.
 
 ## Runtime contract
 
@@ -14,28 +14,34 @@ Each subprocess has a cleared environment, a fixed PATH containing only those di
 
 The response is `{version: 1, observedAt: <runtime milliseconds>, tools: [...]}`. There is exactly one row per allowlisted tool: `{id, status: "installed", version}` or `{id, status: "missing" | "error" | "timeout"}`. The frontend validates the entire set and strips additional fields. No telemetry or persistence is added.
 
-## Reusable UI contract
+## Settings placements
 
-`EnvironmentInfo` accepts an existing `WorkspaceRpcClient`, its current `WorkspaceConnectionState`, and a required `scopeKey` identifying account, organization and workspace. The integrating caller must change that key on identity replacement, subscribe to connection/member changes, and decide rollout visibility. The component has no SaaS flag dependency and is not mounted by this change. It never requests activation or wakes compute. Reports are requested only while opened and connected with the capability and readable membership.
+Both settings surfaces require the active organization’s explicit `cloud.environment-info.v1` key in the signed-in account projection and verified, disabled data privacy mode. The organization placement also requires management access and a template fetched for the current account context and provider. Without readiness, the machine script keeps its existing layout and the repository control opens its original setup help.
 
-The Radix popover uses existing Button and theme tokens, an accessible title, tool description list, Close and Refresh controls, and a bounded scroll area. States cover loading, unavailable/unsupported runtime, disconnected, revoked access, missing tools, timeout, errors, and stale reports. Errors use fixed copy rather than raw RPC messages. Reports older than 60 seconds by runtime or receipt time, from another generation/epoch, or retained across disconnect/refresh failure are marked stale. Scope changes reset the surface; client replacement hides prior results. Closing, unmounting, identity replacement, runtime replacement or access loss cancels in-flight work and ignores late replies.
+The app reuses the live cloud catalog for the current account and the existing connected client registry. The machine script matches the selected provider. The Setup card matches the local checkout’s GitHub origin to the repositories advertised by a workspace in the active organization. Local checkouts with an unknown origin or another Git host, and older workspace listings without repository identities, have no confirmed match. The selection excludes stopped, archived, deleting, restarting and preparation workspaces. It requires Manage authority, a current manager role when membership is reported, and the `environment/1` capability. The settings UI names the source workspace. When several qualify, workspace ID order gives a stable selection.
 
-## Remaining ticket acceptance and owner decisions
+The settings read only existing connections. They never acquire a lease, attach, start a build or wake a workspace. The popover makes a report request on open or refresh and provides an unavailable message when no matching runtime is connected. Account, organization, project, provider, workspace, privacy and authorization changes drop the previous selection and its report.
 
-- Provider/image owners: build Hetzner snapshots, Docker/Boat images; pin the agreed tool versions; include the agreed desktop packages; rebuild on releases/schedule; retire images; handle Boat persistence/reinstallation. No image pipeline or provider files are changed here.
-- SaaS/provider owners: image ID per offering, missing-image install-at-create fallback, rollout/kill-switch wiring and API delivery. No SaaS files or production flags are changed here.
-- Provider acceptance: Docker tests proving every required tool is on PATH for each provider, real new-workspace/resume tests, and before/after first-boot measurements remain unperformed.
-- Placement owners: integrate the link beside the organization install script and project setup script using the correct runtime, identity scope and activation policy. No header/settings/project placement is included.
-- Product/design owners must settle the supplied screen differences: Bun/Rust additions versus the ticket tool set, npm/git-lfs/vim omissions, differing desktop package lists, and Chrome in the image versus the install script. This foundation uses the ticket's 11-tool inventory and adds no base-image summary or desktop claims. The opened popover is not drawn in the supplied screens; its layout/states are provisional existing-component composition, not a claim of screen matching. A material placement/design difference must be resolved before that UI integration proceeds.
-- Native/design certification remains: real attached-runtime transport, account/workspace switching, cancellation/revocation under native lifecycle, keyboard/focus/viewport behavior and visual comparison against all three linked screens. This foundation uses the screen descriptions and differences supplied in the task; no visual match is asserted.
+The Radix popover uses the shared menu layer and theme, an accessible title, a tool description list, Close and Refresh controls, and a bounded scroll area. Reports older than 60 seconds by runtime or receipt time and reports retained across runtime generation, epoch or refresh failure are marked stale. Closing, unmounting, identity replacement, runtime replacement or access loss cancels in-flight work and ignores late replies.
+
+## Design and remaining acceptance
+
+- Screen 11.05 uses the Setup control for `setup.sh`. The existing Setup help stays available, including the project-variable link. Screens 12.12 and 14.14 place the machine entry under Cloud compute. The current app puts that editor in the organization’s **Environment** page, so the report sits there beside **Machine install script**. The screenshots specify the trigger, while the open state uses the shared app popover.
+- The report supplies 11 tool observations and a timestamp. It has no OS version, image ID, template revision, image provenance, desktop package inventory, or evidence distinguishing image tools from runtime additions. Neither placement includes the screens’ Ubuntu base image line or claims that a running workspace reflects the current script, draft or published build. The report includes npm, git-lfs and Vim from the ticket, and has no rows for the screens’ Bun, Rust, Xvfb or VNC mentions. The ticket and 14.14 differ on whether Chrome belongs to the image or install script. Chrome and the window manager remain unverified.
+- Provider and SaaS acceptance remains open for curated Hetzner snapshots, Docker and Boat images, pinned tools, desktop packages, per-offering image IDs, missing-image fallback, rebuild/retirement, and Boat persistence/reinstallation. Per-provider PATH tests, curated-image before/after first-boot measurements, new-workspace and resume certification, and native attached-runtime and full design comparison remain open. The audit records earlier Boat-only runtime-image fallback and timing work under PRO-46.
+- The native account-projection whitelist is owned by the lead. Desktop tests explicitly enable the key with fixture data.
 
 ## Verification
 
 Run at repository root:
 
 ```sh
-pnpm vitest run src/lib/environmentInfo.test.ts src/components/cloud/EnvironmentInfo.test.tsx
-pnpm exec tsc --noEmit
+pnpm install --frozen-lockfile && pnpm exec tsc --noEmit && pnpm vitest run src/components/cloud/EnvironmentInfo.test.tsx src/components/settings/OrganizationEnvironment.test.tsx src/components/settings/RepositoryScriptsTab.test.tsx
+pnpm vitest run src/lib/environmentInfo.test.ts
+pnpm build
+node scripts/webkit/repository-scripts.mjs
+node scripts/webkit/environment-info.mjs
+node scripts/webkit/environment.mjs
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 export SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib remote::environment:: -- --test-threads=1

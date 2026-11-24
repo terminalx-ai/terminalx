@@ -1,26 +1,34 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactElement, type ReactNode } from "react";
 import { Popover, PopoverTrigger, PopoverContent, PopoverClose } from "@/components/ui/popover";
 import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { Button } from "@/components/ui/button";
-import { ENVIRONMENT_STALE_MS, ENVIRONMENT_TOOLS, environmentReport, type EnvironmentReport } from "@/lib/environmentInfo";
+import { canReadEnvironment, ENVIRONMENT_STALE_MS, ENVIRONMENT_TOOLS, environmentReport, type EnvironmentReport } from "@/lib/environmentInfo";
 
 type Result = { client: WorkspaceRpcClient; generation: number; epoch?: string; report: EnvironmentReport; receivedAt: number };
 
+type ReportProps = {
+  client?: WorkspaceRpcClient;
+  state?: WorkspaceConnectionState;
+  workspaceName?: string;
+  trigger?: ReactElement;
+  children?: ReactNode;
+};
+
 /** Caller supplies an account/organization/workspace identity, changing it on replacement. */
-export function EnvironmentInfo({ client, state, scopeKey }: { client: WorkspaceRpcClient; state: WorkspaceConnectionState; scopeKey: string }) {
-  return <EnvironmentInfoReport key={scopeKey} client={client} state={state} />;
+export function EnvironmentInfo({ scopeKey, ...props }: ReportProps & { scopeKey: string }) {
+  return <EnvironmentInfoReport key={scopeKey} {...props} />;
 }
 
-function EnvironmentInfoReport({ client, state }: { client: WorkspaceRpcClient; state: WorkspaceConnectionState }) {
+function EnvironmentInfoReport({ client, state, workspaceName, trigger, children }: ReportProps) {
   const [open, setOpen] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const [result, setResult] = useState<Result | null>(null);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   const [now, setNow] = useState(Date.now);
-  const connected = state.state === "connected";
+  const connected = state?.state === "connected";
   const manager = connected && state.authority === "manage";
-  const readable = !connected || (manager && (!state.you || (state.you.listed !== false && state.you.role !== "none")));
+  const readable = !connected || canReadEnvironment(state);
   const supported = connected && readable && state.capabilities.includes("environment/1");
   const epoch = connected ? state.runtimeEpoch : undefined;
   const generation = connected ? state.runtimeGeneration : -1;
@@ -32,7 +40,7 @@ function EnvironmentInfoReport({ client, state }: { client: WorkspaceRpcClient; 
   }, [readable]);
 
   useEffect(() => {
-    if (!open || !supported) return;
+    if (!client || !open || !supported) return;
     let active = true;
     let requestId = crypto.randomUUID();
     const cancel = () => {
@@ -71,11 +79,13 @@ function EnvironmentInfoReport({ client, state }: { client: WorkspaceRpcClient; 
 
   return (
     <Popover modal={false} open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild><Button size="sm" variant="ghost">Environment info</Button></PopoverTrigger>
+      <PopoverTrigger asChild>{trigger ?? <Button size="sm" variant="ghost">Environment info</Button>}</PopoverTrigger>
       <PopoverContent align="end" sideOffset={6} label="Environment info" className="max-h-[70vh] text-sm">
-          <p className="mt-1 text-xs text-muted-foreground">Versions reported by this workspace’s runtime.</p>
+          {client && <p className="mt-1 break-words text-xs text-muted-foreground">
+            {workspaceName ? <>Versions reported by the runtime of <strong>{workspaceName}</strong>.</> : "Versions reported by this workspace’s runtime."}
+          </p>}
           <div role="status" className="my-2 text-xs text-muted-foreground">
-            {!connected ? "Connect to the running workspace to read its tools." : !manager ? "Only workspace managers can read installed tools." : !readable ? "Workspace access is unavailable." : !supported ? "This runtime does not support environment reports." : loading ? "Reading installed tools…" : failed ? "Could not read installed tools. Try again." : null}
+            {!client ? "No matching workspace with tool reporting is connected." : !connected ? "Connect to the running workspace to read its tools." : !manager ? "Only workspace managers can read installed tools." : !readable ? "Workspace access is unavailable." : !supported ? "This runtime does not support environment reports." : loading ? "Reading installed tools…" : failed ? "Could not read installed tools. Try again." : null}
             {stale && <p>Previous report — may be out of date.</p>}
           </div>
           {current && <dl className="space-y-1" aria-label="Installed tools">
@@ -85,6 +95,7 @@ function EnvironmentInfoReport({ client, state }: { client: WorkspaceRpcClient; 
               return <div key={id} className="flex justify-between gap-4"><dt>{label}</dt><dd className="font-mono text-xs">{text}</dd></div>;
             })}
           </dl>}
+          {children}
           {supported && <Button className="mt-3" size="sm" variant="secondary" disabled={loading} onClick={() => setRefresh((value) => value + 1)}>Refresh</Button>}
           <PopoverClose asChild><Button className="ml-2 mt-3" size="sm" variant="ghost">Close</Button></PopoverClose>
       </PopoverContent>

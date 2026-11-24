@@ -4,9 +4,31 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Project, SessionEntry } from "@/types/session";
 import type { Configuration, ConfigurationLayer } from "@/types/configuration";
+import type { AccountStatus, CloudWorkspaceListItem } from "@/lib/api";
+import { ENVIRONMENT_TOOLS } from "@/lib/environmentInfo";
+import { ENVIRONMENT_INFO_FEATURE } from "@/lib/environmentInfoRuntime";
 const state = vi.hoisted(() => ({
   projects: [] as Project[], sessions: [] as SessionEntry[], selectedSessionId: null as string | null,
   update: vi.fn(), rerun: vi.fn(), resolve: vi.fn(), write: vi.fn(), review: vi.fn(), open: vi.fn(),
+}));
+const reportContext = vi.hoisted(() => ({
+  account: { state: "signed-out", identity: null } as AccountStatus,
+  workspaces: [] as CloudWorkspaceListItem[],
+  client: vi.fn(),
+  githubRepo: vi.fn(),
+}));
+vi.mock("@/lib/account", async (original) => ({ ...await original<typeof import("@/lib/account")>(), useAccount: () => ({ status: reportContext.account }) }));
+vi.mock("@/lib/api", async (original) => {
+  const api = await original<typeof import("@/lib/api")>();
+  return { ...api, issues: { ...api.issues, githubRepo: reportContext.githubRepo } };
+});
+vi.mock("@/lib/dataPrivacy", async (original) => ({ ...await original<typeof import("@/lib/dataPrivacy")>(), useDataPrivacy: () => ({ ready: true, enabled: false }) }));
+vi.mock("@/lib/cloudCatalog", async (original) => ({
+  ...await original<typeof import("@/lib/cloudCatalog")>(),
+  useCloudCatalog: () => ({ owner: "owner@example.test", revision: "rev-1", orgs: { org: { source: "live", workspaces: reportContext.workspaces } }, createMemory: {}, notices: [] }),
+}));
+vi.mock("@/lib/cloudConnections", async (original) => ({
+  ...await original<typeof import("@/lib/cloudConnections")>(), connectedCloudClient: reportContext.client,
 }));
 vi.mock("@/lib/sessions", async (original) => ({ ...await original<typeof import("@/lib/sessions")>(), useSessionStore: () => state, updateProject: state.update }));
 vi.mock("@/lib/workspaceSetup", () => ({ useWorkspaceSetups: () => ({ runs: [] }), rerunSetup: state.rerun }));
@@ -27,6 +49,10 @@ const button = (name: string) => screen.getByRole("button", { name }) as HTMLBut
 
 afterEach(cleanup);
 beforeEach(() => {
+  reportContext.account = { state: "signed-out", identity: null } as AccountStatus;
+  reportContext.workspaces = [];
+  reportContext.client.mockReset();
+  reportContext.githubRepo.mockReset();
   state.projects = [{ path: "/a", name: "a", scripts: { setup: "npm ci", archive: "" } }, { path: "/b", name: "b" }];
   state.sessions = [];
   state.selectedSessionId = null;
@@ -193,6 +219,51 @@ it("explains the environment a script runs with", async () => {
   expect(info.textContent).toContain("$TERMINALX_REPO_ROOT is the project root");
   expect(within(info).getAllByRole("listitem")).toHaveLength(3);
   expect(within(info).getByRole("button", { name: "your and the project’s variables" })).toBeTruthy();
+  expect(info.textContent).not.toContain("No matching workspace");
+  expect(reportContext.githubRepo).not.toHaveBeenCalled();
+  expect(reportContext.client).not.toHaveBeenCalled();
+});
+
+it("reports only from a connected manager runtime listing this repository and clears on project change", async () => {
+  reportContext.account = {
+    state: "signed-in", expiresAt: null, lastError: null,
+    identity: { email: "owner@example.test", organizationId: "org", name: "Owner", organization: "Org" },
+    organizations: [{ id: "org", name: "Org", role: "member", cloud: { enabled: true, flags: {} } }],
+    context: { account: "owner", scope: "scope", revision: "rev-1" }, phase2Readiness: { org: [ENVIRONMENT_INFO_FEATURE] },
+  };
+  reportContext.githubRepo.mockImplementation(async (path: string) => path === "/a" ? "Acme/Widgets" : "Acme/Other");
+  const row = (id: string, repository: string) => ({
+    workspace: {
+      id, orgId: "org", name: id, state: "ready", authority: "manage",
+      repositories: [{ fullName: repository, identity: `github.com/${repository}`, cloneUrl: null }],
+    }, latestOperation: null,
+  }) as CloudWorkspaceListItem;
+  reportContext.workspaces = [row("a-unrelated", "acme/unrelated"), row("b-viewer", "acme/widgets"), row("c-connected", "acme/widgets")];
+  const call = vi.fn().mockResolvedValue({
+    version: 1, observedAt: Date.now(), tools: ENVIRONMENT_TOOLS.map(([id]) => ({ id, status: "missing" })),
+  });
+  const viewer = vi.fn();
+  reportContext.client.mockImplementation((key: string) => ({
+    call: key === "cloud:org:c-connected" ? call : viewer,
+    connection: { state: "connected", authority: "manage", capabilities: ["environment/1"], runtimeGeneration: 1,
+      ...(key === "cloud:org:b-viewer" && { you: { role: "viewer", listed: true } }) },
+  }));
+  const rendered = render(<RepositoryScriptsTab projectPath="/a" />);
+  await waitFor(() => expect(reportContext.client).toHaveBeenCalledWith("cloud:org:c-connected"));
+  expect(call).not.toHaveBeenCalled();
+  fireEvent.click(button("Environment info"));
+  expect(await screen.findAllByText("Not found")).toHaveLength(ENVIRONMENT_TOOLS.length);
+  expect(screen.getByText("c-connected")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "your and the project’s variables" })).toBeTruthy();
+  expect(reportContext.client).not.toHaveBeenCalledWith("cloud:org:a-unrelated");
+  expect(viewer).not.toHaveBeenCalled();
+  rendered.rerender(<RepositoryScriptsTab projectPath="/b" />);
+  expect(screen.queryByText("c-connected")).toBeNull();
+  expect(call).toHaveBeenCalledWith("environment.cancel", expect.anything());
+  await waitFor(() => expect(reportContext.githubRepo).toHaveBeenCalledWith("/b"));
+  fireEvent.click(await screen.findByRole("button", { name: "Environment info" }));
+  expect(await screen.findByText("No matching workspace with tool reporting is connected.")).toBeTruthy();
+  expect(call.mock.calls.filter(([method]) => method === "environment.report")).toHaveLength(1);
 });
 
 it("shows an unreadable configuration as an error without editable fields", async () => {

@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { CheckCircle2, ChevronDown, ChevronUp, CircleAlert, CircleX, Hammer, Loader2, LoaderCircle, MinusCircle, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { EnvironmentInfo } from "@/components/cloud/EnvironmentInfo";
+import { useEnvironmentInfoRuntime } from "@/lib/environmentInfoRuntime";
 import { listedProviders } from "@/lib/hiddenProviders";
 import { api } from "@/lib/api";
 import { providerLabel } from "@/lib/organizationCompute";
@@ -31,6 +33,29 @@ import { EnvironmentRecipes } from "./EnvironmentRecipes";
 const inputClass = "h-7 min-w-0 rounded-md border border-hairline bg-background px-2 text-xs disabled:opacity-60";
 const areaClass = "min-h-16 rounded-md border border-hairline bg-background px-2 py-1 font-mono text-xs disabled:opacity-60";
 const BUILD_POLL_MS = 5000;
+
+function MachineInstallScript({ organizationId, provider, contextRevision, value, disabled, onChange }: {
+  organizationId: string | null;
+  provider: string;
+  contextRevision: string;
+  value: string;
+  disabled: boolean;
+  onChange: (value: string) => void;
+}) {
+  const { enabled, scopeKey, target } = useEnvironmentInfoRuntime({ organizationId, provider, contextRevision });
+  const id = useId();
+  const Field = enabled ? "div" : "label";
+  return <Field className="flex flex-col gap-1 text-xs text-muted-foreground">
+    {enabled
+      ? <div className="flex flex-wrap items-center justify-between gap-x-2">
+        <label htmlFor={id} className="text-[13px] font-medium text-foreground">Machine install script</label>
+        <EnvironmentInfo scopeKey={scopeKey} {...target} />
+      </div>
+      : <span className="text-[13px] font-medium text-foreground">Machine install script</span>}
+    Runs once on the machine, as root, when a version is built. Use it for tools every repository needs.
+    <textarea id={enabled ? id : undefined} aria-label="Machine install script" className={areaClass} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
+  </Field>;
+}
 
 interface ProviderOption {
   id: string;
@@ -598,11 +623,9 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
               <span className="text-xs text-muted-foreground">{template ? `Revision ${template.revision}, saved ${formatTime(template.updatedAt)}` : "Not saved yet"}</span>
             </div>
 
-            <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-              <span className="text-[13px] font-medium text-foreground">Machine install script</span>
-              Runs once on the machine, as root, when a version is built. Use it for tools every repository needs.
-              <textarea aria-label="Machine install script" className={areaClass} value={draft.installScript} disabled={disabled} onChange={(event) => change({ ...draft, installScript: event.target.value })} />
-            </label>
+            <MachineInstallScript organizationId={status.provider === provider && status.contextRevision === contextRevision ? organizationId : null}
+              provider={status.provider} contextRevision={contextRevision}
+              value={draft.installScript} disabled={disabled} onChange={(installScript) => change({ ...draft, installScript })} />
 
             <div className="flex flex-col gap-1.5">
               <span className="text-[13px] font-medium">Repository setup</span>
