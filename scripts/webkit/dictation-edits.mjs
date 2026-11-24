@@ -132,6 +132,10 @@ async function closeMic(page, text = "") {
   await page.getByText("Finishing…", { exact: true }).waitFor({ state: "detached" });
 }
 
+// Select all, Cut and Undo are the engine's own editing keys, not the app's shortcuts, so they are the host's: ⌘ on a
+// Mac, Ctrl in WebKit on Linux, where ⌘A, ⌘X and ⌘Z do nothing. Playwright's ControlOrMeta is that key on each host.
+// The app's own keys (⌘⇧D, held Right Option) stay the Mac's: the page is the Mac app's whatever the host (harness.mjs).
+
 /** Select `count` characters backwards from the caret, as Shift+Left does. */
 async function selectBack(page, count) {
   for (let i = 0; i < count; i++) await page.keyboard.press("Shift+ArrowLeft");
@@ -144,7 +148,7 @@ for (const [name, surface] of Object.entries(SURFACES)) {
   await selectBack(page, " build".length);
   await page.keyboard.press("Backspace");
   const afterBackspace = await settled(page, field);
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Delete");
   const afterDelete = await settled(page, field);
 
@@ -152,7 +156,7 @@ for (const [name, surface] of Object.entries(SURFACES)) {
   await hear(page, "Fix");
   await hear(page, "Fix the build");
   const dictated = await settled(page, field);
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Backspace");
   const afterDictatedDelete = await settled(page, field);
   // The utterance comes back settled, with the same words tidied up.
@@ -211,7 +215,7 @@ for (const [name, surface] of Object.entries(SURFACES)) {
   await hear(page, "Fix the build please");
   const dictated = await settled(page, field);
   await selectBack(page, "please".length);
-  await page.keyboard.press("Meta+X");
+  await page.keyboard.press("ControlOrMeta+X");
   const afterCut = await settled(page, field);
   await selectBack(page, "build ".length);
   await page.keyboard.press("Backspace");
@@ -239,7 +243,7 @@ for (const [name, surface] of Object.entries(SURFACES)) {
   const { page, field } = await sessionComposer();
   await field.fill("Old notes");
   await openMic(page);
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Backspace");
   await page.keyboard.type("New:");
   const edited = await settled(page, field);
@@ -263,12 +267,12 @@ for (const [name, surface] of Object.entries(SURFACES)) {
   await hear(page, "Fix the build");
   await closeMic(page, "Fix the build.");
   const dictated = await settled(page, field);
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Backspace");
   const afterDelete = await settled(page, field);
-  await page.keyboard.press("Meta+Z");
+  await page.keyboard.press("ControlOrMeta+Z");
   const afterUndo = await settled(page, field);
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Backspace");
   await page.keyboard.type("Run the tests");
   const afterTyping = await settled(page, field);
@@ -318,10 +322,10 @@ for (const close of [false, true]) {
   const { page, field } = await sessionComposer();
   await openMic(page);
   await hear(page, "Fix the build");
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Backspace");
   const afterDelete = await settled(page, field);
-  await page.keyboard.press("Meta+Z");
+  await page.keyboard.press("ControlOrMeta+Z");
   const afterUndo = await settled(page, field);
   await hear(page, "Fix the build.");
   const afterSettled = await settled(page, field);
