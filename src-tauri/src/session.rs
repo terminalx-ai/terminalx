@@ -754,7 +754,7 @@ fn shell_output_of_echo(rt: &TabRuntime, payload: &Payload) -> Option<Payload> {
         return None;
     }
     let output = text[text.find("</bash-input>")? + "</bash-input>".len()..].trim_start();
-    Some(Payload::UserMessage { author: None, text: output.to_string(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: cwd.clone() })
+    Some(Payload::UserMessage { author: None, bot: None, text: output.to_string(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: cwd.clone() })
 }
 
 /// The command in a record of Claude Code's `!` shell passthrough (#1294),
@@ -804,7 +804,7 @@ fn cli_composer_message(prompt: &PromptText, images: Vec<ImageRef>, baseline: Op
     // The CLI's record holds the paths of the attached files, which its
     // decoder takes off again (`attachments::split_block`), as here.
     let echo = ComposerEcho { collaboration_required: prompt.collaboration.as_ref().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2()), queued, ..ComposerEcho::new(crate::attachments::split_block(&prompt.agent).0, images.len()) };
-    let payload = Payload::UserMessage { author: prompt.author.clone(), text: prompt.display.clone(), images, files: prompt.files.clone(), baseline, queued, cwd: Some(cwd.to_string()) };
+    let payload = Payload::UserMessage { author: prompt.author.clone(), bot: prompt.bot.clone(), text: prompt.display.clone(), images, files: prompt.files.clone(), baseline, queued, cwd: Some(cwd.to_string()) };
     (payload, echo)
 }
 
@@ -1694,6 +1694,8 @@ struct PromptText {
     mobile: Option<crate::local_runtime::mobile::WritePermit>,
     shared_connection: Option<crate::local_sharing::WritePermit>,
     author: Option<crate::local_sharing::Person>,
+    /// What the message is, when TerminalX sends it for a bot or to one (PRO-539): shown as a card, beside `display`.
+    bot: Option<Box<crate::events::BotMessage>>,
     agent: String,
     display: String,
     /// Stored attachments (PRO-290), already checked to be the session's.
@@ -3805,7 +3807,7 @@ impl SessionManager {
             share.host_takeover(tab_id, chrono::Utc::now().timestamp_millis());
             self.sink.emit("session_share_changed", &serde_json::json!({ "sessionId": session_id, "state": share.snapshot(chrono::Utc::now().timestamp_millis(), true) }));
             let host = share.host.clone();
-            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { request_id, collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
+            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { bot: None, request_id, collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
             drop(sharing);
             outcome
         } else {
@@ -3888,7 +3890,7 @@ impl SessionManager {
     /// handoff that is neither confirmed nor visibly in the input is an error.
     pub fn send_confirmed(&self, session_id: &str, tab_id: &str, text: String) -> Result<SendOutcome> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let outcome = self.send_impl(session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
+        let outcome = self.send_impl(session_id, tab_id, PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
         self.confirm_continuation(session_id, tab_id, outcome, &rx)
     }
 
@@ -3908,7 +3910,7 @@ impl SessionManager {
             let _admitted = permit.enter()?;
             let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
+            self.send_admitted(&admission, session_id, tab_id, PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
         let outcome = outcome?;
@@ -4042,7 +4044,7 @@ impl SessionManager {
     fn send_display_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
         session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, files: Vec<FileRef>, origin: crate::recovery_log::Origin, request_id: Option<uuid::Uuid>,
     ) -> Result<SendOutcome> {
-        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { request_id, collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
+        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { bot: None, request_id, collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
         // The app declining to type into the tab's terminal is no error of
         // the agent's: nothing is raised in the tab, and the reason is said.
         if outcome.as_ref().is_err_and(|error| error.is::<follow::Refusal>()) {
@@ -4082,7 +4084,7 @@ impl SessionManager {
             let _admitted = permit.enter()?;
             let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile:Some(permit.clone()),
+            self.send_admitted(&admission, session_id, tab_id, PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile:Some(permit.clone()),
                 shared_connection:None,author:None,agent:text,display }, images, None, crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
@@ -4092,14 +4094,21 @@ impl SessionManager {
     /// Caller acquires checkout admission before sharing/attachment authority.
     pub(crate) fn send_shared_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, connection: crate::local_sharing::WritePermit) -> Result<SendOutcome> {
         let _privacy = connection.privacy.scope()?;
-        self.send_admitted(admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
+        self.send_admitted(admission, session_id, tab_id, PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
     }
 
-    /// A message one bot sends another (PRO-475): its agent gets `text`, and the transcript names `author`, the
-    /// sending bot, so the message is never shown as the owner's words. A stopped tab starts, as any send starts it.
-    pub(crate) fn send_from_bot(&self, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person) -> Result<SendOutcome> {
+    /// A message TerminalX puts in a bot's chat (PRO-475): another bot's hand-off, tell or answer, a mention, or the
+    /// app's own note. Its agent gets `text`, exactly as given, and the transcript records the same text under
+    /// `author`, never as the owner's words. `card` says what the message is (PRO-539): the window draws it from
+    /// those fields, and nothing of it reaches the agent. A stopped tab starts, as any send starts it.
+    pub(crate) fn send_from_bot(&self, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, card: Option<crate::events::BotMessage>) -> Result<SendOutcome> {
         let admission = crate::issue_pipeline::admission::lock_for(session_id, tab_id);
-        self.send_admitted(&admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: None }, Vec::new(), None, crate::recovery_log::Origin::Programmatic)
+        self.send_admitted(&admission, session_id, tab_id, Self::bot_prompt(text, author, card), Vec::new(), None, crate::recovery_log::Origin::Programmatic)
+    }
+
+    /// What [`Self::send_from_bot`] sends: the same text to the agent and to the transcript, with the card beside it.
+    fn bot_prompt(text: String, author: crate::local_sharing::Person, card: Option<crate::events::BotMessage>) -> PromptText {
+        PromptText { bot: card.map(Box::new), request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: None }
     }
 
     #[cfg(test)]
@@ -4267,7 +4276,7 @@ impl SessionManager {
             };
             let ev = self.publish_prompt(
                 &mut rt,
-                Payload::UserMessage { author: prompt.author.clone(),
+                Payload::UserMessage { author: prompt.author.clone(), bot: prompt.bot.clone(),
                     text: prompt.display,
                     images: refs,
                     files: prompt.files.clone(),
@@ -4300,7 +4309,7 @@ impl SessionManager {
         let baseline = rt.baseline_for(&entry.cwd);
         let events = vec![self.publish_prompt(
             &mut rt,
-            Payload::UserMessage { author: prompt.author.clone(),
+            Payload::UserMessage { author: prompt.author.clone(), bot: prompt.bot.clone(),
                 text: prompt.display,
                 images: refs,
                 files: prompt.files.clone(),
@@ -4659,7 +4668,7 @@ impl SessionManager {
                             }
                         })?;
                         anyhow::ensure!(refused, "provider model refusal request was replaced");
-                        self.publish(rt, Payload::Status { text: message }, None);
+                        self.publish(rt, Payload::Status { text: message, handoff: None }, None);
                     }
                     _ => bail!("Provider setting callback requires an exact supported settlement"),
                 }
@@ -4706,7 +4715,7 @@ impl SessionManager {
                     if let Err(error) = result {
                         rt.stopping = true;
                         self.needs_recovery(rt, RecoveryKind::Disconnected, crate::recovery_log::Source::Connection);
-                        self.publish(rt, Payload::Status { text: format!("Could not apply ACP permission mode: {error:#}. Stop the agent before retrying.") }, None);
+                        self.publish(rt, Payload::Status { text: format!("Could not apply ACP permission mode: {error:#}. Stop the agent before retrying."), handoff: None }, None);
                     }
                 }
                 Action::AcpPrompt(write) => {
@@ -4726,7 +4735,7 @@ impl SessionManager {
                         } else { None };
                     });
                     match result {
-                        Ok(_) if dropped.is_some() => { self.publish(rt, Payload::Status { text: format!("The agent did not change the model to {model}: {message}") }, None); }
+                        Ok(_) if dropped.is_some() => { self.publish(rt, Payload::Status { text: format!("The agent did not change the model to {model}: {message}"), handoff: None }, None); }
                         Err(error) => log::warn!("record ACP model refusal: {error:#}"),
                         _ => {}
                     }
@@ -5124,7 +5133,7 @@ impl SessionManager {
         if self.idle_for(session_id, tab_id, Instant::now()).is_none_or(|idle| idle < quiet) {
             return Ok(AgentStop::Busy);
         }
-        if let Err(error) = self.publish_external(session_id, tab_id, Payload::Status { text: note.to_string() }) {
+        if let Err(error) = self.publish_external(session_id, tab_id, Payload::Status { text: note.to_string(), handoff: None }) {
             log::warn!("note in {session_id}:{tab_id} before stopping its agent: {error:#}");
         }
         self.stop_with(session_id, tab_id, true)?;
@@ -5423,7 +5432,7 @@ impl SessionManager {
         }
         rt.stopping = false;
         rt.stopping_pid = None;
-        self.publish(&mut rt, Payload::Status { text: recovery::SESSION_CLOSED_MESSAGE.into() }, None);
+        self.publish(&mut rt, Payload::Status { text: recovery::SESSION_CLOSED_MESSAGE.into(), handoff: None }, None);
         Ok(())
     }
 
@@ -5923,7 +5932,7 @@ impl SessionManager {
                         misses.push(format!("{} effort, not {asked}", now.effort.as_deref().unwrap_or("default")));
                     }
                     if !misses.is_empty() {
-                        self.publish(rt, Payload::Status { text: format!("{agent} is running {}.", misses.join(" and ")) }, None);
+                        self.publish(rt, Payload::Status { text: format!("{agent} is running {}.", misses.join(" and ")), handoff: None }, None);
                     }
                     now
                 })
@@ -5977,7 +5986,7 @@ impl SessionManager {
         if let Some(value) = dropped {
             let agent = agent_name(&rt.harness);
             let why = why.trim().trim_end_matches('.');
-            self.publish(rt, Payload::Status { text: format!("{agent} did not change the {} to {value}: {why}.", setting.noun()) }, None);
+            self.publish(rt, Payload::Status { text: format!("{agent} did not change the {} to {value}: {why}.", setting.noun()), handoff: None }, None);
         }
         Ok(now)
     }
@@ -6017,7 +6026,7 @@ impl SessionManager {
             Some(why) if !shared => format!("{agent} was switched to {reported} in the terminal. {why} So {agent} was restarted in {kept}."),
             _ => format!("{agent} was switched to {reported} in the terminal. A shared session cannot be in {reported}, so {agent} was restarted in {kept}. Stop sharing this session before switching to {reported}."),
         };
-        self.publish(&mut rt, Payload::Status { text }, None);
+        self.publish(&mut rt, Payload::Status { text, handoff: None }, None);
         // Whatever it was doing, it was doing in a mode the share forbids.
         self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
         let current_tail = match &rt.engine { Engine::Cli(p) => p.tail.clone(), _ => return false };
@@ -6608,11 +6617,11 @@ impl SessionManager {
         // Another account when automatic switching finds this one full (#981).
         let (asked, moved) = self.launch_account(&rt.session_id, &rt.tab_id, &tab.harness, crate::session_ops::project_key(entry), &entry.title, asked);
         if let Some(text) = moved {
-            self.publish(rt, Payload::Status { text }, None);
+            self.publish(rt, Payload::Status { text, handoff: None }, None);
         }
         let grant = crate::agent_keys::launch_grant_on(&tab.harness, Path::new(&entry.cwd), crate::agent_keys::Choice { account: asked.as_deref(), project: crate::session_ops::project_key(entry) })?;
         if let Some(text) = grant.route.as_ref().and_then(|route| route.notice.clone()) {
-            self.publish(rt, Payload::Status { text }, None);
+            self.publish(rt, Payload::Status { text, handoff: None }, None);
         }
         let on = AccountLaunch::of(kind, &grant);
         let launch = match kind {
@@ -6888,7 +6897,7 @@ impl SessionManager {
             (Some(model), _) => model,
             (None, Some(sub)) => {
                 let text = format!("{} is not available on this account; using {}.", tab.model, sub.label);
-                self.publish(rt, Payload::Status { text }, None);
+                self.publish(rt, Payload::Status { text, handoff: None }, None);
                 if let Err(error) = self.update_settings(rt, |s| s.model = sub.id.clone()) {
                     log::warn!("record the substituted Codex model: {error:#}");
                 }
@@ -6913,7 +6922,7 @@ impl SessionManager {
             // Without them the chat is only the rollout, which never says the
             // turn is over — so say so rather than leave a turn spinning.
             let text = "Codex could not install its hooks here, so this tab shows the conversation but not its progress. The terminal view is unaffected.".to_string();
-            self.publish(rt, Payload::Status { text }, None);
+            self.publish(rt, Payload::Status { text, handoff: None }, None);
         }
 
         // A conversation started by native Codex or the old headless engine
@@ -9270,7 +9279,7 @@ impl SessionManager {
             Err(error) => {
                 rt.stopping = true;
                 self.needs_recovery(&mut rt, RecoveryKind::Disconnected, crate::recovery_log::Source::Connection);
-                self.publish(&mut rt, Payload::Status { text: format!("Could not read the agent's launch settings. Stop the agent before retrying: {error:#}") }, None);
+                self.publish(&mut rt, Payload::Status { text: format!("Could not read the agent's launch settings. Stop the agent before retrying: {error:#}"), handoff: None }, None);
                 return;
             }
         };
@@ -9752,7 +9761,7 @@ mod tests {
 
     #[test]
     fn codex_image_prompts_project_once_and_repeated_submissions_stay_distinct() {
-        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
+        let prompt = PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
         let image = ImageRef { url: "attachments/session/proof.png".into(), media_type: Some("image/png".into()), name: Some("proof.png".into()) };
         let mut pending = std::collections::VecDeque::new();
         let mut projected = Vec::new();
@@ -9762,7 +9771,7 @@ mod tests {
             pending.push_back(echo);
             projected.push(composer);
 
-            let rollout = Payload::UserMessage { author: None, text: "[Image #1] describe this".into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: None };
+            let rollout = Payload::UserMessage { author: None, bot: None, text: "[Image #1] describe this".into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: None };
             assert_eq!(consume_composer_echo(&mut pending, &rollout), Some(Echoed { queued: false, seq: 0, overtaken: false, continuation: false, changed: false, into: None }));
         }
 
@@ -9772,7 +9781,7 @@ mod tests {
 
     #[test]
     fn revert_context_reaches_the_agent_without_becoming_the_users_visible_message() {
-        let mut prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
+        let mut prompt = PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
         prompt.append_agent_context("The user reverted a.txt from turn 1.");
         let (message, echo) = cli_composer_message(&prompt, vec![], None, false, "/workspace");
         assert!(prompt.agent.ends_with("The user reverted a.txt from turn 1."));
@@ -9858,7 +9867,7 @@ mod tests {
         let mut echo = ComposerEcho::new("continuation prompt".into(), 0);
         echo.receipt = Some(tx);
         let mut pending = std::collections::VecDeque::from([echo]);
-        let message = |text: &str| Payload::UserMessage { author: None, text: text.into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: None };
+        let message = |text: &str| Payload::UserMessage { author: None, bot: None, text: text.into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: None };
         assert!(consume_composer_echo(&mut pending, &message("continuation prompt")).is_none());
         assert!(rx.try_recv().is_err(), "a prompt still waiting for readiness is not delivered");
         pending[0].submitted = true;
@@ -9894,7 +9903,7 @@ mod tests {
         let mut pending = std::collections::VecDeque::new();
         pending.push_back(ComposerEcho::new("first".into(), 0));
         pending.push_back(ComposerEcho::new("second".into(), 0));
-        let user = |text: &str| Payload::UserMessage { author: None, text: text.into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: None };
+        let user = |text: &str| Payload::UserMessage { author: None, bot: None, text: text.into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: None };
 
         assert!(consume_composer_echo(&mut pending, &user("typed in the pane")).is_none());
         assert_eq!(pending.len(), 2);

@@ -1150,7 +1150,7 @@ mod tests {
         if skip.contains(line) {
             return;
         }
-        out.push(Payload::Status { text: line.to_string() });
+        out.push(Payload::Status { text: line.to_string(), handoff: None });
     }
 
     /// A hook that points the tail at another file and the thread that reads
@@ -1349,7 +1349,7 @@ mod tests {
         let mut s = Streamer::skipping(0, echo, HashSet::from(["copied".to_string()]));
         let out = s.push(b"copied\nfresh\n");
         assert_eq!(out.len(), 1);
-        assert!(matches!(&out[0], Payload::Status { text } if text == "fresh"));
+        assert!(matches!(&out[0], Payload::Status { text, .. } if text == "fresh"));
     }
 
     #[test]
@@ -1456,7 +1456,7 @@ mod tests {
         f.write_all(b"w\n").unwrap();
         let p = tail.drain();
         assert_eq!(p.len(), 1);
-        assert!(matches!(&p[0], Payload::Status { text } if text == "new"));
+        assert!(matches!(&p[0], Payload::Status { text, .. } if text == "new"));
         assert!(tail.drain().is_empty());
     }
 
@@ -1470,11 +1470,11 @@ mod tests {
         std::fs::write(&path, "first\n").unwrap();
         tail.retarget(&path);
         // This is a newly minted conversation, not resumed history.
-        assert!(matches!(&tail.drain()[0], Payload::Status { text } if text == "first"));
+        assert!(matches!(&tail.drain()[0], Payload::Status { text, .. } if text == "first"));
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
         f.write_all(b"second\n").unwrap();
-        assert!(matches!(&tail.drain()[0], Payload::Status { text } if text == "second"));
+        assert!(matches!(&tail.drain()[0], Payload::Status { text, .. } if text == "second"));
     }
 
     /// What Claude Code 2.1.314 printed, byte for byte, when it was resumed on
@@ -1591,6 +1591,6 @@ mod tests {
         let text = "café\n".as_bytes();
         assert!(s.push(&text[..4]).is_empty());
         let out = s.push(&text[4..]);
-        assert!(matches!(&out[0], Payload::Status { text } if text == "café"));
+        assert!(matches!(&out[0], Payload::Status { text, .. } if text == "café"));
     }
 }

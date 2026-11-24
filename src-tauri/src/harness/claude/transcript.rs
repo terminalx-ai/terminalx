@@ -466,7 +466,7 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
         // line and starts no turn, so a turn opened here would never close.
         if v["queueTranscriptOnly"].as_bool() == Some(true) {
             if let Some(summary) = tagged(&text_of(&v["message"]["content"]), "summary").filter(|summary| !summary.is_empty()) {
-                out.push(Payload::Status { text: summary.into() });
+                out.push(Payload::Status { text: summary.into(), handoff: None });
             }
             return None;
         }
@@ -584,7 +584,7 @@ fn decode_user(v: &Value, out: &mut Vec<Payload>) {
     // The paths of attached files went to the model after the typed text
     // (PRO-290): the chat shows them as files again.
     let (text, files) = crate::attachments::split_block(&as_typed(prompt));
-    out.push(Payload::UserMessage { author: None, text, images: Vec::new(), files, baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
+    out.push(Payload::UserMessage { author: None, bot: None, text, images: Vec::new(), files, baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
 }
 
 /// What started a turn when the prompt in a `user` record is not the
@@ -703,7 +703,7 @@ fn decode_queued_prompt(v: &Value, out: &mut Vec<Payload>) {
     // The paths of attached files went to the model after the typed text
     // (PRO-290): the chat shows them as files again.
     let (text, files) = crate::attachments::split_block(&as_typed(prompt));
-    out.push(Payload::UserMessage { author: None, text, images: Vec::new(), files, baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
+    out.push(Payload::UserMessage { author: None, bot: None, text, images: Vec::new(), files, baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
 }
 
 fn decode_assistant(v: &Value, out: &mut Vec<Payload>) {
@@ -1093,7 +1093,7 @@ mod tests {
         let line = started_record("task_notification", origin, content).replace(r#""turnOrigin":"task_notification","#, "");
         let (p, mark) = started_by_of(&line);
         assert_eq!(mark, None);
-        assert!(matches!(p.as_slice(), [Payload::Status { text }] if text == "Background shell command didn't finish before the previous session ended"), "{p:?}");
+        assert!(matches!(p.as_slice(), [Payload::Status { text, handoff: None }] if text == "Background shell command didn't finish before the previous session ended"), "{p:?}");
     }
 
     #[test]

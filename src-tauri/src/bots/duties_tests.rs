@@ -168,7 +168,7 @@ fn due_now(duty: &Automation) {
 fn status_lines(manager: &SessionManager, session: &str) -> Vec<String> {
     let entry = index::get(session).unwrap();
     manager.load_events(session, &entry.tabs[0].id).unwrap().into_iter().filter_map(|event| match event.payload {
-        Payload::Status { text } => Some(text),
+        Payload::Status { text, .. } => Some(text),
         _ => None,
     }).collect()
 }

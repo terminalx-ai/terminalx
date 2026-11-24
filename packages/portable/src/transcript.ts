@@ -1,4 +1,4 @@
-import type { AgentEvent, BackgroundTask, FileEdit, FileRef, Goal, Payload, PermissionOption, Question, ScreenPrompt, ToolResult, Usage } from "./events";
+import type { AgentEvent, BackgroundTask, BotMessage, FileEdit, FileRef, Goal, HandoffNote, Payload, PermissionOption, Question, ScreenPrompt, ToolResult, Usage } from "./events";
 import { shellRecord, withoutHarnessBlocks, type ShellRecord } from "./harnessText";
 import { compactionOperationKey, emptyCompactionLifecycle, reduceCompactionLifecycle, type CompactionLifecycle, type CompactionOperation } from "./compactionLifecycle";
 
@@ -50,10 +50,11 @@ export type WorkItem =
   | { kind: "text"; text: string; key: string; seq: number; messageTs?: string }
   /** `durationMs`: from the turn's previous event to this one, how long the agent thought, where the log's times say. */
   | { kind: "reasoning"; text: string; key: string; seq: number; durationMs?: number }
-  | ({ kind: "queued"; baseline?: string; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[]; files?: FileRef[] } & Delivery)
+  | ({ kind: "queued"; baseline?: string; author?: { userId: string; displayName: string }; bot?: BotMessage; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[]; files?: FileRef[] } & Delivery)
   /** A queued message the agent took mid-turn (#551): the reader's own words, where the agent read them. */
-  | ({ kind: "message"; baseline?: string; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[]; files?: FileRef[] } & Delivery)
-  | { kind: "status"; text: string; initiatingPrompt?: string; key: string; seq: number }
+  | ({ kind: "message"; baseline?: string; author?: { userId: string; displayName: string }; bot?: BotMessage; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[]; files?: FileRef[] } & Delivery)
+  /** `handoff`: the hand-off a line in a bot's chat is about (PRO-539); `ts`: when it was said. */
+  | { kind: "status"; text: string; initiatingPrompt?: string; handoff?: HandoffNote; ts?: string; key: string; seq: number }
   /** `detail`: the agent's (or its launch's) own words under the error (#667). */
   | { kind: "error"; text: string; detail?: string; key: string; seq: number }
   | { kind: "compaction"; preTokens?: number; postTokens?: number; summary?: string; lifecycle?: CompactionOperation; uncertain?: boolean; key: string; seq: number }
@@ -76,7 +77,7 @@ export interface Turn {
   checkpointSeq?: number;
   /** Time of the event that opened this turn, even without a prompt or completion. */
   ts: string;
-  prompt?: { baseline?: string; author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; files?: FileRef[]; ts: string; messageTs?: string; seq: number } & Delivery;
+  prompt?: { baseline?: string; author?: { userId: string; displayName: string }; bot?: BotMessage; text: string; images?: { url: string; name?: string }[]; files?: FileRef[]; ts: string; messageTs?: string; seq: number } & Delivery;
   work: WorkItem[];
   finalText?: string;
   /** Under a failed turn's `finalText`: the agent's last line, when it exited before it ever worked (#667). */
@@ -231,7 +232,7 @@ function takeMessage(turns: Turn[], seq: number): { prompt: NonNullable<Turn["pr
   const [item] = turn.work.splice(at, 1);
   if (item.kind !== "queued" && item.kind !== "message") return undefined;
   const { inputOccupied, inputChoice, replaced, withdrawn, unconfirmed, sent } = item;
-  return { prompt: { baseline: item.baseline, author: item.author, text: item.text, images: item.images, files: item.files, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, inputChoice, replaced, withdrawn, unconfirmed, sent }, from: turn };
+  return { prompt: { baseline: item.baseline, author: item.author, ...(item.bot ? { bot: item.bot } : {}), text: item.text, images: item.images, files: item.files, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, inputChoice, replaced, withdrawn, unconfirmed, sent }, from: turn };
 }
 
 /** Where the reader's message published under `seq` is drawn now: a turn's prompt (no `at`), or a note at `at` in a turn's work. */
@@ -480,17 +481,20 @@ export class TranscriptReducer {
           this.addShell(event, shell);
           break;
         }
-        const text = withoutHarnessBlocks(visibleUserText(payload.text));
+        // A message TerminalX put in a bot's chat (PRO-539) keeps the whole text its agent was given: the card shows
+        // it as written, behind a toggle, and draws everything else from `bot`.
+        const text = payload.bot ? payload.text : withoutHarnessBlocks(visibleUserText(payload.text));
+        const bot = payload.bot ? { bot: payload.bot } : {};
         if (!text.trim() && !payload.images?.length && !payload.files?.length && text !== payload.text) break;
         // Queued behind the turn the agent is on, even one that has drawn
         // nothing yet: a turn the agent started itself is heard of before its
         // first record (#540), and the message is not that turn's prompt.
         if (payload.queued) {
-          this.ensureTurn(event).work.push({ kind: "queued", baseline: payload.baseline, author: payload.author, text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, messageTs: event.messageTs, images: payload.images, ...(payload.files?.length ? { files: payload.files } : {}) });
+          this.ensureTurn(event).work.push({ kind: "queued", baseline: payload.baseline, author: payload.author, ...bot, text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, messageTs: event.messageTs, images: payload.images, ...(payload.files?.length ? { files: payload.files } : {}) });
           break;
         }
         this.abandonUnresolved();
-        this.newTurn(event, { baseline: payload.baseline, author: payload.author, text, images: payload.images, ...(payload.files?.length ? { files: payload.files } : {}), ts: event.ts, messageTs: event.messageTs, seq: event.seq });
+        this.newTurn(event, { baseline: payload.baseline, author: payload.author, ...bot, text, images: payload.images, ...(payload.files?.length ? { files: payload.files } : {}), ts: event.ts, messageTs: event.messageTs, seq: event.seq });
         this.modelRequestOpen = false;
         this.workingSince = Date.parse(event.ts);
         break;
@@ -849,7 +853,7 @@ export class TranscriptReducer {
           const turn = this.ensureTurn(event);
           const last = turn.work[turn.work.length - 1];
           if (payload.text.startsWith(RUNTIME_RESTARTED_NOTICE) && last?.kind === "status" && last.text === payload.text) break;
-          turn.work.push({ kind: "status", text: payload.text, key: `st${event.seq}`, seq: event.seq });
+          turn.work.push({ kind: "status", text: payload.text, ...(payload.handoff ? { handoff: payload.handoff, ts: event.ts } : {}), key: `st${event.seq}`, seq: event.seq });
         }
         break;
       case "error": {

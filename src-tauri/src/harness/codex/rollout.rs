@@ -257,7 +257,7 @@ fn decode_item(item: &Value, out: &mut Vec<Payload>) {
             if !text.is_empty() {
                 // Attached files' paths follow the typed text (PRO-290).
                 let (text, files) = crate::attachments::split_block(&text);
-                out.push(Payload::UserMessage { author: None, text, images: Vec::new(), files, baseline: None, queued: false, cwd: None });
+                out.push(Payload::UserMessage { author: None, bot: None, text, images: Vec::new(), files, baseline: None, queued: false, cwd: None });
             }
         }
         "AgentMessage" => {

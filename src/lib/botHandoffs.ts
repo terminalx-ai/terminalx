@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@/lib/api";
 import type { Handoff, HandoffList, TeamBrief } from "@/types/botHandoffs";
@@ -67,6 +67,57 @@ function useReadOn<T>(key: string | null, event: string, read: () => Promise<T>)
 export function useBotHandoffs(botId: string | null) {
   const { value, error, reload } = useReadOn(botId, "bot_handoffs_changed", () => botHandoffsApi.list(botId ?? ""));
   return { list: value, error, reload };
+}
+
+/** One bot's hand-offs as every card of a chat reads them: read once, however many cards show. */
+type Shared = { list: HandoffList | null; error: string | null; watchers: Set<() => void>; stop: (() => void) | null; snapshot: { list: HandoffList | null; error: string | null } };
+const shared = new Map<string, Shared>();
+const NOTHING: Shared["snapshot"] = { list: null, error: null };
+
+function watch(botId: string, watcher: () => void): () => void {
+  let entry = shared.get(botId);
+  if (!entry) {
+    entry = { list: null, error: null, watchers: new Set(), stop: null, snapshot: NOTHING };
+    shared.set(botId, entry);
+  }
+  const held = entry;
+  held.watchers.add(watcher);
+  if (!held.stop) {
+    let live = true;
+    const tell = (list: HandoffList | null, error: string | null) => {
+      if (!live) return;
+      // A read that failed keeps what was read before it: a card stays as it was, and says the read failed.
+      held.list = list ?? held.list;
+      held.error = error;
+      held.snapshot = { list: held.list, error };
+      for (const each of held.watchers) each();
+    };
+    const load = () => Promise.resolve().then(() => botHandoffsApi.list(botId)).then((list) => tell(list, null), (cause) => tell(null, reason(cause)));
+    void load();
+    const quiet = () => undefined;
+    const stops: Promise<() => void>[] = ["bot_handoffs_changed", "local_runtime_reattached"].map((name) => listen(name, () => void load()).catch(() => quiet));
+    held.stop = () => {
+      live = false;
+      for (const stop of stops) void stop.then((unlisten) => unlisten());
+    };
+  }
+  return () => {
+    held.watchers.delete(watcher);
+    if (held.watchers.size > 0) return;
+    held.stop?.();
+    shared.delete(botId);
+  };
+}
+
+/**
+ * Bot `botId`'s hand-offs, shared by every card that shows one (PRO-539): a chat with twenty cards reads the list
+ * once and each card follows it. Read again whenever any hand-off changes, while a card is mounted.
+ */
+export function useSharedBotHandoffs(botId: string | null): { list: HandoffList | null; error: string | null } {
+  // One subscribe function for one bot: a new one each render would stop and start the read each time.
+  const subscribe = useCallback((watcher: () => void) => (botId ? watch(botId, watcher) : () => undefined), [botId]);
+  const snapshot = useCallback(() => (botId ? shared.get(botId)?.snapshot ?? NOTHING : NOTHING), [botId]);
+  return useSyncExternalStore(subscribe, snapshot);
 }
 
 /** Every bot's hand-offs, read again whenever any changes (PRO-540). Reads nothing while not `enabled`. */

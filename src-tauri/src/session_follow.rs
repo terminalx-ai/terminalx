@@ -922,7 +922,7 @@ impl SessionManager {
             self.release_cli(&mut rt);
             if let Some(said) = said {
                 let text = format!("{} exited: {said}", crate::harness::display_name(&rt.harness));
-                self.publish(&mut rt, Payload::Status { text }, None);
+                self.publish(&mut rt, Payload::Status { text, handoff: None }, None);
             }
             if let Some(kind) = recovery {
                 self.needs_recovery(&mut rt, kind, crate::recovery_log::Source::Connection);
@@ -976,7 +976,7 @@ impl SessionManager {
             None => format!("{text}."),
         });
         if let Some(text) = text {
-            self.publish(rt, Payload::Status { text }, None);
+            self.publish(rt, Payload::Status { text, handoff: None }, None);
         }
         self.set_front(rt, Front::Terminal);
         self.announce_tab(rt);

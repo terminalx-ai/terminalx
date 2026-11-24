@@ -3615,7 +3615,7 @@ impl WorkspaceRpc {
         // Older clients open the returned tab and replay its transcript.
         // A runtime status preserves cleanup details; agent error events
         // are reduced to a recovery category by the session manager.
-        if let Err(error) = manager.publish_external(session_id, tab_id, crate::events::Payload::Status { text: message.clone() }) {
+        if let Err(error) = manager.publish_external(session_id, tab_id, crate::events::Payload::Status { text: message.clone(), handoff: None }) {
             message.push_str(&format!(" Could not record the start failure: {error:#}."));
         }
         message

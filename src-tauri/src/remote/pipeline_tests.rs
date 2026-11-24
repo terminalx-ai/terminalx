@@ -381,7 +381,7 @@ async fn a_failed_first_prompt_returns_an_openable_session_and_stops_only_its_pi
         assert!(Path::new(&session.cwd).is_dir());
         assert_eq!(created["tab"]["sessionId"], session_id);
         let events = f.rpc.manager().unwrap().load_events(session_id, tab_id).unwrap();
-        assert!(events.iter().any(|event| matches!(&event.payload, crate::events::Payload::Status { text: recorded } if recorded == message)));
+        assert!(events.iter().any(|event| matches!(&event.payload, crate::events::Payload::Status { text: recorded, .. } if recorded == message)));
         if n < 2 {
             let pipeline = crate::issue_pipeline::store::for_session(session_id).unwrap().unwrap();
             assert!(pipeline.stopped);
@@ -434,7 +434,7 @@ async fn failed_start_cleanup_reports_storage_failure_without_losing_the_session
     assert!(crate::store::index::get(session_id).is_ok());
     assert!(f.terminals.panes().is_empty());
     assert!(manager.load_events(session_id, tab_id).unwrap().iter().any(|event| matches!(&event.payload,
-        crate::events::Payload::Status { text: recorded } if recorded == &message)));
+        crate::events::Payload::Status { text: recorded, .. } if recorded == &message)));
 }
 
 /// `handoff/1` (#1327): a second opinion, Retry in a new chat or the agent
@@ -518,7 +518,7 @@ async fn a_handoff_opens_one_tab_with_its_first_prompt_and_reads_the_context_it_
     let failed_tab = failed["tabId"].as_str().unwrap();
     assert_eq!(crate::store::index::get(&session_id).unwrap().tabs.len(), 3);
     let events = f.rpc.manager().unwrap().load_events(&session_id, failed_tab).unwrap();
-    assert!(events.iter().any(|event| matches!(&event.payload, crate::events::Payload::Status { text } if text == message)));
+    assert!(events.iter().any(|event| matches!(&event.payload, crate::events::Payload::Status { text, .. } if text == message)));
 }
 
 fn code(result: Result<Value, (String, String)>) -> String {

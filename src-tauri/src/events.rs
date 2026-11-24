@@ -41,6 +41,123 @@ pub struct SubagentRef {
     pub label: Option<String>,
 }
 
+/// What a message TerminalX put in a bot's chat is (PRO-539): a hand-off, a tell or an answer from another bot, a
+/// mention from GitHub, Linear or a chat app, or the app's own note. It rides on the `user_message` beside the text
+/// the agent was given, which it never changes, so the window draws a card from fields and never reads them back out
+/// of that text. A field with nothing to say is left out.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BotMessage {
+    /// `handoff`, `tell`, `answer`, `mention`, `stopped`, `failed`, `dropped` or `checkBack`. A kind a newer build
+    /// wrote is kept as it is.
+    pub kind: String,
+    /// Who sent it: a bot's id, `owner` for the owner's own act in the window, `terminalx` for the app's own word,
+    /// or `person` for someone outside TerminalX (a mention).
+    #[serde(default)]
+    pub from: String,
+    /// The bot it went to, by id.
+    #[serde(default)]
+    pub to: String,
+    /// The two bots' names when it was sent, for a reader without the bots' list.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub to_name: String,
+    /// A tell up the reporting line: labelled "status to", not "message to".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub status: bool,
+    /// The hand-off it is, answers or is about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<u64>,
+    /// How far down its chain that hand-off is, and how deep a chain may go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_depth: Option<u32>,
+    /// A hand-off's title, in its sender's words.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    /// The sender's own words: a hand-off's scope, a message, an answer, what a mention says.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub body: String,
+    /// When a hand-off's answer is due, in its sender's words.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub due: String,
+    /// The owner's own note, when they handed an item on.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    /// The bot whose words `title` and `body` are, when the owner handed its item on, and that item's number.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub words_of: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_item: Option<u64>,
+    /// The receiving bot's item for a hand-off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<u64>,
+    /// An answer that says the work could not be done.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failed: bool,
+    /// What the sender was to the receiver when it was sent: `lead`, `report`, `listed` (the receiver's Who can ask
+    /// lets it hand work) or `pointed`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub relation: String,
+    /// The two bots' access when it was sent, as the bots' records name it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from_access: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub to_access: String,
+    /// Where a mention came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mention: Option<MentionSource>,
+}
+
+/// Where a mention of a bot came from (PRO-539): the service, who wrote it and where.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MentionSource {
+    /// `github`, `linear`, `slack` or `telegram`.
+    pub service: String,
+    /// Who wrote it, in the words the app chose for them.
+    #[serde(default)]
+    pub by: String,
+    /// The owner's own account wrote it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner: bool,
+    /// The pull request, issue, channel or group, as the app labels it. Empty for a direct chat.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub place: String,
+    /// A chat app's direct chat with the bot.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub direct: bool,
+    /// The comment's address, when the service gives one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    /// The title of what they wrote on.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+}
+
+/// The hand-off a `status` line in a bot's chat is about, and what happened to it (PRO-539).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoffNote {
+    pub number: u64,
+    /// `handed`, `answered`, `couldNot`, `stopped`, `notStarted` or `failed`.
+    pub event: String,
+    /// Whose chat the line is in: `from`, the bot that handed the work on, or `to`, the one it went to.
+    pub side: String,
+    /// The two bots, by id, and who handed it: the sending bot's id, or `owner`.
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub to: String,
+    #[serde(default)]
+    pub by: String,
+    /// The hand-off's title, in its sender's words.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+}
+
 /// Durable operation scope; a connection generation is not an operation id.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
@@ -379,6 +496,10 @@ pub enum Payload {
     UserMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         author: Option<crate::local_sharing::Person>,
+        /// What the message is, when TerminalX put it in a bot's chat for another bot, a person outside it or itself
+        /// (PRO-539). `text` stays what the agent was given; the window draws its card from these fields.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bot: Option<Box<BotMessage>>,
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ImageRef>,
@@ -609,6 +730,9 @@ pub enum Payload {
     },
     Status {
         text: String,
+        /// The hand-off this line is about, when it is one of the lines hand-offs leave in their two chats (PRO-539).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handoff: Option<HandoffNote>,
     },
     Error {
         message: String,

@@ -215,7 +215,7 @@ impl Rig {
                 Payload::UserMessage { text, .. } => Some(format!("user: {text}")),
                 Payload::AssistantText { text, .. } => Some(format!("{}: {text}", event.harness)),
                 Payload::TurnCompleted { status, .. } => Some(format!("turn {status:?}")),
-                Payload::Status { text } => Some(format!("status: {text}")),
+                Payload::Status { text, .. } => Some(format!("status: {text}")),
                 Payload::Conversation { harness, resumed, .. } => Some(format!("conversation: {harness}{}", if resumed { ", resumed" } else { "" })),
                 Payload::Recovery { kind: Some(kind) } => Some(format!("recovery: {kind:?}")),
                 _ => None,
@@ -569,7 +569,7 @@ impl Rig {
         let pane = self.launched_running("t1", CliKind::Codex, &transcript, &format!("sh -c 'read line; printf \"%s\\n\" \"{last}\"; exit 1'"));
         // As the composer sends one, keystrokes aside.
         let rt = self.runtime("t1");
-        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "fix the build".into(), display: "fix the build".into() };
+        let prompt = PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "fix the build".into(), display: "fix the build".into() };
         self.manager.record_composer_prompt(&mut rt.lock().unwrap(), &prompt, Vec::new(), self.dir.path().to_str().unwrap(), None);
         self.exit(&pane);
         self.wait("the exit to be settled", || matches!(self.runtime("t1").lock().unwrap().engine, Engine::None));

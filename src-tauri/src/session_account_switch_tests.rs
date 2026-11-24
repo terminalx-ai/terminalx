@@ -136,7 +136,7 @@ impl Rig {
 
     fn statuses(&self) -> Vec<String> {
         self.events().into_iter().filter_map(|event| match event.payload {
-            Payload::Status { text } => Some(text),
+            Payload::Status { text, .. } => Some(text),
             _ => None,
         }).collect()
     }
@@ -306,7 +306,7 @@ fn a_held_follow_up_goes_on_the_account_switched_to() {
     wait("the follow-up", || rig.sent("next task") == 1);
     assert_eq!(rig.account(), work);
     let events = rig.events();
-    let switched = events.iter().position(|event| matches!(&event.payload, Payload::Status { text } if text.starts_with("Switched from "))).expect("switched");
+    let switched = events.iter().position(|event| matches!(&event.payload, Payload::Status { text, .. } if text.starts_with("Switched from "))).expect("switched");
     let sent = events.iter().position(|event| matches!(&event.payload, Payload::UserMessage { text, .. } if text == "next task")).unwrap();
     assert!(switched < sent, "the switch comes before the follow-up");
     assert_eq!(rig.outcomes().len(), 1);

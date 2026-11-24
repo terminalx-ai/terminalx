@@ -112,7 +112,7 @@ impl Rig {
             .unwrap()
             .into_iter()
             .filter_map(|event| match event.payload {
-                Payload::Status { text } => Some(text),
+                Payload::Status { text, .. } => Some(text),
                 _ => None,
             })
             .collect()
