@@ -20,23 +20,31 @@ import { accessLostReason, clearCollabAccess } from "@/lib/cloudCollab";
 import { closeCloudConnection, retainCloudConnection, setSelectedCloudConnection, subscribeCloudConnections, type CloudLease } from "@/lib/cloudConnections";
 import { findCloudWorkspace, refreshCloudCatalog, resumeCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CloudWorkspaceAttention, takeAttentionSessionRequest, useAttentionSessionRequest } from "./CloudWorkspaceAttention";
+import { CloudStartFailure } from "./CloudStartFailure";
 import { resolveCloudAttention } from "@/lib/cloudAttention";
+import { resolveCloudStartFailure, startRecoveryAvailable } from "@/lib/cloudStartFailure";
 import { CloudResourceNotice } from "@/components/cloud/CloudResourceNotice";
-import { archiving, deletion, lastSavedText, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
+import { archiving, deletion, lastSavedText, lifecycleErrorMessage, resuming as workspaceResuming } from "@/lib/cloudLifecycle";
 import { useCloudAgentRan } from "@/lib/cloudSessions";
 import { detachCloudTerminals, errorCode } from "@/lib/cloudTerminals";
 import { selectCloudSession, selectSession } from "@/lib/sessions";
 import { useAccount } from "@/lib/account";
 import { computerColorCss, computerNameOf } from "@/lib/computerIdentity";
+import { managesOrganization } from "@/lib/multiOrg";
 import { cloudSessionKey, cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 
 const UNRESPONSIVE_DELAY_MS = 15_000;
 const NOT_CONNECTED: WorkspaceConnectionState = { state: "idle" };
+type HealthAction = "restart" | "diagnostics" | "start-diagnostics";
 
 /** Connect to a running or stopped workspace without waking it, including a recovered launch whose server state still lags. */
 function openable(item: CloudWorkspaceListItem): boolean {
   const recovered = item.workspace.state === "attention-required" && !resolveCloudAttention(item);
   return (["ready", "suspended", "archived"].includes(item.workspace.state) || recovered) && !deletion(item) && !archiving(item);
+}
+
+function inspectable(item: CloudWorkspaceListItem): boolean {
+  return item.workspace.state === "attention-required" && !deletion(item) && !archiving(item);
 }
 
 /**
@@ -79,8 +87,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   const sessionRequest = useAttentionSessionRequest();
   const requestedInspection = sessionRequest?.key === workspaceKey;
   const inspecting = inspection === workspaceKey || requestedInspection;
-  const canOpen = !!item && !locked && (openable(item) || restarting
-    || (inspecting && item.workspace.state === "attention-required" && !deletion(item) && !archiving(item)));
+  const canOpen = !!item && !locked && (openable(item) || restarting || (inspecting && inspectable(item)));
   // The lease, and through it the workspace's connection of now: the manager
   // replaces it when the workspace stops and comes back, and the view follows.
   const [held, setHeld] = useState<{ lease: CloudLease; name: string; provider: OpenedWorkspace["provider"]; workspaceState: OpenedWorkspace["workspaceState"] } | null>(null);
@@ -178,6 +185,12 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
 
   const agentRan = useCloudAgentRan(item);
   const attention = item ? resolveCloudAttention(item, { agentRan, connection: state.state }) : null;
+  const startRecovery = !!item && !locked && !refusedNow && !restarting && item.workspace.you?.role !== "none"
+    && !(state.state === "connected" && state.you?.role === "none")
+    && startRecoveryAvailable(accountStatus, item.workspace.orgId);
+  const startFailure = startRecovery && item ? resolveCloudStartFailure(item, { agentRan, connection: state.state }) : null;
+  const startResuming = startRecovery && !!item && workspaceResuming(item) && item.latestOperation?.transportAction !== "restart";
+  const legacyAttention = startFailure || startResuming ? null : attention;
   const rowState = item ? workspaceRowState(item, agentRan) : null;
   const [agentRequest, setAgentRequest] = useState({ key: workspaceKey, revision: 0 });
   const inspect = useCallback(() => {
@@ -192,10 +205,12 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   const stopped = !restarting && item?.workspace.state === "suspended";
   const saved = item ? lastSavedText(item) : null;
   const deleting = item ? deletion(item) : null;
-  const [healthAction, setHealthAction] = useState<{ key: string; scope: string; action: "restart" | "diagnostics" } | null>(null);
+  const [healthAction, setHealthAction] = useState<{ key: string; scope: string; action: HealthAction } | null>(null);
   const healthScope = detailsScope();
   useEffect(() => { setHealthAction(null); }, [workspaceKey, healthScope]);
-  const activeHealthAction = detailsAvailable && !locked && healthAction?.key === workspaceKey && healthAction.scope === healthScope
+  const startDiagnostics = startRecovery && !!item && managesOrganization(accountStatus, item.workspace.orgId) === true;
+  const activeHealthAction = (healthAction?.action === "start-diagnostics" ? startDiagnostics : detailsAvailable)
+    && !locked && healthAction?.key === workspaceKey && healthAction.scope === healthScope
     ? healthAction.action : null;
   const recovering = detailsAvailable && !locked && !refusedNow && !restarting && item?.workspace.state === "ready"
     && (state.state === "waitingForRuntime" || state.state === "reconnecting");
@@ -209,7 +224,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   }, [recoveryKey]);
   const unresponsive = !!item && recoveryKey !== null && unresponsiveKey === recoveryKey;
   const diagnosticsOffered = !!item && offersCloudDiagnostics(accountStatus, item.workspace.orgId);
-  const health = (action: "restart" | "diagnostics") => setHealthAction({ key: workspaceKey, scope: healthScope, action });
+  const health = (action: HealthAction) => setHealthAction({ key: workspaceKey, scope: healthScope, action });
 
   return (
     <main className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-clip" data-testid="cloud-workspace-main">
@@ -238,16 +253,19 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
         {item && !locked && <WorkspaceFollowButton key={`${item.workspace.orgId}:${item.workspace.id}`} item={item} />}
         {item && <ExecutionLocation provider={item.workspace.provider} name={item.workspace.name} />}
         <span className="ml-auto min-w-0 truncate text-xs text-muted-foreground" data-testid="cloud-connection-state" title={item ? describeWorkspace(item, Date.now(), agentRan) : undefined}>
-          {!restarting && rowState?.label}
-          {!restarting && opened && state.state !== "idle" && state.state !== "suspended" ? ` · ${describe(state)}` : ""}
+          {!restarting && (startFailure?.label ?? (startResuming ? "Resuming" : rowState?.label))}
+          {!restarting && !startFailure && opened && state.state !== "idle" && state.state !== "suspended" ? ` · ${describe(state)}` : ""}
         </span>
-        {stopped && (
+        {stopped && !startFailure && !startResuming && (
           <Button size="sm" variant="outline" className="shrink-0" disabled={resuming} onClick={() => void resume()}>
             {resuming ? <Loader2 className="animate-spin" /> : <Play />} Resume
           </Button>
         )}
       </header>
-      {item && attention && canOpen && !locked && !restarting && <CloudWorkspaceAttention item={item} input={{ agentRan, connection: state.state }} onOpenSession={inspect} />}
+      {item && startRecovery && <CloudStartFailure key={JSON.stringify([healthScope, workspaceKey])} item={item} failure={startFailure} resuming={startResuming}
+        canInspect={(row) => openable(row) || inspectable(row)} onInspect={inspect}
+        onDiagnostics={startDiagnostics ? () => health("start-diagnostics") : undefined} />}
+      {item && legacyAttention && canOpen && !locked && !restarting && <CloudWorkspaceAttention item={item} input={{ agentRan, connection: state.state }} onOpenSession={inspect} />}
       {unresponsive && <section aria-label="Workspace health" className="shrink-0 border-b border-hairline bg-well px-4 py-3 text-xs">
         <p className="font-medium">Cloud workspace unresponsive</p>
         <p className="mt-1 text-muted-foreground">TerminalX is trying to reconnect to the runtime.</p>
@@ -257,9 +275,9 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
         </div>
       </section>}
       {item && activeHealthAction === "restart" && <WorkspaceRestartDialog item={item} onClose={() => setHealthAction(null)} />}
-      {item && diagnosticsOffered && activeHealthAction === "diagnostics" &&
+      {item && diagnosticsOffered && (activeHealthAction === "diagnostics" || activeHealthAction === "start-diagnostics") &&
         <CloudDiagnosticsDialog request={{ orgId: item.workspace.orgId, workspaceId: item.workspace.id }} onClose={() => setHealthAction(null)} />}
-      {stopped && (
+      {stopped && !startResuming && (
         <div className="shrink-0 border-b border-hairline bg-well px-4 py-1.5 text-xs text-muted-foreground" role="status" data-testid="cloud-stopped-banner">
           Stopped. Saved agent conversations are shown; nothing runs until you resume it.
           {saved && <span data-testid="cloud-last-saved"> {saved}</span>}
@@ -290,7 +308,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
           {forcing && <WorkspaceLifecycleDialog request={{ item, action: "delete" }} onClose={() => setForcing(false)} />}
         </div>
       ) : !canOpen ? (
-        <Centered>{attention ? <CloudWorkspaceAttention item={item} input={{ agentRan, connection: state.state }} onOpenSession={inspect} /> : describeWorkspace(item)}</Centered>
+        startFailure || startResuming ? null : <Centered>{legacyAttention ? <CloudWorkspaceAttention item={item} input={{ agentRan, connection: state.state }} onOpenSession={inspect} /> : describeWorkspace(item)}</Centered>
       ) : opened ? (
         <WorkspaceView
           key={workspaceTargetKey(opened.connection.target)}
@@ -301,7 +319,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
           onOpenSession={(sessionId) => parsed && selectCloudSession(cloudSessionKey(parsed.orgId, parsed.workspaceId, sessionId))}
         />
       ) : (
-        !error && (
+        !error && !startFailure && !startResuming && (
           <Centered>
             <Loader2 className="mr-2 size-4 animate-spin" /> Checking the workspace…
           </Centered>
