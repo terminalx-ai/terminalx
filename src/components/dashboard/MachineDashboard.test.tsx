@@ -163,3 +163,13 @@ it("looks as it always did while no machine is paired (PRO-360)", async () => {
   expect(table.queryByRole("columnheader", { name: "Where" })).toBeNull();
   expect(rowNames()?.sort()).toEqual(["Notarize release builds", "Push org events"]);
 });
+
+it("keeps sessions from paired machines in Mine", async () => {
+  state.cloud = [];
+  setPrefs({ dashboard: { ...DEFAULT_DASHBOARD_PREFERENCES, view: "table" } });
+  render(<AgentDashboard />);
+  fireEvent.click(screen.getByRole("button", { name: /^Mine/ }));
+  expect(rowNames()).toEqual(expect.arrayContaining([
+    "Notarize release builds", "Bisect the flaky relay e2e", "Add read markers", "Nightly soak run",
+  ]));
+});
