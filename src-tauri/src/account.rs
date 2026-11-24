@@ -1267,18 +1267,20 @@ impl AccountManager {
     fn apply_refresh(&self, generation: u64, session: &DesktopSession, result: Result<DesktopSession, CloudError>) -> bool {
         let mut inner = self.inner.lock().unwrap();
         let before = serde_json::to_value(snapshot(&inner)).ok();
-        let unchanged = inner.generation == generation
-            && inner
-                .session
-                .as_ref()
-                .map(|current| current.refresh_token.as_str())
-                == Some(session.refresh_token.as_str());
-        if !unchanged {
+        let Some(current) = inner.session.as_ref() else { return false };
+        if inner.generation != generation || current.refresh_token != session.refresh_token {
             return false;
         }
 
         match result {
-            Ok(refreshed) => {
+            Ok(mut refreshed) => {
+                // Token rotation does not include the readiness snapshot. Keep
+                // the latest capabilities read for this user and profile.
+                if refreshed.cloud.user_id == current.cloud.user_id
+                    && refreshed.cloud.cloud_profile_id == current.cloud.cloud_profile_id
+                {
+                    refreshed.capabilities.phase2_readiness = current.capabilities.phase2_readiness.clone();
+                }
                 inner.last_error = None;
                 inner.set_session(Some(refreshed));
             }
@@ -2666,6 +2668,34 @@ mod tests {
         session.refresh_token = "rotated-refresh".into();
         session.organizations = vec![Organization { org_id: "org-a".into(), name: "Acme".into(), role: role.into(), is_personal: false, cloud: None, computer_name: None, computer_color: None }];
         session
+    }
+
+    #[test]
+    fn token_rotation_preserves_readiness_only_for_the_same_user_and_profile() {
+        for (user, profile, expected) in [
+            ("user", "profile", true),
+            ("other-user", "profile", false),
+            ("user", "other-profile", false),
+        ] {
+            let manager = signed_in("org-a");
+            manager.set_memberships_for_test(&["org-a"], true);
+            manager.apply_phase2_readiness_for_test(json!({
+                "version": 1,
+                "organizations": { "org-a": { (PHASE2_EVENTS): true } }
+            }));
+            assert!(manager.phase2_ready(PHASE2_EVENTS, Some("org-a"), None));
+            let current = manager.inner.lock().unwrap().session.clone().unwrap();
+            let mut refreshed = rotated(&current, "member");
+            refreshed.cloud.user_id = user.into();
+            refreshed.cloud.cloud_profile_id = profile.into();
+            // Model the actual response shape, which omits phase2Readiness.
+            let refreshed = serde_json::from_value(serde_json::to_value(refreshed).unwrap()).unwrap();
+            manager.apply_refresh(7, &current, Ok(refreshed));
+
+            let context = manager.context().unwrap();
+            assert_eq!(context.access_token, "rotated-access");
+            assert_eq!(manager.phase2_ready(PHASE2_EVENTS, Some("org-a"), Some(&context)), expected);
+        }
     }
 
     #[test]

@@ -5859,6 +5859,38 @@ mod tests {
     }
 
     #[test]
+    fn phase2_presence_catalog_strips_presence_only_in_organizations_without_readiness() {
+        let presence = json!({"activeMembers":[{"userId":"user-2","displayName":null,"photoUrl":null}]});
+        let organization = |org, workspace| {
+            let mut item = feed_item(org, workspace);
+            item["presence"] = presence.clone();
+            item["following"] = json!(true);
+            json!({"orgId":org,"workspaces":[item],"presence":presence})
+        };
+        let body = feed_body(json!([organization("org-1", "workspace-1"), organization("org-2", "workspace-2")]));
+        let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
+        let (account, service) = feed_service(&base, &["org-1", "org-2"]);
+        account.apply_phase2_readiness_for_test(json!({
+            "version": 1,
+            "organizations": {
+                "org-1": { (PHASE2_PRESENCE): true },
+                "org-2": { (PHASE2_PRESENCE): false, (PHASE2_FOLLOW_REASSIGN): true }
+            }
+        }));
+
+        let feed = service.catalog_feed(None).unwrap();
+        assert_eq!(feed.organizations.len(), 2);
+        for (org, enabled) in feed.organizations.iter().zip([true, false]) {
+            assert_eq!(org.org_id, if enabled { "org-1" } else { "org-2" });
+            assert_eq!(org.presence.is_some(), enabled);
+            assert_eq!(org.workspaces.len(), 1);
+            assert_eq!(org.workspaces[0].presence.is_some(), enabled);
+            assert_eq!(org.workspaces[0].following, Some(true));
+        }
+        assert!(request.join().unwrap().text.contains("presence=1"));
+    }
+
+    #[test]
     fn the_catalog_feed_is_only_asked_of_a_server_that_offers_it() {
         // Nothing listens here: a request would fail differently.
         let (account, service) = test_service("http://127.0.0.1:9");
