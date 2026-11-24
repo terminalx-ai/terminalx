@@ -1106,7 +1106,10 @@ export function CommandPalette({
   }, [query, scope, moveIds]);
 
   useEffect(() => {
-    if (selected >= selectableRows.length) setSelected(Math.max(0, selectableRows.length - 1));
+    // Clamp the row chosen last, not the one this render saw: the effect above may have just chosen one. Opening Move to
+    // section from row 8 of the Actions list saw 8 here, past the view's six rows, and put the cursor on Remove from
+    // section, the row Enter then ran (PRO-401).
+    setSelected((current) => (current >= selectableRows.length ? Math.max(0, selectableRows.length - 1) : current));
   }, [selectableRows.length, selected]);
 
   useEffect(() => {
