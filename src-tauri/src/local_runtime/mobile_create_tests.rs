@@ -169,17 +169,17 @@ fn phone_create_child() {
             assert!(!store::settings::load().experimental.native_codex);
             let refused = |params: Value| call("phone", "create", params).unwrap_err().to_string();
             assert!(refused(json!({"projectId":store::projects::public_id(&folder.path),"useWorktree":true,"agent":"claude","prompt":"Tidy"})).contains("not a Git repository"));
-            assert!(refused(json!({"projectId":"no-such-project","agent":"claude","prompt":"Hi"})).contains("no longer on this Mac"));
-            assert!(refused(json!({"projectId":repo.path,"agent":"claude","prompt":"Hi"})).contains("no longer on this Mac"), "a path is not an id");
+            assert!(refused(json!({"projectId":"no-such-project","agent":"claude","prompt":"Hi"})).contains(&crate::platform_profile::localize("no longer on this Mac")));
+            assert!(refused(json!({"projectId":repo.path,"agent":"claude","prompt":"Hi"})).contains(&crate::platform_profile::localize("no longer on this Mac")), "a path is not an id");
             assert!(refused(json!({"agent":"claude","prompt":"Hi"})).contains("Choose a project or a quick chat"));
             assert!(refused(json!({"quick":true,"projectId":store::projects::public_id(&repo.path),"agent":"claude","prompt":"Hi"})).contains("Choose a project or a quick chat"));
-            assert!(refused(json!({"quick":true,"agent":"nobody","prompt":"Hi"})).contains("not an agent this Mac offers"));
+            assert!(refused(json!({"quick":true,"agent":"nobody","prompt":"Hi"})).contains(&crate::platform_profile::localize("not an agent this Mac offers")));
             assert!(refused(json!({"quick":true,"agent":"claude","mode":"yolo","prompt":"Hi"})).contains("Unknown permission mode"));
             assert!(refused(json!({"quick":true,"agent":"claude","account":"../../elsewhere","prompt":"Hi"})).contains("not an agent account id"));
             // An archived project is not offered, so it cannot be named.
             let archived = store::projects::update(&folder.path, store::projects::ProjectPatch { archived: Some(true), ..Default::default() }).unwrap();
             assert!(archived.archived);
-            assert!(refused(json!({"projectId":store::projects::public_id(&archived.path),"agent":"claude","prompt":"Hi"})).contains("no longer on this Mac"));
+            assert!(refused(json!({"projectId":store::projects::public_id(&archived.path),"agent":"claude","prompt":"Hi"})).contains(&crate::platform_profile::localize("no longer on this Mac")));
             // A revoked phone starts nothing.
             let before = store::index::load().unwrap().len();
             manager.mobile.revoke_device(&owner, "driver").unwrap();
@@ -210,7 +210,7 @@ fn phone_create_child() {
             assert_eq!(call("phone", "pin", json!({"sessionId":"pin-me","pinned":false})).unwrap()["pinned"], false);
             assert!(!store::index::get("pin-me").unwrap().pinned);
             // A session that has gone, said in words the phone shows.
-            assert!(call("phone", "pin", json!({"sessionId":"gone","pinned":true})).unwrap_err().to_string().contains("no longer on this Mac"));
+            assert!(call("phone", "pin", json!({"sessionId":"gone","pinned":true})).unwrap_err().to_string().contains(&crate::platform_profile::localize("no longer on this Mac")));
             assert!(call("phone", "pin", json!({"sessionId":"pin-me","pinned":"yes"})).is_err());
 
             // A cloud project, kept where the sidebar reads it.

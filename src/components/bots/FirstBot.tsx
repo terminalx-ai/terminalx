@@ -1,3 +1,4 @@
+import { thisComputer } from "@/lib/platform";
 import { useEffect, useRef, useState, type ComponentType } from "react";
 import { Bell, Bot as BotIcon, CalendarClock, CircleDot, LayoutGrid, Laptop, Loader2, MessageSquare, Plus, ShieldOff, SquareTerminal, GitPullRequest } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -100,7 +101,7 @@ export function FirstBot() {
           </div>
 
           <ul className="grid grid-cols-1 gap-4 @3xl/editor-host:grid-cols-3" data-testid="bots-first-points">
-            <Point icon={Laptop} title="Runs on this Mac, with no account">
+            <Point icon={Laptop} title={`Runs on ${thisComputer}, with no account`}>
               Uses the Claude Code and Codex logins you already have.
             </Point>
             <Point icon={ShieldOff} title="Full access, with a brake">

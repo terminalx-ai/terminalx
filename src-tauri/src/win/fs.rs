@@ -133,6 +133,52 @@ pub(crate) fn open_read_refusing_links(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Open the regular file at `path` itself, refusing a symbolic link or
+/// junction there, and with `one_name` a file with another hard link. What
+/// `O_NOFOLLOW` gives on Unix, with no check of who can open the file.
+///
+/// Other reparse points are files, not links: a OneDrive placeholder is one,
+/// and only an ordinary open reaches its data. It is reopened that way and
+/// must still be the same file.
+pub(crate) fn open_plain(path: &Path, write: bool, one_name: bool) -> io::Result<File> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileAttributeTagInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_TAG_INFO,
+    };
+    /// `IsReparseTagNameSurrogate`: the tag names another file.
+    const NAME_SURROGATE: u32 = 0x2000_0000;
+
+    let refused = || io::Error::new(io::ErrorKind::InvalidInput, format!("{} is not a plain file", path.display()));
+    let access = if write { FILE_GENERIC_READ | FILE_GENERIC_WRITE } else { FILE_GENERIC_READ };
+    let held = open_no_follow(path, access)?;
+    let mut tag = FILE_ATTRIBUTE_TAG_INFO { FileAttributes: 0, ReparseTag: 0 };
+    // SAFETY: a live handle and an out-struct of the size passed.
+    if unsafe { GetFileInformationByHandleEx(held.as_raw_handle(), FileAttributeTagInfo, (&raw mut tag).cast(), size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let file = if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+        held
+    } else if tag.ReparseTag & NAME_SURROGATE != 0 {
+        return Err(refused());
+    } else {
+        let file = std::fs::OpenOptions::new().read(true).write(write).open(path)?;
+        if file_id(&file)? != file_id(&held)? {
+            return Err(refused());
+        }
+        file
+    };
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle is live for the call.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 || (one_name && info.nNumberOfLinks != 1) {
+        return Err(refused());
+    }
+    Ok(file)
+}
+
 /// `path` itself, even when it is a link: the link is then what is opened.
 fn open_no_follow(path: &Path, access: u32) -> io::Result<File> {
     let name = wide_path(path);
@@ -258,6 +304,42 @@ mod tests {
         assert_eq!(std::fs::read(&loose).unwrap(), b"x");
         // A directory where a file is, is refused.
         assert!(create_private_dir(&loose).is_err());
+    }
+
+    #[test]
+    fn open_plain_refuses_links_and_keeps_their_targets() {
+        use std::io::{Read, Write};
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        std::fs::write(&target, b"kept").unwrap();
+
+        let mut text = String::new();
+        open_plain(&target, false, true).unwrap().read_to_string(&mut text).unwrap();
+        assert_eq!(text, "kept");
+        open_plain(&target, true, true).unwrap().write_all(b"KEPT").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"KEPT");
+
+        // A second name is refused only when one name is required.
+        let second = root.path().join("second");
+        std::fs::hard_link(&target, &second).unwrap();
+        assert!(open_plain(&second, true, true).is_err());
+        assert!(open_plain(&second, false, false).is_ok());
+        std::fs::remove_file(&second).unwrap();
+
+        assert!(open_plain(root.path(), false, false).is_err());
+        let folder = root.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        let junction_path = root.path().join("junction");
+        junction(&junction_path, &folder).unwrap();
+        assert!(open_plain(&junction_path, false, false).is_err());
+
+        // Creating a symbolic link needs Developer Mode or an administrator.
+        let link = root.path().join("link");
+        if std::os::windows::fs::symlink_file(&target, &link).is_ok() {
+            assert!(open_plain(&link, false, false).is_err());
+            assert!(open_plain(&link, true, false).is_err());
+            assert_eq!(std::fs::read(&target).unwrap(), b"KEPT");
+        }
     }
 
     #[test]

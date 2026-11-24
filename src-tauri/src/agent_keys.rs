@@ -1104,15 +1104,15 @@ fn launch_on(store: &Store<'_>, keys: &Keys, agent: Agent, choice: Choice<'_>, w
             if choice.account == Some(id.as_str()) {
                 keys.requested.lock().unwrap().insert((agent, saved.revision.clone()));
             }
-            let key = keys.get(agent, &saved.revision, wait).with_context(|| format!(
+            let key = keys.get(agent, &saved.revision, wait).with_context(|| crate::platform_profile::localize(&format!(
                 "{} is set to use an API key, but TerminalX could not read it from the Keychain. Open TerminalX on this Mac (and unlock the Keychain if it asks), then start the tab again, or choose the subscription login in Settings → Agents.",
                 agent.label()
-            ))?;
+            )))?;
             Ok(grant_for(agent, &key_entry(&entry), Some(key)).on_account(&id, Vec::new()))
         }
         Login::Subscription { id } => {
             let dir = crate::agent_accounts::account_dir(&store.root, agent, &id);
-            ensure!(dir.is_dir(), "This {} account's sign-in is no longer on this Mac. Sign in again in Settings → Agents, or choose another account.", agent.label());
+            ensure!(dir.is_dir(), "{}", crate::platform_profile::localize(&format!("This {} account's sign-in is no longer on this Mac. Sign in again in Settings → Agents, or choose another account.", agent.label())));
             let home = account_home(&dir, &id)?;
             Ok(subscription_grant(agent, &id, &home))
         }
@@ -1448,7 +1448,7 @@ mod tests {
 
         let keys = Keys::default();
         let error = launch_from(&store, &keys, Agent::Codex, Duration::from_millis(10)).err().unwrap().to_string();
-        assert!(error.starts_with("Codex is set to use an API key, but TerminalX could not read it from the Keychain."), "{error}");
+        assert!(error.starts_with(&crate::platform_profile::localize("Codex is set to use an API key, but TerminalX could not read it from the Keychain.")), "{error}");
         assert!(!error.contains(OTHER));
 
         // The runtime's memory, filled from the desktop's answer.

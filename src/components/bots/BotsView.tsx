@@ -1,3 +1,4 @@
+import { thisComputer } from "@/lib/platform";
 import { useEffect, useState } from "react";
 import { MachineHostError } from "@/components/machines/MachineHostError";
 import { ArrowLeft, ArrowLeftRight, BookUser, Calendar, Loader2, MessageCircleQuestion, Moon, Pause, Play, Plus, RotateCw, Settings2 } from "@/icons";
@@ -142,7 +143,7 @@ function BotsTeam({ focus }: { focus: boolean }) {
             <StatCard
               label="Team"
               value={team === 1 ? "1 bot" : `${team} bots`}
-              note={[`${onMac} on this Mac`, elsewhere ? `${elsewhere} elsewhere` : "", store.unreadable ? `${store.unreadable} cannot be read by this version` : ""].filter(Boolean).join(" · ")}
+              note={[`${onMac} on ${thisComputer}`, elsewhere ? `${elsewhere} elsewhere` : "", store.unreadable ? `${store.unreadable} cannot be read by this version` : ""].filter(Boolean).join(" · ")}
             />
             <StatCard label="Needs you" value={needsError ? "—" : trouble ? `${asking}+` : String(asking)} note={needsError ? "Couldn't be read" : trouble ? "A bot's list can't be read" : needsYouNote(needs)} accent />
             <StatCard label="Working now" value={`${bots.length - paused} ready`} note={paused ? `${paused} paused` : "None paused"} />

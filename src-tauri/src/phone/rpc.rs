@@ -1845,7 +1845,7 @@ fn sync_event_count<'a>(events: impl Iterator<Item = &'a AgentEvent>, budget: us
 
 /// The note that ends a string cut short to fit.
 fn cut_note(omitted: usize) -> String {
-    format!("\n\n[Too large to show on mobile: {} not shown. Open this conversation on your Mac to see all of it.]", megabytes(omitted))
+    crate::platform_profile::localize(&format!("\n\n[Too large to show on mobile: {} not shown. Open this conversation on your Mac to see all of it.]", megabytes(omitted)))
 }
 
 /// An event as JSON of at most `budget` bytes (#669). In one that is larger,
@@ -1884,7 +1884,7 @@ fn fit_event(event: &AgentEvent, budget: usize) -> Result<Value> {
     if excess > 0 || serde_json::to_vec(&value)?.len() > budget {
         value["payload"] = json!({
             "type": "status",
-            "text": format!("This item is too large to show on mobile ({}). Open this conversation on your Mac to see it.", megabytes(size)),
+            "text": crate::platform_profile::localize(&format!("This item is too large to show on mobile ({}). Open this conversation on your Mac to see it.", megabytes(size))),
         });
     }
     Ok(value)
@@ -3615,7 +3615,7 @@ mod tests {
         assert_eq!(rows[0]["payload"]["callId"], "call-2");
         let text = rows[0]["payload"]["result"]["text"].as_str().unwrap();
         assert!(text.starts_with("xxxx"));
-        assert!(text.ends_with("not shown. Open this conversation on your Mac to see all of it.]"));
+        assert!(text.ends_with(&crate::platform_profile::localize("not shown. Open this conversation on your Mac to see all of it.]")), "{text}");
         // The cursor covers the whole event: the next page starts after it.
         let third = sync_page(&events, Some(&cursor(&second)), "session", "tab", "test", direct()).unwrap();
         assert_eq!(third["events"][0]["seq"], 3);

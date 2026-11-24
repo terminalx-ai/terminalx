@@ -73,7 +73,7 @@ describe("a bot's view (PRO-468)", () => {
     view();
     expect(screen.getByRole("heading", { name: "Atlas" })).toBeTruthy();
     expect(screen.getByText("CTO")).toBeTruthy();
-    for (const chip of ["Claude Code", "This Mac", "Full access"]) expect(screen.getByText(chip, { exact: false })).toBeTruthy();
+    for (const chip of ["Claude Code", "This computer", "Full access"]) expect(screen.getByText(chip, { exact: false })).toBeTruthy();
     expect(await screen.findByText("$3.50 today")).toBeTruthy();
     expect(mocks.spentToday).toHaveBeenCalledWith("b1");
     expect(screen.getByRole("button", { name: "Pause" })).toBeTruthy();

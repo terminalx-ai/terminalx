@@ -723,9 +723,9 @@ mod tests {
 
     #[test]
     fn a_new_tab_names_its_session_and_a_resumed_one_reopens_it() {
-        if crate::binpath::resolve("claude").is_none() {
-            return;
-        }
+        // Taking a turn keeps another test's pinned stand-in (a `.cmd` on
+        // Windows, whose settings go in a file) out of this command line.
+        let _program = claude_program_for_tests(std::path::PathBuf::from("/opt/claude"));
         let settings = json!({});
         let fresh = launch_command(LaunchOptions {
             provider_session_id: "abc",
@@ -779,9 +779,7 @@ mod tests {
     /// fresh start, a resume, and a fork alike.
     #[test]
     fn bypass_is_the_default_launch_and_survives_resume() {
-        if crate::binpath::resolve("claude").is_none() {
-            return;
-        }
+        let _program = claude_program_for_tests(std::path::PathBuf::from("/opt/claude"));
         let settings = json!({"hooks": {}});
         let launch = |mode, resume, fork_from| {
             launch_command(LaunchOptions {
@@ -848,9 +846,7 @@ mod tests {
     /// CLI restores a resumed session's own mode and ignores the flag.
     #[test]
     fn a_settings_restart_forks_the_conversation_and_carries_the_new_mode() {
-        if crate::binpath::resolve("claude").is_none() {
-            return;
-        }
+        let _program = claude_program_for_tests(std::path::PathBuf::from("/opt/claude"));
         let settings = json!({});
         let c = launch_command(LaunchOptions {
             provider_session_id: "minted",
