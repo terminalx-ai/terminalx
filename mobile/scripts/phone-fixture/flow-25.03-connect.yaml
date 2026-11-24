@@ -1,0 +1,62 @@
+# 25.03 Connect compute: the path that works, a provider with nothing to connect, and one the app has never heard of.
+appId: com.terminalx.phone.fixture
+# The boards are drawn in Ember when dark and in Den when light: MAESTRO_THEME=Den for the light run.
+env:
+  THEME: ${MAESTRO_THEME || "Ember"}
+name: Connect compute, connecting (25.03)
+---
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected }
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+- tapOn: "${THEME} theme"
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute/agent37?orgId=org-northwind", fixtureCompute: nothing, fixtureConnect: checking }
+- assertVisible: "Paste Agent37 API key"
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-07-agent37-empty
+- setClipboard: "a37_fixture_placeholder_key_0000"
+- tapOn: "Paste Agent37 API key"
+# iOS asks before an app reads what another put on the pasteboard.
+- tapOn:
+    text: "Allow Paste"
+    optional: true
+- tapOn:
+    text: "I understand Agent37 bills.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-08-key-pasted
+- tapOn: "Connect"
+- assertVisible: "Checking the key…"
+- takeScreenshot: 25.03-09-checking
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute/agent37?orgId=org-northwind", fixtureCompute: nothing, fixtureConnect: ok }
+- setClipboard: "a37_fixture_placeholder_key_0000"
+- tapOn: "Paste Agent37 API key"
+# iOS asks before an app reads what another put on the pasteboard.
+- tapOn:
+    text: "Allow Paste"
+    optional: true
+- tapOn:
+    text: "I understand Agent37 bills.*"
+- tapOn: "Connect"
+- extendedWaitUntil:
+    visible: "Replace key"
+    timeout: 10000
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-10-connected
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute/terminalx-cloud?orgId=org-northwind", fixtureCompute: nothing }
+- assertVisible: "TerminalX Cloud.*Ready to use.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-11-terminalx-cloud
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute/lattice?orgId=org-northwind", fixtureCompute: described }
+- assertVisible: "Paste Lattice API token"
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-12-any-provider

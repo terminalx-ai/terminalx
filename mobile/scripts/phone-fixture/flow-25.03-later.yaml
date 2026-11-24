@@ -1,0 +1,47 @@
+# 25.03 Connect compute, later: a key that stopped working, replacing it, and disconnecting.
+appId: com.terminalx.phone.fixture
+# The boards are drawn in Ember when dark and in Den when light: MAESTRO_THEME=Den for the light run.
+env:
+  THEME: ${MAESTRO_THEME || "Ember"}
+name: Connect compute, later (25.03)
+---
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected }
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+- tapOn: "${THEME} theme"
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute/box?orgId=org-northwind", fixtureCompute: attention }
+- assertVisible: "Boat rejected the stored key on its last check.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-18-needs-attention
+- tapOn: "Replace key"
+- assertVisible: "Paste Boat API token"
+- setClipboard: "boat_fixture_placeholder_token_0000"
+- tapOn: "Paste Boat API token"
+# iOS asks before an app reads what another put on the pasteboard.
+- tapOn:
+    text: "Allow Paste"
+    optional: true
+- tapOn:
+    text: "I understand Boat bills.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-19-replace-key
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute/box?orgId=org-northwind", fixtureCompute: one }
+- tapOn: "Disconnect…"
+- assertVisible: "Disconnect Boat?"
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-20-disconnect-asks
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute/box?orgId=org-northwind", fixtureCompute: one, fixtureDisconnect: refused }
+- tapOn: "Disconnect…"
+- tapOn: "Disconnect"
+- assertVisible: "Boat still holds workspaces"
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-21-disconnect-refused

@@ -1,0 +1,50 @@
+# 25.03 Connect compute: the providers the server offers, in each state the list is drawn.
+appId: com.terminalx.phone.fixture
+# The boards are drawn in Ember when dark and in Den when light: MAESTRO_THEME=Den for the light run.
+env:
+  THEME: ${MAESTRO_THEME || "Ember"}
+name: Connect compute, the list (25.03)
+---
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected }
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+- tapOn: "${THEME} theme"
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute?orgId=org-northwind", fixtureCompute: nothing }
+- assertVisible: "Agent37, Not connected.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-01-nothing-connected
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute?orgId=org-northwind", fixtureCompute: one }
+- assertVisible: "Boat, Connected.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-02-one-connected
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute?orgId=org-northwind", fixtureCompute: reading }
+- assertVisible: "Reading compute providers"
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-03-reading
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute?orgId=org-northwind", fixtureCompute: none }
+- assertVisible: "No providers are offered"
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-04-none-offered
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute?orgId=org-northwind", fixtureCompute: unreadable }
+- assertVisible: "Providers could not be read"
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-05-could-not-be-read
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: "/cloud/compute?orgId=org-acme", fixtureCompute: member }
+- assertVisible: "An organization owner or admin must connect compute.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.03-06-member
