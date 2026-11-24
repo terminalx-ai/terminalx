@@ -1,4 +1,4 @@
-import { api, experimental, type CloudWorkspaceProviderId, type CloudWorkspaceQuota, type CloudWorkspaceQuote, type CloudWorkspaceSetup, type CloudWorkspaceSnapshot } from "@/lib/api";
+import { api, experimental, type AccountStatus, type CloudWorkspaceProviderId, type CloudWorkspaceQuota, type CloudWorkspaceQuote, type CloudWorkspaceSetup, type CloudWorkspaceSnapshot } from "@/lib/api";
 import { getAccount } from "@/lib/account";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { getCloudAgents, newCloudAgentTab } from "@/lib/cloudAgents";
@@ -7,6 +7,7 @@ import { cloudOrgArg, defaultOrgId, findCloudWorkspace, getCloudCatalog, isChang
 import {
   CreateRefused,
   PROVIDER_CREATION_PAUSED,
+  REAUTH_REQUIRED,
   SERVER_CREATION_DISABLED,
   listedNames,
   createWorkspace,
@@ -20,7 +21,7 @@ import {
   type PendingCreate,
 } from "@/lib/cloudCreate";
 import { creatableProviders, noProviderRefusal } from "@/lib/hiddenProviders";
-import { cloudProviderLabel, orderedCloudProviderIds } from "@/lib/cloudProviders";
+import { cloudProviderDescriptor, cloudProviderLabel, cloudProviderOffered, orderedCloudProviderIds, orderedCloudProviders } from "@/lib/cloudProviders";
 import type { RuntimeIssuePipeline, RuntimeIssueRef, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
 import { normalizeRepositoryIdentity } from "@terminalx/portable/repositoryIdentity";
@@ -264,6 +265,11 @@ function cloneUrlOf(project: CloudProject): string | null {
 
 const PROVIDER_FLAG = /^cloud\.workspaces\.provider\.(.+)\.v1$/;
 
+export function sessionPlacementReady(status: AccountStatus, orgId: string): boolean {
+  const features = status.phase2Readiness?.[orgId];
+  return status.state === "signed-in" && Array.isArray(features) && features.includes("cloud.workspaces.session-placement.v1");
+}
+
 /**
  * The providers an organization's capability flags offer (PRO-69), in their
  * descriptors' order (PRO-415). The app names none: each
@@ -278,6 +284,93 @@ function offeredByFlags(flags: Record<string, boolean>): CloudWorkspaceProviderI
       return id ? [id] : [];
     }),
   );
+}
+
+export interface CloudPlacementOffer {
+  id: CloudWorkspaceProviderId;
+  label: string;
+  setup: CloudWorkspaceSetup | null;
+  error: unknown;
+}
+
+/** The active org has a provider list. Other orgs expose their offerings through scoped flags and setup. */
+export async function cloudPlacementOffers(orgId: string): Promise<CloudPlacementOffer[]> {
+  const status = getAccount().status;
+  const org = cloudOrgArg(orgId);
+  const readSetup = async (id: string, label: string): Promise<CloudPlacementOffer> => {
+    try {
+      return { id, label, setup: await api.cloudWorkspaceSetup(id, org), error: null };
+    } catch (error) {
+      return { id, label, setup: null, error: placementRefusal(error, label) };
+    }
+  };
+  if (orgId === defaultOrgId(status)) {
+    const { providers } = await api.cloudProviders();
+    return Promise.all(orderedCloudProviders(providers.filter(cloudProviderOffered)).map((provider) =>
+      provider.availability === "available"
+        ? readSetup(provider.id, cloudProviderLabel(provider))
+        : { id: provider.id, label: cloudProviderLabel(provider), setup: null, error: noProviderRefusal([provider]) },
+    ));
+  }
+  const flags = status.organizations?.find((item) => item.id === orgId)?.cloud?.flags ?? {};
+  return Promise.all(offeredByFlags(flags)
+    .filter((id) => cloudProviderDescriptor(id)?.listed !== false)
+    .map((id) => readSetup(id, cloudProviderLabel(id))));
+}
+
+function placementRefusal(error: unknown, provider: string): unknown {
+  return error && typeof error === "object" && "code" in error && error.code === SERVER_CREATION_DISABLED
+    ? new CreateRefused(PROVIDER_CREATION_PAUSED, provider)
+    : error;
+}
+
+function projectRepositories(project: CloudProject, placement = false): CreateForm["repositories"] {
+  if (project.blank) return [];
+  const cloneUrl = placement
+    ? getCloudCatalog().orgs[project.orgId]?.repositories?.find(
+      (repository) => normalizeRepositoryIdentity(repository.cloneUrl) === project.identity,
+    )?.cloneUrl ?? `https://${project.identity}.git`
+    : cloneUrlOf(project)!;
+  return [{ cloneUrl, fullName: project.fullName, ref: "" }];
+}
+
+/** A legacy credential check (one without an agent) cannot establish this agent's readiness. */
+export async function checkCloudPlacement(project: CloudProject, agent: string): Promise<void> {
+  const org = cloudOrgArg(project.orgId);
+  if (!project.selected || (!project.blank && !project.identity.startsWith("github.com/"))) {
+    throw new Error("Choose a GitHub repository available to this organization.");
+  }
+  const repositories = projectRepositories(project, true).map(({ cloneUrl }) => ({ cloneUrl, ref: null }));
+  const result = await api.cloudWorkspacePreflight(repositories, org, agent);
+  const checks = result.checks.filter((check) => check.kind !== "agent-credential" || check.agent === agent);
+  const failed = checks.find((check) => check.status === "failed");
+  if (failed?.kind === "agent-credential") {
+    throw new CreateRefused(failed.errorCode === REAUTH_REQUIRED ? REAUTH_REQUIRED : "cloud_workspace_agent_credential_required", agent);
+  }
+  if (failed) throw new CreateRefused(failed.errorCode ?? "cloud_workspace_request_invalid", failed.cloneUrl);
+  if (!checks.some((check) => check.kind === "agent-credential" && check.status === "verified")) {
+    throw new Error("Could not verify the agent login for this organization.");
+  }
+  if (!result.ready) throw new Error("The cloud preflight did not report ready.");
+}
+
+export async function quoteCloudPlacement(orgId: string, setup: CloudWorkspaceSetup, idleSuspendMinutes: number | null): Promise<CloudWorkspaceQuote> {
+  const minutes = idleSuspendMinutes ?? setup.defaults.idleSuspendMinutes;
+  const quote = await api.cloudWorkspaceQuote({
+    provider: setup.provider,
+    ...setup.defaults,
+    idleSuspendMinutes: minutes,
+  }, cloudOrgArg(orgId));
+  if (quote.provider !== setup.provider || quote.configuration.idleSuspendMinutes !== minutes) {
+    throw new Error("The provider returned a price for different machine settings.");
+  }
+  if (!Number.isFinite(quote.expiresAt) || quote.expiresAt <= Date.now()) throw new CreateRefused("cloud_workspace_quote_expired");
+  return quote;
+}
+
+export interface CloudCreatePlacement {
+  quote: CloudWorkspaceQuote;
+  accessMode: CreateForm["accessMode"];
 }
 
 /**
@@ -319,32 +412,49 @@ async function providerFor(orgId: string): Promise<{ id: CloudWorkspaceProviderI
  * quota (refused at the limit, if there is one, sending nothing), the provider, the checks and
  * a quote. Nothing is created here.
  */
-export async function prepareCloudCreate(project: CloudProject, request: CloudSessionRequest): Promise<PreparedCreate> {
+export async function prepareCloudCreate(project: CloudProject, request: CloudSessionRequest, placement?: CloudCreatePlacement): Promise<PreparedCreate> {
   const orgId = project.orgId;
   const quota = getCloudCatalog().orgs[orgId]?.quota ?? null;
   // Only against a limit: an organization without one (PRO-371) is never refused here.
-  if (atLimit(quota)) throw new CreateRefused("cloud_workspace_quota_exceeded");
-  const provider = await providerFor(orgId);
+  if (atLimit(quota) || (placement && atLimit(quota?.running))) throw new CreateRefused("cloud_workspace_quota_exceeded");
+  const provider = placement
+    ? { id: placement.quote.provider, label: cloudProviderLabel(placement.quote.provider), setup: null }
+    : await providerFor(orgId);
   const org = cloudOrgArg(orgId);
   const name = project.blank ? project.fullName : titleOf(request.prompt) || project.fullName.split("/").pop() || project.fullName;
   const form: CreateForm = {
     name: [...name].slice(0, 80).join(""),
     provider: provider.id,
-    repositories: project.blank ? [] : [{ cloneUrl: cloneUrlOf(project)!, fullName: project.fullName, ref: "" }],
+    repositories: projectRepositories(project, !!placement),
     prompt: request.prompt,
     agent: request.agent,
     model: request.model,
     effort: request.effort ?? "",
     mode: request.mode,
-    accessMode: "private",
+    accessMode: placement?.accessMode ?? "private",
     idleSuspendMinutes: request.idleSuspendMinutes ?? null,
   };
   const errors = Object.values(validateForm(form));
   if (errors[0]) throw new CreateRefused("cloud_workspace_form_invalid", errors[0]);
   const repositories = repositoriesInput(form);
-  await preflightCreate(api, form, org);
-  const setup = provider.setup ?? (await api.cloudWorkspaceSetup(provider.id, org));
-  const quote = await api.cloudWorkspaceQuote({ provider: provider.id, ...setup.defaults, idleSuspendMinutes: form.idleSuspendMinutes ?? setup.defaults.idleSuspendMinutes }, org);
+  let quote: CloudWorkspaceQuote;
+  if (placement) {
+    const { status } = getAccount();
+    if (!sessionPlacementReady(status, orgId)) throw new Error("Cloud session placement is unavailable for this organization.");
+    await checkCloudPlacement(project, request.agent);
+    const current = getAccount().status;
+    if (!sessionPlacementReady(current, orgId) || current.context?.revision !== status.context?.revision) {
+      throw new Error("The organization changed while checking cloud readiness. Try again.");
+    }
+    quote = placement.quote;
+    if (quote.expiresAt <= Date.now() || quote.configuration.idleSuspendMinutes !== request.idleSuspendMinutes) {
+      throw new CreateRefused("cloud_workspace_quote_expired");
+    }
+  } else {
+    await preflightCreate(api, form, org);
+    const setup = provider.setup ?? (await api.cloudWorkspaceSetup(provider.id, org));
+    quote = await api.cloudWorkspaceQuote({ provider: provider.id, ...setup.defaults, idleSuspendMinutes: form.idleSuspendMinutes ?? setup.defaults.idleSuspendMinutes }, org);
+  }
   const idempotencyKey = crypto.randomUUID();
   const pending: PendingCreate = {
     idempotencyKey,

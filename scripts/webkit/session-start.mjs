@@ -68,6 +68,51 @@ function fixture() {
   });
 }
 
+function placementFixture(ready) {
+  const { answers } = window.__PW_STUB__;
+  const org = "org-a";
+  const fullName = "procyon-labs/long-repository-for-session-placement";
+  answers.account_status.organizations = [{
+    ...answers.account_status.organizations[0], name: "Procyon Labs Engineering",
+  }];
+  if (ready) answers.account_status.phase2Readiness = { [org]: ["cloud.workspaces.session-placement.v1"] };
+  const provider = "compute";
+  const defaults = { sourceId: "image", locationId: "fra", machineClassId: "small", idleSuspendMinutes: 30, retentionDays: 7, networkPolicy: "open" };
+  const machine = { id: "small", label: "General Purpose Shared CPU", vcpu: 2, memoryMiB: 4096, diskGiB: 20, activeHourlyMicros: 120_000 };
+  const check = (kind, status = "verified", extra = {}) => ({ kind, status, errorCode: null, retryable: false, cloneUrl: null, ...extra });
+  window.__placementCalls = [];
+  let environmentReady = false;
+  window.__publishEnvironment = () => { environmentReady = true; };
+  Object.assign(answers, {
+    cloud_workspace_repositories: { configured: true, repositories: [{ fullName, cloneUrl: `https://github.com/${fullName}.git`, defaultBranch: "main", private: true, state: "accessible", reason: null }] },
+    cloud_workspaces: { workspaces: [], quota: { used: 0, limit: 3, running: { used: 0, limit: 3 } } },
+    github_identity: { repo: fullName, remoteHost: "github", login: null, email: null, source: null },
+    cloud_providers: () => {
+      window.__placementCalls.push("offers");
+      return { providers: [{ id: provider, displayName: "Regional Compute Provider", availability: "available", descriptor: null, connection: null }] };
+    },
+    cloud_workspace_setup: () => {
+      window.__placementCalls.push("setup");
+      return { provider, defaults, locations: [{ id: "fra", label: "Frankfurt", placement: "selected" }], machineClasses: [machine], allowedIdleSuspendMinutes: [30, 60], currency: "USD", pricing: "provider-rate" };
+    },
+    cloud_workspace_quote: () => {
+      window.__placementCalls.push("quote");
+      return { id: "q", provider, expiresAt: Date.now() + 60000, currency: "USD", pricing: "provider-rate", activeHourlyMicros: machine.activeHourlyMicros,
+        configuration: { ...defaults, machineClassLabel: machine.label, vcpu: machine.vcpu, memoryMiB: machine.memoryMiB, locationLabel: "Frankfurt" } };
+    },
+    cloud_workspace_preflight: ({ agent }) => {
+      window.__placementCalls.push("preflight");
+      return { ready: environmentReady, checks: [check("agent-credential", "verified", { agent }),
+        check("repository", environmentReady ? "verified" : "failed", { errorCode: environmentReady ? null : "cloud_environment_version_missing" })] };
+    },
+    cloud_workspace_create: () => {
+      window.__placementCalls.push("create");
+      throw new Error("The layout check must never create a workspace");
+    },
+    list_models: [{ harness: "claude", id: "opus", label: "Opus", efforts: [], isDefault: true }],
+  });
+}
+
 const shots = process.env.WEBKIT_LAYOUT_SCREENSHOTS;
 if (shots) await mkdir(shots, { recursive: true });
 const server = await serve();
@@ -152,6 +197,49 @@ try {
       assert.equal(await message.count(), 1);
     }
     console.log(`ok Create with delayed first send (${colorScheme}, ${outcome})`);
+    await page.close();
+  }
+  for (const ready of [false, true]) {
+    const page = await open(browser, server.url, { cloud: true, localProjects: 1 }, { width: 760, height: 680 }, {
+      extra: `(${placementFixture.toString()})(${ready});`,
+    });
+    page.setDefaultTimeout(12_000);
+    await page.getByTestId("sidebar-rail").waitFor();
+    await page.keyboard.press("Meta+n");
+    const prompt = page.locator("[data-new-session-prompt]");
+    await prompt.fill("Keep this draft while choosing where it runs.");
+    if (!ready) {
+      assert.equal(await page.getByTestId("where-it-runs").count(), 0);
+      assert.deepEqual(await page.evaluate(() => window.__placementCalls), []);
+    } else {
+      const where = page.getByTestId("where-it-runs");
+      await where.click();
+      const provider = page.getByTestId("where-cloud-org-a-compute");
+      await provider.getByText("No environment version is ready for this organization.").waitFor();
+      assert.equal(await provider.getAttribute("aria-disabled"), "true");
+      await page.evaluate(() => window.__publishEnvironment());
+      await page.getByRole("menuitem", { name: "Recheck cloud placement" }).click();
+      await where.click();
+      await provider.click();
+      await page.getByTestId("cloud-placement-readiness").getByText(/Cloud preflight passed. Environment version unavailable/).waitFor();
+      assert.equal(await prompt.inputValue(), "Keep this draft while choosing where it runs.");
+      await page.getByRole("button", { name: "Visible to Only me" }).click();
+      await page.getByRole("menuitemradio", { name: "Everyone at Procyon Labs Engineering" }).click();
+      const header = page.getByTestId("new-session-header");
+      await header.getByRole("button", { name: "Visible to Procyon Labs Engineering" }).waitFor();
+      await header.getByTestId("cloud-placement-machine").getByText("General Purpose Shared CPU · $0.12 an hour").waitFor();
+      await page.getByRole("button", { name: "Create in cloud" }).waitFor();
+      assert.deepEqual(await header.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        return [...element.children].filter((child) => {
+          const bounds = child.getBoundingClientRect();
+          return bounds.width && (bounds.left < box.left - 1 || bounds.right > box.right + 1 || bounds.bottom > box.bottom + 1);
+        }).map((child) => child.textContent);
+      }), [], "placement chips stay inside the narrow header");
+      if (shots) await page.screenshot({ path: join(shots, "session-placement-narrow.png"), animations: "disabled" });
+      assert.ok(!(await page.evaluate(() => window.__placementCalls)).includes("create"));
+    }
+    console.log(`ok Session placement at 760px (${ready ? "ready" : "held"})`);
     await page.close();
   }
 } finally {

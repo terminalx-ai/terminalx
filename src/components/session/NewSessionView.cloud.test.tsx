@@ -12,7 +12,7 @@ import { accessibilityPress, mouseClick } from "@/test/press";
 // workspace, or creates one at once: Create is the confirmation (PRO-409).
 // No local path command runs for a cloud draft.
 
-const { invoke, flow, draft, mayStart, noLocal, modelConnection, catalog } = vi.hoisted(() => ({
+const { invoke, flow, draft, mayStart, noLocal, modelConnection, catalog, account, here } = vi.hoisted(() => ({
   invoke: vi.fn(),
   /** What the form reads as the cloud catalog: the new workspace's start is followed there. */
   catalog: { value: { orgs: {} } as unknown },
@@ -23,7 +23,12 @@ const { invoke, flow, draft, mayStart, noLocal, modelConnection, catalog } = vi.
     prepareCloudCreate: vi.fn(),
     confirmCloudCreate: vi.fn(),
     cloudIdleOptions: vi.fn(),
+    cloudPlacementOffers: vi.fn(),
+    checkCloudPlacement: vi.fn(),
+    quoteCloudPlacement: vi.fn(),
   },
+  account: { status: { state: "signed-out" } as import("@/lib/api").AccountStatus },
+  here: vi.fn(),
   draft: { value: null as { project: CloudProject | null; orgName: string; mayStart: boolean | null } | null },
   /** Whether this account may start cloud sessions in the organization (an owner or admin). */
   mayStart: { value: true as boolean | null },
@@ -76,13 +81,18 @@ vi.mock("@/lib/sessions", () => ({
   selectSession: vi.fn(),
   upsertSession: vi.fn(),
   startCloudSessionIn: vi.fn(),
+  runNewSessionHere: here,
 }));
 vi.mock("./CloudNewSession", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./CloudNewSession")>()),
   useCloudDraft: () => draft.value,
   useCloudProjectChoices: () => [{ orgId: "org-a", orgName: "Acme", mayStart: mayStart.value, projects: [project, { ...project, key: "cloud:org-a:blank/scratch", identity: "blank/scratch", fullName: "scratch", blank: true }] }],
 }));
-vi.mock("@/lib/cloudNewSession", () => flow);
+vi.mock("@/lib/cloudNewSession", async (original) => ({ ...(await original<typeof import("@/lib/cloudNewSession")>()), ...flow }));
+vi.mock("@/lib/account", async (original) => ({
+  ...(await original<typeof import("@/lib/account")>()),
+  useAccount: () => ({ status: account.status, ready: true, busy: false }),
+}));
 vi.mock("@/lib/cloudCatalog", async (original) => ({
   ...(await original<typeof import("@/lib/cloudCatalog")>()),
   useCloudCatalog: () => catalog.value,
@@ -130,6 +140,8 @@ beforeEach(() => {
   mayStart.value = true;
   noLocal.value = false;
   catalog.value = { orgs: {} };
+  account.status = { state: "signed-out", identity: null, expiresAt: null, lastError: null };
+  here.mockReset().mockImplementation(() => { draft.value = null; });
   draft.value = { project, orgName: "Acme", mayStart: true };
 });
 
@@ -147,6 +159,8 @@ describe("new session in a cloud project", () => {
     // An agent not installed here still runs there.
     expect(screen.queryByText(/isn't installed/)).toBeNull();
     expect(invoke.mock.calls.map(([command]) => command)).toEqual(["transcription_personalization_load"]);
+    expect(flow.cloudPlacementOffers).not.toHaveBeenCalled();
+    expect(flow.checkCloudPlacement).not.toHaveBeenCalled();
   });
 
   it("starts in an existing workspace (a wake for a stopped one) with the prompt and the worktree preference", async () => {
@@ -508,5 +522,92 @@ describe("the composer's pickers", () => {
       fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
       await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
     }
+  });
+});
+
+describe("ready organization session placement", () => {
+  const defaults = { machineClassId: "small", locationId: "eu", idleSuspendMinutes: 30 };
+  function placementOffer(id: string, label: string) {
+    return { id, label, error: null, setup: { provider: id, defaults, allowedIdleSuspendMinutes: [30, 60], currency: "USD", pricing: "estimate",
+      machineClasses: [{ id: "small", label: "Small", vcpu: 2, memoryMiB: 4096, activeHourlyMicros: 120_000 }],
+      locations: [{ id: "eu", label: "Frankfurt" }],
+    } };
+  }
+  beforeEach(() => {
+    account.status = { ...account.status, state: "signed-in", phase2Readiness: { "org-a": ["cloud.workspaces.session-placement.v1"] } };
+    flow.planCloudStart.mockReturnValue({ kind: "create" });
+    flow.cloudPlacementOffers.mockResolvedValue([
+      placementOffer("box", "Box"),
+      placementOffer("boat", "Boat"),
+      { id: "paused", label: "Paused", setup: null, error: new Error("New machines are paused.") },
+    ]);
+    flow.checkCloudPlacement.mockResolvedValue(undefined);
+    flow.quoteCloudPlacement.mockImplementation(async (_orgId, setup) => ({ ...prepared.quote, provider: setup.provider, expiresAt: Date.now() + 30_000 }));
+  });
+
+  it("offers providers and keeps the chosen machine and visibility through prompt edits until Create", async () => {
+    catalog.value = { viewerUserId: "me", orgs: { "org-a": { source: "live", quota: { running: { used: 2, limit: 3 } },
+      workspaces: [{ workspace: { id: "mine", state: "ready", createdBy: "me" } }],
+    } } };
+    flow.prepareCloudCreate.mockResolvedValue(prepared);
+    flow.confirmCloudCreate.mockResolvedValue({ workspace: { id: "ws-new" } });
+    render(<NewSessionView />);
+    await screen.findByText(/Claude signed in for Acme/);
+    expect(screen.getByTestId("cloud-placement-machine").textContent).toMatch(/Small.*\$0.12 an hour/);
+
+    await accessibilityPress(screen.getByRole("button", { name: "Where it runs: Acme · Box" }));
+    expect(screen.getByTestId("where-this-mac")).toBeTruthy();
+    const boat = screen.getByTestId("where-cloud-org-a-boat");
+    expect(boat.textContent).toMatch(/Small.*2 vCPU.*4 GB.*Frankfurt.*About \$0.12 an hour/);
+    expect(screen.getByTestId("where-cloud-org-a-paused").getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByText("New machines are paused.")).toBeTruthy();
+    expect(screen.getByText("Acme: 1 of 2 running workspaces are yours.")).toBeTruthy();
+    fireEvent.click(boat);
+
+    await screen.findByRole("button", { name: "Where it runs: Acme · Boat" });
+    await accessibilityPress(screen.getByRole("button", { name: "Visible to Only me" }));
+    expect(screen.getByText("Who can open this session")).toBeTruthy();
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Everyone at Acme" }));
+    expect(screen.getByRole("button", { name: "Visible to Acme" })).toBeTruthy();
+
+    type("A draft");
+    type("Start the API");
+    expect(flow.prepareCloudCreate).not.toHaveBeenCalled();
+    expect(flow.confirmCloudCreate).not.toHaveBeenCalled();
+    const create = screen.getByRole("button", { name: "Create in cloud" });
+    await waitFor(() => expect(create.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(create);
+    await waitFor(() => expect(flow.prepareCloudCreate).toHaveBeenCalledWith(project, expect.objectContaining({ prompt: "Start the API" }), {
+      accessMode: "organization", quote: expect.objectContaining({ provider: "boat" }),
+    }));
+    expect(flow.confirmCloudCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "Could not verify the agent login for this organization.",
+    "No environment version is ready for this organization.",
+  ])("blocks Create and provider selection when preflight reports %s", async (reason) => {
+    flow.checkCloudPlacement.mockRejectedValue(new Error(reason));
+    render(<NewSessionView />);
+    type("Wait for readiness");
+    await screen.findByText(reason);
+    expect(screen.getByRole("button", { name: "Create in cloud" }).hasAttribute("disabled")).toBe(true);
+    await accessibilityPress(screen.getByTestId("cloud-runs-in"));
+    expect(screen.getByTestId("where-cloud-org-a-box").getAttribute("aria-disabled")).toBe("true");
+    expect(flow.prepareCloudCreate).not.toHaveBeenCalled();
+  });
+
+  it("blocks new cloud placement at the organization's running limit and lets This Mac restore the local form", async () => {
+    catalog.value = { orgs: { "org-a": { quota: { running: { used: 3, limit: 3 } } } } };
+    const view = render(<NewSessionView />);
+    type("Keep this draft");
+    expect(await screen.findByText("Your organization is running 3 of 3 cloud workspaces. Stop one to start another.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Create in cloud" }).hasAttribute("disabled")).toBe(true);
+    await accessibilityPress(screen.getByTestId("cloud-runs-in"));
+    fireEvent.click(screen.getByTestId("where-this-mac"));
+    expect(here).toHaveBeenCalledTimes(1);
+    view.rerender(<NewSessionView />);
+    expect(screen.queryByRole("button", { name: "Create in cloud" })).toBeNull();
+    expect(screen.getByDisplayValue("Keep this draft")).toBeTruthy();
   });
 });
