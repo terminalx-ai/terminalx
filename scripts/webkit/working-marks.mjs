@@ -101,7 +101,6 @@ try {
     page.on("pageerror", (error) => errors.push(error.message));
     const list = page.getByRole("navigation", { name: "Conversations" });
     await list.waitFor();
-    await list.getByRole("button", { name: /View all/ }).click().catch(() => {});
     const row = (id) => page.locator(`[data-row-sessions~="${id}"]`).first();
     await row("solo").waitFor();
 

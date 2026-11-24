@@ -11,7 +11,8 @@
 // WEBKIT_LAYOUT_SCREENSHOTS=~/shots node scripts/webkit/composer-controls.mjs
 import assert from "node:assert/strict";
 import { mkdir, readFile } from "node:fs/promises";
-import { createServer, transformWithEsbuild } from "vite";
+import { transformWithEsbuild } from "vite";
+import { createCheckServer } from "./vite-page.mjs";
 import { launch } from "./harness.mjs";
 
 const entry = `
@@ -49,11 +50,10 @@ const models = [claude("claude-opus-5-5", "Opus 5.5", true), claude("claude-sonn
 const screenshots = process.env.WEBKIT_LAYOUT_SCREENSHOTS;
 if (screenshots) await mkdir(screenshots, { recursive: true });
 
-const server = await createServer({
+const server = await createCheckServer({
   logLevel: "error",
-  server: { port: 0, strictPort: false, host: "127.0.0.1" },
+  server: { host: "127.0.0.1" },
   plugins: [{
-    name: "composer-controls-check",
     resolveId(id) { if (id === "/composer-controls.tsx") return "\0composer-controls.tsx"; },
     async load(id) {
       if (id === "\0composer-controls.tsx") return (await transformWithEsbuild(entry, "composer-controls.tsx", { loader: "tsx", jsx: "automatic" })).code;

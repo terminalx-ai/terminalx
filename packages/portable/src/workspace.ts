@@ -77,6 +77,11 @@ export const WORKSPACE_DETAILS_RESOURCE_INTERVAL_MS = 10_000;
  * first prompt in one call (a second opinion, Retry in a new chat, the
  * composer's agent handoff), and `session.handoffContext`, a tab's
  * conversation read on the runtime for a handoff's prompt.
+ * `bots/1` (PRO-482): the bots that live on the runtime, for the person each
+ * belongs to (`bots.list`, `bots.home`, `bots.answer`), and moving one there
+ * or back in parts (`bots.importPart`, `bots.import`, `bots.export`,
+ * `bots.exportPart`, `bots.remove`).
+ *
  * `follow-ups/1` (#1328): the runtime edits, withdraws and releases (sends
  * next, interrupting the turn) a follow-up it holds: through the mailbox's
  * `follow-up` command on a cloud workspace, live as `session.followUp` with
@@ -84,7 +89,7 @@ export const WORKSPACE_DETAILS_RESOURCE_INTERVAL_MS = 10_000;
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "composer/5", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1", "follow-ups/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "composer/5", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1", "follow-ups/1", "bots/1"] as const;
 /**
  * Offered only by a runtime that serves every project of its machine (docs/MACHINES.md).
  * `machine/3` (PRO-354): `machine.updateStatus`, `machine.update` and the
@@ -213,6 +218,9 @@ export const MUTATING_METHODS = new Set([
   "session.reset",
   "session.fork",
   "session.handoff",
+  "bots.answer",
+  "bots.import",
+  "bots.remove",
   "cleanup.remove",
   "workspace.remove",
   "workspace.sweepMerged",
@@ -256,6 +264,12 @@ export interface WorkspaceYou {
   canApprove: boolean;
   /** False while the runtime has no member list yet (then `role` says nothing about sharing). */
   listed?: boolean;
+  /**
+   * Whether this connection may call `session.create` and `session.addTab`
+   * now (PRO-546, docs/CLOUD-SHARING.md). Absent from a runtime from before
+   * it, which refuses both to a `participate` connection.
+   */
+  canStart?: boolean;
 }
 
 export type WorkspaceConnectionState =
@@ -1725,9 +1739,11 @@ export class WorkspaceRpcClient {
   addSessionTab(
     sessionId: string,
     params: { agent: string; model?: string; effort?: string | null; mode?: string; nativeCodex?: boolean },
+    /** Kept by a caller that may ask again after no answer: the runtime then answers with the tab it already added. */
+    clientRequestId?: string,
   ): Promise<{ sessionId: string; tabId: string; session: RuntimeSession; tab?: AgentTabInfo | null }> {
     const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));
-    return this.mutate("session.addTab", { sessionId, ...defined });
+    return this.mutate("session.addTab", { sessionId, ...defined }, clientRequestId);
   }
 
   /** `session.usage` (`machine/8`): the session's usage, read again on the machine. */

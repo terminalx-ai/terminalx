@@ -175,8 +175,14 @@ mod tests {
         let terminals = Arc::new(crate::pty::Terminals::new());
         let path = root.to_str().unwrap();
         let env = vec![("HOME".to_string(),path.to_string()),("ZDOTDIR".to_string(),path.to_string())];
+        // The pane's login shell is given `exec <command>`. A command that
+        // starts with `exec` itself becomes `exec exec /bin/cat`, which zsh
+        // runs and bash and dash refuse ("exec: exec: not found", exit 127):
+        // under those shells (a CI runner's login shell is bash) the pane was
+        // gone a few milliseconds after spawn, and the resize below was
+        // refused whenever it came after that.
         terminals.spawn(Arc::new(crate::sink::BroadcastSink::new(64)),"observed-pane",
-            crate::pty::PaneSpec { cwd:path,cols:80,rows:24,command:Some("exec /bin/cat"),env:&env }).unwrap();
+            crate::pty::PaneSpec { cwd:path,cols:80,rows:24,command:Some("/bin/cat"),env:&env }).unwrap();
         let view = View { terminals:terminals.clone(),session:"observed".into(),tab:"tab".into(),pane:"observed-pane".into(),
             token:"view".into(),buffer:Arc::new(Mutex::new(Buffer::default())),size:Mutex::new(None) };
         assert_eq!(view.resized(),Some((80,24)),"the subscription says the size");

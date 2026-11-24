@@ -2,6 +2,11 @@
 
 ## 0.2.39
 
+- Chat hides the Second opinion footer button by default, including after an
+  update. To show it again, turn on **Settings → General → Second opinion
+  button**. You can still ask another agent to review a turn from its **…**
+  menu (#1513).
+
 - Bots (experimental): a bot whose session is running no longer reads
   "Quiet". Its sidebar row and the Bots page's **Doing now** say
   "Working · <the chat or duty it is on>", with its runs' workers counted

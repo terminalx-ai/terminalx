@@ -8,6 +8,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { configuration, type SettingsEditor } from "@/lib/configuration";
 import { AlertCircle, Check, ChevronDown, Code, Copy, FileJson, FileText, Folder, FolderGit2, Lock, MousePointer2, UserRound, UserRoundPen, X, Zap } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { InNoticeColumn } from "@/components/ui/NoticeColumn";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/menu";
@@ -217,7 +218,8 @@ export function CantSaveToast({ settingTitle }: {
     copyText(cantSaveCopy(displayPath, problem)).then(() => setCopy("copied"), () => setCopy("failed"));
     reset.current = window.setTimeout(() => setCopy("idle"), 2000);
   };
-  return <div role="alert" aria-labelledby="cant-save-title" data-cant-save="" className="pointer-events-auto fixed right-4 bottom-10 z-(--z-toast) flex w-[26rem] max-w-[calc(100vw-2rem)] items-start gap-2.5 rounded-xl bg-popover p-3 text-sm text-card-foreground shadow-surface hairline animate-fade-in">
+  // In the window's notice column with the toasts, so the two never land on each other (#1499).
+  return <InNoticeColumn><div role="alert" aria-labelledby="cant-save-title" data-cant-save="" className="pointer-events-auto flex w-full items-start gap-2.5 rounded-xl bg-popover p-3 text-sm text-card-foreground shadow-surface hairline animate-fade-in">
     <AlertCircle aria-hidden className="mt-0.5 size-4 shrink-0 text-destructive" />
     <div className="min-w-0 flex-1">
       <div id="cant-save-title" className="font-medium">{title}</div>
@@ -233,7 +235,7 @@ export function CantSaveToast({ settingTitle }: {
       </div>
     </div>
     <button type="button" aria-label="Close" onClick={() => dismissSaveFailure(saveFailure.id)} className="rounded-sm p-0.5 text-faint hover:bg-veil-strong hover:text-foreground"><X className="size-3.5" /></button>
-  </div>;
+  </div></InNoticeColumn>;
 }
 
 const LEGEND: Record<SourceBadgeKind, ReactNode> = {

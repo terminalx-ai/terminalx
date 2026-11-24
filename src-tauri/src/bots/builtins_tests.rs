@@ -271,7 +271,7 @@ fn a_tidy_merges_and_removes_as_one_change_that_one_undo_puts_back() {
         merge: vec![memory::TidyMerge { lines: vec![line("Status updates go in a table."), line("Status updates belong in a table.")], into: "Status updates go in a table, newest first.".into() }],
         remove: vec![line("Releases ship on Fridays.")],
     };
-    let places = memory::conversation_places(&atlas);
+    let places = memory::conversation_places(&memory::working_place(&atlas));
     let log_before = super::super::changes::read_log(&atlas.id).unwrap().changes.len();
     let recorded = memory::tidy(rig.sink.as_ref(), &atlas, &plan, &places, &atlas.id, source(), None).unwrap();
     assert_eq!(recorded.len(), 1, "one change");
@@ -309,7 +309,7 @@ fn a_tidy_is_refused_whole_when_its_lines_do_not_read_as_named() {
     let home = super::super::home(&atlas).unwrap();
     let before = std::fs::read_to_string(home.join(memory::Place::Bot.memory_file())).unwrap();
     let at = |text: &str| before.lines().position(|line| line.ends_with(text)).unwrap() + 1;
-    let places = memory::conversation_places(&atlas);
+    let places = memory::conversation_places(&memory::working_place(&atlas));
     let tidy = |plan: memory::TidyPlan| memory::tidy(rig.sink.as_ref(), &atlas, &plan, &places, &atlas.id, source(), None).unwrap_err().to_string();
     let named = |line: usize, note: &str| memory::TidyLine { place: None, line, note: note.into() };
     assert!(tidy(memory::TidyPlan::default()).contains("Nothing to tidy"));

@@ -99,7 +99,7 @@ impl Cli {
 impl Rig {
     fn compose_confirmed(&self, text: &str) -> std::sync::mpsc::Receiver<std::result::Result<(), String>> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
+        let prompt = PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
         self.manager.record_composer_prompt(&mut self.rt.lock().unwrap(), &prompt, Vec::new(), self._dir.path().to_str().unwrap(), Some(tx));
         rx
     }
@@ -131,7 +131,7 @@ impl Rig {
     /// The composer's half of a send: everything `send` does short of
     /// starting the CLI and typing. Says whether the prompt was queued.
     fn compose(&self, text: &str, images: usize) -> bool {
-        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
+        let prompt = PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
         let images = (0..images).map(|i| ImageRef { url: format!("attachments/s/{i}.png"), media_type: Some("image/png".into()), name: None }).collect();
         let cwd = self._dir.path().to_string_lossy().into_owned();
         let queued = self.manager.record_composer_prompt(&mut self.rt.lock().unwrap(), &prompt, images, &cwd, None).1;
@@ -1227,7 +1227,7 @@ fn an_image_and_files_with_no_text_are_one_message_with_its_files() {
         let rig = Rig::of(kind, "");
         let files = vec![FileRef { path: "/h/attachments/s/k3f9qa/notes.md".into(), name: "notes.md".into(), media_type: None, size: None }];
         let agent = crate::attachments::with_block("", &files);
-        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: files.clone(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: agent.clone(), display: String::new() };
+        let prompt = PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: files.clone(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: agent.clone(), display: String::new() };
         let image = vec![ImageRef { url: "attachments/s/0.png".into(), media_type: Some("image/png".into()), name: None }];
         let cwd = rig._dir.path().to_string_lossy().into_owned();
         assert!(!rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, image, &cwd, None).1);
@@ -1728,7 +1728,7 @@ fn codex_batch_acknowledgement_requires_the_exact_written_fifo() {
             ..ComposerEcho::new((*text).into(), 0)
         }).collect()
     };
-    let message = |text: &str| Payload::UserMessage { author: None, text: text.into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: None };
+    let message = |text: &str| Payload::UserMessage { author: None, bot: None, text: text.into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: None };
     let mut repeated = queue(&["same", "same", "later"]);
     let accepted = consume_codex_queue_echo(&mut repeated, &message("same\nsame"));
     assert_eq!(accepted.iter().map(|echo| echo.seq).collect::<Vec<_>>(), [1, 2]);
@@ -2676,7 +2676,7 @@ fn failed_restart_wait_blocks_only_its_unchanged_claim() {
         }
         if replaced { assert_eq!(rig.events(), before); }
         if !replaced {
-            let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: "must not start".into(), display: "must not start".into(), author: None, shared_connection: None };
+            let prompt = PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: "must not start".into(), display: "must not start".into(), author: None, shared_connection: None };
             let error = rig.manager.send_impl(SESSION, TAB, prompt, vec![], None).expect_err("failed shutdown refuses new work");
             assert!(error.to_string().contains("Stop has not confirmed local process exit"), "unexpected internal refusal: {error:#}");
             assert_eq!(rig.rt.lock().unwrap().recovery, Some(RecoveryKind::Disconnected));

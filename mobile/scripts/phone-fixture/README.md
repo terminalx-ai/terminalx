@@ -36,6 +36,34 @@ in a flow), and it reaches the app through `Settings.get("fixtureScenario")`.
 tab shows its placeholder rows. `openRoute: /cloud` with `openWorkspace: <id>`
 opens a workspace at launch, as a tap on its row does.
 
+## Cloud setup (25.01, 25.02)
+
+The setup screens ask the service for an organization's providers and agent
+logins, and create organizations. `setup/organization.ts` answers those
+requests in memory, before the fixture's own answers; `fixtureSetup: <state>`
+picks the account a board draws (the states are listed in that file), and
+`fixtureCreate: slow` or `fail` what becomes of a creation. Without
+`fixtureSetup` nothing changes and the 22.06 list is shown. An area of the
+setup (`setup/<area>.ts`) is a `SetupHandler`: it returns an answer, or
+nothing to leave the request to the next.
+
+`flow-25.01.yaml` and `flow-25.02.yaml` choose the organization as a person
+does, through the app. The boards are drawn in Ember when dark and in Den when
+light: for the light run set the simulator's appearance to light and
+`MAESTRO_THEME=Den`.
+
+## A running workspace (25.10)
+
+"Search filters" in Acme runs: the app's real catalog, link, session and
+outbox connect to a workspace runtime that answers in `live-workspace.ts`,
+over the real encrypted handshake and frames of `src/cloud/fake-runtime.ts`.
+`fixtureStart: <state>` picks what that runtime says (the states are listed in
+that file: a manager, `tab`, `other`, `old`, `unread`, `no-answer`, `refused`,
+`prompt-failed`, `gone`). `fixtureResume: hold` keeps a start of a stopped
+workspace under way, and `fixtureResume: fail` has the provider not answering.
+`flow-25.10.yaml` shoots each state; it takes about two minutes longer than the
+others, because no answer is only said once the client stops waiting (30 s).
+
 `fixtureTabs: states` gives "Review and merge" four tabs, one for each state on
 the session screen (working, a question, a table, done).
 
@@ -78,3 +106,19 @@ notifications are headed "Phone fixture", the copy's own app name.
    Each screenshot is saved under `<output directory>/<run>/<flow name>/takeScreenshot/`.
    For the boards' look, set the simulator to dark appearance and the status bar to 10:25:
    `xcrun simctl status_bar $SIMULATOR_UDID override --time 10:25`.
+
+## A first task at launch (25.09)
+
+`fixtureLaunch: <outcome>` (`setup/launch.ts`) gives Northwind a connected Boat
+and two agent logins and answers the launch form, its price and the launch.
+The launch then moves through its six phases by the clock and ends as the
+outcome says: `running`, `sign-in`, `unsure`, `not-picked-up`, or `hold`
+(10 s a phase, so each can be shown). `flow-25.09.yaml` draws the form, its
+sheets, the review and the phases; `flow-25.09-ends.yaml` the outcomes,
+a cancel and Launch again. They open the form with
+`openRoute: /cloud/new?orgId=org-northwind`.
+
+Maestro's view of the screen trails the app by a few seconds, and its waits
+end after about one phase whatever their timeout, so the flows wait on what a
+phase shows rather than on time. Its tap on an alert's button can land on a
+page button of the same name under the alert; the cancel is tapped by place.

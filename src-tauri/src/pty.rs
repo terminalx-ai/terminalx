@@ -3078,16 +3078,23 @@ time.sleep(60)
         let home = tempfile::tempdir().unwrap();
         let path = home.path().to_str().unwrap();
         let env = vec![("HOME".to_string(),path.to_string()),("ZDOTDIR".to_string(),path.to_string())];
-        let spec = || PaneSpec { cwd:path,cols:80,rows:24,command:Some("exec /bin/cat"),env:&env };
+        // `spawn` puts its own `exec` before the command. With one written
+        // here too the shell was given `exec exec /bin/cat`, which zsh runs
+        // and bash and sh refuse (exit 127): under those the pane's program
+        // was gone within milliseconds, and a write that came after it was
+        // refused, whichever process it named (PRO-513).
+        let spec = || PaneSpec { cwd:path,cols:80,rows:24,command:Some("/bin/cat"),env:&env };
         terminals.spawn(sink.clone(),"mobile-process",spec()).unwrap();
         let original = terminals.panes().into_iter().find(|pane|pane.id == "mobile-process").unwrap().pid.unwrap();
-        assert!(terminals.write_for_process("mobile-process",original,b"first\n").is_ok());
+        let first = terminals.write_for_process("mobile-process",original,b"first\n");
+        assert!(first.is_ok(), "{first:?}");
         terminals.kill_all();
         terminals.spawn(sink,"mobile-process",spec()).unwrap();
         let replacement = terminals.panes().into_iter().find(|pane|pane.id == "mobile-process").unwrap().pid.unwrap();
         assert_ne!(original,replacement);
         assert!(terminals.write_for_process("mobile-process",original,b"stale\n").is_err());
-        assert!(terminals.write_for_process("mobile-process",replacement,b"current\n").is_ok());
+        let current = terminals.write_for_process("mobile-process",replacement,b"current\n");
+        assert!(current.is_ok(), "{current:?}; the pane: {:?}", terminals.panes().into_iter().find(|pane|pane.id == "mobile-process").map(|pane|(pane.pid,pane.running)));
         terminals.kill_all();
     }
 
@@ -3153,7 +3160,10 @@ time.sleep(60)
         let terminals=Terminals::new();
         let sink:Arc<dyn EventSink>=Arc::new(crate::sink::BroadcastSink::new(16));
         let dir=tempfile::tempdir().unwrap();
-        pane(&terminals,&sink,&dir,"proof-group","exec /bin/sleep 30");
+        // `spawn` puts its own `exec` before the command. Written here too it made `exec exec /bin/sleep 30`,
+        // which bash and sh refuse: under those the group's process was gone before the stop below, and the
+        // test passed with nothing left to stop (0.17 s under bash against 0.6 s under zsh).
+        pane(&terminals,&sink,&dir,"proof-group","/bin/sleep 30");
         let proof=terminals.group_handle("proof-group").unwrap();
         assert!(proof.pid().is_some());
         let stopping=terminals.begin_stop("proof-group").unwrap();

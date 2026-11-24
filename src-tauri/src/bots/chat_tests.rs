@@ -45,7 +45,7 @@ fn a_hire_makes_the_home_chat_in_the_bot_home_folder() {
     assert_eq!(chats.len(), 1);
     let chat = &chats[0];
     assert!(chat.is_quick(), "a bot's chat belongs to no project");
-    assert_eq!(session_bot(chat), Some(BotRef { id: bot.id.clone(), home: true }));
+    assert_eq!(session_bot(chat), Some(BotRef { id: bot.id.clone(), home: true, org: Some("personal".into()) }));
     assert_eq!(chat.title, HOME_CHAT_TITLE);
     let folder = crate::paths::canonicalize(super::super::home(&bot).unwrap()).unwrap();
     assert_eq!(chat.cwd, folder.to_string_lossy());
@@ -55,11 +55,11 @@ fn a_hire_makes_the_home_chat_in_the_bot_home_folder() {
 
     // Asked for again, it is the same chat; stored, it keeps its bot (a restart reads the same).
     assert_eq!(home_chat(sink.as_ref(), &bot.id).unwrap().id, chat.id);
-    assert_eq!(index::get(&chat.id).unwrap().unknown.get(SESSION_KEY), Some(&serde_json::json!({"id": bot.id, "home": true})));
+    assert_eq!(index::get(&chat.id).unwrap().unknown.get(SESSION_KEY), Some(&serde_json::json!({"id": bot.id, "home": true, "org": "personal"})));
 
     // Another conversation is not the home chat; an archived home chat comes back, with its conversation.
-    let other = new_chat(sink.as_ref(), &bot.id).unwrap();
-    assert_eq!(session_bot(&other), Some(BotRef { id: bot.id.clone(), home: false }));
+    let other = new_chat(sink.as_ref(), &bot.id, None).unwrap();
+    assert_eq!(session_bot(&other), Some(BotRef { id: bot.id.clone(), home: false, org: Some("personal".into()) }));
     assert_eq!(home_chat(sink.as_ref(), &bot.id).unwrap().id, chat.id);
     crate::session_archive::set_archived(sink.as_ref(), std::slice::from_ref(&chat.id), true, crate::session_archive::By::Idle).unwrap();
     let again = home_chat(sink.as_ref(), &bot.id).unwrap();
@@ -104,7 +104,7 @@ fn claude_and_codex_launches_are_given_the_role_the_memory_and_the_rules() {
 
     // Codex, through `developer_instructions`, the one key it keeps.
     super::super::update(sink.as_ref(), &bot.id, serde_json::from_value(serde_json::json!({"harness": "codex"})).unwrap()).unwrap();
-    let codex_chat = new_chat(sink.as_ref(), &bot.id).unwrap();
+    let codex_chat = new_chat(sink.as_ref(), &bot.id, None).unwrap();
     assert_eq!(codex_chat.tabs[0].harness, "codex");
     let prompt = launch(&codex_chat);
     let text = if cfg!(unix) {
@@ -219,7 +219,7 @@ fn role_memory_and_rules_fit_one_argument_whatever_the_files_hold() {
         }
         let role = read_home_file(&bot.id, bot_store::ROLE_FILE);
         assert!(matches!(role, Read::Text(_, true)), "read in part, and said so");
-        let memory = super::super::memory::for_conversation(&bot).unwrap();
+        let memory = super::super::memory::for_conversation(&bot, &super::super::memory::working_place(&bot)).unwrap();
         // Control characters only leave blank lines, which read as no notes.
         assert!(memory.matches("past the 64 KB limit").count() == 2 || memory.matches("(empty").count() + memory.matches("(nothing kept").count() == 2, "both files read in part, and said so: {memory}");
         let text = instructions(&bot, &home, &role, Some(&memory), true, false);
@@ -360,7 +360,7 @@ fn access_maps_to_the_permission_mode_and_the_rules() {
     let (_home, sink) = bots_on();
     let bot = hire(sink.as_ref(), "security-auditor", "Sentry").unwrap();
     let bot = super::super::update(sink.as_ref(), &bot.id, serde_json::from_value(serde_json::json!({"access": "readReport"})).unwrap()).unwrap();
-    let chat = new_chat(sink.as_ref(), &bot.id).unwrap();
+    let chat = new_chat(sink.as_ref(), &bot.id, None).unwrap();
     assert_eq!(chat.tabs[0].permission_mode, "plan");
     let note = launch_note(&chat, &chat.tabs[0]).unwrap();
     // In plan mode no file is written; it keeps notes only with `terminalx bots memory add|forget` (PRO-470), or tells the owner.
@@ -446,7 +446,7 @@ fn a_reference_this_build_cannot_read_is_none() {
     };
     entry.unknown.insert(SESSION_KEY.into(), serde_json::json!("not an object"));
     assert_eq!(session_bot(&entry), None);
-    set_session_bot(&mut entry, &BotRef { id: "b".into(), home: false });
+    set_session_bot(&mut entry, &BotRef { id: "b".into(), home: false, org: None });
     assert_eq!(serde_json::to_value(&entry).unwrap()["bot"], serde_json::json!({"id": "b"}));
 }
 

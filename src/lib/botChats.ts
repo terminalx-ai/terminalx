@@ -148,8 +148,34 @@ export function openHomeChat(botId: string): Promise<SessionEntry> {
   return botsApi.homeChat(botId);
 }
 
-export function startBotChat(botId: string): Promise<SessionEntry> {
-  return botsApi.newChat(botId);
+/** A new chat with the bot, working in `org` ("personal" or an organisation it works in; PRO-483), or its first place. */
+export function startBotChat(botId: string, org?: string): Promise<SessionEntry> {
+  return botsApi.newChat(botId, org);
+}
+
+/** A place a bot works in, as its chats name it. */
+export interface BotPlace {
+  /** "personal" or an organisation's id, as `worksIn` has it. */
+  key: string;
+  name: string;
+}
+
+/**
+ * The places `bot` works in, in its `worksIn` order, named by the organisations the owner is in (PRO-483). An
+ * organisation the account does not list (left, or not read yet) is named by its id.
+ */
+export function botPlaces(bot: Pick<Bot, "worksIn">, orgs: readonly { id: string; name: string }[]): BotPlace[] {
+  return bot.worksIn.map((key) => ({ key, name: key === "personal" ? "Personal" : (orgs.find((org) => org.id === key)?.name ?? key) }));
+}
+
+/**
+ * The place a chat of `bot` works in, by its key: the one it recorded, or the bot's first place for a chat that
+ * records none (made by an earlier build, or a duty's run). Null for a place the bot no longer works in.
+ */
+export function chatPlace(chat: Pick<SessionEntry, "bot" | "botStarted">, bot: Pick<Bot, "worksIn">): string | null {
+  const recorded = chat.bot ? chat.bot.org : chat.botStarted?.org;
+  const key = typeof recorded === "string" ? recorded : (bot.worksIn[0] ?? "personal");
+  return bot.worksIn.includes(key) || (key === "personal" && bot.worksIn.length === 0) ? key : null;
 }
 
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });

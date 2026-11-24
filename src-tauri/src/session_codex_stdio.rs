@@ -362,7 +362,7 @@ impl SessionManager {
                 "Codex's connection ended. Stop the session before sending again; this message was not queued.");
             if rt.queued.len() >= 32 { return Err(QueueFull.into()); }
             let event = self.publish_prompt(rt, Payload::UserMessage {
-                author: prompt.author, text: prompt.display, images, files: prompt.files, baseline: None, queued: true, cwd: Some(entry.cwd.clone()),
+                author: prompt.author, bot: prompt.bot, text: prompt.display, images, files: prompt.files, baseline: None, queued: true, cwd: Some(entry.cwd.clone()),
             }, prompt.request_id);
             let privacy = crate::data_privacy::remote_ticket();
             if privacy.is_some() || prompt.mobile.is_some() || prompt.shared_connection.is_some() || prompt.collaboration.is_some() {
@@ -391,7 +391,7 @@ impl SessionManager {
         let events = if manual { Vec::new() } else {
             let baseline = rt.baseline_for(&entry.cwd);
             vec![self.publish_prompt(rt, Payload::UserMessage {
-                author: prompt.author, text: prompt.display, images, files: prompt.files, baseline, queued: true, cwd: Some(entry.cwd.clone()),
+                author: prompt.author, bot: prompt.bot, text: prompt.display, images, files: prompt.files, baseline, queued: true, cwd: Some(entry.cwd.clone()),
             }, prompt.request_id)]
         };
         // Even a send just after completion is pending until Codex's RPC
@@ -565,7 +565,7 @@ impl SessionManager {
         let title = entry.as_ref().map(|entry| entry.title.clone()).unwrap_or_default();
         let (asked, moved) = self.launch_account(session, tab, "codex", project.as_deref(), &title, asked);
         if let Some(text) = moved {
-            self.publish(&mut rt_arc.lock().unwrap(), Payload::Status { text }, None);
+            self.publish(&mut rt_arc.lock().unwrap(), Payload::Status { text, handoff: None }, None);
         }
         let (grant, config) = cloud_launch(&key, cwd, crate::agent_keys::Choice { account: asked.as_deref(), project: project.as_deref() })?;
         let sparse = crate::sparse_checkout::agent_note(Path::new(cwd));
@@ -604,7 +604,7 @@ impl SessionManager {
         current()?;
         {
             let mut rt = rt_arc.lock().unwrap();
-            if let Some(text) = native.notice { self.publish(&mut rt, Payload::Status { text }, None); }
+            if let Some(text) = native.notice { self.publish(&mut rt, Payload::Status { text, handoff: None }, None); }
             if let (Some(model), Engine::CodexStdio(engine)) = (native.model, &mut rt.engine) { engine.route_model(model); }
         }
         crate::cloud_grants::record_launch(&key, &grant);
@@ -1149,7 +1149,7 @@ pub(super) fn recovery_on_open(tab: &TabEntry, log: &Path, kind: RecoveryKind) -
             Payload::PromptAbsorbed { .. } | Payload::TurnStarted { .. } => return kind,
             Payload::TurnCompleted { .. } | Payload::Conversation { .. }
             | Payload::UserMessage { queued: false, .. } => break,
-            Payload::Status { text } if text == recovery::SESSION_CLOSED_MESSAGE => break,
+            Payload::Status { text, .. } if text == recovery::SESSION_CLOSED_MESSAGE => break,
             _ => {}
         }
     }

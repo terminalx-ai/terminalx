@@ -111,6 +111,8 @@ const CODES: Record<string, string> = {
   lease_held: "Someone else is driving this tab.",
   forbidden: "Your role in this workspace does not allow that.",
   "tab-closed": "That agent tab was closed.",
+  // The runtime's mailbox has no such tab (`cloud_agents/mailbox.rs`): it was closed after this was written (25.10).
+  "tab-unknown": "Not sent: this agent tab is no longer in the workspace.",
   "request-not-pending": "That request was already answered.",
   "lease-held": "Someone else is driving this tab. Your message was not sent.",
   "access-revoked": "Not sent: your access changed.",

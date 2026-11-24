@@ -83,6 +83,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "general.animations",
   "general.foldToolCalls",
   "general.turnChanges",
+  "general.secondOpinionButton",
   "general.fixErrorsInstructions",
   "general.promptMap",
   "general.autocorrect",

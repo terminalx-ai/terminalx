@@ -254,15 +254,15 @@ fn a_conversation_reads_the_bots_notes_and_its_places_within_limits() {
     let (_home, sink, bot) = hired();
     add(sink.as_ref(), &bot, &Place::Bot, "Own note", OWNER, Source::of("app")).unwrap();
     add(sink.as_ref(), &bot, &Place::Personal, "Personal note", OWNER, Source::of("app")).unwrap();
-    let given = for_conversation(&bot).unwrap();
+    let given = for_conversation(&bot, &working_place(&bot)).unwrap();
     assert!(given.contains("Own note") && given.contains("Personal note"), "{given}");
     let bot = with_works_in(sink.as_ref(), &bot, &["Acme"]);
-    let given = for_conversation(&bot).unwrap();
+    let given = for_conversation(&bot, &working_place(&bot)).unwrap();
     assert!(given.contains("Own note") && !given.contains("Personal note") && given.contains("Notes kept in organisation Acme"), "{given}");
 
     // Turned off, a conversation is given none.
     let off = super::super::update(sink.as_ref(), &bot.id, super::super::BotPatch { memory_off: Some(true), ..Default::default() }).unwrap();
-    assert!(off.memory_off && for_conversation(&off).is_none());
+    assert!(off.memory_off && for_conversation(&off, &working_place(&off)).is_none());
     assert!(view(sink.as_ref(), &off).unwrap().memory.off);
 
     assert_eq!(read_split(150, 100), (150, 50));
@@ -428,7 +428,7 @@ fn a_link_in_the_home_takes_no_read_or_write_out_of_it() {
     std::os::unix::fs::symlink(outside.path(), home_of(&bot).join(acme.dir().trim_end_matches('/'))).unwrap();
     assert!(add(sink.as_ref(), &bot, &acme, "Through the link", OWNER, Source::of("app")).is_err());
     assert_eq!(std::fs::read_to_string(outside.path().join("MEMORY.md")).unwrap(), "- 2026-11-20 Not the bot's\n");
-    let given = for_conversation(&bot).unwrap();
+    let given = for_conversation(&bot, &working_place(&bot)).unwrap();
     assert!(!given.contains("Not the bot's"), "{given}");
     assert!(view(sink.as_ref(), &bot).unwrap().memory.places[1].file.problem.is_some());
 
@@ -664,7 +664,7 @@ fn a_conversation_reads_the_newest_lines_and_undated_notes_are_archived_first() 
     let header = std::fs::read_to_string(&memory).unwrap();
     let notes: Vec<String> = (0..BUDGET + 5).map(|n| format!("- 2026-10-{:02} Note {n}", 1 + n % 28)).collect();
     std::fs::write(&memory, format!("{header}{}\n", notes.join("\n"))).unwrap();
-    let given = for_conversation(&bot).unwrap();
+    let given = for_conversation(&bot, &working_place(&bot)).unwrap();
     assert!(given.contains(&format!("Note {}", BUDGET + 4)) && !given.contains("Notes kept across conversations"), "the newest are read");
 
     // Undated notes, then the file's own words, are what the budget moves when nothing is dated.
@@ -859,7 +859,7 @@ fn a_memory_past_the_read_limit_is_read_from_its_end() {
     let lines: Vec<String> = (0..3000).map(|n| format!("- 2026-11-01 Note number {n:04}, written long enough to pass the limit")).collect();
     std::fs::write(home_of(&bot).join("MEMORY.md"), format!("{}\n", lines.join("\n"))).unwrap();
     assert!(file(&bot, "MEMORY.md").len() as u64 > READ_LIMIT);
-    let given = for_conversation(&bot).unwrap();
+    let given = for_conversation(&bot, &working_place(&bot)).unwrap();
     assert!(given.contains("Note number 2999") && !given.contains("Note number 0000"), "the newest");
     assert!(given.contains("Older lines in MEMORY.md are not shown here"), "{given}");
     let shown = view(sink.as_ref(), &bot).unwrap();

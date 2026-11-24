@@ -168,7 +168,7 @@ fn due_now(duty: &Automation) {
 fn status_lines(manager: &SessionManager, session: &str) -> Vec<String> {
     let entry = index::get(session).unwrap();
     manager.load_events(session, &entry.tabs[0].id).unwrap().into_iter().filter_map(|event| match event.payload {
-        Payload::Status { text } => Some(text),
+        Payload::Status { text, .. } => Some(text),
         _ => None,
     }).collect()
 }
@@ -252,7 +252,7 @@ fn a_check_that_prints_starts_the_bots_session_with_its_output_and_reports_where
     let run = wait_run(&duty, |run| run.session_id.is_some());
     let session = index::get(run.session_id.as_deref().unwrap()).unwrap();
     // One of the bot's chats, in its home, on its agent and in the mode its access maps to.
-    assert_eq!(chat::session_bot(&session), Some(BotRef { id: bot.id.clone(), home: false }));
+    assert_eq!(chat::session_bot(&session), Some(BotRef { id: bot.id.clone(), home: false, org: None }));
     assert_eq!(session.unknown[SESSION_KEY]["id"], duty.id);
     assert_eq!(std::fs::canonicalize(&session.cwd).unwrap(), std::fs::canonicalize(&home).unwrap());
     assert_eq!(session.automation.as_ref().map(|stamp| stamp.run_id.as_str()), Some(run.run_id.as_str()));

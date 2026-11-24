@@ -101,7 +101,7 @@ fn a_paused_bots_run_worker_finishes_the_step_it_is_on_and_takes_plan_mode_after
     let _home = bots_on();
     let (manager, terminals, sink) = manager();
     let atlas = chat::hire(sink.as_ref(), "cto", "Atlas").unwrap();
-    let worker = chat::new_chat(sink.as_ref(), &atlas.id).unwrap();
+    let worker = chat::new_chat(sink.as_ref(), &atlas.id, None).unwrap();
     mark_run_worker(&worker);
     let worker = index::get(&worker.id).unwrap();
     let pane = in_a_turn(&manager, &terminals, &sink, &worker);

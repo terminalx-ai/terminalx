@@ -176,7 +176,7 @@ In a cloud tab's terminal view Escape is typed into the agent's screen with
 | `session.configure` | manage, idempotent | `{ sessionId, tabId, model?, effort?, mode? }` → `{ tab: AgentTabInfo }` |
 | `session.markRead` | participate | `{ sessionId, tabId }` → `{}` |
 | `session.nudge` | participate | `{}` → `{}` (poll the mailbox now) |
-| `session.create` | manage, idempotent | one session with one agent tab per call (`tab: AgentTabInfo` in the result); optional selected checkout through `session-repository/1` |
+| `session.create` | manage, idempotent; a manager's `participate` connection in a narrow form (PRO-546) | one session with one agent tab per call (`tab: AgentTabInfo` in the result); optional selected checkout through `session-repository/1` |
 | `session.close` | manage, idempotent | `{ sessionId, tabId?, remove? }`. `remove` also drops the tab from the list and its checkpoints |
 
 `session-repository/1` adds `repository: { identity, directory }` to

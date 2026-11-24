@@ -882,6 +882,11 @@ pub(crate) fn desktop_snapshot(harness: &str, revision: &str) -> Result<serde_js
 struct Keys {
     held: Mutex<HashMap<(Agent, String), Zeroizing<String>>>,
     filled: Condvar,
+    /// Keys a launch asked for by account (#980) that no default names: held
+    /// from then on, while their account keeps them. The runtime's own, with
+    /// the keys it holds: a refresh prunes them against the index it reads.
+    #[cfg_attr(not(any(unix, test)), allow(dead_code))]
+    requested: Mutex<std::collections::HashSet<(Agent, String)>>,
 }
 
 /// This runtime's keys.
@@ -890,19 +895,11 @@ fn keys() -> &'static Keys {
     KEYS.get_or_init(Default::default)
 }
 
-/// Keys a launch asked for by account (#980) that no default names: held
-/// from then on, while their account keeps them.
-fn requested() -> &'static Mutex<std::collections::HashSet<(Agent, String)>> {
-    static REQUESTED: OnceLock<Mutex<std::collections::HashSet<(Agent, String)>>> = OnceLock::new();
-    REQUESTED.get_or_init(Default::default)
-}
-
 /// The keys new tabs may use: each agent's default account's, each project
 /// default's, and those a launch asked for. A key kept for later while
 /// another login is chosen is not among them.
 #[cfg(any(unix, test))]
-fn wanted(index: &Index) -> Vec<(Agent, String)> {
-    let asked = requested().lock().unwrap().clone();
+fn wanted(index: &Index, asked: &std::collections::HashSet<(Agent, String)>) -> Vec<(Agent, String)> {
     let mut wanted = Vec::new();
     for agent in Agent::ALL {
         let Some(entry) = index.get(agent.id()) else { continue };
@@ -929,8 +926,11 @@ impl Keys {
     /// fetching.
     #[cfg(any(unix, test))]
     fn refresh(&self, index: &Index, fetch: impl Fn(Agent, &str) -> Result<Zeroizing<String>>) {
-        requested().lock().unwrap().retain(|(agent, revision)| index.get(agent.id()).is_some_and(|entry| entry.key_revisions().any(|saved| saved == revision)));
-        let wanted = wanted(index);
+        let wanted = {
+            let mut asked = self.requested.lock().unwrap();
+            asked.retain(|(agent, revision)| index.get(agent.id()).is_some_and(|entry| entry.key_revisions().any(|saved| saved == revision)));
+            wanted(index, &asked)
+        };
         let missing: Vec<(Agent, String)> = {
             let mut held = self.held.lock().unwrap();
             held.retain(|key, _| wanted.contains(key));
@@ -1102,7 +1102,7 @@ fn launch_on(store: &Store<'_>, keys: &Keys, agent: Agent, choice: Choice<'_>, w
         Login::Local => Ok(grant_for(agent, &local_entry(&entry), None).on_account(crate::agent_accounts::LOCAL, Vec::new())),
         Login::Key { id, saved } => {
             if choice.account == Some(id.as_str()) {
-                requested().lock().unwrap().insert((agent, saved.revision.clone()));
+                keys.requested.lock().unwrap().insert((agent, saved.revision.clone()));
             }
             let key = keys.get(agent, &saved.revision, wait).with_context(|| format!(
                 "{} is set to use an API key, but TerminalX could not read it from the Keychain. Open TerminalX on this Mac (and unlock the Keychain if it asks), then start the tab again, or choose the subscription login in Settings → Agents.",

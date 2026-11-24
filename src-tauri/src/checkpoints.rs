@@ -1213,7 +1213,7 @@ mod tests {
     }
     pub(super) fn prompt(queued: bool) -> Payload {
         Payload::UserMessage {
-            author: None,
+            author: None, bot: None,
             text: "Change it".into(),
             images: vec![],
             files: Vec::new(),

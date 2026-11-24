@@ -3317,7 +3317,7 @@ mod tests {
         // Rewritten in place under the checkpoint, at the same length: the fingerprint catches it.
         let mut changed = store::read_lines::<AgentEvent>(&path).unwrap();
         let last = changed.len() - 1;
-        changed[last] = event(1301, Payload::UserMessage { author: None, text: "prompt 9999".into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: None });
+        changed[last] = event(1301, Payload::UserMessage { author: None, bot: None, text: "prompt 9999".into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: None });
         std::fs::OpenOptions::new().write(true).open(&path).unwrap().write_all(
             changed.iter().map(|event| serde_json::to_string(event).unwrap() + "\n").collect::<String>().as_bytes()).unwrap();
         let (_, checkpoint, reset) = drain_cached(&cache, &path, Some(checkpoint), direct());
@@ -3776,7 +3776,7 @@ mod tests {
     fn prompt(seq: u64) -> AgentEvent {
         event(
             seq,
-            Payload::UserMessage { author: None,
+            Payload::UserMessage { author: None, bot: None,
                 text: format!("prompt {seq}"),
                 images: Vec::new(),
                 files: Vec::new(),

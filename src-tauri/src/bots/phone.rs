@@ -7,7 +7,7 @@
 //! (`enforce::call`): an answer is `itemAnswer`, a pause `pause`. Nothing here
 //! answers, pauses or resumes by a path of its own.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -56,6 +56,41 @@ pub fn call(manager: &SessionManager, operation: &str, params: &Value) -> Result
         "pause" => super::enforce::call(manager, "pause", &json!({"id": id()?, "from": super::pause::FROM_PHONE})),
         "resume" => super::enforce::call(manager, "resume", &json!({"id": id()?})),
         "pauseAll" => super::enforce::call(manager, "pauseAll", &json!({"from": super::pause::FROM_PHONE})),
+        other => Err(super::refused(format!("Unknown bots operation {other}"))),
+    }
+}
+
+/// The calls a workspace connection makes to the bots that live on this
+/// runtime (PRO-482, `bots/1` in `remote::protocol`): the phone's and the
+/// window's `list`, `home` and `answer`, for the bots of the person `user`
+/// alone. On a cloud workspace other members connect too: a bot moved there
+/// is its owner's (`moving::OWNER_USER_KEY`), and nobody else sees it.
+pub fn workspace_call(manager: &SessionManager, operation: &str, params: &Value, user: Option<&str>) -> Result<Value> {
+    super::require_enabled()?;
+    let mine: BTreeSet<String> = super::listing()?.bots.into_iter().filter(|bot| bot.runs_on.here() && super::moving::belongs_to(bot, user)).map(|bot| bot.id).collect();
+    match operation {
+        "list" => {
+            let mut answer = list(manager)?;
+            let keep = |value: &Value| value["botId"].as_str().or_else(|| value["id"].as_str()).is_some_and(|id| mine.contains(id));
+            for path in [&["bots", "bots"][..], &["team"], &["needsYou", "entries"], &["needsYou", "counts"], &["needsYou", "undelivered"]] {
+                let mut at = &mut answer;
+                for key in path {
+                    at = &mut at[*key];
+                }
+                if let Some(entries) = at.as_array_mut() {
+                    entries.retain(keep);
+                }
+            }
+            answer["bots"]["unreadable"] = json!(0);
+            Ok(answer)
+        }
+        "home" | "answer" => {
+            let id = params["id"].as_str().ok_or_else(|| super::refused("id must be a string"))?;
+            if !mine.contains(id) {
+                return Err(super::refused(format!("No bot of yours has the id {id} here.")));
+            }
+            call(manager, operation, params)
+        }
         other => Err(super::refused(format!("Unknown bots operation {other}"))),
     }
 }

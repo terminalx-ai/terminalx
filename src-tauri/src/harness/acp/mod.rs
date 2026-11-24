@@ -680,12 +680,12 @@ impl Acp {
                     self.loading = false;
                     self.resume = None;
                     vec![
-                        Action::Emit(Payload::Status { text: "The previous conversation could not be resumed; starting a new one.".into() }),
+                        Action::Emit(Payload::Status { text: "The previous conversation could not be resumed; starting a new one.".into(), handoff: None }),
                         self.open_session(),
                     ]
                 }
                 Pending::Initialize | Pending::Authenticate | Pending::SessionNew | Pending::Prompt => self.fail_turn(message),
-                Pending::SetMode => vec![Action::Emit(Payload::Status { text: message })],
+                Pending::SetMode => vec![Action::Emit(Payload::Status { text: message, handoff: None })],
                 // A change somebody asked for is turned down in the agent's
                 // words. The tab's own model failing on a new session leaves
                 // the session on the agent's choice, and the tab says so.
@@ -697,7 +697,7 @@ impl Acp {
                 }
                 Pending::SetModel { model, opening: false, request_id: None } => vec![Action::Emit(Payload::ProviderSettings { signal: Signal::Refused { setting: Setting::Model, value: Some(model), message } })],
                 Pending::SetModel { model, opening: true, request_id: None } => {
-                    let mut out = vec![Action::Emit(Payload::Status { text: format!("Could not use {model}: {message}") })];
+                    let mut out = vec![Action::Emit(Payload::Status { text: format!("Could not use {model}: {message}"), handoff: None })];
                     let agent_model = self.agent_model.clone();
                     out.extend(self.model_is(agent_model.as_deref()));
                     out
@@ -711,7 +711,7 @@ impl Acp {
                 self.auth_method = result["authMethods"].as_array().and_then(|a| a.first()).and_then(|m| m["id"].as_str()).map(String::from);
                 match self.auth_method.clone() {
                     Some(m) => vec![
-                        Action::Emit(Payload::Status { text: "Signing in. If a browser window opened, finish the sign-in there; the agent starts once it is done.".into() }),
+                        Action::Emit(Payload::Status { text: "Signing in. If a browser window opened, finish the sign-in there; the agent starts once it is done.".into(), handoff: None }),
                         Action::Write(self.request("authenticate", json!({"methodId": m}), Pending::Authenticate)),
                     ],
                     None => vec![self.open_session()],
@@ -1063,7 +1063,7 @@ mod tests {
         let (mut a, acts) = opened(Some("gone-1"), "auto");
         let asked = writes(&acts).into_iter().find(|w| w["method"] == "session/set_model").unwrap();
         let acts = a.handle(&json!({"jsonrpc":"2.0","id":asked["id"],"error":{"code":-32602,"message":"Unknown model"}}).to_string());
-        assert!(matches!(emits(&acts)[0], Payload::Status { text } if text == "Could not use gone-1: Unknown model"));
+        assert!(matches!(emits(&acts)[0], Payload::Status { text, .. } if text == "Could not use gone-1: Unknown model"));
         assert_eq!(signals(&acts), [now("auto")]);
     }
 

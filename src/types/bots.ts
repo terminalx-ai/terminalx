@@ -4,8 +4,39 @@
  */
 export type BotAccess = "full" | "askOutward" | "readReport" | (string & {});
 
-/** Only `thisMac` for now; a place a newer app wrote (a cloud workspace, another machine) arrives as its own string. */
+/**
+ * Where a bot lives (PRO-482): `thisMac`, a cloud workspace `cloud:<org>:<workspace>`, or a paired machine
+ * `machine:<machine id>`. A place a newer app wrote arrives as its own string, and counts as elsewhere.
+ */
 export type BotRunsOn = "thisMac" | (string & {});
+
+/** [`BotRunsOn`] read: `key` is the value itself, as the runtime keeps it. */
+export type BotPlace =
+  | { kind: "thisMac" }
+  | { kind: "cloud"; key: string; orgId: string; workspaceId: string }
+  | { kind: "machine"; key: string; machineId: string }
+  | { kind: "other"; key: string };
+
+const PLACE_PART = /^[A-Za-z0-9._-]{1,128}$/;
+
+/** Where `runsOn` names, read as the runtime reads it (`BotRunsOn::parse`). */
+export function runsOnPlace(runsOn: BotRunsOn): BotPlace {
+  if (runsOn === "thisMac") return { kind: "thisMac" };
+  const cloud = /^cloud:([^:]+):([^:]+)$/.exec(runsOn);
+  if (cloud && PLACE_PART.test(cloud[1]!) && PLACE_PART.test(cloud[2]!)) return { kind: "cloud", key: runsOn, orgId: cloud[1]!, workspaceId: cloud[2]! };
+  const machine = /^machine:(.+)$/.exec(runsOn);
+  if (machine && PLACE_PART.test(machine[1]!)) return { kind: "machine", key: runsOn, machineId: machine[1]! };
+  return { kind: "other", key: runsOn };
+}
+
+/** The value a bot's `runsOn` takes for a cloud workspace or a paired machine. */
+export function cloudPlace(orgId: string, workspaceId: string): Extract<BotPlace, { kind: "cloud" }> {
+  return { kind: "cloud", key: `cloud:${orgId}:${workspaceId}`, orgId, workspaceId };
+}
+
+export function machinePlace(machineId: string): Extract<BotPlace, { kind: "machine" }> {
+  return { kind: "machine", key: `machine:${machineId}`, machineId };
+}
 
 /** The level to act on: one this app does not know counts as the most restrictive one it knows. */
 export function effectiveAccess(access: BotAccess): KnownBotAccess {

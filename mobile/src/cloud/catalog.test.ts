@@ -620,7 +620,7 @@ describe("what the phone keeps of the list between runs (#988)", () => {
     const h = harness();
     await h.catalog.refresh();
     const session = h.catalog.session("org-1", "ws-new");
-    vi.spyOn(session, "getSnapshot").mockReturnValue({ ...session.getSnapshot(), tabs: [{ tabId: "t1", sessionId: "s1", title: "Checkout redesign", status: "idle", source: "checkpoint", pendingPermissions: [], events: [], truncated: false, noKey: false, continuous: false }] });
+    vi.spyOn(session, "getSnapshot").mockReturnValue({ ...session.getSnapshot(), tabs: [{ tabId: "t1", sessionId: "s1", title: "Checkout redesign", status: "idle", source: "checkpoint", pendingPermissions: [], events: [], truncated: false, noKey: false, continuous: false, gone: false, settings: null }] });
     session.listChanged();
     expect(workspaceTitle(h.catalog.getSnapshot(), h.catalog.workspace("org-1", "ws-new")!)).toBe("Checkout redesign");
     expect(workspaceTitle(h.catalog.getSnapshot(), h.catalog.workspace("org-1", "ws-old")!)).toBe("ws-old");

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { MachineHostError } from "@/components/machines/MachineHostError";
 import { BotDuties } from "@/components/bots/BotDuties";
-import { Bot as BotIcon, Brain, CircleDot, Home, LayoutGrid, Laptop, ListChecks, Loader2, MessageSquare, MessageSquarePlus, PanelLeft, Pause, Play, ShieldOff, Settings2, Sparkles } from "@/icons";
+import { Bot as BotIcon, Brain, CircleDot, Home, LayoutGrid, ListChecks, Loader2, MessageSquare, MessageSquarePlus, PanelLeft, Pause, Play, ShieldOff, Settings2, Sparkles } from "@/icons";
 import { SessionView } from "@/components/session/SessionView";
 import { BotRoleMemory } from "@/components/bots/BotRoleMemory";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -9,7 +9,9 @@ import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { botsApi, errorMessage } from "@/lib/api";
-import { botChats, botSpentToday, openHomeChat, spentTodayLabel, startBotChat, usageKey } from "@/lib/botChats";
+import { botChats, botPlaces, botSpentToday, chatPlace, openHomeChat, spentTodayLabel, startBotChat, usageKey, type BotPlace } from "@/lib/botChats";
+import { useAccount } from "@/lib/account";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
 import { pauseBot, resumeBot, useBotStore } from "@/lib/bots";
 import { heldLine, pausedBySentence, pausedStatus, usePauseHeld } from "@/lib/botPause";
 import { showBotsTeam } from "@/lib/botsPage";
@@ -20,6 +22,8 @@ import { relativeTime } from "@/lib/time";
 import { effectiveAccess, type Bot, type PauseHeld } from "@/types/bots";
 import type { SessionEntry } from "@/types/session";
 import { ChatRow } from "./BotChatRow";
+import { RunsOnIcon } from "./BotAvatar";
+import { usePlaceName } from "./useBotPlace";
 import { BotHome } from "./BotHome";
 import { BotItemPage } from "./BotItemPage";
 import { HandoffStrip, TeamBriefEditor, TeamBriefRow } from "./BotHandoffs";
@@ -47,10 +51,6 @@ function accessLabel(bot: Bot): string {
   const known = effectiveAccess(bot.access);
   // A level a newer app wrote is shown as it is, and acted on as read and report.
   return known === bot.access ? ACCESS_LABEL[known] : `${bot.access} (read and report here)`;
-}
-
-function runsOnLabel(bot: Bot): string {
-  return bot.runsOn === "thisMac" ? "This Mac" : bot.runsOn;
 }
 
 /**
@@ -148,8 +148,8 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
     setBusy(true);
     action().then(() => setError(null), (cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
   };
-  const newChat = () => act(async () => {
-    const chat = await startBotChat(bot.id);
+  const newChat = (org?: string) => act(async () => {
+    const chat = await startBotChat(bot.id, org);
     upsertSession(chat);
     selectSession(chat.id);
   });
@@ -254,6 +254,7 @@ function pausedWorkLine(bot: Bot, held: PauseHeld | null): string {
 function BotHeader({ bot, working, asking, spent, busy, harnessName, onPause, onResume }: { bot: Bot; working: number; asking: number; spent: string; busy: boolean; harnessName: string; onPause: () => void; onResume: () => void }) {
   const full = effectiveAccess(bot.access) === "full";
   const held = usePauseHeld();
+  const placeName = usePlaceName(bot.runsOn);
   return (
     <div data-tauri-drag-region="deep" className="flex shrink-0 flex-wrap items-center gap-3 px-5 pt-4 pb-3">
       <span aria-hidden className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-well text-primary hairline"><BotIcon className="size-5" /></span>
@@ -269,7 +270,7 @@ function BotHeader({ bot, working, asking, spent, busy, harnessName, onPause, on
       </div>
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">
         <Chip title="Agent and model"><Sparkles className="size-3" /> {harnessName}{bot.model ? ` · ${bot.model}` : ""}</Chip>
-        <Chip title="Where it runs"><Laptop className="size-3" /> {runsOnLabel(bot)}</Chip>
+        <Chip title="Where it runs"><RunsOnIcon runsOn={bot.runsOn} className="size-3" /> {placeName}</Chip>
         <Chip title="What it may do without asking" className={cn(full && "text-warning")}><ShieldOff className="size-3" /> {accessLabel(bot)}</Chip>
         <Chip title="What its sessions spent today, at Stats' prices, for information: bots have no budget">{spent}</Chip>
         {bot.paused ? (
@@ -343,7 +344,7 @@ function ChatList({ bot, chats, startedBy, dutyRuns = [], openId, onOpen, onNewC
   dutyRuns?: SessionEntry[];
   openId: string | null;
   onOpen: (chat: SessionEntry) => void;
-  onNewChat: () => void;
+  onNewChat: (org?: string) => void;
   busy: boolean;
   briefOpen?: boolean;
   onOpenBrief?: () => void;
@@ -351,19 +352,27 @@ function ChatList({ bot, chats, startedBy, dutyRuns = [], openId, onOpen, onNewC
   // The runs only with Settings → Experimental → Orchestrator runs on, as the sidebar shows them.
   const runsByLead = useRunsByLead(useExperimentalSettings()?.orchestratorRuns === true);
   const started = startedRows(startedBy, chats, runsByLead);
+  const { status } = useAccount();
+  // PRO-483: a bot that works in several places starts each chat in one of them, and says which on every chat.
+  const places = botPlaces(bot, status.state === "signed-in" ? (status.organizations ?? []) : []);
+  const placeOf = (chat: SessionEntry) => {
+    if (places.length < 2) return undefined;
+    const key = chatPlace(chat, bot);
+    return key === null ? "No longer works here" : places.find((place) => place.key === key)?.name;
+  };
   return (
     <nav aria-label={`${bot.name}'s chats`} className="flex w-[236px] shrink-0 flex-col gap-4 overflow-y-auto border-r border-hairline px-2 py-3">
-      <ChatGroup label={`Chats with ${bot.name}`} action={
+      <ChatGroup label={`Chats with ${bot.name}`} action={places.length > 1 ? <NewChatIn bot={bot} places={places} busy={busy} onNewChat={onNewChat} /> : (
         <WithTooltip label="New chat">
-          <Button variant="ghost" size="icon-xs" aria-label={`New chat with ${bot.name}`} disabled={busy} onClick={onNewChat}><MessageSquarePlus /></Button>
+          <Button variant="ghost" size="icon-xs" aria-label={`New chat with ${bot.name}`} disabled={busy} onClick={() => onNewChat()}><MessageSquarePlus /></Button>
         </WithTooltip>
-      }>
-        {chats.map((chat) => <ChatRow key={chat.id} chat={chat} selected={chat.id === openId} onOpen={onOpen} home={!!chat.bot?.home} />)}
+      )}>
+        {chats.map((chat) => <ChatRow key={chat.id} chat={chat} selected={chat.id === openId} onOpen={onOpen} home={!!chat.bot?.home} place={placeOf(chat)} />)}
       </ChatGroup>
       {(started.runs.length > 0 || started.sessions.length > 0) && (
         <ChatGroup label={`Started by ${bot.name}`}>
           {started.runs.map(({ run, lead }) => <StartedRunRow key={run.id} goal={run.goal} state={runStateLine(run)} selected={lead.id === openId && !chats.includes(lead)} onOpen={() => onOpen(lead)} />)}
-          {started.sessions.map((chat) => <ChatRow key={chat.id} chat={chat} selected={chat.id === openId} onOpen={onOpen} home={false} sub={startedStateLine(chat)} />)}
+          {started.sessions.map((chat) => <ChatRow key={chat.id} chat={chat} selected={chat.id === openId} onOpen={onOpen} home={false} sub={startedStateLine(chat)} place={placeOf(chat)} />)}
         </ChatGroup>
       )}
       {dutyRuns.length > 0 && (
@@ -377,6 +386,30 @@ function ChatList({ bot, chats, startedBy, dutyRuns = [], openId, onOpen, onNewC
         </ChatGroup>
       )}
     </nav>
+  );
+}
+
+/**
+ * New chat, for a bot that works in more than one place (PRO-483): the chat is started in the place chosen, and is
+ * given that place's notes, work items and cloud workspaces only.
+ */
+function NewChatIn({ bot, places, busy, onNewChat }: { bot: Bot; places: BotPlace[]; busy: boolean; onNewChat: (org?: string) => void }) {
+  return (
+    <DropdownMenu>
+      <WithTooltip label="New chat">
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="icon-xs" aria-label={`New chat with ${bot.name}`} disabled={busy}><MessageSquarePlus /></Button>
+        </DropdownMenuTrigger>
+      </WithTooltip>
+      <DropdownMenuContent align="end" className="w-60">
+        <DropdownMenuLabel>New chat, working in</DropdownMenuLabel>
+        {places.map((place) => (
+          <DropdownMenuItem key={place.key} onSelect={() => onNewChat(place.key)} data-testid="bot-new-chat-in">
+            <span className="truncate" title={place.name}>{place.name}</span>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

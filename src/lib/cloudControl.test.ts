@@ -1844,6 +1844,25 @@ describe("a command from a session that works for a bot (PRO-514)", () => {
     expect(sentMode()).toBe("default");
   });
 
+  it("uses only the workspaces of the organisation the bot's conversation works in, where its cloud time is billed (PRO-483)", async () => {
+    tabIn("ws-1", "s1", { permissionMode: "bypassPermissions" });
+    // A conversation started in another organisation, in personal work, or in a place the bot no longer works in.
+    for (const org of [OTHER, "personal", ""]) {
+      const refused = await refusal("send", { target, text: "go", botHold: { org } });
+      expect(refused).toMatchObject({ code: "forbidden" });
+      expect(refused.message).toContain("billed to the organisation the work is for");
+      expect(await refusal("resume", { workspace: `cloud:${ORG}:ws-stopped`, botHold: { org } })).toMatchObject({ code: "forbidden" });
+      expect(await refusal("sessions.create", { project: PROJECT, prompt: "go", botHold: { org } })).toMatchObject({ code: "forbidden" });
+    }
+    expect(enqueued).toEqual([]);
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    // Its own organisation's go ahead, and so does a hold from a build that names none.
+    await handleCloudControl("send", { target, text: "go", botHold: { org: ORG } });
+    await handleCloudControl("send", { target, text: "again", botHold: {} });
+    expect(enqueued).toHaveLength(2);
+    expect(await refusal("send", { target, text: "go", botHold: { org: 7 } })).toMatchObject({ code: "forbidden" });
+  });
+
   it("refuses a hold it cannot read rather than run the command unheld", async () => {
     for (const botHold of ["manual", [], { mode: { terminal: { limit: "manual" } } }, { mode: { terminal: asks.terminal, nativeCodex: { limit: "", modes: {} } } }, { mode: asks, sessions: "all" }]) {
       expect(await refusal("send", { target, text: "go", botHold })).toMatchObject({ code: "forbidden" });

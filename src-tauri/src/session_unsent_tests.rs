@@ -153,7 +153,7 @@ impl Rig {
             .filter_map(|event| match event.payload {
                 Payload::UserMessage { text, queued, .. } => Some(format!("user{}: {text}", if queued { " (queued)" } else { "" })),
                 Payload::AssistantText { text, .. } => Some(format!("claude: {text}")),
-                Payload::Status { text } => Some(format!("status: {text}")),
+                Payload::Status { text, .. } => Some(format!("status: {text}")),
                 Payload::Recovery { kind: Some(kind) } => Some(format!("recovery: {kind:?}")),
                 _ => None,
             })

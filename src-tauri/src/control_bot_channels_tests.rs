@@ -41,6 +41,7 @@ fn mention(bot: &str, id: &str, by: &str, from: &str) -> Mention {
         session: None,
         delivered: None,
         tries: 0,
+        org: None,
         unknown: Default::default(),
     }
 }

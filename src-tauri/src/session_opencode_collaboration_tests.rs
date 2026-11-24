@@ -225,6 +225,11 @@ fn phase2_opencode_collaboration_real_socket_capacity_wait_rechecks_original() {
         socket2::SockRef::from(&stream).set_recv_buffer_size(4096).unwrap();
         accepted.send(()).unwrap();
         draining.recv_timeout(WAIT).unwrap();
+        // The client has stopped writing: open the window to drain what it
+        // had queued. Linux had queued megabytes in the client's auto-sized
+        // send buffer by its WouldBlock, and through a 4 KB window each few
+        // kilobytes wait on an acknowledgement timer: about a minute.
+        socket2::SockRef::from(&stream).set_recv_buffer_size(4 * 1024 * 1024).unwrap();
         stream.set_read_timeout(Some(WAIT)).unwrap();
         let mut observed = Vec::new();
         stream.read_to_end(&mut observed).unwrap();

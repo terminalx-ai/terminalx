@@ -77,7 +77,7 @@ fn empty_write_retries_revalidate_mobile_and_shared_authority() {
             let launch = engine.launch.clone();
             let mut rt = rt_arc.lock().unwrap();
             rt.engine = Engine::CodexStdio(engine);
-            let seq = manager.publish(&mut rt, Payload::UserMessage { author: None, text: "revocable prompt".into(), images: vec![], files: Vec::new(), baseline: None, queued: true, cwd: None }, None).seq;
+            let seq = manager.publish(&mut rt, Payload::UserMessage { author: None, bot: None, text: "revocable prompt".into(), images: vec![], files: Vec::new(), baseline: None, queued: true, cwd: None }, None).seq;
             rt.stdio_followups.active = Some((seq, false));
             rt.open_turn();
             let sink = Arc::new(StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) });
@@ -144,7 +144,7 @@ fn recreated_runtime_reconciles_pending_prompts_and_acknowledged_turns() {
         let manager = make_manager();
         let rt_arc = manager.runtime("stdio-recovery", "tab").unwrap();
         let mut rt = rt_arc.lock().unwrap();
-        let user = |text: &str| Payload::UserMessage { author: None, text: text.into(), images: vec![], files: Vec::new(), baseline: None, queued: true, cwd: None };
+        let user = |text: &str| Payload::UserMessage { author: None, bot: None, text: text.into(), images: vec![], files: Vec::new(), baseline: None, queued: true, cwd: None };
         let first = manager.publish(&mut rt, user("first"), None).seq;
         if matches!(state, "acknowledged" | "started" | "active-with-pending" | "completed" | "completed-with-pending") {
             manager.publish(&mut rt, Payload::PromptAbsorbed { prompt_seq: first }, None);
@@ -1896,7 +1896,7 @@ fn child_fixture() {
         const REVOKED: &str = "account/read failed: workspace routing discovery unauthorized (401)";
         let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
         engine.start("fix the build".into(), Vec::new()).unwrap();
-        manager.publish(&mut rt, Payload::UserMessage { author: None, text: "fix the build".into(), images: vec![], files: Vec::new(), baseline: None, queued: false, cwd: None }, None);
+        manager.publish(&mut rt, Payload::UserMessage { author: None, bot: None, text: "fix the build".into(), images: vec![], files: Vec::new(), baseline: None, queued: false, cwd: None }, None);
         rt.open_turn();
         drop(rt);
         let sink = StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) };
@@ -2331,7 +2331,7 @@ fn phase2_collaboration_v2_native_writer_rechecks_original_policy_and_mode_after
             let launch = engine.launch.clone();
             let mut rt = rt_arc.lock().unwrap();
             rt.engine = Engine::CodexStdio(engine);
-            let seq = manager.publish(&mut rt, Payload::UserMessage { author: None, text: "revocable prompt".into(), images: vec![], files: Vec::new(), baseline: None, queued: true, cwd: None }, None).seq;
+            let seq = manager.publish(&mut rt, Payload::UserMessage { author: None, bot: None, text: "revocable prompt".into(), images: vec![], files: Vec::new(), baseline: None, queued: true, cwd: None }, None).seq;
             rt.stdio_followups.active = Some((seq, false));
             rt.open_turn();
             let sink = Arc::new(StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) });
@@ -2476,7 +2476,7 @@ fn phase2_collaboration_v2_native_provider_reports_reach_actual_writer_only_with
         let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),Arc::new(crate::sink::NoObserver),Arc::new(Host::new()),Arc::new(pty::Terminals::new()),Arc::new(Default::default()),Arc::new(Default::default()),crate::hooks::prepare_control().unwrap());
         let rt_arc = manager.runtime("stdio-owner","tab").unwrap(); let (engine,frame) = phase2_reported_engine(&root,report.clone()); let launch = engine.launch.clone();
         let mut rt = rt_arc.lock().unwrap(); rt.engine = Engine::CodexStdio(engine);
-        let seq = manager.publish(&mut rt,Payload::UserMessage { author:None,text:"revocable prompt".into(),images:vec![],files:vec![],baseline:None,queued:true,cwd:None },None).seq;
+        let seq = manager.publish(&mut rt,Payload::UserMessage { author:None, bot: None,text:"revocable prompt".into(),images:vec![],files:vec![],baseline:None,queued:true,cwd:None },None).seq;
         rt.stdio_followups.active = Some((seq,false)); rt.open_turn();
         let sink = Arc::new(StdioSink { manager:manager.clone(),rt:rt_arc.clone(),launch:launch.clone(),startup_stderr_bytes:Mutex::new(0),startup_stderr:Mutex::new(String::new()) });
         let args = vec!["-c".into(),"cat > received".into()]; let child = manager.host.spawn(&rt.key(),SpawnSpec { program:Path::new("/bin/sh"),args:&args,cwd:&root,env:&[],unset:&[] },sink).unwrap(); rt.child_pid=Some(child.pid);rt.child=Some(child);drop(rt);
@@ -2512,7 +2512,7 @@ fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_onl
         let launch = engine.launch.clone();
         let mut rt = rt_arc.lock().unwrap();
         rt.engine = Engine::CodexStdio(engine);
-        let seq = manager.publish(&mut rt, Payload::UserMessage { author: None, text: "original".into(), images: vec![], files: vec![], baseline: None, queued: true, cwd: None }, None).seq;
+        let seq = manager.publish(&mut rt, Payload::UserMessage { author: None, bot: None, text: "original".into(), images: vec![], files: vec![], baseline: None, queued: true, cwd: None }, None).seq;
         rt.stdio_followups.active = Some((seq, false));
         rt.open_turn();
         let sink = Arc::new(StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) });
@@ -2548,7 +2548,7 @@ fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_onl
                 match change {
                     "revision" => {
                         let mut rt = runtime.lock().unwrap();
-                        let local = writer.publish(&mut rt, Payload::UserMessage { author: None, text: "queued local".into(), images: vec![], files: vec![], baseline: None, queued: true, cwd: None }, None).seq;
+                        let local = writer.publish(&mut rt, Payload::UserMessage { author: None, bot: None, text: "queued local".into(), images: vec![], files: vec![], baseline: None, queued: true, cwd: None }, None).seq;
                         rt.queued.push(PendingMessage { message: QueuedMessage { id: local.to_string(), text: "queued local".into(), images: vec![] }, privacy: None, seq: local });
                         *saved_local.lock().unwrap() = Some(local);
                         drop(rt);
@@ -2566,7 +2566,7 @@ fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_onl
                         let next_launch = engine.launch.clone();
                         let mut rt = runtime.lock().unwrap();
                         rt.engine = Engine::CodexStdio(engine);
-                        let next_seq = writer.publish(&mut rt, Payload::UserMessage { author: None, text: "independent local".into(), images: vec![], files: vec![], baseline: None, queued: true, cwd: None }, None).seq;
+                        let next_seq = writer.publish(&mut rt, Payload::UserMessage { author: None, bot: None, text: "independent local".into(), images: vec![], files: vec![], baseline: None, queued: true, cwd: None }, None).seq;
                         rt.stdio_followups.active = Some((next_seq, false)); rt.open_turn();
                         let sink = Arc::new(StdioSink { manager: writer.clone(), rt: runtime.clone(), launch: next_launch, startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) });
                         let args = vec!["-c".into(), "cat > replacement".into()];

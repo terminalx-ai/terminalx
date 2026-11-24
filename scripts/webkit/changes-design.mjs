@@ -81,9 +81,9 @@ createRoot(document.getElementById('root')).render(<div className="bg-background
 `;
 
 async function serve() {
-  const { createServer, transformWithEsbuild } = await import("vite");
-  const server = await createServer({ server: { host: "127.0.0.1", port: 0, strictPort: false, hmr: false }, plugins: [{
-    name: "changes-design",
+  const { transformWithEsbuild } = await import("vite");
+  const { createCheckServer } = await import("./vite-page.mjs");
+  const server = await createCheckServer({ server: { host: "127.0.0.1", hmr: false }, plugins: [{
     resolveId(id) { if (id === "/changes-design.tsx") return "\0changes-design.tsx"; },
     async load(id) { if (id === "\0changes-design.tsx") return (await transformWithEsbuild(entry, "changes-design.tsx", { loader: "tsx", jsx: "automatic" })).code; },
     configureServer(server) {

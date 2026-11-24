@@ -47,6 +47,7 @@ use serde_json::{json, Value};
 
 use super::items::{one_line, text};
 use super::{chat, refused, Bot, BotAccess, OWNER};
+use crate::events::{BotMessage, HandoffNote};
 use crate::session::SessionManager;
 use crate::sink::EventSink;
 use crate::store::index::{self, SessionEntry};
@@ -208,6 +209,12 @@ pub struct Handoff {
     pub retry_of: Option<u64>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub attempt: u32,
+    /// The hand-off this one was handed on from, by number (PRO-540): recorded when it is made and only where that
+    /// is known, which is when it was sent from the chat of an open hand-off given to its sender. Never worked out
+    /// afterwards, and not what `depth` counts: one with no parent may still be deeper than 1. A retry has none;
+    /// its line is `retry_of`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u64>,
     /// Where the answer goes: the session it was handed from (the sender's home chat when there is none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_session: Option<String>,
@@ -266,6 +273,10 @@ pub struct Message {
     /// How the transcript names its author.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub label: String,
+    /// What it is, for the window to draw as a card (PRO-539): made with `text`, sent beside it, never read back
+    /// out of it. One an older build kept has none, and is sent with what its other fields say ([`card_of`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<BotMessage>,
     /// The chat it goes to; the receiving bot's home chat when there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
@@ -315,6 +326,8 @@ pub struct Store {
     pub messages: Vec<Message>,
     /// Records this build cannot read: kept, never shown.
     pub unreadable: usize,
+    /// How many of those are hand-offs; the rest are messages.
+    pub unreadable_handoffs: usize,
 }
 
 fn path() -> Result<PathBuf> {
@@ -348,7 +361,7 @@ pub fn read() -> Result<Store> {
     let file = read_file()?;
     let (handoffs, lost_handoffs) = split::<Handoff>(file.handoffs);
     let (messages, lost_messages) = split::<Message>(file.messages);
-    Ok(Store { revision: file.revision, next: file.next, handoffs, messages, unreadable: lost_handoffs.len() + lost_messages.len() })
+    Ok(Store { revision: file.revision, next: file.next, handoffs, messages, unreadable: lost_handoffs.len() + lost_messages.len(), unreadable_handoffs: lost_handoffs.len() })
 }
 
 #[cfg(test)]
@@ -375,7 +388,7 @@ fn change<T>(sink: Option<&dyn EventSink>, limit: usize, f: impl FnOnce(&mut Sto
     let mut file = read_file()?;
     let (handoffs, lost_handoffs) = split::<Handoff>(std::mem::take(&mut file.handoffs));
     let (messages, lost_messages) = split::<Message>(std::mem::take(&mut file.messages));
-    let mut store = Store { revision: file.revision, next: file.next, handoffs, messages, unreadable: 0 };
+    let mut store = Store { revision: file.revision, next: file.next, handoffs, messages, unreadable: 0, unreadable_handoffs: 0 };
     let out = f(&mut store)?;
     trim(&mut store);
     file.next = store.next;
@@ -556,6 +569,79 @@ pub fn agent_message(kind: &str, from: &Bot, to: &Bot, body: &str, footer: &str)
     text
 }
 
+/// What `from` is to `to`, as a card's field: the same four cases as [`relation`], never its words.
+fn relation_id(from: &Bot, to: &Bot) -> &'static str {
+    if to.reports_to == from.id {
+        "lead"
+    } else if from.reports_to == to.id {
+        "report"
+    } else if listed_to_hand_off(from, to) {
+        "listed"
+    } else {
+        "pointed"
+    }
+}
+
+/// The fields every card of a message from one bot to another carries (PRO-539): who, to whom, what each is to the
+/// other and may do, as they are now. They say what [`agent_message`] says in words, and are sent beside its text.
+fn bot_card(kind: &str, from: &Bot, to: &Bot) -> BotMessage {
+    BotMessage {
+        kind: kind.into(),
+        from: from.id.clone(),
+        to: to.id.clone(),
+        from_name: from.name.clone(),
+        to_name: to.name.clone(),
+        status: kind == "tell" && from.reports_to == to.id,
+        relation: relation_id(from, to).into(),
+        from_access: from.access.as_str().into(),
+        to_access: to.access.as_str().into(),
+        ..BotMessage::default()
+    }
+}
+
+/// A hand-off's card, for the chat of the bot it went to: its title and scope in the sender's words, its number,
+/// its place in its chain and the receiving bot's item. When the owner handed an item on, it is theirs: `from` is
+/// [`OWNER`], `note` their own words, and the title and scope are `words_of` the bot whose item it was.
+fn handoff_card(handoff: &Handoff, from: &Bot, to: &Bot) -> BotMessage {
+    let mut card = bot_card("handoff", from, to);
+    card.handoff = Some(handoff.number);
+    card.depth = Some(handoff.depth.max(1));
+    card.max_depth = Some(MAX_DEPTH);
+    card.title = handoff.title.clone();
+    card.body = handoff.scope.clone();
+    card.due = handoff.due.clone();
+    card.item = handoff.item;
+    if handoff.by == OWNER {
+        card.from = OWNER.into();
+        card.from_name = String::new();
+        card.words_of = from.id.clone();
+        card.from_item = handoff.from_item;
+        card.note = handoff.note.clone();
+        card.relation = String::new();
+        card.from_access = String::new();
+    }
+    card
+}
+
+/// The card of a stored message that has none: one of TerminalX's own notes, the owner's Stop, or a message an
+/// older build kept. Only what the record's own fields say: who, to whom, what kind and about which hand-off.
+fn card_of(message: &Message) -> BotMessage {
+    if let Some(card) = &message.card {
+        return card.clone();
+    }
+    let name = |id: &str| crate::store::bots::get(id).ok().flatten().map(|bot| bot.name).unwrap_or_default();
+    let from_bot = message.from != OWNER && message.from != "terminalx";
+    BotMessage {
+        kind: message.kind.clone(),
+        from: message.from.clone(),
+        to: message.to.clone(),
+        from_name: if from_bot { name(&message.from) } else { String::new() },
+        to_name: name(&message.to),
+        handoff: message.handoff,
+        ..BotMessage::default()
+    }
+}
+
 /// The open hand-offs given to `bot`, by number.
 fn open_to<'a>(store: &'a Store, bot: &'a str) -> impl Iterator<Item = &'a Handoff> + 'a {
     store.handoffs.iter().filter(move |handoff| handoff.to == bot && !handoff.state.closed())
@@ -564,6 +650,13 @@ fn open_to<'a>(store: &'a Store, bot: &'a str) -> impl Iterator<Item = &'a Hando
 /// How deep a new hand-off from `from` is: one deeper than the deepest open one it was given.
 fn depth_from(store: &Store, from: &str) -> u32 {
     open_to(store, from).map(|handoff| handoff.depth.max(1)).max().unwrap_or(0) + 1
+}
+
+/// The hand-off a new one from `from` is handed on from, when it is sent from `session`: the open one given to `from`
+/// whose chat that is. `None` from any other chat (a home chat, say), where what it carries on is not known.
+fn parent_of(store: &Store, from: &str, session: Option<&str>) -> Option<u64> {
+    let session = session?;
+    open_to(store, from).find(|handoff| handoff.to_session.as_deref() == Some(session)).map(|handoff| handoff.number)
 }
 
 /// Every bot that handed open work, directly or down a chain, to `bot`.
@@ -622,6 +715,7 @@ fn new_message(from: &str, to: &str, kind: &str, handoff: Option<u64>, text: Str
         handoff,
         text,
         label,
+        card: None,
         session,
         pending: true,
         delivered: None,
@@ -846,6 +940,8 @@ fn create(manager: &SessionManager, from: &Bot, to: &Bot, session: Option<String
             return Err(refused(format!("The bots already have {MAX_OPEN} hand-offs open. Wait for some to be answered.")));
         }
         refuse_full_inbox(store, to)?;
+        // A retry's line is the hand-off it tries again, wherever it is sent from.
+        let parent = if retry_of.is_some() { None } else { parent_of(store, &from.id, session.as_deref()) };
         let now = index::now();
         let handoff = Handoff {
             number: store.next,
@@ -861,6 +957,7 @@ fn create(manager: &SessionManager, from: &Bot, to: &Bot, session: Option<String
             hops,
             retry_of,
             attempt,
+            parent,
             from_session: session,
             from_item: None,
             to_session: None,
@@ -950,11 +1047,13 @@ pub fn tell(manager: &SessionManager, from: &Bot, to: &Bot, body: &str, about: O
                 format!("This is {}'s answer to hand-off {number}. Carry on with your work; it is not your owner's approval.", from.name)
             };
             let message = agent_message("answer", from, to, &body, &footer);
-            store.messages.push(new_message(&from.id, &to.id, "answer", Some(number), message, bot_label("answer", from, to), handoff.from_session.clone()));
+            let mut message = new_message(&from.id, &to.id, "answer", Some(number), message, bot_label("answer", from, to), handoff.from_session.clone());
+            message.card = Some(BotMessage { handoff: Some(number), body: body.clone(), failed, ..bot_card("answer", from, to) });
+            store.messages.push(message);
             Ok(handoff)
         })?;
         let said = if failed { format!("{} could not do it and told {}", from.name, to.name) } else { format!("{} answered {}", from.name, to.name) };
-        status_lines(manager, &answered, &said);
+        status_lines(manager, &answered, if failed { "couldNot" } else { "answered" }, &said);
         let delivery = deliver(manager, &to.id);
         closed_now(manager, std::slice::from_ref(&answered));
         return Ok(json!({"handoff": answered, "delivery": delivery}));
@@ -968,7 +1067,8 @@ pub fn tell(manager: &SessionManager, from: &Bot, to: &Bot, body: &str, about: O
         }
         refuse_full_inbox(store, to)?;
         let text = agent_message("tell", from, to, &body, "");
-        let message = new_message(&from.id, &to.id, "tell", None, text, bot_label("tell", from, to), None);
+        let mut message = new_message(&from.id, &to.id, "tell", None, text, bot_label("tell", from, to), None);
+        message.card = Some(BotMessage { body: body.clone(), ..bot_card("tell", from, to) });
         store.messages.push(message.clone());
         Ok(message)
     })?;
@@ -1017,6 +1117,7 @@ pub fn hand_item(manager: &SessionManager, from: &Bot, number: u64, to: &Bot, no
             hops: 0,
             retry_of: None,
             attempt: 0,
+            parent: None,
             from_session: None,
             from_item: Some(number),
             to_session: None,
@@ -1102,7 +1203,7 @@ pub fn stop(manager: &SessionManager, number: u64) -> Result<Handoff> {
         }
     }
     let name = crate::store::bots::get(&stopped.to).ok().flatten().map(|bot| bot.name).unwrap_or_else(|| "the bot".into());
-    status_lines(manager, &stopped, &format!("You stopped {name}'s work on hand-off {number}"));
+    status_lines(manager, &stopped, "stopped", &format!("You stopped {name}'s work on hand-off {number}"));
     deliver(manager, &stopped.from);
     // Its work is stopped above; what waited for room may start.
     if start_waiting(manager, &stopped.to) {
@@ -1157,7 +1258,7 @@ pub fn work_sessions(handoff: &Handoff) -> Vec<SessionEntry> {
 fn start_and_deliver(manager: &SessionManager, number: u64, line: &str) -> Option<Handoff> {
     let started = start(manager, number);
     let handoff = read().ok()?.handoffs.into_iter().find(|handoff| handoff.number == number)?;
-    status_lines(manager, &handoff, line);
+    status_lines(manager, &handoff, "handed", line);
     if started {
         deliver(manager, &handoff.to);
     }
@@ -1198,6 +1299,26 @@ fn start(manager: &SessionManager, number: u64) -> bool {
                 return Ok(Claim::Refused(Box::new(closed)));
             }
         }
+        // The work is for the place it was handed from (PRO-483): the receiver works on it there, or not at all.
+        let place = match work_place(handoff, &from) {
+            Some(key) if super::memory::place_of(&to, Some(&key)) != super::memory::Place::Bot => Ok(key),
+            Some(key) => Err(format!("{} does not work in {}, where this work is for, so it would be worked on with another place's notes.", to.name, place_name(&key))),
+            None => Err(format!("it was handed from a conversation in a place {} no longer works in.", from.name)),
+        };
+        let place = match place {
+            Ok(place) => place,
+            Err(why) => {
+                handoff.state = HandoffState::Failed;
+                handoff.answer = Some(Reply { at: now.clone(), text: format!("It did not start: {why}"), failed: true, by: "terminalx".into(), unknown: BTreeMap::new() });
+                handoff.closed = Some(now.clone());
+                handoff.modified = now;
+                let closed = handoff.clone();
+                store.messages.retain(|message| !(message.pending && message.handoff == Some(number) && message.kind == "handoff"));
+                let text = format!("Hand-off {number} (\"{}\") did not start: {why} Do it another way, or ask your owner.", closed.title);
+                tell_sender(store, &closed, "failed", text);
+                return Ok(Claim::Refused(Box::new(closed)));
+            }
+        };
         // At most MAX_RUNNING_WORK at once: the rest wait, and start as those are answered.
         let handoff_to = handoff.to.clone();
         if working_for(store, &handoff_to) >= MAX_RUNNING_WORK {
@@ -1207,14 +1328,15 @@ fn start(manager: &SessionManager, number: u64) -> bool {
         handoff.state = HandoffState::Working;
         handoff.started = Some(now.clone());
         handoff.modified = now;
-        Ok(Claim::Claimed(Box::new((handoff.clone(), from, to))))
+        Ok(Claim::Claimed(Box::new((handoff.clone(), from, to, place))))
     });
-    let (handoff, from, to) = match claimed {
+    let (handoff, from, to, place) = match claimed {
         Ok(Claim::Claimed(claimed)) => *claimed,
         Ok(Claim::Not) => return false,
         Ok(Claim::Refused(closed)) => {
             drop(one);
-            status_lines(manager, &closed, &format!("Hand-off {number} did not start: the line or Who can ask changed"));
+            let why = closed.answer.as_ref().map_or("the line or Who can ask changed", |answer| answer.text.trim_start_matches("It did not start: "));
+            status_lines(manager, &closed, "notStarted", &format!("Hand-off {number} did not start: {why}"));
             deliver(manager, &closed.from);
             return false;
         }
@@ -1224,18 +1346,12 @@ fn start(manager: &SessionManager, number: u64) -> bool {
         }
     };
     let chat_title = if handoff.by == OWNER { format!("From your item hand-off: {}", handoff.title) } else { format!("Hand-off from {}: {}", from.name, handoff.title) };
-    let made = chat::work_chat(sink.as_ref(), &to, chat_title.chars().take(120).collect()).and_then(|entry| {
+    let made = chat::work_chat(sink.as_ref(), &to, chat_title.chars().take(120).collect(), &place).and_then(|entry| {
         // Who asked and who added it: the sender (or the owner, for an item they handed on), not the receiver.
         let (asked_by, added_by) = if handoff.by == OWNER { (OWNER.to_string(), OWNER.to_string()) } else { (from.id.clone(), from.id.clone()) };
         let summary = if handoff.by == OWNER { handoff.note.clone() } else { handoff.scope.clone() };
-        let item = super::items::add(sink.as_ref(), &to, &super::items::By::Bot { session: Some(entry.id.clone()) }, super::items::NewItem {
-            title: handoff.title.clone(),
-            summary,
-            done_means: Vec::new(),
-            start: true,
-            asked_by: Some(asked_by),
-            added_by: Some(added_by),
-        });
+        let new = super::items::NewItem { title: handoff.title.clone(), summary, done_means: Vec::new(), start: true, asked_by: Some(asked_by), added_by: Some(added_by) };
+        let item = super::items::add_in(sink.as_ref(), &to, &super::items::By::Bot { session: Some(entry.id.clone()) }, new, Some(place.clone()));
         match item {
             Ok(item) => Ok((entry, item.number)),
             Err(error) => {
@@ -1259,8 +1375,10 @@ fn start(manager: &SessionManager, number: u64) -> bool {
                 record.modified = now;
                 let record = record.clone();
                 let text = if record.by == OWNER { owner_hand_message(&record, &from) } else { agent_message("handoff", &from, &to, &handoff_body(&record), &handoff_footer(&record, &from)) };
+                let card = handoff_card(&record, &from, &to);
                 for message in store.messages.iter_mut().filter(|message| message.pending && message.handoff == Some(number) && message.kind == "handoff") {
                     message.text = text.clone();
+                    message.card = Some(card.clone());
                     message.session = Some(entry.id.clone());
                 }
                 Ok(true)
@@ -1328,11 +1446,33 @@ fn start(manager: &SessionManager, number: u64) -> bool {
 }
 
 /// What a start's claim found.
+/// The place the work of `handoff` is for (PRO-483), as `personal` or an organisation's id: that of the sender's
+/// conversation it was handed from, or, for an item the owner handed on, the item's. A hand-off from no known session
+/// is for the sender's first place. `None` when that conversation or item is in a place the sender no longer works in,
+/// or its conversation is gone.
+fn work_place(handoff: &Handoff, from: &Bot) -> Option<String> {
+    use super::memory::{place_of, working_place, Place};
+    let place = match (handoff.from_item, handoff.from_session.as_deref()) {
+        (Some(number), _) => {
+            let org = super::items::read(&from.id).ok().and_then(|list| list.items.into_iter().find(|item| item.number == number)).and_then(|item| item.org);
+            place_of(from, org.as_deref())
+        }
+        (None, Some(session)) => index::get(session).map_or(Place::Bot, |entry| chat::session_place(from, &entry)),
+        (None, None) => working_place(from),
+    };
+    (place != Place::Bot).then(|| place.key().to_owned())
+}
+
+/// A place as a sentence names it.
+fn place_name(key: &str) -> String {
+    if key == super::PERSONAL { "its owner's personal work".into() } else { format!("organisation {key}") }
+}
+
 enum Claim {
     /// Not waiting, its bot paused or gone, or its bot works on as many as it may.
     Not,
-    /// Claimed: it is working from now, with no chat yet.
-    Claimed(Box<(Handoff, Bot, Bot)>),
+    /// Claimed: it is working from now, with no chat yet, in the place its work is for.
+    Claimed(Box<(Handoff, Bot, Bot, String)>),
     /// Closed instead: the owner changed the line or Who can ask since it was handed.
     Refused(Box<Handoff>),
 }
@@ -1424,6 +1564,9 @@ pub type SentForTests = (String, String, String, Option<String>);
 /// from `chat::launched`'s thread is seen; tests that use it hold their temp home's lock, one at a time.
 #[cfg(test)]
 pub static SENT_FOR_TESTS: Mutex<Vec<SentForTests>> = Mutex::new(Vec::new());
+/// The cards sent in tests, by [`send`], in the order of [`SENT_FOR_TESTS`]: (the text sent, its card).
+#[cfg(test)]
+pub static SENT_CARDS_FOR_TESTS: Mutex<Vec<(String, BotMessage)>> = Mutex::new(Vec::new());
 /// Set in a test to make the next sends fail.
 #[cfg(test)]
 pub static FAIL_SENDS_FOR_TESTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1477,14 +1620,16 @@ fn author_of(message: &Message) -> (String, String) {
 fn send(manager: &SessionManager, message: &Message) -> Result<String> {
     let (session, tab) = target(manager, message)?;
     let (user, label) = author_of(message);
+    let card = card_of(message);
     #[cfg(test)]
     if !REAL_SENDS_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
         anyhow::ensure!(!FAIL_SENDS_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst), "the chat could not take the message");
         SENT_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).push((session.clone(), tab, message.text.clone(), Some(label)));
+        SENT_CARDS_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).push((message.text.clone(), card));
         return Ok(session);
     }
     let author = crate::local_sharing::Person { user_id: user, display_name: label, email: String::new(), email_verified: false, organization_ids: Vec::new() };
-    manager.send_from_bot(&session, &tab, message.text.clone(), author)?;
+    manager.send_from_bot(&session, &tab, message.text.clone(), author, Some(card))?;
     Ok(session)
 }
 
@@ -1577,6 +1722,7 @@ fn deliver_as(manager: &SessionManager, id: &str, with_held: bool) -> Value {
                 message.error.clear();
                 // Its words are in the chat's transcript now; the store keeps that it was sent, not the text.
                 message.text.clear();
+                message.card = None;
             }
         }
         if let Some((failed, error)) = &failure {
@@ -1624,7 +1770,7 @@ fn deliver_as(manager: &SessionManager, id: &str, with_held: bool) -> Value {
     }
     closed_now(manager, &gave_up);
     for handoff in gave_up {
-        status_lines(manager, &handoff, &format!("Hand-off {} failed: TerminalX could not reach its bot", handoff.number));
+        status_lines(manager, &handoff, "failed", &format!("Hand-off {} failed: TerminalX could not reach its bot", handoff.number));
         if handoff.by != OWNER {
             let from = handoff.from.clone();
             std::thread::spawn({
@@ -1669,21 +1815,24 @@ pub fn deliver_waiting(manager: &SessionManager, id: &str) {
     }
 }
 
-/// A plain line in the sender's and the receiver's chats: shown, never sent to an agent.
-fn status_lines(manager: &SessionManager, handoff: &Handoff, line: &str) {
-    let mut sessions: Vec<(String, String)> = Vec::new();
-    for (session, bot) in [(handoff.from_session.as_ref(), &handoff.from), (handoff.to_session.as_ref(), &handoff.to)] {
+/// A plain line in the sender's and the receiver's chats: shown, never sent to an agent. Each carries which
+/// hand-off it is about, what happened to it (`event`) and whose chat it is in (PRO-539), so the window draws the
+/// "Handed to" card and TerminalX's own lines from those fields; `line` stays for a reader that knows none of them.
+fn status_lines(manager: &SessionManager, handoff: &Handoff, event: &str, line: &str) {
+    let mut sessions: Vec<(String, String, &str)> = Vec::new();
+    for (session, bot, side) in [(handoff.from_session.as_ref(), &handoff.from, "from"), (handoff.to_session.as_ref(), &handoff.to, "to")] {
         let entry = session.and_then(|session| index::get(session).ok()).filter(|entry| chat::acting_bot(entry).as_deref() == Some(bot.as_str()));
         let entry = entry.or_else(|| index::load().ok()?.into_iter().filter(|entry| !entry.archived && chat::session_bot(entry).is_some_and(|reference| reference.id == *bot && reference.home)).max_by(|a, b| a.created.cmp(&b.created)));
         let Some(entry) = entry else { continue };
         if let Some(tab) = entry.tabs.iter().find(|tab| !tab.is_terminal()) {
-            if !sessions.iter().any(|(session, _)| *session == entry.id) {
-                sessions.push((entry.id.clone(), tab.id.clone()));
+            if !sessions.iter().any(|(session, _, _)| *session == entry.id) {
+                sessions.push((entry.id.clone(), tab.id.clone(), side));
             }
         }
     }
-    for (session, tab) in sessions {
-        if let Err(error) = manager.publish_external(&session, &tab, crate::events::Payload::Status { text: line.to_owned() }) {
+    for (session, tab, side) in sessions {
+        let note = HandoffNote { number: handoff.number, event: event.into(), side: side.into(), from: handoff.from.clone(), to: handoff.to.clone(), by: handoff.by.clone(), title: handoff.title.clone() };
+        if let Err(error) = manager.publish_external(&session, &tab, crate::events::Payload::Status { text: line.to_owned(), handoff: Some(note) }) {
             log::warn!("note hand-off {} in session {session}: {error:#}", handoff.number);
         }
     }
@@ -1844,6 +1993,8 @@ fn shown(handoff: &Handoff, store: &Store) -> Value {
 }
 
 /// The hand-offs bot `id` gave or was given, newest first (every bot's with `None`), and what waits for it.
+/// `unreadable` counts every record this build cannot read; `unreadableHandoffs` and `unreadableMessages` say which
+/// (PRO-540). `maxDepth` and `maxRetries` are the bounds a hand-off's `depth` and `attempt` are counted against.
 pub fn listing(id: Option<&str>) -> Result<Value> {
     let store = read()?;
     let mut handoffs: Vec<&Handoff> = store.handoffs.iter().filter(|handoff| id.is_none_or(|id| handoff.from == id || handoff.to == id)).collect();
@@ -1862,6 +2013,10 @@ pub fn listing(id: Option<&str>) -> Result<Value> {
         "waitingMessages": waiting,
         "undelivered": undelivered,
         "unreadable": store.unreadable,
+        "unreadableHandoffs": store.unreadable_handoffs,
+        "unreadableMessages": store.unreadable - store.unreadable_handoffs,
+        "maxDepth": MAX_DEPTH,
+        "maxRetries": MAX_RETRIES,
     }))
 }
 

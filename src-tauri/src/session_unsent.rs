@@ -202,17 +202,17 @@ impl SessionManager {
         match restart {
             Restart::Lost => {
                 let text = format!("The previous {agent} conversation is no longer on this machine; starting a new one.");
-                self.publish(rt, Payload::Status { text }, None);
+                self.publish(rt, Payload::Status { text, handoff: None }, None);
             }
             Restart::Resend(sent) => {
                 let text = format!("{agent} never received the context carried over from the earlier conversation; sending it again.");
-                self.publish(rt, Payload::Status { text }, None);
+                self.publish(rt, Payload::Status { text, handoff: None }, None);
                 self.redeliver(rt, rt_arc, sent);
             }
             Restart::Unconfirmed(_) => self.needs_recovery(rt, RecoveryKind::DeliveryUnconfirmed, crate::recovery_log::Source::Delivery),
             Restart::Unsent(_) if prompting => {
                 let text = format!("{agent} never received your earlier prompt, so its conversation starts with this one.");
-                self.publish(rt, Payload::Status { text }, None);
+                self.publish(rt, Payload::Status { text, handoff: None }, None);
             }
             // Said when the CLI was last started, or when the tab was opened
             // (`load_events`), and still standing.

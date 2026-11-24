@@ -121,7 +121,7 @@ fn a_bots_home_has_its_list_chats_duties_and_role_and_makes_nothing() {
     let _home = bots_on();
     let (manager, sink) = manager();
     let (bot, _) = asking(&sink);
-    let other = crate::bots::chat::new_chat(&*sink, &bot.id).unwrap();
+    let other = crate::bots::chat::new_chat(&*sink, &bot.id, None).unwrap();
     let before = index::load().unwrap().len();
     let home = call(&manager, "home", &json!({"id": bot.id})).unwrap();
     assert_eq!(home["bot"]["name"], "Sentry");
