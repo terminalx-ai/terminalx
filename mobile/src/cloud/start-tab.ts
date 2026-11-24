@@ -1,7 +1,7 @@
 import { modelNote } from "@terminalx/portable/agentSettings";
 import { WorkspaceRpcError, type RuntimeAgentModel, type RuntimeAgentsReport, type WorkspaceConnectionState, type WorkspaceYou } from "@terminalx/portable/workspace";
 import type { CloudRole } from "./api";
-import { effortLabel, PHONE_DEFAULT_MODE, phoneModeLabel, phoneModes, type PhoneMode } from "./agent-settings";
+import { effortLabel, PHONE_DEFAULT_MODE, phoneMode, phoneModeLabel, phoneModes, type PhoneMode } from "./agent-settings";
 
 /**
  * Starting a conversation, or adding an agent tab, in a running cloud
@@ -139,14 +139,27 @@ function modeFor(agent: StartAgent, wanted: PhoneMode): PhoneMode {
 }
 
 /**
- * The sheet as it opens: the first agent that can be picked, its default
- * model and that model's default effort, and Ask every time. Never the
- * runtime's `defaultMode`, which is Bypass permissions for every agent.
+ * The sheet as it opens: the settings of the tab the person is on, else the
+ * first agent that can be picked, its default model and that model's default
+ * effort, and Ask every time. Never the runtime's `defaultMode`, which is
+ * Bypass permissions for every agent.
  */
-export function initialStartChoices(agents: readonly StartAgent[]): StartChoices {
+export function initialStartChoices(agents: readonly StartAgent[], from?: TabSettings | null): StartChoices {
+  // The tab the person is on (25.10), where its agent can be picked here: its model and effort where offered, its
+  // mode where it is one a phone may choose (Bypass permissions becomes Ask every time).
+  const own = from ? agents.find((candidate) => candidate.id === from.agent && !candidate.blocked) : null;
+  if (own && from) {
+    const base = agentChoices(own, phoneMode(from.mode));
+    const withModel = from.model && own.models.some((model) => model.id === from.model) ? chooseModel(agents, base, from.model) : base;
+    const model = own.models.find((candidate) => candidate.id === withModel.model);
+    return { ...withModel, effort: from.effort && model?.efforts.includes(from.effort) ? from.effort : withModel.effort };
+  }
   const agent = agents.find((candidate) => !candidate.blocked) ?? null;
   return agent ? agentChoices(agent, PHONE_DEFAULT_MODE) : { agent: null, model: "", effort: null, mode: PHONE_DEFAULT_MODE };
 }
+
+/** What a tab runs, as the runtime lists it: where a new start's choices begin. */
+export interface TabSettings { agent: string; model: string | null; effort: string | null; mode: string | null }
 
 function agentChoices(agent: StartAgent, mode: PhoneMode): StartChoices {
   const model = defaultModel(agent);

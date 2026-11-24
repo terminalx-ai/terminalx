@@ -39,6 +39,15 @@ describe("what the start sheet offers (25.10)", () => {
     expect(startRows(agents, choices)).toEqual({ agent: "Claude Code", model: "Opus", effort: "High", mode: "Ask every time" });
   });
 
+  it("starts on what the tab on screen runs, where it can be picked; its Bypass mode becomes Ask every time", () => {
+    const agents = startAgents(REPORT);
+    expect(initialStartChoices(agents, { agent: "claude", model: "sonnet", effort: "low", mode: "plan" })).toEqual({ agent: "claude", model: "sonnet", effort: "low", mode: "plan" });
+    expect(initialStartChoices(agents, { agent: "claude", model: "opus", effort: "max", mode: "bypassPermissions" })).toEqual({ agent: "claude", model: "opus", effort: "high", mode: "manual" });
+    // A model this workspace does not offer: the agent's default. An agent that cannot be picked: the first that can.
+    expect(initialStartChoices(agents, { agent: "claude", model: "gone-model", effort: null, mode: null })).toEqual({ agent: "claude", model: "opus", effort: "high", mode: "manual" });
+    expect(initialStartChoices(agents, { agent: "gemini", model: null, effort: null, mode: "plan" })).toEqual({ agent: "codex", model: "", effort: null, mode: "manual" });
+  });
+
   it("an agent with no models, efforts or modes reads Agent's default, and has no Effort or Permission mode row; its request still names a mode", () => {
     const agents = startAgents({ agents: [CODEX], missing: null });
     const choices = initialStartChoices(agents);

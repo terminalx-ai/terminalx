@@ -27,15 +27,15 @@ name: Start a conversation (25.10)
 - tapOn: { id: "pick-agent" }
 - waitForAnimationToEnd
 - takeScreenshot: 25.10-03-agent-picker
-- tapOn: { id: "choice-sheet-backdrop", index: 0 }
+- tapOn: { point: "50%,12%" }
 - tapOn: { id: "pick-model" }
 - waitForAnimationToEnd
 - takeScreenshot: 25.10-04-model-picker
-- tapOn: { id: "choice-sheet-backdrop", index: 0 }
+- tapOn: { point: "50%,12%" }
 - tapOn: { id: "pick-permission-mode" }
 - waitForAnimationToEnd
 - takeScreenshot: 25.10-05-mode-picker
-- tapOn: { id: "choice-sheet-backdrop", index: 0 }
+- tapOn: { point: "50%,12%" }
 - tapOn: "First message"
 - inputText: "Update the changelog for the search filters."
 - waitForAnimationToEnd

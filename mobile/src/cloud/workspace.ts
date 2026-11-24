@@ -6,7 +6,7 @@ import type { CommandKind, CommandScope } from "./crypto";
 import { WorkspaceKeys, type SecretStorage } from "./keys";
 import { CloudWorkspaceLink, type CloudLinkOptions, type CloudLinkProblem } from "./link";
 import { CloudOutbox, OutboxError, type OutboxEntry, type OutboxPayload } from "./outbox";
-import { startAgents, startOffer, type StartAgent, type StartOffer } from "./start-tab";
+import { startAgents, startOffer, type StartAgent, type StartOffer, type TabSettings } from "./start-tab";
 import { CloudTranscripts, type BlobStorage } from "./transcripts";
 
 /**
@@ -52,6 +52,8 @@ export interface CloudTab {
    * until the person lets the message go (`dismiss`). Nothing streams.
    */
   gone: boolean;
+  /** What its agent runs, as the runtime last listed it; null until then. */
+  settings: TabSettings | null;
 }
 
 /** What a conversation started from the phone became (`session.create`, PRO-546). */
@@ -738,6 +740,7 @@ export class CloudWorkspaceSession {
       tab.pendingPermissions = info.pendingPermissions ?? [];
       tab.source = "live";
       tab.gone = false;
+      if (info.harness) tab.settings = { agent: info.harness, model: info.requestedModel ?? info.model ?? null, effort: info.requestedEffort ?? info.effort ?? null, mode: info.requestedPermissionMode ?? info.permissionMode ?? null };
       if (info.lease !== undefined) this.setLease(info.tabId, info.lease);
     }
     // The runtime's list is the tabs there are: one it no longer names was closed. It stays only
@@ -862,7 +865,7 @@ export class CloudWorkspaceSession {
   private tab(tabId: string): CloudTab {
     let tab = this.tabs.get(tabId);
     if (!tab) {
-      tab = { tabId, sessionId: null, title: null, status: "idle", source: "checkpoint", pendingPermissions: [], events: [], truncated: false, noKey: false, continuous: false, gone: false };
+      tab = { tabId, sessionId: null, title: null, status: "idle", source: "checkpoint", pendingPermissions: [], events: [], truncated: false, noKey: false, continuous: false, gone: false, settings: null };
       this.tabs.set(tabId, tab);
     }
     return tab;

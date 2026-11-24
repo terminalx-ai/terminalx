@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { WifiOff } from "lucide-react-native";
 import { BYPASS_NOT_FROM_PHONE, phoneModes } from "@mobile/cloud/agent-settings";
 import {
   chooseAgent, chooseModel, conversationTitle, effortChoices, initialStartChoices, keepsRequest, modelChoices, PROVEN_BY_LIVE_CHECK,
-  START_WORDS, startFailure, startParams, startRows, type StartAgent, type StartChoices, type StartFailure,
+  START_WORDS, startFailure, startParams, startRows, type StartAgent, type StartChoices, type StartFailure, type TabSettings,
 } from "@mobile/cloud/start-tab";
 import type { CloudWorkspaceSession, CloudWorkspaceSnapshot } from "@mobile/cloud/workspace";
 import { ChoiceSheet, type Choice } from "./ChoiceSheet";
@@ -31,12 +31,14 @@ const newRequestId = () => `phone-${Date.now().toString(36)}-${Math.random().toS
  * workspace starts (`waking`) the message can be written, and the choices
  * appear once it runs.
  */
-export function StartAgentSheet({ kind, session, snapshot, sessionId, text, onText, waking, wakeFailure, onRetryWake, onStarted, onClose }: {
+export function StartAgentSheet({ kind, session, snapshot, sessionId, from, text, onText, waking, wakeFailure, onRetryWake, onStarted, onClose }: {
   kind: "conversation" | "tab";
   session: CloudWorkspaceSession;
   snapshot: CloudWorkspaceSnapshot;
   /** The conversation an added tab joins (the tab on screen's). */
   sessionId?: string | null;
+  /** What the tab on screen runs: the choices start there. */
+  from?: TabSettings | null;
   /** The first message, held by the screen: closing the sheet keeps it for the next time it opens. */
   text: string;
   onText(text: string): void;
@@ -69,9 +71,11 @@ export function StartAgentSheet({ kind, session, snapshot, sessionId, text, onTe
     session.startAgents().then((agents) => {
       if (!current) return;
       setReading({ state: "read", agents });
-      setChoices((held) => held ?? initialStartChoices(agents));
+      setChoices((held) => held ?? initialStartChoices(agents, from));
     }, () => { if (current) setReading({ state: "unread" }); });
     return () => { current = false; };
+    // `from` is read once, when the agents are: what the person picks after that stays theirs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected, offer, session, attempt]);
 
   useEffect(() => {
@@ -149,7 +153,7 @@ export function StartAgentSheet({ kind, session, snapshot, sessionId, text, onTe
         <View style={[styles.handle, { backgroundColor: palette.faint }]} />
         <Text accessibilityRole="header" style={[styles.title, { color: palette.ink }]}>{conversation ? START_WORDS.newConversation : START_WORDS.addTab}</Text>
         {conversation ? null : <Text style={[styles.subtitle, { color: palette.muted }]}>{START_WORDS.addTabUnder}</Text>}
-        <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent} keyboardShouldPersistTaps="handled">
+        <View style={styles.body}>
           {blocker ? <Notice testID="start-blocker" tone={blocker.tone} text={blocker.text} icon={blocker.offline ? (color) => <WifiOff size={16} color={color} /> : undefined} action={blocker.retry ? { label: START_WORDS.tryAgain, onPress: blocker.retry } : undefined} /> : null}
           {spinnerLine ? <View testID="start-reading" style={styles.spinnerLine}><Spinner size={14} color={palette.muted} /><Text style={[styles.spinnerText, { color: palette.muted }]}>{spinnerLine}</Text></View> : null}
           {!showRows ? null
@@ -163,7 +167,7 @@ export function StartAgentSheet({ kind, session, snapshot, sessionId, text, onTe
             helper={emptyAllowed && !text.trim() && !failure ? START_WORDS.noMessage : undefined} /> : null}
           {failure ? <Notice testID="start-failure" tone={failure.kind === "no-answer" || failure.kind === "offline" ? "warning" : failure.kind === "refused" ? "warning" : "danger"} text={failure.text} icon={failure.kind === "no-answer" || failure.kind === "offline" ? (color) => <WifiOff size={16} color={color} /> : undefined} /> : null}
           <Button testID="start-submit" label={label} disabled={!canSend} onPress={() => void start()} style={styles.submit} />
-        </ScrollView>
+        </View>
       </View>
     </KeyboardAvoidingView>
     {pickerSheet}
@@ -187,8 +191,7 @@ const styles = StyleSheet.create({
   handle: { alignSelf: "center", width: 40, height: 4, borderRadius: 2, marginBottom: 12, opacity: 0.6 },
   title: { fontSize: 17, fontWeight: "600", lineHeight: 22, paddingHorizontal: 4 },
   subtitle: { fontSize: 13, lineHeight: 18, paddingHorizontal: 4, paddingTop: 2 },
-  body: { flexGrow: 0, marginTop: 12 },
-  bodyContent: { gap: 12 },
+  body: { marginTop: 12, gap: 12 },
   spinnerLine: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 4 },
   spinnerText: { fontSize: 13, lineHeight: 18, flex: 1 },
   skeletonRow: { minHeight: 48, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14 },

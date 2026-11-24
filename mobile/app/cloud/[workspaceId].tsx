@@ -223,7 +223,7 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
           : <EmptyState title="Connecting…" detail="The conversation shows once this phone reaches the workspace." busy />}</View>
         {startBarShown(listedState, starting, live, stop) ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={roleNow} creatorId={listed?.createdBy ?? null} starting={starting} /> : null}
       </View>}
-    {sheet ? <StartAgentSheet kind={sheet.kind} session={session} snapshot={snapshot} sessionId={tab?.sessionId ?? null} text={sheetText} onText={setSheetText}
+    {sheet ? <StartAgentSheet kind={sheet.kind} session={session} snapshot={snapshot} sessionId={tab?.sessionId ?? null} from={tab && !tab.gone ? tab.settings : null} text={sheetText} onText={setSheetText}
       waking={waking && !live} wakeFailure={live ? null : wakeFailure} onRetryWake={wake} onStarted={started} onClose={() => setSheet(null)} /> : null}
   </>;
 }
