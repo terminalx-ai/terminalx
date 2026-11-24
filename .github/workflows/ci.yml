@@ -163,11 +163,11 @@ jobs:
     needs: macos-rust-changes
     if: needs.macos-rust-changes.outputs.frontend == 'true'
     runs-on: macos-latest
-    # The whole job took 11 min 46 s and 22 min 2 s on its first two runs after
-    # the checks were pooled (#1515); before that the checks alone took about
-    # 30. The limit leaves room for one check hung to run-all's own ten minutes
-    # on the slower of those runners.
-    timeout-minutes: 35
+    # On a slow runner the checks alone take 31 to 37 minutes (three at once,
+    # a load average of 9 to 55 on three cores); at 35 the job was cancelled
+    # with 116 of 128 checks done and none failed (#1518's second run). The
+    # limit comes down when the checks run on Linux, not before.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

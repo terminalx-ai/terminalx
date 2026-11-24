@@ -442,3 +442,40 @@ cheap; it is not known to have fixed anything.
 | `pairing::tests::a_phone_starts_sessions_and_changes_settings_only_as_its_scope_allows` (child `phone_router_child_fixture`) | #1515, Linux | the child's call refused with `person_required` at `pairing/mod.rs:2337`. Cause not known. |
 | `finished-toast` (WebKit check, new with #1499) | `main`, #1515 rounds 2 and 3, #1517, the Linux trial | 10 s waiting for the notice at `finished-toast.mjs:61`. The fixture listed the tab as idle and the list read again on focus undid `in_progress`. Fixed in #1515. |
 | `remote::git::tests::mention_lookups_read_the_workspaces_pull_requests_with_its_gh` | #1515, Linux | `gh: Text file busy`. Fixed in #1520. |
+
+### #1518's second run (run 45288239288, head `92294332`)
+
+Caches of the new shape existed (this pull request's own, from the first run).
+
+| Job | Result | Time |
+| --- | --- | --- |
+| `linux-rust-tests` parts 1, 2, 4 (nextest) | pass, 1,444 / 1,443 / 1,443 tests | 6 min 37 s, 6 min 28 s, 7 min 28 s; tests 121 s, 115 s, 146 s; build about 3 min 35 s |
+| `linux-rust-tests (3)` | pass, 1,443 tests | 15 min 53 s |
+| `linux-rust-tests (binaries)` | pass | 10 min 11 s |
+| `serve-tests` | pass | 9 min 8 s |
+| `linux-rust` (Clippy) | pass | 2 min 45 s |
+| `frontend` | pass | 1 min 27 s |
+| `phone-app` | failed on `main`'s two `setup-routes` tests of 1,685 | 51 s |
+| `macos-native`, selected pull request | pass, 1,875 passed and 14 ignored | 44 min 7 s |
+| `webkit-layout` | cancelled by a 35 minute limit this branch had set; 116 of 128 done, none failed | 35 min 32 s |
+
+Every Linux job was done 16 minutes after the push.
+
+Part 3 was slow for two reasons, neither the partition: its `apt-get` step
+took 466 s (24 s on part 2), and its tests took 214 s because it holds the
+two slowest tests (the socket-capacity test and the 112 s privacy test, both
+shortened in #1520, which this branch does not have).
+
+`macos-native` with Clippy in front: Clippy 6 min 40 s and 5 min 55 s, the
+library's test build 9 min 53 s, and then the test step still compiled the
+crate again, 11 min 9 s, before `running 1889 tests` (457 s). So the second
+compile did not move to Clippy; which input changes is still not found.
+
+nextest reported no flaky test and two leaky ones:
+`action_runner::tests::a_running_non_concurrent_action_is_returned_and_restart_replaces_it`
+and
+`action_runner::tests::a_restart_whose_old_run_will_not_stop_starts_nothing_and_holds_up_no_other_action`.
+
+Linux WebKit, second sample: part 3 passed; the others failed
+(`sidebar-extras`, `file-tab`, `review-threads` in one part; the other two
+parts' lists were not read).
