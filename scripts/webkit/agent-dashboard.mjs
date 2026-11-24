@@ -185,6 +185,7 @@ try {
         const heading = column.locator("header");
         const before = await heading.boundingBox();
         await cards(column).first().hover();
+        await page.evaluate(() => { window.__wheelStill = {}; });
         await page.mouse.wheel(0, 100_000);
         const last = cards(column).last();
         if (count > 1) {
@@ -195,10 +196,16 @@ try {
           }, labels[index]);
           if (!config.stacked) {
             assert.ok(layout.scrollHeight > layout.clientHeight, `${context}: populated column overflows`);
+            // At the end and no longer moving: WebKit on Linux animates a wheel scroll, and at 150% zoom its last step is a
+            // pixel. Read within a pixel of the end, the last card was 1.4 px past the column (hosted-runner run
+            // 45392734637; 3 of 36 copies in a Linux container) and fully in it a step later.
             await page.waitForFunction((label) => {
               const list = document.querySelector(`section[aria-label="${label}"]`).lastElementChild;
-              return list.scrollTop + list.clientHeight >= list.scrollHeight - 1;
-            }, labels[index]);
+              const still = window.__wheelStill;
+              const seen = still[label] ?? { at: null, frames: 0 };
+              still[label] = { at: list.scrollTop, frames: seen.at === list.scrollTop ? seen.frames + 1 : 0 };
+              return still[label].frames >= 3 && list.scrollTop + list.clientHeight >= list.scrollHeight - 1;
+            }, labels[index], { polling: "raf" });
             assert.ok(await visible(last), `${context}: wheel reaches the last card`);
             assert.deepEqual(await heading.boundingBox(), before, `${context}: status heading stays put`);
           }
