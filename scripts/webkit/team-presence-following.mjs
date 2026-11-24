@@ -106,7 +106,18 @@ async function fresh(width, options = {}) {
   if (process.env.WEBKIT_TIMEOUT_MS) page.setDefaultTimeout(Number(process.env.WEBKIT_TIMEOUT_MS));
   // Block before navigation, so startup and avatar requests are also local only.
   await page.route("**/*", (route) => new URL(route.request().url()).origin === new URL(server.url).origin ? route.continue() : route.abort());
-  await page.addInitScript(`window.__PW_FIXTURE__ = ${JSON.stringify({ cloud: true, localProjects: 1, dashboardCount: 0, teamOverview: true, ...options })};\n${fixture}`);
+  await page.addInitScript(`window.__PW_FIXTURE__ = ${JSON.stringify({ cloud: true, localProjects: 1, dashboardCount: 0, teamOverview: true, ...options })};\n${fixture}
+    const answers = window.__PW_STUB__.answers;
+    const nextInboxPage = answers.desktop_inbox;
+    answers.desktop_inbox = (args) => args.waitMs === 0
+      ? { v: 1, cursor: args.after, hasMore: false, events: [] }
+      : nextInboxPage(args);
+    if (window.__PW_FIXTURE__.followReassignHeld) {
+      const status = window.__PW_STUB__.answers.account_status;
+      const orgId = status.organizations[0].id;
+      status.phase2Readiness[orgId] = status.phase2Readiness[orgId].filter((key) => key !== 'team.follow-reassign.v1');
+    }
+  `);
   await page.goto(server.url);
   await sidebar(page);
   await page.getByRole("button", { name: /^Overview/ }).click();
@@ -115,7 +126,7 @@ async function fresh(width, options = {}) {
   await page.getByRole("textbox", { name: "Search sessions" }).waitFor();
   await showTable(page);
   await sameRows(page, names);
-  await viewCounts(page, { Everyone: 4, Mine: 2, "Shared with me": 1, Following: 1, "Active now": 1 });
+  await viewCounts(page, { Everyone: 4, Mine: 2, "Shared with me": 1, "Active now": 1, ...(!options.followReassignHeld && { Following: 1 }) });
   return page;
 }
 async function reassign(page) {
@@ -293,7 +304,7 @@ try {
       await dialog.getByRole("textbox", { name: "Note to the new owner", exact: true }).fill("Private handover note & plain text");
       await reachable(dialog.getByRole("button", { name: "Reassign", exact: true }), "reassign submit");
       await dialog.getByRole("button", { name: "Reassign", exact: true }).click();
-      await dialog.getByRole("alert").filter({ hasText: "Work is running." }).waitFor();
+      await dialog.getByRole("alert").filter({ hasText: "The workspace is busy or a schedule restriction prevents reassignment." }).waitFor();
       const attempts = () => page.evaluate(() => window.__PW_TEAM__.calls.filter((c) => c.command === "cloud_workspace_reassign"));
       assert.equal((await attempts()).length, 1, "no automatic refusal retry");
       await dialog.getByRole("button", { name: "Retry same attempt", exact: true }).click();
@@ -333,10 +344,26 @@ try {
     await dialog.getByRole("textbox", { name: "Find a teammate", exact: true }).fill("Bob");
     await dialog.getByRole("radio").check();
     await dialog.getByRole("textbox", { name: "Note to the new owner", exact: true }).fill("Away until Monday");
-    await success.evaluate(() => { window.__PW_TEAM__.refusal = null; });
+    await success.evaluate(() => {
+      const fixture = window.__PW_TEAM__;
+      fixture.refusal = null;
+      const answers = window.__PW_STUB__.answers;
+      const reassign = answers.cloud_workspace_reassign;
+      answers.cloud_workspace_reassign = (args) => new Promise((resolve) => {
+        fixture.finishReassignment = () => resolve(reassign(args));
+      });
+    });
+    const confirmation = success.getByRole("status").filter({ hasText: "Reassigned Owned workspace to Bob" });
     await dialog.getByRole("button", { name: "Reassign", exact: true }).click();
-    await dialog.getByRole("status").filter({ hasText: "Reassignment recorded." }).waitFor();
-    await dialog.getByRole("button", { name: "Done", exact: true }).click();
+    await success.waitForFunction(() => !!window.__PW_TEAM__.finishReassignment);
+    assert.equal(await dialog.getByRole("button", { name: "Reassigning…", exact: true }).isDisabled(), true);
+    assert.equal(await confirmation.count(), 0, "no sender feedback before the server confirms");
+    await success.evaluate(() => window.__PW_TEAM__.finishReassignment());
+    await dialog.waitFor({ state: "detached" });
+    await confirmation.waitFor();
+    await reachable(confirmation, "confirmed sender feedback");
+    await success.getByRole("button", { name: "Dismiss reassignment confirmation", exact: true }).click();
+    await confirmation.waitFor({ state: "detached" });
     const following = success.getByRole("region", { name: "Following", exact: true });
     await following.getByRole("button", { name: "Owned workspace", exact: true }).waitFor();
     await success.getByRole("button", { name: /^Overview/ }).click();
@@ -349,16 +376,16 @@ try {
   const privatePage = await fresh(390, { privateWorkspace: true });
   try {
     const dialog = await reassign(privatePage);
-    await dialog.getByRole("textbox", { name: "Find a teammate", exact: true }).fill("Bob");
-    await dialog.getByRole("radio").check();
+    assert.equal(await dialog.getByRole("radio").count(), 0);
     await dialog.getByText("Private cross-owner handover is unavailable. Confirmation cannot grant a teammate access.", { exact: true }).waitFor();
     assert.equal(await dialog.getByRole("button", { name: "Reassign", exact: true }).isDisabled(), true);
     assert.equal(await privatePage.evaluate(() => window.__PW_TEAM__.calls.filter((c) => c.command === "cloud_workspace_reassign").length), 0);
   } finally { await privatePage.close(); }
 
-  for (const recipient of ["other", "target-account", "target-privacy"]) {
+  for (const recipient of ["other", "target-account", "target-privacy", "target-events-only"]) {
     const target = recipient !== "other";
-    const page = await fresh(390);
+    const eventsOnly = recipient === "target-events-only";
+    const page = await fresh(390, { followReassignHeld: eventsOnly });
     try {
       await page.waitForFunction(() => !!window.__PW_TEAM__.inboxPending);
       await page.evaluate((target) => {
@@ -369,21 +396,27 @@ try {
       // Durable cursor proves the subscriber consumed the event, independent of notice rendering.
       await page.waitForFunction(() => Number(JSON.parse(localStorage.getItem("terminalx.inbox.v1:account-a") ?? "null")?.cursor) > 0);
       await page.waitForFunction(() => !!window.__PW_TEAM__.inboxPending);
-      if (target) {
+      if (target && !eventsOnly) {
         const notice = page.getByRole("status").filter({ hasText: "reassigned to you Shared workspace" });
         await notice.waitFor();
         await reachable(notice, "target-only notice");
         assert.match(await notice.textContent(), /Target-only note <b>literal<\/b>/);
         assert.equal(await notice.locator("b").count(), 0, "note is text, never markup");
         if (recipient === "target-account") await page.evaluate(() => window.__PW_TEAM__.switchAccount());
-        else await page.evaluate(() => {
+        if (recipient === "target-privacy") await page.evaluate(() => {
           window.__PW_STUB__.answers.data_privacy_status = { enabled: true, managed: false };
           window.dispatchEvent(new Event("focus"));
         });
         await notice.waitFor({ state: "detached" });
         assert.equal(await page.getByText("Target-only note <b>literal</b>", { exact: true }).count(), 0);
       } else {
-        assert.equal(await page.getByRole("button", { name: "Dismiss reassignment", exact: true }).count(), 0, "non-target cannot see private note");
+        assert.equal(await page.getByRole("button", { name: "Dismiss reassignment", exact: true }).count(), 0,
+          eventsOnly ? "PRO-125 keeps incoming reassignment held for this organization" : "non-target cannot see private note");
+        if (eventsOnly) {
+          assert.equal(await page.getByRole("navigation", { name: "Views", exact: true }).getByRole("button", { name: /^Following/ }).isDisabled(), true);
+          await sidebarShown(page, true);
+          assert.equal(await page.getByRole("region", { name: "Following", exact: true }).count(), 0);
+        }
         assert.equal(await page.getByText("Target-only note <b>literal</b>", { exact: true }).count(), 0);
       }
     } finally { await page.close(); }
