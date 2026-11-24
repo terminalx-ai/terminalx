@@ -58,7 +58,7 @@ light: for the light run set the simulator's appearance to light and
 Sign in shows "Signing in…" for a few seconds and is then held at the private
 beta, so the access code screen comes up through the app's own layout. Each
 code goes through the app's real `redeemAccessCode` to a redeem route in
-memory, which answers after three seconds as the argument says, in the words
+memory, which answers after eight seconds (the accepted page also stays eight seconds) as the argument says, in the words
 of the server's contract (PRO-550): `accepted`, `invalid`, `expired`,
 `exhausted`, `rate-limited`, `ended` (the ticket is gone) or `error`.
 `fixtureAccessEmail` is the address the sign-in is for (the long-address

@@ -280,9 +280,9 @@ const accessAnswer = typeof accessAsked === "string" && accessAsked in ACCESS_AN
 const accessEmailAsked = Settings.get("fixtureAccessEmail");
 const ACCESS_EMAIL = typeof accessEmailAsked === "string" && accessEmailAsked.includes("@") ? accessEmailAsked : "alex@example.com";
 const SIGNED_IN: CloudSession = { accessToken: "fixture", refreshToken: "fixture", expiresAt: now + DAY * 60_000, user: { userId: "fixture", email: "alex@example.com", displayName: "Alex" } };
-/** The redeem route, in memory: it answers after a moment, so "Checking the code…" can be shot. */
+/** The redeem route, in memory: it answers after eight seconds, so "Checking the code…" can be shot behind Maestro's lag. */
 const accessServer: typeof fetch = async () => {
-  await pause(3_000);
+  await pause(8_000);
   const answer = accessAnswer!;
   const body = answer.status === 200 ? { ...answer.body, ...SIGNED_IN, user: { ...SIGNED_IN.user, email: ACCESS_EMAIL } } : answer.body;
   return new Response(JSON.stringify(body), { status: answer.status, headers: { "content-type": "application/json" } });
@@ -361,7 +361,8 @@ export function AppProvider({ children }: PropsWithChildren) {
     connection, api,
     signIn, signingIn, accessCode, redeemAccessCode: redeem,
     cancelAccessCode: () => { ticket.current = null; setAccessCode(null); },
-    finishAccessCode: () => setAccessCode(null),
+    // Held a few seconds longer than the app's own pause: Maestro trails the screen, and the accepted page is shot.
+    finishAccessCode: () => { void pause(8_000).then(() => setAccessCode(null)); },
     signOut: async () => undefined, refreshMachines: async () => { await pause(1_500); }, pairAvailable: async () => undefined, pairCode: async () => undefined, retryPairing: async () => undefined,
     connectHost: async () => true, disconnectHost: () => undefined,
     forgetHost: async (id: string) => setHosts((current) => current.filter((host) => host.id !== id)),

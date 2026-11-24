@@ -45,6 +45,7 @@ name: Access code (25.08)
 - inputText: "K7QM2X9TR8"
 - tapOn: "Continue"
 - assertVisible: "That access code is not valid. Check it and try again."
+- waitForAnimationToEnd
 - takeScreenshot: 25.08-08-not-valid
 - eraseText: 1
 - inputText: "B"
@@ -59,6 +60,7 @@ name: Access code (25.08)
 - inputText: "K7QM2X9TRB"
 - tapOn: "Continue"
 - assertVisible: "That access code has expired. Enter a different one."
+- waitForAnimationToEnd
 - takeScreenshot: 25.08-09-expired
 - launchApp:
     stopApp: true
@@ -69,6 +71,7 @@ name: Access code (25.08)
 - inputText: "K7QM2X9TRB"
 - tapOn: "Continue"
 - assertVisible: "That access code has been fully used. Enter a different one."
+- waitForAnimationToEnd
 - takeScreenshot: 25.08-10-fully-used
 # The code cannot be checked: offline, and no answer or a server error.
 - launchApp:
@@ -124,7 +127,8 @@ name: Access code (25.08)
 - inputText: "K7QM2X9TR8"
 - tapOn: "Continue"
 - assertVisible: "That access code is not valid. Check it and try again."
-- tapOn: "K7QM2X9TR8"
+# The refused code keeps the cursor, so the keyboard is up again.
+- waitForAnimationToEnd
 - takeScreenshot: 25.08-16-a-long-address-an-error-and-the-keyboard
 # Cancel signs the person out: back on the Machines tab, signed out.
 - launchApp:
