@@ -161,6 +161,7 @@ afterEach(() => {
   resetCloudAgents();
   resetCloudSessions();
   localStorage.removeItem(ownerStorageKey("a", ORG));
+  localStorage.removeItem(ownerStorageKey("a", OTHER));
 });
 
 describe("a waiting cloud tab", () => {
@@ -408,7 +409,7 @@ it("filters table sessions by cloud owner and archive state and opens an archive
   fireEvent.pointerDown(screen.getByRole("button", { name: "Hiding archived" }), { button: 0, ctrlKey: false });
   fireEvent.click(await screen.findByRole("menuitemradio", { name: "Only archived" }));
   await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
-  expect(screen.queryByRole("button", { name: /^People:/ })).toBeNull();
+  expect(screen.getByRole("button", { name: "People: Everyone · 1" })).toBeTruthy();
   // The people picker (02.05): Amy alone.
   fireEvent.pointerDown(screen.getByRole("button", { name: "By Anyone" }), { button: 0, ctrlKey: false });
   const picker = await screen.findByRole("menu");
@@ -449,6 +450,43 @@ it("preserves the base dashboard toolbar and named owners while presence is held
   expect(screen.queryByRole("columnheader", { name: "Where" })).toBeNull();
 });
 
+it("preserves each organisation’s people presentation and saved owner filters with mixed readiness", async () => {
+  mocks.status.phase2Readiness = { [ORG]: ["team.presence.v1"] };
+  rememberPeople([{ userId: "amy", displayName: "Amy" }, { userId: "zoe", displayName: "Zoe" }, { userId: "pat", displayName: "Pat" }]);
+  await poll(ORG, [item("ws-1", ORG, { createdBy: "amy" })]);
+  await poll(OTHER, [
+    item("ws-b", OTHER, { createdBy: "zoe", runtimeActivity: { ...pending(0), activeTurns: 1 } }),
+    item("ws-excluded", OTHER, { createdBy: "pat" }),
+  ]);
+  act(() => {
+    catalog.cacheCloudSessions(OTHER, "ws-b", [
+      session("sb", "Landing page copy", "in_progress", { modified: new Date().toISOString(), lastMessageAt: new Date().toISOString() }),
+    ] as never, ["session/2"]);
+    catalog.cacheCloudSessions(OTHER, "ws-excluded", [session("sx", "Exclude by saved owner", "idle")] as never, ["session/2"]);
+  });
+  localStorage.setItem(ownerStorageKey("a", ORG), JSON.stringify(["amy"]));
+  prefs.setPrefs({ dashboard: { ...DEFAULT_DASHBOARD_PREFERENCES, view: "table", owners: ["zoe"] } });
+  render(<TooltipProvider><AgentDashboard /></TooltipProvider>);
+
+  expect(screen.getByRole("button", { name: "People: Zoe" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "By Amy" })).toBeTruthy();
+  expect(screen.getByRole("group", { name: "Active now: Zoe" })).toBeTruthy();
+  const ready = await screen.findByRole("row", { name: /Fix login redirect/ });
+  const held = await screen.findByRole("row", { name: /Landing page copy/ });
+  expect(within(ready).getByRole("button", { name: "View profile: Amy" })).toBeTruthy();
+  expect(within(ready).queryByText("Amy", { exact: true })).toBeNull();
+  expect(within(held).getByRole("button", { name: "View profile: Zoe" })).toBeTruthy();
+  expect(within(held).getByText("Zoe", { exact: true })).toBeTruthy();
+  expect(screen.queryByRole("row", { name: /Exclude by saved owner/ })).toBeNull();
+
+  localStorage.setItem(ownerStorageKey("a", OTHER), JSON.stringify(["zoe"]));
+  act(() => prefs.setPrefs({ selectedOrganization: OTHER, dashboard: { ...DEFAULT_DASHBOARD_PREFERENCES, view: "table" } }));
+  expect(screen.getByRole("button", { name: "By 1 person" })).toBeTruthy();
+  expect(screen.getByRole("row", { name: /Fix login redirect/ })).toBeTruthy();
+  expect(screen.getByRole("row", { name: /Landing page copy/ })).toBeTruthy();
+  expect(screen.queryByRole("row", { name: /Exclude by saved owner/ })).toBeNull();
+});
+
 it.each(["cache", "error"])("preserves cached owners and a saved By filter when the catalog has %s", async (availability) => {
   mocks.status.phase2Readiness = { [ORG]: ["team.presence.v1"] };
   rememberPeople([{ userId: "amy", displayName: "Amy" }]);
@@ -462,7 +500,8 @@ it.each(["cache", "error"])("preserves cached owners and a saved By filter when 
   expect(screen.getByRole("button", { name: "By Amy" })).toBeTruthy();
   const row = await screen.findByRole("row", { name: /Fix login redirect/ });
   expect(within(row).getByRole("button", { name: "View profile: Amy" })).toBeTruthy();
-  expect(screen.queryByRole("row", { name: /Landing page copy/ })).toBeNull();
+  expect(screen.queryByRole("row", { name: /Add tests/ })).toBeNull();
+  expect(screen.getByRole("row", { name: /Landing page copy/ })).toBeTruthy();
 });
 
 it("shows a cloud row's Active time from its workspace's lastActivityAt only, and a local row's from its own messages", async () => {
