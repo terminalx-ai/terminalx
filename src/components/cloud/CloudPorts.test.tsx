@@ -1,16 +1,29 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RpcWireRequest } from "@terminalx/portable/rpc";
 import { WorkspaceRpcClient, type WorkspaceConnectionState, type WorkspaceTransport } from "@terminalx/portable/workspace";
 
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), openUrl: vi.fn(), listen: vi.fn(async () => () => undefined) }));
+const mocks = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  openUrl: vi.fn(),
+  listen: vi.fn(async (_event: string, _handler: (event: { payload: unknown }) => void) => () => undefined),
+}));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: mocks.openUrl }));
+vi.mock("@/lib/platform", async (original) => ({
+  ...(await original<typeof import("@/lib/platform")>()),
+  isMac: true,
+}));
 
 const { CloudPortsView, POLL_MS, connectionText, portErrorMessage, resetPortsMemory } = await import("./CloudPorts");
+const { PortForwardChip } = await import("./PortForwardChip");
+const { PortToasts } = await import("./PortToast");
+const { PortsPopover } = await import("./PortsPopover");
+const { CLOUD_PORT_FORWARDS_CHANGED } = await import("@/lib/api");
+const { portForwardsOf } = await import("@/lib/portForwards");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
 
 const live: WorkspaceConnectionState = { state: "connected", runtimeGeneration: 1, runtimeEpoch: "e1", runtimeVersion: "0.3.0", capabilities: ["pty/1", "ports/1"], authority: "manage" };
@@ -88,6 +101,128 @@ beforeEach(() => {
   });
 });
 afterEach(cleanup);
+
+describe("the Phase 2 cloud workspace header", () => {
+  const connectionId = "cloud-1";
+  const key = () => fireEvent.keyDown(document.body, { key: "y", code: "KeyY", metaKey: true });
+
+  function mockSettings(available: boolean) {
+    let settings = { enabled: true, auto: false };
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "phase2_desktop_contracts_available") return available;
+      if (command === "cloud_port_settings") return settings;
+      if (command === "cloud_port_set_settings") {
+        settings = { enabled: args.enabled ?? settings.enabled, auto: args.auto ?? settings.auto };
+        forwards = forwards.map((forward) => ({ ...forward, state: settings.enabled ? "open" : "waiting" }));
+        return settings;
+      }
+      return answer(command, args);
+    });
+  }
+
+  it("uses ⌘Y to pause and resume the active connection and leaves automatic forwarding off by default", async () => {
+    mockSettings(true);
+    const { client } = setup();
+    forwards = [{ port: 5173, localPort: 5173, reassigned: false, state: "open" }];
+    draw(<PortForwardChip workspaceKey="ws-1" client={client} state={live} connectionId={connectionId} mayOpen follow />);
+    fireEvent.click(screen.getByTestId("port-forward-chip"));
+    const forwarding = await screen.findByRole("switch", { name: "Forwarding" });
+    const auto = screen.getByRole("switch", { name: "Forward new ports automatically" });
+    await waitFor(() => expect(forwarding.getAttribute("aria-keyshortcuts")).toBe("Meta+Y"));
+    expect(auto.getAttribute("aria-checked")).toBe("false");
+    expect(key()).toBe(false);
+    await waitFor(() => expect(forwarding.getAttribute("aria-checked")).toBe("false"));
+    expect((await screen.findByText(/Port forwarding is off for this workspace/)).textContent).toContain("Looking here never starts it");
+    await waitFor(() => expect(row(5173).getAttribute("data-state")).toBe("waiting"));
+    expect((auto as HTMLButtonElement).disabled).toBe(true);
+    expect(key()).toBe(false);
+    await waitFor(() => expect(row(5173).getAttribute("data-state")).toBe("open"));
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "cloud_port_set_settings")).toEqual([
+      ["cloud_port_set_settings", { connectionId, enabled: false, auto: null }],
+      ["cloud_port_set_settings", { connectionId, enabled: true, auto: null }],
+    ]);
+  });
+
+  it.each([["ws-1", false], ["machine:mini", true]])("keeps ⌘Y inactive for %s with gate %s", async (workspaceKey, available) => {
+    mockSettings(available);
+    const { client } = setup();
+    draw(<PortForwardChip workspaceKey={workspaceKey} client={client} state={live} connectionId={connectionId} mayOpen follow />);
+    await waitFor(() => expect(portForwardsOf(connectionId).loaded).toBe(true));
+    expect(key()).toBe(true);
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "cloud_port_set_settings")).toBe(false);
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "phase2_desktop_contracts_available")).toBe(workspaceKey === "ws-1");
+  });
+
+  it("shows the native watcher's toast with the popover closed and no frontend polling", async () => {
+    mockSettings(true);
+    const { runtime, client } = setup(live, () => ({ detected: true, ports: [{ port: 32768 }], streams: [] }));
+    draw(<>
+      <PortForwardChip workspaceKey="ws-1" client={client} state={live} connectionId={connectionId} mayOpen follow />
+      <PortToasts connectionId={connectionId} where="in #19" />
+    </>);
+    fireEvent.click(screen.getByTestId("port-forward-chip"));
+    expect(await screen.findByText(/Auto-forwarding skips 32768–60999/)).toBeTruthy();
+    const auto = screen.getByRole("switch", { name: "Forward new ports automatically" });
+    expect(auto.getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(auto);
+    await waitFor(() => expect(auto.getAttribute("aria-checked")).toBe("true"));
+    expect(within(row(32768)).getByRole("button", { name: "Forward" })).toBeTruthy();
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "cloud_port_forward")).toBe(false);
+    fireEvent.click(screen.getByTestId("port-forward-chip"));
+    await waitFor(() => expect(screen.queryByTestId("ports-popover")).toBeNull());
+    runtime.sent.length = 0;
+    const watcher = mocks.listen.mock.calls.find(([event]) => event === CLOUD_PORT_FORWARDS_CHANGED)?.[1];
+    expect(watcher).toBeTypeOf("function");
+    const vite = { port: 5173, localPort: 5173, reassigned: false, state: "open", auto: true };
+    act(() => {
+      watcher?.({ payload: { connectionId, forwards: [vite], opened: [vite], settings: { enabled: true, auto: true } } });
+    });
+    const toast = await screen.findByTestId("port-toast");
+    expect(toast.textContent).toContain("Port 5173 forwarded to 127.0.0.1:5173");
+    expect(within(toast).getByRole("button", { name: "Open" })).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Copy" })).toBeTruthy();
+    expect(runtime.sent).toEqual([]);
+  });
+
+  it("validates the workspace and local fields before invoking a forward with an exact local port", async () => {
+    const { client } = setup(live, () => ({ detected: true, ports: [], streams: [] }));
+    draw(<PortsPopover workspaceKey="ws-1" client={client} state={live} connectionId={connectionId} mayOpen active phase2 />);
+    expect(await screen.findByText("No ports detected")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Forward a port" }));
+    const workspace = screen.getByRole("textbox", { name: "Workspace port" });
+    const local = screen.getByRole("textbox", { name: "Local port (optional)" });
+    fireEvent.change(workspace, { target: { value: "22" } });
+    fireEvent.change(local, { target: { value: "70000" } });
+    expect(screen.getByText(/Port 22 is kept for SSH/)).toBeTruthy();
+    expect(screen.getByText("Enter a port from 1 to 65535.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Forward" }));
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "cloud_port_forward")).toBe(false);
+    fireEvent.change(workspace, { target: { value: "5173" } });
+    fireEvent.change(local, { target: { value: "20173" } });
+    fireEvent.click(screen.getByRole("button", { name: "Forward" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("cloud_port_forward", { connectionId, port: 5173, localPort: 20173, exact: true }));
+    expect(await screen.findByText(/127\.0\.0\.1:20173/)).toBeTruthy();
+  });
+
+  it("shows an unavailable bind on the affected row and retries that port", async () => {
+    const { client } = setup();
+    const answer = mocks.invoke.getMockImplementation()!;
+    let fail = true;
+    mocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "cloud_port_forward" && fail) throw "cloud_port_in_use";
+      return answer(command, args);
+    });
+    draw(<PortsPopover workspaceKey="ws-1" client={client} state={live} connectionId={connectionId} mayOpen active phase2 />);
+    await screen.findByText("5432");
+    fireEvent.click(within(row(5432)).getByRole("button", { name: "Forward" }));
+    const retry = await within(row(5432)).findByRole("button", { name: "Retry" });
+    expect(within(row(5432)).getByRole("alert").textContent).toMatch(/No free local port could be assigned/);
+    fail = false;
+    fireEvent.click(retry);
+    await waitFor(() => expect(row(5432).getAttribute("data-state")).toBe("open"));
+  });
+});
 
 describe("the Ports tab (PRO-28, 14.11)", () => {
   it("lists what listens in the workspace and forwards a port to this Mac's 127.0.0.1, opening it in the built-in browser", async () => {

@@ -24,6 +24,8 @@
 //   shield: red for an unguarded mode, blue for plan;
 // - a tab whose agent cannot sign in (PRO-110): its notice and the Agent
 //   logins button sit above the transcript, inside the window.
+// - the Phase 2 cloud header pauses and resumes forwards with ⌘Y, and
+//   announces a native automatic forward while the popover is closed.
 //
 // A cloud session is reached through the command palette ("Go to cloud
 // session…", then its title): the chat-first sidebar lists no cloud sessions.
@@ -639,6 +641,72 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
     },
     { failures, wide: measured },
   );
+  await page.close();
+}
+
+{
+  const page = await open(browser, server.url, { cloud: true, localProjects: 0, session: { role: "manager", lines: 4 } }, VIEWPORT, {
+    extra: `(() => {
+      const { answers, emit } = window.__PW_STUB__;
+      answers.cloud_catalog_load.orgs["org-a"].sessions.w1.capabilities.push("ports/1");
+      answers.phase2_desktop_contracts_available = true;
+      const send = answers.cloud_remote_send;
+      const ports = [{ port: 5173, process: { name: "vite", pid: 9 } }];
+      answers.cloud_remote_send = (args) => {
+        if (args.frame.method !== "ports.list") return send(args);
+        const message = { id: args.frame.id, ok: true, result: { detected: true, ports, streams: [] } };
+        setTimeout(() => emit("cloud_remote_event", { kind: "message", connectionId: "conn-1", message }), 0);
+        return true;
+      };
+      const forwarder = window.__PW_CLOUD_PORTS__ = { forwards: [], settings: { enabled: true, auto: false }, calls: [] };
+      const announce = (opened = []) => emit("cloud_port_forwards_changed", { connectionId: "conn-1", forwards: forwarder.forwards, settings: forwarder.settings, opened });
+      answers.cloud_port_settings = () => forwarder.settings;
+      answers.cloud_port_forwards = () => forwarder.forwards;
+      answers.cloud_port_set_settings = ({ enabled, auto }) => {
+        forwarder.calls.push({ enabled, auto });
+        forwarder.settings = { enabled: enabled ?? forwarder.settings.enabled, auto: auto ?? forwarder.settings.auto };
+        forwarder.forwards = forwarder.forwards.map((forward) => ({ ...forward, state: forwarder.settings.enabled ? "open" : "waiting" }));
+        announce();
+        return forwarder.settings;
+      };
+      forwarder.start = () => {
+        const vite = { port: 5173, localPort: 5173, reassigned: false, state: "open", auto: true };
+        forwarder.forwards = [vite];
+        announce([vite]);
+      };
+    })()`,
+  });
+  await openCloudSession(page, await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle));
+  const chip = page.getByTestId("port-forward-chip");
+  await chip.click();
+  const popover = page.getByTestId("ports-popover");
+  const shortcut = popover.locator('[aria-keyshortcuts="Meta+Y"]');
+  await shortcut.waitFor();
+  const auto = popover.getByRole("switch", { name: "Forward new ports automatically" });
+  const defaultOff = (await auto.getAttribute("aria-checked")) === "false";
+  await auto.click();
+  await page.waitForFunction(() => window.__PW_CLOUD_PORTS__.settings.auto);
+  await page.keyboard.press("Escape");
+  await popover.waitFor({ state: "hidden" });
+  await page.evaluate(() => window.__PW_CLOUD_PORTS__.start());
+  const toast = page.getByTestId("port-toast");
+  await toast.waitFor({ timeout: 5_000 });
+  const announcedVite = /Port 5173 forwarded to 127\.0\.0\.1:5173/.test(await toast.textContent()) &&
+    (await toast.getByRole("button", { name: "Open" }).count()) === 1 && (await toast.getByRole("button", { name: "Copy" }).count()) === 1;
+  await page.keyboard.press("Meta+y");
+  await page.waitForFunction(() => window.__PW_CLOUD_PORTS__.forwards[0]?.state === "waiting");
+  await chip.click();
+  await popover.getByText(/Port forwarding is off for this workspace/).waitFor();
+  await page.keyboard.press("Meta+y");
+  await popover.locator('[data-port="5173"][data-state="open"]').waitFor();
+  const calls = await page.evaluate(() => window.__PW_CLOUD_PORTS__.calls);
+  failed += report("Phase 2 cloud workspace ports", {
+    "automatic forwarding starts off": defaultOff,
+    "the native watcher announces 5173 with Open and Copy": announcedVite,
+    "⌘Y pauses and resumes the active connection": JSON.stringify(calls) === JSON.stringify([
+      { enabled: null, auto: true }, { enabled: false, auto: null }, { enabled: true, auto: null },
+    ]),
+  }, calls);
   await page.close();
 }
 
