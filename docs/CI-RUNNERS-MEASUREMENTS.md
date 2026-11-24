@@ -334,3 +334,165 @@ local checks are correctness evidence, not CI performance measurements: they
 do not substitute for GitHub-hosted AMD64 CI or either post-change ten-run
 comparison. No Hetzner runner has been provisioned, activated or certified by
 this change.
+
+## Step 1 of the 5 to 10 minute target (2026-11-23): what was measured, and what was not
+
+The workflow changes of #1514 (nextest in parts, the wider selector, the
+Linux WebKit workflow) were written without a CI run. Nothing below is a
+measured run time on a hosted runner; the first pull request that carries the
+workflow is the first measurement. Local checks were compile-only by the
+owner's rule: no full suite ran.
+
+Measured on the development Mac (arm64, busy, load average 8 to 100):
+
+| What | Result |
+| --- | --- |
+| `cargo test --locked --lib --no-run` with only a one-line `dist/index.html` | builds, 4 min 46 s warm dependencies |
+| Tests in the library's binary (`--list`) | 5,871, of which 26 `#[ignore]` |
+| `cargo nextest list --locked --lib --profile ci` (cargo-nextest 0.9.152) | 5,845: the same names, less the 26 ignored |
+| `--partition count:N/4` | 1,462 + 1,461 + 1,461 + 1,461 = 5,845 |
+| `--partition hash:N/4` | 1,492 + 1,463 + 1,467 + 1,423 = 5,845 |
+| 85 tests by name under nextest: the privacy tests that run the test binary again, `github_process`, `session::codex_stdio`, `machine_host::security_tests`, `control::issue_tests` and others | 85 passed, none retried; 297 s, all of it one test |
+| The slowest of them, `github_process::tests::privacy_covers_identity_and_issue_entry_points` | 297 s in a process of its own under that load |
+| macOS filters (`macos-rust.py --filters`) against the binary's list | 51 filters, 1,889 of 5,871 tests |
+| The selector over the last 400 first-parent commits | none of the selected jobs 8; frontend alone 94; Rust alone 44; phone alone 2; Rust and frontend 64; macOS 118 |
+| WebKit parts (`run-all.mjs --shard N/4 --list`) | 32 + 31 + 31 + 31 = 125 |
+
+Not measured, and to read from the first runs: each `linux-rust-tests` part's
+time under nextest on a four-core runner (the 297 s test sets a floor for its
+part); whether the serve crate's test binaries pass on a hosted runner (no
+workflow ran them before); the Linux WebKit parts; a cold and a warm
+`ci-v5` cache; and the macOS job's time on a selected pull request.
+
+## Step 1, first hosted runs (2026-11-23)
+
+One run of each, so every number is a single sample.
+
+### #1518's first run (run 45252128642, head `c9e811e4`)
+
+| Job | Result | Time |
+| --- | --- | --- |
+| `linux-rust-tests` parts 2, 3, 4 (nextest) | pass, 1,443 tests each | 14 min 45 s, 14 min 30 s, 15 min 23 s; the tests themselves 132 s, 222 s, 202 s |
+| `linux-rust-tests (1)` | failed before any test | an `apt-get` download hung until the step's 10 minutes ended |
+| `linux-rust-tests (binaries)` | pass | 17 min 17 s |
+| `serve-tests` | pass | 10 min 15 s |
+| `linux-rust` (Clippy) | pass | 12 min 23 s |
+| `webkit-layout` (macOS, 125 checks) | pass | 22 min 2 s (11 min 46 s for the same checks on #1515's first run) |
+| `macos-native`, selected pull request | pass, 1,875 passed and 14 ignored of 51 filters | 81 min 34 s |
+| `frontend` | failed | the icon check ran before `pnpm` was set up |
+
+Every Rust job compiled from nothing: no `ci-v5` cache existed. A warm run is
+still unmeasured, on Linux and on macOS.
+
+`macos-native` compiled the library's tests twice: the `--no-run` step ended
+with `Finished test profile in 34m 25s`, and the test step then printed
+`Compiling raccoon` again and `Finished test profile in 28m 23s` before
+`running 1889 tests` (856 s). Which input changed between the two is not
+found.
+
+### WebKit on Linux (run 45252129157, not required)
+
+111 of 120 checks passed over four parts in 4 min 21 s to 7 min 40 s a job;
+five are left out as Mac-only. The nine failures, none diagnosed, are step 2's
+list:
+
+| Check | Part | What failed |
+| --- | --- | --- |
+| `sidebar-extras` | 1 | `locator.waitFor`, 15 s |
+| `dictation-edits` | 1 | four assertions in "a session's composer" (Delete over a selection; dictated words; Backspace over them; the settled utterance) |
+| `quick-open` | 1 | `locator.waitFor`, 30 s |
+| `command-palette` | 2 | `locator.waitFor`, 30 s |
+| `file-tab` | 3 | `locator.waitFor`, 30 s |
+| `review-threads` | 3 | an assertion after the light theme's footer checks |
+| `sidebar-order` | 4 | `page.waitForFunction`, 30 s |
+| `machine-session` | 4 | an assertion after the light theme's header checks |
+| `finished-toast` | 4 | `locator.waitFor`, 10 s |
+
+### WebKit on macOS: one slow run that did not repeat (#1515)
+
+| Run | Runner | Checks | Wall time | Check time |
+| --- | --- | --- | --- | --- |
+| `main`, fast runner | 4 at once | 124 | 596 s | 2,183 s |
+| #1515 round 1 | 4 at once | 125 | 503 s | 1,897 s |
+| `main`, slow runners | 3 at once | 124 | 1,650 to 1,940 s | |
+| #1518 round 1 (the code of #1515 round 1) | 3 at once | 125 | 1,225 s | 3,631 s |
+| #1515 round 2 | 3 at once | 123 of 128 ended | cut off at 50 minutes | over 8,319 s |
+| #1515 round 3 | 3 at once | 128 | 1,888 s | 5,604 s |
+
+Runner speed moves this job more than the pooling does: do not set the fast
+run's 11 min 46 s against `main`'s median.
+
+Round 2 is one bad run whose cause is not shown. The same 109 checks took
+7,344 s against 3,208 s on #1518's round, 1.2 times as long in the first ten
+minutes and about 3.6 times from the twentieth on; `agent-dashboard`'s three
+entries had run together for five minutes just before. Run alone on a Mac, a
+part, a Vite check, `machine-page` and `run-all` itself each left no process
+behind. Round 3, with the parts of a split check taking turns (228 s, 103 s,
+129 s) and each start line saying the host's state, read: no swap in use at
+any start, 8 WebKit and 4 node processes throughout, 0.6 to 2 GB free, and a
+load average of 10 to 33 on three cores. So nothing is left behind and the
+runner is short of processor, not of memory. The bound stays because it is
+cheap; it is not known to have fixed anything.
+
+### Flaky tests seen on these runs
+
+| Test | Seen | What it said |
+| --- | --- | --- |
+| `machine_host::security_tests::a_caller_from_a_public_address_is_refused_under_every_listen_choice_unless_allowed` | #1515, Linux | `EOF while parsing a value` at `security_tests.rs:362`: the refusal file read while still empty (read from the log, not reproduced). PRO-513. |
+| `pairing::tests::a_phone_starts_sessions_and_changes_settings_only_as_its_scope_allows` (child `phone_router_child_fixture`) | #1515, Linux | the child's call refused with `person_required` at `pairing/mod.rs:2337`. Cause not known. |
+| `finished-toast` (WebKit check, new with #1499) | `main`, #1515 rounds 2 and 3, #1517, the Linux trial | 10 s waiting for the notice at `finished-toast.mjs:61`. The fixture listed the tab as idle and the list read again on focus undid `in_progress`. Fixed in #1515. |
+| `remote::git::tests::mention_lookups_read_the_workspaces_pull_requests_with_its_gh` | #1515, Linux | `gh: Text file busy`. Fixed in #1520. |
+
+### #1518's second run (run 45288239288, head `92294332`)
+
+Caches of the new shape existed (this pull request's own, from the first run).
+
+| Job | Result | Time |
+| --- | --- | --- |
+| `linux-rust-tests` parts 1, 2, 4 (nextest) | pass, 1,444 / 1,443 / 1,443 tests | 6 min 37 s, 6 min 28 s, 7 min 28 s; tests 121 s, 115 s, 146 s; build about 3 min 35 s |
+| `linux-rust-tests (3)` | pass, 1,443 tests | 15 min 53 s |
+| `linux-rust-tests (binaries)` | pass | 10 min 11 s |
+| `serve-tests` | pass | 9 min 8 s |
+| `linux-rust` (Clippy) | pass | 2 min 45 s |
+| `frontend` | pass | 1 min 27 s |
+| `phone-app` | failed on `main`'s two `setup-routes` tests of 1,685 | 51 s |
+| `macos-native`, selected pull request | pass, 1,875 passed and 14 ignored | 44 min 7 s |
+| `webkit-layout` | cancelled by a 35 minute limit this branch had set; 116 of 128 done, none failed | 35 min 32 s |
+
+Every Linux job was done 16 minutes after the push.
+
+Part 3 was slow for two reasons, neither the partition: its `apt-get` step
+took 466 s (24 s on part 2), and its tests took 214 s because it holds the
+two slowest tests (the socket-capacity test and the 112 s privacy test, both
+shortened in #1520, which this branch does not have).
+
+`macos-native` with Clippy in front: Clippy 6 min 40 s and 5 min 55 s, the
+library's test build 9 min 53 s, and then the test step still compiled the
+crate again, 11 min 9 s, before `running 1889 tests` (457 s). So the second
+compile did not move to Clippy; which input changes is still not found.
+
+nextest reported no flaky test and two leaky ones:
+`action_runner::tests::a_running_non_concurrent_action_is_returned_and_restart_replaces_it`
+and
+`action_runner::tests::a_restart_whose_old_run_will_not_stop_starts_nothing_and_holds_up_no_other_action`.
+
+Linux WebKit, second sample: part 3 passed; the others failed
+(`sidebar-extras`, `file-tab`, `review-threads` in one part; the other two
+parts' lists were not read).
+
+Two more flaky results seen that night, neither fixed here:
+
+| Test or check | Seen | What it said |
+| --- | --- | --- |
+| `bots::calendar::tests::a_duty_deleted_mid_run_ends_its_run_then` (`src/bots/calendar_tests.rs:669`) | #1515's macOS rerun | 5,844 passed, 1 failed |
+| `agent-dashboard` on `main` (one check, seven layouts) | #1520's WebKit rerun | cut off at `run-all`'s 600 s; #1515 splits it into three entries |
+
+### #1518's third run (head `3456d0c3`): the package mirror
+
+`linux-rust-tests` parts 1, 2 and 4 failed in "Install Linux build
+dependencies" at that step's ten minute limit. The mirror
+(`us-east-2.ec2.archive.ubuntu.com`) served packages at seconds per small
+file, so the 30 s stall option never fired and nothing was retried; the same
+step took 24 to 26 s in other jobs of the same run. The step's own limit is
+gone (`main` never had one there); the job's limit bounds it, and the retry
+and stall options stay. A cache for the packages is a later piece.
