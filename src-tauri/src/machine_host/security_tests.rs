@@ -358,8 +358,16 @@ async fn a_caller_from_a_public_address_is_refused_under_every_listen_choice_unl
     let status = rig.host.status();
     let listen = status.listen.expect("the status says where it listens");
     assert!(!listen.allow_public && listen.refused_public_at.is_some(), "{listen:?}");
-    let kept = eventually("the refusal is kept on disk", || std::fs::read(rig.host.data_dir.join(super::DIR).join(super::PUBLIC_CALLERS_FILE)).ok()).await;
-    let kept_at = serde_json::from_slice::<Value>(&kept).unwrap()["refusedAt"].as_i64().expect("when it was refused");
+    // Kept off this task (`MachineHost::answers`), by `std::fs::write`, which
+    // makes the file empty and then writes into it: a read in between finds
+    // the file there and no bytes in it (PRO-513: "EOF while parsing a value"
+    // at column 0). So what is waited for is the whole value, not the file.
+    let kept = eventually("the refusal is kept on disk", || {
+        let bytes = std::fs::read(rig.host.data_dir.join(super::DIR).join(super::PUBLIC_CALLERS_FILE)).ok()?;
+        serde_json::from_slice::<Value>(&bytes).ok()
+    })
+    .await;
+    let kept_at = kept["refusedAt"].as_i64().expect("when it was refused");
     assert!(kept_at <= listen.refused_public_at.unwrap(), "the first refusal of the hour is the one kept");
     assert!(super::read_refused_public(&rig.host.data_dir).is_some(), "read back at the next start");
 
