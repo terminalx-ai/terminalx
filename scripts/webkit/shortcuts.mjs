@@ -231,6 +231,42 @@ const fits = (layout) => ({
   await page.close();
 }
 
+// PRO-300: rebind a positional organization shortcut through Settings itself.
+{
+  const page = await open(browser, server.url, { cloud: true, localProjects: 1 }, { width: 960, height: 700 }, {
+    extra: `window.__PW_STUB__.answers.phase2_desktop_contracts_available = true;`,
+  });
+  await openShortcuts(page);
+  const organizationGroup = page.getByRole("region", { name: "Organizations shortcuts" });
+  const binding = organizationGroup.locator('[data-shortcut="organization.switch1"] button[data-binding]');
+  await binding.waitFor();
+  const original = await binding.textContent();
+  const count = await organizationGroup.locator("[data-shortcut]").count();
+  await binding.click();
+  await page.keyboard.press("Meta+Shift+9");
+  await page.getByTestId("shortcut-editor").getByRole("button", { name: "Save", exact: true }).click();
+  const updated = await binding.textContent();
+  await page.getByRole("button", { name: "Back to app", exact: true }).click();
+  await sidebar(page);
+
+  await page.keyboard.press("Control+3");
+  await page.waitForFunction(() => window.__PW_STUB__.settingsFile.preferences.selectedOrganization === "o0");
+  await page.keyboard.press("Control+1");
+  const afterOldBinding = await page.evaluate(() => window.__PW_STUB__.settingsFile.preferences.selectedOrganization);
+  await page.keyboard.press("Meta+Shift+9");
+  await page.waitForFunction(() => window.__PW_STUB__.settingsFile.preferences.selectedOrganization === "org-a");
+  await page.keyboard.press("Meta+K");
+  await page.getByLabel("Command palette search").fill("switch");
+  const paletteBinding = await page.getByRole("option", { name: /Switch to Demo/ }).locator("kbd").textContent();
+
+  failed += report("organization shortcuts", {
+    "all nine actions are listed and can be rebound": count === 9 && original === "⌃1" && updated === "⇧⌘9",
+    "the old key leaves the sidebar selection and the new key switches it": afterOldBinding === "o0",
+    "the palette reports the rebound key": paletteBinding === "⇧⌘9",
+  }, { count, original, updated, afterOldBinding, paletteBinding });
+  await page.close();
+}
+
 await browser.close();
 server.close();
 process.exit(failed ? 1 : 0);
