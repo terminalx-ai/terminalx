@@ -58,15 +58,15 @@ try {
     await page.getByRole("menuitem", { name: "Mark as read", exact: true }).waitFor();
     await page.keyboard.press("Escape");
     // A real shortcut opens the first waiting session, and the next follows dashboard recency.
-    await page.keyboard.press("ControlOrMeta+Alt+l");
+    await page.keyboard.press("Meta+Alt+l");
     await row("one").locator('button[aria-current="true"]').waitFor();
     await page.waitForFunction(() => !JSON.parse(localStorage.getItem('pro179.sessions'))[0].tabs[0].markedUnread);
     const composer = page.locator("textarea").first();
     await composer.fill("Finish the regression test before pushing");
     await row("one").getByTestId("row-draft").waitFor();
-    await page.keyboard.press("ControlOrMeta+Alt+l");
+    await page.keyboard.press("Meta+Alt+l");
     await row("two").locator('button[aria-current="true"]').waitFor();
-    await page.keyboard.press("ControlOrMeta+Alt+l");
+    await page.keyboard.press("Meta+Alt+l");
     await row("one").locator('button[aria-current="true"]').waitFor();
     assert.equal(await composer.inputValue(), "Finish the regression test before pushing");
     assert.equal(await page.getByTestId("conversation-list").evaluate(el => el.scrollWidth > el.clientWidth + 1), false, "row extras fit the sidebar");

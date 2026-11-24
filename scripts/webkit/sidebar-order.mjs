@@ -68,8 +68,11 @@ try {
   await page.getByRole("status").filter({ hasText: "Moved local-1. Position 2 of 2." }).waitFor();
   await page.keyboard.press("Escape");
   assert.deepEqual(await projectNames(page), ["local-1", "local-0"]);
+  await handle.focus();
   await page.keyboard.press("Space");
+  await page.getByRole("status").filter({ hasText: "Picked up local-1. Position 1 of 2." }).waitFor();
   await page.keyboard.press("ArrowDown");
+  await page.getByRole("status").filter({ hasText: "Moved local-1. Position 2 of 2." }).waitFor();
   await page.keyboard.press("Space");
   await page.waitForFunction(() => window.__PW_STUB__.answers.sidebar_order.projects[0] === "/repos/p0");
   assert.deepEqual(await projectNames(page), ["local-0", "local-1"]);
@@ -129,6 +132,7 @@ try {
   await status.keyboard.press("Space");
   await status.getByRole("status").filter({ hasText: "Picked up Chat 0. Position 2 of 3." }).waitFor();
   await status.keyboard.press("ArrowDown");
+  await status.getByRole("status").filter({ hasText: "Moved Chat 0. Position 3 of 3." }).waitFor();
   await status.keyboard.press("ArrowDown"); // Cannot move into the following Done group.
   await status.keyboard.press("Space");
   await status.waitForFunction(() => window.__PW_ORDER_WRITES__.length === 2);

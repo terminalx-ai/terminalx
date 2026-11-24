@@ -64,7 +64,7 @@ try {
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await openConversation(page, "First conversation");
-    await page.keyboard.press("ControlOrMeta+p");
+    await page.keyboard.press("Meta+p");
     const field = page.getByRole("textbox", { name: "Search files" });
     await field.waitFor();
     const list = page.getByRole("listbox", { name: "Files" });

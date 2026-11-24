@@ -26,6 +26,7 @@ const tab = empty
   ? { id: 'tab-empty', harness: 'codex', model: 'gpt-6.1-sol', effort: 'high', permissionMode: 'manual', status: 'idle', created: '', modified: '' }
   : { id: 'tab-chat', harness: 'claude', model: 'claude-opus-5-5', effort: 'high', permissionMode: 'manual', status: 'idle', created: '', modified: '' };
 const noop = () => {};
+const aiEditor = { run: async () => "Which device fails first?", cancel: noop };
 window.__models = [];
 function App() {
   const [draft, setDraft] = useState('');
@@ -33,6 +34,7 @@ function App() {
   return <TooltipProvider>
     <div className="flex h-dvh flex-col justify-end bg-background text-foreground">
       <Composer tab={shownTab} busy={false} hasConversation={!empty} draft={draft} onDraftChange={setDraft}
+        aiEditor={aiEditor}
         files={{ key: 'repo', search: async () => [] }}
         contextUsed={12000} contextMax={100000}
         agentHandoff={empty ? { id: 'claude', name: 'Claude Code', run: noop } : { id: 'codex', name: 'Codex', run: noop }}

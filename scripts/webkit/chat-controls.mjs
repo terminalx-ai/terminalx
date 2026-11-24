@@ -103,7 +103,7 @@ try {
     if (screenshots && cycle===0) await page.screenshot({path:`${screenshots}/${label}-fullscreen.png`});
     if (cycle===0) await viewer.getByRole('button',{name:'Exit fullscreen'}).click(); else await page.keyboard.press('Escape');
     await viewer.waitFor({state:'detached'});
-    assert.ok(await expand.evaluate(el=>el===document.activeElement),`${label}: focus restored`);
+    await expand.and(page.locator(':focus')).waitFor();
    }
    assert.ok(await wrapper.locator('table').evaluate(table => [...table.querySelectorAll('th,td')].every(cell => {
     const box=cell.getBoundingClientRect(); const range=document.createRange(); range.selectNodeContents(cell);

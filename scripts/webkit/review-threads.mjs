@@ -119,9 +119,7 @@ try {
     const card = page.locator('.diff-pane article[data-review-thread="t-open"]:visible');
     await card.waitFor();
     await card.getByText("on GitHub · lines 2–4", { exact: true }).waitFor();
-    await card.getByRole("button", { name: "2 replies", exact: true }).click();
-    await card.getByText("Same pattern in invoices.ts.").waitFor();
-    const cardLayout = await card.evaluate(layout);
+    await card.and(page.locator(":focus")).waitFor();
     const placement = await card.evaluate((node) => {
       const editor = node.closest(".cm-editor")?.getBoundingClientRect();
       const box = node.getBoundingClientRect();
@@ -131,6 +129,9 @@ try {
       const l = line?.getBoundingClientRect(), n = next?.getBoundingClientRect();
       return { inEditor: !!editor && box.left >= editor.left - 1 && box.right <= editor.right + 1, betweenLines: !!l && !!n && l.bottom <= box.top + 1 && box.bottom <= n.top + 1, focused: document.activeElement === node };
     });
+    await card.getByRole("button", { name: "2 replies", exact: true }).click();
+    await card.getByText("Same pattern in invoices.ts.").waitFor();
+    const cardLayout = await card.evaluate(layout);
     if (shots) await page.screenshot({ path: join(shots, `review-threads-inline-${mode}.png`) });
 
     // Resolve: GitHub's state, the inline badge, and the toast with View on GitHub.

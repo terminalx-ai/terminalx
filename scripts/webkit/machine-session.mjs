@@ -328,23 +328,24 @@ for (const colorScheme of ["light", "dark"]) {
   {
     await page.locator(`[data-testid="machine-session-row"][title$="${TITLE}"]`).click();
     await strip.waitFor();
+    const main = page.locator("main");
+    const composer = main.locator("textarea[data-composer]");
+    await composer.fill("Keep this draft until the machine returns.");
+    const send = main.getByRole("button", { name: "Send", exact: true });
+    await send.and(page.locator(":enabled")).waitFor();
     await page.evaluate(() => window.__PW_MACHINE__({ state: "reconnecting", lostAt: Date.now() - 12_000, attempt: 1, retryInMs: 2000, trying: ["lan", "relay"] }));
-    const notice = page.locator('main [data-testid="machine-session-reconnecting"]');
-    await notice.waitFor({ timeout: 5_000 }).catch(() => undefined);
-    await page.waitForTimeout(200);
-    await shoot(page, `21.09-reconnecting-${colorScheme}`);
-    const m = await page.evaluate(() => ({
-      notice: document.querySelector('main [data-testid="machine-session-reconnecting"]')?.textContent ?? null,
-      chip: document.querySelector('main header [data-testid="machine-chip"]')?.textContent ?? null,
-      // The composer says so as its placeholder, which textContent does not include.
-      blocked: (() => {
-        const main = document.querySelector("main");
-        const reason = "Can't send until Mac mini is back";
-        if (main?.textContent?.includes(reason)) return true;
-        return [...(main?.querySelectorAll("[placeholder], [data-placeholder], [aria-placeholder]") ?? [])].some((element) =>
-          ["placeholder", "data-placeholder", "aria-placeholder"].some((name) => element.getAttribute(name)?.includes(reason)));
-      })(),
-    }));
+    const notice = main.getByTestId("machine-session-reconnecting");
+    await notice.waitFor();
+    await main.getByPlaceholder("Can't send until Mac mini is back").waitFor();
+    const m = {
+      notice: await notice.textContent(),
+      chip: await main.locator('header [data-testid="machine-chip"]').textContent(),
+      blocked: await send.isDisabled(),
+    };
+    if (shots) {
+      await composer.fill("");
+      await shoot(page, `21.09-reconnecting-${colorScheme}`);
+    }
     failed += report(`reconnecting (${colorScheme})`, {
       "the session says it is reconnecting and the agent keeps working": /Reconnecting to Mac mini/.test(m.notice ?? "") && /The agent keeps working there/.test(m.notice ?? ""),
       "the chip says Reconnecting": /Reconnecting/.test(m.chip ?? ""),

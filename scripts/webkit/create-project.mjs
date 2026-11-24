@@ -60,7 +60,7 @@ try {
       await start.getByRole("button", { name: "Quick start", exact: true }).click();
     } else {
       // Once a project exists the start screen gives way; the palette keeps all three actions.
-      await page.keyboard.press(`${mod}+K`);
+      await page.keyboard.press(`${mod}+k`);
       await page.getByLabel("Command palette search").fill("Add a project: Quick start");
       await page.getByRole("option", { name: /Add a project: Quick start/ }).first().click();
     }
@@ -72,6 +72,7 @@ try {
   const radio = (dialog, name) => dialog.getByRole("radio", { name: new RegExp(`^${name.replace(/\+/g, "\\+")}`) });
 
   // The default state, as the design draws it.
+  await page.getByTestId("start-screen").waitFor();
   let dialog = await openDialog();
   assert.equal(await dialog.getByRole("heading", { name: "Create a project" }).count(), 1);
   assert.equal(await page.locator("#start-quick-name").evaluate((el) => el === document.activeElement), true, "the name is focused");

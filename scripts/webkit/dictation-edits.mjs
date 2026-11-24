@@ -29,6 +29,9 @@
 //   pnpm build && npx playwright install webkit && pnpm test:webkit-dictation-edits
 import { launch, open, openConversation, report, serve, sidebar, tab } from "./harness.mjs";
 
+// Native editing commands follow the WebKit host, even with the app's Mac profile.
+const editMod = process.platform === "darwin" ? "Meta" : "Control";
+
 const server = await serve();
 const browser = await launch();
 let failed = 0;
@@ -144,7 +147,7 @@ for (const [name, surface] of Object.entries(SURFACES)) {
   await selectBack(page, " build".length);
   await page.keyboard.press("Backspace");
   const afterBackspace = await settled(page, field);
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(`${editMod}+a`);
   await page.keyboard.press("Delete");
   const afterDelete = await settled(page, field);
 
@@ -152,7 +155,7 @@ for (const [name, surface] of Object.entries(SURFACES)) {
   await hear(page, "Fix");
   await hear(page, "Fix the build");
   const dictated = await settled(page, field);
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(`${editMod}+a`);
   await page.keyboard.press("Backspace");
   const afterDictatedDelete = await settled(page, field);
   // The utterance comes back settled, with the same words tidied up.
@@ -211,7 +214,7 @@ for (const [name, surface] of Object.entries(SURFACES)) {
   await hear(page, "Fix the build please");
   const dictated = await settled(page, field);
   await selectBack(page, "please".length);
-  await page.keyboard.press("Meta+X");
+  await page.keyboard.press(`${editMod}+x`);
   const afterCut = await settled(page, field);
   await selectBack(page, "build ".length);
   await page.keyboard.press("Backspace");
@@ -239,7 +242,7 @@ for (const [name, surface] of Object.entries(SURFACES)) {
   const { page, field } = await sessionComposer();
   await field.fill("Old notes");
   await openMic(page);
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(`${editMod}+a`);
   await page.keyboard.press("Backspace");
   await page.keyboard.type("New:");
   const edited = await settled(page, field);
@@ -263,12 +266,12 @@ for (const [name, surface] of Object.entries(SURFACES)) {
   await hear(page, "Fix the build");
   await closeMic(page, "Fix the build.");
   const dictated = await settled(page, field);
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(`${editMod}+a`);
   await page.keyboard.press("Backspace");
   const afterDelete = await settled(page, field);
-  await page.keyboard.press("Meta+Z");
+  await page.keyboard.press(`${editMod}+z`);
   const afterUndo = await settled(page, field);
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(`${editMod}+a`);
   await page.keyboard.press("Backspace");
   await page.keyboard.type("Run the tests");
   const afterTyping = await settled(page, field);
@@ -318,10 +321,10 @@ for (const close of [false, true]) {
   const { page, field } = await sessionComposer();
   await openMic(page);
   await hear(page, "Fix the build");
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(`${editMod}+a`);
   await page.keyboard.press("Backspace");
   const afterDelete = await settled(page, field);
-  await page.keyboard.press("Meta+Z");
+  await page.keyboard.press(`${editMod}+z`);
   const afterUndo = await settled(page, field);
   await hear(page, "Fix the build.");
   const afterSettled = await settled(page, field);
