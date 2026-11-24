@@ -248,6 +248,10 @@ jobs:
   # that changes a mac-only check, what it loads, or the product it renders
   # (docs/CI-RUNNERS.md "macOS runner time"). A mac-only check broken by any
   # other pull request is found on main.
+  #
+  # `check` does not wait for it (the owner's decision, 24 November 2026): on
+  # a pull request it shows its own result without holding the merge. Every
+  # other run is held to it by `check-macos`.
   webkit-mac-only:
     needs: macos-rust-changes
     if: needs.macos-rust-changes.outputs.mac-webkit == 'true'
@@ -1082,7 +1086,7 @@ jobs:
   check:
     # Keep the exact required status and fail closed on failed/cancelled/skipped jobs.
     if: always()
-    needs: [frontend, phone-app, vitest, webkit-layout-linux, webkit-layout, webkit-mac-only, linux-rust, linux-rust-tests, macos-rust-changes, macos-native, headless-serve, serve-tests, machine-compat, machines-e2e, desktop-platforms, legacy-runtime-probe]
+    needs: [frontend, phone-app, vitest, webkit-layout-linux, webkit-layout, linux-rust, linux-rust-tests, macos-rust-changes, macos-native, headless-serve, serve-tests, machine-compat, machines-e2e, desktop-platforms, legacy-runtime-probe]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1096,7 +1100,7 @@ jobs:
           echo "$RESULTS" | jq -e '
             {"macos-native": "required", "machine-compat": "machines",
              "linux-rust": "rust", "linux-rust-tests": "rust", "headless-serve": "rust", "serve-tests": "rust",
-             "vitest": "frontend", "webkit-layout-linux": "frontend", "webkit-mac-only": "mac-webkit", "phone-app": "phone"} as $selected
+             "vitest": "frontend", "webkit-layout-linux": "frontend", "phone-app": "phone"} as $selected
             | .["macos-rust-changes"] as $selector
             | $selector.result == "success"
               and ([to_entries[] | .key as $job | .value.result
@@ -1105,3 +1109,20 @@ jobs:
                           and $selected[$job] != null
                           and $selector.outputs[$selected[$job]] == "false")]
                    | all)'
+  check-macos:
+    # Pushes to main, nightly and manual runs: everything `check` requires, and
+    # the mac-only WebKit checks. On these the selector answers "true" to
+    # everything, so webkit-mac-only always runs and must succeed. Not a
+    # required status; release-serve.yml follows the run's own conclusion,
+    # which a failed job here or in webkit-mac-only makes a failure. #1536
+    # adds the same job for macos-native: whichever merges second joins the
+    # two needs lists.
+    if: ${{ always() && github.event_name != 'pull_request' }}
+    needs: [check, webkit-mac-only]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require check and the macOS jobs to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: echo "$RESULTS" | jq -e '(keys == ["check", "webkit-mac-only"]) and all(.[]; .result == "success")'
