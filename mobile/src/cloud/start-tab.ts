@@ -242,5 +242,12 @@ export function startFailure(error: unknown, connected: boolean): StartFailure {
   return connected ? { kind: "no-answer", text: START_WORDS.noAnswer } : { kind: "offline", text: START_WORDS.offline };
 }
 
+/**
+ * How long the sheet waits before it says no answer came. The client goes on
+ * resending for minutes (six tries of 30 s); the person is told sooner, and
+ * whatever answer comes later still opens the tab.
+ */
+export const NO_ANSWER_MS = 35_000;
+
 /** Whether a failure keeps the request: asking again is then the same request. */
 export const keepsRequest = (failure: StartFailure): boolean => failure.kind === "no-answer" || failure.kind === "offline";

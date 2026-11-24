@@ -125,6 +125,27 @@ describe("the start sheet (25.10)", () => {
     expect(w.calls[1]!.args[2]).toBe(w.calls[0]!.args[2]);
   });
 
+  it("says no answer came after 35 s while the client still waits, and opens the tab when the answer comes late", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const w = workspace();
+      let answer!: (value: { sessionId: string; tabId: string; promptNotSent: boolean }) => void;
+      w.answers.create = () => new Promise((resolve) => { answer = resolve; });
+      const started = vi.fn();
+      await page.show(<Held kind="conversation" session={w.session} snapshot={snap()} onStarted={started} onClose={vi.fn()} />);
+      await page.type(page.byLabel("First message"), "Go");
+      await page.press(page.byId("start-submit"));
+      expect(page.byText(START_WORDS.starting)).not.toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(35_000); });
+      expect(page.byText(START_WORDS.noAnswer)).not.toBeNull();
+      expect(started).not.toHaveBeenCalled();
+      await act(async () => { answer({ sessionId: "s2", tabId: "t2", promptNotSent: false }); });
+      expect(started).toHaveBeenCalledWith({ tabId: "t2", promptNotSent: false, text: "Go" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("a refusal says who can, and the next try is a new request", async () => {
     const w = workspace();
     w.answers.create = async () => { throw new WorkspaceRpcError("forbidden", "needs a workspace manager", "session.create", { role: "driver" }); };

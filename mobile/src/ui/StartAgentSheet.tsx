@@ -5,7 +5,7 @@ import { WifiOff } from "lucide-react-native";
 import { BYPASS_NOT_FROM_PHONE, phoneModes } from "@mobile/cloud/agent-settings";
 import {
   chooseAgent, chooseModel, conversationTitle, effortChoices, initialStartChoices, keepsRequest, modelChoices, PROVEN_BY_LIVE_CHECK,
-  START_WORDS, startFailure, startParams, startRows, type StartAgent, type StartChoices, type StartFailure, type TabSettings,
+  NO_ANSWER_MS, START_WORDS, startFailure, startParams, startRows, type StartAgent, type StartChoices, type StartFailure, type TabSettings,
 } from "@mobile/cloud/start-tab";
 import type { CloudWorkspaceSession, CloudWorkspaceSnapshot } from "@mobile/cloud/workspace";
 import { ChoiceSheet, type Choice } from "./ChoiceSheet";
@@ -61,6 +61,10 @@ export function StartAgentSheet({ kind, session, snapshot, sessionId, from, text
   const [attempt, setAttempt] = useState(0);
   // One request per start: asked again after no answer, it is the same request, so nothing is started twice.
   const request = useRef(newRequestId());
+  // Still on screen, and told no answer came: a late answer then opens the tab.
+  const shown = useRef(true);
+  const toldNoAnswer = useRef(false);
+  useEffect(() => () => { shown.current = false; }, []);
 
   const connected = snapshot.connection.state === "connected";
   const offer = snapshot.startOffer;
@@ -107,18 +111,27 @@ export function StartAgentSheet({ kind, session, snapshot, sessionId, from, text
     if (!canSend || !choices) return;
     setBusy(true);
     setFailure(null);
+    toldNoAnswer.current = false;
+    const sent = text;
+    const params = startParams(agents, choices);
+    const asked = conversation
+      ? session.startConversation(params, { title: conversationTitle(sent, snapshot.tabs.length), prompt: sent }, request.current)
+      : session.addAgentTab(sessionId!, params, request.current).then((added) => ({ ...added, promptNotSent: false }));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const silence = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("No answer yet")), NO_ANSWER_MS); });
+    // Said to have no answer, it may still come: it then opens the tab, as an answer in time would.
+    asked.then((late) => { if (shown.current && toldNoAnswer.current) onStarted({ tabId: late.tabId, promptNotSent: late.promptNotSent, text: sent }); }, () => undefined);
     try {
-      const params = startParams(agents, choices);
-      const started = conversation
-        ? await session.startConversation(params, { title: conversationTitle(text, snapshot.tabs.length), prompt: text }, request.current)
-        : { ...(await session.addAgentTab(sessionId!, params, request.current)), promptNotSent: false };
+      const started = await Promise.race([asked, silence]);
       request.current = newRequestId();
-      onStarted({ tabId: started.tabId, promptNotSent: started.promptNotSent, text });
+      onStarted({ tabId: started.tabId, promptNotSent: started.promptNotSent, text: sent });
     } catch (error) {
       const failed = startFailure(error, session.client.connection.state === "connected");
       if (!keepsRequest(failed)) request.current = newRequestId();
+      toldNoAnswer.current = failed.kind === "no-answer";
       setFailure(failed);
     } finally {
+      clearTimeout(timer);
       setBusy(false);
     }
   };

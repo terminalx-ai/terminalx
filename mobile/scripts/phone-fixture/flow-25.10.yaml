@@ -36,7 +36,7 @@ name: Start a conversation (25.10)
 - waitForAnimationToEnd
 - takeScreenshot: 25.10-05-mode-picker
 - tapOn: { point: "50%,12%" }
-- tapOn: "First message"
+- tapOn: "First message.*"
 - inputText: "Update the changelog for the search filters."
 - waitForAnimationToEnd
 - takeScreenshot: 25.10-06-writing
@@ -93,7 +93,7 @@ name: Start a conversation (25.10)
 - extendedWaitUntil: { visible: "Start one with an agent.", timeout: 20000 }
 - tapOn: { id: "empty-start-button" }
 - extendedWaitUntil: { visible: "Permission mode: Ask every time", timeout: 10000 }
-- tapOn: "First message"
+- tapOn: "First message.*"
 - inputText: "Run the tests."
 - tapOn: "New conversation"
 - tapOn: "Start conversation"
@@ -107,7 +107,7 @@ name: Start a conversation (25.10)
 - extendedWaitUntil: { visible: "Start one with an agent.", timeout: 20000 }
 - tapOn: { id: "empty-start-button" }
 - extendedWaitUntil: { visible: "Permission mode: Ask every time", timeout: 10000 }
-- tapOn: "First message"
+- tapOn: "First message.*"
 - inputText: "Run the tests."
 - tapOn: "New conversation"
 - tapOn: "Start conversation"
@@ -120,11 +120,10 @@ name: Start a conversation (25.10)
     stopApp: true
     arguments: { fixtureScenario: connected, openRoute: /cloud, openWorkspace: ws-search, fixtureStart: gone }
 - extendedWaitUntil: { visible: ".*Want me to open the pull request.*", timeout: 20000 }
-- tapOn: "Message for the agent"
+- tapOn: "Message for the agent.*"
 - inputText: "Open the pull request."
 - tapOn: "Send"
 - extendedWaitUntil: { visible: "Not sent: this agent tab is no longer in the workspace.", timeout: 20000 }
-- hideKeyboard
 - waitForAnimationToEnd
 - takeScreenshot: 25.10-17-tab-gone
 # No answer: the request is asked once and never answered (the client gives up after 30 s).
@@ -134,7 +133,7 @@ name: Start a conversation (25.10)
 - extendedWaitUntil: { visible: "Start one with an agent.", timeout: 20000 }
 - tapOn: { id: "empty-start-button" }
 - extendedWaitUntil: { visible: "Permission mode: Ask every time", timeout: 10000 }
-- tapOn: "First message"
+- tapOn: "First message.*"
 - inputText: "Run the tests."
 - tapOn: "New conversation"
 - tapOn: "Start conversation"
