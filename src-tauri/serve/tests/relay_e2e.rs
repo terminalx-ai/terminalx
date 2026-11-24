@@ -1412,7 +1412,8 @@ async fn a_shared_workspace_serializes_input_and_stops_access_when_revoked() {
     assert_eq!(you(&admin.connected().await)["role"], "manager");
     let mut alice = Client::start(open("alice", "session"));
     let state = alice.connected().await;
-    assert_eq!(you(&state), json!({ "userId": "alice", "role": "driver", "canApprove": false, "listed": true }));
+    // A driver starts no session and no tab; that is a manager's (PRO-546).
+    assert_eq!(you(&state), json!({ "userId": "alice", "role": "driver", "canApprove": false, "listed": true, "canStart": false }));
     let mut bob = Client::start(open("bob", "session"));
     assert_eq!(you(&bob.connected().await)["role"], "viewer");
     // Carol is a member of the organization the workspace is not shared
