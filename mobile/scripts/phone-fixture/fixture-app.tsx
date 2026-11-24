@@ -22,6 +22,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { HOSTS_KEY, type StoredHost } from "../../src/store/hosts";
 import type { HostConnection, ConnectionStage } from "../../src/transport/connection";
 import { useWaited, WAITING_AFTER_MS } from "../../src/state/connection-view";
+import type { AccessCodeAnswer, AccessCodeRequest } from "../../src/auth/access-code";
+import { AUTH_CONFIG, redeemAccessCode, type CloudSession } from "../../src/auth/protocol";
 
 /**
  * Each state the 22.01–22.05 boards draw.
@@ -254,6 +256,38 @@ const STAGE: Record<Scenario, ConnectionStage> = {
 };
 const trying = scenario === "connecting" || scenario === "waiting" || scenario === "offline";
 
+/**
+ * The private beta's access code (25.08, PRO-551). With `fixtureAccessCode: <answer>`
+ * the phone starts signed out with no machines; Sign in is held at the beta (after
+ * a few seconds of "Signing in…", so the wait can be shot), and every code is
+ * sent through the app's own `redeemAccessCode` to a server in memory that answers
+ * as the argument says, as the server's contract (PRO-550) words it:
+ * `accepted`, `invalid`, `expired`, `exhausted`, `rate-limited`, `ended` (the
+ * ticket is gone) or `error` (a server error). `fixtureAccessEmail` is the address
+ * the sign-in is for. The ticket is a placeholder, never a real one.
+ */
+const ACCESS_ANSWERS: Record<string, { status: number; body: Record<string, unknown> }> = {
+  accepted: { status: 200, body: { status: "accepted" } },
+  invalid: { status: 404, body: { error: "invalid" } },
+  expired: { status: 410, body: { error: "expired" } },
+  exhausted: { status: 409, body: { error: "exhausted" } },
+  "rate-limited": { status: 429, body: { error: "rate_limited", retryAfter: 30 } },
+  ended: { status: 401, body: { error: "invalid_grant" } },
+  error: { status: 500, body: { error: "server_error" } },
+};
+const accessAsked = Settings.get("fixtureAccessCode");
+const accessAnswer = typeof accessAsked === "string" && accessAsked in ACCESS_ANSWERS ? ACCESS_ANSWERS[accessAsked]! : null;
+const accessEmailAsked = Settings.get("fixtureAccessEmail");
+const ACCESS_EMAIL = typeof accessEmailAsked === "string" && accessEmailAsked.includes("@") ? accessEmailAsked : "alex@example.com";
+const SIGNED_IN: CloudSession = { accessToken: "fixture", refreshToken: "fixture", expiresAt: now + DAY * 60_000, user: { userId: "fixture", email: "alex@example.com", displayName: "Alex" } };
+/** The redeem route, in memory: it answers after eight seconds, so "Checking the code…" can be shot behind Maestro's lag. */
+const accessServer: typeof fetch = async () => {
+  await pause(8_000);
+  const answer = accessAnswer!;
+  const body = answer.status === 200 ? { ...answer.body, ...SIGNED_IN, user: { ...SIGNED_IN.user, email: ACCESS_EMAIL } } : answer.body;
+  return new Response(JSON.stringify(body), { status: answer.status, headers: { "content-type": "application/json" } });
+};
+
 type Value = Record<string, unknown>;
 const AppContext = createContext<Value | null>(null);
 
@@ -262,7 +296,27 @@ export function AppProvider({ children }: PropsWithChildren) {
   const connection = useMemo(() => new FixtureConnection(() => connected), [connected]);
   const api = useMemo(() => new HostApi(connection as unknown as HostConnection), [connection]);
   const [ready, setReady] = useState(false);
-  const [hosts, setHosts] = useState(HOSTS);
+  const [hosts, setHosts] = useState(accessAnswer ? [] : HOSTS);
+  const [session, setSession] = useState<CloudSession | null>(accessAnswer ? null : SIGNED_IN);
+  const [signingIn, setSigningIn] = useState(false);
+  const [accessCode, setAccessCode] = useState<AccessCodeRequest | null>(null);
+  const ticket = useRef<string | null>(null);
+  const holds = useRef(0);
+  const signIn = useCallback(async () => {
+    if (!accessAnswer) return;
+    setSigningIn(true);
+    await pause(4_000);
+    ticket.current = "cah_fixture.placeholder";
+    setAccessCode({ id: ++holds.current, email: ACCESS_EMAIL });
+    setSigningIn(false);
+  }, []);
+  const redeem = useCallback(async (code: string): Promise<AccessCodeAnswer> => {
+    if (!ticket.current) return { status: "ticket_dead" };
+    const outcome = await redeemAccessCode(AUTH_CONFIG, { ticket: ticket.current }, code, accessServer);
+    if (outcome.status === "accepted") { ticket.current = null; setSession(outcome.session); return { status: "accepted" }; }
+    if (outcome.status === "ticket_dead") ticket.current = null;
+    return outcome;
+  }, []);
   const [prefs, setPrefs] = useState<Record<string, { customName?: string; hidden?: boolean }>>({});
   // "waiting" began trying long enough ago for the app's own clock to say so; the other
   // states keep no start, so a capture that takes more than 15 s still shows them.
@@ -298,14 +352,18 @@ export function AppProvider({ children }: PropsWithChildren) {
   }, [ready, connected, connection]);
   const refreshSessions = useCallback(async () => { if (scenario === "slow-refresh") await pause(6_000); }, []);
   const value: Value = {
-    ready, session: { accessToken: "fixture", refreshToken: "fixture", expiresAt: now + DAY * 60_000, user: { userId: "fixture", email: "alex@example.com", displayName: "Alex" } },
+    ready, session,
     hosts, accountHosts: ACCOUNT, availableHosts: ACCOUNT.filter((host) => !hosts.some((stored) => stored.publicKeyB64 === host.hostPublicKeyB64)), accountMachinePrefs: prefs,
     installationState: "ready", activeHost: hosts.find((host) => host.id === studio.id) ?? null,
     connectionStage: STAGE[scenario], connectionAttempt: trying ? 1 : 0, connectionEpoch: 1, connectionSince: since, connectionWaiting,
     online: scenario !== "offline", updating, beginUpdate, retryConnection: () => undefined,
     sessions: SESSIONS, loadingMachines: false, error: null, logs: [], pairingProgress: null,
     connection, api,
-    signIn: async () => undefined, signOut: async () => undefined, refreshMachines: async () => { await pause(1_500); }, pairAvailable: async () => undefined, pairCode: async () => undefined, retryPairing: async () => undefined,
+    signIn, signingIn, accessCode, redeemAccessCode: redeem,
+    cancelAccessCode: () => { ticket.current = null; setAccessCode(null); },
+    // Held a few seconds longer than the app's own pause: Maestro trails the screen, and the accepted page is shot.
+    finishAccessCode: () => { void pause(8_000).then(() => setAccessCode(null)); },
+    signOut: async () => undefined, refreshMachines: async () => { await pause(1_500); }, pairAvailable: async () => undefined, pairCode: async () => undefined, retryPairing: async () => undefined,
     connectHost: async () => true, disconnectHost: () => undefined,
     forgetHost: async (id: string) => setHosts((current) => current.filter((host) => host.id !== id)),
     renameHost: async (id: string, name: string) => setHosts((current) => current.map((host) => host.id === id ? { ...host, customName: name.trim() || undefined } : host)),
