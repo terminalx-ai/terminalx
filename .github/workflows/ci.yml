@@ -152,7 +152,7 @@ jobs:
       # No limit of its own: the job's bounds it (a slow mirror trips neither the
       # stall option nor a retry).
       - name: Install shells used by the tests
-        run: sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y zsh && command -v zsh
+        run: sudo infra/ci-runners/apt-mirrors.sh && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y zsh && command -v zsh
       - name: vitest
         run: pnpm vitest run --shard=${{ matrix.part }}/4
 
@@ -231,7 +231,7 @@ jobs:
       # took 25 s in its other jobs.
       - name: Install Linux build dependencies
         if: runner.environment == 'github-hosted'
-        run: sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh ripgrep
+        run: sudo infra/ci-runners/apt-mirrors.sh && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh ripgrep
       # tauri-build needs the folder the frontend builds into; no Rust test
       # reads what is in it, so these jobs do not install or build the frontend.
       - name: Stand in for the frontend build
@@ -301,7 +301,7 @@ jobs:
           persist-credentials: false
       # No limit of its own, as in linux-rust: the job's bounds it.
       - name: Install Linux build dependencies
-        run: sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh ripgrep
+        run: sudo infra/ci-runners/apt-mirrors.sh && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh ripgrep
       # tauri-build needs the folder the frontend builds into; no Rust test
       # reads what is in it, so these jobs do not install or build the frontend.
       - name: Stand in for the frontend build
@@ -690,7 +690,7 @@ jobs:
       # No limit of its own: the job's bounds it (a slow mirror trips neither the
       # stall option nor a retry).
       - name: Install the tools the tests run
-        run: sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y zsh ripgrep
+        run: sudo infra/ci-runners/apt-mirrors.sh && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y zsh ripgrep
       - name: Show the Rust toolchain
         id: toolchain
         run: |
