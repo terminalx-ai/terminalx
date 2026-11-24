@@ -50,7 +50,8 @@ machine, a pull request's edited workflow included.
 | `machines-e2e` | Ubuntu | always; decides in a step | Two machines end to end (PRO-358). |
 | `desktop-platforms` | Ubuntu | always | Off-macOS helper build, Linux renderer and launcher tests. No Rust on Linux: that is `linux-rust` and `linux-rust-tests`. Disabled Windows steps retained. |
 | `legacy-runtime-probe` | Ubuntu | always | Legacy AppImage diagnostics. Its tests set the operating system themselves, so one runner covers Linux and macOS. |
-| `check` | Ubuntu | always | The aggregate. Every other job must succeed. A job in the "Runs" column's frontend, phone, Rust, macOS or machines rows may be skipped instead, and only when the selector succeeded and answered "false" for it. |
+| `check` | Ubuntu | always | The aggregate. Every other job but `macos-native` and `check-macos` must succeed. A job in the "Runs" column's frontend, phone, Rust or machines rows may be skipped instead, and only when the selector succeeded and answered "false" for it. |
+| `check-macos` | Ubuntu | main, nightly, manual | Needs `check` and `macos-native`; fails unless both succeeded. Not a required status: a pull request is not held to the macOS Rust suite ("macOS Rust coverage"). |
 
 All runners are GitHub-hosted. `.github/workflows/webkit-linux.yml` is a second
 workflow: the WebKit checks on Linux in four parts, not required and not part
@@ -228,10 +229,12 @@ take one only when they are selected:
 - `machine-compat`: the same events, and pull requests that touch the machines
   (`scripts/machine-e2e/relevant.py`, the list `machines-e2e` uses).
 
-`macos-rust-changes` decides all three and `check` accepts a skipped macOS job
-on its word alone. On `main`, each of the two jobs keeps the run in progress and
-the newest waiting commit: an older commit still waiting when a newer one
-arrives is cancelled and its `check` fails. The newest commit of a burst of
+`macos-rust-changes` decides all three. `check` accepts a skipped
+`machine-compat` on its word alone, and does not wait for `macos-native` at all.
+On `main`, each of the two jobs keeps the run in progress and the newest waiting
+commit: an older commit still waiting when a newer one arrives is cancelled, and
+its `check` (for `machine-compat`) or its `check-macos` (for `macos-native`)
+fails. The newest commit of a burst of
 merges is always tested.
 
 The required WebKit layout checks stay on macOS for now. They were tried on

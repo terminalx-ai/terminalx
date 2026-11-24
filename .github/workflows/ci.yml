@@ -433,7 +433,9 @@ jobs:
 
   # Runs when the selector asks for it: every push to main, nightly, manual
   # runs, and a pull request that touches code macOS builds differently.
-  # Skipped otherwise, and `check` accepts that skip from the selector alone.
+  # Skipped otherwise. `check` does not wait for it, on any event: a pull
+  # request shows its result without being held to it, and every other run is
+  # held to it by `check-macos`.
   #
   # A selected pull request gets the Swift tests, the icon checks, the helper,
   # one build of the library's tests, and the tests of the Apple-only and
@@ -442,7 +444,7 @@ jobs:
   #
   # Pushes to main share one group: while one runs, only the newest waiting
   # commit keeps its place, and an older one still waiting is cancelled (its
-  # `check` fails). Merges land in bursts and each run is long; a commit
+  # `check-macos` fails). Merges land in bursts and each run is long; a commit
   # already superseded does not need the runner more than the newest one does.
   macos-native:
     needs: macos-rust-changes
