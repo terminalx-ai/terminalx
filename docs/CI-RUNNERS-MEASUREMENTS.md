@@ -479,3 +479,10 @@ and
 Linux WebKit, second sample: part 3 passed; the others failed
 (`sidebar-extras`, `file-tab`, `review-threads` in one part; the other two
 parts' lists were not read).
+
+Two more flaky results seen that night, neither fixed here:
+
+| Test or check | Seen | What it said |
+| --- | --- | --- |
+| `bots::calendar::tests::a_duty_deleted_mid_run_ends_its_run_then` (`src/bots/calendar_tests.rs:669`) | #1515's macOS rerun | 5,844 passed, 1 failed |
+| `agent-dashboard` on `main` (one check, seven layouts) | #1520's WebKit rerun | cut off at `run-all`'s 600 s; #1515 splits it into three entries |
