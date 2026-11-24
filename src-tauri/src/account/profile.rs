@@ -1,18 +1,32 @@
 use super::*;
 
-const PROFILE_PATH: &str = "/users/me";
+use std::io::Read;
+
+const PROFILE_PATH: &str = "/v1/desktop/auth/display-name";
 const MAX_NAME_LENGTH: usize = 100;
 
 #[derive(Deserialize)]
-struct ProfileResponse {
-    success: bool,
-    data: UpdatedProfile,
+#[serde(rename_all = "camelCase")]
+struct UpdatedProfile {
+    display_name: String,
 }
 
 #[derive(Deserialize)]
-struct UpdatedProfile {
-    id: String,
-    name: String,
+struct ProfileError {
+    error: String,
+}
+
+fn profile_error(status: u16, code: Option<&str>) -> &'static str {
+    match (status, code) {
+        (401 | 403, _) => "The account service did not authorize this desktop session. Sign in and try again.",
+        (400, Some("display_name_required")) => "Enter a display name.",
+        (400, Some("display_name_too_long")) => "Display names must be 100 characters or fewer.",
+        (400, Some("invalid_request")) => "The account service could not read the display name.",
+        (404, Some("user_not_found")) => "Your account could not be found.",
+        (404, _) => "This account service does not support editing display names from the desktop.",
+        (413, _) => "The display name request is too large.",
+        _ => "Couldn’t save your display name. Try again.",
+    }
 }
 
 fn validated_name(name: &str) -> Result<&str, &'static str> {
@@ -28,22 +42,22 @@ fn validated_name(name: &str) -> Result<&str, &'static str> {
 }
 
 fn put_profile(url: &str, access_token: &str, name: &str) -> Result<UpdatedProfile, &'static str> {
-    let response: ProfileResponse = request_json(
-        "PUT",
-        url,
-        json!({ "name": name }),
-        Some(access_token),
-    )
-    .map_err(|error| match error {
-        CloudError::Http(401 | 403) => {
-            "The account service did not authorize this desktop session to edit your display name."
+    let response = match cloud_agent()
+        .put(url)
+        .set("content-type", "application/json")
+        .set("authorization", &format!("Bearer {access_token}"))
+        .send_json(json!({ "displayName": name }))
+    {
+        Ok(response) if response.status() == 200 => response,
+        Ok(response) | Err(ureq::Error::Status(_, response)) => {
+            let status = response.status();
+            let body = serde_json::from_reader::<_, ProfileError>(response.into_reader().take(4096)).ok();
+            return Err(profile_error(status, body.as_ref().map(|body| body.error.as_str())));
         }
-        _ => "Couldn’t save your display name. Try again.",
-    })?;
-    if !response.success {
-        return Err("Couldn’t save your display name. Try again.");
-    }
-    Ok(response.data)
+        Err(ureq::Error::Transport(_)) => return Err(profile_error(0, None)),
+    };
+    serde_json::from_reader(response.into_reader().take(4096))
+        .map_err(|_| "The account service returned an invalid display name.")
 }
 
 impl AccountManager {
@@ -78,15 +92,13 @@ impl AccountManager {
         crate::data_privacy::require_network()
             .map_err(|_| "Turn off data privacy mode to edit your display name.")?;
         let name = validated_name(name)?;
+        let _save = self.display_name_gate.lock().unwrap();
         let context = prepare().ok_or("Sign in to edit your display name.")?;
         let changed_account = "Your account changed while saving. Open the editor and try again.";
         if Self::context_revision(&context) != revision {
             return Err(changed_account);
         }
 
-        // A capability read or token refresh begun before the PUT must finish
-        // before we install the confirmed name in the cached session.
-        let gate = self.refresh_gate.lock().unwrap();
         let current = |inner: &Inner| {
             inner.generation == context.generation
                 && inner.session.as_ref().is_some_and(|session| {
@@ -95,6 +107,7 @@ impl AccountManager {
                 })
         };
         let access_token = {
+            let _gate = self.refresh_gate.lock().unwrap();
             let inner = self.inner.lock().unwrap();
             if !current(&inner) {
                 return Err(changed_account);
@@ -107,25 +120,23 @@ impl AccountManager {
                 .clone()
         };
         let updated = send(&access_token, name)?;
-        if updated.id != context.user_id
-            || validated_name(&updated.name) != Ok(updated.name.as_str())
-        {
+        if validated_name(&updated.display_name) != Ok(updated.display_name.as_str()) {
             return Err("The account service returned an invalid display name.");
         }
         let changed = {
+            let _gate = self.refresh_gate.lock().unwrap();
             let mut inner = self.inner.lock().unwrap();
             if !current(&inner) {
                 return Err(changed_account);
             }
             let mut session = inner.session.clone().ok_or(changed_account)?;
-            let changed = session.cloud.display_name.as_deref() != Some(updated.name.as_str());
+            let changed = session.cloud.display_name.as_deref() != Some(updated.display_name.as_str());
             if changed {
-                session.cloud.display_name = Some(updated.name);
+                session.cloud.display_name = Some(updated.display_name);
                 inner.set_session(Some(session));
             }
             changed
         };
-        drop(gate);
         self.settle(context.generation, changed, None);
         let inner = self.inner.lock().unwrap();
         if !current(&inner) {
@@ -139,7 +150,7 @@ impl AccountManager {
 mod tests {
     use super::*;
     use crate::keychain::testing::MemorySecrets;
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
 
     fn account() -> (AccountManager, MemorySecrets, AccountContext) {
@@ -173,7 +184,7 @@ mod tests {
             let mut stream = BufReader::new(stream);
             let mut line = String::new();
             stream.read_line(&mut line).unwrap();
-            assert_eq!(line.trim_end(), "PUT /users/me HTTP/1.1");
+            assert_eq!(line.trim_end(), "PUT /v1/desktop/auth/display-name HTTP/1.1");
             let mut length = 0;
             let mut authorized = false;
             loop {
@@ -193,9 +204,9 @@ mod tests {
             stream.read_exact(&mut body).unwrap();
             assert_eq!(
                 serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
-                json!({"name": "New Name"})
+                json!({"displayName": "New Name"})
             );
-            let response = r#"{"success":true,"data":{"id":"person","name":"New Name"}}"#;
+            let response = r#"{"displayName":"New Name"}"#;
             write!(stream.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
         });
 
@@ -206,7 +217,10 @@ mod tests {
                 "  New Name  ",
                 &revision,
                 || Some(context),
-                |token, name| put_profile(&url, token, name),
+                |token, name| {
+                    assert!(account.refresh_gate.try_lock().is_ok());
+                    put_profile(&url, token, name)
+                },
             )
             .unwrap();
         server.join().unwrap();
@@ -269,8 +283,7 @@ mod tests {
                 |_, _| {
                     account.set_context_for_test(None);
                     Ok(UpdatedProfile {
-                        id: "person".into(),
-                        name: "After".into(),
+                        display_name: "After".into(),
                     })
                 }
             )

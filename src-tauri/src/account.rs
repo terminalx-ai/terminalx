@@ -458,6 +458,8 @@ pub struct AccountManager {
     /// order. Taken before `inner`, never while holding it.
     store_gate: Mutex<()>,
     refresh_gate: Mutex<()>,
+    // Serialize display-name writes without blocking session refresh during the request.
+    display_name_gate: Mutex<()>,
     /// When the server last answered with organizations and roles. Held while
     /// asking, so concurrent callers share one answer.
     roles_refreshed: Mutex<Option<Instant>>,

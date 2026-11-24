@@ -44,8 +44,7 @@ pub async fn account_update_display_name(
     state: tauri::State<'_, crate::AppState>,
 ) -> CmdResult<crate::account::AccountStatus> {
     let account = state.account.clone();
-    // PRO-305 follows the existing Phase 2 rollout. Production stays off until
-    // the server accepts desktop sessions and the shared rollout is enabled.
+    // PRO-305 follows the shared Phase 2 rollout.
     let enabled = state.cloud_workspaces.phase2_contracts_available();
     tauri::async_runtime::spawn_blocking(move || account.update_display_name(&app, enabled, &name, &context_revision))
         .await
