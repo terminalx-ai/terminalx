@@ -1,0 +1,41 @@
+# 25.06, Stop: it asks first (and says when an agent is working), then stopping, a stop that did not go through, and a refusal.
+appId: com.terminalx.phone.fixture
+name: Stop workspace (25.06)
+---
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: manage-running, openRoute: /cloud, openWorkspace: ws-checkout }
+- tapOn: { id: "workspace-actions" }
+- tapOn: "Stop workspace"
+- assertVisible: "Stop this workspace?"
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-06-stop-asks-first
+- tapOn: "Stop"
+- assertVisible: "Stopping the workspace…"
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-08-stopping
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: manage-working, openRoute: /cloud, openWorkspace: ws-checkout }
+- tapOn: { id: "workspace-actions" }
+- tapOn: "Stop workspace"
+- assertVisible: "Stop while an agent is working?"
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-07-while-an-agent-is-working
+- tapOn: "Cancel"
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: manage-failed-stop, openRoute: /cloud, openWorkspace: ws-checkout }
+- assertVisible: "The workspace did not stop"
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-10-it-did-not-stop
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: manage-busy, openRoute: /cloud, openWorkspace: ws-checkout }
+- tapOn: { id: "workspace-actions" }
+- tapOn: "Stop workspace"
+- tapOn: "Stop"
+- assertVisible: "Not right now"
+- waitForAnimationToEnd
+- takeScreenshot: 25.06-11-refused-something-else-is-under-way
+- tapOn: "OK"
