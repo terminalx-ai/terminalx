@@ -13,6 +13,7 @@ import { CloudSchedulesDialog } from '/src/components/cloud/CloudSchedulesDialog
 import { Toasts } from '/src/components/ui/Toasts.tsx';
 import { api } from '/src/lib/api.ts';
 import { bootAccount } from '/src/lib/account.ts';
+import { bootCloudCatalog } from '/src/lib/cloudCatalog.ts';
 import { refreshDataPrivacy } from '/src/lib/dataPrivacy.ts';
 import '/src/styles/app.css';
 const calls = window.automationCalls = [];
@@ -29,7 +30,19 @@ api.cloudAutomation = async () => {
     {id:'webhook-failed',scheduledFor:1,trigger:'webhook',state:'failed',category:'webhook-prompt-too-large'},
     {id:'manual-completed',scheduledFor:2,trigger:'manual',state:'completed'},
   ]};
-  return ({schedule,runs:[{id:'pending',scheduledFor:1,trigger:'github',state:'creating-workspace',workspaceId:null},{id:'allocated',scheduledFor:2,trigger:'github',state:'completed',workspaceId:'run-own',archiveAt:3},{id:'archived',scheduledFor:3,trigger:'github',state:'completed',workspaceId:'run-archived',archivedAt:4}]});};
+  return {schedule,runs:[
+    {id:'pending',scheduledFor:1,trigger:'github',state:'creating-workspace',workspaceId:null},
+    {id:'placeholder',scheduledFor:1,trigger:'github',state:'queued',workspaceId:'w1'},
+    {id:'allocated',scheduledFor:2,trigger:'github',state:'completed',workspaceId:'run-own',archiveAt:3},
+    {id:'archived',scheduledFor:3,trigger:'github',state:'completed',workspaceId:'run-archived',archivedAt:4},
+  ]};
+};
+api.cloudWorkspaces = async () => ({workspaces:[['w1','Automation template'],['run-own','PR review workspace']].map(([id,name]) => ({
+  workspace:{id,name,orgId:'o1',provider:'docker',state:'suspended',accessMode:'private',createdAt:1,updatedAt:1,releaseDisposition:null},
+  latestOperation:null,
+}))});
+api.cloudCatalogLoad = async () => null;
+api.cloudCatalogSave = async () => {};
 api.cloudWorkspaceRepositories = async () => ({configured:true,repositories:[{id:'row1',fullName:'acme/repo',state:'accessible'},{fullName:'acme/no-id',state:'accessible'}]});
 api.cloudAutomationEstimate = async (input) => {calls.push({kind:'estimate',input});return {estimate,supported:true,nextRunAt:null};};
 api.cloudAutomationCreate = async (input) => {
@@ -46,7 +59,7 @@ api.cloudAutomationRotateWebhookSecret = async (id, orgId) => {
 api.cloudAutomationSetActive = async (id,active) => {calls.push({kind:'active',id,active});return {...schedule,state:active?'active':'paused'};};
 api.cloudScheduleDelete = async (id) => {calls.push({kind:'delete',id});};
 api.cloudSchedulesPauseAll = async () => {calls.push({kind:'pause-all'});return {paused:1};};
-await refreshDataPrivacy();await bootAccount();
+await refreshDataPrivacy();await bootAccount();bootCloudCatalog();
 createRoot(document.getElementById('root')).render(<><CloudSchedulesDialog orgId='o1' workspaceId='w1' name='Automation lab' onClose={()=>{}}/><Toasts /></>);
 `;
 const stub = readFileSync(new URL('./tauri-stub.js', import.meta.url), 'utf8');
@@ -56,6 +69,22 @@ const server = await createCheckServer({server:{host:'127.0.0.1' },plugins:[{
  configureServer(server){server.middlewares.use('/cloud-automation-test',async(_req,res)=>{res.setHeader('Content-Type','text/html');res.end(await server.transformIndexHtml('/cloud-automation-test','<div id="root"></div><script type="module" src="/cloud-automation-regression.tsx"></script>'));});}
 }]});
 let browser;
+async function checkFreshRunRows(dialog) {
+ await dialog.getByRole('button',{name:'Show runs',exact:true}).click();
+ const pending=dialog.getByTestId('automation-run-pending');
+ await pending.getByText(/Creating workspace/).waitFor();
+ await pending.getByText('Run workspace not allocated.',{exact:true}).waitFor();
+ await dialog.getByTestId('automation-run-placeholder').getByText('Run workspace not allocated.',{exact:true}).waitFor();
+ assert.equal(await dialog.getByText('Workspace Automation template',{exact:true}).count(),0,'the template never labels a run');
+ const allocated=dialog.getByTestId('automation-run-allocated');
+ await allocated.getByText('Workspace PR review workspace',{exact:true}).waitFor();
+ await allocated.getByText(/Archive due .*archival not observed/).waitFor();
+ const archived=dialog.getByTestId('automation-run-archived');
+ await archived.getByText('Workspace ID run-archived',{exact:true}).waitFor();
+ await archived.getByText(/^Archived /).waitFor();
+ assert.equal(await dialog.getByRole('button',{name:'Open run workspace',exact:true}).count(),2,'only allocated run workspaces, including archived, enable navigation');
+ assert.equal(await archived.getByRole('button',{name:'Open run workspace',exact:true}).count(),1,'observed archival retains its own workspace link');
+}
 try {
  await server.listen();browser=await launch();
  for(const width of [1100,390,320]){
@@ -65,12 +94,7 @@ try {
   const dialog=page.getByTestId('cloud-schedules-dialog');await dialog.waitFor();
   await dialog.getByText('PR triage',{exact:true}).waitFor();
   assert.equal(await dialog.getByText(/Next run/).count(),0,'GitHub has no fabricated timer');
-  await dialog.getByRole('button',{name:'Show runs',exact:true}).click();
-  await dialog.getByText('Run workspace not allocated.',{exact:true}).first().waitFor();
-  assert.equal(await dialog.getByRole('button',{name:'Open run workspace',exact:true}).count(),2,'both allocated run workspaces, including archived, enable navigation');
-  await dialog.getByText(/archival not observed/).waitFor();
-  await dialog.getByTestId('automation-run-archived').getByText(/^Archived /).waitFor();
-  assert.equal(await dialog.getByTestId('automation-run-archived').getByRole('button',{name:'Open run workspace',exact:true}).count(),1,'observed archival retains its own workspace link');
+  await checkFreshRunRows(dialog);
   await dialog.getByRole('button',{name:'New scheduled task',exact:true}).click();
   await dialog.getByLabel('Name',{exact:true}).fill('PR report');await dialog.getByLabel('Prompt',{exact:true}).fill('Review the change.');
   await dialog.getByLabel('Trigger',{exact:true}).selectOption('github');
@@ -142,6 +166,7 @@ try {
  await dialog.getByRole('button',{name:'Delete PR triage',exact:true}).click();await dialog.getByTestId('cloud-schedule-delete-confirm').getByRole('button',{name:'Delete',exact:true}).click();
  await page.waitForFunction(()=>window.automationCalls.some(c=>c.kind==='delete'));
  assert.equal(await page.evaluate(()=>window.automationCalls.filter(c=>c.kind==='detail').length),0,'safety actions perform no detail preflight');
+ await checkFreshRunRows(dialog);
  await dialog.getByRole('button',{name:'New scheduled task',exact:true}).click();
  await dialog.getByLabel('Name',{exact:true}).fill('Held report');await dialog.getByLabel('Prompt',{exact:true}).fill('Review safely.');
  await dialog.getByRole('checkbox',{name:/I understand this task starts/}).check();
@@ -153,5 +178,5 @@ try {
  assert(await dialog.getByRole('button',{name:'Create scheduled task',exact:true}).isDisabled());
  assert.equal(await page.evaluate(()=>window.automationCalls.filter(c=>c.kind==='estimate').length),priorEstimates,'held fresh mode issues no estimate after debounce');
  assert.equal(await page.evaluate(()=>window.automationCalls.filter(c=>c.kind==='create').length),0,'advanced create stays held locally');
- console.log('ok cloud-automations held: pause/delete reachable without preflight, fresh create refused');await page.close();
+ console.log('ok cloud-automations held: run workspace labels, pause/delete without preflight, fresh create refused');await page.close();
 } finally {await browser?.close();await server.close();}

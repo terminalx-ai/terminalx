@@ -1,11 +1,13 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AccountStatus, CloudAutomationDto, CloudAutomationDetailDto, CloudSelectedRepository, CloudSchedule, CloudScheduleQuote } from "@/lib/api";
+import type { AccountStatus, CloudAutomationDto, CloudAutomationDetailDto, CloudSelectedRepository, CloudSchedule, CloudScheduleQuote, CloudWorkspace, CloudWorkspaceListItem } from "@/lib/api";
+import type { CloudCatalogState, OrgCatalog } from "@/lib/cloudCatalog";
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
   detail: vi.fn(),
   repositories: vi.fn(),
+  relistCatalog: vi.fn(),
   openRun: vi.fn(),
   estimate: vi.fn(),
   create: vi.fn(),
@@ -37,6 +39,7 @@ const automationFeatures = [
 const scope = vi.hoisted(() => ({
   status: {} as AccountStatus,
   privacy: { enabled: false, ready: true, managed: false },
+  catalog: {} as CloudCatalogState,
   accountListeners: new Set<() => void>(),
   privacyListeners: new Set<() => void>(),
 }));
@@ -46,12 +49,18 @@ vi.mock("@/lib/account", () => ({
 }));
 vi.mock("@/lib/dataPrivacy", () => ({
   getDataPrivacy: () => scope.privacy,
+  privacyEnabled: () => scope.privacy.enabled,
   useDataPrivacy: () => scope.privacy,
   subscribeDataPrivacy: (listener: () => void) => { scope.privacyListeners.add(listener); return () => scope.privacyListeners.delete(listener); },
 }));
 vi.mock("@/lib/errorToasts", () => ({ showError: mocks.toast }));
 vi.mock("@/lib/clipboard", () => ({ copyText: mocks.copy }));
 vi.mock("@/lib/cloudDashboard", () => ({ openCloudSession: mocks.openRun }));
+vi.mock("@/lib/cloudCatalog", async (original) => ({
+  ...(await original<typeof import("@/lib/cloudCatalog")>()),
+  useCloudCatalog: () => scope.catalog,
+  relistCloudCatalog: mocks.relistCatalog,
+}));
 
 vi.mock("@/lib/models", async (original) => ({ ...(await original<typeof import("@/lib/models")>()), useModels: () => [] }));
 
@@ -106,9 +115,11 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
   scope.status = { state: "signed-in", identity: { email: "a@example.com", organizationId: "org-1", name: "A", organization: "One" }, context: { account: "account-a", scope: "profile-a", revision: "rev-1" }, expiresAt: null, lastError: null };
   scope.privacy = { enabled: false, ready: true, managed: false };
+  scope.catalog = { owner: "a@example.com", revision: "rev-1", loaded: true, orgs: {}, createMemory: {}, notices: [] };
   listed = [schedule()];
   for (const mock of Object.values(mocks)) mock.mockReset();
   mocks.repositories.mockResolvedValue({ configured: true, repositories: [] });
+  mocks.relistCatalog.mockResolvedValue(undefined);
   mocks.detail.mockImplementation(async () => ({ schedule: listed[0], runs: [] }));
   mocks.list.mockImplementation(async () => ({ schedules: listed }));
   mocks.estimate.mockResolvedValue(quote());
@@ -612,31 +623,69 @@ describe("accepted raw cloud automations", () => {
     await waitFor(() => expect(mocks.create).toHaveBeenCalledWith({ workspaceId: "ws-1", workspaceMode: "fresh", archiveAfterDays: 365, archiveOnPrMerge: true, schedule, name: "Morning report", prompt: "Summarise what changed.", agent: "claude", mode: "acceptEdits", missedRunPolicy: "skip", completionPolicy: "suspend", maxRunMinutes: 60 }, "org-1"));
   });
 
-  it("uses only allocated own run workspaces and distinguishes archive due from observed archival", async () => {
+  it.each(["ready", "held"])("labels fresh run workspaces and keeps pending and archival distinct when %s", async (readiness) => {
+    scope.status.organizations = [{ id: "org-1", name: "One", role: "owner", isPersonal: false, cloud: { enabled: true, flags: {} } }];
+    scope.status.phase2Readiness = readiness === "ready" ? { "org-1": automationFeatures } : {};
+    const catalogRow = (id: string, name: string, fields: Partial<CloudWorkspace> = {}): CloudWorkspaceListItem => ({
+      workspace: { id, orgId: "org-1", name, provider: "docker", state: "ready", accessMode: "private", createdAt: 1, updatedAt: 1, releaseDisposition: null, ...fields },
+      latestOperation: null,
+    });
+    const org: OrgCatalog = { orgId: "org-1", source: "cache", error: null, fetchedAt: 1, requestedAt: 1, repositories: null, repositoriesAt: null, quota: null, sessions: {},
+      workspaces: [catalogRow("ws-1", "Template name"), catalogRow("fresh-ws-9", "Cached run name")],
+    };
+    scope.catalog.orgs = { "org-1": org };
     listed = [githubAutomation()];
     mocks.detail.mockResolvedValue({ schedule: listed[0], runs: [
       { id: "unallocated", state: "creating-workspace", trigger: "github", scheduledFor: 1, workspaceId: null },
       { id: "placeholder", state: "queued", trigger: "github", scheduledFor: 1, workspaceId: "ws-1" },
       { id: "allocated", state: "working", trigger: "github", scheduledFor: 1, workspaceId: "fresh-ws-9", tabId: "tab-9", workBranch: "terminalx/review-9", archiveAt: 1 },
       { id: "archived", state: "completed", trigger: "github", scheduledFor: 1, workspaceId: "fresh-ws-8", sessionId: "session-8", tabId: "tab-8", archiveAt: 1, archivedAt: 2 },
+      { id: "denied", state: "completed", trigger: "github", scheduledFor: 1, workspaceId: "fresh-ws-7" },
+      { id: "other-org", state: "completed", trigger: "github", scheduledFor: 1, workspaceId: "fresh-ws-6" },
     ] });
-    open();
+    const view = open();
     fireEvent.click(within(await row()).getByRole("button", { name: "Show runs" }));
     const unallocated = await screen.findByTestId("automation-run-unallocated");
     expect(unallocated.textContent).toContain("Creating workspace");
+    expect(within(unallocated).getByText("Run workspace not allocated.")).toBeTruthy();
     expect(within(unallocated).queryByRole("button")).toBeNull();
-    expect(within(screen.getByTestId("automation-run-placeholder")).queryByRole("button")).toBeNull();
+    const placeholder = within(screen.getByTestId("automation-run-placeholder"));
+    expect(placeholder.getByText("Run workspace not allocated.")).toBeTruthy();
+    expect(placeholder.queryByRole("button")).toBeNull();
+    expect(screen.queryByText(/Template name|Cached run name/)).toBeNull();
     const allocated = screen.getByTestId("automation-run-allocated");
+    expect(within(allocated).getByText("Workspace ID fresh-ws-9")).toBeTruthy();
+    expect(mocks.relistCatalog).toHaveBeenCalledWith("org-1");
+    const refreshCatalog = (fields: Partial<OrgCatalog>) => {
+      scope.catalog.orgs = { "org-1": { ...scope.catalog.orgs["org-1"], ...fields } };
+      view.rerender(<CloudSchedulesDialog orgId="org-1" workspaceId="ws-1" name="Docs site" onClose={() => undefined} />);
+    };
+    refreshCatalog({ source: "live" });
+    expect(within(allocated).getByText("Workspace ID fresh-ws-9")).toBeTruthy();
+    refreshCatalog({ requestedAt: Date.now() + 1, workspaces: [
+      catalogRow("fresh-ws-9", "PR review workspace"),
+      catalogRow("fresh-ws-7", "Private run name", { you: { role: "none", canApprove: false } }),
+      catalogRow("fresh-ws-6", "Other organization workspace", { orgId: "org-2" }),
+    ] });
+    expect(within(allocated).getByText("Workspace PR review workspace")).toBeTruthy();
+    expect(screen.queryByText(/Private run name|Other organization workspace/)).toBeNull();
+    expect(within(screen.getByTestId("automation-run-denied")).getByText("Workspace ID fresh-ws-7")).toBeTruthy();
+    expect(within(screen.getByTestId("automation-run-other-org")).getByText("Workspace ID fresh-ws-6")).toBeTruthy();
     expect(allocated.textContent).toContain("Archive due");
     expect(allocated.textContent).toContain("archival not observed");
     expect(allocated.textContent).not.toContain("Archived ");
     expect(screen.getByTestId("automation-run-archived").textContent).toContain("Archived ");
+    expect(within(screen.getByTestId("automation-run-archived")).getByText("Workspace ID fresh-ws-8")).toBeTruthy();
     fireEvent.click(within(allocated).getByRole("button", { name: "Open run workspace" }));
     expect(mocks.openRun).toHaveBeenCalledWith("cloud:org-1:fresh-ws-9", "tab-9");
     fireEvent.click(within(screen.getByTestId("automation-run-archived")).getByRole("button", { name: "Open run workspace" }));
     expect(mocks.openRun).toHaveBeenLastCalledWith("cloud:org-1:fresh-ws-8:session-8", "tab-8");
     expect(mocks.detail).toHaveBeenCalledWith(ID, "org-1");
     expect(mocks.setActive).not.toHaveBeenCalled();
+    expect(mocks.estimate).not.toHaveBeenCalled();
+    refreshCatalog({ error: "cloud_workspace_not_found" });
+    expect(within(allocated).getByText("Workspace ID fresh-ws-9")).toBeTruthy();
+    expect(screen.queryByText(/PR review workspace/)).toBeNull();
   });
 
   it("invalidates an agreed quote across a mode A-B-A change immediately and excludes hidden cleanup on existing mode", async () => {
