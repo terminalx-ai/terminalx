@@ -1,0 +1,45 @@
+# 25.05, progress until it is running: the launch's stages on the workspace page, asked about every 3 seconds.
+appId: com.terminalx.phone.fixture
+name: Launch progress (25.05)
+---
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: launch-queued, openRoute: /cloud, openWorkspace: ws-launch }
+- assertVisible: "Launching…"
+- assertVisible: "You can leave this page.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-20-queued
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: launch-creating, openRoute: /cloud, openWorkspace: ws-launch }
+- assertVisible: "Creating the machine, in progress"
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-21-creating-the-machine
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: launch-installing, openRoute: /cloud, openWorkspace: ws-launch }
+- assertVisible: "Installing the runtime, in progress: Cloning the repository"
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-22-installing-the-runtime
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: launch-running, openRoute: /cloud, openWorkspace: ws-launch }
+- extendedWaitUntil:
+    visible: "Checkout redesign is running"
+    timeout: 15000
+- takeScreenshot: 25.05-23-running
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: launch-creating, openRoute: /cloud, openWorkspace: ws-launch }
+- assertVisible: "Creating the machine, in progress"
+- tapOn: "Cancel launch"
+- assertVisible: "Cancel this launch?"
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-24-cancel-asks-first
+- tapOn: "Keep launching"
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: launch-canceling, openRoute: /cloud, openWorkspace: ws-launch }
+- assertVisible: "Canceling…"
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-25-canceling

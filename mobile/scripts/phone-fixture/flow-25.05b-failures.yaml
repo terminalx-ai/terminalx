@@ -1,0 +1,37 @@
+# 25.05, when the launch does not finish: the cause, what was left at the provider, and what can be done next.
+appId: com.terminalx.phone.fixture
+name: Launch failures (25.05)
+---
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: launch-canceled, openRoute: /cloud, openWorkspace: ws-launch }
+- assertVisible: "Launch canceled"
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-26-canceled
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: launch-runtime, openRoute: /cloud, openWorkspace: ws-launch }
+- assertVisible: "The launch failed"
+- assertVisible: "Retry setup"
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-27-failed-runtime
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: launch-key, openRoute: /cloud, openWorkspace: ws-launch }
+- assertVisible: "Fix the provider key"
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-28-failed-key
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: launch-timeout, openRoute: /cloud, openWorkspace: ws-launch }
+- assertVisible: "Delete it and launch a new one.*"
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-29-took-too-long
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureWorkspace: launch-offline, openRoute: /cloud, openWorkspace: ws-launch }
+- extendedWaitUntil:
+    visible: "Offline. The launch carries on.*"
+    timeout: 15000
+- waitForAnimationToEnd
+- takeScreenshot: 25.05-30-network-lost

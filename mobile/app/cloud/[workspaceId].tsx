@@ -153,7 +153,8 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, item, in
   // Who is in the middle of a turn, for the alert that asks before stopping.
   const busyTab = unshared ? null : snapshot.tabs.find((entry) => entry.status === "in_progress") ?? null;
   const busyHarness = busyTab?.events?.[busyTab.events.length - 1]?.harness;
-  const working = busyTab ? { agent: (busyHarness && AGENTS[busyHarness]) ?? null } : null;
+  // Not connected, the runtime says nothing: the list's activity says whether an agent is in a turn, not which.
+  const working = busyTab ? { agent: (busyHarness && AGENTS[busyHarness]) ?? null } : !live && !unshared && (item?.workspace.runtimeActivity?.activeTurns ?? 0) > 0 ? { agent: null } : null;
   // The runtime's word on the role decides, as it does for everything else here.
   const managed = item && roleNow ? { ...item, workspace: { ...item.workspace, you: { canApprove: false, ...item.workspace.you, role: roleNow } } } : item;
   const actions = managed && !unshared ? workspaceRowActions(managed, { catalog, push: (href) => router.push(href as Href), working, onStopping: setStopAnswer }).filter((action) => !(stoppingNow && action.name === "stop-workspace")) : [];
