@@ -817,13 +817,20 @@ try {
         // Back in the app's own table: one cell saved for one agent, and Reset puts it back.
         await nav.getByRole("button", { name: "Orchestrator", exact: true }).click();
         await page.waitForFunction(() => document.querySelector('[data-testid="orchestrator-settings"] select[aria-label="Claude Code model for search"]')?.selectedOptions[0]?.textContent === "Haiku 5.5");
+        // The table shows what the backend answered, set after the call returns: the stub has the call before the page
+        // has its answer. Reset to defaults is drawn from the same answer (it is offered while a row is changed), so the
+        // table is read once it says the answer is in, not when the call is made (a busy Linux runner read it first).
+        const reset = tab.getByRole("button", { name: "Reset to defaults", exact: true });
         await cell("Codex model for code").selectOption("mid");
         await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 9);
+        await reset.waitFor();
+        await page.waitForFunction((button) => !button.disabled, await reset.elementHandle());
         const moved = [await chosen("Codex model for code"), await chosen("Claude Code model for code")].join();
         await routing.locator('[data-kind="verify"]').scrollIntoViewIfNeeded();
         await shot(page, "settings-routing-changed");
-        await tab.getByRole("button", { name: "Reset to defaults", exact: true }).click();
+        await reset.click();
         await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 10);
+        await page.waitForFunction((button) => button.disabled, await reset.elementHandle());
         checks["a cell of the app's table saves that agent's column alone, and Reset to defaults puts every row back"] = moved === "GPT-6.1 Terra,Opus 5.5" && (await chosen("Codex model for code")) === "GPT-6.1 Sol"
           && JSON.stringify(await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args).slice(8))) === JSON.stringify([{ routing: { code: { codex: { tier: "mid", effort: "medium" } } } }, { resetRouting: true }]);
         const layout = await layoutOf(settings.locator("section").first());
