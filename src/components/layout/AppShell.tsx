@@ -9,7 +9,7 @@ import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { WorktreeCopyNotices } from "@/components/ui/WorktreeCopyNotices";
 import { onOpenOrganizationSettings, onOpenSettingRow, onStatsSettingsRequest } from "@/lib/settingsLinks";
 import { onOpenCloudSetup, type CloudSetupTarget } from "@/lib/cloudSetupFlow";
-import { useAccount } from "@/lib/account";
+import { getAccount, useAccount } from "@/lib/account";
 import { CloudSetupFlow } from "@/components/cloudSetup/CloudSetupFlow";
 import { useUnknownSettingLink } from "@/lib/settingsDeepLink";
 import { bootDesktopLinks } from "@/lib/desktopLinks";
@@ -40,7 +40,10 @@ import { MachineSessionHost } from "@/components/machines/MachineSessionHost";
 import { CloudSessionHost } from "@/components/session/CloudSessionHost";
 import { isCloudKey, isLocalKey, isMachineKey, machineKeyKind } from "@/types/target";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
-import { useShortcut } from "@/lib/hotkeys";
+import { registerShortcut, useShortcut } from "@/lib/hotkeys";
+import { ORGANIZATION_SHORTCUTS } from "@/lib/shortcuts";
+import { organizationSwitchTargets, switchOrganization } from "@/lib/organizationVisibility";
+import { useOrganizationSwitchingEnabled } from "@/lib/organizationVisibilityGate";
 import { toggleMode } from "@/lib/theme";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { NewSessionDialog } from "@/components/session/NewSessionDialog";
@@ -330,6 +333,16 @@ export function AppShell() {
   useShortcut("app.skills", showSkills);
   useShortcut("app.automations", showAutomations);
   useShortcut("app.quickChat", showQuickChat);
+  const organizationSwitching = useOrganizationSwitchingEnabled();
+  useEffect(() => {
+    if (!organizationSwitching) return;
+    const unbind = ORGANIZATION_SHORTCUTS.map(({ id }, index) => registerShortcut(id, (event) => {
+      const target = organizationSwitchTargets(getAccount().status)[index];
+      if (!target) return false;
+      return event.repeat || switchOrganization(target.id);
+    }, { global: true }));
+    return () => unbind.forEach((dispose) => dispose());
+  }, [organizationSwitching]);
   useShortcut("app.commandPalette", () => setPaletteOpen(true), { global: true });
 
   const sidebarOpen = prefs.sidebarOpen;

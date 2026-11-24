@@ -39,7 +39,8 @@ import {
   useCloudSidebarSections,
 } from "@/lib/cloudSidebarSections";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
-import { organizationName, organizationRunningCount, setOrganizationHidden, useOrganizationVisibility } from "@/lib/organizationVisibility";
+import { organizationName, organizationRunningCount, setOrganizationHidden, switchOrganization, useOrganizationVisibility } from "@/lib/organizationVisibility";
+import { useOrganizationSwitchingEnabled } from "@/lib/organizationVisibilityGate";
 import { setPrefs, usePrefs, type CloudSidebarSection } from "@/lib/prefs";
 import { bootCloudPins, useCloudPins, useCloudPinsError } from "@/lib/cloudPins";
 import { workspaceUsage } from "@/lib/runningLimit";
@@ -81,7 +82,7 @@ export function CloudOrganizations({ onOpenOrganizations }: { onOpenOrganization
   useEffect(() => bootCloudSessions(), []);
   useEffect(() => bootCloudMirrors(), []);
   if (privacy.enabled) return <PrivacyEmptyState />;
-  if (!cloud.all.length) return null;
+  if (!cloud.all.length && !cloud.orgs.length) return null;
   const hiddenRunning = cloud.hidden.reduce((count, org) => count + organizationRunningCount(org.id, catalog), 0);
   return (
     <>
@@ -93,7 +94,7 @@ export function CloudOrganizations({ onOpenOrganizations }: { onOpenOrganization
           isDefault={org.id === cloud.defaultOrg}
           live={cloud.live.has(org.id)}
           temporary={org.id === cloud.temporaryOrganization}
-          organizations={cloud.all}
+          organizations={cloud.choices}
           selectedOrganization={cloud.selectedOrganization}
           onLifecycle={setDialog}
           onAdd={(kind) => setAdding({ orgId: org.id, orgName: sectionName(org), kind })}
@@ -174,6 +175,8 @@ function OrganizationSection({
 }) {
   const catalog = useCloudCatalog();
   const prefs = usePrefs();
+  const switchingEnabled = useOrganizationSwitchingEnabled();
+  const cloudEnabled = org.cloud?.enabled === true;
   const cloudPins = useCloudPins();
   const pinsError = useCloudPinsError();
   const store = useSessionStore();
@@ -230,11 +233,11 @@ function OrganizationSection({
     >
       cloud · {usage.used} running
     </span>
-  ) : "cloud";
+  ) : cloudEnabled ? "cloud" : "Cloud workspaces unavailable";
 
   const actions = (
     <>
-      <OrganizationPresenceCount orgId={org.id} />
+      {cloudEnabled && <OrganizationPresenceCount orgId={org.id} />}
       <RowActions persistent className={anyMenuOpen ? "not-sr-only" : undefined}>
         {/* Adding a repository only pins it to this sidebar, so a member may; a new project is created with its first session, so it says who can. */}
         {live && mayCreate !== null && (
@@ -287,7 +290,7 @@ function OrganizationSection({
                   </DropdownMenuItem>
                 )}
               </>
-            ) : (
+            ) : cloudEnabled && (
               <DropdownMenuItem onSelect={() => void switchOrg()}>
                 <ArrowLeftRight /> Switch to show cloud sessions
               </DropdownMenuItem>
@@ -309,6 +312,10 @@ function OrganizationSection({
                       role="menuitemradio"
                       aria-checked={choice.id === selectedOrganization}
                       onSelect={() => {
+                        if (switchingEnabled) {
+                          switchOrganization(choice.id);
+                          return;
+                        }
                         setPrefs({ selectedOrganization: choice.id });
                         // Leaving an organization also leaves a session of it that was shown only while selected.
                         const selected = store.selectedSessionId ? parseCloudWorkspaceKey(store.selectedSessionId) : null;
@@ -344,7 +351,7 @@ function OrganizationSection({
           </button>
         </div>
       )}
-      {!live && (
+      {cloudEnabled && !live && (
         <div className="flex min-w-0 items-center gap-1.5 px-2 py-1 text-[12px] text-faint" title={HINT} data-testid="cloud-org-not-live">
           <span className="min-w-0 flex-1 truncate">Its cloud sessions show when it is the default organization.</span>
           <button type="button" onClick={() => void switchOrg()} className="shrink-0 rounded-sm underline underline-offset-2 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40" data-testid="cloud-org-switch">

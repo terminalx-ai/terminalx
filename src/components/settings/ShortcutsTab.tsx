@@ -3,12 +3,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { suspendHotkeys, useHotkey } from "@/lib/hotkeys";
+import { useOrganizationSwitchingEnabled } from "@/lib/organizationVisibilityGate";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { SystemShortcutSection } from "./FloatingWindowSettings";
 import { ChordCap, SHORTCUT_CARD, SHORTCUT_GROUP_TITLE } from "./Keycap";
 import { Pencil, Plus } from "@/icons";
 import {
   HOLD_CODES,
+  ORGANIZATION_SHORTCUTS,
   SHORTCUT_ACTIONS,
   SHORTCUT_GROUPS,
   bindingProblem,
@@ -26,6 +28,7 @@ import {
   useKeymap,
   type Keymap,
   type ShortcutAction,
+  type StandardShortcutId,
 } from "@/lib/shortcuts";
 
 
@@ -38,11 +41,13 @@ import {
 export function ShortcutsTab() {
   const keymap = useKeymap();
   const switches = useExperimentalSettings();
+  const switchingEnabled = useOrganizationSwitchingEnabled();
   // The binding being changed: which action, and which of its bindings (its count for a new one).
   const [editing, setEditing] = useState<{ id: string; slot: number } | null>(null);
   const [confirmAll, setConfirmAll] = useState(false);
   const [said, setSaid] = useState("");
-  const customized = SHORTCUT_ACTIONS.some((action) => !action.fixed && isCustomized(action.id, keymap));
+  const actions: readonly ShortcutAction[] = switchingEnabled ? [...SHORTCUT_ACTIONS, ...ORGANIZATION_SHORTCUTS] : SHORTCUT_ACTIONS;
+  const customized = actions.some((action) => !action.fixed && isCustomized(action.id, keymap));
 
   return (
     <div className="flex flex-col gap-4" data-testid="shortcuts-tab">
@@ -76,11 +81,11 @@ export function ShortcutsTab() {
         )}
       </div></RegisteredSetting>
       <SystemShortcutSection />
-      {SHORTCUT_GROUPS.map((group) => (
+      {SHORTCUT_GROUPS.filter((group) => switchingEnabled || group !== "Organizations").map((group) => (
         <section key={group} aria-label={`${group} shortcuts`}>
           <div className={SHORTCUT_GROUP_TITLE}>{group}</div>
           <ul className={SHORTCUT_CARD}>
-            {SHORTCUT_ACTIONS.filter((action) => action.group === group && (!action.requires || switches?.[action.requires] === true)).map((action) => (
+            {actions.filter((action) => action.group === group && (!action.requires || switches?.[action.requires] === true)).map((action) => (
               <ShortcutRow
                 key={action.id}
                 action={action}
@@ -144,8 +149,8 @@ function ShortcutRow({
     focusRow();
   };
 
-  return (
-    <RegisteredSetting setting={`shortcuts.${action.id}`}><li ref={row} className="flex flex-col px-3 text-[13px]" data-shortcut={action.id}>
+  const item = (
+    <li ref={row} className="flex flex-col px-3 text-[13px]" data-shortcut={action.id}>
       <div className="flex min-h-[35px] min-w-0 items-center gap-3 py-1">
         <span className="min-w-0 flex-1">{action.label}</span>
         <span className="flex shrink-0 items-center gap-1">
@@ -220,8 +225,9 @@ function ShortcutRow({
         </div>
       )}
       {slot != null && !action.fixed && <ShortcutEditor action={action} bindings={bindings} slot={slot} keymap={keymap} onClose={close} onSaid={onSaid} />}
-    </li></RegisteredSetting>
+    </li>
   );
+  return action.group === "Organizations" ? item : <RegisteredSetting setting={`shortcuts.${action.id as StandardShortcutId}`}>{item}</RegisteredSetting>;
 }
 
 /**
