@@ -712,6 +712,7 @@ pub fn run() {
             commands::cloud_provider_set_creation_enabled,
             commands::cloud_provider_revalidate,
             commands::cloud_agent_logins,
+            commands::cloud_agent_login_affected_workspaces,
             commands::cloud_agent_login_connect,
             commands::cloud_agent_login_remove,
             commands::cloud_agent_routes,

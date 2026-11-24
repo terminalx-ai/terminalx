@@ -460,6 +460,8 @@ export const api = {
   // Each organization has its own (PRO-107): `orgId` (and a consent's `organizationId`) names any member
   // organization, whatever the active one is; null is the active one.
   cloudAgentLogins: (orgId?: string | null) => invoke<{ credentials: AgentLogin[] }>("cloud_agent_logins", { orgId: orgId ?? null }),
+  cloudAgentLoginAffectedWorkspaces: (provider: AgentLoginProvider, contextRevision: string, orgId?: string | null) =>
+    invoke<AgentLoginAffectedWorkspaces>("cloud_agent_login_affected_workspaces", { provider, contextRevision, orgId: orgId ?? null }),
   cloudAgentLoginConnect: (provider: AgentLoginProvider, source: AgentLoginSource, consent: AgentLoginConsent) =>
     invoke<AgentLogin>("cloud_agent_login_connect", { provider, source, consent }),
   cloudAgentLoginRemove: (provider: AgentLoginProvider, contextRevision: string, orgId?: string | null) =>
@@ -1198,6 +1200,13 @@ export interface AgentLogin {
   sharedUse?: "organization" | "managers" | (string & {});
   /** In the list only: the person who connected this subscription login no longer owns or administers the organization. */
   configurerLeft?: boolean;
+}
+
+export interface AgentLoginAffectedWorkspaces {
+  workspaces: { id: string; name: string }[];
+  count: number;
+  hasMore: boolean;
+  hasHidden: boolean;
 }
 
 export interface ClaudeLoginStarted {
