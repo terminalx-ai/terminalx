@@ -653,6 +653,7 @@ pub fn run() {
             commands::repository_files_preview,
             commands::repository_folders,
             commands::account_status,
+            commands::account_update_display_name,
             commands::account_refresh_roles,
             commands::account_sign_in,
             commands::account_paste_callback,

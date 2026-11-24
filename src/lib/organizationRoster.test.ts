@@ -39,6 +39,29 @@ describe("organization roster cache", () => {
     act(() => invalidateOrganizationRoster("org-a"));
     await waitFor(() => expect(result.current.roster?.members[0].userId).toBe("bob"));
   });
+  it("shows a teammate's changed name through polling while the roster stays mounted", async () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useOrganizationRoster("org-a"));
+    const original = await act(() => readOrganizationRoster("org-a"));
+    const [member] = original.members;
+    expect(result.current.roster?.members[0].displayName).toBe("alice");
+
+    mocks.listIn.mockResolvedValue({ ...original, members: [{ ...member, displayName: "Alice Chen" }] });
+    await act(() => vi.advanceTimersByTimeAsync(ROSTER_MAX_AGE_MS));
+    expect(result.current.roster?.members[0]).toMatchObject({ userId: "alice", displayName: "Alice Chen" });
+  });
+  it("replaces an initial roster request when an account name changes", async () => {
+    const pending = deferred<OrganizationRoster>();
+    const original = roster();
+    const updated = { ...original, members: [{ ...original.members[0], displayName: "Alice Chen" }] };
+    mocks.listIn.mockReturnValueOnce(pending.promise).mockResolvedValueOnce(updated);
+    const firstRead = readOrganizationRoster("org-a");
+    invalidateOrganizationRoster("org-a", { refreshCached: true });
+    pending.resolve(original);
+    expect(await firstRead).toBe(updated);
+    expect(await readOrganizationRoster("org-a")).toBe(updated);
+    expect(mocks.listIn).toHaveBeenCalledTimes(2);
+  });
   it.each(["active", "org-a"])("recovers from initial read failures while %s stays subscribed", async (orgId) => {
     vi.useFakeTimers();
     const error = new Error("temporarily unavailable");

@@ -36,6 +36,23 @@ pub async fn account_status(
     tauri::async_runtime::spawn_blocking(move || account.status(&app)).await.map_err(err)
 }
 
+#[tauri::command]
+pub async fn account_update_display_name(
+    app: AppHandle,
+    name: String,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::account::AccountStatus> {
+    let account = state.account.clone();
+    // PRO-305 follows the existing Phase 2 rollout. Production stays off until
+    // the server accepts desktop sessions and the shared rollout is enabled.
+    let enabled = state.cloud_workspaces.phase2_contracts_available();
+    tauri::async_runtime::spawn_blocking(move || account.update_display_name(&app, enabled, &name, &context_revision))
+        .await
+        .map_err(err)?
+        .map_err(str::to_owned)
+}
+
 /// Read the organizations and the role in each again from the account service.
 #[tauri::command]
 pub async fn account_refresh_roles(

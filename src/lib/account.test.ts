@@ -585,3 +585,50 @@ it("forwards capability-only native account announcements without inventing supp
   mocks.listeners.get("account_status")!({ payload: { ...before, workClaims: false } });
   expect(account.getAccount().status.workClaims).toBe(false);
 });
+
+it("retires cached rosters in every member organization when the confirmed name changes", async () => {
+  vi.resetModules();
+  const before = signedIn(true);
+  const cloud = { enabled: true, flags: { "team.roster.v1": true } };
+  const status = {
+    ...before,
+    context: { ...before.context, account: "account-a" },
+    organizations: [{ ...before.organizations[0], cloud }, { ...before.organizations[0], cloud, id: "org-b" }],
+  };
+  const renamed = { ...status, identity: { ...status.identity, name: "New Name" } };
+  let finishStatus!: (value: typeof status) => void;
+  let booted = false;
+  let name = status.identity.name;
+  mocks.invoke.mockReset().mockImplementation(async (command: string) => {
+    if (command === "account_status") {
+      if (booted) return new Promise((resolve) => { finishStatus = resolve; });
+      return status;
+    }
+    if (command === "account_refresh_roles") return { status, fresh: true };
+    if (command === "account_update_display_name") {
+      name = renamed.identity.name;
+      return renamed;
+    }
+    if (command === "organization_members" || command === "organization_members_in") return {
+      members: [{ userId: "me", email: status.identity.email, role: "owner", displayName: name }],
+      pendingInvites: [], viewerRole: "owner", canManageMembers: true, contextRevision: status.context.revision,
+    };
+    return [];
+  });
+  const account = await import("./account");
+  const { readOrganizationRoster } = await import("./organizationRoster");
+  await account.bootAccount();
+  await account.refreshAccountRoles();
+  booted = true;
+
+  expect((await readOrganizationRoster("org-a")).members[0].displayName).toBe("A");
+  expect((await readOrganizationRoster("org-b")).members[0].displayName).toBe("A");
+  const staleRead = account.refreshAccount();
+  await account.updateDisplayName("New Name", status.context.revision);
+  expect(account.getAccount().status.identity?.name).toBe("New Name");
+  finishStatus(status);
+  await staleRead;
+  expect(account.getAccount().status.identity?.name).toBe("New Name");
+  expect((await readOrganizationRoster("org-a")).members[0].displayName).toBe("New Name");
+  expect((await readOrganizationRoster("org-b")).members[0].displayName).toBe("New Name");
+});
