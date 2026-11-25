@@ -9,8 +9,10 @@
 // Its states (23.19): some unreadable (the sentence above the list), the read failed (the error row with Retry, never
 // "No hand-offs yet"), empty, and loading.
 // A way in: the hand-off row among an item's links opens the thread that holds that hand-off, at that step.
-// Under 820 wide the page keeps its two columns: folding to one (23.18) is not built. The 760 case checks that the two
-// columns stay usable there, and prints how wide each is.
+// Under 820 wide (PRO-572, 23.18; the page is 492 in a 760 window) the page folds to one column: the Hand-offs button
+// lands on a thread alone, "All hand-offs" shows the list alone with the same chain marked and the keyboard on it,
+// opening a chain shows its thread alone with the keyboard on its title, steps are stepped in 14 for each hand-off
+// deeper, and nothing is cut short (an ellipsis or a clamp) that the 1440 layout shows in full.
 // Run after pnpm build: node scripts/webkit/bot-handoffs-page.mjs
 // BOT_HANDOFFS_PAGE_SHOTS=<dir> saves a screenshot of each case.
 import { launch, open, openSession, report, serve, sidebar } from "./harness.mjs";
@@ -86,6 +88,28 @@ const box = (locator) => locator.evaluate((element) => {
   return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height };
 });
 
+/**
+ * What the page cuts short now: each text whose box hides part of it (an ellipsis or a line clamp), by its test id or
+ * tag and its first words. Boxes that scroll are not counted.
+ */
+async function cutShort(page) {
+  return page.evaluate(() => {
+    const view = document.querySelector("[data-testid=bots-handoffs]");
+    const cut = [];
+    for (const element of view?.querySelectorAll("*") ?? []) {
+      const style = getComputedStyle(element);
+      const hides = ["hidden", "clip"].includes(style.overflowX) || ["hidden", "clip"].includes(style.overflowY);
+      if (!hides || !element.textContent?.trim()) continue;
+      if (element.scrollWidth > element.clientWidth + 1 || element.scrollHeight > element.clientHeight + 1) {
+        cut.push(`${element.getAttribute("data-testid") ?? element.tagName.toLowerCase()}: ${element.textContent.replace(/\s+/g, " ").trim().slice(0, 48)}`);
+      }
+    }
+    return cut;
+  });
+}
+/** What the 1440 layout cut short, by colour scheme: the 760 one may cut only these. */
+const cutAtWide = new Map();
+
 /** What is wrong with the page's layout, as sentences; none when it is sound. */
 async function measure(page) {
   return page.evaluate(async () => {
@@ -102,18 +126,24 @@ async function measure(page) {
     }
     const list = view.querySelector("[data-testid=bots-handoffs-list]");
     const thread = view.querySelector("[data-testid=bots-handoffs-thread]");
+    const folded = view.dataset.folded === "true";
+    if (folded && list && thread) problems.push("the folded page shows the list and a thread together");
+    if (folded) for (const pane of [list, thread].filter(Boolean)) {
+      const rect = pane.getBoundingClientRect();
+      if (Math.abs(rect.left - slot.left) > 1 || Math.abs(rect.right - slot.right) > 1) problems.push(`the ${pane === list ? "list" : "thread"} does not fill the folded page (${rect.left}–${rect.right} of ${slot.left}–${slot.right})`);
+    }
+    if (list) for (const row of list.querySelectorAll("[data-testid=bots-handoffs-chain]")) {
+      const rect = row.getBoundingClientRect();
+      for (const child of row.querySelectorAll("span")) {
+        const inner = child.getBoundingClientRect();
+        if (inner.width && (inner.right > rect.right + 1 || inner.left < rect.left - 1)) problems.push(`chain "${text(row)}": "${text(child)}" spills out of its row`);
+      }
+    }
     if (list && thread) {
       const [a, b] = [list.getBoundingClientRect(), thread.getBoundingClientRect()];
       if (a.right > b.left + 1) problems.push(`the list (to ${a.right}) covers the thread (from ${b.left})`);
       if (a.width < 150) problems.push(`the list is ${a.width}px wide`);
       if (b.width < 240) problems.push(`the thread is ${b.width}px wide`);
-      for (const row of list.querySelectorAll("[data-testid=bots-handoffs-chain]")) {
-        const rect = row.getBoundingClientRect();
-        for (const child of row.querySelectorAll("span")) {
-          const inner = child.getBoundingClientRect();
-          if (inner.width && (inner.right > rect.right + 1 || inner.left < rect.left - 1)) problems.push(`chain "${text(row)}": "${text(child)}" spills out of its row`);
-        }
-      }
     }
     const scroller = view.querySelector("[data-testid=bots-handoffs-steps]");
     for (const step of view.querySelectorAll("[data-testid=bots-handoffs-step]")) {
@@ -176,22 +206,60 @@ try {
       await shot("button");
       await button.click();
 
-      // 23.16: the chain three deep, with its retry.
       const view = main.getByTestId("bots-handoffs");
-      await view.locator("[data-testid=bots-handoffs-chain][data-chain='1']").click();
       const thread = view.getByTestId("bots-handoffs-thread");
-      await thread.locator("[data-testid=bots-handoffs-step][data-number='4']").waitFor();
+      const listNav = view.getByTestId("bots-handoffs-list");
+      await thread.waitFor();
+      const folded = (await view.getAttribute("data-folded")) === "true";
+      const focusedTestId = () => page.evaluate(() => `${document.activeElement?.getAttribute("data-testid") ?? ""}${document.activeElement?.dataset.chain ? `:${document.activeElement.dataset.chain}` : ""}`);
+      const markedChains = () => view.locator("[data-testid=bots-handoffs-chain][aria-current=true]").evaluateAll((all) => all.map((row) => row.dataset.chain).join());
+      // What each layout cuts short: the first thread (the newest open chain), the list and the chain three deep.
+      const cut = new Set(await cutShort(page));
+      let fold = {};
+      if (folded) {
+        // 23.18: the Hand-offs button lands on a thread alone; All hand-offs shows the list alone, the chain still marked.
+        const landed = { chain: await thread.getAttribute("data-chain"), lists: await listNav.count(), focus: await focusedTestId(), position: (await view.getByTestId("bots-handoffs-position").textContent())?.trim() };
+        await shot("landed");
+        const landedProblems = await measure(page);
+        await view.getByTestId("bots-handoffs-all").click();
+        await listNav.waitFor();
+        const back = { threads: await thread.count(), marked: await markedChains(), focus: await focusedTestId() };
+        await shot("list");
+        const listProblems = await measure(page);
+        for (const value of await cutShort(page)) cut.add(value);
+        await view.locator("[data-testid=bots-handoffs-chain][data-chain='1']").click();
+        await thread.locator("[data-testid=bots-handoffs-step][data-number='4']").waitFor();
+        const opened = { lists: await listNav.count(), focus: await focusedTestId(), position: (await view.getByTestId("bots-handoffs-position").textContent())?.trim() };
+        fold = { landed, back, opened, landedProblems, listProblems };
+        failed += report(`hand-offs page folded ${name}`, {
+          "the Hand-offs button lands on the newest open chain's thread, alone, with the keyboard on its title": landed.chain === "5" && landed.lists === 0 && landed.focus === "bots-handoffs-title" && landed.position === "1 of 2 open",
+          "All hand-offs shows the list alone, the same chain marked and the keyboard on it": back.threads === 0 && back.marked === "5" && back.focus === "bots-handoffs-chain:5",
+          "opening a chain shows its thread alone, with the keyboard on its title": opened.lists === 0 && opened.focus === "bots-handoffs-title" && opened.position === "2 of 2 open",
+          "the thread and the list each fill the page, and nothing leaves it or overlaps": landedProblems.length === 0 && listProblems.length === 0,
+        }, fold);
+      } else {
+        // 23.16: the chain three deep, with its retry.
+        await view.locator("[data-testid=bots-handoffs-chain][data-chain='1']").click();
+        await thread.locator("[data-testid=bots-handoffs-step][data-number='4']").waitFor();
+      }
       await shot("chain");
       const problems = await measure(page);
+      for (const value of await cutShort(page)) cut.add(value);
+      const indent = folded ? 14 : 28;
       const steps = await thread.getByTestId("bots-handoffs-step").evaluateAll((all) => all.map((step) => ({ number: step.dataset.number, level: Number(step.dataset.level), left: step.getBoundingClientRect().left })));
-      const [listBox, threadBox] = await Promise.all([box(view.getByTestId("bots-handoffs-list")), box(thread)]);
+      const [listBox, threadBox] = await Promise.all([folded ? null : box(listNav), box(thread)]);
+      if (viewport.width === 1440) cutAtWide.set(colorScheme, cut);
+      const wide = cutAtWide.get(colorScheme);
+      const cutHere = [...cut].filter((value) => !wide?.has(value));
       failed += report(`hand-offs page ${name}`, {
         "the Hand-offs button stands right of Calendar, in its row, and counts the two open chains": buttonBox.left >= calendarBox.right - 0.5 && Math.abs(buttonBox.top - calendarBox.top) < 1 && buttonText === "Hand-offs 2",
         "nothing leaves the page, overlaps, or is clipped; every Stop is whole": problems.length === 0,
-        "the list stands left of the thread": listBox.right <= threadBox.left + 1 && listBox.width > 0 && threadBox.width > 0,
-        "four chains: two open, two closed": (await view.locator("[data-testid=bots-handoffs-chain][data-open=true]").count()) === 2 && (await view.locator("[data-testid=bots-handoffs-chain][data-open=false]").count()) === 2,
+        ...(folded
+          ? { "folded: the thread fills the page, and no list beside it": (await listNav.count()) === 0 && threadBox.width > 0 }
+          : { "the list stands left of the thread": listBox.right <= threadBox.left + 1 && listBox.width > 0 && threadBox.width > 0 }),
+        "nothing is cut short that the 1440 layout shows in full": wide !== undefined && cutHere.length === 0,
         "the chain's four steps are in the order made": steps.map((step) => step.number).join() === "1,2,3,4",
-        "each step is 28px in for each hand-off deeper, the retry where what it tries again is": steps.length === 4 && steps.every((step) => Math.abs(step.left - steps[0].left - step.level * 28) < 0.5) && steps.map((step) => step.level).join() === "0,1,2,2",
+        [`each step is ${indent}px in for each hand-off deeper, the retry where what it tries again is`]: steps.length === 4 && steps.every((step) => Math.abs(step.left - steps[0].left - step.level * indent) < 0.5) && steps.map((step) => step.level).join() === "0,1,2,2",
         "each says its number and how deep the limit counts it": (await thread.getByTestId("bots-handoffs-step-depth").allTextContents()).join("|") === "#1 · 1 of 3|#2 · 2 of 3|#3 · 3 of 3|#4 · 3 of 3",
         "the retry says which try it is": (await thread.getByTestId("bots-handoffs-step-retry").textContent())?.trim() === "Iris handed hand-off 3 again · try 2 of 3",
         "the header says how deep the chain got": (await thread.getByTestId("bots-handoffs-depth").textContent())?.trim() === "3 of 3 deep · a chain stops at 3",
@@ -199,8 +267,20 @@ try {
         "Stop is on the two open steps and no other": (await thread.getByTestId("bots-handoffs-stop").count()) === 2 && (await thread.locator("[data-number='1'] [data-testid=bots-handoffs-stop]").count()) === 1 && (await thread.locator("[data-number='4'] [data-testid=bots-handoffs-stop]").count()) === 1,
         "the header counts the open chains and what waits for a paused bot": (await view.getByTestId("bots-handoffs-counts").textContent()) === "2 open1 waits for a paused bot",
         "no page errors": errors.length === 0,
-      }, { problems, steps, listBox, threadBox, buttonText, errors });
-      console.log(`     hand-offs page ${name}: page ${(await box(view)).width.toFixed(0)}px wide, list ${listBox.width.toFixed(0)}px, thread ${threadBox.width.toFixed(0)}px`);
+      }, { problems, steps, listBox, threadBox, buttonText, errors, cutHere, cut: [...cut] });
+      console.log(`     hand-offs page ${name}: page ${(await box(view)).width.toFixed(0)}px wide, ${folded ? "folded" : `list ${listBox.width.toFixed(0)}px`}, thread ${threadBox.width.toFixed(0)}px`);
+
+      // The list, as the rest of the checks read it: folded, All hand-offs goes back to it with chain 1 still marked.
+      if (folded) {
+        await view.getByTestId("bots-handoffs-all").click();
+        await listNav.waitFor();
+        failed += report(`hand-offs page folded, back from chain 1 ${name}`, {
+          "the list shows alone, chain 1 still marked, the keyboard on it": (await thread.count()) === 0 && (await markedChains()) === "1" && (await focusedTestId()) === "bots-handoffs-chain:1",
+        });
+      }
+      failed += report(`hand-offs page, the list ${name}`, {
+        "four chains: two open, two closed": (await view.locator("[data-testid=bots-handoffs-chain][data-open=true]").count()) === 2 && (await view.locator("[data-testid=bots-handoffs-chain][data-open=false]").count()) === 2,
+      });
 
       // 23.19: some could not be read. The sentence counts hand-offs alone, above the list that could be read.
       await setCase("unreadable");
@@ -272,6 +352,7 @@ try {
         "names the hand-off and the bot it came from, inside the item's links": rowText?.startsWith("Hand-off 1 · from Atlas") && rowBox.left >= asideBox.left - 0.5 && rowBox.right <= asideBox.right + 0.5,
         "opens the thread that holds it": (await opened.getAttribute("data-chain")) === "1",
         "at that step": (await opened.locator("[data-testid=bots-handoffs-step][aria-current=step]").getAttribute("data-number")) === "1",
+        ...(folded ? { "folded: the thread alone, with the keyboard on its title": (await page.locator("main").getByTestId("bots-handoffs-list").count()) === 0 && (await focusedTestId()) === "bots-handoffs-title" } : {}),
         "no page errors": errors.length === 0,
       }, { rowText, rowBox, asideBox, errors });
       await page.close();

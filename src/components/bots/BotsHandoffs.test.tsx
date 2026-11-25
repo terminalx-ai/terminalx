@@ -389,3 +389,198 @@ describe("the ways in to the Hand-offs page (PRO-540)", () => {
     expect(getBotsPage()).toEqual({ page: "team", focus: true });
   });
 });
+
+describe("the Hand-offs page folded to one column under 820 wide (PRO-572, 23.18)", () => {
+  // jsdom lays nothing out: the page is given a width, and an observer that a test can make report a new one.
+  let pageWidth = 0;
+  let resized: (() => void)[] = [];
+  const resizeTo = (width: number) => act(() => { pageWidth = width; resized.forEach((notify) => notify()); });
+  beforeEach(() => {
+    pageWidth = 492;
+    resized = [];
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const width = this.dataset.testid === "bots-handoffs" ? pageWidth : 0;
+      return { width, height: 0, top: 0, left: 0, right: width, bottom: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+    });
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(private notify: ResizeObserverCallback) {}
+      observe() { resized.push(() => this.notify([], this as unknown as ResizeObserver)); }
+      unobserve() {}
+      disconnect() {}
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const chainRow = (root: number) => screen.getAllByTestId("bots-handoffs-chain").find((row) => row.dataset.chain === String(root))!;
+  const marked = () => screen.getAllByTestId("bots-handoffs-chain").filter((row) => row.getAttribute("aria-current")).map((row) => row.dataset.chain);
+
+  it("at 492 (a 760 window) the Hand-offs button lands on a thread alone, with All hand-offs and which open chain it is; the keyboard is on its title", async () => {
+    showBotsHandoffs();
+    render(<BotsHandoffs />);
+    const thread = await screen.findByTestId("bots-handoffs-thread");
+    expect(screen.getByTestId("bots-handoffs").dataset.folded).toBe("true");
+    expect(thread.dataset.chain).toBe("5");
+    expect(screen.queryByTestId("bots-handoffs-list")).toBeNull();
+    expect(screen.getByTestId("bots-handoffs-all").textContent?.trim()).toBe("All hand-offs");
+    expect(screen.getByTestId("bots-handoffs-position").textContent).toBe("1 of 2 open");
+    expect(document.activeElement).toBe(screen.getByTestId("bots-handoffs-title"));
+    // Bots still goes back to the team.
+    expect(screen.getByTestId("bots-handoffs-back").textContent?.trim()).toBe("Bots");
+  });
+
+  it("All hand-offs shows the list alone with the same chain still marked and the keyboard on it; opening another shows its thread alone", async () => {
+    render(<BotsHandoffs />);
+    await screen.findByTestId("bots-handoffs-thread");
+    fireEvent.click(screen.getByTestId("bots-handoffs-all"));
+    expect(screen.queryByTestId("bots-handoffs-thread")).toBeNull();
+    const list = screen.getByTestId("bots-handoffs-list");
+    expect(list.className).toContain("flex-1");
+    expect(list.className).not.toContain("border-r");
+    expect(marked()).toEqual(["5"]);
+    expect(document.activeElement).toBe(chainRow(5));
+
+    fireEvent.click(chainRow(1));
+    expect(screen.queryByTestId("bots-handoffs-list")).toBeNull();
+    expect(screen.getByTestId("bots-handoffs-thread").dataset.chain).toBe("1");
+    expect(screen.getByTestId("bots-handoffs-position").textContent).toBe("2 of 2 open");
+    expect(document.activeElement).toBe(screen.getByTestId("bots-handoffs-title"));
+    expect(screen.getByTestId("bots-handoffs-title").textContent).toBe("Offline mode: get the screens designed before any build work");
+
+    fireEvent.click(screen.getByTestId("bots-handoffs-all"));
+    expect(marked()).toEqual(["1"]);
+    expect(document.activeElement).toBe(chainRow(1));
+    // A closed chain says which closed one it is.
+    fireEvent.click(chainRow(6));
+    expect(screen.getByTestId("bots-handoffs-position").textContent).toBe("2 of 2 closed");
+  });
+
+  it("the same chain stays marked after All hand-offs, and stays marked when a newer chain arrives under the list", async () => {
+    render(<BotsHandoffs />);
+    await screen.findByTestId("bots-handoffs-thread");
+    fireEvent.click(screen.getByTestId("bots-handoffs-all"));
+    fireEvent.click(chainRow(5));
+    const shown = screen.getByTestId("bots-handoffs-thread").dataset.chain;
+    expect(shown).toBe("5");
+    fireEvent.click(screen.getByTestId("bots-handoffs-all"));
+    expect(marked()).toEqual(["5"]);
+    // A newer open chain now comes first in the list; the one the reader came back from is still the one marked.
+    list = listOf([...chainOfFour(), ...others(), handoff(8, "atlas", "iris", { title: "A newer open chain" })]);
+    await changed();
+    await waitFor(() => expect(screen.getAllByTestId("bots-handoffs-chain").map((row) => row.dataset.chain)).toContain("8"));
+    expect(screen.getAllByTestId("bots-handoffs-chain")[0].dataset.chain).toBe("8");
+    expect(marked()).toEqual(["5"]);
+  });
+
+  it("steps are stepped in 14 for each hand-off deeper; state, Stop and time take their own line; the scope is whole", async () => {
+    render(<BotsHandoffs />);
+    await screen.findByTestId("bots-handoffs-thread");
+    fireEvent.click(screen.getByTestId("bots-handoffs-all"));
+    fireEvent.click(chainRow(1));
+    expect(steps().map((step) => [step.dataset.number, step.dataset.level, step.style.marginLeft])).toEqual([["1", "0", "0px"], ["2", "1", "14px"], ["3", "2", "28px"], ["4", "2", "28px"]]);
+    const status = within(stepOf(1)).getByTestId("bots-handoffs-step-status");
+    expect(status.className).toContain("basis-full");
+    expect(status.className).not.toContain("ml-auto");
+    expect(within(status).getByTestId("bots-handoffs-stop")).toBeTruthy();
+    expect(within(status).getByTestId("bots-handoffs-step-state")).toBeTruthy();
+    expect(status.querySelector("time")?.className).toContain("ml-auto");
+    expect(within(stepOf(1)).getByTestId("bots-handoffs-step-scope").className).not.toContain("line-clamp");
+    // The sentence under the title has its own line and is not cut short.
+    const about = screen.getByTestId("bots-handoffs-about");
+    expect(about.className).toContain("basis-full");
+    expect(about.className).not.toContain("truncate");
+  });
+
+  it("the wide page keeps both columns, 28 a level, the clamped scope, and the keyboard where it was", async () => {
+    pageWidth = 820;
+    render(<BotsHandoffs />);
+    await screen.findByTestId("bots-handoffs-thread");
+    expect(screen.getByTestId("bots-handoffs").dataset.folded).toBe("false");
+    expect(screen.getByTestId("bots-handoffs-list")).toBeTruthy();
+    expect(screen.queryByTestId("bots-handoffs-all")).toBeNull();
+    expect(document.activeElement).not.toBe(screen.getByTestId("bots-handoffs-title"));
+    chainRow(1).focus();
+    fireEvent.click(chainRow(1));
+    expect(document.activeElement).toBe(chainRow(1));
+    expect(steps().map((step) => step.style.marginLeft)).toEqual(["0px", "28px", "56px", "56px"]);
+    expect(within(stepOf(1)).getByTestId("bots-handoffs-step-scope").className).toContain("line-clamp-2");
+    expect(screen.getByTestId("bots-handoffs-about").className).toContain("truncate");
+  });
+
+  it("folds and unfolds as the page's own width crosses 820, keeping the chain that shows", async () => {
+    pageWidth = 1100;
+    render(<BotsHandoffs />);
+    await screen.findByTestId("bots-handoffs-list");
+    fireEvent.click(chainRow(1));
+    await resizeTo(819);
+    expect(screen.queryByTestId("bots-handoffs-list")).toBeNull();
+    expect(screen.getByTestId("bots-handoffs-thread").dataset.chain).toBe("1");
+    expect(steps().map((step) => step.style.marginLeft)).toEqual(["0px", "14px", "28px", "28px"]);
+    fireEvent.click(screen.getByTestId("bots-handoffs-all"));
+    await resizeTo(820);
+    expect(screen.getByTestId("bots-handoffs-list")).toBeTruthy();
+    expect(screen.getByTestId("bots-handoffs-thread").dataset.chain).toBe("1");
+    expect(marked()).toEqual(["1"]);
+    await resizeTo(600);
+    // Folded again from the list, it stays on the list.
+    expect(screen.getByTestId("bots-handoffs-list")).toBeTruthy();
+    expect(screen.queryByTestId("bots-handoffs-thread")).toBeNull();
+  });
+
+  it("every way in lands on the thread: a card's chain link or an item's hand-off row opens its chain at that step, from the list too", async () => {
+    render(<BotsHandoffs />);
+    await screen.findByTestId("bots-handoffs-thread");
+    fireEvent.click(screen.getByTestId("bots-handoffs-all"));
+    expect(screen.queryByTestId("bots-handoffs-thread")).toBeNull();
+    // showBotsHandoffs(number) is what a card's chain link (BotMessageCards) and an item's hand-off row (BotItemPage) call.
+    act(() => showBotsHandoffs(3));
+    expect(screen.queryByTestId("bots-handoffs-list")).toBeNull();
+    expect(screen.getByTestId("bots-handoffs-thread").dataset.chain).toBe("1");
+    expect(stepOf(3).getAttribute("aria-current")).toBe("step");
+    expect(document.activeElement).toBe(screen.getByTestId("bots-handoffs-title"));
+    fireEvent.click(screen.getByTestId("bots-handoffs-all"));
+    expect(marked()).toEqual(["1"]);
+    // The Hand-offs button, from the list: the thread again.
+    act(() => showBotsHandoffs());
+    expect(screen.getByTestId("bots-handoffs-thread").dataset.chain).toBe("5");
+  });
+
+  it("opened on a number before the read ends, shows that thread and takes the keyboard to it once read", async () => {
+    showBotsHandoffs(7);
+    render(<BotsHandoffs />);
+    const thread = await screen.findByTestId("bots-handoffs-thread");
+    expect(thread.dataset.chain).toBe("7");
+    expect(stepOf(7).getAttribute("aria-current")).toBe("step");
+    expect(document.activeElement).toBe(screen.getByTestId("bots-handoffs-title"));
+    expect(screen.queryByTestId("bots-handoffs-list")).toBeNull();
+  });
+
+  it("renders its states folded: loading, empty, read failed and some unreadable", async () => {
+    let arrive: (value: HandoffList) => void = () => {};
+    mocks.invoke.mockImplementation(() => new Promise<HandoffList>((resolve) => { arrive = resolve; }));
+    const loading = render(<BotsHandoffs />);
+    expect((await screen.findByTestId("bots-handoffs-reading")).textContent).toBe(" Reading the hand-offs…");
+    expect(screen.queryByTestId("bots-handoffs-list")).toBeNull();
+    await act(async () => arrive(listOf([])));
+    expect(within(screen.getByTestId("bots-handoffs-empty")).getByRole("heading", { name: "No hand-offs yet" })).toBeTruthy();
+    loading.unmount();
+
+    mocks.invoke.mockImplementation(route);
+    list = new Error("/Users/you/.raccoon/bot-handoffs.json cannot be read; it is left as it is");
+    const failed = render(<BotsHandoffs />);
+    expect((await screen.findByTestId("bots-handoffs-error")).textContent).toContain("Couldn't read the hand-offs: /Users/you/.raccoon/bot-handoffs.json cannot be read; it is left as it is");
+    expect(screen.queryByText("No hand-offs yet")).toBeNull();
+    expect(screen.getByTestId("bots-handoffs-retry")).toBeTruthy();
+    failed.unmount();
+
+    list = listOf(others(), { unreadable: 5, unreadableHandoffs: 2, unreadableMessages: 3 });
+    render(<BotsHandoffs />);
+    expect((await screen.findAllByTestId("bots-handoffs-unreadable"))[0].textContent).toBe("2 hand-offs were saved by a newer TerminalX and can't be shown here. Update the app to see them.");
+    expect(screen.getByTestId("bots-handoffs-thread")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("bots-handoffs-all"));
+    expect(screen.getAllByTestId("bots-handoffs-unreadable")).toHaveLength(2);
+    expect(screen.getAllByTestId("bots-handoffs-chain")).toHaveLength(3);
+  });
+});
