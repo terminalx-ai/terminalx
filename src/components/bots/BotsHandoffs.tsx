@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type Ref } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type Ref, type RefObject } from "react";
 import { ArrowLeft, ArrowLeftRight, ArrowRight, CornerDownRight, Loader2, RotateCw, Square } from "@/icons";
 import { MachineHostError } from "@/components/machines/MachineHostError";
 import { Button } from "@/components/ui/button";
@@ -24,8 +24,31 @@ import { BotAvatar } from "./BotAvatar";
  * thread shows what the hand-off records hold: the work, its answer in the answering bot's words, a stop. Messages
  * one bot tells another are not in it: they are saved without a hand-off's number.
  *
- * The page is laid out in two columns at every width. Folding to one column in a narrow window (23.18) is not built.
+ * Under 820 wide (the page's own width, which is 492 in a 760 window) the page folds to one column (23.18): the list or
+ * one thread, never both. Opening a chain shows its thread with "All hand-offs" above it to go back, and going back shows
+ * the list with that chain still marked. Every way in lands on a thread. Steps are stepped in 14 instead of 28.
  */
+
+/** The page folds to one column when it is narrower than this (23.18). */
+export const FOLD_BELOW = 820;
+
+/**
+ * The page's own width, kept up to date as it changes: null until it is measured. jsdom lays nothing out and measures
+ * 0, which is a page that is not laid out, so it never folds.
+ */
+function usePageWidth(page: RefObject<HTMLDivElement | null>): number | null {
+  const [width, setWidth] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    const node = page.current;
+    if (!node) return;
+    const measure = () => setWidth(node.getBoundingClientRect().width);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [page]);
+  return width;
+}
 
 const GONE = "a bot no longer here";
 
@@ -98,12 +121,22 @@ export function BotsHandoffs() {
   const asked = page.page === "handoffs" ? page.number : undefined;
   const [picked, setPicked] = useState<number | null>(asked ?? null);
   const [step, setStep] = useState<number | null>(asked ?? null);
+  // Folded, which of the two shows. Every way in lands on a thread: the asked-for one, or the one the wide page opens at.
+  const [view, setView] = useState<"list" | "thread">("thread");
+  // Where the keyboard goes once the folded page shows what was asked for: the thread's title, or the marked chain.
+  const focusNext = useRef<"thread" | "list" | null>("thread");
   // Every request is taken, the same number asked again too: `page` is a new value for each.
   useEffect(() => {
     setPicked(asked ?? null);
     setStep(asked ?? null);
+    setView("thread");
+    focusNext.current = "thread";
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page]);
+  const root = useRef<HTMLDivElement | null>(null);
+  const heading = useRef<HTMLHeadingElement | null>(null);
+  const width = usePageWidth(root);
+  const folded = width !== null && width > 0 && width < FOLD_BELOW;
 
   const found = picked === null ? null : chainOf(chains, picked);
   const chain = found ?? chains[0] ?? null;
@@ -114,15 +147,48 @@ export function BotsHandoffs() {
   const notes = list ? unreadableNotes(list) : [];
   // "No hand-offs yet" is true only of a read that worked, found none, and left none unread.
   const none = !!list && list.handoffs.length === 0 && (list.unreadableHandoffs ?? list.unreadable) === 0;
+  // Which of its kind the shown chain is, for the folded thread's bar: "1 of 2 open".
+  const kin = chain ? chains.filter((value) => value.open === chain.open) : [];
+  const position = chain ? `${kin.indexOf(chain) + 1} of ${kin.length} ${chain.open ? "open" : "closed"}` : "";
+
+  // Folded, a thread that opens takes the keyboard to its title, and "All hand-offs" takes it to the marked chain. Wide,
+  // the list stays where it is. Nothing moves until the page is measured and the read has ended.
+  useEffect(() => {
+    const want = focusNext.current;
+    if (!want || width === null || (!list && !error)) return;
+    if (!folded || error || !chain) {
+      focusNext.current = null;
+      return;
+    }
+    const target = want === "thread" ? heading.current : root.current?.querySelector<HTMLElement>("[data-testid=bots-handoffs-chain][aria-current=true]");
+    // Asked in the same commit that changes what shows: it is there on the next one.
+    if (!target) return;
+    focusNext.current = null;
+    target.focus();
+  });
+  const pick = (number: number) => {
+    setPicked(number);
+    setStep(null);
+    setView("thread");
+    if (folded) focusNext.current = "thread";
+  };
+  const back = (number: number) => {
+    // The same chain stays marked, even if a newer one comes first by the time the list shows.
+    setPicked(number);
+    setView("list");
+    focusNext.current = "list";
+  };
+  const gutter = folded ? "px-4" : "px-6";
 
   return (
-    <div className="@container/handoffs-page flex min-h-0 flex-1 flex-col" data-testid="bots-handoffs">
-      <header className="flex min-h-12 shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-hairline px-6 py-2" data-testid="bots-handoffs-header">
+    <div ref={root} className="flex min-h-0 flex-1 flex-col" data-testid="bots-handoffs" data-folded={folded ? "true" : "false"}>
+      <header className={cn("flex min-h-12 shrink-0 flex-wrap items-center gap-x-3 border-b border-hairline py-2", folded ? "gap-y-1 px-4" : "gap-y-2 px-6")} data-testid="bots-handoffs-header">
         <Button variant="ghost" size="sm" className="-ml-2 shrink-0 text-muted-foreground" onClick={() => showBotsTeam(true)} data-testid="bots-handoffs-back">
           <ArrowLeft /> Bots
         </Button>
         <h1 className="shrink-0 text-[15px] font-semibold text-foreground">Hand-offs</h1>
-        <p className="min-w-0 flex-1 basis-[12rem] truncate text-[12.5px] text-faint">Work your bots passed to each other, one thread for each chain.</p>
+        {/* Folded, the sentence takes its own line under the title, whole, so the counts keep their place. */}
+        <p className={cn("min-w-0 text-[12.5px] text-faint", folded ? "order-last basis-full leading-[18px] break-words" : "flex-1 basis-[12rem] truncate")} data-testid="bots-handoffs-about">Work your bots passed to each other, one thread for each chain.</p>
         {/* No counts until the read ends, and none over a read that failed. */}
         {list && !error && (open > 0 || waitsPaused > 0) && (
           <div className="ml-auto flex min-w-0 flex-wrap items-center gap-2" data-testid="bots-handoffs-counts">
@@ -134,11 +200,11 @@ export function BotsHandoffs() {
 
       {error ? (
         // The read failed: said in the Bots page's own row, and nothing of an earlier read stays under it.
-        <div className="min-h-0 flex-1 px-6 py-4">
+        <div className={cn("min-h-0 flex-1 py-4", gutter)}>
           <ReadError error={error} onRetry={reload} />
         </div>
       ) : !list ? (
-        <div className="min-h-0 flex-1 px-6 py-4">
+        <div className={cn("min-h-0 flex-1 py-4", gutter)}>
           <p role="status" className="flex items-center gap-2 text-[12.5px] text-faint" data-testid="bots-handoffs-reading">
             <Loader2 className="size-3.5 animate-spin" /> Reading the hand-offs…
           </p>
@@ -146,7 +212,7 @@ export function BotsHandoffs() {
       ) : (
         <>
           {(notes.length > 0 || missing !== null) && (
-            <div className="flex shrink-0 flex-col gap-2 border-b border-hairline px-6 py-3">
+            <div className={cn("flex shrink-0 flex-col gap-2 border-b border-hairline py-3", gutter)}>
               {notes.map((note) => (
                 <p key={note.of} className="rounded-md bg-warning/10 px-3 py-2 text-[12.5px] text-warning" data-testid="bots-handoffs-unreadable" data-of={note.of}>{note.text}</p>
               ))}
@@ -158,7 +224,7 @@ export function BotsHandoffs() {
             </div>
           )}
           {none ? (
-            <div className="flex min-h-0 flex-1 items-center justify-center px-6 pb-16" data-testid="bots-handoffs-empty">
+            <div className={cn("flex min-h-0 flex-1 items-center justify-center pb-16", gutter)} data-testid="bots-handoffs-empty">
               <div className="w-full max-w-[440px] text-center">
                 <span className="inline-flex size-11 items-center justify-center rounded-xl border border-hairline bg-card text-muted-foreground"><ArrowLeftRight className="size-5" /></span>
                 <h2 className="mt-3 text-[15px] font-semibold text-foreground">No hand-offs yet</h2>
@@ -169,8 +235,20 @@ export function BotsHandoffs() {
             </div>
           ) : chain ? (
             <div className="flex min-h-0 flex-1">
-              <ChainList chains={chains} bots={bots} selected={chain.root} onPick={(root) => { setPicked(root); setStep(null); }} />
-              <Thread key={chain.root} chain={chain} bots={bots} list={list} step={step !== null && chainOf([chain], step) ? step : null} />
+              {(!folded || view === "list") && <ChainList chains={chains} bots={bots} selected={chain.root} folded={folded} onPick={pick} />}
+              {(!folded || view === "thread") && (
+                <Thread
+                  key={chain.root}
+                  chain={chain}
+                  bots={bots}
+                  list={list}
+                  step={step !== null && chainOf([chain], step) ? step : null}
+                  folded={folded}
+                  position={position}
+                  heading={heading}
+                  onBack={() => back(chain.root)}
+                />
+              )}
             </div>
           ) : null}
         </>
@@ -210,14 +288,14 @@ function BotPath({ ids, bots, names = false }: { ids: readonly string[]; bots: r
   );
 }
 
-/** The chains, open ones first. The one whose thread shows is marked. */
-function ChainList({ chains, bots, selected, onPick }: { chains: readonly HandoffChain[]; bots: readonly Bot[]; selected: number; onPick: (root: number) => void }) {
+/** The chains, open ones first. The one whose thread shows, or showed last when folded, is marked. Folded, it fills the page. */
+function ChainList({ chains, bots, selected, folded, onPick }: { chains: readonly HandoffChain[]; bots: readonly Bot[]; selected: number; folded: boolean; onPick: (root: number) => void }) {
   const groups = [
     { label: "Open", chains: chains.filter((chain) => chain.open) },
     { label: "Closed", chains: chains.filter((chain) => !chain.open) },
   ].filter((group) => group.chains.length > 0);
   return (
-    <nav aria-label="Chains of hand-offs" className="w-[clamp(11rem,34%,20.75rem)] shrink-0 overflow-y-auto border-r border-hairline p-2 scrollbar-thin" data-testid="bots-handoffs-list">
+    <nav aria-label="Chains of hand-offs" className={cn("overflow-y-auto p-2 scrollbar-thin", folded ? "min-w-0 flex-1" : "w-[clamp(11rem,34%,20.75rem)] shrink-0 border-r border-hairline")} data-testid="bots-handoffs-list">
       {groups.map((group) => (
         <section key={group.label} aria-label={group.label} className="mb-2 last:mb-0">
           <h2 className="flex h-8 items-center px-3 text-[11px] font-medium uppercase tracking-[.08em] text-faint">{group.label}</h2>
@@ -268,8 +346,23 @@ function DepthMeter({ depth, max }: { depth: number; max: number | undefined }) 
   );
 }
 
-/** One chain: its title, its bots, how deep it got, the trust line, then its steps. Opens at `step` when a way in asked for one. */
-function Thread({ chain, bots, list, step }: { chain: HandoffChain; bots: readonly Bot[]; list: HandoffList; step: number | null }) {
+interface ThreadProps {
+  chain: HandoffChain;
+  bots: readonly Bot[];
+  list: HandoffList;
+  step: number | null;
+  /** The page is one column: the thread fills it, under a bar with "All hand-offs" and which of its kind it is. */
+  folded: boolean;
+  position: string;
+  heading: RefObject<HTMLHeadingElement | null>;
+  onBack: () => void;
+}
+
+/**
+ * One chain: its title, its bots, how deep it got, the trust line, then its steps. Opens at `step` when a way in asked
+ * for one. Folded, "All hand-offs" above it goes back to the list.
+ */
+function Thread({ chain, bots, list, step, folded, position, heading, onBack }: ThreadProps) {
   const now = useTicking(chain.steps.some(({ handoff }) => handoff.state === "working"));
   const [stopping, setStopping] = useState<number[]>([]);
   // Why a Stop failed, by hand-off number, kept until it is tried again.
@@ -292,18 +385,27 @@ function Thread({ chain, bots, list, step }: { chain: HandoffChain; bots: readon
 
   return (
     <section aria-label={`Thread: ${chain.title}`} className="flex min-w-0 flex-1 flex-col" data-testid="bots-handoffs-thread" data-chain={chain.root}>
-      <div className="shrink-0 border-b border-hairline px-6 pt-4 pb-3 @max-[44rem]/handoffs-page:px-3">
-        <h2 className="text-[15px] font-semibold leading-5 break-words text-foreground">{chain.title}</h2>
+      {folded && (
+        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-hairline px-2" data-testid="bots-handoffs-thread-bar">
+          <Button variant="ghost" size="sm" className="shrink-0 text-muted-foreground" onClick={onBack} data-testid="bots-handoffs-all">
+            <ArrowLeft /> All hand-offs
+          </Button>
+          <span className="ml-auto pr-2 text-[11.5px] whitespace-nowrap text-faint" data-testid="bots-handoffs-position">{position}</span>
+        </div>
+      )}
+      <div className={cn("shrink-0 border-b border-hairline pb-3", folded ? "px-4 pt-3" : "px-6 pt-4")}>
+        <h2 ref={heading} tabIndex={-1} className="text-[15px] font-semibold leading-5 break-words text-foreground outline-none" data-testid="bots-handoffs-title">{chain.title}</h2>
         <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 text-[12px] text-muted-foreground">
           <BotPath ids={chain.bots} bots={bots} names />
-          <span className="ml-auto"><DepthMeter depth={chain.depth} max={list.maxDepth} /></span>
+          {/* Folded, the bots wrap and the depth takes the next line. */}
+          <span className={folded ? "basis-full" : "ml-auto"}><DepthMeter depth={chain.depth} max={list.maxDepth} /></span>
         </div>
         <p className="mt-2.5 flex items-start gap-1.5 text-[11.5px] leading-4 text-faint" data-testid="bots-handoffs-trust">
           <CornerDownRight className="mt-[2.5px] size-[11px] shrink-0" />
           <span className="min-w-0">Every step and message in this thread is a bot's words, not an approval.</span>
         </p>
       </div>
-      <ol className="min-h-0 flex-1 overflow-y-auto px-6 pt-4 scrollbar-thin @max-[44rem]/handoffs-page:px-3" data-testid="bots-handoffs-steps">
+      <ol className={cn("min-h-0 flex-1 overflow-y-auto pt-4 scrollbar-thin", folded ? "px-4" : "px-6")} data-testid="bots-handoffs-steps">
         {chain.steps.map((value, index) => (
           <Step
             key={value.handoff.number}
@@ -314,6 +416,7 @@ function Thread({ chain, bots, list, step }: { chain: HandoffChain; bots: readon
             now={now}
             last={index === chain.steps.length - 1}
             current={value.handoff.number === step}
+            folded={folded}
             busy={stopping.includes(value.handoff.number)}
             stopError={stopErrors[value.handoff.number] ?? null}
             onStop={() => stop(value.handoff.number)}
@@ -325,8 +428,9 @@ function Thread({ chain, bots, list, step }: { chain: HandoffChain; bots: readon
   );
 }
 
-/** How far a step is stepped in for each hand-off deeper. */
+/** How far a step is stepped in for each hand-off deeper: half as far when the page is folded (23.18). */
 const INDENT = 28;
+const FOLDED_INDENT = 14;
 
 interface StepProps {
   step: ChainStep;
@@ -335,6 +439,7 @@ interface StepProps {
   now: number;
   last: boolean;
   current: boolean;
+  folded: boolean;
   busy: boolean;
   stopError: string | null;
   onStop: () => void;
@@ -346,7 +451,7 @@ interface StepProps {
  * One hand-off in the thread: who to whom, its number and how deep the limit counts it, its state, a Stop while it is
  * open, and when it was made; under them the work, and its answer in the words of whoever gave it.
  */
-function Step({ step, bots, list, now, last, current, busy, stopError, onStop, onStopFailed, ref }: StepProps) {
+function Step({ step, bots, list, now, last, current, folded, busy, stopError, onStop, onStopFailed, ref }: StepProps) {
   const { handoff, level } = step;
   const from = bots.find((bot) => bot.id === handoff.from);
   const to = bots.find((bot) => bot.id === handoff.to);
@@ -361,13 +466,13 @@ function Step({ step, bots, list, now, last, current, busy, stopError, onStop, o
   const failed = handoff.state === "failed" || !!answer?.failed;
   const waits = handoff.waitingMessages > 0 ? `${handoff.waitingMessages === 1 ? "1 message waits" : `${handoff.waitingMessages} messages wait`} for its chat to start.` : null;
   return (
-    <li ref={ref} className="flex min-w-0 gap-3" style={{ marginLeft: level * INDENT }} aria-label={`Hand-off ${handoff.number}: ${handoff.title}`} aria-current={current ? "step" : undefined} data-testid="bots-handoffs-step" data-number={handoff.number} data-level={level} data-state={handoff.state}>
+    <li ref={ref} className="flex min-w-0 gap-3" style={{ marginLeft: level * (folded ? FOLDED_INDENT : INDENT) }} aria-label={`Hand-off ${handoff.number}: ${handoff.title}`} aria-current={current ? "step" : undefined} data-testid="bots-handoffs-step" data-number={handoff.number} data-level={level} data-state={handoff.state}>
       <span className="flex w-7 shrink-0 flex-col items-center">
         <BotAvatar roleTemplateId={from?.roleTemplateId ?? ""} size="sm" paused={!!from?.paused} />
         {!last && <span className="mt-1 w-px flex-1 bg-border" />}
       </span>
       <div className="min-w-0 flex-1 pb-4">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[12px]">
+        <div className={cn("flex min-w-0 flex-wrap items-center gap-x-2 text-[12px]", folded ? "gap-y-1.5" : "gap-y-1")}>
           <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             <span className="min-w-0 truncate text-[13px] font-medium text-foreground">{handoff.by === "owner" ? "You" : fromName}</span>
             <ArrowRight className="size-3 shrink-0 text-faint" />
@@ -377,7 +482,8 @@ function Step({ step, bots, list, now, last, current, busy, stopError, onStop, o
             </span>
             <span className="whitespace-nowrap text-faint" data-testid="bots-handoffs-step-depth">#{handoff.number} · {list.maxDepth ? `${depth} of ${list.maxDepth}` : `depth ${depth}`}</span>
           </span>
-          <span className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-x-2 gap-y-1">
+          {/* Folded, the state, Stop and the time take their own line under the names. */}
+          <span className={cn("flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-1", folded ? "basis-full" : "ml-auto justify-end")} data-testid="bots-handoffs-step-status">
             <Chip className={cn("min-w-0 whitespace-nowrap", stateTone(handoff))} title={state} data-testid="bots-handoffs-step-state">
               {handoff.state === "working" && <Loader2 className="size-3 shrink-0 animate-spin" />}
               <span className="truncate">{state}</span>
@@ -387,11 +493,11 @@ function Step({ step, bots, list, now, last, current, busy, stopError, onStop, o
                 {busy ? <Loader2 className="animate-spin" /> : <Square />} <span className="truncate">Stop {toName}</span>
               </Button>
             )}
-            <time className="shrink-0 whitespace-nowrap text-[11.5px] text-faint" dateTime={handoff.created} title={handoff.created}>{stepTime(handoff.created, now)}</time>
+            <time className={cn("shrink-0 whitespace-nowrap text-[11.5px] text-faint", folded && "ml-auto")} dateTime={handoff.created} title={handoff.created}>{stepTime(handoff.created, now)}</time>
           </span>
         </div>
         {stopError && <MachineHostError error={stopError} onRestarted={onStop} onFailed={onStopFailed} className="mt-1.5" />}
-        <div className={cn("mt-1.5 min-w-0 rounded-xl border bg-card px-4 py-2.5 @max-[44rem]/handoffs-page:px-3", current ? "border-accent/60" : "border-hairline")}>
+        <div className={cn("mt-1.5 min-w-0 rounded-xl border bg-card py-2.5", folded ? "px-3" : "px-4", current ? "border-accent/60" : "border-hairline")}>
           <p className="text-[13.5px] font-medium leading-5 break-words text-foreground">{handoff.title}</p>
           {handoff.by === "owner" && (
             <p className="mt-1 text-[11.5px] leading-[17px] text-muted-foreground" data-testid="bots-handoffs-step-owner">
@@ -409,9 +515,10 @@ function Step({ step, bots, list, now, last, current, busy, stopError, onStop, o
               <span className="min-w-0">{fromName} handed hand-off {handoff.retryOf} again · try {(handoff.attempt ?? 0) + 1}{tries ? ` of ${tries}` : ""}</span>
             </p>
           )}
-          {/* The work as its sender scoped it, until there is an answer to read in its place. */}
+          {/* The work as its sender scoped it, until there is an answer to read in its place. Two lines on the wide page;
+              folded, whole, so nothing the wide page shows in full is cut short in the narrow one. */}
           {!answer && handoff.by !== "owner" && handoff.scope && (
-            <p className="mt-1 line-clamp-2 text-[12.5px] leading-[19px] break-words text-muted-foreground" title={handoff.scope} data-testid="bots-handoffs-step-scope">{handoff.scope}</p>
+            <p className={cn("mt-1 text-[12.5px] leading-[19px] break-words text-muted-foreground", !folded && "line-clamp-2")} title={handoff.scope} data-testid="bots-handoffs-step-scope">{handoff.scope}</p>
           )}
           {answer && (
             <p className={cn("mt-2 border-l-2 pl-2.5 text-[12.5px] leading-[19px] break-words whitespace-pre-wrap", failed ? "border-destructive/60 text-destructive" : "border-hairline-strong text-muted-foreground")} data-testid="bots-handoffs-step-answer">
