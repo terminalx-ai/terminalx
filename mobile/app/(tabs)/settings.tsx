@@ -12,6 +12,7 @@ import { useHostFeatures } from "@mobile/state/host-features";
 import { useMachines } from "@mobile/state/useMachines";
 import { hostDisplayName } from "@mobile/store/host-name";
 import { Button, Card, Screen, SectionTitle } from "@mobile/ui/primitives";
+import { Spinner } from "@mobile/ui/Spinner";
 import { THEMES, themePalette, useTheme } from "@mobile/ui/theme";
 
 /**
@@ -73,7 +74,7 @@ export default function SettingsScreen() {
         <View style={styles.flex}><Text numberOfLines={1} style={[styles.rowTitle, { color: palette.ink }]}>{user.displayName ?? "TerminalX account"}</Text><Text numberOfLines={1} style={[styles.detail, { color: palette.muted }]}>{user.email}</Text></View>
         <ChevronRight size={18} color={palette.faint} />
       </Pressable>
-    </Card> : <Card style={styles.block}><Text style={[styles.title, { color: palette.ink }]}>Not signed in</Text><Text style={[styles.detail, { color: palette.muted }]}>Sign in to see the machines on your TerminalX account.</Text><Button label="Sign in" onPress={() => void app.signIn()} />{app.error ? <Text accessibilityRole="alert" style={[styles.detail, { color: palette.danger }]}>{app.error}</Text> : null}</Card>}
+    </Card> : <Card style={styles.block}><Text style={[styles.title, { color: palette.ink }]}>Not signed in</Text><Text style={[styles.detail, { color: palette.muted }]}>Sign in to see the machines on your TerminalX account.</Text><Button label={app.signingIn ? "Signing in…" : "Sign in"} disabled={app.signingIn} accessibilityState={{ disabled: app.signingIn, busy: app.signingIn }} icon={app.signingIn ? (color) => <Spinner size={16} color={color} /> : undefined} onPress={() => void app.signIn()} />{app.error ? <Text accessibilityRole="alert" style={[styles.detail, { color: palette.danger }]}>{app.error}</Text> : null}</Card>}
 
     <SectionTitle>Notifications</SectionTitle>
     {/* Its own page (#990, design 22.07): the row says what is switched on. */}

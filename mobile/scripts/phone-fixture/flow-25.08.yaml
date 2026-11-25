@@ -1,0 +1,143 @@
+# 25.08 Beta access code, after sign-in on the phone (PRO-551): every state the board draws,
+# and the two answers the server's contract adds (too many tries, a sign-in that has ended).
+appId: com.terminalx.phone.fixture
+# The boards are drawn in Ember when dark and in Den when light: MAESTRO_THEME=Den for the light run.
+env:
+  THEME: ${MAESTRO_THEME || "Ember"}
+name: Access code (25.08)
+---
+# The path that works: Sign in, held at the beta, a code typed, checked and accepted, then the Cloud tab's first run.
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureAccessCode: accepted, fixtureSetup: first-run }
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+- tapOn: "${THEME} theme"
+- tapOn: "Machines"
+- tapOn: "Sign in"
+- assertVisible: "Signing in…"
+- takeScreenshot: 25.08-01-between-the-sign-in-page-and-this-screen
+- assertVisible: "TerminalX is in private beta. Enter your access code to create an account."
+- waitForAnimationToEnd
+- takeScreenshot: 25.08-02-empty
+- tapOn: "10 letters and digits"
+- inputText: "K7QM2"
+- takeScreenshot: 25.08-03-typing
+- inputText: "X9TRB"
+- hideKeyboard
+- takeScreenshot: 25.08-04-entered
+- tapOn: "Continue"
+- assertVisible: "Checking the code…"
+- takeScreenshot: 25.08-05-checking
+- assertVisible: "Access code accepted"
+- takeScreenshot: 25.08-06-accepted
+- assertVisible: "Start setup"
+- waitForAnimationToEnd
+- takeScreenshot: 25.08-07-signed-in-on-the-first-run
+# Refused: not valid, then fixing it.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureAccessCode: invalid }
+- tapOn: "Machines"
+- tapOn: "Sign in"
+- tapOn: "10 letters and digits"
+- inputText: "K7QM2X9TR8"
+- tapOn: "Continue"
+- assertVisible: "That access code is not valid. Check it and try again."
+- waitForAnimationToEnd
+- takeScreenshot: 25.08-08-not-valid
+- eraseText: 1
+- inputText: "B"
+- assertNotVisible: "That access code is not valid. Check it and try again."
+- takeScreenshot: 25.08-11-fixing-it
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureAccessCode: expired }
+- tapOn: "Machines"
+- tapOn: "Sign in"
+- tapOn: "10 letters and digits"
+- inputText: "K7QM2X9TRB"
+- tapOn: "Continue"
+- assertVisible: "That access code has expired. Enter a different one."
+- waitForAnimationToEnd
+- takeScreenshot: 25.08-09-expired
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureAccessCode: exhausted }
+- tapOn: "Machines"
+- tapOn: "Sign in"
+- tapOn: "10 letters and digits"
+- inputText: "K7QM2X9TRB"
+- tapOn: "Continue"
+- assertVisible: "That access code has been fully used. Enter a different one."
+- waitForAnimationToEnd
+- takeScreenshot: 25.08-10-fully-used
+# The code cannot be checked: offline, and no answer or a server error.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: offline, fixtureAccessCode: accepted }
+- tapOn: "Machines"
+- tapOn: "Sign in"
+- tapOn: "10 letters and digits"
+- inputText: "K7QM2X9TRB"
+- hideKeyboard
+- assertVisible: "Offline. The code was not sent."
+- takeScreenshot: 25.08-12-offline
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureAccessCode: error }
+- tapOn: "Machines"
+- tapOn: "Sign in"
+- tapOn: "10 letters and digits"
+- inputText: "K7QM2X9TRB"
+- tapOn: "Continue"
+- assertVisible: "The code could not be checked. Try again: a code is never used twice for the same account."
+- hideKeyboard
+- takeScreenshot: 25.08-13-no-answer
+# The contract's two answers the board does not draw.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureAccessCode: rate-limited }
+- tapOn: "Machines"
+- tapOn: "Sign in"
+- tapOn: "10 letters and digits"
+- inputText: "K7QM2X9TRB"
+- tapOn: "Continue"
+- assertVisible: "Too many tries. Wait a moment, then try again."
+- hideKeyboard
+- takeScreenshot: 25.08-14-too-many-tries
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureAccessCode: ended }
+- tapOn: "Machines"
+- tapOn: "Sign in"
+- tapOn: "10 letters and digits"
+- inputText: "K7QM2X9TRB"
+- tapOn: "Continue"
+- assertVisible: "This sign-in has ended. Sign in again to enter your code."
+- takeScreenshot: 25.08-15-sign-in-ended
+# Fit: a long address, an error and the keyboard together.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureAccessCode: invalid, fixtureAccessEmail: "alexandra.montgomery-fitzwilliam@engineering.northwind-logistics.example" }
+- tapOn: "Machines"
+- tapOn: "Sign in"
+- tapOn: "10 letters and digits"
+- inputText: "K7QM2X9TR8"
+- tapOn: "Continue"
+- assertVisible: "That access code is not valid. Check it and try again."
+# The refused code keeps the cursor, so the keyboard is up again.
+- waitForAnimationToEnd
+- takeScreenshot: 25.08-16-a-long-address-an-error-and-the-keyboard
+# Cancel signs the person out: back on the Machines tab, signed out.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureAccessCode: accepted }
+- tapOn: "Machines"
+- tapOn: "Sign in"
+- assertVisible: "TerminalX is in private beta. Enter your access code to create an account."
+- tapOn: "Cancel"
+- assertVisible: "Your work, away from your desk"
+- waitForAnimationToEnd
+- takeScreenshot: 25.08-17-after-cancel
