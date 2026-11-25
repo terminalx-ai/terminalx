@@ -219,6 +219,9 @@ export function RepositorySettingsPage({ project }: { project: Project }) {
             value={preview?.fromIncludeFile ? patterns.map((item) => item.pattern).join("\n") : text}
             readOnly={(draft === null && !preview && loading) || !!preview?.fromIncludeFile}
             aria-describedby="repository-copy-commit-help"
+            // Set while this edit holds Settings (the leave guard above): unsaved, or its save not yet ended. Nothing
+            // else draws that, and a click to leave before it ends is refused (scripts/webkit/project-settings.mjs).
+            data-unsaved={dirty || saving ? "" : undefined}
             onFocus={() => setCommit(null)}
             onBlur={commitDraft}
             onChange={(event) => { setDraft(event.target.value); setCommit(null); }}

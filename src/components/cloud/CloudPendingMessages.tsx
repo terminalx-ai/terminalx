@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CircleAlert, Loader2, Send } from "@/icons";
+import { CircleAlert, Loader2, Send, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { QueuedCard } from "@/components/chat/TurnBlock";
 import { inputRefusalText } from "@/lib/cloudCollab";
@@ -8,6 +8,7 @@ import {
   nextGraceEnd,
   pendingCloudMessages,
   trackPending,
+  undeliverable,
   waitingLine,
   type PendingCloudMessage,
   type PendingTrack,
@@ -25,6 +26,18 @@ const STATE_TEXT: Record<string, string> = {
   "outcome-unknown": "May not have been sent",
 };
 
+/**
+ * Why the API or the runtime refused a command, in words, by its category.
+ * A category with no sentence here is never shown as its raw code: the code
+ * stays on the row's `data-category` for diagnostics.
+ */
+const REJECTED_TEXT: Record<string, string> = {
+  // The API takes no new commands for a workspace that needs attention or is not running (#1582).
+  cloud_workspace_agent_command_not_runnable: "Not delivered: the workspace can't take commands while it needs attention or isn't running",
+  cloud_workspace_not_found: "Not delivered: the workspace is gone",
+};
+const REJECTED_FALLBACK = "Not delivered: the workspace refused it";
+
 /** A command's state, in words; a refusal because of sharing says whose turn it is. */
 export function outboxStateText(entry: OutboxEntry, nameOf: (userId: string | null | undefined) => string): string {
   if (entry.state === "rejected" && entry.category === "lease-held") {
@@ -36,8 +49,8 @@ export function outboxStateText(entry: OutboxEntry, nameOf: (userId: string | nu
   if (entry.state === "rejected" && entry.category === "receipt-store-failed") return "Not sent: the workspace could not record it (its disk may be full)";
   const refused = entry.state === "rejected" ? inputRefusalText(entry.category, entry.receipt) : null;
   if (refused) return refused;
-  const text = STATE_TEXT[entry.state] ?? entry.state;
-  return entry.state === "rejected" && entry.category ? `${text} (${entry.category})` : text;
+  if (entry.state === "rejected") return (entry.category && REJECTED_TEXT[entry.category]) || (entry.category ? REJECTED_FALLBACK : STATE_TEXT.rejected);
+  return STATE_TEXT[entry.state] ?? entry.state;
 }
 
 /**
@@ -92,6 +105,7 @@ export function CloudPendingMessages({
   nameOf,
   onSendAgain,
   onSendNow,
+  onRemove,
 }: {
   messages: readonly PendingCloudMessage[];
   workspace: WorkspaceStatus;
@@ -99,18 +113,21 @@ export function CloudPendingMessages({
   onSendAgain?: (entry: OutboxEntry) => void;
   /** Interrupt the running turn so the runtime's held follow-ups go now; absent where the runtime cannot. */
   onSendNow?: () => void;
+  /** Cancel a message its workspace cannot take (#1582), so it never goes later; absent where this person may not. */
+  onRemove?: (entry: OutboxEntry) => void;
 }) {
   if (!messages.length) return null;
   return (
     <div data-testid="cloud-pending-messages">
       {messages.map((message) => {
         const failed = message.phase === "failed" && message.entry;
+        const stuck = !failed && undeliverable(message, workspace);
         const line = failed ? outboxStateText(message.entry!, nameOf) : waitingLine(message, workspace);
-        const moving = !failed && line.endsWith("…");
+        const moving = !failed && !stuck && line.endsWith("…");
         return (
           <QueuedCard
             key={message.id}
-            label={failed ? null : message.kind === "steer" ? "Steer" : "Queued"}
+            label={failed || stuck ? null : message.kind === "steer" ? "Steer" : "Queued"}
             author={message.actorId ? { userId: message.actorId, displayName: nameOf(message.actorId) } : null}
             text={message.text}
             files={message.images ? <span className="text-xs">{message.images === 1 ? "1 image" : `${message.images} images`}</span> : null}
@@ -119,8 +136,18 @@ export function CloudPendingMessages({
             data-phase={message.phase}
             data-state={message.entry?.state}
           >
-            {failed ? (
-              <div className={"mt-2 flex flex-wrap items-center gap-2 text-xs text-warning"} role="status" data-testid="queued-status">
+            {stuck ? (
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-warning" role="status" data-testid="queued-status">
+                <CircleAlert className="size-3.5 shrink-0" />
+                <span className="min-w-0 flex-1 break-words">{line}</span>
+                {onRemove && (
+                  <Button size="xs" variant="outline" className="shrink-0" onClick={() => onRemove(message.entry!)} data-testid="queued-remove">
+                    <Trash2 /> Remove
+                  </Button>
+                )}
+              </div>
+            ) : failed ? (
+              <div className={"mt-2 flex flex-wrap items-center gap-2 text-xs text-warning"} role="status" data-testid="queued-status" data-category={message.entry!.category ?? undefined}>
                 <CircleAlert className="size-3.5 shrink-0" />
                 <span className="min-w-0 flex-1 break-words">{line}</span>
                 {onSendAgain && !refusedForGood(message.entry!) && (

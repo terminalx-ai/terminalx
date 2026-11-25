@@ -87,6 +87,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "general.fixErrorsInstructions",
   "general.promptMap",
   "general.autocorrect",
+  "general.optionAsMeta",
   "general.aiEditor",
   "general.snippets",
   "general.useWorktree",

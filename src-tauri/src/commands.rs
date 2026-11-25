@@ -1165,7 +1165,14 @@ pub async fn cloud_agent_codex_login_start(
     if !crate::codex_device_login::runs_trusted(&program, &path) {
         return Err(CloudWorkspaceClientError::local(crate::codex_device_login::DeviceLoginError::CliUntrusted.code(), false));
     }
-    let (login, code) = tauri::async_runtime::spawn_blocking(move || crate::codex_device_login::start(&program, &args, &path, &crate::codex_device_login::homes_parent()))
+    let (login, code) = tauri::async_runtime::spawn_blocking(move || {
+        // No private folder for the sign-in's home: it does not begin anywhere else.
+        let parent = crate::codex_device_login::homes_parent().map_err(|error| {
+            log::warn!("no private folder for a Codex sign-in: {error}");
+            crate::codex_device_login::DeviceLoginError::Unavailable
+        })?;
+        crate::codex_device_login::start(&program, &args, &path, &parent)
+    })
         .await
         .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Mutation))?
         .map_err(|error| CloudWorkspaceClientError::local(error.code(), false))?;

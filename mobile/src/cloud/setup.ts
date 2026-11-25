@@ -129,6 +129,31 @@ export function signedInAgents(logins: readonly CloudCredential[]): string[] {
   return AGENTS.filter(([provider]) => logins.some((login) => login.provider === provider && login.state === "connected")).map(([, name]) => name);
 }
 
+/** Whether the account service holds anything of an organization's setup: compute connected or rejected, or an agent signed in. */
+export function setupStarted(setup: OrganizationSetup | undefined): boolean {
+  const compute = setup?.providers.value ? connectedCompute(setup.providers.value) : null;
+  return !!compute?.connected.length || !!compute?.attention.length || !!(setup?.logins.value && signedInAgents(setup.logins.value).length);
+}
+
+/**
+ * The organization whose setup is carried on when this phone holds no choice
+ * (PRO-569): the first one without workspaces, in the account's order, that
+ * the service holds something of. That is read from the server, so a second
+ * phone finds the setup the first one left. `pending` while an organization
+ * before any such one is still unread: nothing is said on a guess.
+ *
+ * An organization that was only chosen, with nothing connected yet, is not
+ * found: choosing changes nothing on the server (`setup-choice.ts`).
+ */
+export function resumedSetup<T extends Pick<CloudOrganization, "orgId">>(organizations: readonly T[], setups: ReadonlyMap<string, OrganizationSetup>): { organization: T | null; pending: boolean } {
+  for (const organization of organizations) {
+    const setup = setups.get(organization.orgId);
+    if (!setup?.read) return { organization: null, pending: true };
+    if (setupStarted(setup)) return { organization, pending: false };
+  }
+  return { organization: null, pending: false };
+}
+
 export interface SetupStepView {
   key: SetupStepKey;
   title: string;

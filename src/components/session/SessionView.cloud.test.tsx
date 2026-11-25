@@ -1433,6 +1433,99 @@ describe("the session header's location and connection chips", () => {
     for (const [label, tone] of seen) expect([label, label.endsWith("…")]).toEqual([label, tone === "pending"]);
   });
 
+  // #1582: the machine was deleted at the provider and the resume failed. Nothing in the session spins.
+  it("shows a workspace that needs attention as unavailable, with the reason: the chip, the queued card and a refused stop; never Connecting…", async () => {
+    setCatalog(workspaceItem("attention-required"));
+    cache["t-1"] = { tab: tabInfo(), events: [ev({ type: "user_message", text: "earlier question", queued: false })], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    outbox = [
+      { clientCommandId: "cmd-stuck", tabId: "t-1", kind: "send", text: "fix the login page", requestId: null, state: "queued", wake: "queued", createdAt: 1, updatedAt: 1 },
+      { clientCommandId: "cmd-stop", tabId: "t-1", kind: "stop", text: null, requestId: null, state: "rejected", category: "cloud_workspace_agent_command_not_runnable", createdAt: 2, updatedAt: 2 },
+    ];
+    const cancelled: string[] = [];
+    guard.handlers.cloud_agent_cancel = ({ clientCommandId }) => {
+      cancelled.push(String(clientCommandId));
+      outbox = outbox.map((entry) => (entry.clientCommandId === clientCommandId ? { ...entry, state: "cancelled", category: "cancelled-by-user" } : entry));
+      return outbox.find((entry) => entry.clientCommandId === clientCommandId);
+    };
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    expect(await screen.findByText("earlier question")).toBeTruthy();
+    const chip = () => screen.getByTestId("session-connection");
+    // Whatever the transport says on its way to finding out, and once it parked: Unavailable, settled.
+    for (const state of [
+      { state: "opening" },
+      { state: "reconnecting", attempt: 3, reason: "cloud_workspace_unavailable", retryInMs: 2_000 },
+      { state: "connecting", attempt: 1 },
+      { state: "unavailable", reason: "attention-required" },
+    ] as WorkspaceConnectionState[]) {
+      await act(async () => runtime.emit(state));
+      expect(chip().textContent).toBe("Unavailable");
+    }
+    expect(chip().getAttribute("title")).toBe("The workspace needs attention. Open it to inspect its runtime and provider state.");
+
+    // The queued prompt says it will not be delivered, spins nothing, and can be removed.
+    const card = await screen.findByTestId("queued-message");
+    const status = within(card).getByTestId("queued-status");
+    expect(status.textContent).toMatch(/^Won't be delivered: the workspace can't be reached/);
+    expect(card.textContent).not.toContain("Connecting…");
+    expect(card.querySelector(".animate-spin")).toBeNull();
+    // The refused stop reads as a sentence, its code kept for diagnostics only.
+    const stop = screen.getByTestId("cloud-agent-command");
+    expect(stop.textContent).toBe("Stop:Not delivered: the workspace can't take commands while it needs attention or isn't running");
+    expect(stop.getAttribute("data-category")).toBe("cloud_workspace_agent_command_not_runnable");
+
+    fireEvent.click(within(card).getByTestId("queued-remove"));
+    await waitFor(() => expect(screen.queryByTestId("queued-message")).toBeNull());
+    expect(cancelled).toEqual(["cmd-stuck"]);
+    // Removing never wakes anything.
+    expect(activate).not.toHaveBeenCalledWith("wake");
+  });
+
+  // #1582 review: repaired into stopped. The list decides now, the connection opens again, and a send would wake it.
+  it("follows a workspace repaired from needing attention into stopped: Stopped, the prompt waits for a wake, and the connection opens again", async () => {
+    setCatalog(workspaceItem("attention-required"));
+    cache["t-1"] = { tab: tabInfo(), events: [ev({ type: "user_message", text: "earlier question", queued: false })], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    outbox = [{ clientCommandId: "cmd-later", tabId: "t-1", kind: "send", text: "fix the login page", requestId: null, state: "queued", wake: "queued", createdAt: 1, updatedAt: 1 }];
+    const view = render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.emit({ state: "unavailable", reason: "attention-required" }));
+    const chip = () => screen.getByTestId("session-connection");
+    expect(chip().textContent).toBe("Unavailable");
+    expect(within(await screen.findByTestId("queued-message")).getByTestId("queued-status").textContent).toMatch(/^Won't be delivered/);
+
+    // An owner repaired it, and it is stopped now: a list asked for after the park says so.
+    const before = activate.mock.calls.length;
+    const requestedAt = Date.now() + 1_000;
+    mocks.catalog.orgs = { [ORG]: { orgId: ORG, workspaces: [workspaceItem("suspended")], repositories: null, repositoriesAt: null, quota: null, fetchedAt: requestedAt, requestedAt, source: "live", error: null } };
+    view.rerender(wrap(<CloudHarness />));
+    await waitFor(() => expect(activate.mock.calls.slice(before)).toEqual([["connect"]]));
+    expect(activate).not.toHaveBeenCalledWith("wake");
+    // Even before the transport has opened again, the list's state is what the session shows.
+    expect(chip().textContent).toBe("Stopped");
+    const status = within(screen.getByTestId("queued-message")).getByTestId("queued-status");
+    expect(status.textContent).not.toMatch(/Won't be delivered/);
+    expect(screen.queryByTestId("queued-remove")).toBeNull();
+    await act(async () => runtime.emit({ state: "suspended" }));
+    expect(chip().textContent).toBe("Stopped");
+  });
+
+  it("never reads a workspace that needs attention, was deleted or cannot be reached as on its way", () => {
+    const states = ["idle", "opening", "connecting", "reconnecting", "waitingForRuntime", "suspended", "unavailable", "updateRequired", "stopped"];
+    for (const state of states) {
+      for (const workspaceState of ["attention-required", "destroyed", null]) {
+        if (workspaceState === null && state !== "unavailable") continue;
+        for (const woke of [false, true]) for (const starting of [false, true]) for (const reattaching of [false, true]) {
+          const chip = cloudConnectionChip({ state, reason: "attention-required" } as WorkspaceConnectionState, workspaceState, { woke, starting, reattaching, wakeFloor: 1 });
+          if (state === "updateRequired") expect(chip.label).toBe("Update required");
+          else expect([state, workspaceState, chip]).toEqual([state, workspaceState, { label: "Unavailable", tone: "offline" }]);
+        }
+      }
+    }
+    // A live connection is the transport's own word, whatever an older list says.
+    const live: WorkspaceConnectionState = { state: "connected", runtimeGeneration: 1, runtimeVersion: "test", capabilities: [], authority: "manage" };
+    expect(cloudConnectionChip(live, "attention-required").label).toBe("Live");
+  });
+
   it("says Stopping… while a stop runs, whoever asked, then Stopped: never Starting or Live", async () => {
     const stoppingItem = { ...workspaceItem("ready"), latestOperation: { state: "running", action: "suspend" } } as CloudWorkspaceListItem;
     setCatalog(stoppingItem);

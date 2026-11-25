@@ -119,7 +119,7 @@ app. The outbound connections are these nine:
 | Linear | You open the Issues view with a Linear key configured, or a session you started from a Linear issue has its pull request opened | A GraphQL query to `api.linear.app`, authorized with the key you pasted; for the pull request, one update that moves the issue to its team's review state |
 | Anthropic usage | While the status bar shows usage and the window is on screen, at the **Usage auto-refresh interval** in Settings (one minute by default; Off leaves returning to the app, Refresh and window resets), and less often while Anthropic asks the app to wait | A GET to `api.anthropic.com/api/oauth/usage`, authorized with the OAuth token Claude Code already stores; no prompts, transcripts or files |
 | Hugging Face | You press Download on a transcription model | A plain GET for the weights, at a pinned revision |
-| The update endpoint | You press "Check for updates" | The current version and your channel |
+| The update endpoint | 15 seconds after launch, every 4 hours while the app runs, and when you press "Check for updates"; never while **Data privacy mode** is on | The current version and your channel |
 
 Some detail on each:
 
@@ -186,11 +186,12 @@ Some detail on each:
   download is verified against a compiled-in SHA-256 before it is moved into
   place. A failed checksum leaves nothing behind. Nothing is downloaded until
   you ask for it.
-- **The updater is manual only.** Nothing checks on launch, on a timer, or in
-  the background. The one call happens when you press "Check for updates" in
-  Settings → About, and it goes to the endpoint in
-  `src-tauri/tauri.conf.json`. Updates are signed and verified against a public
-  key compiled into the app; nothing installs without you pressing Install.
+- **The updater checks, but never installs by itself.** A release build asks
+  the endpoint in `src-tauri/tauri.conf.json` for a newer version 15 seconds
+  after launch and every 4 hours, and whenever you press "Check for updates" in
+  Settings → About. **Data privacy mode** (Settings → Account) stops every
+  check. Updates are signed and verified against a public key compiled into
+  the app; nothing installs without you pressing Install.
 - **Dictation stays local.** Apple's recogniser runs on-device where your
   language supports it, and the optional local models run entirely in-process.
   Audio never leaves the machine.

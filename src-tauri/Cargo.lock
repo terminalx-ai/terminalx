@@ -4117,6 +4117,7 @@ dependencies = [
  "qrcode",
  "rand_core 0.6.4",
  "regex",
+ "rfd",
  "ring",
  "salsa20",
  "security-framework",

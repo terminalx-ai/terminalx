@@ -22,6 +22,9 @@ pub mod checkpoints;
 #[path = "git_worktree_identity.rs"]
 pub(crate) mod worktree_identity;
 
+#[path = "git_shared.rs"]
+pub(crate) mod shared;
+
 pub(crate) fn git() -> Command {
     let mut c = Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")));
     c.env("PATH", crate::binpath::login_path());
@@ -1847,7 +1850,7 @@ pub fn remove_worktree(project: &Path, name: &str, direct: DirectDelete) -> Resu
 }
 
 pub fn list_worktrees(project: &Path) -> Result<Vec<(String, Option<String>)>> {
-    let out = run(project, &["worktree", "list", "--porcelain"])?;
+    let out = shared::run(project, &["worktree", "list", "--porcelain"])?;
     let mut v = Vec::new();
     let mut cur: Option<String> = None;
     for line in out.lines() {

@@ -1,5 +1,5 @@
 import { getExperimentalSettings } from "@/lib/experimentalSettings";
-import { thisComputer } from "@/lib/platform";
+import { isMac, thisComputer } from "@/lib/platform";
 import type { SettingRegistration } from "@/components/settings/settingsRegistry";
 
 // The pages ⌘K lists; searching goes by row (settingsSearch.ts), whose metadata lives in settingsRegistry.
@@ -41,8 +41,8 @@ export function settingsSectionOffered(tab: SettingsTab): boolean {
 /**
  * Whether a row is shown, and so findable: its section is offered and, when the
  * row names an Experimental switch (`requires`), that switch is on. Off until
- * the switches are read, as everywhere else.
+ * the switches are read, as everywhere else. A Mac-only row is on a Mac only.
  */
-export function settingOffered(row: Pick<SettingRegistration, "section" | "requires">): boolean {
-  return settingsSectionOffered(row.section) && (!row.requires || getExperimentalSettings()?.[row.requires] === true);
+export function settingOffered(row: Pick<SettingRegistration, "section" | "requires" | "macOnly">, mac = isMac): boolean {
+  return settingsSectionOffered(row.section) && (!row.requires || getExperimentalSettings()?.[row.requires] === true) && (!row.macOnly || mac);
 }

@@ -74,6 +74,18 @@ impl Drop for Rig {
     }
 }
 
+/// Kills a run's process group outright, however the test ends.
+#[cfg(unix)]
+struct KillGroupOnDrop(u32);
+
+#[cfg(unix)]
+impl Drop for KillGroupOnDrop {
+    fn drop(&mut self) {
+        // SAFETY: signals the process group this test's own PTY started.
+        unsafe { libc::kill(-(self.0 as i32), libc::SIGKILL); }
+    }
+}
+
 pub(crate) fn action(id: &str, command: &str) -> RepositoryActionEntry {
     RepositoryActionEntry { id: id.into(), name: format!("Action {id}"), command: command.into(), ..Default::default() }
 }
@@ -254,6 +266,9 @@ fn a_restart_whose_old_run_will_not_stop_starts_nothing_and_holds_up_no_other_ac
     ]);
     let first = run(&rig.manager, &entry.id, "stuck", RunOptions::default()).unwrap();
     wait_until("the stuck run to start", || cwd.join("stuck").exists());
+    // The runner's forced kill comes on a timer this test outlives, and the
+    // fixture ignores everything else: left alone it runs forever (#1594).
+    let _stuck = KillGroupOnDrop(rig.manager.terminals().pid(&first.run.pane_id).expect("the stuck run's shell"));
     let restarting = {
         let (session, manager) = (entry.id.clone(), rig.manager.clone());
         std::thread::spawn(move || run(&manager, &session, "stuck", RunOptions { restart: true }))

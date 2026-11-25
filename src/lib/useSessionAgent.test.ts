@@ -226,6 +226,46 @@ describe("a form's own launch settings", () => {
   });
 });
 
+describe("a cloud form before any workspace has said what it runs (#1580)", () => {
+  /** The create form: no workspace yet, so the list is this computer's. */
+  function useCloudForm(initial: LaunchSettings) {
+    const [value, setValue] = useState(initial);
+    return { value, selection: useSessionAgent(HARNESSES, false, null, { value, onChange: setValue }) };
+  }
+
+  it("sends no Codex model it was not given here: this computer's saved one may not run there", () => {
+    setPrefs({ lastAgent: "codex", lastModel: { codex: "gpt-5.6-sol" }, lastEffort: { codex: "high" } });
+    const { result } = renderHook(() => useCloudForm(launchDefaults()));
+    const { harness, modelId, model, effort, agentDefault } = result.current.selection;
+    expect({ harness: harness?.id, modelId, model, effort, agentDefault }).toEqual({ harness: "codex", modelId: "", model: null, effort: null, agentDefault: true });
+    // This computer's list is still offered, to pick from.
+    expect(result.current.selection.models.map((m) => m.id)).toEqual(["gpt-6-astra", "gpt-5.6-sol"]);
+  });
+
+  it("sends a Codex model picked in the form, and its effort", () => {
+    setPrefs({ lastAgent: "codex", lastModel: { codex: "gpt-5.6-sol" } });
+    const { result } = renderHook(() => useCloudForm(launchDefaults()));
+    act(() => result.current.selection.selectModel("gpt-5.6-sol"));
+    act(() => result.current.selection.selectEffort("medium"));
+    const { modelId, effort, agentDefault } = result.current.selection;
+    expect({ modelId, effort, agentDefault }).toEqual({ modelId: "gpt-5.6-sol", effort: "medium", agentDefault: false });
+  });
+
+  it("still sends a family alias, which every machine's CLI takes", () => {
+    catalog.models = catalog.models.map((m) => (m.id === "opus" ? { ...m, alias: true } : m));
+    const { result } = renderHook(() => useCloudForm(launchDefaults()));
+    expect(result.current.selection.modelId).toBe("opus");
+    expect(result.current.selection.agentDefault).toBe(false);
+  });
+
+  it("keeps this computer's saved Codex model for a start on this computer", () => {
+    setPrefs({ lastAgent: "codex", lastModel: { codex: "gpt-5.6-sol" } });
+    const { result } = renderHook(() => useForm(launchDefaults()));
+    expect(result.current.selection.modelId).toBe("gpt-5.6-sol");
+    expect(result.current.selection.agentDefault).toBe(false);
+  });
+});
+
 describe("where a handoff starts", () => {
   const source: LaunchSettings = { harness: "claude", model: "sonnet", effort: "low", permissionMode: "plan" };
   const start = (from: Partial<LaunchSettings>, harnesses = HARNESSES) => handoffStart({ ...source, ...from }, harnesses, catalog.models, getPrefs());

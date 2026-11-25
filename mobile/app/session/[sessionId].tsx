@@ -1,6 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ActionSheetIOS, Alert, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Alert, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
 import { File as ExpoFile } from "expo-file-system";
@@ -20,6 +20,7 @@ import { canRetry, connectionProblem, isTransportError, mayHaveArrived, problemT
 import { Button, Card, EmptyState, StatusDot } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
 import { useKeyboardShown } from "@mobile/ui/keyboard";
+import { showChoices } from "@mobile/ui/choices";
 import { Glass } from "@mobile/ui/glass";
 import { EdgeFade } from "@mobile/ui/EdgeFade";
 import { useDictation } from "@mobile/ui/useDictation";
@@ -499,12 +500,10 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
     void AsyncStorage.setItem(cacheKey, typedBefore.current);
   };
 
-  /** The + button: photos or files, from the system's own sheet. */
+  /** The + button: photos or files, from the system's own chooser. */
   const chooseAttachment = () => {
     // A note takes no attachments: offered only while there are none.
-    const options = ["Photo Library", "Choose File", ...(attachments.length ? [] : ["Worktree note"]), "Cancel"];
-    ActionSheetIOS.showActionSheetWithOptions({ options, cancelButtonIndex: options.length - 1 }, (index) => {
-      const choice = options[index];
+    showChoices("Add attachment", ["Photo Library", "Choose File", ...(attachments.length ? [] : ["Worktree note"])], (choice) => {
       if (choice === "Photo Library") void pickPhotos();
       else if (choice === "Choose File") void pickAttachments();
       else if (choice === "Worktree note") { setSendToAgent(false); setSendFailure(null); }

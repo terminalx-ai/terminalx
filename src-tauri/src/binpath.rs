@@ -165,9 +165,50 @@ pub fn find(name: &str) -> Option<PathBuf> {
         .find(|path| path.is_absolute() && is_executable(path))
 }
 
+/// [`find`] on Windows: the same rule, from [`trusted_dirs`] only. Never the
+/// PATH, a hit cached from it, or the current folder, any of which a
+/// workspace or a shell's startup can reach.
 #[cfg(windows)]
 pub fn find(name: &str) -> Option<PathBuf> {
-    resolve(name)
+    find_in(name, &trusted_dirs())
+}
+
+/// The folders a program TerminalX runs on a command's behalf may come from
+/// on Windows: [`known_dirs`], then the system's, then where Git for Windows,
+/// WinGet, Scoop and Chocolatey put the programs they install.
+#[cfg(windows)]
+fn trusted_dirs() -> Vec<PathBuf> {
+    let var = |name: &str| std::env::var_os(name).map(PathBuf::from);
+    let mut dirs = known_dirs();
+    dirs.push(var("SystemRoot").unwrap_or_else(|| PathBuf::from(r"C:\Windows")).join("System32"));
+    // The folders `posix_sh` looks for Git in: `<base>\Git` or `<base>\Programs\Git`.
+    for base in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)", "LOCALAPPDATA"].into_iter().filter_map(var) {
+        for git in [base.join("Git"), base.join("Programs").join("Git")] {
+            dirs.push(git.join("cmd"));
+            dirs.push(git.join("usr").join("bin"));
+        }
+    }
+    dirs.extend(var("LOCALAPPDATA").map(|local| local.join("Microsoft").join("WinGet").join("Links")));
+    dirs.extend(home().map(|home| home.join("scoop").join("shims")));
+    dirs.extend(var("ProgramData").map(|data| data.join("chocolatey").join("bin")));
+    dirs
+}
+
+/// The program `name` names in `dirs`, the first folder first. Only an `.exe`
+/// or `.com` is a program here: a `.cmd` or `.bat` runs through `cmd.exe`,
+/// which reads its arguments as its own syntax. A name holding a path, a
+/// drive or a folder separator is not a program name, so it is never found.
+#[cfg(windows)]
+fn find_in(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
+    if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
+        return None;
+    }
+    let runnable = |file: &str| std::path::Path::new(file).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe") || ext.eq_ignore_ascii_case("com"));
+    let files: Vec<String> = if runnable(name) { vec![name.to_string()] } else { vec![format!("{name}.exe"), format!("{name}.com")] };
+    dirs.iter()
+        .filter(|dir| dir.is_absolute())
+        .flat_map(|dir| files.iter().map(move |file| dir.join(file)))
+        .find(|path| path.is_file())
 }
 
 fn resolve_at(name: &str, now: Instant) -> Option<PathBuf> {
@@ -355,6 +396,44 @@ mod tests {
         assert!(fixed.iter().any(|dir| sh.parent() == Some(dir.as_path())), "{sh:?}");
         assert_eq!(find("/bin/sh"), None, "a path is not a program name");
         assert_eq!(find("terminalx-no-such-program"), None);
+    }
+
+    /// PRO-330 on Windows: the system's own programs are found in System32.
+    #[cfg(windows)]
+    #[test]
+    fn find_on_windows_takes_system_programs_from_system32() {
+        let cmd = find("cmd").expect("cmd.exe is in System32");
+        assert!(cmd.is_absolute());
+        assert!(cmd.parent().is_some_and(|dir| dir.to_string_lossy().to_ascii_lowercase().ends_with("system32")), "{cmd:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn find_on_windows_runs_only_an_exe_from_the_folders_it_is_given() {
+        let trusted = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::write(trusted.path().join("tool.exe"), b"").unwrap();
+        std::fs::write(trusted.path().join("shim.cmd"), b"@echo off\r\n").unwrap();
+        std::fs::write(elsewhere.path().join("onpath.exe"), b"").unwrap();
+        let dirs = [trusted.path().to_path_buf()];
+        assert_eq!(find_in("tool", &dirs), Some(trusted.path().join("tool.exe")));
+        assert_eq!(find_in("tool.exe", &dirs), Some(trusted.path().join("tool.exe")));
+        assert_eq!(find_in("shim", &dirs), None, "a .cmd beside nothing else is not run");
+        assert_eq!(find_in("shim.cmd", &dirs), None, "nor when it is named");
+        assert_eq!(find_in("onpath", &dirs), None, "a program only in another folder, as on PATH, is not found");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn find_on_windows_refuses_a_name_that_is_a_path() {
+        let trusted = tempfile::tempdir().unwrap();
+        std::fs::create_dir(trusted.path().join("sub")).unwrap();
+        std::fs::write(trusted.path().join("sub").join("tool.exe"), b"").unwrap();
+        let dirs = [trusted.path().to_path_buf()];
+        for name in [r"sub\tool", "sub/tool", r"C:\Windows\System32\cmd.exe", "C:cmd", "..", ""] {
+            assert_eq!(find_in(name, &dirs), None, "{name:?} is not a program name");
+        }
+        assert_eq!(find_in("tool", &[PathBuf::from("relative")]), None, "a relative folder is never searched");
     }
 
     #[test]

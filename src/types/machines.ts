@@ -139,6 +139,15 @@ export interface MachineHostStatus {
     generation: number;
     runtimeGeneration: number;
   } | null;
+  /** While `retrying` after the relay closed the registration with 4401 (#1579). */
+  relayRefused?: {
+    code: number;
+    /** The relay's reason code, such as `relay_unknown_control_message`. */
+    reason?: string;
+    refusals: number;
+    /** When the runtime registers again, in Unix milliseconds. */
+    retryAt: number;
+  };
   /** Where the runtime listens and who it answers (PRO-487); absent from older runtimes. */
   listen?: MachineListenStatus | null;
   /** Who the runtime runs as (PRO-487); absent from older runtimes. */

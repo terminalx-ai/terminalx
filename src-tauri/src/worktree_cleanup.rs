@@ -443,7 +443,7 @@ pub(crate) struct Listed {
 }
 
 pub(crate) fn list_worktrees(project: &Path) -> anyhow::Result<Vec<Listed>> {
-    let out = git::run(project, &["worktree", "list", "--porcelain"])?;
+    let out = git::shared::run(project, &["worktree", "list", "--porcelain"])?;
     let mut entries: Vec<Listed> = Vec::new();
     for line in out.lines() {
         if let Some(path) = line.strip_prefix("worktree ") {

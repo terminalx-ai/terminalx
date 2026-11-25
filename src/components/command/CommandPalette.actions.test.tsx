@@ -149,6 +149,22 @@ describe("Move to section (design 07.13)", () => {
     expect(edits()).toEqual([]);
   });
 
+  it("opens on the session's own section when chosen from far down the Actions list", async () => {
+    const { input, onOpenChange } = palette();
+    fireEvent.click(screen.getByRole("tab", { name: "Actions" }));
+    const row = document.getElementById("command:local-section:move")!;
+    // Further down than the view's five rows: the cursor once stayed past their end, on Remove from section.
+    expect(Number(row.getAttribute("data-palette-index"))).toBeGreaterThan(4);
+    fireEvent.mouseMove(row);
+    expect(row.getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(row);
+    await waitFor(() => expect(input.getAttribute("placeholder")).toBe("Search sections…"));
+    expect(screen.getByRole("option", { name: /Bugs/ }).getAttribute("aria-selected")).toBe("true");
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    expect(edits()).toEqual([]);
+  });
+
   it("moves the session to the section chosen, and out of its section only by Remove from section", async () => {
     const first = palette();
     await openMove(first.input);

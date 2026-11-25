@@ -248,6 +248,10 @@ jobs:
   # that changes a mac-only check, what it loads, or the product it renders
   # (docs/CI-RUNNERS.md "macOS runner time"). A mac-only check broken by any
   # other pull request is found on main.
+  #
+  # `check` does not wait for it (the owner's decision, 24 November 2026): on
+  # a pull request it shows its own result without holding the merge. Every
+  # other run is held to it by `check-macos`.
   webkit-mac-only:
     needs: macos-rust-changes
     if: needs.macos-rust-changes.outputs.mac-webkit == 'true'
@@ -323,11 +327,12 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -424,11 +429,15 @@ jobs:
           name: rust-junit-${{ matrix.part }}
           path: src-tauri/target/nextest/ci/junit.xml
           if-no-files-found: warn
+      # Built once, as macos-native builds the library's tests: without the
+      # OUT_DIR dates put back, the test step below compiled the crate again
+      # (190 s in run 45442275413). The script fails unless a second
+      # `--no-run` finds every unit fresh.
       - name: Build the other test binaries
         id: build
         if: matrix.part == 'binaries'
         working-directory: src-tauri
-        run: cargo test --locked --bins --test '*' --no-run
+        run: ../infra/ci-runners/cargo-build-once.sh --bins --test '*'
       - name: cargo test (the other test binaries and the doc tests)
         if: matrix.part == 'binaries'
         working-directory: src-tauri
@@ -443,11 +452,12 @@ jobs:
       # `binaries` builds every dependency the four parts do, so it alone
       # saves: also when a test failed, as long as its build was whole.
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ !cancelled() && steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -499,7 +509,9 @@ jobs:
 
   # Runs when the selector asks for it: every push to main, nightly, manual
   # runs, and a pull request that touches code macOS builds differently.
-  # Skipped otherwise, and `check` accepts that skip from the selector alone.
+  # Skipped otherwise. `check` does not wait for it, on any event: a pull
+  # request shows its result without being held to it, and every other run is
+  # held to it by `check-macos`.
   #
   # A selected pull request gets the Swift tests, the icon checks, the helper,
   # one build of the library's tests, and the tests of the Apple-only and
@@ -508,7 +520,7 @@ jobs:
   #
   # Pushes to main share one group: while one runs, only the newest waiting
   # commit keeps its place, and an older one still waiting is cancelled (its
-  # `check` fails). Merges land in bursts and each run is long; a commit
+  # `check-macos` fails). Merges land in bursts and each run is long; a commit
   # already superseded does not need the runner more than the newest one does.
   macos-native:
     needs: macos-rust-changes
@@ -517,6 +529,10 @@ jobs:
       group: ci-macos-native-${{ github.event_name == 'push' && 'main' || github.run_id }}
       cancel-in-progress: false
     runs-on: macos-latest
+    # A cold run, every dependency built, took 1 h 52 min (run 45448416407:
+    # Clippy 15 + 15, the test build 35, the full suite 42 with the ordinary
+    # library's build in it). A warm one builds only this crate. The limit
+    # leaves a third over the cold run for a slow runner.
     timeout-minutes: 150
 
     steps:
@@ -612,43 +628,43 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings
 
-      # The build says where the test binary is, and a pull request runs that
-      # binary itself. Another `cargo test` would compile the crate again (11 to
-      # 23 minutes): `tauri::generate_context!` writes the app's compressed
-      # assets into the crate's build output while the crate compiles, so they
-      # are newer than that build and cargo calls the crate dirty ("the file
-      # target/debug/build/raccoon-…/out/… has changed, 17s after last build",
-      # CARGO_LOG=cargo::core::compiler::fingerprint=info on #1528's run).
+      # Built once. `tauri::generate_context!` writes the app's compressed
+      # assets into the crate's OUT_DIR while the crate compiles, and the crate
+      # embeds them, so to cargo they are inputs newer than the build, and the
+      # next cargo command compiles the crate again ("Dirty raccoon: the file
+      # `target/debug/build/raccoon/<hash>/out/<checksum>` has changed, 4m 18s
+      # after last build", cargo -v): 21 to 24 minutes on this runner. The
+      # files are named by a checksum of their content, so an old date says
+      # nothing false; tauri-codegen 2.7 dates them back itself, and this step
+      # does it until the lock file has that release. OUT_DIR is the folder
+      # cargo names for the crate's build script, not a path searched for:
+      # cargo 1.100 keeps every unit's output, the test binary among them,
+      # under build/raccoon/<hash>/out, and dating those back makes them stale.
+      # The second `--no-run` must find every unit fresh: if the crate is
+      # compiled a second time again, the job fails here and prints cargo's
+      # reason. The commands are infra/ci-runners/cargo-build-once.sh, which
+      # sets pipefail itself; linux-rust-tests (binaries) builds through it too.
       - name: build the library's tests by themselves
         id: build
         if: ${{ !cancelled() && steps.helper.outcome == 'success' }}
         working-directory: src-tauri
-        run: |
-          cargo test --locked --lib --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/build.jsonl"
-          binary=$(jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null) | .executable' "$RUNNER_TEMP/build.jsonl" | tail -n 1)
-          test -x "$binary"
-          echo "binary=$binary" >> "$GITHUB_OUTPUT"
+        run: ../infra/ci-runners/cargo-build-once.sh --lib
 
-      - name: cargo test (a pull request, the Apple-only and system-dependent modules)
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'pull_request' }}
-        working-directory: src-tauri
-        env:
-          BINARY: ${{ steps.build.outputs.binary }}
-        run: '"$BINARY" $(python3 ../infra/ci-runners/macos-rust.py --filters)'
-
-      - name: cargo test (main, nightly and manual runs, the full macOS suite)
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && github.event_name != 'pull_request' }}
-        working-directory: src-tauri
-        run: cargo test --locked
-
-      # Also when a test failed, as long as the build was whole: a suite that
-      # fails must not leave every later run to build the dependencies again.
+      # Saved as soon as the dependencies are built, before any test runs: a
+      # suite that fails or runs out of time must not leave every later run to
+      # build them again. The tests below need this crate's output, so the
+      # cache is made from a copy (APFS clones, no second copy on disk) with
+      # that output removed, and the build itself is put back untouched.
       - name: Leave this crate's own output out of the cache
+        id: aside
         if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
-        run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
+        run: |
+          mv target "$RUNNER_TEMP/target"
+          cp -cpR "$RUNNER_TEMP/target" target
+          cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ !cancelled() && steps.aside.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -657,6 +673,22 @@ jobs:
             ~/.cargo/git/db
             src-tauri/target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      - name: Put this crate's own output back
+        if: ${{ !cancelled() && steps.aside.outcome != 'skipped' }}
+        working-directory: src-tauri
+        run: |
+          test -d "$RUNNER_TEMP/target"
+          rm -rf target && mv "$RUNNER_TEMP/target" target
+
+      - name: cargo test (a pull request, the Apple-only and system-dependent modules)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'pull_request' }}
+        working-directory: src-tauri
+        run: cargo test --locked --lib -- $(python3 ../infra/ci-runners/macos-rust.py --filters)
+
+      - name: cargo test (main, nightly and manual runs, the full macOS suite)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && github.event_name != 'pull_request' }}
+        working-directory: src-tauri
+        run: cargo test --locked
 
   # The headless runtime a cloud workspace boots. The runner has no WebView,
   # GTK or ALSA development packages, so a GUI dependency fails the build.
@@ -734,11 +766,12 @@ jobs:
       - name: Self-test under the cloud workspace unit's sandbox (ProtectHome, own user)
         run: bash scripts/remote-runtime/cloud-unit-self-test.sh src-tauri/target/debug/terminalx-serve
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ !cancelled() && steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -754,6 +787,13 @@ jobs:
   # feature it needs. A new file under tests/ runs here without being named.
   # It builds what headless-serve builds, so it restores that job's cache and
   # saves none.
+  #
+  # They run under cargo-nextest's `ci` profile, as the library's tests do:
+  # every test in a process of its own and the binaries side by side, where
+  # `cargo test` ran the binaries one after another (433 s in run 45442275413).
+  # The slowest test is then the floor. local_supervisor has no libtest
+  # harness (`harness = false`), so nextest cannot list it: it runs under
+  # `cargo test` in a step of its own, as it did before.
   serve-tests:
     needs: macos-rust-changes
     if: needs.macos-rust-changes.outputs.rust == 'true'
@@ -775,6 +815,16 @@ jobs:
         run: |
           rustup show && cargo --version && command -v rg && command -v zsh
           echo "rustc=$(rustc --version | tr -c '[:alnum:].\n' '-')" >> "$GITHUB_OUTPUT"
+      # The release linux-rust-tests installs, by version and by the SHA-256 of its archive.
+      - name: Install cargo-nextest
+        env:
+          NEXTEST_VERSION: "0.9.152"
+          NEXTEST_SHA256: d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --max-time 120 -o "$RUNNER_TEMP/nextest.tar.gz" "https://get.nexte.st/$NEXTEST_VERSION/x86_64-unknown-linux-gnu.tar.gz"
+          echo "$NEXTEST_SHA256  $RUNNER_TEMP/nextest.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/nextest.tar.gz" -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+          cargo nextest --version
       - name: Restore the cargo cache
         id: cargo-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -791,18 +841,42 @@ jobs:
       - name: Build the runtime the tests start
         working-directory: src-tauri/serve
         run: cargo build --locked --bin terminalx-serve
-      - name: cargo test (every serve test binary without a job of its own)
+      - name: cargo nextest (every serve test binary without a job of its own)
         working-directory: src-tauri/serve
         run: |
+          set -o pipefail
           tests=()
           for file in tests/*.rs; do
             name=$(basename "$file" .rs)
             case "$name" in
               machine_compat|machines_e2e|machine_routes|local_issue_start) ;;
+              local_supervisor) ;;
               *) tests+=(--test "$name") ;;
             esac
           done
-          cargo test --locked --bins "${tests[@]}"
+          cargo nextest run --locked --profile ci --bins "${tests[@]}" 2>&1 | tee "$RUNNER_TEMP/nextest.log"
+      - name: cargo test (the serve test binaries without libtest's harness)
+        if: ${{ !cancelled() }}
+        working-directory: src-tauri/serve
+        run: cargo test --locked --test local_supervisor
+      # As in the library's parts: a flaky test passed on a retry its override
+      # allows; a leaky one left a process or a pipe open.
+      - name: Name the flaky and leaky tests in the summary
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo "### Flaky and leaky tests, serve-tests"
+            echo '```'
+            grep -aE '^[[:space:]]*(FLAKY|LEAK)[[:space:]]' "$RUNNER_TEMP/nextest.log" | sort -u || echo "none"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep the JUnit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: serve-junit
+          path: src-tauri/target/nextest/ci/junit.xml
+          if-no-files-found: warn
 
   # PRO-354: this build against the previous two released runtimes, both
   # ways (docs/MACHINES.md "Versions and updates"). The released runtimes
@@ -865,11 +939,12 @@ jobs:
           TERMINALX_MACHINE_COMPAT: ${{ runner.temp }}/machine-compat/manifest.json
         run: cargo test --locked --test machine_compat -- --test-threads=1
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ !cancelled() && steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -958,11 +1033,12 @@ jobs:
       # Saved from main, schedule and dispatch runs only: uploading the
       # target directory would eat a pull request's ten minutes.
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ steps.relevant.outputs.run == 'true' && github.event_name != 'pull_request' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ steps.relevant.outputs.run == 'true' && github.event_name != 'pull_request' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -1066,11 +1142,12 @@ jobs:
         shell: pwsh
         run: ./native/computer-use-windows/runtime-render.test.ps1
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ runner.os != 'Linux' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ runner.os != 'Linux' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -1081,8 +1158,15 @@ jobs:
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
   check:
     # Keep the exact required status and fail closed on failed/cancelled/skipped jobs.
+    #
+    # Not macos-native, machine-compat or webkit-mac-only: a pull request is not
+    # held to the macOS Rust suite, to the build against the released runtimes
+    # or to the mac-only WebKit checks (the owner's decisions, 24 and 25
+    # November 2026). On a pull request the selector still runs each when the
+    # change needs it, and it reports there as its own job; `check` does not
+    # wait for it. Every other run is held to all three by `check-macos` below.
     if: always()
-    needs: [frontend, phone-app, vitest, webkit-layout-linux, webkit-layout, webkit-mac-only, linux-rust, linux-rust-tests, macos-rust-changes, macos-native, headless-serve, serve-tests, machine-compat, machines-e2e, desktop-platforms, legacy-runtime-probe]
+    needs: [frontend, phone-app, vitest, webkit-layout-linux, webkit-layout, linux-rust, linux-rust-tests, macos-rust-changes, headless-serve, serve-tests, machines-e2e, desktop-platforms, legacy-runtime-probe]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1094,9 +1178,8 @@ jobs:
           RESULTS: ${{ toJSON(needs) }}
         run: |
           echo "$RESULTS" | jq -e '
-            {"macos-native": "required", "machine-compat": "machines",
-             "linux-rust": "rust", "linux-rust-tests": "rust", "headless-serve": "rust", "serve-tests": "rust",
-             "vitest": "frontend", "webkit-layout-linux": "frontend", "webkit-mac-only": "mac-webkit", "phone-app": "phone"} as $selected
+            {"linux-rust": "rust", "linux-rust-tests": "rust", "headless-serve": "rust", "serve-tests": "rust",
+             "vitest": "frontend", "webkit-layout-linux": "frontend", "phone-app": "phone"} as $selected
             | .["macos-rust-changes"] as $selector
             | $selector.result == "success"
               and ([to_entries[] | .key as $job | .value.result
@@ -1105,3 +1188,20 @@ jobs:
                           and $selected[$job] != null
                           and $selector.outputs[$selected[$job]] == "false")]
                    | all)'
+  check-macos:
+    # Pushes to main, nightly and manual runs: everything `check` requires, the
+    # full macOS Rust suite, the build against the released runtimes and the
+    # mac-only WebKit checks. On these the selector answers "true" to
+    # everything, so macos-native, machine-compat and webkit-mac-only always
+    # run and must succeed. Not a required status; release-serve.yml follows
+    # the run's own conclusion, which a failed job here or in any of the three
+    # makes a failure.
+    if: ${{ always() && github.event_name != 'pull_request' }}
+    needs: [check, macos-native, machine-compat, webkit-mac-only]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require check and the macOS jobs to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: echo "$RESULTS" | jq -e '(keys == ["check", "machine-compat", "macos-native", "webkit-mac-only"]) and all(.[]; .result == "success")'

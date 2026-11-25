@@ -6,7 +6,9 @@
 //! mirror and also prevent cleanup. There is no reset, clean or force path.
 
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -126,14 +128,17 @@ fn source_check(root: &Path, common: &Path, source: &Path) -> Result<PathBuf> {
 }
 
 fn lease(common: &Path) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
-    {
+    let file = {
         use std::os::unix::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    }
-    let file = options.open(common.join("terminalx-root-mirror.lock"))?;
+        options.open(common.join("terminalx-root-mirror.lock"))?
+    };
+    // A link or a file with a second name there is refused rather than followed.
+    #[cfg(windows)]
+    let file = crate::win::fs::open_or_create_plain(&common.join("terminalx-root-mirror.lock"))?;
     file.try_lock()
         .map_err(|_| anyhow::anyhow!("Another TerminalX window or process is mirroring this repository. Stop it there first."))?;
     Ok(file)

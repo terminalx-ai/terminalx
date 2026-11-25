@@ -23,8 +23,10 @@
 //! builds it, its tries with their worker sessions, what each cost and what
 //! each reported. An item that links a run that has not ended is not done.
 //!
-//! A bot checks back on an item at a time it sets, and when a run the item
-//! links tells its lead something new (a worker reported): the app wakes the
+//! A bot checks back on an item at a time it sets, and sooner when a worker
+//! reports: a run the item links tells its lead something new, one of that
+//! run's workers or its lead ends a turn with its report, or a session the
+//! bot's chat started with `--report` does ([`reported`]). The app wakes the
 //! chat that set it with a short note from TerminalX. Nothing runs and nothing
 //! is spent while it waits; the clock is the automation scheduler's
 //! (`automations::evaluate`), not a scheduler of its own.
@@ -44,6 +46,7 @@ use crate::orchestration::{store as runs_store, Run, RunState};
 use crate::session::SessionManager;
 use crate::sink::EventSink;
 use crate::store::index::{self, SessionEntry};
+use crate::worker_report::{self, Status};
 
 /// Runs one item may ask about; past it the oldest that ended goes first.
 pub const MAX_RUNS: usize = 10;
@@ -543,8 +546,8 @@ pub(super) fn check_back(value: &str, session: Option<String>) -> Result<Option<
 pub(super) fn check_back_words(bot: &Bot, check_back: Option<&CheckBack>) -> String {
     match check_back {
         None => format!("{} no longer checks back at a set time", bot.name),
-        Some(CheckBack { at: Some(at), .. }) => format!("{} checks back at {at}, or sooner when a worker reports. Nothing runs and nothing is spent while it waits", bot.name),
-        Some(_) => format!("{} checks back when a worker reports. Nothing runs and nothing is spent while it waits", bot.name),
+        Some(CheckBack { at: Some(at), .. }) => format!("{} checks back at {at}, or sooner when a worker reports: a run it links tells its lead something, the run's lead or one of its workers ends a turn with its report, or a session started with --report from that chat does. Nothing runs and nothing is spent while it waits", bot.name),
+        Some(_) => format!("{} checks back when a worker reports: a run it links tells its lead something, the run's lead or one of its workers ends a turn with its report, or a session started with --report from that chat does. Nothing runs and nothing is spent while it waits", bot.name),
     }
 }
 
@@ -554,6 +557,29 @@ enum Why<'a> {
     Time(DateTime<Utc>),
     /// Run `run`, led from session `lead`, told its lead something new.
     Report { run: &'a str, lead: &'a str },
+    /// Session `session` ended a turn with its report (`status`; `None` when it gave none it could be held to).
+    Reported { session: &'a str, status: Option<Status>, by: Reporter<'a> },
+}
+
+/// Who a session that reported is to the item.
+#[derive(Debug, Clone, Copy)]
+enum Reporter<'a> {
+    /// The lead of run `run`.
+    Lead { run: &'a str },
+    /// A worker of piece `piece` of run `run`.
+    Worker { run: &'a str, piece: &'a str },
+    /// A session started with `--report` from the chat that set the check-back, or one the item links.
+    Started,
+}
+
+fn status_words(status: Option<Status>) -> &'static str {
+    match status {
+        Some(Status::Done) => "done",
+        Some(Status::Partial) => "partial",
+        Some(Status::Blocked) => "blocked",
+        Some(Status::Failed) => "failed",
+        None => "no readable report, after it was asked once more",
+    }
 }
 
 fn due(check_back: &CheckBack, now: DateTime<Utc>) -> bool {
@@ -570,6 +596,20 @@ fn wake_text(number: u64, why: &Why<'_>) -> String {
         Why::Report { run, .. } => format!(
             "Run {run} told its lead something new: a worker reported, or the run moved on. You asked to check back on item #{number} then. `terminalx runs show {run} --json` says where it stands; set the next check-back when you have looked."
         ),
+        Why::Reported { session, status, by } => {
+            let status = status_words(*status);
+            match by {
+                Reporter::Lead { run } => format!(
+                    "The lead of run {run} (session {session}) ended its turn with its report ({status}): it may be waiting on you. You asked to check back on item #{number} when a worker reports. `terminalx sessions report {session} --json` reads the report and `terminalx runs show {run} --json` says where the run stands; answer the lead, then set the next check-back."
+                ),
+                Reporter::Worker { run, piece } => format!(
+                    "The worker of piece {piece} of run {run} (session {session}) ended its turn with its report ({status}). You asked to check back on item #{number} when a worker reports. `terminalx runs show {run} --json` says where the piece and the run stand; set the next check-back when you have looked."
+                ),
+                Reporter::Started => format!(
+                    "Session {session}, which you started to report back, ended its turn with its report ({status}). You asked to check back on item #{number} when a worker reports. `terminalx sessions report {session} --json` reads it; set the next check-back when you have looked."
+                ),
+            }
+        }
     }
 }
 
@@ -612,6 +652,82 @@ pub fn lead_told(manager: &SessionManager, run: &Run) {
     }
 }
 
+/// A turn ended in `session_id` with `final_message`, in a session that is not a bot's own chat: when it is a run's
+/// lead or worker, or a session a bot's chat started with `--report`, and its bot asked to check back when a worker
+/// reports, that check-back is woken (#1545). The run's own messages to its lead wake it too ([`lead_told`]); a
+/// piece's worker reports to no one but the lead's `terminalx wait`, and a lead or a `--report` session to no one
+/// at all, so their turn ends are watched here.
+///
+/// `owed` is whether the tab owes a report (`sessions create --report`, a run's worker): its turn end comes here once
+/// it is not asked again for one, with or without a report. A tab that owes none comes here only for a reply that
+/// ends with a readable report: a lead's turn ends for many other reasons (it waits on its owner's approval, say).
+pub fn reported(manager: &SessionManager, session_id: &str, final_message: Option<&str>, owed: bool) {
+    if !super::enabled_cached() {
+        return;
+    }
+    let status = final_message.and_then(|message| worker_report::parse(message).ok()).map(|(report, _)| report.status);
+    if status.is_none() && !owed {
+        return;
+    }
+    let Ok(entry) = index::get(session_id) else { return };
+    // A bot's own chat is not its worker: what it says is its own.
+    if chat::session_bot(&entry).is_some() {
+        return;
+    }
+    let runs = runs_store::list().unwrap_or_default();
+    let in_run = runs.iter().rev().find_map(|run| {
+        if run.lead.session_id == session_id {
+            return Some((run, None));
+        }
+        let piece = run.pieces.iter().find(|piece| piece.worker.iter().chain(piece.tries.iter().filter_map(|attempt| attempt.worker.as_ref())).any(|worker| worker.session_id == session_id))?;
+        Some((run, Some(piece.id.as_str())))
+    });
+    let (bot_of, by) = match in_run {
+        // A lead is held to a readable report: one it was not asked for is a turn end like any.
+        Some((run, None)) if status.is_some() => (run.lead.session_id.as_str(), Reporter::Lead { run: &run.id }),
+        Some((_, None)) => return,
+        Some((run, Some(piece))) => (run.lead.session_id.as_str(), Reporter::Worker { run: &run.id, piece }),
+        None => (session_id, Reporter::Started),
+    };
+    let bot_entry = if bot_of == session_id { Some(entry.clone()) } else { index::get(bot_of).ok() };
+    let Some(bot) = bot_entry.as_ref().and_then(chat::acting_bot).and_then(|id| super::get(&id).ok()) else { return };
+    if bot.paused.is_some() {
+        return;
+    }
+    let Ok(list) = items::read(&bot.id) else { return };
+    let parent = entry.parent.as_ref().map(|parent| parent.session_id.as_str());
+    let numbers: Vec<u64> = list
+        .items
+        .iter()
+        .filter(|item| !item.state.closed())
+        .filter(|item| {
+            let Some(check_back) = item.check_back.as_ref().filter(|check_back| check_back.on_report) else { return false };
+            match by {
+                Reporter::Lead { run } | Reporter::Worker { run, .. } => run_ids(item).iter().any(|id| id == run),
+                // Started from the chat that set it, or one of the item's own sessions.
+                Reporter::Started => (parent.is_some() && check_back.session.as_deref() == parent) || item.links.iter().any(|link| link.kind == "session" && link.target == session_id),
+            }
+        })
+        .map(|item| item.number)
+        .collect();
+    for number in numbers {
+        fire(manager, &bot, number, &Why::Reported { session: session_id, status, by });
+    }
+}
+
+/// [`reported`] off the caller's thread, for a turn end of a tab that owes no report: the hook thread must get back
+/// to the agent at once. Nothing is read unless the reply ends with a readable report.
+pub fn reported_later(manager: &SessionManager, session_id: &str, final_message: Option<&str>) {
+    if !final_message.is_some_and(|message| worker_report::parse(message).is_ok()) || !super::enabled_cached() {
+        return;
+    }
+    let (manager, session, message) = (manager.clone(), session_id.to_string(), final_message.map(str::to_owned));
+    let spawned = std::thread::Builder::new().name("bot-check-back".into()).spawn(move || reported(&manager, &session, message.as_deref(), false));
+    if let Err(error) = spawned {
+        log::warn!("look for bots' check-backs on a report: {error:#}");
+    }
+}
+
 /// Take the item's check-back under the list's lock (so it fires once), then wake the chat that set it. One that
 /// cannot be woken is tried again a little later.
 fn fire(manager: &SessionManager, bot: &Bot, number: u64, why: &Why<'_>) {
@@ -625,6 +741,8 @@ fn fire(manager: &SessionManager, bot: &Bot, number: u64, why: &Why<'_>) {
             (Some(check_back), Why::Time(now)) => due(check_back, *now),
             // The lead that set it was told by the run itself: nothing to wake, and its time, if any, still stands.
             (Some(check_back), Why::Report { lead, .. }) => check_back.on_report && check_back.session.as_deref() != Some(*lead),
+            // A session is not woken by its own report.
+            (Some(check_back), Why::Reported { session, .. }) => check_back.on_report && check_back.session.as_deref() != Some(*session),
             (None, _) => false,
         };
         if !still {
@@ -634,6 +752,9 @@ fn fire(manager: &SessionManager, bot: &Bot, number: u64, why: &Why<'_>) {
         let said = match why {
             Why::Time(_) => format!("TerminalX woke {} to check back, at the time it set", bot.name),
             Why::Report { run, .. } => format!("TerminalX woke {} to check back: run {run} reported", bot.name),
+            Why::Reported { by: Reporter::Lead { run }, .. } => format!("TerminalX woke {} to check back: the lead of run {run} reported", bot.name),
+            Why::Reported { by: Reporter::Worker { run, piece }, .. } => format!("TerminalX woke {} to check back: the worker of piece {piece} of run {run} reported", bot.name),
+            Why::Reported { session, by: Reporter::Started, .. } => format!("TerminalX woke {} to check back: session {session} reported", bot.name),
         };
         items::log(item, BY_TERMINALX, "checkBack", said, String::new());
         Ok(check_back)

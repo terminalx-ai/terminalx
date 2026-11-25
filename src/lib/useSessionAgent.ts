@@ -190,6 +190,10 @@ export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClie
   const [pickedAgent, setPickedAgent] = useState<string | null>(null);
   // An account picked here, per agent: a choice for this start, never saved (the defaults are Settings').
   const [pickedAccount, setPickedAccount] = useState<Record<string, string>>({});
+  // A model picked in this form, per agent. On a list that is only this
+  // computer's (`foreign`), a pinned version nobody picked here, such as the
+  // saved one, is not sent: the machine runs its own default (#1580).
+  const [pickedModel, setPickedModel] = useState<Record<string, string>>({});
   // The bypass confirmation answers later: it must change the value as it is then.
   const latest = useRef(controlled);
   latest.current = controlled;
@@ -214,7 +218,9 @@ export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClie
   // A retired model, another provider's id, or a local pin unavailable in the
   // cloud must never reach the launch payload. Keep prefs intact while loading.
   const unavailableModel = controlled?.preserveUnavailableModel && savedModel && !models.some((m) => m.id === savedModel) ? savedModel : null;
-  const model = unavailableModel ? null : models.find((m) => m.id === savedModel) ?? models.find((m) => m.isDefault) ?? models[0] ?? null;
+  const offered = unavailableModel ? null : models.find((m) => m.id === savedModel) ?? models.find((m) => m.isDefault) ?? models[0] ?? null;
+  const agentDefault = !!offered && picker.foreign && !offered.alias && pickedModel[harness?.id ?? ""] !== offered.id;
+  const model = agentDefault ? null : offered;
   const savedEffort = harness ? (chosen ? chosen.effort : prefs.lastEffort[harness.id]) : undefined;
   const effort = savedEffort && model?.efforts.includes(savedEffort)
     ? savedEffort
@@ -251,6 +257,8 @@ export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClie
     model,
     modelId: unavailableModel ?? model?.id ?? "",
     unavailableModel,
+    /** No model is sent: the machine has not said what it runs and none was picked here, so it uses its own default. */
+    agentDefault,
     allowDefaultEffort: controlled?.allowDefaultEffort ?? false,
     effort,
     mode,
@@ -295,6 +303,7 @@ export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClie
     selectModel: (id: string) => {
       const next = models.find((m) => m.id === id);
       if (!harness || !next) return;
+      setPickedModel((picked) => ({ ...picked, [harness.id]: id }));
       if (!controlled) setPrefs({ lastModel: { ...prefs.lastModel, [harness.id]: id } });
       // Only an effort picked here or saved carries over, where the new model takes it; else that model's default applies, as on New Session.
       else change({ model: id, effort: chosen?.effort && next.efforts.includes(chosen.effort) ? chosen.effort : null });

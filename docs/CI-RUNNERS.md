@@ -46,13 +46,14 @@ machine, a pull request's edited workflow included.
 | `linux-rust` | Ubuntu on **every PR** | Rust | `cargo clippy --locked --all-targets -- -D warnings`; GTK/WebKit/audio dependencies installed. Main push/nightly/manual runs alone may use the owner-approved `CI_LINUX_RUNNER` label; unset/empty falls back to Ubuntu. |
 | `linux-rust-tests` | Ubuntu, five at once | Rust | The library's tests under cargo-nextest in four parts, and a fifth with the other test binaries, the doc tests and the local owner path without desktop features (below). |
 | `headless-serve` | Ubuntu | Rust | Headless build, dependency exclusions, Clippy, the named integration tests and the self-tests. |
-| `serve-tests` | Ubuntu | Rust | Every other test binary under `src-tauri/serve/tests`. |
+| `serve-tests` | Ubuntu | Rust | Every other test binary under `src-tauri/serve/tests`, under cargo-nextest (below). |
 | `macos-native` | **macOS** | macOS | Icon checks, Swift tests, helper build, one build of the library's tests. On a pull request the Apple-only and system-dependent tests; on main, nightly and manual runs macOS Clippy and the full suite. |
 | `machine-compat` | **macOS** | machines | This build against the previous two released runtimes (PRO-354). |
 | `machines-e2e` | Ubuntu | always; decides in a step | Two machines end to end (PRO-358). |
 | `desktop-platforms` | Ubuntu | always | Off-macOS helper build, Linux renderer and launcher tests. No Rust on Linux: that is `linux-rust` and `linux-rust-tests`. Disabled Windows steps retained. |
 | `legacy-runtime-probe` | Ubuntu | always | Legacy AppImage diagnostics. Its tests set the operating system themselves, so one runner covers Linux and macOS. |
-| `check` | Ubuntu | always | The aggregate. Every other job must succeed. A job in the "Runs" column's frontend, phone, Rust, macOS, mac-webkit or machines rows may be skipped instead, and only when the selector succeeded and answered "false" for it. |
+| `check` | Ubuntu | always | The aggregate. Every other job but `macos-native`, `machine-compat`, `webkit-mac-only` and `check-macos` must succeed. A job in the "Runs" column's frontend, phone, Rust or machines rows may be skipped instead, and only when the selector succeeded and answered "false" for it. |
+| `check-macos` | Ubuntu | main, nightly, manual | Needs `check`, `macos-native`, `machine-compat` and `webkit-mac-only`; fails unless all four succeeded. Not a required status: a pull request is not held to the macOS Rust suite, the build against the released runtimes or the mac-only WebKit checks ("macOS Rust coverage"). |
 
 All runners are GitHub-hosted. The WebKit checks run in `ci.yml` alone: the
 trial workflow `webkit-linux.yml` that first ran them on Linux is gone.
@@ -226,6 +227,41 @@ reported a day later. `macos-native` was 70% of those minutes and
 compiler on this crate needs more, so a build that takes under four minutes on
 Linux takes 20 to 33 there.
 
+**The crate is compiled once per kind of build.** `tauri::generate_context!`
+writes the app's compressed assets into the crate's `OUT_DIR` while the crate
+compiles, and the crate embeds them, so to cargo they are inputs newer than
+the build: every cargo command after the first compiled the crate again (11 to
+23 minutes on a pull request; on `main` it ran beside the ordinary library
+build and the runner swapped, an hour before the first test). Cargo -v names
+it: "Dirty raccoon: the file `target/debug/build/raccoon/<hash>/out/<checksum>`
+has changed". The build step dates the files in that folder back to 2000, as
+tauri-codegen 2.7 does itself (the lock file has 2.6.3), and then fails, with
+cargo's reason, unless a second `cargo test --no-run -v` finds every unit
+fresh. The folder is the `out_dir` cargo reports for the crate's build script,
+not a path searched for: cargo 1.100 keeps every unit's output, the test binary
+among them, under `build/raccoon/<hash>/out`, and dating those back makes them
+stale.
+
+The commands are one script, `infra/ci-runners/cargo-build-once.sh`, which
+takes cargo test's target arguments and sets pipefail itself: `macos-native`
+calls it with `--lib`, and the `binaries` part of `linux-rust-tests` with
+`--bins --test '*'`. On Linux the same cause compiled the crate a second time
+in `binaries`, 190 s of a 10.4 minute job (run 45442275413), between the build
+step and the step that runs the tests. The other jobs that build the crate
+build it without the desktop features, so `generate_context!` does not run in
+them and they do not call the script. The policy tests pin the script's
+commands and the call in both jobs.
+
+A cold run of `macos-native` on a manual run (45448416407, 24 November 2026,
+every dependency built) took 1 h 52 min: Clippy 15 min 41 s and 15 min 6 s,
+the test build 34 min 52 s (the freshness check in it 2 s), the cache save
+30 s, and the full suite 41 min 39 s (the ordinary library, the binary and the
+integration tests built in 8 min 27 s, the library's 5,886 tests in 1,969 s,
+the doc-tests, of which there are none, 17 s). The limit is 150 minutes. Before
+this, main's job reached its limit during the doc-tests, after an hour of the
+second compile. `main`'s `cargo test --locked` still builds the ordinary
+library once, which the binary, the integration tests and the doc-tests need.
+
 No macOS runner is taken on a pull request unless the selector asks for one.
 Three jobs take one only when they are selected:
 
@@ -238,11 +274,11 @@ Three jobs take one only when they are selected:
 - `webkit-mac-only`: the same events, and pull requests the `mac-webkit` answer
   selects (below).
 
-`macos-rust-changes` decides all three and `check` accepts a skipped macOS job
-on its word alone. On `main`, `macos-native` and `machine-compat` each keep the
-run in progress and the newest waiting commit: an older commit still waiting
-when a newer one arrives is cancelled and its `check` fails. The newest commit
-of a burst of merges is always tested.
+`macos-rust-changes` decides all three, and `check` waits for none of them.
+On `main`, `macos-native` and `machine-compat` each keep the run in progress
+and the newest waiting commit: an older commit still waiting when a newer one
+arrives is cancelled, and its `check-macos` fails. The newest commit of a burst
+of merges is always tested.
 
 ### The WebKit layout checks
 
@@ -292,11 +328,60 @@ list. The answer fails closed: a check in `macOnly` with no entry of its own in
 the job on every frontend change, and `test_macos_rust.py` fails when an entry
 is missing or names a path that is not in the tree.
 
-**What is left to `main`:** a mac-only check broken by a pull request the
-answer does not select (a product file outside those paths that changes what a
-mac-only check measures, such as a component the transcript renders from
-another folder) is found on `main`, after the merge, by `webkit-mac-only` on
-the push. Every other WebKit check runs on every frontend pull request.
+**A pull request is not held to the mac-only checks** (the owner's decision,
+24 November 2026). On #1530's three runs the job ran 3.0 to 3.4 minutes but
+waited 9, 20 and 24 minutes for a macOS runner, and the selector picks it on 23
+of the last 60 pull requests merged into `main`. So `check` does not need it:
+a selected pull request shows its result for the reviewer, red or green, and
+can merge either way. `check-macos` holds every push to `main`, nightly and
+manual run to it, as it holds them to `macos-native` ("macOS Rust coverage").
+
+**What is left to `main`:** a break in one of the six mac-only checks is found
+on `main` after the merge, by `webkit-mac-only` on the push and `check-macos`.
+That is any pull request the answer does not select (a product file outside
+those paths that changes what a mac-only check measures, such as a component
+the transcript renders from another folder), and a selected one merged with
+its `webkit-mac-only` red. Every other WebKit check runs on every frontend pull
+request.
+
+#### One rerun, alone, on the Linux parts
+
+A Linux part runs its checks several at once, and a check can fail there only
+because the others hold the processor. So, by the owner's decision (#1514,
+item 21), each check that failed runs once more after the part's other checks
+have ended, by itself, with nothing else running in that part. The part passes
+only if every such check passes alone; one that fails again fails the part.
+There is exactly one rerun: `reruns` in `run-all.mjs` is 1, `rerunFailed`
+refuses any other number, and `infra/ci-runners/test_webkit_reruns.py` fails
+when either allows a second (or a retry loop is added around the one). The
+macOS job (`--only mac-only`) and runs on a Mac make none.
+
+A check that passed only alone is not hidden. The log prints `<name> FAILED
+under load, passed alone` with the output of its first run, the part's last
+lines name it again, and the job summary (`GITHUB_STEP_SUMMARY`) lists it under
+the heading "FAILED under load, passed alone", with that output. A check on
+run-all's `alone` list ran by itself the first time too, so it is said to have
+"failed, passed when run again", in the same list. It is a check to fix: it
+failed once, on a runner like the next one.
+
+Nobody opens the summary of a green job, so each such check also gets one
+warning annotation, titled `WebKit check passed only when run again: <name>,
+part <i>/4`. It shows on the run's page and among the pull request's checks,
+and the API returns it without the log.
+
+**The list is read with `node scripts/webkit/rerun-tally.mjs`.** For the last
+completed CI runs (20 by default, `--runs N` up to 100, `--branch main` for
+one branch, `--json` for JSON, `--help` for these), it reads those annotations
+for every attempt of every Linux part, through `gh api`, and prints each check
+that passed only when run again, with in how many runs and which (link,
+branch, commit, part). A run counts once for a check, however many of its
+attempts said so. It sends four requests at once and says each run on stderr
+as it is read: 20 runs take about 20 seconds, 100 about 70. A request GitHub
+answers with a 5xx is sent again, up to four times, backing off.
+
+A rerun takes the check's own time again, after the part. A check that timed
+out (ten minutes) and is rerun can take the part past its 25-minute limit; the
+part then fails, as it would have without the rerun.
 
 The legacy runtime diagnostic's macOS leg is gone: its tests patch
 `platform.system` to Linux and to Darwin themselves.
@@ -338,11 +423,30 @@ race that fails half the time pass seven runs in eight.
 nextest is installed as one release by version, its archive checked against a
 SHA-256 in the workflow before it is opened.
 
+**The serve tests** (`serve-tests`) run under the same `ci` profile: `cargo
+nextest run --locked --profile ci --bins` with a `--test` for every file under
+`src-tauri/serve/tests` but the four other jobs run (`machine_compat`,
+`machines_e2e`, `machine_routes`, `local_issue_start`). Under `cargo test` the
+binaries ran one after another, 433 s in run 45442275413, 186 s of it
+`scheduled_run`; nextest runs them side by side, so the slowest test is the
+floor. The job installs the same nextest release, checked the same way, keeps
+its JUnit report as `serve-junit` and names flaky and leaky tests in its
+summary. `local_supervisor` is built without libtest's harness (`harness =
+false`) and cannot answer nextest's `--list`, so it runs under `cargo test` in
+a step of its own; a policy test takes the binaries without a harness from
+`src-tauri/serve/Cargo.toml` and requires that step for each.
+
+With every test in a process of its own, a reservation one process keeps is no
+longer one: `free_port()` (`tests/common/machine.rs`), which hands a test a
+port no other test got, takes it by creating
+`<temp dir>/terminalx-test-ports/<port>` exclusively with its process id, and
+takes over a file whose process is gone.
+
 The Rust jobs on Linux do not install or build the frontend. `tauri-build`
 needs the folder the frontend builds into, so a step writes a one-line
 `dist/index.html`; no Rust test reads what is in it.
 
-`infra/ci-runners/test_workflow_security.py` holds both suites to these shapes.
+`infra/ci-runners/test_workflow_security.py` holds the suites to these shapes.
 
 ## Cargo caches
 
@@ -359,15 +463,78 @@ dependency, and now builds the ones that changed. A job saves only when what
 it restored was not built from its lock file, so `main` keeps one per job and
 lock file and a pull request writes its own only when it changes the lock
 file. A job whose build was whole saves even when a test then failed.
+`macos-native` saves before its tests, as soon as the library's tests are
+built: a suite that fails, or runs out of time (every macOS job on `main`
+from #1521 to #1535 did, and so no `main` cache existed and each pull request
+built every dependency), still leaves the cache. Its tests need the crate's
+output, so it moves the build aside, cleans an APFS clone of it with the same
+`cargo clean`, saves the clone and puts the build back. Which runs may write
+`main`'s scope does not change: a save still uses the run's own primary key.
 `serve-tests` builds what `headless-serve` builds: it restores that job's
 cache and saves none. In `linux-rust-tests` the `binaries` part saves, and
 the four library parts restore what it saved.
+
+A save runs only once its clean step succeeded: its `if` is
+`steps.<id>.outcome == 'success'` on the step just before it (`clean`, and
+`aside` in `macos-native`), with `!cancelled()` in front where the clean step
+runs after a failed test. The save used to repeat the clean step's own `if`,
+so a clean that failed still saved the crate's output. A policy test holds
+every job that saves to this, and rejects the clean step's `if` copied.
 
 Keyed by commit, every run saved a new cache, the repository's 10 GB limit
 evicted them within hours, and the macOS jobs, which failed and so never
 saved, built every dependency on every run.
 
+## The Rust toolchain
+
+**Rust is pinned to one release** (the owner's decision, 25 November 2026):
+`rust-toolchain.toml` names `channel = "1.100.0"`, not `stable`, with the
+components `clippy` and `rustfmt` and the target `aarch64-apple-darwin`. Every
+job, and every developer's machine, builds with the release `rustup` installs
+from that file. So a new stable release, with its new Clippy lints, no longer
+fails every pull request at once with no change of ours. No workflow installs
+or picks a toolchain of its own: each runs `rustup show && cargo --version`,
+which installs the pinned release and prints it in the log. To bump it, open
+a one-line pull request that changes `channel`, with any Clippy fixes the new
+release needs. The cache keys carry `rustc --version`, so a bump starts new
+caches by itself. `test_rust_toolchain.py` fails unless the channel is an
+exact `x.y.z` and no workflow picks another toolchain (a toolchain action,
+`rustup default`, `install`, `override` or `run`, `cargo +<toolchain>`,
+`RUSTUP_TOOLCHAIN` or `RUSTC`).
+
 ## macOS Rust coverage
+
+**A pull request is not held to the macOS Rust suite** (the owner's decision,
+24 November 2026). `check`, the required status, does not need
+`macos-native`, so it reports as soon as the Linux jobs and `webkit-layout`
+have, without waiting the 45 to 90 minutes the macOS job takes. On a pull
+request the selector still starts `macos-native` when the change needs it
+(below), and its result shows as its own job; a red one there is information
+for the reviewer, not a block. Pushes to `main`, nightly and manual runs are
+held to it as before, by `check-macos`, which needs `check`, `macos-native`
+and `webkit-mac-only` and fails unless all three succeeded; `release-serve.yml`
+follows that run's conclusion. The mac-only WebKit checks follow the same rule
+("The WebKit layout checks"). So an Apple-only failure can now first fail on `main`,
+and the policy tests pin that `check` never needs `macos-native` or
+`webkit-mac-only` again (either would hold the required status for its run and
+its wait for a macOS runner), that `check-macos` needs both, and that it runs
+on every event but a pull request.
+
+**A pull request is not held to `machine-compat` either** (the owner's
+decision, 25 November 2026). The job builds this tree against the previous two
+released runtimes on a macOS runner. In run 45418009203 it waited 37.4 minutes
+for that runner and then ran 2.6, while the rest of the run had finished by
+minute 10, and `check` waited for it. Now `check` does not need it: a pull
+request the selector picks for it (the paths in
+`scripts/machine-e2e/relevant.py`) still runs it and shows its result for the
+reviewer, red or green, and can merge either way. `check-macos` holds every push
+to `main`, nightly and manual run to it, beside `macos-native` and
+`webkit-mac-only`. **What is left to `main`:** a change that breaks the build
+against a released runtime is found on `main` after the merge, by
+`machine-compat` on the push and `check-macos`, and is fixed there. The policy
+tests pin that `check` neither needs `machine-compat` nor names it in its gate,
+that `check-macos` needs it and fails unless it succeeded, and that it still
+runs when selected.
 
 The full macOS suite runs on pushes to `main`, nightly at 02:23 UTC and on
 manual workflow dispatch. A selected pull request runs the filtered part of it
@@ -431,9 +598,7 @@ A selected pull request runs the Swift tests, the icon checks, the helper
 build, Clippy over every target (so every Apple-only line of the library, the
 binaries and the integration tests is checked), one build of the library's
 tests, and the tests of the Apple-only and system-dependent modules:
-the test binary that one build made, run with `$(macos-rust.py --filters)`
-(a second `cargo test` would compile the crate again: see the comment on the
-build step in `ci.yml`), 51 name filters
+`cargo test --locked --lib -- $(macos-rust.py --filters)`, 51 name filters
 that match 1,889 of the 5,871 tests. They are the modules with any Apple
 `cfg`, and the ones whose behaviour is the system's without one (terminals,
 process groups, the keychain, sockets). A test fails when a file with an

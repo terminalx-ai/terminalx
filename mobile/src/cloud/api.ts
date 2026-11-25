@@ -215,6 +215,8 @@ const workspaceSchema = z
     lastActivityAt: z.number().nullish(),
     archivedAt: z.number().nullish(),
     deletedAt: z.number().nullish(),
+    // The server's word that the machine is gone at the provider (#1589); a malformed value reads as absent.
+    machineMissingAt: z.number().nullish().catch(undefined),
     runtimeActivity: z
       .object({ online: z.boolean().optional(), activeTurns: z.number().optional(), pendingApprovals: z.number().optional(), reportedAt: z.number().optional(), stale: z.boolean().optional() })
       .passthrough()
@@ -552,6 +554,83 @@ const deviceLoginPollSchema = z.discriminatedUnion("status", [
 export type CodexDeviceLoginPoll = z.infer<typeof deviceLoginPollSchema>;
 const deviceLoginCancelSchema = z.object({ status: z.enum(["waiting", "connected", "expired", "canceled", "failed"]) });
 export type CodexDeviceLoginState = z.infer<typeof deviceLoginCancelSchema>["status"];
+
+// ── The GitHub App (PRO-537; terminalx-saas `docs/mobile-github-app.md`) ──
+
+/** The only GitHub address a screen is ever handed to open: a page on github.com itself. */
+const GITHUB_URL = z.string().refine((value) => /^https:\/\/github\.com\/\S*$/.test(value));
+/** The server takes at most this many repositories in an organization's set. */
+export const MAX_GITHUB_REPOSITORIES = 100;
+/** The longest `query` the installation's list takes. */
+export const MAX_GITHUB_QUERY = 200;
+
+const githubInstallationSchema = z.object({
+  /** The TerminalX id: what the repository routes take, never GitHub's own number. */
+  id: z.string().min(1),
+  accountLogin: z.string(),
+  /** `connected`, `suspended` or `revoked`. */
+  state: z.string(),
+  // Anything but a github.com address is dropped, not opened.
+  manageUrl: GITHUB_URL.optional().catch(undefined),
+});
+const githubRepositorySchema = z.object({
+  installationId: z.string().min(1),
+  githubRepositoryId: z.number(),
+  fullName: z.string().min(1),
+  cloneUrl: z.string().nullish(),
+  defaultBranch: z.string().nullish(),
+  private: z.boolean(),
+  /** `accessible`, `missing`, `installation-suspended` or `installation-revoked`. */
+  state: z.string(),
+  reason: z.string().nullish(),
+});
+const githubAppSchema = z.object({
+  /** False when this server has no GitHub App: nothing to connect. */
+  configured: z.boolean(),
+  /** True for an owner or admin; a server that does not say so is answering a member. */
+  canManage: z.boolean().default(false),
+  installations: z.array(githubInstallationSchema),
+  /** The organization's set: what its cloud workspaces may clone. */
+  repositories: z.array(githubRepositorySchema),
+});
+/** An organization's GitHub App as this person may see it: its installations and its chosen repositories. */
+export type CloudGithubApp = z.infer<typeof githubAppSchema>;
+export type CloudGithubInstallation = z.infer<typeof githubInstallationSchema>;
+export type CloudGithubRepository = z.infer<typeof githubRepositorySchema>;
+
+const githubConnectStartSchema = z.object({ attemptId: z.string().min(1), installUrl: GITHUB_URL, resumeUrl: GITHUB_URL.optional().catch(undefined), expiresAt: millis });
+/**
+ * A connect attempt just started. Both addresses carry the attempt's secret
+ * `state`: they are opened, and never shown, logged or kept in what is drawn.
+ */
+export type GithubConnectStart = z.infer<typeof githubConnectStartSchema>;
+const githubConnectAttemptSchema = z.object({
+  attemptId: z.string().min(1),
+  /** `waiting`, `connected`, `canceled`, `expired` or `failed`. */
+  state: z.string(),
+  expiresAt: millis.optional(),
+  installation: z.object({ id: z.string().min(1), accountLogin: z.string(), state: z.string() }).optional(),
+  /** `mobile`, `desktop` or `confirmation_page`, on a canceled attempt. */
+  canceledBy: z.string().optional(),
+  errorCode: z.string().optional(),
+});
+export type GithubConnectAttempt = z.infer<typeof githubConnectAttemptSchema>;
+
+const githubLiveRepositorySchema = z.object({ githubRepositoryId: z.number(), fullName: z.string().min(1), cloneUrl: z.string().nullish(), defaultBranch: z.string().nullish(), private: z.boolean(), selected: z.boolean() });
+const githubLiveRepositoriesSchema = z.object({
+  installation: z.object({ id: z.string().min(1), accountLogin: z.string(), state: z.string() }),
+  repositories: z.array(githubLiveRepositorySchema),
+  /** The installation grants more than the 1,000 the server reads: the list, and a search of it, is incomplete. */
+  truncated: z.boolean(),
+  /** Chosen repositories the installation no longer makes usable. */
+  missing: z.array(z.object({ githubRepositoryId: z.number(), fullName: z.string(), reason: z.string() })),
+  manageUrl: GITHUB_URL.optional().catch(undefined),
+});
+/** What an installation grants right now, as GitHub lists it, with which of them the organization has chosen. */
+export type GithubLiveRepositories = z.infer<typeof githubLiveRepositoriesSchema>;
+export type GithubLiveRepository = z.infer<typeof githubLiveRepositorySchema>;
+/** One entry of the organization's set as it is saved. */
+export interface GithubRepositoryChoice { installationId: string; githubRepositoryId: number }
 
 export interface CloudApiOptions {
   /** `https://login.terminalx.ai`. */
@@ -935,6 +1014,63 @@ export class CloudApi {
     return read(deviceLoginCancelSchema, await this.request("POST", `${base(orgId)}/cloud-workspace-credentials/codex/device-cancel`, body)).status;
   }
 
+  // ── The GitHub App ──
+
+  /** The organization's GitHub App: whether one can be connected, its installations, and the repositories chosen for its workspaces. Any member may read it. */
+  async githubApp(orgId: string): Promise<CloudGithubApp> {
+    return read(githubAppSchema, await this.request("GET", `${base(orgId)}/github-app`));
+  }
+
+  /**
+   * Begin connecting the GitHub App, as an owner or admin may. The attempt
+   * lasts until `expiresAt` (by `serverNow()`) and belongs to this person:
+   * the browser finishes it, and only `githubConnectAttempt` says how it ended.
+   */
+  async startGithubConnect(orgId: string): Promise<GithubConnectStart> {
+    return read(githubConnectStartSchema, await this.request("POST", `${base(orgId)}/github-app/connect-attempts`, {}));
+  }
+
+  /** How a connect attempt stands. The link that brings the browser back proves nothing: this answer does. */
+  async githubConnectAttempt(orgId: string, attemptId: string): Promise<GithubConnectAttempt> {
+    return attemptFor(attemptId, await this.request("GET", `${base(orgId)}/github-app/connect-attempts/${id(attemptId)}`));
+  }
+
+  /** Give up a connect attempt. The answer is where it ended, which is `connected` when the browser won the race. */
+  async cancelGithubConnect(orgId: string, attemptId: string): Promise<GithubConnectAttempt> {
+    return attemptFor(attemptId, await this.request("POST", `${base(orgId)}/github-app/connect-attempts/${id(attemptId)}/cancel`, {}));
+  }
+
+  /**
+   * What an installation grants, for an owner or admin to choose from.
+   * `installationId` is the TerminalX id (`installations[].id`). `query` keeps
+   * the repositories whose `owner/name` contains it; `refresh` asks GitHub
+   * again now instead of using a list read in the last minute.
+   */
+  async githubRepositories(orgId: string, installationId: string, options: { query?: string; refresh?: boolean } = {}): Promise<GithubLiveRepositories> {
+    const query = options.query?.trim() ?? "";
+    // Refused here as the server would, before anything is sent.
+    if (query.length > MAX_GITHUB_QUERY) throw new CloudApiError("cloud_workspace_request_invalid", 422);
+    const asked = [query ? `query=${id(query)}` : "", options.refresh ? "refresh=1" : ""].filter(Boolean).join("&");
+    const live = read(githubLiveRepositoriesSchema, await this.request("GET", `${base(orgId)}/github-app/installations/${id(installationId)}/repositories${asked ? `?${asked}` : ""}`));
+    // An answer about another installation is not the answer to this request.
+    if (live.installation.id !== installationId) throw invalidResponse();
+    return live;
+  }
+
+  /**
+   * Save the organization's set, whole: it replaces what was saved, and an
+   * empty list clears it. The server asks GitHub again before saving and
+   * saves nothing when one repository is not granted. The answer is the
+   * status every member then reads.
+   */
+  async saveGithubRepositories(orgId: string, repositories: readonly GithubRepositoryChoice[]): Promise<CloudGithubApp> {
+    const body = { repositories: repositories.map((choice) => ({ installationId: choice.installationId, githubRepositoryId: choice.githubRepositoryId })) };
+    const seen = new Set(body.repositories.map((choice) => `${choice.installationId}\u0000${choice.githubRepositoryId}`));
+    // Refused here as the server would, before anything is sent: at most 100, each once.
+    if (body.repositories.length > MAX_GITHUB_REPOSITORIES || seen.size !== body.repositories.length) throw new CloudApiError("cloud_workspace_request_invalid", 422);
+    return read(githubAppSchema, await this.request("PUT", `${base(orgId)}/github-app/repositories`, body));
+  }
+
   private async request(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown, headers: Record<string, string> = {}, secrets: readonly string[] = []): Promise<unknown> {
     const token = await this.options.accessToken();
     if (!token) throw new CloudApiError("account_signed_out", 401);
@@ -1022,6 +1158,12 @@ function operationFor(orgId: string, operationId: string, body: unknown): CloudL
   const answer = read(lifecycleSchema, body);
   if (answer.operation.id !== operationId || answer.workspace.orgId !== orgId || answer.operation.workspaceId !== answer.workspace.id) throw invalidResponse();
   return answer;
+}
+
+function attemptFor(attemptId: string, body: unknown): GithubConnectAttempt {
+  const attempt = read(githubConnectAttemptSchema, body);
+  if (attempt.attemptId !== attemptId) throw invalidResponse();
+  return attempt;
 }
 
 function credentialFor(provider: CloudCredentialProvider, body: unknown): CloudCredential {
