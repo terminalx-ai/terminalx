@@ -81,4 +81,11 @@ export const Alert = { alert: vi.fn() };
 // A sheet over the screen (25.10's start sheet): drawn in place while visible.
 export const Modal = (props: Props & { visible?: boolean }) => (props.visible === false ? null : <div data-modal="true">{props.children}</div>);
 export const KeyboardAvoidingView = View;
+/** The app's place on the phone: a test brings it to the front with `AppState.emit("active")`. */
+const appStateListeners = new Set<(state: string) => void>();
+export const AppState = {
+  currentState: "active",
+  addEventListener: (_event: string, listener: (state: string) => void) => { appStateListeners.add(listener); return { remove: () => { appStateListeners.delete(listener); } }; },
+  emit: (state: string) => { for (const listener of [...appStateListeners]) listener(state); },
+};
 export const Keyboard = { addListener: () => ({ remove: () => undefined }), dismiss: vi.fn(), isVisible: () => false };
