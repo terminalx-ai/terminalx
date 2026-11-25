@@ -4176,3 +4176,55 @@ fn a_reset_tab_names_its_history_and_what_its_reset_did() {
     }
     assert_eq!(serde_json::to_value(crate::cloud_agents::ResetNotice::of(&tab).unwrap()).unwrap(), json!({ "undoable": false }));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cloud_desktop_requires_readiness_and_watchers_cannot_open_control_or_generic_ports() {
+    use std::os::unix::fs::PermissionsExt;
+    use base64::{engine::general_purpose, Engine as _};
+
+    let f = fixture();
+    listed(&f.rpc);
+    let (viewer, mut events) = Peer::for_user("desktop-viewer".into(), Authority::Participate, Some("viewer".into()));
+    let (stranger, _) = Peer::for_user("desktop-stranger".into(), Authority::Participate, Some("stranger".into()));
+    let hello = json!({ "protocol": PROTOCOL, "want": ["ports/1", protocol::CLOUD_DESKTOP] });
+    assert_eq!(call(&f.rpc, &viewer, "rpc.hello", hello.clone()).await.unwrap()["capabilities"], json!(["ports/1"]));
+    assert_eq!(code(call(&f.rpc, &viewer, "desktop.open", json!({})).await), "capability_not_granted");
+
+    f.rpc.set_desktop_readiness(7, true);
+    let tools = tempfile::tempdir().unwrap();
+    let pool = super::super::cloud_desktop::DesktopPool::new(vec![tools.path().to_string_lossy().into_owned()], Duration::from_millis(10));
+    assert!(f.rpc.desktop.set(pool).is_ok());
+    call(&f.rpc, &viewer, "rpc.hello", hello.clone()).await.unwrap();
+    call(&f.rpc, &stranger, "rpc.hello", hello).await.unwrap();
+    assert_eq!(code(call(&f.rpc, &stranger, "desktop.open", json!({})).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &viewer, "desktop.open", json!({"control":true})).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &viewer, "ports.open", json!({"port":5900})).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &viewer, "desktop.open", json!({})).await), "cloud_desktop_image_unavailable");
+
+    for (name, body) in [
+        ("xauth", "umask 077; cat > \"$3\""),
+        ("Xvfb", "printf '42\\n'; exec /bin/sleep 15"),
+        ("openbox", "exec /bin/sleep 15"),
+        ("chromium", "exec /bin/sleep 15"),
+        ("x11vnc", "for arg; do [ \"$arg\" = -viewonly ] && printf watch; done; exec /bin/cat"),
+    ] {
+        let path = tools.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    f.rpc.answer_port_open(&viewer, &json!({ "id": "desktop-open", "method": "desktop.open", "params": { "control": false } })).await;
+    let opened = tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap().unwrap();
+    assert_eq!(opened["id"], "desktop-open");
+    let stream = opened["result"]["streamId"].as_str().unwrap();
+    let data = tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap().unwrap();
+    assert_eq!(data["event"], "desktop.data");
+    assert_eq!(data["params"]["data"], general_purpose::STANDARD.encode("watch"));
+
+    f.rpc.set_desktop_readiness(7, false);
+    let closed = tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap().unwrap();
+    assert_eq!(closed["event"], "desktop.closed");
+    assert_eq!(closed["params"]["streamId"], stream);
+    assert_eq!(closed["params"]["reason"], "revoked");
+    assert_eq!(code(call(&f.rpc, &viewer, "desktop.write", json!({"streamId":stream, "data":"eA=="})).await), "forbidden");
+}

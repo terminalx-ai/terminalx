@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type RFB from "@novnc/novnc";
+import type { RawChannel } from "@novnc/novnc";
 import { cn } from "@/lib/cn";
 
 export type VncState = "connecting" | "connected" | "disconnected";
@@ -12,13 +13,15 @@ export type VncState = "connecting" | "connected" | "disconnected";
 export function VncView({
   port,
   password,
+  openChannel,
   control,
   attempt = 0,
   onState,
   className,
 }: {
-  port: number;
-  password: string;
+  port?: number;
+  password?: string;
+  openChannel?: () => RawChannel;
   control: boolean;
   /** Bumped to connect again after a drop. */
   attempt?: number;
@@ -35,6 +38,7 @@ export function VncView({
     const target = host.current;
     if (!target) return;
     let gone = false;
+    let channel: RawChannel | undefined;
     const set = (next: VncState) => {
       if (gone) return;
       setState(next);
@@ -45,7 +49,12 @@ export function VncView({
     void import("@novnc/novnc")
       .then(({ default: Client }) => {
         if (gone) return;
-        const client = new Client(target, `ws://127.0.0.1:${port}/websockify`, { credentials: { password }, shared: true });
+        channel = openChannel?.();
+        const client = new Client(target, channel ?? `ws://127.0.0.1:${port}/websockify`, { credentials: { password }, shared: true });
+        if (channel) {
+          client.qualityLevel = 4;
+          client.compressionLevel = 6;
+        }
         client.scaleViewport = true;
         client.resizeSession = false;
         client.background = "transparent";
@@ -55,14 +64,15 @@ export function VncView({
         client.addEventListener("credentialsrequired", () => client.sendCredentials({ password }));
         rfb.current = client;
       })
-      .catch(() => set("disconnected"));
+      .catch(() => { channel?.close(); set("disconnected"); });
     return () => {
       gone = true;
       rfb.current?.disconnect();
+      channel?.close();
       rfb.current = null;
       target.replaceChildren();
     };
-  }, [port, password, attempt]);
+  }, [port, password, openChannel, attempt]);
 
   useEffect(() => {
     const client = rfb.current;

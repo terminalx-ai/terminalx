@@ -1,6 +1,6 @@
 //! Process resources for a single Linux workspace desktop. Its caller must
 //! authorize the attachment before starting or opening a desktop connection.
-//! RFB runs over an inherited socket per attachment, with no VNC listener.
+//! RFB runs over an inherited loopback socket per attachment, with no persistent VNC listener.
 
 use std::io;
 use std::os::fd::OwnedFd;
@@ -11,7 +11,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
@@ -23,6 +23,8 @@ pub(crate) enum DesktopError {
     MissingTools,
     #[error("Could not start the cloud desktop")]
     StartupFailed,
+    #[error("Cloud desktop access changed before open")]
+    AccessChanged,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,7 +140,7 @@ pub(crate) struct Desktop {
 }
 
 pub(crate) struct DesktopConnection {
-    pub(crate) rfb: UnixStream,
+    pub(crate) rfb: Option<TcpStream>,
     _server: Process,
 }
 
@@ -217,24 +219,43 @@ impl Desktop {
         })
     }
 
-    pub(crate) fn connect(&self, access: DesktopAccess) -> Result<DesktopConnection, DesktopError> {
+    pub(crate) async fn connect(
+        &self,
+        access: DesktopAccess,
+    ) -> Result<DesktopConnection, DesktopError> {
         self.connect_inner(access)
+            .await
             .map_err(|_| DesktopError::StartupFailed)
     }
 
-    fn connect_inner(&self, access: DesktopAccess) -> io::Result<DesktopConnection> {
-        // inetd mode receives an already-connected private socket. No port is
-        // published or separately dialed, so another process cannot claim it.
-        let (client, server) = std::os::unix::net::UnixStream::pair()?;
+    async fn connect_inner(&self, access: DesktopAccess) -> io::Result<DesktopConnection> {
+        // x11vnc expects TCP in inetd mode. Bind an ephemeral loopback
+        // listener only long enough to form one socket pair. Reject a raced
+        // connection before launching VNC, then close the listener.
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+        let rfb = TcpStream::connect(listener.local_addr()?).await?;
+        let (server, address) = listener.accept().await?;
+        if address != rfb.local_addr()? {
+            return Err(io::Error::other("unexpected desktop loopback peer"));
+        }
+        drop(listener);
+        let server = server.into_std()?;
+        server.set_nonblocking(false)?;
         let input: OwnedFd = server.try_clone()?.into();
         let output: OwnedFd = server.into();
-        client.set_nonblocking(true)?;
-        let rfb = UnixStream::from_std(client)?;
         let mut process = command(&self.vnc);
         process
             .args(["-inetd", "-display", &self.display, "-auth"])
             .arg(self.files.path().join("Xauthority"))
-            .args(["-norc", "-nopw", "-nosel", "-novncconnect"])
+            .args([
+                "-norc",
+                "-nopw",
+                "-nosel",
+                "-novncconnect",
+                "-noremote",
+                "-nocmds",
+                "-noultraext",
+            ])
             .env("HOME", self.files.path())
             .stdin(Stdio::from(input))
             .stdout(Stdio::from(output));
@@ -243,7 +264,7 @@ impl Desktop {
         }
         let server = Process(process.spawn()?);
         Ok(DesktopConnection {
-            rfb,
+            rfb: Some(rfb),
             _server: server,
         })
     }
@@ -284,17 +305,28 @@ impl DesktopPool {
     pub(crate) async fn connect(
         self: &Arc<Self>,
         access: DesktopAccess,
+        allowed: impl Fn() -> bool,
     ) -> Result<DesktopLease, DesktopError> {
         let mut state = self.state.lock().await;
+        if !allowed() {
+            return Err(DesktopError::AccessChanged);
+        }
         if state.desktop.is_none() {
             let dirs: Vec<_> = self.bin_dirs.iter().map(String::as_str).collect();
             state.desktop = Some(Desktop::start(&dirs).await?);
+        }
+        if !allowed() {
+            if state.connected == 0 {
+                state.desktop = None;
+            }
+            return Err(DesktopError::AccessChanged);
         }
         let connection = match state
             .desktop
             .as_ref()
             .expect("desktop started")
             .connect(access)
+            .await
         {
             Ok(connection) => connection,
             Err(error) => {
@@ -417,8 +449,8 @@ mod tests {
             vec![tools.path().to_str().unwrap().into()],
             Duration::from_millis(20),
         );
-        let mut first = pool.connect(DesktopAccess::Watch).await.unwrap();
-        let second = pool.connect(DesktopAccess::Control).await.unwrap();
+        let mut first = pool.connect(DesktopAccess::Watch, || true).await.unwrap();
+        let second = pool.connect(DesktopAccess::Control, || true).await.unwrap();
         let files = pool
             .state
             .lock()
@@ -429,8 +461,25 @@ mod tests {
             .files
             .path()
             .to_owned();
-        first.connection.rfb.write_all(b"x").await.unwrap();
-        assert_eq!(first.connection.rfb.read_u8().await.unwrap(), b'x');
+        first
+            .connection
+            .rfb
+            .as_mut()
+            .unwrap()
+            .write_all(b"x")
+            .await
+            .unwrap();
+        assert_eq!(
+            first
+                .connection
+                .rfb
+                .as_mut()
+                .unwrap()
+                .read_u8()
+                .await
+                .unwrap(),
+            b'x'
+        );
         drop(first);
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(files.exists());
@@ -459,9 +508,12 @@ mod tests {
             display: ":42".into(),
             vnc,
         };
-        let mut watch = desktop.connect(DesktopAccess::Watch).unwrap();
-        let mut control = desktop.connect(DesktopAccess::Control).unwrap();
-        for (socket, view_only) in [(&mut watch.rfb, true), (&mut control.rfb, false)] {
+        let mut watch = desktop.connect(DesktopAccess::Watch).await.unwrap();
+        let mut control = desktop.connect(DesktopAccess::Control).await.unwrap();
+        for (socket, view_only) in [
+            (watch.rfb.as_mut().unwrap(), true),
+            (control.rfb.as_mut().unwrap(), false),
+        ] {
             let mut flags = String::new();
             tokio::time::timeout(Duration::from_secs(2), socket.read_to_string(&mut flags))
                 .await

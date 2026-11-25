@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use base64::{engine::general_purpose, Engine as _};
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Notify};
 use tokio_util::sync::CancellationToken;
@@ -67,6 +67,8 @@ struct Window {
 
 struct Stream {
     policy: Option<Permit>,
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    desktop: Option<DesktopStream>,
     id: String,
     peer_id: u64,
     port: u16,
@@ -87,6 +89,13 @@ struct Stream {
     /// When something last crossed, in milliseconds since the stream opened.
     last_activity: AtomicU64,
     opened: std::time::Instant,
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+pub(super) struct DesktopStream {
+    pub(super) collaboration: Arc<super::collab::Collaboration>,
+    pub(super) allowed: Box<dyn Fn() -> bool + Send + Sync>,
+    pub(super) lease: super::cloud_desktop::DesktopLease,
 }
 
 impl Stream {
@@ -125,6 +134,7 @@ pub struct Ports {
     windows: Mutex<HashMap<u64, Arc<Window>>>,
     opening: Mutex<HashMap<u64, usize>>,
     next: AtomicU64,
+    desktop: bool,
 }
 
 /// Whether the caller may still open ports, read again at the moment a
@@ -140,6 +150,51 @@ fn stream_id(params: &Value) -> Result<&str, RpcError> {
 }
 
 impl Ports {
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    pub(super) fn desktop() -> Self { Self { desktop: true, ..Self::default() } }
+
+    fn event(&self, port: &'static str, desktop: &'static str) -> &'static str {
+        if self.desktop { desktop } else { port }
+    }
+
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    pub(super) async fn open_desktop(
+        self: &Arc<Self>, peer: &Arc<Peer>, ticket: crate::data_privacy::Ticket,
+        open: impl std::future::Future<Output = Result<DesktopStream, RpcError>>,
+    ) -> Result<Value, RpcError> {
+        let _privacy = ticket.enter().map_err(|error| RpcError::forbidden(error.to_string()))?;
+        let _opening = self.opening(peer.id())?;
+        let mut desktop = open.await?;
+        let socket = desktop.lease.connection.rfb.take().expect("fresh RFB socket");
+        let (reader, writer) = socket.into_split();
+        let allowed = &|| true;
+        self.attach(peer, 0, allowed, ticket, None, Some(desktop), reader, writer)
+    }
+
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    pub(super) fn desktop_message(&self, peer: &Peer, method: &str, params: &Value) -> Result<Value, RpcError> {
+        match method {
+            "desktop.write" => self.write(peer, params),
+            "desktop.ack" => self.ack(peer, params),
+            "desktop.close" => {
+                if let Some(stream) = self.owned(peer, stream_id(params)?) { self.end(&stream, None); }
+                Ok(json!({}))
+            }
+            _ => Err(RpcError::invalid("invalid desktop stream method")),
+        }
+    }
+
+    fn opening(&self, id: u64) -> Result<Opening<'_>, RpcError> {
+        self.check_room(id)?;
+        let mut opening = self.opening.lock().unwrap();
+        let limit = if self.desktop { 1 } else { MAX_OPENS_IN_FLIGHT };
+        if opening.get(&id).copied().unwrap_or(0) >= limit || (self.desktop && opening.values().sum::<usize>() >= 8) {
+            return Err(RpcError::new("backpressure", "too many streams being opened at once"));
+        }
+        *opening.entry(id).or_default() += 1;
+        Ok(Opening { ports: self, peer_id: id })
+    }
+
     #[cfg(test)]
     pub async fn handle(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, allowed: Allowed<'_>) -> Result<Value, RpcError> {
         self.handle_admitted(peer, method, params, allowed, crate::github_process::ticket(), None).await
@@ -196,16 +251,7 @@ impl Ports {
             .and_then(|port| u16::try_from(port).ok())
             .filter(|port| *port != 0)
             .ok_or_else(|| RpcError::invalid("port must be between 1 and 65535"))?;
-        self.check_room(peer.id())?;
-        let _opening = {
-            let mut opening = self.opening.lock().unwrap();
-            let count = opening.entry(peer.id()).or_default();
-            if *count >= MAX_OPENS_IN_FLIGHT {
-                return Err(RpcError::new("backpressure", "too many ports are being opened at once"));
-            }
-            *count += 1;
-            Opening { ports: self, peer_id: peer.id() }
-        };
+        let _opening = self.opening(peer.id())?;
         // Loopback only, IPv4 then IPv6: where a development server listens.
         let mut socket = None;
         for address in [SocketAddr::from((Ipv4Addr::LOCALHOST, port)), SocketAddr::from((Ipv6Addr::LOCALHOST, port))] {
@@ -216,6 +262,20 @@ impl Ports {
         }
         let socket = socket.ok_or_else(|| unreachable_port(port))?;
         let _ = socket.set_nodelay(true);
+        let (reader, writer) = socket.into_split();
+        self.attach(peer, port, allowed, ticket, policy,
+            #[cfg(any(target_os = "linux", all(test, unix)))]
+            None, reader, writer)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn attach(
+        self: &Arc<Self>, peer: &Arc<Peer>, port: u16, allowed: Allowed<'_>,
+        ticket: crate::data_privacy::Ticket, policy: Option<Permit>,
+        #[cfg(any(target_os = "linux", all(test, unix)))] desktop: Option<DesktopStream>,
+        reader: impl AsyncRead + Unpin + Send + 'static,
+        writer: impl AsyncWrite + Unpin + Send + 'static,
+    ) -> Result<Value, RpcError> {
         let read_lease = ticket.enter().map_err(|error| RpcError::forbidden(error.to_string()))?;
         let write_lease = ticket.enter().map_err(|error| RpcError::forbidden(error.to_string()))?;
         let (input, pending) = mpsc::unbounded_channel();
@@ -231,12 +291,18 @@ impl Ports {
             if !allowed() {
                 return Err(RpcError::forbidden("ports.open is no longer allowed for this connection"));
             }
-            Self::room(&streams, peer.id())?;
+            self.room(&streams, peer.id())?;
+            #[cfg(any(target_os = "linux", all(test, unix)))]
+            if desktop.as_ref().is_some_and(|desktop| !(desktop.allowed)()) {
+                return Err(RpcError::forbidden("Cloud desktop access changed before open"));
+            }
             let peer_window = self.windows.lock().unwrap().entry(peer.id()).or_default().clone();
             if let Some(permit) = &policy { permit.check(None).map_err(|_| RpcError::forbidden("Port policy changed before open"))?; }
             let stream = Arc::new(Stream {
                 policy,
-                id: format!("port-{}", self.next.fetch_add(1, Ordering::Relaxed) + 1),
+                #[cfg(any(target_os = "linux", all(test, unix)))]
+                desktop,
+                id: format!("{}-{}", self.event("port", "desktop"), self.next.fetch_add(1, Ordering::Relaxed) + 1),
                 peer_id: peer.id(),
                 port,
                 input,
@@ -253,7 +319,6 @@ impl Ports {
             streams.insert(stream.id.clone(), stream.clone());
             stream
         };
-        let (reader, writer) = socket.into_split();
         // Keep both socket halves owned until cancellation has dropped their
         // futures and I/O. Queued writes must never outlive their open request.
         let read = self.clone().read(stream.clone(), peer.clone(), reader);
@@ -272,19 +337,23 @@ impl Ports {
             });
         }
         // Who opened what, never what was carried.
+        if self.desktop {
+            return Ok(json!({ "streamId": stream.id, "window": STREAM_WINDOW, "maxWriteBytes": MAX_WRITE_BYTES }));
+        }
         log::info!("port stream {}: {} opened port {port}", stream.id, peer.user_id.as_deref().unwrap_or("an attachment with no person"));
         Ok(json!({ "streamId": stream.id, "port": port, "window": STREAM_WINDOW, "maxWriteBytes": MAX_WRITE_BYTES }))
     }
 
-    fn room(streams: &HashMap<String, Arc<Stream>>, peer_id: u64) -> Result<(), RpcError> {
-        if streams.len() >= MAX_STREAMS || streams.values().filter(|stream| stream.peer_id == peer_id).count() >= MAX_STREAMS_PER_PEER {
+    fn room(&self, streams: &HashMap<String, Arc<Stream>>, peer_id: u64) -> Result<(), RpcError> {
+        let (total, per_peer) = if self.desktop { (8, 1) } else { (MAX_STREAMS, MAX_STREAMS_PER_PEER) };
+        if streams.len() >= total || streams.values().filter(|stream| stream.peer_id == peer_id).count() >= per_peer {
             return Err(RpcError::new("backpressure", "too many open port streams"));
         }
         Ok(())
     }
 
     fn check_room(&self, peer_id: u64) -> Result<(), RpcError> {
-        Self::room(&self.streams.lock().unwrap(), peer_id)
+        self.room(&self.streams.lock().unwrap(), peer_id)
     }
 
     /// The caller's own stream. Another connection's stream does not exist
@@ -328,7 +397,7 @@ impl Ports {
     }
 
     /// Application → client.
-    async fn read(self: Arc<Self>, stream: Arc<Stream>, peer: Arc<Peer>, mut reader: tokio::net::tcp::OwnedReadHalf) {
+    async fn read(self: Arc<Self>, stream: Arc<Stream>, peer: Arc<Peer>, mut reader: impl AsyncRead + Unpin) {
         tokio::select! {
             _ = stream.cancel.cancelled() => return,
             _ = stream.started.notified() => {}
@@ -400,9 +469,16 @@ impl Ports {
                         release(&stream.peer_window.unacked, count);
                         break "limit";
                     }
+                    #[cfg(any(target_os = "linux", all(test, unix)))]
+                    let _admission = stream.desktop.as_ref().map(|desktop| desktop.collaboration.enter_admission());
+                    #[cfg(any(target_os = "linux", all(test, unix)))]
+                    if stream.desktop.as_ref().is_some_and(|desktop| !(desktop.allowed)()) {
+                        release(&stream.peer_window.unacked, count);
+                        break "revoked";
+                    }
                     stream.unacked.fetch_add(count, Ordering::SeqCst);
                     peer.notify_sized(
-                        "ports.data",
+                        self.event("ports.data", "desktop.data"),
                         json!({ "streamId": stream.id, "data": general_purpose::STANDARD.encode(&buffer[..count]) }),
                         count,
                     );
@@ -417,7 +493,7 @@ impl Ports {
     }
 
     /// Client → application.
-    async fn feed(self: Arc<Self>, stream: Arc<Stream>, peer: Arc<Peer>, mut writer: tokio::net::tcp::OwnedWriteHalf, mut pending: mpsc::UnboundedReceiver<Vec<u8>>) {
+    async fn feed(self: Arc<Self>, stream: Arc<Stream>, peer: Arc<Peer>, mut writer: impl AsyncWrite + Unpin, mut pending: mpsc::UnboundedReceiver<Vec<u8>>) {
         loop {
             let bytes = tokio::select! {
                 _ = stream.cancel.cancelled() => break,
@@ -425,14 +501,14 @@ impl Ports {
             };
             let written = tokio::select! {
                 _ = stream.cancel.cancelled() => break,
-                written = tokio::time::timeout(WRITE_TIMEOUT, write_port_input(&mut writer, &bytes, stream.policy.as_ref())) => written,
+                written = tokio::time::timeout(WRITE_TIMEOUT, write_stream_input(&mut writer, &bytes, &stream)) => written,
             };
             if !matches!(written, Ok(Ok(()))) {
                 self.end(&stream, Some((&peer, "error")));
                 break;
             }
             stream.pending_input.fetch_sub(bytes.len(), Ordering::SeqCst);
-            peer.notify("ports.drained", json!({ "streamId": stream.id, "bytes": bytes.len() }));
+            peer.notify(self.event("ports.drained", "desktop.drained"), json!({ "streamId": stream.id, "bytes": bytes.len() }));
             if !stream.carry(bytes.len()) {
                 self.end(&stream, Some((&peer, "limit")));
                 break;
@@ -454,7 +530,7 @@ impl Ports {
         release(&stream.peer_window.unacked, outstanding);
         stream.peer_window.freed.notify_waiters();
         if let Some((peer, reason)) = told {
-            peer.notify("ports.closed", json!({ "streamId": stream.id, "reason": reason }));
+            peer.notify(self.event("ports.closed", "desktop.closed"), json!({ "streamId": stream.id, "reason": reason }));
         }
     }
 
@@ -469,6 +545,14 @@ impl Ports {
     /// End the streams of a connection that may no longer drive, and say so.
     pub fn revoke(&self, peer: &Peer) {
         for stream in self.of(|stream| stream.peer_id == peer.id()) {
+            self.end(&stream, Some((peer, "revoked")));
+        }
+    }
+
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    pub(super) fn revalidate_desktop(&self, peer: &Peer) {
+        for stream in self.of(|stream| stream.peer_id == peer.id()
+            && stream.desktop.as_ref().is_some_and(|desktop| !(desktop.allowed)())) {
             self.end(&stream, Some((peer, "revoked")));
         }
     }
@@ -520,22 +604,33 @@ fn listed_port(listener: super::port_listeners::Listener) -> Value {
 /// A port can be an agent's control interface. Each physical write retains
 /// the stream opener's native revision/source, including queued bytes. The
 /// lock is held only for a nonblocking syscall, never across an await.
-async fn write_port_input(writer: &mut tokio::net::tcp::OwnedWriteHalf, bytes: &[u8], policy: Option<&Permit>) -> std::io::Result<()> {
+async fn write_stream_input(writer: &mut (impl AsyncWrite + Unpin), bytes: &[u8], stream: &Stream) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    if let Some(desktop) = &stream.desktop {
+        return write_checked(writer, bytes, &desktop.collaboration, || (desktop.allowed)()).await;
+    }
+    write_port_input(writer, bytes, stream.policy.as_ref()).await
+}
+
+async fn write_port_input(writer: &mut (impl AsyncWrite + Unpin), bytes: &[u8], policy: Option<&Permit>) -> std::io::Result<()> {
     let Some(policy) = policy else { return writer.write_all(bytes).await };
-    let mut offset = 0;
-    while offset < bytes.len() {
-        writer.writable().await?;
-        let attempt = {
-            let _admission = policy.collaboration.enter_admission();
-            policy.check(None).map_err(|error| std::io::Error::other(error.to_string()))?;
-            writer.try_write(&bytes[offset..])
-        };
-        match attempt {
-            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
-            Ok(written) => offset += written,
-            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => {},
-            Err(error) => return Err(error),
-        }
+    write_checked(writer, bytes, &policy.collaboration, || policy.check(None).is_ok()).await
+}
+
+async fn write_checked(
+    writer: &mut (impl AsyncWrite + Unpin), mut bytes: &[u8],
+    collaboration: &super::collab::Collaboration, allowed: impl Fn() -> bool,
+) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        let written = std::future::poll_fn(|cx| {
+            let _admission = collaboration.enter_admission();
+            if !allowed() {
+                return std::task::Poll::Ready(Err(std::io::Error::other("stream authorization changed")));
+            }
+            std::pin::Pin::new(&mut *writer).poll_write(cx, bytes)
+        }).await?;
+        if written == 0 { return Err(std::io::ErrorKind::WriteZero.into()); }
+        bytes = &bytes[written..];
     }
     Ok(())
 }

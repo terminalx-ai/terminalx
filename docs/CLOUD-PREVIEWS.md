@@ -328,3 +328,21 @@ Previews open in the system browser, and only when asked, because the
 built-in browser is not available in cloud sessions today (its pages are
 grouped by a local working directory, which a cloud session does not
 have).
+
+### Cloud desktop streams
+
+The Linux workspace runtime offers `cloud-desktop/1` only when its
+authenticated workspace readiness explicitly enables it. The default reader
+holds it while the relay readiness contract is pending.
+
+- `desktop.open` takes `{ control?: boolean }` and returns
+  `{ streamId, window, maxWriteBytes }`. The default is watch-only. A control
+  request requires the same explicit configuration authority as terminal input.
+  An image without the required tools returns `cloud_desktop_image_unavailable`.
+- `desktop.write`, `desktop.ack`, and `desktop.close` use the development-port
+  stream formats. Runtime notifications use the `desktop.data`,
+  `desktop.drained`, and `desktop.closed` names.
+- The desktop path only attaches to an inherited loopback socket, with
+  a separate VNC process per attachment. A watcher uses VNC's view-only mode.
+  A watch-mode stream still carries the RFB handshake and framebuffer
+  requests. Clipboard access and VNC remote commands are disabled.

@@ -72,6 +72,7 @@ pub(crate) fn relay_session(session: &crate::cloud_bootstrap::Session, requested
         attachments,
         revocations,
         collaboration,
+        desktop_ready: session.desktop_ready,
         collaboration_v2: requested_capabilities.split(',').any(|capability| capability == "collaboration-v2"),
     }
 }

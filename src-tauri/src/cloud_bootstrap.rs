@@ -235,6 +235,7 @@ pub struct Session {
     /// Who the workspace is shared with (contract §21.3), kept raw and read
     /// by the relay host; absent from an API before PRO-30.
     pub collaboration: Option<serde_json::Value>,
+    pub(crate) desktop_ready: bool,
 }
 
 /// Read leniently: a field the server adds later must not fail the whole
@@ -287,6 +288,8 @@ pub struct Refreshed {
     // Sent because this runtime advertises `collaboration-v1`.
     #[serde(default)]
     collaboration: Option<serde_json::Value>,
+    #[serde(skip)]
+    desktop_ready: bool,
 }
 
 impl Drop for Redeemed {
@@ -354,8 +357,21 @@ impl Api for HttpApi {
     }
 
     fn refresh(&self, credential: &str) -> Result<Refreshed, CallError> {
-        self.post("/v1/cloud-workspace-bootstrap/refresh", credential, serde_json::json!({}), Some((CAPABILITIES_HEADER, CAPABILITIES)))
+        let mut raw: serde_json::Value = self.post("/v1/cloud-workspace-bootstrap/refresh", credential,
+            serde_json::json!({}), Some((CAPABILITIES_HEADER, CAPABILITIES)))?;
+        let desktop_ready = read_desktop_readiness(&mut raw);
+        let mut refreshed: Refreshed = serde_json::from_value(raw)
+            .map_err(|_| CallError::Transient(anyhow!("unreadable workspace refresh")))?;
+        refreshed.desktop_ready = desktop_ready;
+        Ok(refreshed)
     }
+}
+
+/// Read the negotiated desktop readiness from the authenticated refresh.
+fn read_desktop_readiness(_refresh: &mut serde_json::Value) -> bool {
+    // Held until the server defines the field. Once defined, remove just
+    // that field before decoding the otherwise strict refresh response.
+    false
 }
 
 /// A bootstrapped runtime: its session and what it needs to refresh it.
@@ -572,6 +588,7 @@ fn redeem(config: &Config, api: &dyn Api, key: &HostKey, stored: Option<(&str, &
                 quiesce: None,
                 environment: None,
                 collaboration: None,
+                desktop_ready: false,
             }
         }
     };
@@ -764,6 +781,7 @@ fn session_from_refresh(mut refreshed: Refreshed, relay_host_id: &str) -> Result
         attachments: std::mem::take(&mut refreshed.attachments),
         revocations: std::mem::take(&mut refreshed.revocations),
         collaboration: refreshed.collaboration.take().filter(|value| !value.is_null()),
+        desktop_ready: refreshed.desktop_ready,
         quiesce: refreshed.quiesce.take().filter(|value| !value.is_null()).and_then(|value| {
             match serde_json::from_value::<QuiesceRequest>(value) {
                 Ok(request) if opaque_id(&request.operation_id) => Some(request),
@@ -1050,6 +1068,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cloud_desktop_is_held_without_the_authenticated_contract() {
+        let mut future = serde_json::json!({ "desktopReady": true });
+        assert!(!read_desktop_readiness(&mut future));
+        assert_eq!(future, serde_json::json!({ "desktopReady": true }));
+        assert!(!read_desktop_readiness(&mut serde_json::Value::Null));
+    }
+
     fn session_fields() -> (String, String, String, u64, String) {
         (WORKSPACE.into(), "org_1".into(), "relay.token.jwt".into(), 1, "https://relay.example".into())
     }
@@ -1096,6 +1122,7 @@ mod tests {
                 access_mode: Some(AccessMode::Organization),
                 quiesce: None,
                 collaboration: None,
+                desktop_ready: false,
             })
         }
     }
