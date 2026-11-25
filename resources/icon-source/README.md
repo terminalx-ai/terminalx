@@ -8,6 +8,7 @@ Vendored from `dudhatparesh/terminalx-app-v3` at commit
 | `resources/build/icon.icns` | `resources/icon-source/legacy.icns` |
 | `mobile/assets/icon.png` | `mobile/assets/icon.png` |
 | `mobile/assets/adaptive-icon.png` | `mobile/assets/adaptive-icon.png` |
+| `resources/icon-source/icon.icon/Assets/logo.svg` | `resources/icon-source/logo.svg` |
 
 The ICNS was built by Legacy's `resources/icon-source/generate.sh` from its
 Icon Composer project. Its 16/32/64px slots are already trimmed; larger slots
@@ -18,6 +19,10 @@ The development badge geometry and colour follow Legacy's
 `resources/icon-dev.png`: a 58px disc, 9px from the bottom/right of a 256px
 canvas, filled `#ff6b2b`, with a white D and no outline.
 
-To update, copy those three files from the same Legacy revision, record its
+`logo.svg` is the mark itself, the one layer of that Icon Composer project.
+The phone app draws it from the same paths (`mobile/src/ui/TerminalXMark.tsx`,
+held to this file by its test).
+
+To update, copy those four files from the same Legacy revision, record its
 commit here and in `THIRD-PARTY-NOTICES.md`, then follow the regeneration
 commands in `docs/RELEASING.md`. Do not extract icons from `/Applications`.
