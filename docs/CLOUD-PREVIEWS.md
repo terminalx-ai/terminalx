@@ -332,8 +332,8 @@ have).
 ### Cloud desktop streams
 
 The Linux workspace runtime offers `cloud-desktop/1` only when its
-authenticated workspace readiness explicitly enables it. The default reader
-holds it while the relay readiness contract is pending.
+authenticated bootstrap or refresh response enables `cloud.desktop.v1` with
+a version-1 readiness map and a literal boolean true.
 
 - `desktop.open` takes `{ control?: boolean }` and returns
   `{ streamId, window, maxWriteBytes }`. The default is watch-only. A control

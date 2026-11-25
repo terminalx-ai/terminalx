@@ -60,7 +60,7 @@ pub const TOKEN_PATH_ENV: &str = "TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_TOKEN_PATH
 /// `attachment-installation-v1` asks for `installationKey` on each attachment:
 /// what stays the same when a person's installation is issued a new
 /// attachment and device (`remote::server`, `resume_control`).
-pub const CAPABILITIES: &str = "organization-access-v1,agent-grants-v1,github-broker-v1,quiesce-v1,environment-template-v1,collaboration-v1,attachment-installation-v1";
+pub const CAPABILITIES: &str = "organization-access-v1,agent-grants-v1,github-broker-v1,quiesce-v1,environment-template-v1,collaboration-v1,attachment-installation-v1,phase2-readiness-v1";
 pub(crate) const CAPABILITIES_HEADER: &str = "x-terminalx-cloud-workspace-runtime-capabilities";
 pub(crate) const VERSION_HEADER: &str = "x-terminalx-cloud-workspace-runtime-version";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -260,6 +260,8 @@ pub struct Redeemed {
     relay_token_expires_at: u64,
     director_url: String,
     runtime_credential: String,
+    #[serde(default)]
+    phase2_readiness: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -288,8 +290,8 @@ pub struct Refreshed {
     // Sent because this runtime advertises `collaboration-v1`.
     #[serde(default)]
     collaboration: Option<serde_json::Value>,
-    #[serde(skip)]
-    desktop_ready: bool,
+    #[serde(default)]
+    phase2_readiness: Option<serde_json::Value>,
 }
 
 impl Drop for Redeemed {
@@ -353,25 +355,21 @@ impl HttpApi {
 impl Api for HttpApi {
     fn redeem(&self, token: &str, key: &HostKey) -> Result<Redeemed, CallError> {
         let body = serde_json::json!({ "relayHostId": key.relay_host_id(), "hostPublicKeyB64": key.public_key_b64() });
-        self.post("/v1/cloud-workspace-bootstrap/redeem", token, body, None)
+        self.post("/v1/cloud-workspace-bootstrap/redeem", token, body, Some((CAPABILITIES_HEADER, "phase2-readiness-v1")))
     }
 
     fn refresh(&self, credential: &str) -> Result<Refreshed, CallError> {
-        let mut raw: serde_json::Value = self.post("/v1/cloud-workspace-bootstrap/refresh", credential,
-            serde_json::json!({}), Some((CAPABILITIES_HEADER, CAPABILITIES)))?;
-        let desktop_ready = read_desktop_readiness(&mut raw);
-        let mut refreshed: Refreshed = serde_json::from_value(raw)
-            .map_err(|_| CallError::Transient(anyhow!("unreadable workspace refresh")))?;
-        refreshed.desktop_ready = desktop_ready;
-        Ok(refreshed)
+        self.post("/v1/cloud-workspace-bootstrap/refresh", credential, serde_json::json!({}), Some((CAPABILITIES_HEADER, CAPABILITIES)))
     }
 }
 
-/// Read the negotiated desktop readiness from the authenticated refresh.
-fn read_desktop_readiness(_refresh: &mut serde_json::Value) -> bool {
-    // Held until the server defines the field. Once defined, remove just
-    // that field before decoding the otherwise strict refresh response.
-    false
+/// The workspace and organisation are bound by the authenticated bootstrap
+/// response. Read only literal true from the supported readiness version.
+fn read_desktop_readiness(readiness: Option<&serde_json::Value>) -> bool {
+    readiness.is_some_and(|readiness| {
+        readiness.get("version").and_then(serde_json::Value::as_u64) == Some(1)
+            && readiness.pointer("/flags/cloud.desktop.v1").and_then(serde_json::Value::as_bool) == Some(true)
+    })
 }
 
 /// A bootstrapped runtime: its session and what it needs to refresh it.
@@ -572,7 +570,12 @@ fn redeem(config: &Config, api: &dyn Api, key: &HostKey, stored: Option<(&str, &
     // The redeem answer has no attachments; ask for them now rather than at
     // the first tick.
     let session = match api.refresh(&stored.runtime_credential) {
-        Ok(refreshed) => session_from_refresh(refreshed, &relay_host_id).map_err(Failure::Fatal)?,
+        Ok(refreshed) => {
+            if refreshed.workspace_id != stored.workspace_id || refreshed.organization_id != stored.organization_id {
+                return Err(Failure::Fatal(anyhow!("the server answered for a different workspace")));
+            }
+            session_from_refresh(refreshed, &relay_host_id).map_err(Failure::Fatal)?
+        }
         Err(error) => {
             log::warn!("first refresh after redeem failed: {}", describe(&error));
             Session {
@@ -588,7 +591,7 @@ fn redeem(config: &Config, api: &dyn Api, key: &HostKey, stored: Option<(&str, &
                 quiesce: None,
                 environment: None,
                 collaboration: None,
-                desktop_ready: false,
+                desktop_ready: read_desktop_readiness(redeemed.phase2_readiness.as_ref()),
             }
         }
     };
@@ -781,7 +784,7 @@ fn session_from_refresh(mut refreshed: Refreshed, relay_host_id: &str) -> Result
         attachments: std::mem::take(&mut refreshed.attachments),
         revocations: std::mem::take(&mut refreshed.revocations),
         collaboration: refreshed.collaboration.take().filter(|value| !value.is_null()),
-        desktop_ready: refreshed.desktop_ready,
+        desktop_ready: read_desktop_readiness(refreshed.phase2_readiness.as_ref()),
         quiesce: refreshed.quiesce.take().filter(|value| !value.is_null()).and_then(|value| {
             match serde_json::from_value::<QuiesceRequest>(value) {
                 Ok(request) if opaque_id(&request.operation_id) => Some(request),
@@ -1069,11 +1072,29 @@ mod tests {
     }
 
     #[test]
-    fn cloud_desktop_is_held_without_the_authenticated_contract() {
-        let mut future = serde_json::json!({ "desktopReady": true });
-        assert!(!read_desktop_readiness(&mut future));
-        assert_eq!(future, serde_json::json!({ "desktopReady": true }));
-        assert!(!read_desktop_readiness(&mut serde_json::Value::Null));
+    fn cloud_desktop_requires_the_versioned_literal_boolean_and_replaces_it_on_refresh() {
+        use serde_json::json;
+        assert!(!read_desktop_readiness(None));
+        for denied in [
+            json!(null), json!({"version": 2, "flags": {"cloud.desktop.v1": true}}),
+            json!({"version": 1, "flags": {"cloud.desktop.v1": "true"}}),
+            json!({"version": 1, "flags": {"cloud.desktop.v1": false}}),
+            json!({"version": 1, "flags": {}}),
+        ] {
+            assert!(!read_desktop_readiness(Some(&denied)));
+        }
+        let ready = json!({"version": 1, "flags": {"cloud.desktop.v1": true}});
+        let response = |readiness: Option<serde_json::Value>| {
+            let mut raw = json!({
+                "v": 1, "workspaceId": WORKSPACE, "organizationId": "org_1",
+                "relayToken": "fresh-relay-token", "relayTokenExpiresAt": 1,
+                "directorUrl": "https://relay.example", "attachments": [], "revocations": []
+            });
+            if let Some(readiness) = readiness { raw["phase2Readiness"] = readiness; }
+            serde_json::from_value::<Refreshed>(raw).unwrap()
+        };
+        assert!(session_from_refresh(response(Some(ready)), "host_1").unwrap().desktop_ready);
+        assert!(!session_from_refresh(response(None), "host_1").unwrap().desktop_ready);
     }
 
     fn session_fields() -> (String, String, String, u64, String) {
@@ -1097,7 +1118,7 @@ mod tests {
             let credential = random_credential();
             *self.credential.borrow_mut() = Some(credential.clone());
             let (workspace_id, organization_id, relay_token, relay_token_expires_at, director_url) = session_fields();
-            Ok(Redeemed { v: 1, workspace_id, organization_id, relay_token, relay_token_expires_at, director_url, runtime_credential: credential })
+            Ok(Redeemed { v: 1, workspace_id, organization_id, relay_token, relay_token_expires_at, director_url, runtime_credential: credential, phase2_readiness: None })
         }
 
         fn refresh(&self, credential: &str) -> Result<Refreshed, CallError> {
@@ -1122,7 +1143,7 @@ mod tests {
                 access_mode: Some(AccessMode::Organization),
                 quiesce: None,
                 collaboration: None,
-                desktop_ready: false,
+                phase2_readiness: None,
             })
         }
     }
