@@ -1,0 +1,164 @@
+# 25.11 Connect GitHub and choose repositories: connecting, the organization's set, the launch picker, a branch, a typed URL, the review.
+appId: com.terminalx.phone.fixture
+# The boards are drawn in Ember when dark and in Den when light: MAESTRO_THEME=Den for the light run.
+env:
+  THEME: ${MAESTRO_THEME || "Ember"}
+name: Repositories (25.11)
+---
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: running, fixtureGithub: none }
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+- tapOn: "${THEME} theme"
+# An owner, nothing connected. The attempt is confirmed "in the browser" six seconds after it starts.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: running, fixtureGithub: none, fixtureGithubEnds: connected, openRoute: "/cloud/new?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "New workspace"
+    timeout: 15000
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- tapOn:
+    id: pick-repository
+- assertVisible: "Connect GitHub"
+- waitForAnimationToEnd
+- takeScreenshot: 25.11-1-connect-github
+- tapOn:
+    id: connect-github
+# iOS asks before the sign-in session shares the browser's github.com sign-in.
+- extendedWaitUntil:
+    visible: "Continue"
+    timeout: 10000
+- takeScreenshot: 25.11-2-ios-asks-to-open-github
+- tapOn: "Continue"
+# The sheet is GitHub's own page. Once the server says connected, the app puts it away.
+- extendedWaitUntil:
+    visible: "Connected northwind-labs.*"
+    timeout: 30000
+- waitForAnimationToEnd
+- takeScreenshot: 25.11-3-connected
+- tapOn:
+    id: choose-repositories
+- extendedWaitUntil:
+    visible:
+      id: grant-northwind-labs/checkout
+    timeout: 10000
+- takeScreenshot: 25.11-4-choose-repositories
+- tapOn:
+    id: grant-northwind-labs/checkout
+- tapOn:
+    id: grant-northwind-labs/api
+- tapOn:
+    id: grant-northwind-labs/web
+- tapOn:
+    id: grant-northwind-labs/infra
+- takeScreenshot: 25.11-5-four-chosen
+- tapOn:
+    id: save-repositories
+- extendedWaitUntil:
+    visible:
+      id: repository-northwind-labs/checkout
+    timeout: 10000
+- takeScreenshot: 25.11-6-the-launch-picker
+- tapOn:
+    id: repository-northwind-labs/checkout
+- tapOn:
+    id: repository-northwind-labs/api
+- takeScreenshot: 25.11-7-two-picked
+- tapOn:
+    id: chosen-northwind-labs/api
+- assertVisible: "Leave it empty to clone main.*"
+- inputText: "release/2.4"
+- takeScreenshot: 25.11-8-branch-or-tag
+- tapOn:
+    id: branch-done
+- tapOn:
+    id: type-url
+- inputText: "github.com/acme/sandbox"
+- takeScreenshot: 25.11-9-type-a-url
+- tapOn:
+    id: add-repository
+- assertVisible: "Use 3 repositories"
+- takeScreenshot: 25.11-10-picked-and-typed
+- tapOn:
+    id: use-repositories
+- assertVisible: ".*checkout and 2 more"
+- takeScreenshot: 25.11-11-the-form
+- tapOn:
+    id: review-price
+- extendedWaitUntil:
+    visible:
+      id: launch
+    timeout: 15000
+- scrollUntilVisible:
+    element: "Repositories:.*"
+- takeScreenshot: 25.11-12-the-review
+# The browser closed before GitHub finished: the attempt is canceled and nothing is connected.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: running, fixtureGithub: none, fixtureGithubEnds: "", openRoute: "/cloud/new?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "New workspace"
+    timeout: 15000
+# The name field has the focus: Return puts the keyboard away.
+- pressKey: Enter
+- tapOn:
+    id: pick-repository
+- tapOn:
+    id: connect-github
+- extendedWaitUntil:
+    visible: "Continue"
+    timeout: 10000
+- tapOn: "Continue"
+- extendedWaitUntil:
+    visible: "Cancel"
+    timeout: 15000
+- takeScreenshot: 25.11-13-github-in-the-sign-in-sheet
+- tapOn: "Cancel"
+- assertVisible: "The browser was closed before GitHub finished. Nothing was connected."
+- waitForAnimationToEnd
+- takeScreenshot: 25.11-14-browser-closed-early
+# A member: who can connect, and the typed URL.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: running, fixtureGithub: member, openRoute: "/cloud/new?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "New workspace"
+    timeout: 15000
+# The name field has the focus: Return puts the keyboard away.
+- pressKey: Enter
+- tapOn:
+    id: pick-repository
+- assertVisible: "No GitHub installation is connected yet.*"
+- takeScreenshot: 25.11-15-a-member
+# Five chosen: the rest dim.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: running, fixtureGithub: chosen, openRoute: "/cloud/new?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "New workspace"
+    timeout: 15000
+# The name field has the focus: Return puts the keyboard away.
+- pressKey: Enter
+- tapOn:
+    id: pick-repository
+- tapOn:
+    id: repository-northwind-labs/checkout
+- tapOn:
+    id: repository-northwind-labs/api
+- tapOn:
+    id: repository-northwind-labs/web
+- tapOn:
+    id: repository-northwind-labs/infra
+- scrollUntilVisible:
+    centerElement: true
+    element:
+      id: repository-northwind-labs/mobile
+- tapOn:
+    id: repository-northwind-labs/mobile
+- scrollUntilVisible:
+    element: "A workspace takes up to five repositories.*"
+- takeScreenshot: 25.11-16-five-chosen

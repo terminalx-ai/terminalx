@@ -52,6 +52,19 @@ does, through the app. The boards are drawn in Ember when dark and in Den when
 light: for the light run set the simulator's appearance to light and
 `MAESTRO_THEME=Den`.
 
+## Connect GitHub and repositories (25.11)
+
+`fixtureGithub: <state>` (with `fixtureLaunch`, which gives Northwind its
+compute) answers the GitHub App routes in memory, by the account service the
+screen tests use (`src/cloud/testing/github.ts`, which follows the server's
+`docs/mobile-github-app.md`); the states are listed in `setup/github.ts`.
+Connect GitHub opens the system's real sign-in sheet on github.com, where
+nobody is signed in, so `fixtureGithubEnds: connected` (or `canceled`, or an
+error code) ends the attempt six seconds later, as the browser's pages would.
+`flow-25.11.yaml` shoots connecting, the organization's set, the launch
+picker, a branch, a typed URL, the review, the browser closed early, a member
+and five chosen.
+
 ## Beta access code (25.08)
 
 `fixtureAccessCode: <answer>` starts the phone signed out with no machines.
