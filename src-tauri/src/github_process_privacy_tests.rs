@@ -9,21 +9,38 @@ use crate::paths::Canonical;
 
 const OPERATIONS: &[&str] = &["ssh", "https", "list", "legacy-read", "legacy-write", "details", "write", "repositories", "overview", "disposition", "review-list", "review-files", "review-resolve", "review-reply"];
 
+// One test per (policy, child) pair: each pair is an independent run of this
+// binary with its own home, so nextest runs the four in parallel.
 #[test]
-fn privacy_covers_identity_and_issue_entry_points() {
-    for managed in [false, true] {
-        for child in ["privacy_entry_points_child", "privacy_transport_entry_points_child"] {
-            let root = tempfile::tempdir().unwrap();
-            let mut command = Command::new(std::env::current_exe().unwrap());
-            command.args(["--exact", &format!("github_process::tests::{child}"), "--nocapture"])
-                .env("TERMINALX_TEST_GITHUB_ENTRIES", if managed { "managed" } else { "personal" })
-                .env("TERMINALX_HOME", root.path().canonical().unwrap());
-            let (output, timed_out) = fixture_output(&mut command, Duration::from_secs(300));
-            assert!(!timed_out, "policy={managed}/{child} exceeded 300 seconds; child killed and reaped\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-            assert!(output.status.success(), "policy={managed}/{child}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-            print!("{}", String::from_utf8_lossy(&output.stdout));
-        }
-    }
+fn privacy_covers_identity_and_issue_entry_points_personal_entry() {
+    privacy_covers_identity_and_issue_entry_points(false, "privacy_entry_points_child");
+}
+
+#[test]
+fn privacy_covers_identity_and_issue_entry_points_personal_transport() {
+    privacy_covers_identity_and_issue_entry_points(false, "privacy_transport_entry_points_child");
+}
+
+#[test]
+fn privacy_covers_identity_and_issue_entry_points_managed_entry() {
+    privacy_covers_identity_and_issue_entry_points(true, "privacy_entry_points_child");
+}
+
+#[test]
+fn privacy_covers_identity_and_issue_entry_points_managed_transport() {
+    privacy_covers_identity_and_issue_entry_points(true, "privacy_transport_entry_points_child");
+}
+
+fn privacy_covers_identity_and_issue_entry_points(managed: bool, child: &str) {
+    let root = tempfile::tempdir().unwrap();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command.args(["--exact", &format!("github_process::tests::{child}"), "--nocapture"])
+        .env("TERMINALX_TEST_GITHUB_ENTRIES", if managed { "managed" } else { "personal" })
+        .env("TERMINALX_HOME", root.path().canonical().unwrap());
+    let (output, timed_out) = fixture_output(&mut command, Duration::from_secs(300));
+    assert!(!timed_out, "policy={managed}/{child} exceeded 300 seconds; child killed and reaped\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(output.status.success(), "policy={managed}/{child}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    print!("{}", String::from_utf8_lossy(&output.stdout));
 }
 
 fn fixture_output(command: &mut Command, timeout: Duration) -> (std::process::Output, bool) {
