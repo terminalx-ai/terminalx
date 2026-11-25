@@ -292,8 +292,14 @@ pub(super) fn run(root: &Path, managed: bool) {
     push.workspace("git.push").unwrap();
     assert_eq!(git(&push.origin, &["rev-parse", "main"]), commit);
     assert!(push.transfers() > before);
-    transfers::run(root, managed);
     openssh::run(root, managed, None);
+}
+
+/// The app's other transfer entry points, in the same environment. Their
+/// fixtures are their own, so they are a run apart from `run`.
+pub(super) fn app_transfers(root: &Path, managed: bool) {
+    let _environment = Environment::new(root);
+    transfers::run(root, managed);
 }
 
 #[cfg(feature = "desktop")]

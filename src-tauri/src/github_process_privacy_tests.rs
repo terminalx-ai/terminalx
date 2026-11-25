@@ -31,6 +31,54 @@ fn privacy_covers_identity_and_issue_entry_points_managed_transport() {
     privacy_covers_identity_and_issue_entry_points(true, "privacy_transport_entry_points_child");
 }
 
+// The entry child's explicit pulls, its other app transfers and its desktop
+// IPC queues build their own fixtures and use nothing the rest of it leaves:
+// each part is a run of its own, in a home of its own, so nextest runs them
+// beside the entry tests above.
+#[test]
+fn privacy_entry_points_pull_personal() {
+    privacy_covers_identity_and_issue_entry_points(false, "privacy_entry_points_pull_child");
+}
+
+#[test]
+fn privacy_entry_points_pull_managed() {
+    privacy_covers_identity_and_issue_entry_points(true, "privacy_entry_points_pull_child");
+}
+
+#[test]
+fn privacy_entry_points_transfer_personal() {
+    privacy_covers_identity_and_issue_entry_points(false, "privacy_entry_points_transfer_child");
+}
+
+#[test]
+fn privacy_entry_points_transfer_managed() {
+    privacy_covers_identity_and_issue_entry_points(true, "privacy_entry_points_transfer_child");
+}
+
+#[cfg(feature = "desktop")]
+#[test]
+fn privacy_entry_points_ipc_personal() {
+    privacy_covers_identity_and_issue_entry_points(false, "privacy_entry_points_ipc_child");
+}
+
+#[cfg(feature = "desktop")]
+#[test]
+fn privacy_entry_points_ipc_managed() {
+    privacy_covers_identity_and_issue_entry_points(true, "privacy_entry_points_ipc_child");
+}
+
+#[cfg(feature = "desktop")]
+#[test]
+fn privacy_entry_points_pull_ipc_personal() {
+    privacy_covers_identity_and_issue_entry_points(false, "privacy_entry_points_pull_ipc_child");
+}
+
+#[cfg(feature = "desktop")]
+#[test]
+fn privacy_entry_points_pull_ipc_managed() {
+    privacy_covers_identity_and_issue_entry_points(true, "privacy_entry_points_pull_ipc_child");
+}
+
 fn privacy_covers_identity_and_issue_entry_points(managed: bool, child: &str) {
     let root = tempfile::tempdir().unwrap();
     let mut command = Command::new(std::env::current_exe().unwrap());
@@ -341,15 +389,72 @@ fn privacy_entry_points_child() {
     workspace_rpc(&root, &ssh, managed);
     panel::run(&root, &ssh, managed);
     media::run(&root, managed);
-    pull::run(&root, managed);
     let fetch = fresh_fixture(&root);
     fresh_runtime(&root, &fetch, managed);
     cleanup_keeps_revoked_branches(&root, &fetch, managed);
     forwarded_cleanup_keeps_denial(&root, &fetch, managed);
-    #[cfg(feature = "desktop")]
-    queued_commands(&root, &ssh, &fetch, managed);
     let observed = std::fs::read_to_string(root.join("launches")).unwrap();
     assert!(observed.contains("ControlMaster=no -o ControlPath=none -o ControlPersist=no"));
+}
+
+/// The explicit pulls, pushes and real OpenSSH runs of the entry points, on
+/// the same observed executables in a home of their own.
+#[test]
+fn privacy_entry_points_pull_child() {
+    let Ok(kind) = std::env::var("TERMINALX_TEST_GITHUB_ENTRIES") else { return };
+    let root = store::root().unwrap();
+    fixture(&root);
+    // The login shell's PATH is read once per process, on first use. The
+    // entry child read it in its first sections; read it here too, so a cold
+    // read (the login shell starting) is not inside a timed section below.
+    crate::binpath::login_path();
+    pull::run(&root, kind == "managed");
+}
+
+/// The entry points' other app transfers (merges, pipelines, PuTTY,
+/// submodules, branch/worktree/clone/push/read/fetch), likewise on their own.
+#[test]
+fn privacy_entry_points_transfer_child() {
+    let Ok(kind) = std::env::var("TERMINALX_TEST_GITHUB_ENTRIES") else { return };
+    let root = store::root().unwrap();
+    fixture(&root);
+    // The login shell's PATH is read once per process, on first use. The
+    // entry child read it in its first sections; read it here too, so a cold
+    // read (the login shell starting) is not inside a timed section below.
+    crate::binpath::login_path();
+    pull::app_transfers(&root, kind == "managed");
+}
+
+/// The entry points' queued desktop IPC commands, on the same observed
+/// executables and a fresh non-main worktree, in a home of their own.
+#[cfg(feature = "desktop")]
+#[test]
+fn privacy_entry_points_ipc_child() {
+    let Ok(kind) = std::env::var("TERMINALX_TEST_GITHUB_ENTRIES") else { return };
+    let root = store::root().unwrap();
+    let (ssh, _) = fixture(&root);
+    // The login shell's PATH is read once per process, on first use. The
+    // entry child read it in its first sections; read it here too, so a cold
+    // read (the login shell starting) is not inside a timed section below.
+    crate::binpath::login_path();
+    let fetch = fresh_fixture(&root);
+    queued_commands(&root, &ssh, &fetch, kind == "managed");
+}
+
+/// The explicit pulls' and transfers' queued desktop IPC commands, likewise
+/// in a home of their own.
+#[cfg(feature = "desktop")]
+#[test]
+fn privacy_entry_points_pull_ipc_child() {
+    let Ok(kind) = std::env::var("TERMINALX_TEST_GITHUB_ENTRIES") else { return };
+    let root = store::root().unwrap();
+    fixture(&root);
+    // The login shell's PATH is read once per process, on first use. The
+    // entry child read it in its first sections; read it here too, so a cold
+    // read (the login shell starting) is not inside a timed section below.
+    crate::binpath::login_path();
+    let runtime = ipc_runtime();
+    pull::ipc_queues(&root, kind == "managed", &runtime);
 }
 
 /// Saturate the actual Tauri blocking pool, poll each IPC command until queued,
@@ -358,9 +463,7 @@ fn privacy_entry_points_child() {
 fn queued_commands(root: &Path, cwd: &Path, fetch: &FetchFixture, managed: bool) {
     use std::future::Future;
     use std::task::{Context, Waker};
-    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2)
-        .max_blocking_threads(1).enable_all().build().unwrap();
-    tauri::async_runtime::set(runtime.handle().clone());
+    let runtime = ipc_runtime();
     for operation in ["identity", "issue", "overview", "disposition", "review-list", "review-files", "review-resolve", "review-reply"] {
         policy(true, managed);
         let before = launches(root);
@@ -388,7 +491,15 @@ fn queued_commands(root: &Path, cwd: &Path, fetch: &FetchFixture, managed: bool)
     fresh_ipcs(root, fetch, managed, &runtime);
     panel::ipc_queues(root, cwd, managed, &runtime);
     media::ipc_queues(root, managed, &runtime);
-    pull::ipc_queues(root, managed, &runtime);
+}
+
+/// Saturable Tauri runtime for the queued IPC commands: one blocking thread.
+#[cfg(feature = "desktop")]
+fn ipc_runtime() -> tokio::runtime::Runtime {
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2)
+        .max_blocking_threads(1).enable_all().build().unwrap();
+    tauri::async_runtime::set(runtime.handle().clone());
+    runtime
 }
 
 #[cfg(feature = "desktop")]
