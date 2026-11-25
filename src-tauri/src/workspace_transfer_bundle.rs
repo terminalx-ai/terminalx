@@ -552,6 +552,27 @@ pub(crate) fn rollback_checkout(repo: &Path, path: &Path, expected: &BranchCommi
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
+pub(crate) fn rollback_import_checkout(
+    repo: &Path,
+    path: &Path,
+    pin: &BranchCommit,
+    checkout_created: bool,
+    branch_created: bool,
+) -> Result<()> {
+    if checkout_created {
+        rollback_checkout(repo, path, pin)?;
+    }
+    if branch_created {
+        ensure!(
+            !path.exists(),
+            "The unfinished checkout was kept with its branch."
+        );
+        rollback_branch(repo, pin)?;
+    }
+    Ok(())
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 // Transcript tags are lowercase. Message fields use the webview wire convention.
 #[serde(
@@ -832,6 +853,27 @@ mod tests {
         assert!(!path.exists());
         assert!(git(&local, &["rev-parse", "--verify", "refs/heads/topic"]).is_err());
         assert_eq!(git(&local, &["rev-parse", "HEAD"]).unwrap().trim(), head);
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn import_rollback_keeps_a_preexisting_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("local");
+        repository(&repo);
+        let head = commit(&repo);
+        git(&repo, &["branch", "preexisting"]).unwrap();
+        let pin = BranchCommit::new("preexisting", &head).unwrap();
+        let branch_created = ensure_local_branch(&repo, &pin).unwrap();
+        assert!(!branch_created);
+        let path = temp.path().join("failed-import");
+        checkout(&repo, &path, &pin).unwrap();
+        rollback_import_checkout(&repo, &path, &pin, true, branch_created).unwrap();
+        assert!(!path.exists());
+        assert_eq!(
+            git(&repo, &["rev-parse", "preexisting"]).unwrap().trim(),
+            head
+        );
     }
 
     #[test]

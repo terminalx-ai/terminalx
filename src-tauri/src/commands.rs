@@ -2346,14 +2346,7 @@ pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, i
                         anyhow::ensure!(!log.exists(), "The local conversation acquired a transcript and was kept.");
                         sessions.delete_session(&local.id)?;
                     }
-                    if checkout_created {
-                        transfer::rollback_checkout(project, &path, &local_pin)?;
-                    }
-                    if created_branch {
-                        anyhow::ensure!(!path.exists(), "The unfinished checkout was kept with its branch.");
-                        transfer::rollback_branch(project, &local_pin)?;
-                    }
-                    Ok(())
+                    transfer::rollback_import_checkout(project, &path, &local_pin, checkout_created, created_branch)
                 })();
                 match cleanup {
                     Ok(()) => Err(error),
