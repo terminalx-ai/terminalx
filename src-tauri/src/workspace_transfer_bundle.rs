@@ -565,6 +565,53 @@ mod tests {
         assert!(validate_listing("invalid\0", 16, 1).is_err());
     }
 
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn rolls_back_a_new_checkout_and_ref_and_preserves_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = temp.path().join("local");
+        let path = temp.path().join("transferred");
+        repository(&local);
+        let head = commit(&local);
+        let selected = BranchCommit::new("topic", &head).unwrap();
+        assert!(ensure_local_branch(&local, &selected).unwrap());
+        checkout(&local, &path, &selected).unwrap();
+        std::fs::write(path.join("other-work"), b"user data").unwrap();
+        assert!(rollback_checkout(&local, &path, &selected).is_err());
+        assert!(rollback_branch(&local, &selected).is_err());
+        std::fs::remove_file(path.join("other-work")).unwrap();
+        rollback_checkout(&local, &path, &selected).unwrap();
+        rollback_branch(&local, &selected).unwrap();
+        assert!(!path.exists());
+        assert!(git(&local, &["rev-parse", "--verify", "refs/heads/topic"]).is_err());
+        assert_eq!(git(&local, &["rev-parse", "HEAD"]).unwrap().trim(), head);
+    }
+
+    #[test]
+    fn counts_only_exported_transcript_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("transcript.jsonl");
+        let event = |payload| {
+            serde_json::json!({
+                "id": "event", "sessionId": "session", "tabId": "tab", "harness": "claude",
+                "seq": 1, "ts": "2026-11-25T00:00:00Z", "payload": payload,
+            })
+        };
+        let hidden = event(serde_json::json!({ "type": "reasoning", "text": "x".repeat(5000) }));
+        let visible = event(serde_json::json!({ "type": "assistant_text", "text": "Answer" }));
+        std::fs::write(&log, format!("{hidden}\n{visible}\n")).unwrap();
+        let text = transcript_file(&log, 64).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&text).unwrap(),
+            serde_json::json!([
+                {"role":"assistant","text":"Answer"}
+            ])
+        );
+        assert!(transcript_file(&log, 8)
+            .unwrap_err()
+            .is::<TransferTooLarge>());
+    }
+
     #[test]
     fn exports_an_origin_delta_without_updating_the_remote_branch() {
         let temp = tempfile::tempdir().unwrap();
