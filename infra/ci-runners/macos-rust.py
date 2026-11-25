@@ -83,7 +83,7 @@ MACOS_FILTERS = (
     "agent_accounts::", "agent_keys::", "agent_local_login::", "browser::", "chat_windows::", "cloud_agent_client::",
     "cloud_mirror", "cloud_resources::", "commands::", "computer::", "container_vm::", "control::", "data_privacy::",
     "dictation::", "direct_endpoints::", "drag_text::", "floating::", "github_process", "harness::codex::",
-    "harness::read_only", "keychain::", "local_runtime::", "local_vm::", "machine_account::", "machine_host::",
+    "harness::read_only", "host_command_policy::", "keychain::", "local_runtime::", "local_vm::", "machine_account::", "machine_host::",
     "machine_name::", "machines::", "native_menu::", "notification_permission::", "orchestration_archive::",
     "pairing::", "power::", "pty::", "quit::", "remote::environment", "remote::machine", "remote::port_listeners",
     "secret_clipboard::", "serve::", "serve_cli::", "sidebar_activity::", "skills::", "startup::", "status::",

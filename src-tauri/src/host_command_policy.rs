@@ -89,6 +89,7 @@ pub enum Rejection {
     DecisionMismatch,
     InvalidDirectory,
     ExecutableUnavailable,
+    #[cfg(not(target_os = "macos"))]
     UnsupportedPlatform,
     WorkerUnavailable,
     Poisoned,
