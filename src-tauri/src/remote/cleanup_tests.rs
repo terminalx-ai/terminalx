@@ -394,10 +394,23 @@ async fn the_runtime_removes_a_merged_worktree_with_its_branches_keeps_an_unsafe
     assert!(Path::new(&done.cwd).exists());
 }
 
+// Each method's first, failing cleanup waits out the product's kill wait
+// (`RESTART_WAIT`): the two methods are independent tests, run side by side.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn remote_workspace_cleanup_retains_unconfirmed_ownership_and_retries() {
-    for method in ["workspace.remove", "workspace.sweepMerged"] {
+async fn remote_workspace_cleanup_retains_unconfirmed_ownership_and_retries_remove() {
+    remote_workspace_cleanup_retains_unconfirmed_ownership_and_retries("workspace.remove").await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_workspace_cleanup_retains_unconfirmed_ownership_and_retries_sweep_merged() {
+    remote_workspace_cleanup_retains_unconfirmed_ownership_and_retries("workspace.sweepMerged").await;
+}
+
+#[cfg(unix)]
+async fn remote_workspace_cleanup_retains_unconfirmed_ownership_and_retries(method: &str) {
+    {
         let f = fixture();
         let mut merged = Merged::new();
         let done = session(&f, "retained cleanup", Some("retained-cleanup"));
