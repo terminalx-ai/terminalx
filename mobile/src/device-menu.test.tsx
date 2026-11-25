@@ -386,10 +386,10 @@ describe("one list of machines (#987)", () => {
     expect(mocks.app.pairAvailable).not.toHaveBeenCalled();
   });
 
-  it("names a machine that calls itself “This Mac” by what it is", async () => {
-    signedIn([host()], [account(8, { displayName: "This Mac", platform: "darwin" }), account(9, { displayName: "This Mac", platform: "linux" })]);
+  it("names a machine that calls itself “This computer” by what it is", async () => {
+    signedIn([host()], [account(8, { displayName: "This computer", platform: "darwin" }), account(9, { displayName: "This computer", platform: "linux" })]);
     await show(<MachinesScreen />);
-    expect(container.textContent).not.toContain("This Mac");
+    expect(container.textContent).not.toContain("This computer");
     expect(button("Device options for Mac")).toBeDefined();
     expect(button("Device options for Linux machine")).toBeDefined();
   });
@@ -421,7 +421,7 @@ it("keeps the fallback for a desktop that never sent its name, and tells two sam
   const twin = host({ id: "host-bbbb2222", publicKeyB64: "k2" });
   mocks.app = { ...mocks.app, hosts: [old, host(), twin], activeHost: null };
   await show(<MachinesScreen />);
-  expect(button("Device options for Paired Mac"), container.textContent ?? "").toBeDefined();
+  expect(button("Device options for Paired computer"), container.textContent ?? "").toBeDefined();
   expect(button("Device options for Paresh’s Mac mini · 1111")).toBeDefined();
   expect(button("Device options for Paresh’s Mac mini · 2222")).toBeDefined();
 });

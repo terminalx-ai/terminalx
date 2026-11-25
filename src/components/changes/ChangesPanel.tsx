@@ -261,7 +261,7 @@ function ScopedChanges({ openFileAction: hostOpenFileAction, source, events, ver
         : <EmptyState icon={<MessageSquare />} title="No changes in the selected turn" actions={backButton}>The agent didn't change any files in this turn.</EmptyState>;
   const unavailable = loading ? null : choice.scope === "commit" && !choice.commit
     ? <EmptyState icon={<GitCommitHorizontal />} title="Choose a commit" actions={<Button size="sm" variant="outline" className="border" onClick={() => setScopeOpen(true)}><GitCommitHorizontal /> Pick a commit</Button>}>Choose a commit to review its changes.</EmptyState>
-    : <EmptyState role="note" icon={choice.scope === "turn" || choice.scope === "checkpoint" ? <MessageSquare /> : <Layers />} title="Changes unavailable" actions={choice.scope !== "all" ? backButton : undefined}><p role="alert">{error ?? "Changes unavailable."}</p></EmptyState>;
+    : <EmptyState role="note" icon={choice.scope === "turn" || choice.scope === "checkpoint" ? <MessageSquare /> : <Layers />} title="Changes unavailable" actions={<><Button size="sm" variant="outline" className="border" onClick={() => setTick((t) => t + 1)}>Retry</Button>{choice.scope !== "all" ? backButton : null}</>}><p role="alert">{error ?? "Changes unavailable."}</p></EmptyState>;
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-1.5 border-b border-hairline px-3 py-2">
@@ -369,7 +369,7 @@ function ChangesBody({
   return (
     <div className="animate-panel-content flex h-full min-h-0 flex-col">
       <DiscardDialog source={source} file={discarding} base={range.base} onClose={() => setDiscarding(null)} onDiscarded={() => { setSelected(null); onChanged(); }} />
-      {error && <div className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
+      {error && <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error} <Button size="xs" variant="outline" onClick={onChanged}>Retry</Button></div>}
       <div className={cn("shrink-0 overflow-y-auto scrollbar-thin", current ? "max-h-[40%] border-b border-hairline" : "flex-1")}>
         <ReviewFileList workspace={source.key} base={range.base} files={files} selected={selected} onSelect={select} empty="No changes in this scope." trailing={discardAction} loading={loading} />
       </div>

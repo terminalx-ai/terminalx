@@ -59,3 +59,11 @@ export const secretStoreWord = profile.secretStoreWord;
 export const fileManager = profile.fileManager;
 /** The action that shows a file there: "Reveal in Finder", "Reveal in File Explorer". */
 export const revealInFileManager = `Reveal in ${fileManager}`;
+
+/**
+ * Whether keys can be entered in the system's secure dialog, so they never pass
+ * through this window. Only the Mac build has one; elsewhere the forms that
+ * would open it are off, and say where to enter the key instead.
+ */
+export const hasSecureDialog = isMac;
+export const SECURE_DIALOG_OFF = "Keys are entered in a secure system dialog, which TerminalX has on macOS only. Use the web console to enter a key from this computer.";

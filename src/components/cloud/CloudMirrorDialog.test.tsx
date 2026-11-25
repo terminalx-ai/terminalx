@@ -121,7 +121,8 @@ describe("the local mirror dialog", () => {
     // The dialog says what the copy is, and when it goes away.
     expect(text).toContain("treat them like a download");
     // What it does not promise: macOS asks, it does not prevent; a tool opened there may run code.
-    expect(text).toContain("No file in the copy is marked executable, and macOS asks before opening one");
+    // Only macOS asks before opening a downloaded file, so only there does it say so.
+    expect(text).toContain("No file in the copy is marked executable");
     expect(text).toContain("may still build or index it, which runs the workspace's code on this computer");
     expect(text).not.toContain("Nothing in the copy can be run");
     expect(text).toContain("files you edited in it are kept aside");

@@ -34,7 +34,7 @@ beforeEach(() => storage.clear());
 // PRO-87: what a paired computer is called on the phone.
 describe("a paired computer's name", () => {
   it("is the name typed on the phone, then the computer's own, then the fallback", () => {
-    expect(hostDisplayName(host())).toBe("Paired Mac");
+    expect(hostDisplayName(host())).toBe("Paired computer");
     expect(hostDisplayName(host({ hostName: "Paresh’s Mac mini" }))).toBe("Paresh’s Mac mini");
     expect(hostDisplayName(host({ hostName: "Paresh’s Mac mini", customName: "Studio" }))).toBe("Studio");
     expect(hasCustomName(host({ hostName: "Paresh’s Mac mini", customName: "Studio" }))).toBe(true);
@@ -42,7 +42,7 @@ describe("a paired computer's name", () => {
     // An account pairing's own label stays the fallback under the computer's name.
     expect(hostDisplayName(host({ label: "Office iMac" }))).toBe("Office iMac");
     // A name that cleans to nothing is no name.
-    expect(hostDisplayName(host({ hostName: "\u0000\u202e", customName: "  " }))).toBe("Paired Mac");
+    expect(hostDisplayName(host({ hostName: "\u0000\u202e", customName: "  " }))).toBe("Paired computer");
   });
 
   it("is cleaned and bounded: controls and invisible characters go, whitespace collapses, length is capped", () => {
@@ -98,7 +98,7 @@ describe("names in the stored host list", () => {
 
   it("give an entry paired as Paired Mac its real name, keep a custom name, and survive a reload", async () => {
     await savePairedHost(host(), credential);
-    expect(hostDisplayName((await readHosts())[0]!)).toBe("Paired Mac");
+    expect(hostDisplayName((await readHosts())[0]!)).toBe("Paired computer");
     await setHostNames("host-aaaa1111", { hostName: "Paresh’s Mac mini" });
     expect(hostDisplayName((await readHosts())[0]!)).toBe("Paresh’s Mac mini");
     await setHostNames("host-aaaa1111", { customName: "Studio" });

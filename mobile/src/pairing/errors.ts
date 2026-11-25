@@ -2,7 +2,7 @@ export type PairingStage = "parsing" | "transport" | "approval" | "host-verifica
 export type PairingCategory = "invalid-offer" | "expired-offer" | "connection-failed" | "relay-rejected" | "not-approved" | "invalid-host" | "credential-rejected" | "save-failed";
 
 const recovery: Record<PairingCategory, string> = {
-  "invalid-offer": "This pairing code is invalid or unsupported. Generate a fresh offer in Settings → Devices on your Mac or with terminalx-serve pair --phone on your server, then copy the full code.",
+  "invalid-offer": "This pairing code is invalid or unsupported. Generate a fresh offer in Settings → Devices on your computer or with terminalx-serve pair --phone on your server, then copy the full code.",
   "expired-offer": "This pairing offer has expired. Generate a fresh offer on the machine. Check both devices’ clocks if a new offer also expires immediately.",
   "connection-failed": "Couldn’t establish a secure connection to the machine. Check that TerminalX is running and the phone can reach it, then retry. If this offer was already used, generate a fresh one.",
   "relay-rejected": "Relay rejected this pairing attempt. The offer may have expired or already been used. Retry to recover an interrupted pairing, or generate a fresh offer on the machine.",

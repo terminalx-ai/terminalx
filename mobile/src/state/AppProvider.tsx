@@ -656,7 +656,7 @@ export function useApp(): AppContextValue {
 }
 
 /** An error as a screen may say it: the connection's own failures in plain words, never their raw text or an address (#983). */
-const UNREACHABLE = "Couldn’t reach your Mac. Check that it is awake and TerminalX is open, then try again.";
+const UNREACHABLE = "Couldn’t reach your computer. Check that it is awake and TerminalX is open, then try again.";
 const readableError = (value: unknown) => isTransportError(value) ? UNREACHABLE : value instanceof Error ? value.message.replace(/[A-Za-z0-9_-]{32,}/g, "[redacted]") : "Something went wrong";
 
 const isSummaryList = (value: unknown): value is SessionSummary[] => Array.isArray(value) && value.every(isSessionSummary);

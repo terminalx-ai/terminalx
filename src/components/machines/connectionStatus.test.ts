@@ -41,7 +41,7 @@ const STATES: { state: MachineConnectionState; label: string; hint: string; tone
     view: "Mac mini runs an older TerminalX. Update TerminalX there to connect.",
   },
   { state: { state: "updating", version: "0.2.34", since: NOW }, label: "Updating", hint: "Back in under a minute", tone: "updating", view: "Mac mini is updating. Back in under a minute. Sessions there keep running." },
-  { state: { state: "accessRemoved" }, label: "Access removed", hint: "Revoked on that Mac", tone: "removed", view: "Mac mini no longer allows this computer. Pair again to reconnect." },
+  { state: { state: "accessRemoved" }, label: "Access removed", hint: "Revoked on Mac mini", tone: "removed", view: "Mac mini no longer allows this computer. Pair again to reconnect." },
 ];
 
 describe("machine connection states (21.09)", () => {

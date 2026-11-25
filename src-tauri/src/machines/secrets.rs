@@ -54,49 +54,49 @@ impl MachineSecrets {
     /// This installation's client key, made the first time. Blocking.
     pub fn client_secret(&self) -> Result<Zeroizing<[u8; 32]>> {
         let service = self.service()?;
-        if let Some(bytes) = self.store.get(service, CLIENT_KEY_ACCOUNT).context("read the client key from the Keychain")? {
+        if let Some(bytes) = self.store.get(service, CLIENT_KEY_ACCOUNT).with_context(|| crate::platform_profile::localize("read the client key from the Keychain"))? {
             let bytes = Zeroizing::new(bytes);
             let secret: [u8; 32] = bytes.as_slice().try_into().map_err(|_| anyhow!("the saved client key has an invalid length"))?;
             return Ok(Zeroizing::new(secret));
         }
         let mut secret = Zeroizing::new([0u8; 32]);
         OsRng.fill_bytes(secret.as_mut());
-        self.store.set(service, CLIENT_KEY_ACCOUNT, secret.as_ref()).context("save the client key to the Keychain")?;
+        self.store.set(service, CLIENT_KEY_ACCOUNT, secret.as_ref()).with_context(|| crate::platform_profile::localize("save the client key to the Keychain"))?;
         Ok(secret)
     }
 
     pub fn save_token(&self, machine_id: &str, token: &str) -> Result<()> {
-        self.store.set(self.service()?, &machine_account(machine_id), token.as_bytes()).context("save the machine's device token to the Keychain")
+        self.store.set(self.service()?, &machine_account(machine_id), token.as_bytes()).with_context(|| crate::platform_profile::localize("save the machine's device token to the Keychain"))
     }
 
     /// The device token the machine paired this computer with. Blocking.
     pub fn load_token(&self, machine_id: &str) -> Result<Option<Zeroizing<String>>> {
-        self.load_text(&machine_account(machine_id)).context("read the machine's device token from the Keychain")
+        self.load_text(&machine_account(machine_id)).with_context(|| crate::platform_profile::localize("read the machine's device token from the Keychain"))
     }
 
     pub fn delete_token(&self, machine_id: &str) -> Result<()> {
-        self.store.delete(self.service()?, &machine_account(machine_id)).context("delete the machine's device token from the Keychain")
+        self.store.delete(self.service()?, &machine_account(machine_id)).with_context(|| crate::platform_profile::localize("delete the machine's device token from the Keychain"))
     }
 
     pub fn save_relay_token(&self, machine_id: &str, token: &str) -> Result<()> {
-        self.store.set(self.service()?, &relay_account(machine_id), token.as_bytes()).context("save the machine's relay credential to the Keychain")
+        self.store.set(self.service()?, &relay_account(machine_id), token.as_bytes()).with_context(|| crate::platform_profile::localize("save the machine's relay credential to the Keychain"))
     }
 
     pub fn load_relay_token(&self, machine_id: &str) -> Result<Option<Zeroizing<String>>> {
-        self.load_text(&relay_account(machine_id)).context("read the machine's relay credential from the Keychain")
+        self.load_text(&relay_account(machine_id)).with_context(|| crate::platform_profile::localize("read the machine's relay credential from the Keychain"))
     }
 
     pub fn delete_relay_token(&self, machine_id: &str) -> Result<()> {
-        self.store.delete(self.service()?, &relay_account(machine_id)).context("delete the machine's relay credential from the Keychain")
+        self.store.delete(self.service()?, &relay_account(machine_id)).with_context(|| crate::platform_profile::localize("delete the machine's relay credential from the Keychain"))
     }
 
     /// The account installation's identity as saved (`machines::account`). Blocking.
     pub fn load_installation(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
-        Ok(self.store.get(self.service()?, INSTALLATION_ACCOUNT).context("read the account installation from the Keychain")?.map(Zeroizing::new))
+        Ok(self.store.get(self.service()?, INSTALLATION_ACCOUNT).with_context(|| crate::platform_profile::localize("read the account installation from the Keychain"))?.map(Zeroizing::new))
     }
 
     pub fn save_installation(&self, identity: &[u8]) -> Result<()> {
-        self.store.set(self.service()?, INSTALLATION_ACCOUNT, identity).context("save the account installation to the Keychain")
+        self.store.set(self.service()?, INSTALLATION_ACCOUNT, identity).with_context(|| crate::platform_profile::localize("save the account installation to the Keychain"))
     }
 
     fn load_text(&self, account: &str) -> Result<Option<Zeroizing<String>>> {

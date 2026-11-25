@@ -1,9 +1,13 @@
+import { isMac, secretStoreShort } from "@/lib/platform";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { RuntimeStartFailedDialog } from "@/components/RuntimeStartFailedDialog";
 import { MachineHostError } from "@/components/machines/MachineHostError";
 import { errorMessage, type LocalRuntimeOutdated, type LocalRuntimeUnproven, type LocalRuntimeRestart, type LocalRuntimeRestartRefused, type LocalRuntimeWorkItem } from "@/lib/api";
 import { bootLocalRuntime, proveLocalRuntimeWindow, reconnectLocalRuntime, replaceLocalRuntime, restartLocalRuntime, useLocalRuntime } from "@/lib/localRuntime";
+
+/** What makes the window's key readable again: on a Mac its login Keychain; elsewhere the system's secret store. */
+const UNLOCK = isMac ? "unlock your login Keychain" : `make sure ${secretStoreShort} is unlocked`;
 
 /** A short gap says nothing: most reconnect before anyone would notice. */
 export const QUIET_MS = 3_000;
@@ -114,7 +118,7 @@ export function UnprovenNotice({ unproven, onHide }: { unproven: LocalRuntimeUnp
         <div className="min-w-0 flex-1 text-xs">
           <div className="font-medium">Bots are held less strictly on this runtime</div>
           <p className="mt-1 text-muted-foreground">{unproven.why}</p>
-          <p className="mt-1 text-muted-foreground">To have it check this window's proof, unlock your login Keychain, then in Settings → Machines choose Create pairing code: TerminalX restarts its runtime with the key, or offers Restart runtime there.</p>
+          <p className="mt-1 text-muted-foreground">{`To have it check this window's proof, ${UNLOCK}, then in Settings → Machines choose Create pairing code: TerminalX restarts its runtime with the key, or offers Restart runtime there.`}</p>
         </div>
         <Button variant="ghost" size="sm" className="shrink-0" onClick={onHide}>Hide</Button>
       </aside>
@@ -126,8 +130,8 @@ export function UnprovenNotice({ unproven, onHide }: { unproven: LocalRuntimeUnp
         <div className="font-medium">This window can't change sessions or terminals</div>
         <p className="mt-1 text-muted-foreground">
           {unproven.restart
-            ? "While Bots is on, the TerminalX runtime takes changes only from a window that proves it is TerminalX with its key in Keychain, and the key in Keychain was replaced after this runtime started, so only a restart lets it check this window's. Agents and terminals keep running until then."
-            : "While Bots is on, the TerminalX runtime takes changes only from a window that proves it is TerminalX with its key in Keychain, and this one couldn't. Unlock your login Keychain and allow TerminalX access if asked, then choose Try again. Agents and terminals keep running."}
+            ? `While Bots is on, the TerminalX runtime takes changes only from a window that proves it is TerminalX with its key in ${secretStoreShort}, and that key was replaced after this runtime started, so only a restart lets it check this window's. Agents and terminals keep running until then.`
+            : `While Bots is on, the TerminalX runtime takes changes only from a window that proves it is TerminalX with its key in ${secretStoreShort}, and this one couldn't. ${UNLOCK[0].toUpperCase()}${UNLOCK.slice(1)} and allow TerminalX access if asked, then choose Try again. Agents and terminals keep running.`}
         </p>
         <p className="mt-1 text-muted-foreground" data-testid="local-runtime-unproven-services">
           Until then, terminalx commands that need this window (browser, computer, cloud, share and machine) fail too.

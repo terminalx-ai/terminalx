@@ -77,7 +77,7 @@ export function resumeLogDetail(failure: ResumeFailure): string {
 function refused(action: ResumeAction, step: ResumeStep, result: { message: string; code?: string }, after = false): ResumeResult {
   const what = step === "stop" ? "stop the agent" : step === "model" ? "switch the model" : step === "prepare" ? "prepare the handoff" : step === "open" ? "open the new conversation" : action === "resend" ? "send the prompt again" : "send the prompt";
   const said = result.message.trim() ? ` It said: ${result.message.trim().replace(/\.?$/, ".")}` : "";
-  const text = `${after ? "The agent was stopped, but your" : "Your"} Mac did not ${what}.${said} Try again, or open the session on the Mac to see more.`;
+  const text = `${after ? "The agent was stopped, but your" : "Your"} computer did not ${what}.${said} Try again, or open the session on the computer to see more.`;
   return { done: false, failure: { action, step, code: result.code ?? "refused", text, next: "retry", pending: false } };
 }
 
@@ -87,17 +87,17 @@ function failed(action: ResumeAction, step: ResumeStep, cause: unknown, after = 
   const lead = after ? "The agent was stopped, but the resume was not finished" : "Not resumed";
   if (problem === null) {
     if (cause instanceof HostRefusal) return refused(action, step, cause, after);
-    if (isTransportError(cause)) return { done: false, failure: { action, step, code: "transport", text: `${lead}: the connection to your Mac failed. Reconnect, then try again.`, next: "reconnect", pending: false } };
+    if (isTransportError(cause)) return { done: false, failure: { action, step, code: "transport", text: `${lead}: the connection to your computer failed. Reconnect, then try again.`, next: "reconnect", pending: false } };
     return { done: false, failure: { action, step, code: "client_error", text: `${lead}: something on this phone stopped the request. Try again.`, next: "retry", pending: false } };
   }
   if (problem === "no-answer" && (step === "send" || step === "open")) {
     // The resume itself reached the Mac and may still be running there: sending it again could resume twice.
-    return { done: false, failure: { action, step, code: problem, text: "Your Mac has not answered yet, so the resume may still be under way. It shows in the conversation when it starts; check there before trying again.", next: "wait", pending: true } };
+    return { done: false, failure: { action, step, code: problem, text: "Your computer has not answered yet, so the resume may still be under way. It shows in the conversation when it starts; check there before trying again.", next: "wait", pending: true } };
   }
   if (problem === "no-answer") {
     // A step before the resume (stop, model, prepare) got no answer: the resume itself was never asked for.
     const what = step === "stop" ? "stopping the agent" : step === "model" ? "switching the model" : "preparing the handoff";
-    return { done: false, failure: { action, step, code: problem, text: `${lead}: your Mac didn't answer in time while ${what}, so the resume was not sent. Try again.`, next: "retry", pending: false } };
+    return { done: false, failure: { action, step, code: problem, text: `${lead}: your computer didn't answer in time while ${what}, so the resume was not sent. Try again.`, next: "retry", pending: false } };
   }
   if (cause instanceof Error && ["Host is disconnected", "Relay connection unavailable"].includes(cause.message)) {
     // Never sent: the connection was not back in time.
@@ -105,7 +105,7 @@ function failed(action: ResumeAction, step: ResumeStep, cause: unknown, after = 
   }
   if (!canRetry(problem)) return { done: false, failure: { action, step, code: problem, text: `${lead}: ${problemText(problem)}.`, next: "mac", pending: false } };
   // Lost while the request was on its way: it may or may not have reached the Mac.
-  return { done: false, failure: { action, step, code: problem, text: `${lead}: ${problemText(problem)} while resuming, so it may or may not have reached your Mac. Reconnect and check the conversation before trying again.`, next: "reconnect", pending: false } };
+  return { done: false, failure: { action, step, code: problem, text: `${lead}: ${problemText(problem)} while resuming, so it may or may not have reached your computer. Reconnect and check the conversation before trying again.`, next: "reconnect", pending: false } };
 }
 
 /**
@@ -188,7 +188,7 @@ export async function continueInNewTab(api: HostApi, sessionId: string, tabId: s
   } catch (cause) {
     // The Mac answered, but not with what this handoff needs (the complete history, say): its reason, and another way.
     const reason = cause instanceof Error && cause.message.trim() ? `${cause.message.trim().replace(/\.?$/, ".")} ` : "";
-    return { done: false, failure: { action: "continue-new", step: "prepare", code: "context_unavailable", text: `Not continued: ${reason}Choose a shorter handoff, or continue on the Mac.`, next: "retry", pending: false } };
+    return { done: false, failure: { action: "continue-new", step: "prepare", code: "context_unavailable", text: `Not continued: ${reason}Choose a shorter handoff, or continue on the computer.`, next: "retry", pending: false } };
   }
   let result: ContinueResult;
   try {

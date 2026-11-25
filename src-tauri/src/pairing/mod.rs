@@ -733,10 +733,10 @@ impl PairingManager {
     pub(crate) fn consent_key(&self, create: bool) -> Result<ring::signature::Ed25519KeyPair> {
         self.secrets.window_consent_key(create)
             .map_err(|_| {
-                anyhow!("TerminalX couldn’t access the window consent key in Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.")
+                anyhow!("TerminalX couldn’t read the window consent key from the Windows encrypted store. Restart TerminalX and try again.")
             })?
             .ok_or_else(|| {
-                anyhow!("The window consent key is missing from Keychain. Restart the local runtime from TerminalX and try again.")
+                anyhow!("The window consent key is missing from the Windows encrypted store. Restart the local runtime from TerminalX and try again.")
             })
     }
 

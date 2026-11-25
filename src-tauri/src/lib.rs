@@ -1224,6 +1224,7 @@ pub fn run() {
             commands::conversation_settings,
             commands::set_archive_idle_days,
             commands::experimental_settings,
+            commands::experimental_unsupported,
             store::settings::file::settings_file_status,
             store::settings::file::update_user_preferences,
             store::settings::file::create_settings_file,

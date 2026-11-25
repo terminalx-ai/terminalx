@@ -176,7 +176,7 @@ describe("who may answer, and when", () => {
   });
 
   it("shows a reader who may not answer the question and its options, with why and nothing to press", () => {
-    for (const why of ["This paired device is read-only.", "Answer this question from your Mac."]) {
+    for (const why of ["This paired device is read-only.", "Answer this question from your computer."]) {
       draw(card(asked([checks, branch, notes]), { readOnly: why }));
       expect(container.querySelector('[data-testid="question-read-only"]')?.textContent).toBe(why);
       for (const shown of ["Which checks should run?", "Lint, format", "Unit tests only", "Which branch?", "next", "Anything else?"]) expect(container.textContent).toContain(shown);
@@ -189,11 +189,11 @@ describe("who may answer, and when", () => {
     }
   });
 
-  it("says the Mac's own message when the answer came too late", () => {
+  it("says the computer's own message when the answer came too late", () => {
     draw(card(asked([branch]), { error: "internal: that question is no longer open" }));
     expect(container.querySelector('[data-testid="question-error"]')?.textContent).toBe("That question is no longer open.");
     expect(refusalSentence("This paired device is read-only.")).toBe("This paired device is read-only.");
-    expect(refusalSentence("unavailable: TerminalX on your Mac needs updating or restarting to do this.")).toBe("TerminalX on your Mac needs updating or restarting to do this.");
+    expect(refusalSentence("unavailable: TerminalX on your computer needs updating or restarting to do this.")).toBe("TerminalX on your computer needs updating or restarting to do this.");
     expect(refusalSentence("  ")).toBe("The answer was not sent.");
   });
 });

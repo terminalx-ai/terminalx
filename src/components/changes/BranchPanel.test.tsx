@@ -84,6 +84,24 @@ function answer(next: BranchOverview, prs: unknown[] = []) {
   });
 }
 
+describe("a branch read that fails (3.6)", () => {
+  it("says the branch could not be read, and reads it again on Retry", async () => {
+    let fail = true;
+    answer(overview({ unpulled: 0, unpushed: 0, dirty: false, behind: 0, merge: { state: "clean", conflicted: [] } }));
+    const backend = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args?: unknown) => (command === "branch_overview" && fail ? Promise.reject(new Error("git crashed")) : backend(command, args)));
+    render(<BranchPanel cwd="/repo/wt" active sessionId="s1" />);
+    const alert = await screen.findByRole("alert", {}, WAIT);
+    expect(alert.textContent).toContain("Couldn’t read the branch. git crashed");
+    const reads = invoke.mock.calls.filter(([command]) => command === "branch_overview").length;
+    fail = false;
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByTestId("branch-name", {}, WAIT)).toBeTruthy();
+    expect(invoke.mock.calls.filter(([command]) => command === "branch_overview").length).toBeGreaterThan(reads);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
 describe("the Branch tab", () => {
   it.each([undefined, "githubUnavailable"] as const)("reads the branch and retains PR actions while forge is %s", async (state) => {
     forge.value = state;

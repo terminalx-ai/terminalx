@@ -589,3 +589,17 @@ describe("a machine's new agent tab is created in one of its projects (PRO-346)"
     expect(client.createAgentTab.mock.calls[0][0]).not.toHaveProperty("projectId");
   });
 });
+
+describe("a tab list that fails to read (3.7)", () => {
+  it("says the workspace's agent tabs could not be read, and reads them again on Retry", async () => {
+    liveTabs = [tabInfo({ title: "Fix the login" })];
+    client.listAgentTabs.mockRejectedValueOnce(new Error("runtime busy"));
+    render(view(connected()));
+    const alert = (await screen.findByText(/Couldn’t read this workspace’s agent tabs/)).closest("[role=alert]") as HTMLElement;
+    expect(alert.textContent).toContain("runtime busy");
+    const before = client.listAgentTabs.mock.calls.length;
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(client.listAgentTabs.mock.calls.length).toBeGreaterThan(before));
+    await waitFor(() => expect(screen.queryByText(/Couldn’t read this workspace’s agent tabs/)).toBeNull());
+  });
+});

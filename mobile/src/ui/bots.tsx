@@ -79,7 +79,7 @@ export function useBotAnswer(api: HostApi, onAnswered?: () => void) {
       const note = result.delivery && !result.delivery.sent ? `Saved. ${bot.name} gets it when its chat next starts.` : null;
       return { ok: true, note };
     } catch (cause) {
-      const message = screenMessage(cause, "Couldn’t reach the Mac. Try again once it is connected.");
+      const message = screenMessage(cause, "Couldn’t reach the computer. Try again once it is connected.");
       setErrors((current) => ({ ...current, [key]: message }));
       return { ok: false, message };
     } finally {

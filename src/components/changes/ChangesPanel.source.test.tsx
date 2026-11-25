@@ -671,3 +671,16 @@ it("keeps missing size metadata unknown and never opens a deleted file", async (
   expect(screen.queryByRole("button", { name: "Open file" })).toBeNull();
   expect(screen.queryByText("0 B")).toBeNull();
 });
+
+it("says a scope's changes could not be read, and reads them again on Retry (3.6)", async () => {
+  const source = fakeSource("cloud:w9|repo");
+  source.changesBetween.mockRejectedValueOnce(new Error("diff timed out"));
+  render(<ChangesPanel source={source} events={events} version={2} active live={false} />);
+  pickScope("turn");
+  const alert = await screen.findByText(/diff timed out/);
+  const before = source.changesBetween.mock.calls.length;
+  fireEvent.click(within(alert.closest("[role=note]") as HTMLElement).getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(source.changesBetween.mock.calls.length).toBeGreaterThan(before));
+  expect(await screen.findByRole("button", { name: /turn.ts/ })).toBeTruthy();
+  expect(screen.queryByText(/diff timed out/)).toBeNull();
+});

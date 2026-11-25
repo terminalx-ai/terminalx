@@ -6,6 +6,7 @@ import type { NewSessionOptions } from "@mobile/data/host-api";
 import { agentDefaults, blocked, chooseModel, initialChoices, request, type NewSessionChoices } from "@mobile/data/new-session";
 import { draftContent, draftIdFor, type DraftId } from "@mobile/data/draft-id";
 import { useApp } from "@mobile/state/AppProvider";
+import { useHostWords } from "@mobile/state/host-words";
 import { AccountChoices } from "@mobile/ui/AccountChoices";
 import { Button, Card, EmptyState, Screen, SectionTitle } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
@@ -24,6 +25,7 @@ export default function NewSessionScreen() {
  */
 export function NewSessionForm({ title, onStarted }: { title?: string; onStarted(session: StartedSession): void }) {
   const app = useApp();
+  const words = useHostWords();
   const { palette } = useTheme();
   const [options, setOptions] = useState<NewSessionOptions | null | undefined>(undefined);
   const [choices, setChoices] = useState<NewSessionChoices | null>(null);
@@ -43,9 +45,9 @@ export function NewSessionForm({ title, onStarted }: { title?: string; onStarted
     return () => { current = false; };
   }, [app.api, app.connectionStage]);
 
-  if (app.connectionStage !== "connected") return <Screen title={title}><EmptyState title="Connect to your Mac" detail="New sessions start on the Mac, over the encrypted connection." /></Screen>;
-  if (options === undefined) return <Screen title={title}><EmptyState title="Loading" detail="Reading projects and agents from your Mac." busy /></Screen>;
-  if (options === null || !choices) return <Screen title={title}><EmptyState title="Not available on this Mac" detail={error ?? "Update TerminalX on this Mac to start sessions from your phone."} /></Screen>;
+  if (app.connectionStage !== "connected") return <Screen title={title}><EmptyState title={`Connect to ${words.your}`} detail={`New sessions start on ${words.the}, over the encrypted connection.`} /></Screen>;
+  if (options === undefined) return <Screen title={title}><EmptyState title="Loading" detail={`Reading projects and agents from ${words.your}.`} busy /></Screen>;
+  if (options === null || !choices) return <Screen title={title}><EmptyState title={`Not available on ${words.this}`} detail={error ?? `Update TerminalX on ${words.this} to start sessions from your phone.`} /></Screen>;
 
   const agent = options.agents.find((candidate) => candidate.id === choices.agent) ?? null;
   const model = agent?.models.find((candidate) => candidate.id === choices.model) ?? null;
@@ -88,12 +90,12 @@ export function NewSessionForm({ title, onStarted }: { title?: string; onStarted
     </Card> : null}
 
     <SectionTitle>Agent</SectionTitle>
-    <Card style={styles.group}>{options.agents.map((candidate) => choice(candidate.id, candidate.name, candidate.id === choices.agent, () => change(agentDefaults(candidate)), candidate.available ? undefined : `Not installed · ${candidate.installHint}`, !candidate.available))}</Card>
+    <Card style={styles.group}>{options.agents.map((candidate) => choice(candidate.id, candidate.name, candidate.id === choices.agent, () => change(agentDefaults(candidate)), candidate.available ? undefined : `Not installed · ${candidate.installHint || "install it with its setup guide"}`, !candidate.available))}</Card>
     {agent && agent.models.length ? <><SectionTitle>Model</SectionTitle><Card style={styles.group}>{agent.models.map((candidate) => choice(candidate.id, candidate.label, candidate.id === choices.model, () => setChoices(chooseModel(choices, agent, candidate.id))))}</Card></> : null}
     <AccountChoices agent={agent} choices={choices} onChange={change} />
     {agent?.effort && model && model.efforts.length ? <><SectionTitle>Effort</SectionTitle><Card style={styles.row}>{model.efforts.map((effort) => <Pressable key={effort} accessibilityRole="button" accessibilityState={{ selected: effort === choices.effort }} onPress={() => change({ effort })} style={[styles.pill, { backgroundColor: effort === choices.effort ? palette.selected : palette.raised }]}><Text style={[styles.choiceLabel, { color: palette.ink }]}>{effort}</Text></Pressable>)}</Card></> : null}
     {agent?.permissionModes !== false ? <><SectionTitle>Permissions</SectionTitle><Card style={styles.group}>{options.modes.map((mode) => choice(mode.id, mode.label, mode.id === choices.mode, () => change({ mode: mode.id })))}</Card></> : null}
-    {agent?.id === "codex" && options.nativeCodex ? <Text style={[styles.detail, styles.note, { color: palette.muted }]}>Native Codex is on for this Mac: unless you choose Ask every time, the session connects to Codex directly.</Text> : null}
+    {agent?.id === "codex" && options.nativeCodex ? <Text style={[styles.detail, styles.note, { color: palette.muted }]}>Native Codex is on for {words.this}: unless you choose Ask every time, the session connects to Codex directly.</Text> : null}
 
     <SectionTitle>First message</SectionTitle>
     <Card style={styles.block}>

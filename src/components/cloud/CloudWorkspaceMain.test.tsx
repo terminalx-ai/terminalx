@@ -322,3 +322,19 @@ it("keeps a path to start the agent after repairing a login on an attention-requ
   await screen.findByTestId("workspace-view");
   expect(mocks.workspaceConnection).toHaveBeenCalledExactlyOnceWith({ kind: "cloud", organizationId: ORG, workspaceId: "alpha" }, "connect");
 });
+
+describe("a workspace that cannot be opened (3.7)", () => {
+  it("says so in words, and opens it again on Try again", async () => {
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [shared("driver")] });
+    mocks.workspaceConnection.mockReset().mockRejectedValueOnce(Object.assign(new Error("boom"), { code: "relay_unreachable" })).mockResolvedValue(connection);
+    render(<CloudWorkspaceMain workspaceKey={KEY} sidebarOpen onToggleSidebar={() => undefined} />);
+    const alert = (await screen.findByText(/Could not open this workspace/)).closest("[role=alert]") as HTMLElement;
+    // A sentence, as every cloud action failure reads, not the bare code in brackets after "workspace".
+    expect(alert.textContent).toContain("Could not open this workspace. The action failed (relay_unreachable).");
+    const before = mocks.workspaceConnection.mock.calls.length;
+    fireEvent.click(within(alert).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(mocks.workspaceConnection.mock.calls.length).toBeGreaterThan(before));
+    expect(await screen.findByTestId("workspace-view")).toBeTruthy();
+    expect(screen.queryByText(/Could not open this workspace/)).toBeNull();
+  });
+});

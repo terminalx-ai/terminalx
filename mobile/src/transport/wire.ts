@@ -103,9 +103,9 @@ export const megabytes = (bytes: number) => `${(bytes / 1_000_000).toFixed(1)} M
 export class MessageTooLargeError extends Error {
   constructor(transport: WireTransport, plaintextBytes: number, fragments: boolean) {
     const limit = fragments ? FRAGMENTED_MESSAGE_BYTES_LIMIT : textPlaintextLimit(transport);
-    const route = transport === "relay" ? "over Relay" : "to your Mac";
+    const route = transport === "relay" ? "over Relay" : "to your computer";
     const advice = transport === "relay" && !fragments
-      ? "Update TerminalX on your Mac, or send it on the same Wi-Fi as your Mac."
+      ? "Update TerminalX on your computer, or send it on the same Wi-Fi as your computer."
       : "Send less at once.";
     super(`This is too large to send ${route} (${megabytes(plaintextBytes)}; the limit is ${megabytes(limit)}). ${advice}`);
     this.name = "MessageTooLargeError";

@@ -70,7 +70,7 @@ describe("fragments", () => {
 
 it("says how large a refused message was, and what to do", () => {
   expect(new MessageTooLargeError("relay", 2_300_000, false).message).toBe(
-    "This is too large to send over Relay (2.3 MB; the limit is 0.8 MB). Update TerminalX on your Mac, or send it on the same Wi-Fi as your Mac.",
+    "This is too large to send over Relay (2.3 MB; the limit is 0.8 MB). Update TerminalX on your computer, or send it on the same Wi-Fi as your computer.",
   );
   expect(new MessageTooLargeError("relay", 11_000_000, true).message).toBe(
     "This is too large to send over Relay (11.0 MB; the limit is 10.5 MB). Send less at once.",

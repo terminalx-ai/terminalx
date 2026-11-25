@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ThisComputer, thisComputer } from "@/lib/platform";
+import { hasSecureDialog, SECURE_DIALOG_OFF, ThisComputer, thisComputer } from "@/lib/platform";
 import { ExternalLink, Loader2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -887,10 +887,12 @@ export function OrganizationAgentLogins({
                         sign-in again once the access already handed to a machine runs out, which lasts until its own expiry. Disconnecting does not sign
                         you out at the provider.
                       </p>
+                      {/* Only Codex's sign-in needs no secure system dialog: a key, a lent sign-in and Claude's code all go through one. */}
+                      {!hasSecureDialog && !(open.source === "sign-in" && agent.id === "codex") && <p role="note" className="text-warning">{SECURE_DIALOG_OFF}</p>}
                       <div className="flex gap-1.5">
                         <Button
                           size="xs"
-                          disabled={busy || !sharing || !machines || (stored && !replace)}
+                          disabled={busy || !sharing || !machines || (stored && !replace) || (!hasSecureDialog && !(open.source === "sign-in" && agent.id === "codex"))}
                           onClick={() =>
                             open.source === "sign-in" && agent.id === "codex"
                               ? void startCodexSignIn({ contextRevision, organizationSharing: sharing, machineInstallation: machines, replaceExisting: stored && replace, organizationId })

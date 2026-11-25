@@ -49,7 +49,7 @@ const WORDS: Record<ConnectionState, string | null> = {
   connected: "Connected",
   waiting: "Waiting for Mac…",
   offline: "No internet",
-  held: "Disconnected on your Mac",
+  held: "Disconnected on your computer",
 };
 
 /** The words for a state; the only ones any screen uses for the connection. */

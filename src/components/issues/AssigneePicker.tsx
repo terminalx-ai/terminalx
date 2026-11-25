@@ -79,6 +79,8 @@ export function AssigneePicker({
   useEffect(() => {
     if (!open || options) return;
     let live = true;
+    // A read again starts clean: an earlier failure is not left on screen beside it.
+    setOptionsError(null);
     issueOps
       .options(projectPath, issue.provider, { id: issue.id })
       .then((value) => live && setOptions(value))

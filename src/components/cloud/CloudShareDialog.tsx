@@ -387,7 +387,7 @@ export function CloudShareDialog({
           </DialogDescription>
         </DialogHeader>
         {!listed && !loadError && <Loader2 className="size-4 animate-spin" />}
-        {loadError && <p className="text-xs text-destructive">Could not load who this workspace is shared with ({loadError}).</p>}
+        {loadError && <p role="alert" className="text-xs text-destructive">Could not load who this workspace is shared with ({loadError}). <Button size="xs" variant="outline" onClick={() => void reload()}>Try again</Button></p>}
         {listed && (
           <div className="flex flex-col gap-3 text-xs">
             <p className="text-muted-foreground" data-testid="cloud-share-you">
