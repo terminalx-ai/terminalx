@@ -130,6 +130,7 @@ mod fork_allocation;
 mod repo_mirror;
 mod checkpoints;
 mod worktree_files;
+mod workspace_transfer_bundle;
 mod sparse_checkout;
 mod git_media;
 mod github;
@@ -740,6 +741,7 @@ pub fn run() {
             commands::cloud_workspace_resume,
             commands::cloud_workspace_release,
             commands::cloud_workspace_archive,
+            commands::cloud_transfer_import,
             commands::cloud_workspace_delete,
             commands::cloud_workspace_unarchive,
             commands::cloud_workspace_disposition,

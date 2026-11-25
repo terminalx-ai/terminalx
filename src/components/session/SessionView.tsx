@@ -1,3 +1,5 @@
+import { CloudWorkspaceTransfer } from "@/components/cloud/CloudWorkspaceTransfer";
+import { parseCloudWorkspaceKey } from "@/types/target";
 import { RunStrip } from "@/components/orchestration/RunStrip";
 import { RunPill, RunViewHint } from "@/components/orchestration/RunPill";
 import { RunView } from "@/components/orchestration/RunView";
@@ -627,6 +629,11 @@ export function SessionView({
     return () => setVisibleSessionTab(session.id, null);
   }, [session.id, selectedKind, selectedId]);
   const activeTab = selected?.kind === "agent" ? session.tabs.find((tab) => tab.id === selected.id) : undefined;
+  const transferSessionId = cloud ? parseCloudWorkspaceKey(session.id)?.sessionId : undefined;
+  const transferRevision = desktopAccount.context?.revision;
+  const canTransfer = cloud && !machine && !compact && !start && !cloud.locked && cloud.connected && cloud.manage
+    && privacy.ready && !privacy.enabled && phase2Ready(desktopAccount, cloud.orgId, "workspaceTransferToLocal")
+    && cloud.client?.hasCapability("workspace-transfer/2");
   // PRO-404: a machine session's branch, diff size and next Git step, read and run on the machine (21.08). Nothing is read for any other session.
   const machineBranch = useMachineBranch({
     session,
@@ -1114,6 +1121,12 @@ export function SessionView({
                 }}>{label}</button>;
             })}
           </div>}
+          {canTransfer && cloud && activeTab && transferSessionId && transferRevision && (
+            <div className="flex justify-end border-b border-hairline px-2">
+              <CloudWorkspaceTransfer key={`${transferRevision}:${transferSessionId}:${activeTab.id}`}
+                cloud={cloud} sessionId={transferSessionId} tabId={activeTab.id} accountRevision={transferRevision} />
+            </div>
+          )}
           {desktopScope && cloud && <div role="tabpanel" id={`${desktopTabsId}-Desktop-panel`}
             aria-labelledby={`${desktopTabsId}-Desktop`} hidden={!desktopShown}
             className={cn("min-h-0 flex-1", desktopShown && "flex")}>

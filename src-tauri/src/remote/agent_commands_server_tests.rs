@@ -664,3 +664,65 @@ async fn phase2_collaboration_v2_bootstrap_refresh_installs_before_actual_rpc_an
     assert!(m.agent.seen.lock().unwrap().decisions.is_empty());
     assert!(!crate::cloud_bootstrap::CAPABILITIES.contains("collaboration-v2"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_transfer_reauthorizes_each_replayed_chunk() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let manager = SessionManager::new(
+        f.sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()),
+        f.terminals.clone(), Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap(),
+    );
+    f.rpc = WorkspaceRpc::new(&f.root, 7, f.sink.clone(), f.terminals.clone(), Some(manager)).unwrap();
+    let git = |args: &[&str]| crate::workspace_transfer_bundle::git(&f.root, args).unwrap();
+    git(&["init", "-q", "-b", "topic"]);
+    git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-qm", "Initial"]);
+    let session = seed_session(&f.root, "Transfer", None);
+    let agent = Agent::new(&session);
+    let identity = crate::cloud_agents::Identity { organization_id: "org".into(), workspace_id: "workspace".into() };
+    let agents = CloudAgents::open(&agents_dir(&f), Arc::new(Ops(agent)), None, Some((Arc::new(Mailbox), identity)), 7).unwrap();
+    f.rpc.set_agents(agents);
+    listed(&f.rpc);
+    let tab = &session.tabs[0].id;
+    let log = crate::store::log_path(&session.id, tab).unwrap();
+    for (seq, payload) in [
+        (1, json!({"type":"user_message","text":"Visible request"})),
+        (2, json!({"type":"assistant_text","text":"Visible answer"})),
+        (3, json!({"type":"reasoning","text":"Internal reasoning"})),
+    ] {
+        crate::store::append_line(&log, &json!({
+            "id": format!("event-{seq}"), "sessionId": session.id, "tabId": tab,
+            "harness": "claude", "seq": seq, "ts": "2026-11-25T00:00:00Z", "payload": payload,
+        }).to_string()).unwrap();
+    }
+
+    let hello = json!({ "protocol": PROTOCOL, "want": ["workspace-transfer/2"] });
+    let (admin, _admin_notifications) = Peer::for_user("transfer-device".into(), Authority::Manage, Some("admin".into()));
+    let (other, _other_notifications) = Peer::for_user("other-device".into(), Authority::Manage, Some("admin".into()));
+    let (viewer, _viewer_notifications) = Peer::for_user("viewer-device".into(), Authority::Participate, Some("viewer".into()));
+    for peer in [&admin, &other, &viewer] {
+        call(&f.rpc, peer, "rpc.hello", hello.clone()).await.unwrap();
+    }
+
+    let scope = json!({ "sessionId": session.id, "tabId": tab, "requestId": uuid::Uuid::new_v4() });
+    assert_eq!(code(call(&f.rpc, &viewer, "transfer.open", scope.clone()).await), "forbidden");
+    let export = call(&f.rpc, &admin, "transfer.open", scope.clone()).await.unwrap();
+    assert_eq!(call(&f.rpc, &admin, "transfer.open", scope.clone()).await.unwrap(), export);
+    assert_eq!(export["branch"], "topic");
+    assert!(export["bundleBytes"].as_u64().unwrap() > 0);
+    let read = json!({
+        "sessionId": session.id, "tabId": tab, "transferId": export["transferId"],
+        "offset": 0, "part": "transcript",
+    });
+    let first = call(&f.rpc, &admin, "transfer.read", read.clone()).await.unwrap();
+    let messages: Value = serde_json::from_slice(&STANDARD.decode(first["data"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(messages, json!([
+        { "role": "user", "text": "Visible request" },
+        { "role": "assistant", "text": "Visible answer" },
+    ]));
+    assert_eq!(code(call(&f.rpc, &other, "transfer.read", read.clone()).await), "not_found");
+    f.rpc.set_collaboration(members(json!([{ "userId": "admin", "role": "viewer" }])));
+    assert_eq!(code(call(&f.rpc, &admin, "transfer.read", read).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &admin, "transfer.open", scope).await), "forbidden");
+}

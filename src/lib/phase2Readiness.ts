@@ -9,6 +9,7 @@ export const phase2Features = {
   freshWorkspace: "cloud.automations.fresh-workspace.v1",
   githubTrigger: "cloud.automations.github-trigger.v1",
   precreateUsage: "cloud.workspaces.precreate-usage.v1",
+  workspaceTransferToLocal: "cloud.workspaces.transfer-to-local.v1",
   workspaceAccessRequest: "cloud.workspaces.access-request-copy.v1",
   agentLoginAffectedWorkspaces: "cloud.agent-logins.affected-workspaces.v1",
   webhookTrigger: "cloud.automations.webhook-trigger.v1",
