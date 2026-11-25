@@ -1,21 +1,7 @@
 import Svg, { Defs, LinearGradient, Path, Rect, Stop } from "react-native-svg";
+import { MARK_BOX, MARK_STROKES } from "./terminalx-mark";
 
-/**
- * The TerminalX mark's own drawing: prompt arrow, underscore and cross, on
- * the grid of `resources/icon-source/logo.svg` (the one layer of the Icon
- * Composer project the app icon is compiled from). Square caps, mitred joins.
- * `TerminalXMark.test.ts` holds these to that file.
- */
-export const MARK_STROKES = [
-  { d: "M25 30 L45 50 L25 70", width: 8, opacity: 1 },
-  { d: "M55 70 L80 70", width: 8, opacity: 1 },
-  { d: "M60 30 L80 50 M80 30 L60 50", width: 6, opacity: 0.8 },
-] as const;
-
-/** The source drawing's `viewBox`: x, y, width, height. */
-export const MARK_BOX = [18, 23, 68, 54] as const;
-
-// How `mobile/assets/icon.png` places that drawing: its box is centred on the
+// How `mobile/assets/icon.png` places the drawing: its box is centred on the
 // 1024 px tile at 10.3 px a unit (the paths laid over the icon cover the same
 // pixels, 99.5 %), so the tile is 1024 / 10.3 units across.
 const TILE = 1024 / 10.3;

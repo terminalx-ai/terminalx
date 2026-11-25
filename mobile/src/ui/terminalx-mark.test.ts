@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { expect, it } from "vitest";
-import { MARK_BOX, MARK_STROKES } from "./TerminalXMark";
+import { MARK_BOX, MARK_STROKES } from "./terminalx-mark";
 
 // PRO-578: the phone draws the mark from the app icon's own source, not by eye.
 const source = readFileSync(new URL("../../../resources/icon-source/logo.svg", import.meta.url), "utf8");

@@ -20,7 +20,7 @@ The development badge geometry and colour follow Legacy's
 canvas, filled `#ff6b2b`, with a white D and no outline.
 
 `logo.svg` is the mark itself, the one layer of that Icon Composer project.
-The phone app draws it from the same paths (`mobile/src/ui/TerminalXMark.tsx`,
+The phone app draws it from the same paths (`mobile/src/ui/terminalx-mark.ts`,
 held to this file by its test).
 
 To update, copy those four files from the same Legacy revision, record its
