@@ -237,8 +237,35 @@ def validate_common(workflow):
                 assert calls and all(step["run"].count(option) == calls for option in ("Acquire::Retries=5", "Acquire::http::Timeout=30", "Acquire::https::Timeout=30")) and ("timeout-minutes" in step or "timeout-minutes" in job), "a package install without retries, a stall limit and a time limit of its own or its job's"
 
 
+def save_condition(clean):
+    """What a cache save's `if` must be: its clean step succeeded, and nothing else.
+
+    A save with the clean step's own `if` ran also when the clean failed, and saved this crate's output. A clean
+    step that runs after a failed test (`!cancelled()`) keeps its save running then too.
+    """
+    assert clean.get("id"), "the clean step before a cache save has an id"
+    prefix = "!cancelled() && " if clean.get("if", "").startswith("${{ !cancelled() && ") else ""
+    return f"${{{{ {prefix}steps.{clean['id']}.outcome == 'success' }}}}"
+
+
+def validate_saves(workflow):
+    """Every job that saves a cargo cache saves only after its clean step, the step right before, succeeded."""
+    saving = 0
+    for name, job in workflow["jobs"].items():
+        steps = job["steps"]
+        for i, step in enumerate(steps):
+            if "/save@" not in step.get("uses", ""):
+                continue
+            saving += 1
+            clean = steps[i - 1]
+            assert clean.get("name") == "Leave this crate's own output out of the cache", f"{name}: the save comes right after the clean step"
+            assert step.get("if") == save_condition(clean), f"{name}: the cache is saved only once its clean step succeeded"
+    assert saving == len(CACHES) - len(RESTORE_ONLY), "every job that keeps a cache saves it"
+
+
 def validate(workflow):
     validate_common(workflow)
+    validate_saves(workflow)
     assert set(workflow["on"]) == {"pull_request", "push", "schedule", "workflow_dispatch"}, "unexpected trigger"
     assert workflow["on"]["pull_request"] == "", "a pull request based on any branch runs CI"
     assert workflow["on"]["push"]["branches"] == ["main"], "push scope"
@@ -293,8 +320,8 @@ def validate(workflow):
                 if "/save@" in action:
                     assert restored and name not in RESTORE_ONLY, "save without a restore, or by a job that only restores"
                     assert inputs["key"] == "${{ steps.cargo-cache.outputs.cache-primary-key }}", "save must use restored scope"
-                    assert CACHE_MISS in step["if"], "a cache is saved only when none built from this lock file was restored"
-                    assert previous.get("run") == (ASIDE if name in MACOS_NATIVE else CLEAN) and previous.get("if") == step["if"] and previous.get("working-directory") == "src-tauri", "a cache must not hold this crate's own output"
+                    assert CACHE_MISS in previous.get("if", ""), "a cache is saved only when none built from this lock file was restored"
+                    assert previous.get("run") == (ASIDE if name in MACOS_NATIVE else CLEAN) and previous.get("working-directory") == "src-tauri", "a cache must not hold this crate's own output"
                 else:
                     assert "/restore@" in action, "a cache action that saves by itself"
                     assert step["id"] == "cargo-cache", "cache step name"
@@ -544,6 +571,27 @@ class WorkflowSecurity(unittest.TestCase):
         self.rejects(change)
         self.rejects(lambda w: self.step(w, "headless-serve", run="cargo clean").update({"run": "cargo clean --locked -p terminalx-serve"}))
         self.rejects(lambda w: self.step(w, "linux-rust", run="cargo clean").update({"if": "always()"}))
+
+    def test_every_cache_save_needs_its_clean_step(self):
+        validate_saves(self.workflow)
+        saving = [name for name, job in self.workflow["jobs"].items() if any("/save@" in s.get("uses", "") for s in job["steps"])]
+        self.assertEqual(sorted(saving), sorted(["linux-rust", "linux-rust-tests", "macos-native", "headless-serve", "machine-compat", "machines-e2e", "desktop-platforms"]))
+        for job in saving:
+            with self.subTest(job=job):
+                def clean(w, job=job):
+                    return self.step(w, job, name="Leave this crate's own output out of the cache")
+
+                def save(w, job=job):
+                    return self.step(w, job, name="Save the cargo cache")
+                # The clean step's own condition, copied: the save runs also when the clean failed.
+                self.rejects(lambda w: save(w).update({"if": clean(w)["if"]}))
+                self.rejects(lambda w: save(w).update({"if": save(w)["if"].replace("== 'success'", "!= 'skipped'")}))
+                self.rejects(lambda w: save(w).update({"if": "always()"}))
+                self.rejects(lambda w: clean(w).pop("id"))
+                # Another step's success is not the clean's.
+                self.rejects(lambda w: save(w).update({"if": save(w)["if"].replace(f"steps.{clean(w)['id']}.", "steps.cargo-cache.")}))
+        # A save after a failed test, where the clean runs then too, keeps running then.
+        self.rejects(lambda w: self.step(w, "linux-rust-tests", name="Save the cargo cache").update({"if": "${{ steps.clean.outcome == 'success' }}"}))
 
     def test_cache_saved_by_a_job_that_only_restores_is_rejected(self):
         def change(w):

@@ -327,11 +327,12 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -451,11 +452,12 @@ jobs:
       # `binaries` builds every dependency the four parts do, so it alone
       # saves: also when a test failed, as long as its build was whole.
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ !cancelled() && steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -662,7 +664,7 @@ jobs:
           cp -cpR "$RUNNER_TEMP/target" target
           cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ !cancelled() && steps.aside.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -764,11 +766,12 @@ jobs:
       - name: Self-test under the cloud workspace unit's sandbox (ProtectHome, own user)
         run: bash scripts/remote-runtime/cloud-unit-self-test.sh src-tauri/target/debug/terminalx-serve
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ !cancelled() && steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -936,11 +939,12 @@ jobs:
           TERMINALX_MACHINE_COMPAT: ${{ runner.temp }}/machine-compat/manifest.json
         run: cargo test --locked --test machine_compat -- --test-threads=1
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ !cancelled() && steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -1029,11 +1033,12 @@ jobs:
       # Saved from main, schedule and dispatch runs only: uploading the
       # target directory would eat a pull request's ten minutes.
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ steps.relevant.outputs.run == 'true' && github.event_name != 'pull_request' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ steps.relevant.outputs.run == 'true' && github.event_name != 'pull_request' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -1137,11 +1142,12 @@ jobs:
         shell: pwsh
         run: ./native/computer-use-windows/runtime-render.test.ps1
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ runner.os != 'Linux' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ runner.os != 'Linux' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |

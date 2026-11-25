@@ -476,6 +476,13 @@ output, so it moves the build aside, cleans an APFS clone of it with the same
 cache and saves none. In `linux-rust-tests` the `binaries` part saves, and
 the four library parts restore what it saved.
 
+A save runs only once its clean step succeeded: its `if` is
+`steps.<id>.outcome == 'success'` on the step just before it (`clean`, and
+`aside` in `macos-native`), with `!cancelled()` in front where the clean step
+runs after a failed test. The save used to repeat the clean step's own `if`,
+so a clean that failed still saved the crate's output. A policy test holds
+every job that saves to this, and rejects the clean step's `if` copied.
+
 Keyed by commit, every run saved a new cache, the repository's 10 GB limit
 evicted them within hours, and the macOS jobs, which failed and so never
 saved, built every dependency on every run.
