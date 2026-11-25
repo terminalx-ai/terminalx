@@ -99,7 +99,7 @@ SERVE_ELSEWHERE = {
 SERVE_NEXTEST = 'cargo nextest run --locked --profile ci --bins "${tests[@]}" 2>&1 | tee "$RUNNER_TEMP/nextest.log"'
 SERVE_CARGO = ROOT / "src-tauri/serve/Cargo.toml"
 FLAKY_SUMMARY = "grep -aE '^[[:space:]]*(FLAKY|LEAK)[[:space:]]' \"$RUNNER_TEMP/nextest.log\" | sort -u || echo \"none\""
-STAND_IN ="mkdir -p dist && printf '<!doctype html><title>TerminalX</title>\\n' > dist/index.html"
+STAND_IN = "mkdir -p dist && printf '<!doctype html><title>TerminalX</title>\\n' > dist/index.html"
 
 
 def without_harness():
