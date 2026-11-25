@@ -21,7 +21,7 @@ const models = [
 const context = { sessionId: "s", tabId: "t", title: "Fix sign in", provider: "claude", providerSessionId: "p", cwd: "/w", sourceActive: false, transcriptPath: null, fullUnavailableReason: "No transcript was saved.", lastPrompt: "fix it", lastUpdate: null, partialCapture: "user: fix it" };
 
 describe("the phone's session control requests", () => {
-  it("asks the Mac with the tab each control is for, and only a Mac that says it takes them", async () => {
+  it("asks the computer with the tab each control is for, and only a Mac that says it takes them", async () => {
     const { request, api: host } = api((method) => method === "sync.capabilities" ? ok({ sessionControls: 1 }) : method === "models.list" ? ok(models) : ok());
     expect(await host.sessionControls()).toBe(true);
     await host.stop("s", "t");
@@ -40,7 +40,7 @@ describe("the phone's session control requests", () => {
     ]);
   });
 
-  it("reports the Mac's refusal instead of a silent no", async () => {
+  it("reports the computer's refusal instead of a silent no", async () => {
     const { api: host } = api(() => refused("This paired device is read-only."));
     expect(await host.stop("s", "t")).toEqual({ done: false, message: "This paired device is read-only.", code: "refused" });
     expect(await host.resendUnsent("s", "t")).toEqual({ sent: false, message: "This paired device is read-only.", code: "refused" });
@@ -56,7 +56,7 @@ describe("the phone's session control requests", () => {
 });
 
 describe("the phone's session controls, as the desktop's", () => {
-  it("retries safely by stopping first, on another model when one is chosen, and stops there if the Mac refuses", async () => {
+  it("retries safely by stopping first, on another model when one is chosen, and stops there if the computer refuses", async () => {
     const { request, api: host } = api(() => ok({ status: "sent", queued: false }));
     expect(await retrySafely(host, "s", "t", "opus")).toEqual({ done: true });
     expect(request.mock.calls.map(([method]) => method)).toEqual(["session.stop", "session.setModel", "session.send"]);
@@ -64,7 +64,7 @@ describe("the phone's session controls, as the desktop's", () => {
     const refusing = api(() => refused("Stop has not confirmed local process exit."));
     expect(await retrySafely(refusing.api, "s", "t")).toEqual({ done: false, failure: {
       action: "retry-safely", step: "stop", code: "refused", next: "retry", pending: false,
-      text: "Your Mac did not stop the agent. It said: Stop has not confirmed local process exit. Try again, or open the session on the Mac to see more.",
+      text: "Your computer did not stop the agent. It said: Stop has not confirmed local process exit. Try again, or open the session on the computer to see more.",
     } });
     expect(refusing.request).toHaveBeenCalledTimes(1);
   });
@@ -81,7 +81,7 @@ describe("the phone's session controls, as the desktop's", () => {
     const [, params] = request.mock.calls[1]!;
     expect(params).toMatchObject({ sessionId: "s", tabId: "t", tab: { harness: "codex", model: "gpt-5.6", permissionMode: "auto" } });
     expect(params?.prompt).toContain("bounded, partial recent conversation capture");
-    expect(await continueInNewTab(host, "s", "t", { harness: "codex", model: "" }, "full")).toMatchObject({ done: false, failure: { step: "prepare", code: "context_unavailable", text: "Not continued: No transcript was saved. Choose a shorter handoff, or continue on the Mac." } });
+    expect(await continueInNewTab(host, "s", "t", { harness: "codex", model: "" }, "full")).toMatchObject({ done: false, failure: { step: "prepare", code: "context_unavailable", text: "Not continued: No transcript was saved. Choose a shorter handoff, or continue on the computer." } });
   });
 
   it("offers the tab's own models and efforts, and says what is still switching", () => {
@@ -113,7 +113,7 @@ describe("the phone's session controls, as the desktop's", () => {
   });
 });
 
-describe("a resume on the Mac that fails (#1290)", () => {
+describe("a resume on the computer that fails (#1290)", () => {
   const throwing = (error: unknown) => api(() => { throw error; });
 
   it("waits for the connection while the phone reconnects, then sends once", async () => {
@@ -129,7 +129,7 @@ describe("a resume on the Mac that fails (#1290)", () => {
     const result = await continueHere(host, "t");
     expect(result).toEqual({ done: false, failure: {
       action: "continue-here", step: "connect", code: "dropped", next: "reconnect", pending: false,
-      text: "Not resumed: the connection to your Mac dropped before it could be sent. Reconnect, then try again.",
+      text: "Not resumed: the connection to your computer dropped before it could be sent. Reconnect, then try again.",
     } });
     // Not sent again by itself.
     expect(request).toHaveBeenCalledTimes(1);
@@ -138,7 +138,7 @@ describe("a resume on the Mac that fails (#1290)", () => {
     expect(relay).toMatchObject({ done: false, failure: { step: "connect", next: "reconnect" } });
   });
 
-  it("shows a resume the Mac has not answered in time as under way, not as a failure, and never repeats it", async () => {
+  it("shows a resume the computer has not answered in time as under way, not as a failure, and never repeats it", async () => {
     const { request, api: host } = throwing(new Error("RPC timed out: session.send"));
     const result = await continueHere(host, "t");
     expect(result).toMatchObject({ done: false, failure: { step: "send", code: "no-answer", next: "wait", pending: true } });
@@ -151,15 +151,15 @@ describe("a resume on the Mac that fails (#1290)", () => {
     const stopped = await retrySafely(stop.api, "s", "t");
     expect(stopped).toEqual({ done: false, failure: {
       action: "retry-safely", step: "stop", code: "no-answer", next: "retry", pending: false,
-      text: "Not resumed: your Mac didn't answer in time while stopping the agent, so the resume was not sent. Try again.",
+      text: "Not resumed: your computer didn't answer in time while stopping the agent, so the resume was not sent. Try again.",
     } });
     // The prompt was never asked for.
     expect(stop.request.mock.calls.map(([method]) => method)).toEqual(["session.stop"]);
     const model = api((method) => { if (method === "session.setModel") throw new Error("RPC timed out: session.setModel"); return ok(); });
-    expect(await retrySafely(model.api, "s", "t", "opus")).toMatchObject({ done: false, failure: { step: "model", pending: false, next: "retry", text: "The agent was stopped, but the resume was not finished: your Mac didn't answer in time while switching the model, so the resume was not sent. Try again." } });
+    expect(await retrySafely(model.api, "s", "t", "opus")).toMatchObject({ done: false, failure: { step: "model", pending: false, next: "retry", text: "The agent was stopped, but the resume was not finished: your computer didn't answer in time while switching the model, so the resume was not sent. Try again." } });
     expect(model.request.mock.calls.map(([method]) => method)).toEqual(["session.stop", "session.setModel"]);
     const prepare = api(() => { throw new Error("RPC timed out: session.prepareContinuation"); });
-    expect(await continueInNewTab(prepare.api, "s", "t", { harness: "claude", model: "" }, "focused")).toMatchObject({ done: false, failure: { step: "prepare", pending: false, next: "retry", text: "Not resumed: your Mac didn't answer in time while preparing the handoff, so the resume was not sent. Try again." } });
+    expect(await continueInNewTab(prepare.api, "s", "t", { harness: "claude", model: "" }, "focused")).toMatchObject({ done: false, failure: { step: "prepare", pending: false, next: "retry", text: "Not resumed: your computer didn't answer in time while preparing the handoff, so the resume was not sent. Try again." } });
     expect(prepare.request.mock.calls.map(([method]) => method)).toEqual(["session.prepareContinuation"]);
     // The resume itself unanswered is still under way, also for Retry safely's last step.
     const send = api((method) => { if (method === "session.send") throw new Error("RPC timed out: session.send"); return ok(); });
@@ -169,7 +169,7 @@ describe("a resume on the Mac that fails (#1290)", () => {
   it("says a connection lost while the resume was on its way may or may not have arrived", async () => {
     const result = await resendLast(throwing(new RelayOuterError(4408)).api, "s", "t");
     expect(result).toMatchObject({ done: false, failure: { action: "resend", step: "send", code: "dropped", next: "reconnect", pending: false } });
-    expect((result as { failure: { text: string } }).failure.text).toMatch(/may or may not have reached your Mac/);
+    expect((result as { failure: { text: string } }).failure.text).toMatch(/may or may not have reached your computer/);
     const offline = await resendLast(throwing(new RelayOuterError(4404)).api, "s", "t");
     expect(offline).toMatchObject({ done: false, failure: { code: "mac-offline", next: "reconnect" } });
   });
@@ -177,7 +177,7 @@ describe("a resume on the Mac that fails (#1290)", () => {
   it("says a pairing the relay refuses has to be made again, with no Try again", async () => {
     const result = await continueHere(throwing(new RelayOuterError(4401)).api, "t");
     expect(result).toMatchObject({ done: false, failure: { code: "pairing-invalid", next: "mac" } });
-    expect((result as { failure: { text: string } }).failure.text).toBe("Not resumed: this phone is no longer paired with your Mac; pair it again from Machines.");
+    expect((result as { failure: { text: string } }).failure.text).toBe("Not resumed: this phone is no longer paired with your computer; pair it again from Machines.");
   });
 
   it("says the step after the stop that failed, so the person knows the agent was stopped", async () => {
@@ -192,14 +192,14 @@ describe("a resume on the Mac that fails (#1290)", () => {
     expect(result).toMatchObject({ done: false, failure: { action: "retry-safely", step: "send", code: "dropped" } });
     expect((result as { failure: { text: string } }).failure.text).toMatch(/^The agent was stopped, but the resume was not finished: /);
     const model = api((method) => method === "session.setModel" ? refused("Unknown model.") : ok({ status: "sent", queued: false }));
-    expect(await retrySafely(model.api, "s", "t", "nope")).toMatchObject({ done: false, failure: { step: "model", text: "The agent was stopped, but your Mac did not switch the model. It said: Unknown model. Try again, or open the session on the Mac to see more." } });
+    expect(await retrySafely(model.api, "s", "t", "nope")).toMatchObject({ done: false, failure: { step: "model", text: "The agent was stopped, but your computer did not switch the model. It said: Unknown model. Try again, or open the session on the computer to see more." } });
     const send = api((method) => method === "session.send" ? refused("The agent is not running") : ok());
-    expect(await retrySafely(send.api, "s", "t")).toMatchObject({ done: false, failure: { step: "send", code: "refused", text: "The agent was stopped, but your Mac did not send the prompt. It said: The agent is not running. Try again, or open the session on the Mac to see more." } });
+    expect(await retrySafely(send.api, "s", "t")).toMatchObject({ done: false, failure: { step: "send", code: "refused", text: "The agent was stopped, but your computer did not send the prompt. It said: The agent is not running. Try again, or open the session on the computer to see more." } });
   });
 
   it("names the step of Continue in new session that failed: preparing the handoff, or opening the new conversation", async () => {
     const prepare = api((method) => method === "session.prepareContinuation" ? refused("No such tab.") : ok());
-    expect(await continueInNewTab(prepare.api, "s", "t", { harness: "claude", model: "" }, "focused")).toMatchObject({ done: false, failure: { step: "prepare", code: "refused", text: expect.stringMatching(/^Your Mac did not prepare the handoff\. It said: No such tab\./) } });
+    expect(await continueInNewTab(prepare.api, "s", "t", { harness: "claude", model: "" }, "focused")).toMatchObject({ done: false, failure: { step: "prepare", code: "refused", text: expect.stringMatching(/^Your computer did not prepare the handoff\. It said: No such tab\./) } });
     const open = api((method) => {
       if (method === "session.prepareContinuation") return ok(context);
       throw new Error("RPC timed out: session.continue");
@@ -209,7 +209,7 @@ describe("a resume on the Mac that fails (#1290)", () => {
     expect(await continueInNewTab(unconfirmed.api, "s", "t", { harness: "claude", model: "" }, "focused")).toEqual({ done: true, tabId: "new", note: "The handoff is in the new conversation's input but has not been sent yet." });
   });
 
-  it("says a failure that is not the connection's and not the Mac's as this phone's, never as its raw message", async () => {
+  it("says a failure that is not the connection's and not the computer's as this phone's, never as its raw message", async () => {
     const result = await continueHere(throwing(new TypeError("undefined is not a function")).api, "t");
     expect(result).toMatchObject({ done: false, failure: { code: "client_error", next: "retry", text: "Not resumed: something on this phone stopped the request. Try again." } });
   });

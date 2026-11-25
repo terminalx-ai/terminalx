@@ -386,10 +386,10 @@ describe("one list of machines (#987)", () => {
     expect(mocks.app.pairAvailable).not.toHaveBeenCalled();
   });
 
-  it("names a machine that calls itself “This Mac” by what it is", async () => {
-    signedIn([host()], [account(8, { displayName: "This Mac", platform: "darwin" }), account(9, { displayName: "This Mac", platform: "linux" })]);
+  it("names a machine that calls itself “This computer” by what it is", async () => {
+    signedIn([host()], [account(8, { displayName: "This computer", platform: "darwin" }), account(9, { displayName: "This computer", platform: "linux" })]);
     await show(<MachinesScreen />);
-    expect(container.textContent).not.toContain("This Mac");
+    expect(container.textContent).not.toContain("This computer");
     expect(button("Device options for Mac")).toBeDefined();
     expect(button("Device options for Linux machine")).toBeDefined();
   });

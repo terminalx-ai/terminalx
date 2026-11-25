@@ -36,7 +36,7 @@ describe("which buttons a notification gets", () => {
     expect(categoryFor(shown(finished))).toBeNull();
   });
 
-  it("none for a question the Mac sent without answers, or with more options than iOS shows", () => {
+  it("none for a question the computer sent without answers, or with more options than iOS shows", () => {
     expect(categoryFor(shown({ ...question, question: undefined }))).toBeNull();
     expect(categoryFor(shown({ ...approval, approval: undefined }))).toBeNull();
     const many = Array.from({ length: MAX_QUESTION_ACTIONS + 1 }, (_, index) => ({ label: `Option ${index}` }));
@@ -75,14 +75,14 @@ describe("what a tap asks for", () => {
   });
 });
 
-describe("answering on the Mac", () => {
+describe("answering on the computer", () => {
   const target = (reachable: boolean): AnswerTarget & { calls: unknown[] } => {
     const calls: unknown[] = [];
     return {
       calls,
       reach: vi.fn(async () => reachable),
       respondPermission: vi.fn(async (...args: unknown[]) => { calls.push(["permission", ...args]); return { answered: true as const }; }),
-      answerQuestions: vi.fn(async (...args: unknown[]) => { calls.push(["question", ...args]); return { answered: false as const, message: "Already answered on the Mac." }; }),
+      answerQuestions: vi.fn(async (...args: unknown[]) => { calls.push(["question", ...args]); return { answered: false as const, message: "Already answered on the computer." }; }),
       answerBot: vi.fn(async (...args: unknown[]) => { calls.push(["bot", ...args]); if (args[0] === "gone") throw new Error("Sentry no longer asks this on item #4."); return {}; }),
     };
   };
@@ -91,11 +91,11 @@ describe("answering on the Mac", () => {
     const mac = target(true);
     expect(await answer({ type: "permission", hostId: "mac", sessionId: "s", tabId: "t", requestId: "p1", optionId: "allow" }, mac)).toBeNull();
     expect(mac.reach).toHaveBeenCalledWith("mac");
-    expect(await answer({ type: "question", hostId: "mac", sessionId: "s", tabId: "t", requestId: "q1", answers: { Q: "A" } }, mac)).toBe("Already answered on the Mac.");
+    expect(await answer({ type: "question", hostId: "mac", sessionId: "s", tabId: "t", requestId: "q1", answers: { Q: "A" } }, mac)).toBe("Already answered on the computer.");
     expect(mac.calls).toEqual([["permission", "s", "t", "p1", "allow"], ["question", "s", "t", "q1", { Q: "A" }]]);
   });
 
-  it("says so when the Mac cannot be reached, and sends nothing", async () => {
+  it("says so when the computer cannot be reached, and sends nothing", async () => {
     const mac = target(false);
     expect(await answer({ type: "permission", hostId: "mac", sessionId: "s", tabId: "t", requestId: "p1", optionId: "deny" }, mac)).toMatch(/not connected/);
     expect(mac.calls).toEqual([]);
@@ -109,7 +109,7 @@ describe("a bot's question", () => {
     data: { hostId: "mac", sessionId: "home", tabId: "t", kind: "bot_question", detailsHidden: false, botId: "b1", number: 4, question: "q1", answers: ["Fix it now", "File an issue", "Not a problem"], recommended: 1, ...fields },
   });
 
-  it("gets its answers as buttons, the recommended one first, each answering by its index on the Mac", () => {
+  it("gets its answers as buttons, the recommended one first, each answering by its index on the computer", () => {
     const category = categoryFor(shown());
     expect(category?.actions.map((each) => [each.identifier, each.buttonTitle])).toEqual([["bot.answer.1", "File an issue"], ["bot.answer.0", "Fix it now"], ["bot.answer.2", "Not a problem"]]);
     expect(category?.actions.every((each) => each.options?.isAuthenticationRequired)).toBe(true);

@@ -217,7 +217,7 @@ describe("mobile transcript presentation (#388)", () => {
 
 // #987: the session says which machine it is on, by the name it has on this phone.
 it("names the machine in the session subtitle with the name saved on this phone", async () => {
-  const host = { id: mocks.params.hostId, label: "This Mac", hostName: "Office iMac", customName: "Desk", publicKeyB64: "k", endpoint: "localhost", lastConnectedAt: 1, provenance: { kind: "explicit" } };
+  const host = { id: mocks.params.hostId, label: "This computer", hostName: "Office iMac", customName: "Desk", publicKeyB64: "k", endpoint: "localhost", lastConnectedAt: 1, provenance: { kind: "explicit" } };
   mocks.app = { ...mocks.app, hosts: [host], activeHost: host };
   await render();
   expect(container.textContent).toContain("TerminalX · Desk");
@@ -388,7 +388,7 @@ describe("messages for the agent and worktree notes (#541)", () => {
     const lost = new RelayOuterError(1001, "Stream end encountered", false);
     mocks.app.api.sendSession.mockRejectedValueOnce(lost);
     await render(); await type("How is it going?"); await click("Send");
-    expect(container.textContent).toContain("Not sent: the connection to your Mac dropped. Your message is still in the box.");
+    expect(container.textContent).toContain("Not sent: the connection to your computer dropped. Your message is still in the box.");
     expect(container.textContent).not.toContain("relay_outer");
     expect(input().value).toBe("How is it going?");
     expect(mocks.app.connection.reportError).toHaveBeenCalledWith("Session message failed", lost);
@@ -408,11 +408,11 @@ describe("messages for the agent and worktree notes (#541)", () => {
     expect(() => button("Resend")).toThrow();
   });
 
-  it("does not call a send the Mac never answered 'not sent', nor offer to send it again", async () => {
+  it("does not call a send the computer never answered 'not sent', nor offer to send it again", async () => {
     const timedOut = new Error("RPC timed out: session.send");
     mocks.app.api.sendSession.mockRejectedValueOnce(timedOut);
     await render(); await type("Run the migration"); await click("Send");
-    expect(container.textContent).toContain("Not confirmed: your Mac didn't answer in time, so the message may have reached the agent. Check the conversation before sending it again.");
+    expect(container.textContent).toContain("Not confirmed: your computer didn't answer in time, so the message may have reached the agent. Check the conversation before sending it again.");
     expect(container.textContent).not.toContain("Not sent");
     expect(container.textContent).not.toContain("RPC timed out");
     expect(() => button("Resend")).toThrow();
@@ -420,21 +420,21 @@ describe("messages for the agent and worktree notes (#541)", () => {
     expect(mocks.app.connection.reportError).toHaveBeenCalledWith("Session message failed", timedOut);
   });
 
-  it("says a worktree note the Mac never answered may have been added, not that it reached the agent", async () => {
+  it("says a worktree note the computer never answered may have been added, not that it reached the agent", async () => {
     mocks.app.api.postNote.mockRejectedValueOnce(new Error("RPC timed out: chat.post"));
     await render(); mocks.sheetChoice = "Worktree note"; await click("Add attachment"); await type("Deploying at 5"); await click("Send");
-    expect(container.textContent).toContain("Not confirmed: your Mac didn't answer in time, so the note may have been added. Check the notes before adding it again.");
+    expect(container.textContent).toContain("Not confirmed: your computer didn't answer in time, so the note may have been added. Check the notes before adding it again.");
     expect(container.textContent).not.toContain("agent. Check");
     expect(() => button("Resend")).toThrow();
     expect(input().value).toBe("Deploying at 5");
   });
 
-  it("does not offer Resend when the relay refuses the pairing, and keeps the Mac's own refusals as they are", async () => {
+  it("does not offer Resend when the relay refuses the pairing, and keeps the computer's own refusals as they are", async () => {
     mocks.app.api.sendSession
       .mockRejectedValueOnce(new RelayOuterError(4401, "", false))
       .mockResolvedValueOnce({ sent: false, message: "The agent is busy" });
     await render(); await type("Ship it"); await click("Send");
-    expect(container.textContent).toContain("Not sent: this phone is no longer paired with your Mac; pair it again from Machines. Your message is still in the box.");
+    expect(container.textContent).toContain("Not sent: this phone is no longer paired with your computer; pair it again from Machines. Your message is still in the box.");
     expect(() => button("Resend")).toThrow();
     await click("Send");
     expect(container.textContent).toContain("Message not sent: The agent is busy");
@@ -729,15 +729,15 @@ describe("mobile conversation navigation", () => {
   });
 
   it("clears failed initial loading and retries without showing empty-history copy", async () => {
-    mocks.app.api.tail.mockRejectedValueOnce(new Error("Transcript event 12 is too large to load on mobile. Open this conversation on your Mac."));
+    mocks.app.api.tail.mockRejectedValueOnce(new Error("Transcript event 12 is too large to load on mobile. Open this conversation on your computer."));
     await render();
-    expect(container.textContent).toContain("Open this conversation on your Mac.");
+    expect(container.textContent).toContain("Open this conversation on your computer.");
     expect(container.textContent).not.toContain("No transcript yet");
     expect(container.textContent).not.toContain("Loading transcript");
     expect(button("Try again").disabled).toBe(false);
     await click("Try again");
     expect(container.textContent).toContain("claude transcript");
-    expect(container.textContent).not.toContain("Open this conversation on your Mac.");
+    expect(container.textContent).not.toContain("Open this conversation on your computer.");
     expect(mocks.app.api.tail).toHaveBeenCalledTimes(2);
   });
 
@@ -766,7 +766,7 @@ describe("mobile conversation navigation", () => {
     // Connecting is the subtitle's to say: no card, no error, no button.
     expect(container.textContent).toContain("Connecting…");
     expect(container.textContent).not.toContain("Could not load transcript");
-    expect(container.textContent).not.toContain("connection to your Mac dropped");
+    expect(container.textContent).not.toContain("connection to your computer dropped");
     expect(container.textContent).not.toContain("relay_outer");
     expect(container.textContent).not.toContain("Loading transcript");
     expect(() => button("Try again")).toThrow();
@@ -825,7 +825,7 @@ describe("mobile conversation navigation", () => {
     mocks.app = { ...mocks.app, connectionStage: "connecting" }; await render();
     mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 2 }; await render();
     expect(mocks.app.api.syncTranscript).toHaveBeenCalledTimes(2);
-    expect(container.textContent).toContain("This conversation is too large to load over Relay; open it on the same Wi-Fi as your Mac.");
+    expect(container.textContent).toContain("This conversation is too large to load over Relay; open it on the same Wi-Fi as your computer.");
     expect(container.textContent).not.toContain("relay_outer");
     // The next reconnect does not ask for it again, so the connection stays up for notes and sends.
     mocks.app = { ...mocks.app, connectionStage: "connecting" }; await render();
@@ -888,7 +888,7 @@ describe("mobile conversation navigation", () => {
       events: [event("claude", `synced ${seq}`, seq)], reset,
       cursor: { offset: seq, digest: "a".repeat(64) }, hasMore: false, hasEarlier: true,
     });
-    mocks.app.api.syncTranscript = vi.fn().mockRejectedValueOnce(new Error("Event too large. Open this conversation on your Mac."));
+    mocks.app.api.syncTranscript = vi.fn().mockRejectedValueOnce(new Error("Event too large. Open this conversation on your computer."));
     await render();
     expect(container.textContent).toContain("Event too large");
     mocks.app.api.syncTranscript.mockResolvedValueOnce(page(10, true));
@@ -1061,7 +1061,7 @@ describe("the phone's terminal view, as on the desktop", () => {
     await vi.waitFor(() => expect(mocks.terminalListeners.has("claude")).toBe(true));
   };
 
-  it("opens the tab's terminal on the Mac before watching it, and draws the agent's screen", async () => {
+  it("opens the tab's terminal on the computer before watching it, and draws the agent's screen", async () => {
     terminalMac();
     await openTerminalView();
     expect(mocks.app.api.openTerminal).toHaveBeenCalledWith("worktree", "claude");
@@ -1115,7 +1115,7 @@ describe("the phone's terminal view, as on the desktop", () => {
     expect(mocks.app.api.openTerminal).toHaveBeenCalledTimes(2);
   });
 
-  it("shows the Mac's reason when typing is refused, and keeps the keys for another try", async () => {
+  it("shows the computer's reason when typing is refused, and keeps the keys for another try", async () => {
     terminalMac();
     mocks.app.api.queueInput.mockResolvedValueOnce({ accepted: false, message: "Another mobile client or terminal instance owns this driver lease." });
     await openTerminalView();
@@ -1137,7 +1137,7 @@ describe("the phone's terminal view, as on the desktop", () => {
   });
 
   // #730: a Mac whose runtime is older than its app names no terminal until the runtime is replaced.
-  it("offers the Terminal view as soon as the Mac's runtime serves it, without reconnecting", async () => {
+  it("offers the Terminal view as soon as the computer's runtime serves it, without reconnecting", async () => {
     terminalMac();
     mocks.app.api.features = async () => ({});
     await render();
@@ -1156,14 +1156,14 @@ describe("the phone's terminal view, as on the desktop", () => {
     expect(mocks.terminalListeners.has("claude")).toBe(false);
   });
 
-  it("says the Mac needs updating when it refuses to open the terminal, and the chat keeps working", async () => {
+  it("says the computer needs updating when it refuses to open the terminal, and the chat keeps working", async () => {
     terminalMac();
     // As the transport reads a runtime's refusal of an operation it does not know (`refusal.ts`).
-    mocks.app.api.openTerminal.mockResolvedValue({ opened: false, message: "TerminalX on your Mac needs updating or restarting to do this." });
+    mocks.app.api.openTerminal.mockResolvedValue({ opened: false, message: "TerminalX on your computer needs updating or restarting to do this." });
     await render();
     await click("Terminal");
     await vi.waitFor(() => expect(container.textContent).toContain("The terminal isn't available"));
-    expect(container.textContent).toContain("TerminalX on your Mac needs updating or restarting to do this.");
+    expect(container.textContent).toContain("TerminalX on your computer needs updating or restarting to do this.");
     expect(container.textContent).not.toContain("Unsupported paired-device owner operation");
     await click("Chat");
     await vi.waitFor(() => expect(container.textContent).toContain("claude transcript"));
@@ -1178,7 +1178,7 @@ describe("a compaction on the paired Mac, as the desktop shows it (#644)", () =>
   const lifecycle = (seq: number, evidence: Record<string, unknown>) => ({ ...event("claude", "", seq), payload: { type: "context_compaction_lifecycle", persisted: true, confirmedStart: true, evidence: { scope, generation: 1, ...evidence } } });
   const started = [event("claude", "/compact"), lifecycle(2, { type: "connection_opened" }), lifecycle(3, { type: "item_started", turnId: "turn", itemId: "item" })];
 
-  it("shows it running only once the conversation caught up with the Mac's, and its status unknown before that and while disconnected", async () => {
+  it("shows it running only once the conversation caught up with the computer's, and its status unknown before that and while disconnected", async () => {
     vi.useFakeTimers();
     try {
       mocks.app.api.tail.mockResolvedValue({ events: started, hasMore: false });
@@ -1225,7 +1225,7 @@ describe("an agent's question on the phone (#979)", () => {
     await render();
     for (const shown of ["2 questions", "Which checks should run?", "Lint, format", "Both", "Tests", "Unit tests only", "Choose any that apply", "Which branch?", "main", "next"]) expect(text()).toContain(shown);
     expect(text()).not.toContain("Permission");
-    expect(text()).not.toContain("from your Mac");
+    expect(text()).not.toContain("from your computer");
 
     await click("Tests. Unit tests only"); await click("Lint, format. Both"); await click("main"); await click("next");
     await click("Answer");
@@ -1238,7 +1238,7 @@ describe("an agent's question on the phone (#979)", () => {
     expect(() => button("Answer")).toThrow();
   });
 
-  it("skips with an empty answer set, and goes away when the Mac answers first", async () => {
+  it("skips with an empty answer set, and goes away when the computer answers first", async () => {
     takesAnswers();
     asks(question);
     await render();
@@ -1250,7 +1250,7 @@ describe("an agent's question on the phone (#979)", () => {
     expect(text()).not.toContain("Which checks should run?");
   });
 
-  it("sends one answer for a double tap, and says the Mac's message when the answer came too late", async () => {
+  it("sends one answer for a double tap, and says the computer's message when the answer came too late", async () => {
     takesAnswers();
     asks(question);
     let settle!: (result: { answered: false; message: string }) => void;
@@ -1283,7 +1283,7 @@ describe("an agent's question on the phone (#979)", () => {
     asks(question);
     await render();
     for (const shown of ["2 questions", "Which checks should run?", "Lint, format", "Unit tests only", "Which branch?", "next"]) expect(text()).toContain(shown);
-    expect(text()).toContain("Answer this question from your Mac.");
+    expect(text()).toContain("Answer this question from your computer.");
     expect(text()).not.toContain("Permission");
     // No button that would fail.
     expect(() => button("Answer")).toThrow();
@@ -1406,7 +1406,7 @@ describe("the session screen's status line, keyboard and send feedback (#985)", 
     mocks.app.api.tail.mockResolvedValueOnce({ events: [...working(), question(3, ago(1))], hasMore: false });
     await render();
     await act(async () => { await Promise.resolve(); });
-    expect(text()).toContain("Answer this question from your Mac.");
+    expect(text()).toContain("Answer this question from your computer.");
     expect(text()).toContain("Needs your answer · 1 min");
     await click("Stop");
     expect(mocks.app.api.interrupt).toHaveBeenCalledWith("worktree", "claude");
@@ -1482,7 +1482,7 @@ describe("the session screen's status line, keyboard and send feedback (#985)", 
     for (const said of ["Sent to the agent.", "Queued for the agent."]) expect(text()).not.toContain(said);
     mocks.app.api.sendSession.mockRejectedValueOnce(new RelayOuterError(1001, "Stream end encountered", false));
     await type("Ship it again"); await click("Send");
-    expect(text()).toContain("Not sent: the connection to your Mac dropped. Your message is still in the box.");
+    expect(text()).toContain("Not sent: the connection to your computer dropped. Your message is still in the box.");
     expect(button("Resend").disabled).toBe(false);
 
     // Left and opened again, with the conversation state this app keeps between visits.
@@ -1609,7 +1609,7 @@ describe("one quiet connection state in a session (#983)", () => {
     for (const said of ["Sent to the agent.", "Sends when connected."]) expect(container.textContent).not.toContain(said);
   });
 
-  it("forgets a held message with the Mac or the person signing out: never sent later", async () => {
+  it("forgets a held message with the computer or the person signing out: never sent later", async () => {
     mocks.app = { ...mocks.app, connectionStage: "connecting" };
     await render();
     await type("Not for later"); await click("Send");
@@ -1641,7 +1641,7 @@ describe("one quiet connection state in a session (#983)", () => {
     expect(container.textContent).toContain("Couldn’t load new messages from Mac.");
     await type("Hello"); await click("Send");
     expect(container.textContent).not.toContain("Relay connection closed");
-    expect(container.textContent).toContain("Not sent: the connection to your Mac dropped.");
+    expect(container.textContent).toContain("Not sent: the connection to your computer dropped.");
   });
 
   it("keeps the tab strip's + and × in place while the connection changes, dimmed and unusable", async () => {

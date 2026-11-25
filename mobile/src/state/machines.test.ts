@@ -110,11 +110,11 @@ describe("machine states", () => {
   });
 
   it("shows what a machine is when its own name is a generic default", () => {
-    const thisMac = account(10, { displayName: "This Mac" });
+    const thisMac = account(10, { displayName: "This computer" });
     const wsl = account(11, { displayName: "this computer", environmentKind: "wsl" });
-    const pairedThisMac = account(12, { displayName: "This Mac" });
+    const pairedThisMac = account(12, { displayName: "This computer" });
     const list = machineList(input({
-      hosts: [stored(pairedThisMac.hostId, { label: "This Mac", publicKeyB64: pairedThisMac.hostPublicKeyB64 }), stored("described", { label: "This Mac", hostName: "Paresh’s MacBook Air" })],
+      hosts: [stored(pairedThisMac.hostId, { label: "This computer", publicKeyB64: pairedThisMac.hostPublicKeyB64 }), stored("described", { label: "This computer", hostName: "Paresh’s MacBook Air" })],
       accountHosts: [thisMac, wsl, pairedThisMac],
     }));
     expect(list.paired.map((machine) => machine.name).sort()).toEqual(["Mac · " + pairedThisMac.hostId.replace(/[^A-Za-z0-9]/g, "").slice(-4), "Paresh’s MacBook Air"].sort());
@@ -127,7 +127,7 @@ describe("machine states", () => {
     const quiet = account(13, { displayName: "Studio", reachability: "unverifiable", lastSeenAt: new Date(NOW - 2 * DAY).toISOString() });
     const forged = { ...account(14, { displayName: "Renamed by someone else", reachability: "exited" }), hostId: "wrong-id" };
     const list = machineList(input({ hosts: [
-      stored(quiet.hostId, { label: "This Mac", publicKeyB64: quiet.hostPublicKeyB64, lastConnectedAt: NOW - 5 * DAY }),
+      stored(quiet.hostId, { label: "This computer", publicKeyB64: quiet.hostPublicKeyB64, lastConnectedAt: NOW - 5 * DAY }),
       stored("mine", { hostName: "Work laptop", publicKeyB64: forged.hostPublicKeyB64 }),
     ], accountHosts: [quiet, forged] }));
     expect(list.paired.map((machine) => [machine.name, machine.state, machine.connectBlocked, machine.account?.hostId ?? null])).toEqual([
@@ -139,7 +139,7 @@ describe("machine states", () => {
   it("says the machine in use in the words every screen uses (#983)", () => {
     const one = (connection: ConnectionState) => machineList(input({ hosts: [stored("a")], activeHostId: "a", connection })).paired[0]!;
     const states: ConnectionState[] = ["connecting", "updating", "connected", "waiting", "offline", "held"];
-    expect(states.map((state) => one(state).state)).toEqual(["Connecting…", "Updating…", "Connected", "Waiting for Mac…", "No internet", "Disconnected on your Mac · tap to reconnect"]);
+    expect(states.map((state) => one(state).state)).toEqual(["Connecting…", "Updating…", "Connected", "Waiting for Mac…", "No internet", "Disconnected on your computer · tap to reconnect"]);
     expect(states.map((state) => one(state).tone)).toEqual(["unknown", "connected", "connected", "attention", "unknown", "attention"]);
     // None of the old words: attempt counts, "Can’t connect", "Reconnecting".
     for (const state of states) expect(one(state).state).not.toMatch(/attempt|Can’t|Reconnecting|retrying/);
@@ -147,7 +147,7 @@ describe("machine states", () => {
 
   it("says a machine left disconnected on its side the same way when it is not in use", () => {
     const list = machineList(input({ hosts: [stored("a", { disconnectedOnMacAt: NOW - DAY })] }));
-    expect(list.paired[0]!.state).toBe("Disconnected on your Mac · tap to reconnect");
+    expect(list.paired[0]!.state).toBe("Disconnected on your computer · tap to reconnect");
   });
 });
 
@@ -157,7 +157,7 @@ describe("words", () => {
   });
 
   it("knows a generic name from a real one", () => {
-    expect(["This Mac", "this computer", "Mac", "localhost", "", "  "].map(isGenericName)).toEqual([true, true, true, true, true, true]);
+    expect(["This computer", "this computer", "Mac", "localhost", "", "  "].map(isGenericName)).toEqual([true, true, true, true, true, true]);
     expect(["Paired Mac", "Mac mini", "Office iMac", "My Mac Studio"].map(isGenericName)).toEqual([false, false, false, false]);
     expect([kindName("darwin"), kindName("linux"), kindName("win32"), kindName(undefined, "ssh")]).toEqual(["Mac", "Linux machine", "Windows PC", "SSH machine"]);
   });

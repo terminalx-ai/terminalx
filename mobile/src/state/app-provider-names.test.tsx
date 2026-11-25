@@ -417,7 +417,7 @@ it("reports malformed stored credentials without leaving an unhandled selection 
 });
 
 describe("the connection state's facts (#983)", () => {
-  it("counts the wait from when the phone starts trying, and not while connected or held on the Mac", async () => {
+  it("counts the wait from when the phone starts trying, and not while connected or held on the computer", async () => {
     const before = Date.now();
     await act(async () => fake.stage!("connecting", 0));
     expect(app.connectionSince).toBeGreaterThanOrEqual(before);
@@ -441,7 +441,7 @@ describe("the connection state's facts (#983)", () => {
     expect(fake.retryNow).toHaveBeenCalledTimes(1);
   });
 
-  it("sends the messages held for the Mac in use when it connects, once, and not those for another Mac (#983)", async () => {
+  it("sends the messages held for the computer in use when it connects, once, and not those for another Mac (#983)", async () => {
     const { holdSend, showConversation } = await import("./conversation-state");
     const host = app.activeHost!.id;
     const left = vi.fn(async () => undefined);
@@ -495,7 +495,7 @@ describe("the connection state's facts (#983)", () => {
     expect(fake.reportError).toHaveBeenCalledWith("Session list refresh failed", expect.any(Error));
   });
 
-  it("shows the session list saved last time at once on the next open, before the Mac answers", async () => {
+  it("shows the session list saved last time at once on the next open, before the computer answers", async () => {
     fake.summaries.mockResolvedValue([summary("kept")]);
     await connected();
     await act(async () => fake.connected!());

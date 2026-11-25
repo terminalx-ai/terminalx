@@ -31,7 +31,7 @@ export function PermissionCard({ ask, connected, answering, error, onRespond }: 
     {ask.input !== undefined ? <LinkedText style={[styles.monoSmall, { color: palette.muted }]}>{safeJson(ask.input)}</LinkedText> : null}
     {options.length ? <View style={styles.permissionActions}>{options.map((option) => <Button key={option.id} label={option.label} kind={option.kind === "deny" ? "danger" : option.kind === "allow_once" ? "primary" : "secondary"} disabled={!connected || answering} onPress={() => onRespond(option.id)} style={styles.permissionAction} />)}</View> : <Text style={[styles.body, { color: palette.muted }]}>Answer this request from your Mac.</Text>}
     {!connected ? <Text style={[styles.permissionHint, { color: palette.warning }]}>Reconnect before answering.</Text> : null}
-    {error ? <LinkedText style={[styles.permissionHint, { color: palette.danger }]}>{`${error} The request may have lapsed; check your Mac.`}</LinkedText> : null}
+    {error ? <LinkedText style={[styles.permissionHint, { color: palette.danger }]}>{`${error} The request may have lapsed; check your computer.`}</LinkedText> : null}
   </Card>;
 }
 
@@ -159,7 +159,7 @@ function ReaderBubble({ text, ts, note, images, delivery }: { text: string; ts?:
 function DeliveryMark({ delivery }: { delivery: MessageDelivery }) {
   const { palette } = useTheme();
   if (delivery === "queued") return <Text testID="message-queued" accessibilityLiveRegion="polite" style={[styles.deliveryMark, { color: palette.muted }]}>Queued</Text>;
-  return <View testID="message-delivered" accessible accessibilityLabel="Delivered to your Mac" style={styles.tick}><CheckCheck size={14} color={palette.muted} /></View>;
+  return <View testID="message-delivered" accessible accessibilityLabel="Delivered to your computer" style={styles.tick}><CheckCheck size={14} color={palette.muted} /></View>;
 }
 
 /** A whole turn, drawn row by row as the transcript list draws it: a cloud workspace's tab draws its turns this way. */

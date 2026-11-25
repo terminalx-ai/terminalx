@@ -126,9 +126,9 @@ describe("where the reader's message is, under it", () => {
   const prompt = (extra: object = {}): Turn => ({ key: "t", seq: 1, ts: "2026-11-15T10:22:00Z", toolCount: 0, editedFiles: 0, live: false, prompt: { text: "What's the latest status?", seq: 1, ts: "2026-11-15T10:22:00Z", messageTs: "2026-11-15T10:22:00Z", ...extra }, work: [] });
   const drawRows = (turn: Turn) => draw(<>{turnRows(turn).map((row) => <TranscriptRow key={row.key} row={row} />)}</>);
 
-  it("ticks a message the Mac has, beside its time", () => {
+  it("ticks a message the computer has, beside its time", () => {
     drawRows(prompt());
-    expect(one("message-delivered")?.getAttribute("aria-label")).toBe("Delivered to your Mac");
+    expect(one("message-delivered")?.getAttribute("aria-label")).toBe("Delivered to your computer");
     expect(one("message-delivered")?.querySelector("[data-icon=check-check]")).not.toBeNull();
     expect(one("message-queued")).toBeNull();
   });

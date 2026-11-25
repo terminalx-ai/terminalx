@@ -88,7 +88,7 @@ export function kindName(platform: string | undefined, environment?: AccountHost
   if (value === "darwin" || value === "macos" || value === "mac") return "Mac";
   if (value === "linux") return "Linux machine";
   if (value === "win32" || value === "windows") return "Windows PC";
-  return "Mac";
+  return "Computer";
 }
 
 export function machineList(input: MachineInput): { paired: PairedMachine[]; available: AvailableMachine[]; hidden: AvailableMachine[] } {
