@@ -19,7 +19,7 @@ pub const MAX_TIMEOUT_MS: u64 = 30_000;
 pub const MAX_OUTPUT_BYTES: u64 = 1_048_576;
 const PROMPT_WINDOW_MS: u64 = 60_000;
 const MAX_PROMPTS_PER_WINDOW: usize = 3;
-const MAX_GLOBAL_PROMPTS_PER_WINDOW: usize = 3;
+const MAX_GLOBAL_PROMPTS_PER_WINDOW: usize = 6;
 const MAX_REQUESTS_PER_ORIGIN: usize = 32;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -205,6 +205,8 @@ struct Registry {
     epoch: Arc<()>,
     entries: HashMap<String, Arc<Mutex<Entry>>>,
     prompt_open: bool,
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
+    preparing_prompt: bool,
     prompt_times: VecDeque<(OriginBudget, u64)>,
     in_flight: bool,
 }
@@ -231,6 +233,8 @@ impl Default for Policy {
                 epoch: Arc::new(()),
                 entries: HashMap::new(),
                 prompt_open: false,
+                #[cfg(all(target_os = "macos", feature = "desktop"))]
+                preparing_prompt: false,
                 prompt_times: VecDeque::new(),
                 in_flight: false,
             })),
@@ -397,9 +401,11 @@ impl Policy {
         {
             return Err(Rejection::PromptRateLimited);
         }
-        registry.prompt_times.push_back((budget, now));
         registry.prompt_open = true;
-        Ok(PromptSlot(self.clone()))
+        Ok(PromptSlot {
+            policy: self.clone(),
+            budget: Some(budget),
+        })
     }
 
     fn prepare_local_decision(&self, request: &Request) -> Result<LocalDecisionBinding, Rejection> {
@@ -553,12 +559,39 @@ impl Request {
     }
 }
 
-struct PromptSlot(Policy);
+struct PromptSlot {
+    policy: Policy,
+    budget: Option<OriginBudget>,
+}
+
+impl PromptSlot {
+    fn charge_for_shown_alert(&mut self) -> Result<(), Rejection> {
+        let mut registry = self.policy.lock()?;
+        if let Some(budget) = self.budget.take() {
+            registry
+                .prompt_times
+                .push_back((budget, self.policy.now_ms()));
+        }
+        Ok(())
+    }
+}
 
 impl Drop for PromptSlot {
     fn drop(&mut self) {
-        if let Ok(mut registry) = self.0.lock() {
+        if let Ok(mut registry) = self.policy.lock() {
             registry.prompt_open = false;
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "desktop"))]
+struct PreparationSlot(Policy);
+
+#[cfg(all(target_os = "macos", feature = "desktop"))]
+impl Drop for PreparationSlot {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = self.0.lock() {
+            registry.preparing_prompt = false;
         }
     }
 }
@@ -725,30 +758,147 @@ mod consent {
         }
     }
 
-    #[cfg(any(test, all(target_os = "macos", feature = "desktop")))]
-    pub(super) struct PromptLifetime {
-        request: Request,
-        _slot: PromptSlot,
+    pub(super) trait Presenter {
+        fn alert(&self, input: &RequestInput) -> Result<Presented<bool>, Rejection>;
+        fn biometric(&self, input: &RequestInput) -> Result<Presented<LocalDecision>, Rejection>;
     }
 
-    #[cfg(any(test, all(target_os = "macos", feature = "desktop")))]
-    impl PromptLifetime {
-        pub(super) fn begin(policy: &Policy, request: &Request) -> Result<Self, Rejection> {
-            Ok(Self {
-                request: request.clone(),
-                _slot: policy.reserve_prompt(request)?,
-            })
+    pub(super) struct Presented<T> {
+        pub(super) replies: mpsc::Receiver<T>,
+        pub(super) dismiss: Option<Box<dyn FnOnce()>>,
+    }
+
+    impl<T> Drop for Presented<T> {
+        fn drop(&mut self) {
+            if let Some(dismiss) = self.dismiss.take() {
+                dismiss();
+            }
+        }
+    }
+
+    enum Stage {
+        Preparing(mpsc::Receiver<Result<LocalDecisionBinding, Rejection>>),
+        Alert(Box<LocalDecisionBinding>, Presented<bool>),
+        Confirmed(Box<LocalDecisionBinding>),
+        Biometric(Box<LocalDecisionBinding>, Presented<LocalDecision>),
+    }
+
+    enum Step {
+        Pending(Stage),
+        Finished(State),
+    }
+
+    pub(super) struct Flow<P> {
+        request: Request,
+        slot: PromptSlot,
+        presenter: P,
+        sender: mpsc::SyncSender<Result<State, Rejection>>,
+        stage: Option<Stage>,
+    }
+
+    impl<P: Presenter> Flow<P> {
+        pub(super) fn new(
+            request: Request,
+            slot: PromptSlot,
+            presenter: P,
+            prepared: mpsc::Receiver<Result<LocalDecisionBinding, Rejection>>,
+        ) -> (Self, mpsc::Receiver<Result<State, Rejection>>) {
+            let (sender, result) = mpsc::sync_channel(1);
+            (
+                Self {
+                    request,
+                    slot,
+                    presenter,
+                    sender,
+                    stage: Some(Stage::Preparing(prepared)),
+                },
+                result,
+            )
         }
 
-        pub(super) fn poll<T>(&self, replies: &mpsc::Receiver<T>) -> Option<Result<T, Rejection>> {
-            if let Err(reason) = self.request.require_pending() {
-                return Some(Err(reason));
+        pub(super) fn tick(flow: &std::cell::Cell<Option<Self>>) -> bool {
+            // A presenter may trigger re-entrant AppKit work. Only the outer
+            // tick owns the flow and may dismiss a sheet or stop the timer.
+            let Some(active) = flow.take() else {
+                return false;
+            };
+            match active.advance() {
+                Some(active) => {
+                    flow.set(Some(active));
+                    false
+                }
+                None => true,
             }
-            match replies.try_recv() {
-                Ok(reply) => Some(Ok(reply)),
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err(Rejection::WorkerUnavailable)),
-                Err(mpsc::TryRecvError::Empty) => None,
+        }
+
+        fn advance(mut self) -> Option<Self> {
+            let result = match self.next() {
+                Ok(Step::Pending(stage)) => {
+                    self.stage = Some(stage);
+                    return Some(self);
+                }
+                Ok(Step::Finished(state)) => Ok(state),
+                Err(reason) => Err(reason),
+            };
+            drop(self.stage.take());
+            drop(self.slot);
+            let _ = self.sender.try_send(result);
+            None
+        }
+
+        fn next(&mut self) -> Result<Step, Rejection> {
+            self.request.require_pending()?;
+            let stage = self.stage.take().ok_or(Rejection::InvalidTransition)?;
+            match stage {
+                Stage::Preparing(prepared) => match poll(&prepared)? {
+                    Some(binding) => {
+                        let binding = binding?;
+                        self.request.require_pending()?;
+                        let sheet = self.presenter.alert(&binding.input)?;
+                        self.slot.charge_for_shown_alert()?;
+                        Ok(Step::Pending(Stage::Alert(Box::new(binding), sheet)))
+                    }
+                    None => Ok(Step::Pending(Stage::Preparing(prepared))),
+                },
+                Stage::Alert(binding, sheet) => match poll(&sheet.replies)? {
+                    None => Ok(Step::Pending(Stage::Alert(binding, sheet))),
+                    Some(true) => Ok(Step::Pending(Stage::Confirmed(binding))),
+                    Some(false) => {
+                        drop(sheet);
+                        self.finish(*binding, LocalDecision::Deny)
+                    }
+                },
+                Stage::Confirmed(binding) => {
+                    let sheet = self.presenter.biometric(&binding.input)?;
+                    Ok(Step::Pending(Stage::Biometric(binding, sheet)))
+                }
+                Stage::Biometric(binding, sheet) => match poll(&sheet.replies)? {
+                    None => Ok(Step::Pending(Stage::Biometric(binding, sheet))),
+                    Some(choice) => {
+                        drop(sheet);
+                        self.finish(*binding, choice)
+                    }
+                },
             }
+        }
+
+        fn finish(
+            &self,
+            binding: LocalDecisionBinding,
+            choice: LocalDecision,
+        ) -> Result<Step, Rejection> {
+            self.request
+                .policy
+                .record_local_decision(&self.request, Decision { binding, choice })
+                .map(Step::Finished)
+        }
+    }
+
+    fn poll<T>(replies: &mpsc::Receiver<T>) -> Result<Option<T>, Rejection> {
+        match replies.try_recv() {
+            Ok(reply) => Ok(Some(reply)),
+            Err(mpsc::TryRecvError::Disconnected) => Err(Rejection::WorkerUnavailable),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
         }
     }
 
@@ -791,97 +941,66 @@ mod consent {
             fn CFRelease(object: *const c_void);
         }
 
-        enum Stage {
-            Alert {
-                parent: Retained<NSWindow>,
-                alert: Retained<NSAlert>,
-                replies: mpsc::Receiver<NSModalResponse>,
-            },
-            Biometric {
-                context: Retained<AnyObject>,
-                replies: mpsc::Receiver<LocalDecision>,
-            },
+        struct CocoaPresenter {
+            parent: Retained<NSWindow>,
         }
 
-        impl Stage {
-            fn dismiss(self) {
-                match self {
-                    Self::Alert { parent, alert, .. } => {
+        impl Presenter for CocoaPresenter {
+            fn alert(&self, input: &RequestInput) -> Result<Presented<bool>, Rejection> {
+                let main = MainThreadMarker::new().ok_or(Rejection::ContextUnavailable)?;
+                if self.parent.attachedSheet().is_some() {
+                    return Err(Rejection::Busy);
+                }
+                let (reply, replies) = mpsc::sync_channel(1);
+                let completion = RcBlock::new(move |response: NSModalResponse| {
+                    let _ = reply.try_send(response == NSAlertSecondButtonReturn);
+                });
+                let alert = NSAlert::new(main);
+                alert.setAlertStyle(NSAlertStyle::Warning);
+                alert.setMessageText(&NSString::from_str("Run this command on your Mac?"));
+                alert.setInformativeText(&NSString::from_str(&prompt_text(input)?));
+                alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+                alert.addButtonWithTitle(&NSString::from_str("Continue to Touch ID"));
+                alert.beginSheetModalForWindow_completionHandler(&self.parent, Some(&completion));
+                if alert.window().sheetParent().is_none() {
+                    return Err(Rejection::WorkerUnavailable);
+                }
+                let parent = self.parent.clone();
+                Ok(Presented {
+                    replies,
+                    dismiss: Some(Box::new(move || {
                         let sheet = alert.window();
                         if sheet.sheetParent().is_some() {
                             parent.endSheet(&sheet);
                         }
-                    }
-                    Self::Biometric { context, .. } => {
-                        // SAFETY: the object is the LAContext owned by this flow.
-                        unsafe {
-                            let _: () = msg_send![&*context, invalidate];
-                        }
-                    }
-                }
+                    })),
+                })
+            }
+
+            fn biometric(
+                &self,
+                input: &RequestInput,
+            ) -> Result<Presented<LocalDecision>, Rejection> {
+                start_biometric(input)
             }
         }
 
-        struct Flow {
-            lifetime: PromptLifetime,
-            policy: Policy,
-            binding: LocalDecisionBinding,
-            sender: mpsc::SyncSender<Result<State, Rejection>>,
-            stage: Stage,
-        }
-
-        impl Flow {
-            fn advance(mut self) -> Option<Self> {
-                let choice = match &self.stage {
-                    Stage::Alert { replies, .. } => match self.lifetime.poll(replies) {
-                        None => return Some(self),
-                        Some(reply) => match reply {
-                            Ok(response) if response == NSAlertSecondButtonReturn => {
-                                match start_biometric(&self.binding.input) {
-                                    Ok(stage) => {
-                                        self.stage = stage;
-                                        return Some(self);
-                                    }
-                                    Err(choice) => Ok(choice),
-                                }
-                            }
-                            Ok(_) => Ok(LocalDecision::Deny),
-                            Err(reason) => Err(reason),
-                        },
-                    },
-                    Stage::Biometric { replies, .. } => match self.lifetime.poll(replies) {
-                        Some(result) => result,
-                        None => return Some(self),
-                    },
-                };
-                self.stage.dismiss();
-                let result = choice.and_then(|choice| {
-                    self.policy.record_local_decision(
-                        &self.lifetime.request,
-                        Decision {
-                            binding: self.binding,
-                            choice,
-                        },
-                    )
-                });
-                drop(self.lifetime);
-                let _ = self.sender.try_send(result);
-                None
-            }
-        }
-
-        fn start_biometric(input: &RequestInput) -> Result<Stage, LocalDecision> {
-            let reason = command_text(input).map_err(|_| LocalDecision::Deny)?;
+        fn start_biometric(input: &RequestInput) -> Result<Presented<LocalDecision>, Rejection> {
+            let reason = command_text(input)?;
             // SAFETY: LAContext selectors use their SDK signatures. Each
             // request gets its own context, held and invalidated on the main thread.
             let context: Retained<AnyObject> = unsafe { msg_send![class!(LAContext), new] };
             let available: Bool = unsafe {
                 msg_send![&*context, canEvaluatePolicy: BIOMETRICS_ONLY, error: std::ptr::null_mut::<*mut NSError>()]
             };
-            if !available.as_bool() {
-                return Err(LocalDecision::TouchIdUnavailable);
-            }
             let (reply, replies) = mpsc::sync_channel(1);
+            if !available.as_bool() {
+                let _ = reply.try_send(LocalDecision::TouchIdUnavailable);
+                return Ok(Presented {
+                    replies,
+                    dismiss: None,
+                });
+            }
             let callback = RcBlock::new(move |success: Bool, error: *mut NSError| {
                 let choice = if success.as_bool() {
                     LocalDecision::AllowOnce
@@ -903,7 +1022,12 @@ mod consent {
                     msg_send![&*context, setTouchIDAuthenticationAllowableReuseDuration: 0.0_f64];
                 let _: () = msg_send![&*context, evaluatePolicy: BIOMETRICS_ONLY, localizedReason: &*reason, reply: &*callback];
             }
-            Ok(Stage::Biometric { context, replies })
+            Ok(Presented {
+                replies,
+                dismiss: Some(Box::new(move || unsafe {
+                    let _: () = msg_send![&*context, invalidate];
+                })),
+            })
         }
 
         pub(in super::super) fn prompt(
@@ -911,43 +1035,41 @@ mod consent {
             request: &Request,
             parent: &NSWindow,
         ) -> Result<mpsc::Receiver<Result<State, Rejection>>, Rejection> {
-            let main = MainThreadMarker::new().ok_or(Rejection::ContextUnavailable)?;
-            if parent.attachedSheet().is_some() {
-                return Err(Rejection::Busy);
-            }
-            let lifetime = PromptLifetime::begin(policy, request)?;
-            let binding = policy.prepare_local_decision(request)?;
-            let (sender, result) = mpsc::sync_channel(1);
-            let (reply, replies) = mpsc::sync_channel(1);
-            let completion = RcBlock::new(move |response: NSModalResponse| {
-                let _ = reply.try_send(response);
-            });
-            let alert = NSAlert::new(main);
-            alert.setAlertStyle(NSAlertStyle::Warning);
-            alert.setMessageText(&NSString::from_str("Run this command on your Mac?"));
-            alert.setInformativeText(&NSString::from_str(&prompt_text(&binding.input)?));
-            alert.addButtonWithTitle(&NSString::from_str("Cancel"));
-            alert.addButtonWithTitle(&NSString::from_str("Continue to Touch ID"));
-            let flow = Cell::new(Some(Flow {
-                lifetime,
-                policy: policy.clone(),
-                binding,
-                sender,
-                stage: Stage::Alert {
+            MainThreadMarker::new().ok_or(Rejection::ContextUnavailable)?;
+            let slot = policy.reserve_prompt(request)?;
+            let preparation = {
+                let mut registry = policy.lock()?;
+                if registry.preparing_prompt {
+                    return Err(Rejection::Busy);
+                }
+                registry.preparing_prompt = true;
+                PreparationSlot(policy.clone())
+            };
+            let (prepared, replies) = mpsc::sync_channel(1);
+            let worker_request = request.clone();
+            thread::Builder::new()
+                .name("host-command-approval-paths".into())
+                .spawn(move || {
+                    let result = worker_request
+                        .policy
+                        .prepare_local_decision(&worker_request);
+                    drop(preparation);
+                    let _ = prepared.try_send(result);
+                })
+                .map_err(|_| Rejection::WorkerUnavailable)?;
+            let (flow, result) = Flow::new(
+                request.clone(),
+                slot,
+                CocoaPresenter {
                     parent: parent.retain(),
-                    alert: alert.clone(),
-                    replies,
                 },
-            }));
+                replies,
+            );
+            let flow = Cell::new(Some(flow));
             let tick = RcBlock::new(move |timer: *mut c_void| {
-                // Take ownership before any AppKit call. If AppKit re-enters
-                // this timer while dismissing a sheet, there is no flow to advance.
-                if let Some(active) = flow.take() {
-                    match active.advance() {
-                        Some(active) => flow.set(Some(active)),
-                        // SAFETY: this is the live timer passed by Core Foundation.
-                        None => unsafe { CFRunLoopTimerInvalidate(timer) },
-                    }
+                if Flow::tick(&flow) {
+                    // SAFETY: this is the live timer passed by Core Foundation.
+                    unsafe { CFRunLoopTimerInvalidate(timer) };
                 }
             });
             // SAFETY: Core Foundation copies the block. The timer is added
@@ -964,7 +1086,6 @@ mod consent {
                 if timer.is_null() {
                     return Err(Rejection::WorkerUnavailable);
                 }
-                alert.beginSheetModalForWindow_completionHandler(parent, Some(&completion));
                 CFRunLoopAddTimer(CFRunLoopGetMain(), timer, kCFRunLoopCommonModes);
                 CFRelease(timer);
             }

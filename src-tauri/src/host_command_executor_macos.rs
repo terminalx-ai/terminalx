@@ -5,7 +5,7 @@ use super::super::{
 use super::GroupEvent;
 use std::ffi::{c_char, c_int, c_short, c_uint, c_ulong, c_void, CString};
 use std::fs::{File, Metadata, OpenOptions};
-use std::io::{self, PipeReader, Read};
+use std::io::{self, PipeReader, Read, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -456,6 +456,7 @@ impl Process {
 
 struct ReaperPermit {
     queue: &'static SyncSender<ReapRequest>,
+    count: &'static AtomicUsize,
 }
 
 static REAPER_QUEUE: OnceLock<io::Result<SyncSender<ReapRequest>>> = OnceLock::new();
@@ -475,40 +476,53 @@ impl ReaperPermit {
         let queue = queue
             .as_ref()
             .map_err(|error| io::Error::new(error.kind(), "could not start host command reaper"))?;
-        if OWNED_CHILDREN.fetch_add(1, Ordering::AcqRel) >= MAX_REAPER_CHILDREN {
-            OWNED_CHILDREN.fetch_sub(1, Ordering::AcqRel);
+        Self::reserve_slot(queue, &OWNED_CHILDREN)
+    }
+
+    fn reserve_slot(
+        queue: &'static SyncSender<ReapRequest>,
+        count: &'static AtomicUsize,
+    ) -> io::Result<Self> {
+        if count.fetch_add(1, Ordering::AcqRel) >= MAX_REAPER_CHILDREN {
+            count.fetch_sub(1, Ordering::AcqRel);
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "host command cleanup is at capacity",
             ));
         }
-        Ok(Self { queue })
+        Ok(Self { queue, count })
     }
 }
 
 impl Drop for ReaperPermit {
     fn drop(&mut self) {
-        OWNED_CHILDREN.fetch_sub(1, Ordering::AcqRel);
+        self.count.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
 struct ReapRequest {
     pid: c_int,
     _permit: ReaperPermit,
+    warn_after: Option<Instant>,
     #[cfg(test)]
     events: Option<std::sync::Arc<std::sync::Mutex<Vec<GroupEvent>>>>,
 }
 
 fn reap_children(receiver: mpsc::Receiver<ReapRequest>) {
     let mut waiting: Vec<ReapRequest> = Vec::with_capacity(MAX_REAPER_CHILDREN);
+    let mut interval = POLL_INTERVAL;
+    const MAX_INTERVAL: Duration = Duration::from_millis(250);
     loop {
         if waiting.is_empty() {
+            interval = POLL_INTERVAL;
             let Ok(child) = receiver.recv() else { break };
             waiting.push(child);
-        } else if let Ok(child) = receiver.recv_timeout(POLL_INTERVAL) {
+        } else if let Ok(child) = receiver.recv_timeout(interval) {
             waiting.push(child);
+            interval = POLL_INTERVAL;
         }
-        waiting.retain(|child| {
+        let prior_count = waiting.len();
+        waiting.retain_mut(|child| {
             let mut status = 0;
             // SAFETY: the queue took exclusive ownership of this child.
             // No group signal is sent from the reaper.
@@ -522,8 +536,27 @@ fn reap_children(receiver: mpsc::Receiver<ReapRequest>) {
                 }
                 return false;
             }
-            result == 0 || io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
+            let pending =
+                result == 0 || io::Error::last_os_error().kind() == io::ErrorKind::Interrupted;
+            if pending
+                && child
+                    .warn_after
+                    .is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                let _ = writeln!(
+                    io::stderr().lock(),
+                    "host command reaper is still waiting for a child"
+                );
+                child.warn_after = None;
+            }
+            pending
         });
+        // Continue to reap slow exits without a constant 5 ms poll.
+        interval = if waiting.len() == prior_count {
+            (interval * 2).min(MAX_INTERVAL)
+        } else {
+            POLL_INTERVAL
+        };
     }
 }
 
@@ -538,6 +571,7 @@ impl Drop for Process {
             let _ = queue.try_send(ReapRequest {
                 pid,
                 _permit: permit,
+                warn_after: Some(Instant::now() + Duration::from_secs(30)),
                 #[cfg(test)]
                 events: self.group_events.take(),
             });
@@ -742,6 +776,25 @@ unsafe extern "C" {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn reaper_capacity_refuses_extra_children_and_releases_permits() {
+        static COUNT: AtomicUsize = AtomicUsize::new(0);
+        static QUEUE: OnceLock<SyncSender<ReapRequest>> = OnceLock::new();
+        let queue = QUEUE.get_or_init(|| mpsc::sync_channel(1).0);
+        let mut permits: Vec<_> = (0..MAX_REAPER_CHILDREN)
+            .map(|_| ReaperPermit::reserve_slot(queue, &COUNT).unwrap())
+            .collect();
+        assert_eq!(
+            ReaperPermit::reserve_slot(queue, &COUNT)
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        permits.pop();
+        assert!(ReaperPermit::reserve_slot(queue, &COUNT).is_ok());
+    }
 
     #[test]
     fn leader_is_reaped_after_cleanup_hands_off_to_background() {
