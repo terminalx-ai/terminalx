@@ -179,15 +179,52 @@ fn blocked_pipe_child() {
     assert!(rig.rt.lock().unwrap().child.is_none());
 }
 
-#[test]
-fn phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write() {
-    let mut cases: Vec<String> = ["phone-on", "phone-cycle", "phone-off", "phone-revoked", "phone-mode", "phone-interrupt", "phone-stop", "phone-init-error", "local-on", "phone-load-cycle", "phone-load-fallback-cycle", "phone-auth-cycle", "phone-interrupt-local", "edit-model-on", "edit-model-cycle", "edit-model-off", "edit-mode-on", "edit-mode-cycle", "edit-mode-off", "edit-local-model-on", "edit-local-mode-on", "edit-mixed-model-on", "edit-mixed-model-cycle", "edit-mixed-mode-on", "edit-mixed-mode-cycle"].into_iter().map(String::from).collect();
-    for stage in ["init", "auth", "load"] {
-        for setting in ["model", "mode"] {
-            for policy in ["on", "cycle"] { cases.push(format!("edit-{stage}-{setting}-{policy}")); }
-        }
-    }
-    startup_cases(cases);
+/// Each case is a child run of this binary with its own directory, so each
+/// is a test of its own and nextest runs them side by side.
+macro_rules! phone_startup_cases {
+    ($($name:ident => $case:literal,)*) => { $(
+        #[test]
+        fn $name() { startup_cases([$case.to_string()]); }
+    )* };
+}
+phone_startup_cases! {
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_phone_on => "phone-on",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_phone_cycle => "phone-cycle",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_phone_off => "phone-off",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_phone_revoked => "phone-revoked",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_phone_mode => "phone-mode",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_phone_interrupt => "phone-interrupt",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_phone_stop => "phone-stop",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_phone_init_error => "phone-init-error",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_local_on => "local-on",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_phone_load_cycle => "phone-load-cycle",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_phone_load_fallback_cycle => "phone-load-fallback-cycle",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_phone_auth_cycle => "phone-auth-cycle",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_phone_interrupt_local => "phone-interrupt-local",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_model_on => "edit-model-on",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_model_cycle => "edit-model-cycle",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_model_off => "edit-model-off",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_mode_on => "edit-mode-on",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_mode_cycle => "edit-mode-cycle",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_mode_off => "edit-mode-off",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_local_model_on => "edit-local-model-on",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_local_mode_on => "edit-local-mode-on",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_mixed_model_on => "edit-mixed-model-on",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_mixed_model_cycle => "edit-mixed-model-cycle",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_mixed_mode_on => "edit-mixed-mode-on",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_mixed_mode_cycle => "edit-mixed-mode-cycle",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_init_model_on => "edit-init-model-on",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_init_model_cycle => "edit-init-model-cycle",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_init_mode_on => "edit-init-mode-on",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_init_mode_cycle => "edit-init-mode-cycle",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_auth_model_on => "edit-auth-model-on",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_auth_model_cycle => "edit-auth-model-cycle",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_auth_mode_on => "edit-auth-mode-on",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_auth_mode_cycle => "edit-auth-mode-cycle",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_load_model_on => "edit-load-model-on",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_load_model_cycle => "edit-load-model-cycle",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_load_mode_on => "edit-load-mode-on",
+    phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write_edit_load_mode_cycle => "edit-load-mode-cycle",
 }
 
 #[test]
