@@ -2,6 +2,7 @@
 import { expect, it, vi } from "vitest";
 import { AGENT_DEFAULT_MODEL, AgentSettingsRows, PickRow } from "./PickRow";
 import { appearance, stage } from "./testing/kit";
+import { LargeText } from "./text-size";
 
 // PRO-547: the form's row, shared from ui/, and the four rows an agent starts with (25.09, 25.10).
 vi.mock("react-native", () => import("@mobile/ui/testing/native"));
@@ -25,6 +26,22 @@ it("is a button with a chevron when it opens a choice, and a fact without one wh
   // The second row has the hairline over it; the first does not.
   expect(page.styleOf(button).borderTopWidth).toBeUndefined();
   expect(page.styleOf(fact).borderTopWidth).toBe(1);
+});
+
+it("puts the value under its label, in full, at the accessibility text sizes (PRO-563)", async () => {
+  await page.show(<PickRow label="Region" value="Automatic EU placement" onPress={() => undefined} />);
+  // Side by side at the ordinary sizes: one line, the row's own child.
+  expect(page.byText("Automatic EU placement")!.getAttribute("data-lines")).toBe("1");
+  expect(page.byText("Automatic EU placement")!.parentElement).toBe(page.byId("pick-region"));
+  await page.show(<LargeText.Provider value><PickRow label="Region" value="Automatic EU placement" onPress={() => undefined} /></LargeText.Provider>);
+  const value = page.byText("Automatic EU placement")!;
+  expect(value.getAttribute("data-lines")).toBeNull();
+  expect(value.parentElement!.textContent).toBe("RegionAutomatic EU placement");
+  expect(page.styleOf(value).textAlign).toBeUndefined();
+  // Still one button, said the same way, with its chevron.
+  const button = page.byId("pick-region")!;
+  expect(button.getAttribute("aria-label")).toBe("Region: Automatic EU placement");
+  expect(button.querySelector("[data-icon='ChevronRight']")).not.toBeNull();
 });
 
 it("marks a value that stops a launch in the danger colour, in dark and in light", async () => {

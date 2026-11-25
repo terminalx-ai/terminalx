@@ -479,7 +479,7 @@ function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live
     <TranscriptList key={tabId ?? "none"} data={transcript.turns} keyExtractor={(turn) => turn.key}
       earlier={tab?.truncated ? <Text style={[styles.notice, { color: palette.muted }]}>Earlier messages are not in the saved conversation.</Text> : null}
       ListEmptyComponent={tab?.noKey ? <EmptyState title="Not readable on this phone yet" detail={codeText("no-key")!} /> : <EmptyState title="No conversation yet" detail={live ? "This tab has not published any turns." : "Nothing has been saved for this tab."} />}
-      renderItem={({ item }) => <TurnCard turn={item} />}
+      renderItem={({ item }) => <TurnCard turn={item} deliveredTo="workspace" />}
       latest={<>
         {transcript.compacting ? <CompactingLine /> : null}
         {transcript.pendingAsks.map((ask) => ask.kind === "questions"

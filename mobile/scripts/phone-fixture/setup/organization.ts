@@ -59,7 +59,8 @@ const codex = { id: "cred-codex", provider: "codex", authKind: "api-key", finger
 function workspace(orgId: string, id: string, name: string, state: string, idleMinutes: number, repository: string) {
   return {
     workspace: {
-      id, orgId, name, provider: "box", providerDescriptor: { label: "Boat" }, state, accessMode: "organization",
+      // As the account service sends a workspace: its provider by id only. The row names it from the provider list (PRO-566).
+      id, orgId, name, provider: "box", state, accessMode: "organization",
       you: { role: "manager", canApprove: true, canManageShares: true }, sharedWith: 0, createdBy: "fixture", lastActivityAt: Date.now() - idleMinutes * MINUTE,
       runtimeActivity: null, repositories: [{ identity: repository, fullName: repository, primary: true }],
     },

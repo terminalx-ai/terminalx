@@ -289,11 +289,16 @@ describe("the Cloud tab with nothing set up (25.01)", () => {
 
   it("shows only the list, as before, when the chosen organization has workspaces", async () => {
     choose("org-n");
-    const catalog = account([entry(northwind, [workspace("checkout", "org-n")])]);
+    const catalog = account([entry(northwind, [workspace("checkout", "org-n")])], { providers: { "org-n": [{ ...offered("Boat"), id: "box" }] } });
     await show(<CloudScreen />);
     expect(page.byId("setup-card")).toBeNull();
     expect(page.byId("setup-folded")).toBeNull();
-    expect(catalog.api.providers).not.toHaveBeenCalled();
+    // Its setup is not read: no agent logins are asked for.
+    expect(catalog.api.credentials).not.toHaveBeenCalled();
+    // The provider list is read once, for the name the row gives the workspace's provider id (PRO-566).
+    expect(catalog.api.providers).toHaveBeenCalledExactlyOnceWith("org-n");
+    expect(text()).toContain("Boat");
+    expect(text()).not.toContain("box");
   });
 
   it("tells a member who can connect compute, and shows their own organization's steps under it", async () => {

@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState, type ComponentRef } from "react";
+import { createContext, memo, useContext, useEffect, useRef, useState, type ComponentRef } from "react";
 import { Keyboard, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { Check, CheckCheck } from "lucide-react-native";
 import { askAgentNote, COMPACTING_LINE, compactionStatus, messageTime, questionAnswers, questionsLabel, toggleQuestionChoice } from "@terminalx/portable/transcript";
@@ -155,16 +155,25 @@ function ReaderBubble({ text, ts, note, images, delivery }: { text: string; ts?:
   </View>;
 }
 
+/** What took the reader's message: the paired Mac, or a cloud workspace, which has no Mac (PRO-570). */
+export type MessagePlace = "mac" | "workspace";
+const DELIVERED: Record<MessagePlace, string> = { mac: "Delivered to your Mac", workspace: "Delivered to the workspace" };
+const DeliveredTo = createContext<MessagePlace>("mac");
+
 /** Where the reader's message is, in a word or a tick, beside its time. */
 function DeliveryMark({ delivery }: { delivery: MessageDelivery }) {
   const { palette } = useTheme();
+  const place = useContext(DeliveredTo);
   if (delivery === "queued") return <Text testID="message-queued" accessibilityLiveRegion="polite" style={[styles.deliveryMark, { color: palette.muted }]}>Queued</Text>;
-  return <View testID="message-delivered" accessible accessibilityLabel="Delivered to your Mac" style={styles.tick}><CheckCheck size={14} color={palette.muted} /></View>;
+  return <View testID="message-delivered" accessible accessibilityLabel={DELIVERED[place]} style={styles.tick}><CheckCheck size={14} color={palette.muted} /></View>;
 }
 
-/** A whole turn, drawn row by row as the transcript list draws it: a cloud workspace's tab draws its turns this way. */
-export function TurnCard({ turn }: { turn: Turn }) {
-  return <View>{turnRows(turn).map((row) => <TranscriptRow key={row.key} row={row} />)}</View>;
+/**
+ * A whole turn, drawn row by row as the transcript list draws it: a cloud workspace's tab draws its turns this way.
+ * `deliveredTo` is what a delivered message's tick says aloud took it.
+ */
+export function TurnCard({ turn, deliveredTo = "mac" }: { turn: Turn; deliveredTo?: MessagePlace }) {
+  return <DeliveredTo.Provider value={deliveredTo}><View>{turnRows(turn).map((row) => <TranscriptRow key={row.key} row={row} />)}</View></DeliveredTo.Provider>;
 }
 
 export const TranscriptRow = memo(function TranscriptRow({ row }: { row: TurnRow }) {
