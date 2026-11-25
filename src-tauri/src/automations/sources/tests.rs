@@ -96,8 +96,11 @@ fn tick(automation: &Automation, minute: i64, snapshot: Snapshot) -> Vec<WakeSub
     tick_read(automation, minute, complete(snapshot))
 }
 
+/// Completes each run not completed yet. One already completed is left as it
+/// is: the run log only grows, so writing it again would add a line that
+/// every later read parses, for no change.
 fn finish_runs(automation: &Automation) {
-    for run in automation_store::list_runs(&automation.id).unwrap() {
+    for run in automation_store::list_runs(&automation.id).unwrap().into_iter().filter(|run| run.status != AutomationRunStatus::Completed) {
         automation_store::replace_run(&automation.id, &run.run_id, |value| {
             value.status = AutomationRunStatus::Completed;
             Ok(())
