@@ -1,4 +1,4 @@
-//! The no-remote part of a cloud-to-local transfer. A bundle contains one
+//! A cloud-to-local transfer bundle contains one
 //! pinned branch and never supplies a destination path or updates a ref.
 
 use anyhow::{bail, ensure, Context, Result};
@@ -100,15 +100,22 @@ pub(crate) fn export(repo: &Path, expected: &BranchCommit) -> Result<TransferBun
         .prefix("terminalx-transfer-")
         .tempdir()?;
     let path = directory.path().join("workspace.bundle");
-    git(
-        repo,
-        &[
-            "bundle",
-            "create",
-            path_argument(&path)?,
-            &expected.branch_ref,
-        ],
-    )?;
+    let base = ["@{upstream}", "refs/remotes/origin/HEAD"]
+        .into_iter()
+        .filter_map(|reference| git(repo, &["merge-base", expected.commit(), reference]).ok())
+        .map(|base| base.trim().to_owned())
+        .find(|base| base != expected.commit());
+    let exclude = base.map(|base| format!("^{base}"));
+    let mut args = vec![
+        "bundle",
+        "create",
+        path_argument(&path)?,
+        &expected.branch_ref,
+    ];
+    if let Some(exclude) = &exclude {
+        args.push(exclude);
+    }
+    git(repo, &args)?;
     check_head(repo, &path, expected)?;
     let size = std::fs::metadata(&path)?.len();
     Ok(TransferBundle {
@@ -341,6 +348,35 @@ mod tests {
                 .trim(),
             "commit"
         );
+    }
+
+    #[test]
+    fn exports_an_origin_delta_without_updating_the_remote_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let origin = temp.path().join("origin");
+        let cloud = temp.path().join("cloud");
+        let local = temp.path().join("local");
+        repository(&origin);
+        let base = commit(&origin);
+        let source = origin.to_str().unwrap();
+        for checkout in [&cloud, &local] {
+            git(
+                temp.path(),
+                &["clone", "-q", source, checkout.to_str().unwrap()],
+            )
+            .unwrap();
+            git(checkout, &["config", "user.name", "Fixture"]).unwrap();
+            git(checkout, &["config", "user.email", "fixture@example.test"]).unwrap();
+        }
+        let head = commit(&cloud);
+        let selected = BranchCommit::new("main", &head).unwrap();
+        let bundle = export(&cloud, &selected).unwrap();
+        assert_eq!(git(&origin, &["rev-parse", "main"]).unwrap().trim(), base);
+        import_objects(&local, &bundle.path, &selected).unwrap();
+        assert_eq!(git(&local, &["rev-parse", "main"]).unwrap().trim(), base);
+        let missing_base = temp.path().join("missing-base");
+        repository(&missing_base);
+        assert!(import_objects(&missing_base, &bundle.path, &selected).is_err());
     }
 
     #[test]

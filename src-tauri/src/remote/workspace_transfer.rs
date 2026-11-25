@@ -17,7 +17,7 @@ pub(super) struct Export {
     generation: u64,
     stamp: Option<collab::v2::Stamp>,
     expires: Instant,
-    bundle: Option<TransferBundle>,
+    bundle: TransferBundle,
     transcript: Vec<u8>,
 }
 
@@ -91,8 +91,6 @@ impl WorkspaceRpc {
                 let bytes = match required_str(params, "part")? {
                     "bundle" => entry
                         .bundle
-                        .as_ref()
-                        .ok_or_else(|| RpcError::invalid("This export has no Git bundle"))?
                         .read_chunk(offset)
                         .map_err(RpcError::internal)?,
                     "transcript" => {
@@ -203,32 +201,16 @@ impl WorkspaceRpc {
             ));
         }
         still_allowed()?;
-        let remotes = bundle::git(&checkout, &["remote"]).map_err(RpcError::internal)?;
-        let bundle = if remotes.is_empty() {
-            let snapshot = bundle::export(&checkout, &pin).map_err(RpcError::internal)?;
-            if snapshot.size() > MAX_BUNDLE_BYTES {
-                return Err(RpcError::invalid("The Git bundle is too large to transfer"));
-            }
-            Some(snapshot)
-        } else if remotes.lines().any(|remote| remote == "origin") {
-            let refspec = format!("{}:refs/heads/{}", pin.commit(), pin.branch());
-            still_allowed()?;
-            bundle::git(&checkout, &["push", "--porcelain", "origin", &refspec]).map_err(|_| {
-                RpcError::new(
-                    "transfer_push_failed",
-                    "Could not push the selected branch to origin",
-                )
-            })?;
-            None
-        } else {
-            return Err(RpcError::invalid("The checkout has remotes but no origin"));
-        };
+        let bundle = bundle::export(&checkout, &pin).map_err(RpcError::internal)?;
+        if bundle.size() > MAX_BUNDLE_BYTES {
+            return Err(RpcError::invalid("The Git bundle is too large to transfer"));
+        }
         let _admission = self.collab.enter_admission();
         still_allowed()?;
         let id = uuid::Uuid::new_v4().to_string();
         let result = json!({
             "transferId": id, "branch": pin.branch(), "commit": pin.commit(),
-            "bundleBytes": bundle.as_ref().map(TransferBundle::size),
+            "bundleBytes": bundle.size(),
             "transcriptBytes": transcript.len(), "harness": tab.harness, "title": session.title,
         });
         self.transfers.lock().unwrap().insert(

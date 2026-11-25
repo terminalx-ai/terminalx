@@ -697,7 +697,7 @@ async fn workspace_transfer_reauthorizes_each_replayed_chunk() {
         }).to_string()).unwrap();
     }
 
-    let hello = json!({ "protocol": PROTOCOL, "want": ["workspace-transfer/1"] });
+    let hello = json!({ "protocol": PROTOCOL, "want": ["workspace-transfer/2"] });
     let (admin, _admin_notifications) = Peer::for_user("transfer-device".into(), Authority::Manage, Some("admin".into()));
     let (other, _other_notifications) = Peer::for_user("other-device".into(), Authority::Manage, Some("admin".into()));
     let (viewer, _viewer_notifications) = Peer::for_user("viewer-device".into(), Authority::Participate, Some("viewer".into()));

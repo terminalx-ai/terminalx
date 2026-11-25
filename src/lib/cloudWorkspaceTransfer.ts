@@ -59,7 +59,7 @@ export interface TransferManifest {
   transferId: string;
   branch: string;
   commit: string;
-  bundleBytes: number | null;
+  bundleBytes: number;
   transcriptBytes: number;
   title: string;
   harness: string;
@@ -98,7 +98,7 @@ export async function readCloudTransfer(
   }
   try {
     const transcript = await read("transcript", manifest.transcriptBytes, 4 * 1024 * 1024);
-    const bundle = manifest.bundleBytes === null ? null : await read("bundle", manifest.bundleBytes, 32 * 1024 * 1024);
+    const bundle = await read("bundle", manifest.bundleBytes, 32 * 1024 * 1024);
     checkScope();
     return { branch: manifest.branch, commit: manifest.commit, harness: manifest.harness, title: manifest.title, transcript, bundle };
   } finally {

@@ -258,7 +258,7 @@ class FakeRuntime implements WorkspaceTransport {
       runtimeGeneration: this.generation,
       runtimeEpoch: this.epoch,
       runtimeVersion: "0.3.0",
-      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", ...this.composer(), ...(this.followUps ? (["follow-ups/1"] as const) : []), ...(this.transfer ? (["workspace-transfer/1"] as const) : [])],
+      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", ...this.composer(), ...(this.followUps ? (["follow-ups/1"] as const) : []), ...(this.transfer ? (["workspace-transfer/2"] as const) : [])],
       authority,
     });
   }

@@ -4806,7 +4806,7 @@ impl WorkspaceRpc {
         protocol::served(self.is_machine()).into_iter().filter(|capability| match *capability {
             protocol::AGENT_COMMANDS => self.agent_commands.get().is_some(),
             protocol::CLOUD_DESKTOP => desktop,
-            "workspace-transfer/1" => self.is_cloud_transfer_runtime(),
+            "workspace-transfer/2" => self.is_cloud_transfer_runtime(),
             _ => true,
         }).collect()
     }

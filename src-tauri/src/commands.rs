@@ -2254,7 +2254,7 @@ pub struct CloudTransferImport {
     harness: String,
     branch: String,
     commit: String,
-    bundle: Option<String>,
+    bundle: String,
     transcript: String,
 }
 
@@ -2282,18 +2282,11 @@ pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, i
         let transcript = serde_json::from_slice::<Vec<transfer::TranscriptMessage>>(&STANDARD.decode(&input.transcript)?)?;
         let pin = transfer::BranchCommit::new(&input.branch, &input.commit)?;
         let project = Path::new(&input.project_path);
-        if let Some(encoded) = &input.bundle {
-            anyhow::ensure!(encoded.len() <= 45 * 1024 * 1024, "Git bundle is too large.");
-            let directory = tempfile::tempdir()?;
-            let path = directory.path().join("workspace.bundle");
-            std::fs::write(&path, STANDARD.decode(encoded)?)?;
-            transfer::import_objects(project, &path, &pin)?;
-        } else {
-            let branch = format!("refs/heads/{}", pin.branch());
-            transfer::git(project, &["fetch", "--no-tags", "origin", &branch])?;
-            let fetched = transfer::git(project, &["rev-parse", "--verify", "FETCH_HEAD"])?;
-            anyhow::ensure!(fetched.trim() == pin.commit(), "The local project's origin does not have the transferred commit.");
-        }
+        anyhow::ensure!(input.bundle.len() <= 45 * 1024 * 1024, "Git bundle is too large.");
+        let bundle_directory = tempfile::tempdir()?;
+        let bundle_path = bundle_directory.path().join("workspace.bundle");
+        std::fs::write(&bundle_path, STANDARD.decode(&input.bundle)?)?;
+        transfer::import_objects(project, &bundle_path, &pin)?;
         anyhow::ensure!(authorized(&account, &input), "The cloud account changed.");
         transfer::ensure_local_branch(project, &pin)?;
         let name = format!("transfer-{}", uuid::Uuid::now_v7().simple());
