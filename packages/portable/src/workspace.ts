@@ -501,6 +501,8 @@ export interface RemoteTurnCheckpoint {
   restored?: boolean;
   backupRef?: string | null;
   unavailableReason?: string | null;
+  /** An unreviewed turn whose Undo is about to expire: how many more turns in this workspace it lasts. */
+  expiresIn?: number | null;
 }
 
 /** An undo or restore of a turn: refused with what it would overwrite, and the token that confirms it. */

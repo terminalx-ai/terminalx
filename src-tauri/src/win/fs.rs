@@ -54,7 +54,8 @@ pub(crate) fn create_new_private(path: &Path) -> io::Result<File> {
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             &attributes,
             CREATE_NEW,
-            FILE_ATTRIBUTE_NORMAL,
+            // A link already at `path`, dangling or not, is a name that exists, never a way through.
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
             std::ptr::null_mut(),
         )
     };
@@ -64,6 +65,44 @@ pub(crate) fn create_new_private(path: &Path) -> io::Result<File> {
     }
     // SAFETY: a fresh handle nobody else owns.
     Ok(unsafe { File::from_raw_handle(handle as RawHandle) })
+}
+
+/// Open the plain file at `path` to read and write, or create it when there
+/// is none. A link there, or a file with a second name, is refused, never
+/// followed: what `O_CREAT | O_NOFOLLOW` gives on Unix. A new file gets the
+/// access its folder gives new files, not an owner-only one: for a lock in a
+/// folder that need not be private, such as a repository's `.git`.
+pub(crate) fn open_or_create_plain(path: &Path) -> io::Result<File> {
+    let exists = |error: &io::Error| matches!(error.raw_os_error(), Some(code) if code == ERROR_FILE_EXISTS as i32 || code == ERROR_ALREADY_EXISTS as i32);
+    // Another process may create it between the two steps: then it is opened.
+    for _ in 0..2 {
+        match open_plain(path, true, true) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            opened => return opened,
+        }
+        let name = wide_path(path);
+        // SAFETY: `name` is NUL-terminated; the handle is owned by the File.
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle != INVALID_HANDLE_VALUE {
+            // SAFETY: a fresh handle nobody else owns.
+            return Ok(unsafe { File::from_raw_handle(handle as RawHandle) });
+        }
+        let error = io::Error::last_os_error();
+        if !exists(&error) {
+            return Err(error);
+        }
+    }
+    open_plain(path, true, true)
 }
 
 /// Create `path` as a new file only this user (and SYSTEM) can open, or, when
@@ -177,6 +216,29 @@ pub(crate) fn open_plain(path: &Path, write: bool, one_name: bool) -> io::Result
         return Err(refused());
     }
     Ok(file)
+}
+
+/// Where the open `file` is now, as Windows names it with every link on the
+/// way resolved: what a check of a held handle reads, which a link swapped
+/// into a folder after the handle was opened cannot change.
+pub(crate) fn final_path(file: &File) -> io::Result<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED, VOLUME_NAME_DOS};
+    let mut buffer = vec![0u16; 512];
+    loop {
+        // SAFETY: a live handle and a buffer of the length passed.
+        let length = unsafe { GetFinalPathNameByHandleW(file.as_raw_handle(), buffer.as_mut_ptr(), buffer.len() as u32, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS) } as usize;
+        if length == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if length < buffer.len() {
+            buffer.truncate(length);
+            return Ok(std::ffi::OsString::from_wide(&buffer).into());
+        }
+        // Too small: `length` is the size needed, its terminating NUL included.
+        buffer.resize(length + 1, 0);
+    }
 }
 
 /// `path` itself, even when it is a link: the link is then what is opened.
@@ -340,6 +402,39 @@ mod tests {
             assert!(open_plain(&link, true, false).is_err());
             assert_eq!(std::fs::read(&target).unwrap(), b"KEPT");
         }
+    }
+
+    #[test]
+    fn open_or_create_plain_makes_a_lock_and_refuses_a_linked_one() {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        let lock = root.path().join("mirror.lock");
+        open_or_create_plain(&lock).unwrap().write_all(b"held").unwrap();
+        // Made once, then opened as it is.
+        open_or_create_plain(&lock).unwrap();
+        assert_eq!(std::fs::read(&lock).unwrap(), b"held");
+        // A lock that is a second name of another file is refused, and that file is left as it was.
+        let other = root.path().join("other");
+        std::fs::write(&other, b"kept").unwrap();
+        let second = root.path().join("second.lock");
+        std::fs::hard_link(&other, &second).unwrap();
+        assert!(open_or_create_plain(&second).is_err());
+        // A folder link there is refused too.
+        let folder = root.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        let linked = root.path().join("linked.lock");
+        junction(&linked, &folder).unwrap();
+        assert!(open_or_create_plain(&linked).is_err());
+        // Creating a symbolic link needs Developer Mode or an administrator.
+        let dangling = root.path().join("dangling.lock");
+        let target = root.path().join("made-through-the-link");
+        if std::os::windows::fs::symlink_file(&target, &dangling).is_ok() {
+            assert!(open_or_create_plain(&dangling).is_err());
+            assert!(!target.exists(), "a dangling link is not followed to create its target");
+            assert!(create_new_private(&dangling).is_err());
+            assert!(!target.exists());
+        }
+        assert_eq!(std::fs::read(&other).unwrap(), b"kept");
     }
 
     #[test]

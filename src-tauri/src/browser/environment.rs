@@ -87,14 +87,24 @@ pub fn socket_directory_for(home: &Path) -> PathBuf {
     PathBuf::from("/tmp").join(format!("{SOCKET_DIRECTORY_PREFIX}{key}"))
 }
 
-fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
+/// Create `dir` for this user alone, or accept the one there only if it
+/// already is that: a real directory, not a link, owned by this user, that
+/// no one else can open. Its name under `/tmp` is predictable, so another
+/// account could have made it first, or left a link there, to reach or plant
+/// the sockets. Nothing here follows a link or loosens what it finds.
+fn ensure_private_dir(dir: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        use std::os::unix::fs::DirBuilderExt;
+        match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
     }
-    Ok(())
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)?;
+    crate::private_fs::verify_dir(dir, "the browser socket folder")
 }
 
 #[cfg(test)]
@@ -136,6 +146,35 @@ mod tests {
             assert_eq!(dir.metadata().unwrap().permissions().mode() & 0o777, 0o700);
         }
         let _ = std::fs::remove_dir(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_socket_folder_that_is_a_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let planted = tmp.path().join("socket-dir");
+        std::os::unix::fs::symlink(&elsewhere, &planted).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let before = elsewhere.metadata().unwrap().permissions().mode();
+        assert!(ensure_private_dir(&planted).is_err(), "a link is never taken for the folder");
+        assert_eq!(elsewhere.metadata().unwrap().permissions().mode(), before, "nothing reached through the link was changed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_socket_folder_others_can_open_and_keeps_its_own() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let open = tmp.path().join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(ensure_private_dir(&open).is_err(), "a folder others can open is refused, not tightened");
+        let own = tmp.path().join("own");
+        ensure_private_dir(&own).unwrap();
+        assert_eq!(own.metadata().unwrap().permissions().mode() & 0o777, 0o700);
+        ensure_private_dir(&own).expect("its own folder is accepted again");
     }
 
     #[test]

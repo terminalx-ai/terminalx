@@ -314,14 +314,17 @@ impl OwnerLease {
         if fs::symlink_metadata(&namespace).is_ok_and(|m| m.file_type().is_symlink()) {
             bail!("journal namespace must not be a symlink");
         }
-        let mut options = fs::OpenOptions::new();
-        options.read(true).write(true).create(true).truncate(false);
         #[cfg(unix)]
-        {
+        let file = {
             use std::os::unix::fs::OpenOptionsExt;
+            let mut options = fs::OpenOptions::new();
+            options.read(true).write(true).create(true).truncate(false);
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-        }
-        let file = options.open(namespace.with_extension("owner.lock")).context("open journal owner lease")?;
+            options.open(namespace.with_extension("owner.lock")).context("open journal owner lease")?
+        };
+        // Owner-only, and a link or a file with a second name is refused rather than followed.
+        #[cfg(windows)]
+        let file = crate::win::fs::create_private(&namespace.with_extension("owner.lock"), false).context("open journal owner lease")?;
         let metadata = file.metadata()?;
         if !metadata.is_file() { bail!("journal owner lease is not a regular file"); }
         #[cfg(unix)]

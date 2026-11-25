@@ -3,7 +3,9 @@
 //! start another transaction; reads are allowed and see the last committed file.
 
 use std::cell::Cell;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -42,14 +44,18 @@ pub(crate) fn read_lock(path: &Path, admission: &Path, timeout: Duration) -> Res
 }
 
 fn lock(path: &Path, deadline: Instant, shared: bool) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
-    {
+    let lock = {
         use std::os::unix::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    }
-    let lock = options.open(path).context("open store transaction lock")?;
+        options.open(path).context("open store transaction lock")?
+    };
+    // Owner-only, and a link or a file with a second name is refused rather
+    // than followed: the checks below on Unix.
+    #[cfg(windows)]
+    let lock = crate::win::fs::create_private(path, false).context("open store transaction lock")?;
     let metadata = lock.metadata()?;
     if !metadata.is_file() { bail!("store transaction lock is not a regular file"); }
     #[cfg(unix)]
@@ -79,6 +85,45 @@ fn lock(path: &Path, deadline: Instant, shared: bool) -> Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_transaction_lock_with_a_second_name_is_refused_and_the_other_file_stays_unlocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("someone-elses-file");
+        std::fs::write(&other, b"kept").unwrap();
+        let lock_path = dir.path().join(".transaction.lock");
+        std::fs::hard_link(&other, &lock_path).unwrap();
+        assert!(lock(&lock_path, Instant::now(), false).is_err(), "a lock with a second name is refused");
+        // Had it been taken, Windows' mandatory lock would now keep this file from being locked or written.
+        let still = std::fs::OpenOptions::new().read(true).write(true).open(&other).unwrap();
+        still.try_lock().expect("the other file was never locked");
+        drop(still);
+        assert_eq!(std::fs::read(&other).unwrap(), b"kept");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_transaction_lock_that_is_a_symbolic_link_is_refused_and_nothing_is_made_at_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("made-through-the-link");
+        let lock_path = dir.path().join(".transaction.lock");
+        // Creating a symbolic link needs Developer Mode or an administrator.
+        if std::os::windows::fs::symlink_file(&target, &lock_path).is_err() {
+            return;
+        }
+        assert!(lock(&lock_path, Instant::now(), false).is_err());
+        assert!(!target.exists(), "a dangling link is not followed to create its target");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_new_transaction_lock_is_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join(".transaction.lock");
+        drop(lock(&lock_path, Instant::now() + Duration::from_secs(1), false).unwrap());
+        crate::win::security::verify_private(&lock_path).unwrap();
+    }
 
     #[test]
     fn credential_reader_keeps_an_exclusive_update_waiting() {

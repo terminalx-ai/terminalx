@@ -19,6 +19,7 @@ fn launch_note(entry: &SessionEntry) -> String {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_fact_learned_in_one_organisation_is_not_given_to_the_agent_in_another() {
     let _home = crate::store::temp_home();
     bots_on();
@@ -103,6 +104,7 @@ fn a_fact_learned_in_one_organisation_is_not_given_to_the_agent_in_another() {
 /// carries its conversation's organisation to the window, which takes only
 /// that organisation's workspaces (`cloudControl.ts`, `assertBotOrg`).
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_bots_cloud_command_carries_the_organisation_its_conversation_works_in() {
     let _home = crate::store::temp_home();
     bots_on();
@@ -133,6 +135,7 @@ impl Drop for Sends {
 /// A hand-off is worked on in the place it was handed from: the receiver's chat and item are that place's, never its
 /// first place's; one that does not work there is not handed the work at all.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_hand_off_is_worked_on_in_the_place_it_was_handed_from() {
     let _home = crate::store::temp_home();
     let _sends = Sends;
@@ -170,6 +173,7 @@ fn a_hand_off_is_worked_on_in_the_place_it_was_handed_from() {
 /// The owner's word about an item reaches a chat of that item's place only: the home chat when it works there, else
 /// the bot's standing chat of that place. One about a place the bot left waits, saying why.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_owners_word_about_an_item_reaches_a_chat_of_that_items_place() {
     let _home = crate::store::temp_home();
     let _sends = Sends;
@@ -214,6 +218,7 @@ fn the_owners_word_about_an_item_reaches_a_chat_of_that_items_place() {
 /// A mention from a person listed for an organisation the bot has left is turned away, not kept waiting to be
 /// delivered late if the place is switched on again.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_mention_from_an_organisation_the_bot_left_is_not_accepted() {
     let _home = crate::store::temp_home();
     let _sends = Sends;

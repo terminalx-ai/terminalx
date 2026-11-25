@@ -194,7 +194,7 @@ Tauri 2 + React 19 + Vite + Tailwind 4, overlay title bar, vibrancy, icon set.
 
 ### C15 — Settings, updater, usage ✅
 - [x] Settings tabs: General, Appearance, Agents (installed CLIs, paths, capabilities, re-check), Shortcuts, About.
-- [x] Updater plugin with channel; changelog surface (CHANGELOG.md rendered in About). Signing key at `~/.tauri/raccoon.key`; the endpoint is the repository's GitHub Releases feed. The check is manual only — nothing runs on launch or on a timer.
+- [x] Updater plugin with channel; changelog surface (CHANGELOG.md rendered in About). Signing key at `~/.tauri/raccoon.key`; the endpoint is the repository's GitHub Releases feed. A release build checks 15 seconds after launch, every 4 hours and on "Check for updates", never while Data privacy mode is on; installing always waits for Install.
 - [x] App-wide status bar: Claude/Codex usage windows, live reset countdowns,
       and attributed PTY/app resource usage with guarded idle cleanup.
 

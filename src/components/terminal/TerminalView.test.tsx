@@ -234,3 +234,25 @@ describe("the header row", () => {
     bare.unmount();
   });
 });
+
+describe("the Option key setting", () => {
+  it("reaches a terminal already open, and stops once it is disposed", async () => {
+    const { followOptionKey } = await import("./TerminalView");
+    const { setPrefs } = await import("@/lib/prefs");
+    const open = { options: { macOptionIsMeta: true }, dispose: vi.fn() };
+    const closed = { options: { macOptionIsMeta: true }, dispose: vi.fn() };
+    followOptionKey(open);
+    followOptionKey(closed);
+    closed.dispose();
+    try {
+      setPrefs({ optionAsMeta: false });
+      expect(open.options.macOptionIsMeta).toBe(false);
+      expect(closed.options.macOptionIsMeta).toBe(true);
+      setPrefs({ optionAsMeta: true });
+      expect(open.options.macOptionIsMeta).toBe(true);
+    } finally {
+      setPrefs({ optionAsMeta: true });
+      open.dispose();
+    }
+  });
+});
