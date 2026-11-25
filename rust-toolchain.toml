@@ -1,6 +1,14 @@
-# Everyone builds Raccoon with the same toolchain: stable, plus the two
-# components the four checks need. `rustup` installs this on first build.
+# Everyone builds Raccoon with the same toolchain, pinned to one release, plus
+# the two components the four checks need. `rustup` installs it on first build,
+# on every CI job and on every machine.
+#
+# Pinned, not "stable": a new stable release can bring new Clippy lints and
+# fail every pull request at once, with no change of ours (#1514, D5). To bump
+# it, open a one-line pull request that changes `channel` here, with any Clippy
+# fixes the new release needs. CI's cache keys carry `rustc --version`, so the
+# bump starts fresh caches by itself. No workflow names a toolchain of its own:
+# infra/ci-runners/test_rust_toolchain.py holds both.
 [toolchain]
-channel = "stable"
+channel = "1.100.0"
 components = ["clippy", "rustfmt"]
 targets = ["aarch64-apple-darwin"]

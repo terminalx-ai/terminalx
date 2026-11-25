@@ -449,6 +449,23 @@ Keyed by commit, every run saved a new cache, the repository's 10 GB limit
 evicted them within hours, and the macOS jobs, which failed and so never
 saved, built every dependency on every run.
 
+## The Rust toolchain
+
+**Rust is pinned to one release** (the owner's decision, 25 November 2026):
+`rust-toolchain.toml` names `channel = "1.100.0"`, not `stable`, with the
+components `clippy` and `rustfmt` and the target `aarch64-apple-darwin`. Every
+job, and every developer's machine, builds with the release `rustup` installs
+from that file. So a new stable release, with its new Clippy lints, no longer
+fails every pull request at once with no change of ours. No workflow installs
+or picks a toolchain of its own: each runs `rustup show && cargo --version`,
+which installs the pinned release and prints it in the log. To bump it, open
+a one-line pull request that changes `channel`, with any Clippy fixes the new
+release needs. The cache keys carry `rustc --version`, so a bump starts new
+caches by itself. `test_rust_toolchain.py` fails unless the channel is an
+exact `x.y.z` and no workflow picks another toolchain (a toolchain action,
+`rustup default`, `install`, `override` or `run`, `cargo +<toolchain>`,
+`RUSTUP_TOOLCHAIN` or `RUSTC`).
+
 ## macOS Rust coverage
 
 **A pull request is not held to the macOS Rust suite** (the owner's decision,
