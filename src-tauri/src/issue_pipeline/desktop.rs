@@ -29,6 +29,8 @@ pub fn turn_completed(app: &AppHandle, session_id: &str, tab_id: &str, final_mes
         if crate::worker_report::expected(session_id, tab_id) {
             let (session_id, tab_id) = (session_id.to_string(), tab_id.to_string());
             off_thread(app, move |host| host.worker_turn_completed(&session_id, &tab_id, final_message.as_deref()));
+        } else if let Ok(host) = host(app) {
+            host.turn_ended_unowed(session_id, final_message.as_deref());
         }
         return;
     }

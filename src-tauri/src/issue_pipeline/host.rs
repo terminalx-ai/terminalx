@@ -62,10 +62,19 @@ impl LocalHost {
     /// once more when the reply has none.
     pub(crate) fn worker_turn_completed(&self, session_id: &str, tab_id: &str, final_message: Option<&str>) {
         let to = SessionRef { session_id: session_id.into(), tab_id: tab_id.into() };
-        crate::worker_report::turn_completed(final_message, || self.manager.load_events(session_id, tab_id), |prompt| Host::send(self, &to, prompt));
+        let asked_again = crate::worker_report::turn_completed(final_message, || self.manager.load_events(session_id, tab_id), |prompt| Host::send(self, &to, prompt));
         // A run's worker: its piece follows what it just reported.
         // A try that fell short is followed by the next without anything more from here: the read of the run asks its host for that.
         crate::orchestration::engine::worker_turn_ended(&crate::orchestration::host::ManagerHost::new(self.sink.clone(), self.manager.clone()), session_id);
+        // Once the piece has followed it: a bot that asked to check back when a worker reports is woken (#1545).
+        if !asked_again {
+            crate::bots::runs::reported(&self.manager, session_id, final_message, true);
+        }
+    }
+
+    /// A turn ended in a tab that owes no report: a run's lead that ended it with one wakes its bot's check-back.
+    pub(crate) fn turn_ended_unowed(&self, session_id: &str, final_message: Option<&str>) {
+        crate::bots::runs::reported_later(&self.manager, session_id, final_message);
     }
 
     /// The host of a cloud workspace's runtime.
