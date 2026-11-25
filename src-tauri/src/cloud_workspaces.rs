@@ -4728,6 +4728,7 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_general_access_unavailable"
             | "cloud_workspace_groups_unavailable"
             | "cloud_workspace_group_share_not_found"
+            | "cloud_workspace_group_manager_unsupported"
             | "organization_group_not_found"
             | "workspace_following_unavailable"
             | "presence_rate_limited"
@@ -5497,6 +5498,7 @@ mod tests {
             ("409 Conflict", "workspace_reassign_credential_restricted"), ("409 Conflict", "workspace_reassign_runtime_unsupported"),
             ("409 Conflict", "cloud_workspace_member_concurrency_exceeded"), ("409 Conflict", "cloud_teardown_in_progress"),
             ("409 Conflict", "workspace_reassign_idempotency_conflict"), ("409 Conflict", "cloud_workspace_last_admin"),
+            ("409 Conflict", "cloud_workspace_group_manager_unsupported"),
             ("503 Service Unavailable", "workspace_following_unavailable"),
         ] {
             assert!(known_error_code(code));
