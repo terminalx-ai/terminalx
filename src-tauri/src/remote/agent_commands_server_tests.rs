@@ -678,6 +678,7 @@ async fn workspace_transfer_reauthorizes_each_replayed_chunk() {
     let git = |args: &[&str]| crate::workspace_transfer_bundle::git(&f.root, args).unwrap();
     git(&["init", "-q", "-b", "topic"]);
     git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-qm", "Initial"]);
+    git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-qm", "Second"]);
     let session = seed_session(&f.root, "Transfer", None);
     let agent = Agent::new(&session);
     let identity = crate::cloud_agents::Identity { organization_id: "org".into(), workspace_id: "workspace".into() };
@@ -697,7 +698,7 @@ async fn workspace_transfer_reauthorizes_each_replayed_chunk() {
         }).to_string()).unwrap();
     }
 
-    let hello = json!({ "protocol": PROTOCOL, "want": ["workspace-transfer/2"] });
+    let hello = json!({ "protocol": PROTOCOL, "want": ["workspace-transfer/3"] });
     let (admin, _admin_notifications) = Peer::for_user("transfer-device".into(), Authority::Manage, Some("admin".into()));
     let (other, _other_notifications) = Peer::for_user("other-device".into(), Authority::Manage, Some("admin".into()));
     let (viewer, _viewer_notifications) = Peer::for_user("viewer-device".into(), Authority::Participate, Some("viewer".into()));
