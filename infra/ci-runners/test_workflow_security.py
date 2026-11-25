@@ -42,6 +42,9 @@ SELECTED = {
 ANSWERS = ["required", "rust", "frontend", "phone", "mac-webkit", "machines"]
 # Only these may take a macOS runner.
 MACOS = {"macos-native", "machine-compat", "webkit-mac-only"}
+# A pull request is not held to these (the owner's decisions, 24 November 2026): `check` does not need them, and
+# `check-macos` holds every other run to them.
+NOT_HELD = ["macos-native", "webkit-mac-only"]
 # The WebKit layout checks: the Linux parts, the required status that stands for them, and the mac-only ones.
 WEBKIT_PARTS = ["1", "2", "3", "4"]
 WEBKIT_PART_RUN = "node scripts/webkit/run-all.mjs --shard ${{ matrix.part }}/4"
@@ -76,16 +79,16 @@ def load(path):
     return yaml.load(path.read_text(), Loader=yaml.BaseLoader)
 
 
-def gate_passes(workflow, needs):
+def gate_passes(workflow, needs, gate="check"):
     """Run the aggregate's own script against these job results."""
-    script = workflow["jobs"]["check"]["steps"][0]["run"]
+    script = workflow["jobs"][gate]["steps"][0]["run"]
     done = subprocess.run(["bash", "-c", script], env={**os.environ, "RESULTS": json.dumps(needs)}, capture_output=True)
     return done.returncode == 0
 
 
 def results(workflow, skipped=(), ended=None, **answers):
     """Every job succeeded and every answer was "true", but for the jobs `skipped` or `ended` otherwise and for `answers`."""
-    needs = {name: {"result": "success", "outputs": {}} for name in workflow["jobs"] if name != "check"}
+    needs = {name: {"result": "success", "outputs": {}} for name in workflow["jobs"]["check"]["needs"]}
     needs["macos-rust-changes"]["outputs"] = {answer: answers.get(answer, "true") for answer in ANSWERS}
     for name, result in {**{name: "skipped" for name in skipped}, **(ended or {})}.items():
         needs[name]["result"] = result
@@ -206,12 +209,17 @@ def validate(workflow):
     assert workflow["env"]["CI_CACHE_SCOPE"] == CACHE_SCOPE, "cache trust scope"
     jobs = workflow["jobs"]
     assert {"check", "frontend", "webkit-layout"} <= jobs.keys(), "required status names"
-    assert set(jobs["check"]["needs"]) == jobs.keys() - {"check"}, "aggregate must require every job"
+    # A pull request is not held to the macOS Rust suite or the mac-only WebKit checks; every other run is, through check-macos.
+    assert set(jobs["check"]["needs"]) == jobs.keys() - {"check", "check-macos", *NOT_HELD}, "aggregate must require every job but the macOS Rust suite and the mac-only WebKit checks"
     assert jobs["check"]["if"] == "always()", "aggregate must report failures and cancellations"
+    held = jobs.get("check-macos")
+    assert held, "main, nightly and manual runs are held to the macOS jobs"
+    assert held["needs"] == ["check", *NOT_HELD] and held["if"] == "${{ always() && github.event_name != 'pull_request' }}", "main, nightly and manual runs are held to check and the macOS suite"
+    assert held["runs-on"] == "ubuntu-latest" and "permissions" not in held and len(held["steps"]) == 1, "a gate and nothing else"
     gate = jobs["check"]["steps"][0]["run"]
     assert '$selector.result == "success"' in gate, "a skip is accepted on a failed selector's word"
     accepted = re.search(r"(\{[^{}]*\}) as \$selected", gate)
-    assert accepted and json.loads(accepted.group(1)) == SELECTED, "aggregate must reject every other skipped dependency"
+    assert accepted and json.loads(accepted.group(1)) == {name: answer for name, answer in SELECTED.items() if name not in NOT_HELD}, "aggregate must reject every other skipped dependency"
     assert '$selector.outputs[$selected[$job]] == "false"' in gate and "$selected[$job] != null" in gate, "a skip is accepted only on the selector's own answer"
     selector = jobs["macos-rust-changes"]
     assert set(selector["outputs"]) == set(ANSWERS), "the selector's answers"
@@ -222,7 +230,7 @@ def validate(workflow):
             assert job["needs"] == "macos-rust-changes", "selection dependency"
         elif name in {"check", "webkit-layout"}:
             assert job.get("if") == "always()", f"{name} must report a failed or cancelled part"
-        else:
+        elif name != "check-macos":
             assert "if" not in job, "a job the aggregate would see skipped"
         if name in {"macos-native", "machine-compat"}:
             assert job["concurrency"] == {
@@ -630,10 +638,10 @@ class WorkflowSecurity(unittest.TestCase):
         self.rejects(lambda w: self.step(w, "webkit-layout-linux", name="WebKit layout checks").update({"env": {"WEBKIT_MAC_ONLY_TOO": "1"}}))
         self.rejects(lambda w: w["jobs"].pop("webkit-mac-only"))
 
-        def gone_from_check_too(w):
+        def gone_from_main_too(w):
             w["jobs"].pop("webkit-mac-only")
-            w["jobs"]["check"]["needs"].remove("webkit-mac-only")
-        self.rejects(gone_from_check_too)
+            w["jobs"]["check-macos"]["needs"].remove("webkit-mac-only")
+        self.rejects(gone_from_main_too)
         # The checks are still all listed, so only the coverage itself can see them run nowhere.
         with self.assertRaisesRegex(AssertionError, "WebKit checks no job runs"):
             changed = deepcopy(self.workflow)
@@ -666,7 +674,7 @@ class WorkflowSecurity(unittest.TestCase):
 
     def test_webkit_layout_without_its_parts_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["check"]["needs"].remove("webkit-layout-linux"))
-        self.rejects(lambda w: w["jobs"]["check"]["needs"].remove("webkit-mac-only"))
+        self.rejects(lambda w: w["jobs"]["check-macos"]["needs"].remove("webkit-mac-only"))
         self.rejects(lambda w: w["jobs"]["webkit-layout"]["needs"].remove("webkit-layout-linux"))
         self.rejects(lambda w: w["jobs"]["webkit-layout"].update({"if": "success()"}))
         self.rejects(lambda w: w["jobs"]["webkit-layout"].pop("if"))
@@ -713,6 +721,8 @@ class WorkflowSecurity(unittest.TestCase):
         w = self.workflow
         self.assertTrue(gate_passes(w, results(w)))
         for name, answer in SELECTED.items():
+            if name not in w["jobs"]["check"]["needs"]:
+                continue
             with self.subTest(job=name):
                 self.assertTrue(gate_passes(w, results(w, skipped=[name], **{answer: "false"})))
                 # Selected, but it did not run.
@@ -727,12 +737,36 @@ class WorkflowSecurity(unittest.TestCase):
                 for result in ("cancelled", "failure"):
                     self.assertFalse(gate_passes(w, results(w, ended={name: result}, **{answer: "false"})))
         nothing = {answer: "false" for answer in ANSWERS}
-        self.assertTrue(gate_passes(w, results(w, skipped=list(SELECTED), **nothing)))
+        self.assertTrue(gate_passes(w, results(w, skipped=[name for name in SELECTED if name in w["jobs"]["check"]["needs"]], **nothing)))
         # No other job may be skipped, whatever the selector said.
-        for name in set(w["jobs"]) - {"check", *SELECTED}:
+        for name in set(w["jobs"]["check"]["needs"]) - set(SELECTED):
             with self.subTest(job=name):
                 self.assertFalse(gate_passes(w, results(w, skipped=[name], **nothing)))
                 self.assertFalse(gate_passes(w, results(w, ended={name: "failure"})))
+
+    def test_main_is_held_to_the_macos_jobs(self):
+        w = self.workflow
+        ok = {name: {"result": "success"} for name in ["check", *NOT_HELD]}
+        self.assertTrue(gate_passes(w, ok, gate="check-macos"))
+        for job in ok:
+            for result in ("failure", "cancelled", "skipped"):
+                with self.subTest(job=job, result=result):
+                    self.assertFalse(gate_passes(w, {**ok, job: {"result": result}}, gate="check-macos"))
+            # A job left out of the results is not a pass.
+            self.assertFalse(gate_passes(w, {name: r for name, r in ok.items() if name != job}, gate="check-macos"))
+        for job in NOT_HELD:
+            with self.subTest(missing=job):
+                self.rejects(lambda w, job=job: w["jobs"]["check-macos"]["needs"].remove(job))
+        self.rejects(lambda w: w["jobs"]["check-macos"].update({"if": "always()"}))
+        self.rejects(lambda w: w["jobs"]["check-macos"].update({"if": "${{ always() && github.event_name == 'schedule' }}"}))
+        self.rejects(lambda w: w["jobs"].pop("check-macos"))
+
+    def test_a_pull_request_waiting_for_a_macos_job_is_rejected(self):
+        # In check's needs, macos-native would hold the required status for the 45 to 90 minutes it runs, and
+        # webkit-mac-only for its 3 minutes and its wait for a macOS runner.
+        for job in NOT_HELD:
+            with self.subTest(job=job):
+                self.rejects(lambda w, job=job: w["jobs"]["check"]["needs"].append(job))
 
     def test_missing_gate_dependency_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["check"]["needs"].remove("linux-rust"))

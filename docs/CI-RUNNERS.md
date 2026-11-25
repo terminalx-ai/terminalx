@@ -52,7 +52,8 @@ machine, a pull request's edited workflow included.
 | `machines-e2e` | Ubuntu | always; decides in a step | Two machines end to end (PRO-358). |
 | `desktop-platforms` | Ubuntu | always | Off-macOS helper build, Linux renderer and launcher tests. No Rust on Linux: that is `linux-rust` and `linux-rust-tests`. Disabled Windows steps retained. |
 | `legacy-runtime-probe` | Ubuntu | always | Legacy AppImage diagnostics. Its tests set the operating system themselves, so one runner covers Linux and macOS. |
-| `check` | Ubuntu | always | The aggregate. Every other job must succeed. A job in the "Runs" column's frontend, phone, Rust, macOS, mac-webkit or machines rows may be skipped instead, and only when the selector succeeded and answered "false" for it. |
+| `check` | Ubuntu | always | The aggregate. Every other job but `macos-native`, `webkit-mac-only` and `check-macos` must succeed. A job in the "Runs" column's frontend, phone, Rust or machines rows may be skipped instead, and only when the selector succeeded and answered "false" for it. |
+| `check-macos` | Ubuntu | main, nightly, manual | Needs `check`, `macos-native` and `webkit-mac-only`; fails unless all three succeeded. Not a required status: a pull request is not held to the macOS Rust suite or the mac-only WebKit checks ("macOS Rust coverage"). |
 
 All runners are GitHub-hosted. The WebKit checks run in `ci.yml` alone: the
 trial workflow `webkit-linux.yml` that first ran them on Linux is gone.
@@ -238,11 +239,13 @@ Three jobs take one only when they are selected:
 - `webkit-mac-only`: the same events, and pull requests the `mac-webkit` answer
   selects (below).
 
-`macos-rust-changes` decides all three and `check` accepts a skipped macOS job
-on its word alone. On `main`, `macos-native` and `machine-compat` each keep the
-run in progress and the newest waiting commit: an older commit still waiting
-when a newer one arrives is cancelled and its `check` fails. The newest commit
-of a burst of merges is always tested.
+`macos-rust-changes` decides all three. `check` accepts a skipped
+`machine-compat` on its word alone, and does not wait for `macos-native` or
+`webkit-mac-only` at all. On `main`, `macos-native` and `machine-compat` each
+keep the run in progress and the newest waiting commit: an older commit still
+waiting when a newer one arrives is cancelled, and its `check` (for
+`machine-compat`) or its `check-macos` (for `macos-native`) fails. The newest
+commit of a burst of merges is always tested.
 
 ### The WebKit layout checks
 
@@ -292,11 +295,21 @@ list. The answer fails closed: a check in `macOnly` with no entry of its own in
 the job on every frontend change, and `test_macos_rust.py` fails when an entry
 is missing or names a path that is not in the tree.
 
-**What is left to `main`:** a mac-only check broken by a pull request the
-answer does not select (a product file outside those paths that changes what a
-mac-only check measures, such as a component the transcript renders from
-another folder) is found on `main`, after the merge, by `webkit-mac-only` on
-the push. Every other WebKit check runs on every frontend pull request.
+**A pull request is not held to the mac-only checks** (the owner's decision,
+24 November 2026). On #1530's three runs the job ran 3.0 to 3.4 minutes but
+waited 9, 20 and 24 minutes for a macOS runner, and the selector picks it on 23
+of the last 60 pull requests merged into `main`. So `check` does not need it:
+a selected pull request shows its result for the reviewer, red or green, and
+can merge either way. `check-macos` holds every push to `main`, nightly and
+manual run to it, as it holds them to `macos-native` ("macOS Rust coverage").
+
+**What is left to `main`:** a break in one of the six mac-only checks is found
+on `main` after the merge, by `webkit-mac-only` on the push and `check-macos`.
+That is any pull request the answer does not select (a product file outside
+those paths that changes what a mac-only check measures, such as a component
+the transcript renders from another folder), and a selected one merged with
+its `webkit-mac-only` red. Every other WebKit check runs on every frontend pull
+request.
 
 The legacy runtime diagnostic's macOS leg is gone: its tests patch
 `platform.system` to Linux and to Darwin themselves.
@@ -368,6 +381,22 @@ evicted them within hours, and the macOS jobs, which failed and so never
 saved, built every dependency on every run.
 
 ## macOS Rust coverage
+
+**A pull request is not held to the macOS Rust suite** (the owner's decision,
+24 November 2026). `check`, the required status, does not need
+`macos-native`, so it reports as soon as the Linux jobs and `webkit-layout`
+have, without waiting the 45 to 90 minutes the macOS job takes. On a pull
+request the selector still starts `macos-native` when the change needs it
+(below), and its result shows as its own job; a red one there is information
+for the reviewer, not a block. Pushes to `main`, nightly and manual runs are
+held to it as before, by `check-macos`, which needs `check`, `macos-native`
+and `webkit-mac-only` and fails unless all three succeeded; `release-serve.yml`
+follows that run's conclusion. The mac-only WebKit checks follow the same rule
+("The WebKit layout checks"). So an Apple-only failure can now first fail on `main`,
+and the policy tests pin that `check` never needs `macos-native` or
+`webkit-mac-only` again (either would hold the required status for its run and
+its wait for a macOS runner), that `check-macos` needs both, and that it runs
+on every event but a pull request.
 
 The full macOS suite runs on pushes to `main`, nightly at 02:23 UTC and on
 manual workflow dispatch. A selected pull request runs the filtered part of it
