@@ -137,7 +137,11 @@ export function RepositoriesStep({ api, orgId, organization, repositories, probl
     <Notice testID="github-outcome" tone={over.outcome.tone} text={over.outcome.text} />
     {over.outcome.connected
       ? <><Button testID="choose-repositories" label="Choose repositories" onPress={() => choose(over.installationId)} /><Help>{WORDS.connectedHelp}</Help></>
-      : over.outcome.again && app?.configured && app.canManage ? <Button testID="connect-again" label={over.outcome.again} onPress={connect.connect} /> : null}
+      : over.outcome.again && app?.configured && app.canManage ? <>
+        <Button testID="connect-again" label={over.outcome.again} onPress={connect.connect} />
+        <Button testID="connect-installed" label={WORDS.existing} kind="secondary" onPress={connect.connectExisting} />
+        <Help>{WORDS.existingHelp}</Help>
+      </> : null}
   </> : null;
   const chosenBlock = chosen.length ? <>
     <SectionTitle>Chosen</SectionTitle>
@@ -266,6 +270,8 @@ function ConnectCard({ connect }: { connect: Connect }) {
     {head(<View style={[styles.mark, { backgroundColor: palette.raised, borderColor: palette.border }]}><GitFork size={20} color={palette.ink} /></View>, "Connect GitHub", WORDS.connectDetail)}
     <Text style={[styles.text, { color: palette.muted }]}>{WORDS.connectHow}</Text>
     <Button testID="connect-github" label="Connect GitHub" disabled={starting} accessibilityState={{ disabled: starting, busy: starting }} onPress={connect.connect} />
+    <Button testID="connect-installed" label={WORDS.existing} kind="secondary" disabled={starting} onPress={connect.connectExisting} />
+    <Text style={[styles.detail, { color: palette.muted }]}>{WORDS.existingHelp}</Text>
   </View></Card>;
 }
 
@@ -277,7 +283,7 @@ function WaitingCard({ connect, state, head }: { connect: Connect; state: Extrac
   return <>
     <Card testID="github-waiting"><View style={styles.pad}>
       {head(<Spinner size={20} color={palette.accent} />, "Waiting for GitHub")}
-      <Text style={[styles.text, { color: palette.muted }]}>{WORDS.waiting}</Text>
+      <Text style={[styles.text, { color: palette.muted }]}>{state.existing ? WORDS.waitingExisting : WORDS.waiting}</Text>
       <Text testID="github-ends" style={[styles.detail, styles.number, { color: palette.faint }]}>{`This attempt ends in ${clockText(left)}.`}</Text>
       <View style={styles.pair}>
         <Button testID="open-github-again" label="Open GitHub again" kind="secondary" style={styles.grow} disabled={busy} onPress={connect.reopen} />

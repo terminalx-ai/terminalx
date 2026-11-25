@@ -102,7 +102,7 @@ describe("before GitHub is connected", () => {
   it("leads with Connect GitHub for an owner or admin, with the typed URL under it", async () => {
     const service = await repositories("admin");
     expect(service.sent("GET", "/github-app")).toHaveLength(1);
-    expect(text("github-connect")).toBe("Connect GitHubChoose repositories from a list, private ones included.You finish on GitHub, in the browser, then come back here.Connect GitHub");
+    expect(text("github-connect")).toBe("Connect GitHubChoose repositories from a list, private ones included.You finish on GitHub, in the browser, then come back here.Connect GitHubThe app is already installedFor a GitHub account that already has the TerminalX app, with nothing to change on GitHub. It works only with the GitHub account linked to your TerminalX sign-in.");
     expect(page.container.textContent).toContain("Optional. Each repository is cloned before the workspace becomes available.");
     expect(page.container.textContent).toContain("OR TYPE A URL");
     expect(field("repository-url")).not.toBeNull();
@@ -172,6 +172,47 @@ describe("connecting", () => {
     // Nothing was canceled, and the status was read again.
     expect(service.sent("POST", "/github-app/connect-attempts/ghattempt_1/cancel")).toHaveLength(0);
     expect(service.sent("GET", "/github-app").length).toBeGreaterThan(1);
+  });
+
+  it("connects an App that is already installed through the resume address, which is the one that comes back", async () => {
+    const service = await repositories("admin");
+    await press("connect-installed");
+    expect(service.sent("POST", "/github-app/connect-attempts").map((call) => call.body)).toEqual([{}]);
+    expect(sheet()).toMatchObject({ url: "https://github.com/login/oauth/authorize?client_id=Iv1&state=secret-1", returnUrl: "terminalx://github-app/connect", options: { preferEphemeralSession: false } });
+    expect(page.container.innerHTML).not.toContain("secret-1");
+    // Nothing is installed this time: only the confirmation is left.
+    expect(text("github-waiting")).toContain("Finish in your browser: confirm the organization on the TerminalX page. This updates once you confirm.");
+    // Android: back in the app with the attempt open, GitHub opens again at the same address.
+    await endSheet({ type: "dismiss" });
+    await press("open-github-again");
+    expect(mocks.sheets[1]!.url).toBe(mocks.sheets[0]!.url);
+    service.github.finish("ghattempt_1", { connected: northwind });
+    await endSheet(cameBack());
+    expect(text("github-outcome")).toContain("Connected northwind-labs.");
+  });
+
+  it("offers the already-installed way again after an attempt that ended without connecting", async () => {
+    const service = await repositories("admin");
+    await press("connect-github");
+    // Installed on GitHub, then the sheet closed before the TerminalX page was confirmed: the App stays installed.
+    await endSheet({ type: "cancel" });
+    expect(text("github-outcome")).toBe("The browser was closed before GitHub finished. Nothing was connected.");
+    await press("connect-installed");
+    expect(service.sent("POST", "/github-app/connect-attempts")).toHaveLength(2);
+    expect(sheet().url).toBe("https://github.com/login/oauth/authorize?client_id=Iv1&state=secret-2");
+  });
+
+  it("opens the install page when the server gives no resume address", async () => {
+    const service = await repositories("admin");
+    service.state.answer = (call) => {
+      if (call.path !== "/github-app/connect-attempts") return undefined;
+      const answer = service.github.handle(call, "admin") as { body: Record<string, unknown> };
+      const { resumeUrl: _none, ...body } = answer.body;
+      return { body };
+    };
+    await press("connect-installed");
+    expect(sheet().url).toBe("https://github.com/apps/terminalx-cloud/installations/new?state=secret-1");
+    expect(text("github-waiting")).toContain("install the app on GitHub");
   });
 
   it("says it is checking while the server is asked", async () => {
@@ -434,6 +475,40 @@ describe("choosing for the organization", () => {
     expect(text("save-repositories")).toBe("Save · 1 chosen");
     await press("save-repositories");
     expect(service.github.state.repositories.map((repository) => repository.fullName)).toEqual(["northwind-labs/checkout"]);
+  });
+
+  it("asks GitHub itself once after a refused save, and the next search uses the server's own list again", async () => {
+    const service = await connected();
+    await press("grant-northwind-labs/checkout");
+    await press("grant-northwind-labs/docs");
+    service.github.state.granted.set(NORTHWIND, northwindGrants.filter((grant) => grant.githubRepositoryId !== 106));
+    await press("save-repositories");
+    const lists = () => service.calls.filter((call) => call.path.startsWith(`/github-app/installations/${NORTHWIND}/repositories`)).map((call) => call.path.split("repositories")[1]);
+    expect(lists().at(-1)).toBe("?refresh=1");
+    await page.type(field("organization-search"), "api");
+    await pass(SEARCH_PAUSE_MS);
+    expect(lists().at(-1)).toBe("?query=api");
+    await page.type(field("organization-search"), "");
+    await pass(SEARCH_PAUSE_MS);
+    expect(lists().at(-1)).toBe("");
+    expect(lists().filter((asked) => asked.includes("refresh"))).toHaveLength(1);
+  });
+
+  it("names what a save drops from a suspended account, and does not call that the person's unsaved work", async () => {
+    const acme = { ...northwind, id: "ghinst_acme", installationId: 222, accountLogin: "acme", state: "suspended" };
+    const service = await connected((made) => {
+      made.github.choose(["checkout"]);
+      made.github.connectInstallation(acme, [{ githubRepositoryId: 901, fullName: "acme/site", defaultBranch: "main", private: true }]);
+      made.github.state.repositories.push({ id: "ghrepo_901", installationId: "ghinst_acme", githubRepositoryId: 901, fullName: "acme/site", cloneUrl: "https://github.com/acme/site.git", defaultBranch: "main", private: true, state: "installation-suspended", reason: null, lastVerifiedAt: 0 });
+    });
+    expect(text("organization-dropped")).toBe("These chosen repositories cannot be reached now, because their installation is suspended or uninstalled on GitHub, and are removed when you save: acme/site.");
+    // A save would change the set, so it is offered; nothing was ticked, so leaving asks nothing.
+    expect(disabled("save-repositories")).toBe(false);
+    await page.press(page.byLabel("Back"));
+    await pass();
+    expect(alert).not.toHaveBeenCalled();
+    expect(page.byId("organization-list")).toBeNull();
+    void service;
   });
 
   it("asks before leaving with ticks that are not saved", async () => {

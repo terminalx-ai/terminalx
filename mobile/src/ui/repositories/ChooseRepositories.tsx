@@ -3,7 +3,7 @@ import { Alert, Keyboard, View } from "react-native";
 import * as WebBrowser from "expo-web-browser";
 import { ExternalLink, FolderGit2, SearchX } from "lucide-react-native";
 import { CloudApiError, MAX_GITHUB_QUERY, MAX_GITHUB_REPOSITORIES, type CloudApi, type CloudGithubApp, type GithubLiveRepositories } from "@mobile/cloud/api";
-import { WORDS, chooseableInstallations, githubRefusal, missingNote, openedDraft, setChanged, setChoices, toggled, type SetDraft } from "@mobile/cloud/github";
+import { WORDS, chooseableInstallations, githubRefusal, droppedNote, missingNote, openedDraft, setChanged, setChoices, setDropped, setEdited, toggled, type SetDraft } from "@mobile/cloud/github";
 import { ChoiceSheet } from "../ChoiceSheet";
 import { Notice } from "../Notice";
 import { PickRow } from "../PickRow";
@@ -46,9 +46,10 @@ export function ChooseRepositories({ api, orgId, app, installationId: opened, pa
   const [saving, setSaving] = useState(false);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
-  // `refresh`: this read asks GitHub itself, not the server's list of the last minute.
-  const [read, setRead] = useState({ turn: 0, refresh: false });
-  const asked = `${installationId}\n${query}\n${read.turn}`;
+  const [turn, setTurn] = useState(0);
+  // The one read that asks GitHub itself, not the server's list of the last minute: used up by that read, so a later search is not one.
+  const fresh = useRef<number | null>(null);
+  const asked = `${installationId}\n${query}\n${turn}`;
   const loading = answered !== asked;
   const status = useRef(app);
   useEffect(() => { status.current = app; });
@@ -62,7 +63,8 @@ export function ChooseRepositories({ api, orgId, app, installationId: opened, pa
 
   useEffect(() => {
     let current = true;
-    const refresh = read.refresh;
+    const refresh = fresh.current === turn;
+    fresh.current = null;
     api.githubRepositories(orgId, installationId, { query, refresh }).then((live) => {
       if (!current) return;
       setList(live);
@@ -81,13 +83,18 @@ export function ChooseRepositories({ api, orgId, app, installationId: opened, pa
       setAnswered(asked);
     });
     return () => { current = false; };
-  }, [api, orgId, installationId, query, read, asked]);
+  }, [api, orgId, installationId, query, turn, asked]);
 
-  const again = (refresh: boolean) => setRead((was) => ({ turn: was.turn + 1, refresh }));
+  // Counted from the turn as it is then, not as it was when a browser page was opened.
+  const again = (refresh: boolean) => setTurn((was) => { fresh.current = refresh ? was + 1 : null; return was + 1; });
   const shown = list && list.installation.id === installationId ? list : null;
   const ticked = draft[installationId] ?? [];
   const total = setChoices(draft, app).length;
   const changed = setChanged(draft, app);
+  // Leaving asks only about what the person ticked; what a save drops by itself is not their unsaved work.
+  const edited = setEdited(draft, app);
+  // Dropped by any save, and not already named under this installation's list as no longer granted.
+  const dropped = setDropped(app).filter((repository) => !(repository.installationId === installationId && shown?.missing.some((missing) => missing.githubRepositoryId === repository.githubRepositoryId)));
   const tooMany = total > MAX_GITHUB_REPOSITORIES;
   const manageUrl = shown?.manageUrl ?? installations.find((installation) => installation.id === installationId)?.manageUrl;
   // GitHub's own page for the installation, in the browser over the app; what it grants is read again on the way back.
@@ -113,7 +120,7 @@ export function ChooseRepositories({ api, orgId, app, installationId: opened, pa
   };
 
   const leave = () => {
-    if (!changed || saving) return onBack();
+    if (!edited || saving) return onBack();
     Alert.alert("Leave without saving?", "The repositories you chose are not saved for the organization yet.", [
       { text: "Keep choosing", style: "cancel" },
       { text: "Leave", style: "destructive", onPress: onBack },
@@ -126,6 +133,7 @@ export function ChooseRepositories({ api, orgId, app, installationId: opened, pa
       <Lede small>{WORDS.organizationLede}</Lede>
       {installations.length > 1 ? <Card><PickRow testID="pick-github-account" label="GitHub account" value={account?.accountLogin ?? "Choose"} onPress={() => { Keyboard.dismiss(); setPicking(true); }} first /></Card> : null}
       {refusal ? <Notice testID="save-refusal" tone="danger" text={refusal} /> : null}
+      {shown && dropped.length ? <Help testID="organization-dropped">{droppedNote(dropped.map((repository) => repository.fullName))}</Help> : null}
       {failure && !loading ? <Notice testID="list-failed" tone="danger" text={failure} action={{ label: "Try again", onPress: () => again(false) }} />
         : !shown ? <>
           <TextField testID="organization-search" accessibilityLabel="Search repositories" value={typed} onChangeText={setTyped} placeholder="Search repositories" disabled />

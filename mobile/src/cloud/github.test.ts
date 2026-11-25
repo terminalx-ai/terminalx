@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { CloudApiError, type CloudGithubApp } from "./api";
-import { CANCELED, CANCELED_ON_PAGE, LEFT_BROWSER, branchHelp, connectOutcome, githubRefusal, githubReturn, launchRepository, matchesSearch, openedDraft, repositoriesView, repositoryProblem, returnedAttempt, setChanged, setChoices, startRefusal, suspendedInstallations, toggled } from "./github";
+import { CANCELED, CANCELED_ON_PAGE, LEFT_BROWSER, branchHelp, connectOutcome, githubRefusal, githubReturn, launchRepository, matchesSearch, openedDraft, repositoriesView, repositoryProblem, returnedAttempt, setChanged, setChoices, setDropped, setEdited, startRefusal, suspendedInstallations, toggled } from "./github";
 
 // PRO-537: connecting GitHub and choosing repositories from the phone (25.11).
 
@@ -157,6 +157,18 @@ describe("the launch picker", () => {
   });
 });
 
+describe("what any save drops", () => {
+  it("names the chosen repositories no installation can reach, whichever list is open, and is not the person's edit", () => {
+    const set = app({ installations: [installation(), installation({ id: "ghinst_2", accountLogin: "acme", state: "suspended" })], repositories: [chosen(1, "checkout"), chosen(7, "site", { installationId: "ghinst_2", state: "installation-suspended", fullName: "acme/site" })] });
+    expect(setDropped(set)).toEqual([{ installationId: "ghinst_2", githubRepositoryId: 7, fullName: "acme/site" }]);
+    // Opening the other account's list ticks nothing: no edit, yet a save would change the set.
+    const opened = openedDraft({}, set, { installation: { id: "ghinst_1", accountLogin: "northwind-labs", state: "connected" }, repositories: [{ githubRepositoryId: 1, fullName: "northwind-labs/checkout", private: true, selected: true }] });
+    expect(setEdited(opened, set)).toBe(false);
+    expect(setChanged(opened, set)).toBe(true);
+    expect(setChoices(opened, set)).toEqual([{ installationId: "ghinst_1", githubRepositoryId: 1 }]);
+  });
+});
+
 describe("the organization's set while it is chosen", () => {
   const list = (ids: number[], selected: number[] = []) => ({ installation: { id: "ghinst_1", accountLogin: "northwind-labs", state: "connected" }, repositories: ids.map((githubRepositoryId) => ({ githubRepositoryId, fullName: `northwind-labs/r${githubRepositoryId}`, private: true, selected: selected.includes(githubRepositoryId) })) });
 
@@ -181,6 +193,9 @@ describe("the organization's set while it is chosen", () => {
     expect(setChanged(opened, set)).toBe(false);
     expect(setChanged(toggled(opened, "ghinst_1", 2), set)).toBe(true);
     expect(setChanged(toggled(toggled(opened, "ghinst_1", 2), "ghinst_1", 2), set)).toBe(false);
+    // Nothing was ticked, so nothing of the person's is unsaved.
+    expect(setEdited(opened, set)).toBe(false);
+    expect(setEdited(toggled(opened, "ghinst_1", 2), set)).toBe(true);
     // A chosen repository that stopped working is dropped by a save, so there is something to save.
     expect(setChanged({}, app({ installations: [installation()], repositories: [chosen(3, "gone", { state: "missing" })] }))).toBe(true);
   });

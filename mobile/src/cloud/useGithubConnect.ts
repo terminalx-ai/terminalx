@@ -52,7 +52,7 @@ export type GithubConnect =
   /** The attempt is being asked for. */
   | { phase: "starting" }
   /** The attempt waits on the browser. `browser`: the sign-in sheet is open over the page. `canceling`: Cancel was pressed and is being asked for. `problem`: why the last Cancel did not go through. */
-  | { phase: "waiting"; expiresAt: number; browser: boolean; canceling?: boolean; problem?: string }
+  | { phase: "waiting"; expiresAt: number; browser: boolean; existing: boolean; canceling?: boolean; problem?: string }
   /** Back from the browser: the server is asked how the attempt ended. */
   | { phase: "checking" }
   /** Over: connected, or why not. `installationId` is the one just connected. */
@@ -69,9 +69,10 @@ export type GithubConnect =
  * Leaving the page, or closing the browser while the attempt still waits,
  * cancels it, so it cannot be finished from the browser later.
  */
-export function useGithubConnect(api: GithubApi, orgId: string, onSettled: () => void): { state: GithubConnect; now(): number; connect(): void; reopen(): void; cancel(): void; dismiss(): void } {
+export function useGithubConnect(api: GithubApi, orgId: string, onSettled: () => void): { state: GithubConnect; now(): number; connect(): void; connectExisting(): void; reopen(): void; cancel(): void; dismiss(): void } {
   const [state, setState] = useState<GithubConnect>({ phase: "idle" });
-  const attempt = useRef<GithubConnectStart | null>(null);
+  // `existing`: this attempt opens the address that connects an App already installed, with nothing to change on GitHub.
+  const attempt = useRef<(GithubConnectStart & { existing: boolean }) | null>(null);
   const browsing = useRef(false);
   const asking = useRef(false);
   const alive = useRef(true);
@@ -123,20 +124,21 @@ export function useGithubConnect(api: GithubApi, orgId: string, onSettled: () =>
       const answer = await api.cancelGithubConnect(orgId, mine.attemptId);
       if (attempt.current !== mine) return;
       // Canceling an attempt that already ended returns how it ended: connected, when the browser won the race.
-      if (!settle(answer, ended) && alive.current) setState({ phase: "waiting", expiresAt: mine.expiresAt, browser: browsing.current });
+      if (!settle(answer, ended) && alive.current) setState({ phase: "waiting", expiresAt: mine.expiresAt, browser: browsing.current, existing: mine.existing });
     } catch (error) {
       // Not canceled as far as is known: the attempt keeps waiting, and the page keeps asking.
-      if (attempt.current === mine && alive.current) setState({ phase: "waiting", expiresAt: mine.expiresAt, browser: browsing.current, problem: githubRefusal(error) });
+      if (attempt.current === mine && alive.current) setState({ phase: "waiting", expiresAt: mine.expiresAt, browser: browsing.current, existing: mine.existing, problem: githubRefusal(error) });
     }
   }, [api, orgId, settle]);
 
   /** Open GitHub in the system's sign-in browser, and act on how that session ends. */
-  const browse = useCallback(async (mine: GithubConnectStart) => {
+  const browse = useCallback(async (mine: GithubConnectStart & { existing: boolean }) => {
     browsing.current = true;
     let result: { type: string; url?: string };
     try {
       // The platform's sign-in session, not a web view, and not a private one: the person's GitHub sign-in in the browser is used.
-      result = await WebBrowser.openAuthSessionAsync(mine.installUrl, GITHUB_RETURN_URL, { preferEphemeralSession: false });
+      // An App that is already installed sends no redirect from its install page: only the resume address comes back with the attempt.
+      result = await WebBrowser.openAuthSessionAsync(mine.existing && mine.resumeUrl ? mine.resumeUrl : mine.installUrl, GITHUB_RETURN_URL, { preferEphemeralSession: false });
     } catch {
       result = { type: "failed" };
     }
@@ -157,35 +159,41 @@ export function useGithubConnect(api: GithubApi, orgId: string, onSettled: () =>
     // The person closed the sheet (iOS's Cancel) with the attempt still waiting: it is ended, so the browser cannot finish it later.
     if (result.type === "cancel" && !returned) return end("closed");
     // Otherwise the app is back with the attempt still open (Android's tab may live on): the page waits, and can open GitHub again.
-    setState({ phase: "waiting", expiresAt: mine.expiresAt, browser: false });
+    setState({ phase: "waiting", expiresAt: mine.expiresAt, browser: false, existing: mine.existing });
   }, [api, orgId, ask, end]);
 
-  const connect = useCallback(() => {
+  const start = useCallback((existing: boolean) => {
     if (attempt.current || state.phase === "starting" || state.phase === "checking") return;
     setState({ phase: "starting" });
     void api.startGithubConnect(orgId).then((started) => {
       if (!alive.current) return void api.cancelGithubConnect(orgId, started.attemptId).catch(() => undefined);
-      attempt.current = started;
-      setState({ phase: "waiting", expiresAt: started.expiresAt, browser: true });
-      void browse(started);
+      // A server that gives no resume address has only the install page to open.
+      const mine = { ...started, existing: existing && !!started.resumeUrl };
+      attempt.current = mine;
+      setState({ phase: "waiting", expiresAt: mine.expiresAt, browser: true, existing: mine.existing });
+      void browse(mine);
     }, (error: unknown) => {
       if (!alive.current) return;
       setState({ phase: "ended", outcome: startRefusal(error), installationId: null });
       settled.current();
     });
   }, [api, orgId, browse, state.phase]);
+  /** Install the App on a GitHub account, or change what it grants. */
+  const connect = useCallback(() => start(false), [start]);
+  /** Connect an App that is already installed on the account, with nothing to change on GitHub. */
+  const connectExisting = useCallback(() => start(true), [start]);
 
   const reopen = useCallback(() => {
     const mine = attempt.current;
     if (!mine || browsing.current) return;
-    setState({ phase: "waiting", expiresAt: mine.expiresAt, browser: true });
+    setState({ phase: "waiting", expiresAt: mine.expiresAt, browser: true, existing: mine.existing });
     void browse(mine);
   }, [browse]);
 
   const cancel = useCallback(() => {
     const mine = attempt.current;
     if (!mine) return;
-    setState({ phase: "waiting", expiresAt: mine.expiresAt, browser: browsing.current, canceling: true });
+    setState({ phase: "waiting", expiresAt: mine.expiresAt, browser: browsing.current, existing: mine.existing, canceling: true });
     void end("cancel");
   }, [end]);
 
@@ -228,5 +236,5 @@ export function useGithubConnect(api: GithubApi, orgId: string, onSettled: () =>
     };
   }, [api, orgId]);
 
-  return { state, now: api.serverNow, connect, reopen, cancel, dismiss };
+  return { state, now: api.serverNow, connect, connectExisting, reopen, cancel, dismiss };
 }

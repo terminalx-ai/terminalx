@@ -121,6 +121,19 @@ name: Repositories (25.11)
 - assertVisible: "The browser was closed before GitHub finished. Nothing was connected."
 - waitForAnimationToEnd
 - takeScreenshot: 25.11-14-browser-closed-early
+# The App is already installed: the resume address opens, in the same sign-in sheet.
+- tapOn:
+    id: connect-installed
+- extendedWaitUntil:
+    visible: "Continue"
+    timeout: 10000
+- tapOn: "Continue"
+- extendedWaitUntil:
+    visible: "Cancel"
+    timeout: 15000
+- takeScreenshot: 25.11-17-already-installed-in-the-sheet
+- tapOn: "Cancel"
+- assertVisible: "The browser was closed before GitHub finished. Nothing was connected."
 # A member: who can connect, and the typed URL.
 - launchApp:
     stopApp: true

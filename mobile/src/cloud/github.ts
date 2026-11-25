@@ -68,8 +68,8 @@ const START = "Connect GitHub";
  * for the two codes the desktop has none for, the server's result page's
  * (`api.githubAppChooseInstallation`, `api.githubAppTooManyInstallations`).
  * `github_resume_identity_mismatch` is deliberately not here and gets the
- * plain fallback: its page sentence carries security advice whose wording is
- * the owner's to approve.
+ * plain fallback, by the owner's decision on PRO-537 (question 6): its page
+ * sentence carries security advice, which the phone does not repeat.
  */
 const FAILED: Record<string, { tone: GithubTone; text: string; again: string | null }> = {
   github_installation_unverified: { tone: "danger", again: AGAIN, text: "GitHub did not confirm that the account signed in to GitHub in your browser can manage this installation. Sign in to GitHub as an owner of the organization (or as the user) you are installing on, then connect again." },
@@ -220,6 +220,9 @@ export const WORDS = {
   connectHow: "You finish on GitHub, in the browser, then come back here.",
   ask: "No GitHub installation is connected yet. Only owners and admins can connect GitHub or choose repositories.",
   waiting: "Finish in your browser: install the app on GitHub, then confirm the organization on the TerminalX page. This updates once you confirm.",
+  waitingExisting: "Finish in your browser: confirm the organization on the TerminalX page. This updates once you confirm.",
+  existing: "The app is already installed",
+  existingHelp: "For a GitHub account that already has the TerminalX app, with nothing to change on GitHub. It works only with the GitHub account linked to your TerminalX sign-in.",
   checking: "Back from the browser. TerminalX is asking the account service how it ended.",
   connectedHelp: "Only owners and admins choose them. Every member can then pick from them at launch.",
   typedToken: "A private repository is cloned with the GitHub token saved in Agent logins.",
@@ -278,7 +281,29 @@ export function setChoices(draft: SetDraft, app: Pick<CloudGithubApp, "installat
   return [...installations].flatMap((installationId) => (draft[installationId] ?? stored(app, installationId)).map((githubRepositoryId) => ({ installationId, githubRepositoryId })));
 }
 
-/** Whether saving would change the organization's set. */
+/**
+ * Chosen repositories that no installation can reach now (no longer granted,
+ * or their installation suspended or uninstalled). The server takes no entry
+ * for them, so any save removes them from the organization's set, whichever
+ * installation's list is open.
+ */
+export function setDropped(app: Pick<CloudGithubApp, "repositories">): { installationId: string; githubRepositoryId: number; fullName: string }[] {
+  return app.repositories.filter((repository) => repository.state !== "accessible").map(({ installationId, githubRepositoryId, fullName }) => ({ installationId, githubRepositoryId, fullName }));
+}
+
+/** The line that names them, for the ones the open list does not already name as no longer granted. */
+export const droppedNote = (names: readonly string[]): string =>
+  `These chosen repositories cannot be reached now, because their installation is suspended or uninstalled on GitHub, and are removed when you save: ${names.join(", ")}.`;
+
+/** Whether the person ticked or unticked anything: an installation's ticks differ from what is saved of it and still works. */
+export function setEdited(draft: SetDraft, app: Pick<CloudGithubApp, "repositories">): boolean {
+  return Object.entries(draft).some(([installationId, ticked]) => {
+    const before = new Set(stored(app, installationId));
+    return ticked.length !== before.size || ticked.some((githubRepositoryId) => !before.has(githubRepositoryId));
+  });
+}
+
+/** Whether saving would change the organization's set: by the person's ticks, or by dropping what cannot be reached. */
 export function setChanged(draft: SetDraft, app: Pick<CloudGithubApp, "installations" | "repositories">): boolean {
   const key = (choice: GithubRepositoryChoice) => `${choice.installationId}\u0000${choice.githubRepositoryId}`;
   const before = new Set(app.repositories.map(key));
