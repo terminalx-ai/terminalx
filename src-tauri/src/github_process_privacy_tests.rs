@@ -894,25 +894,46 @@ mod media;
 #[path = "git_pull_privacy_tests.rs"]
 mod pull;
 
+// One test per (policy, part): each is an independent run of this binary
+// with its own home, so nextest runs the four in parallel.
 #[test]
-fn privacy_contains_identity_and_simple_openssh() {
-    for managed in [false, true] {
-        let root = tempfile::tempdir().unwrap();
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "github_process::tests::privacy_native_ssh_child", "--nocapture"])
-            .env("TERMINALX_TEST_GITHUB_ENTRIES", if managed { "managed" } else { "personal" })
-            .env("TERMINALX_HOME", root.path().canonical().unwrap()).output().unwrap();
-        assert!(output.status.success(), "policy={managed}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-        print!("{}", String::from_utf8_lossy(&output.stdout));
-    }
+fn privacy_contains_identity_and_simple_openssh_personal_identity() {
+    privacy_contains_identity_and_simple_openssh(false, "identity");
+}
+
+#[test]
+fn privacy_contains_identity_and_simple_openssh_personal_transfer() {
+    privacy_contains_identity_and_simple_openssh(false, "transfer");
+}
+
+#[test]
+fn privacy_contains_identity_and_simple_openssh_managed_identity() {
+    privacy_contains_identity_and_simple_openssh(true, "identity");
+}
+
+#[test]
+fn privacy_contains_identity_and_simple_openssh_managed_transfer() {
+    privacy_contains_identity_and_simple_openssh(true, "transfer");
+}
+
+fn privacy_contains_identity_and_simple_openssh(managed: bool, part: &str) {
+    let root = tempfile::tempdir().unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "github_process::tests::privacy_native_ssh_child", "--nocapture"])
+        .env("TERMINALX_TEST_GITHUB_ENTRIES", if managed { "managed" } else { "personal" })
+        .env("TERMINALX_TEST_NATIVE_SSH", part)
+        .env("TERMINALX_HOME", root.path().canonical().unwrap()).output().unwrap();
+    assert!(output.status.success(), "policy={managed}/{part}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    print!("{}", String::from_utf8_lossy(&output.stdout));
 }
 
 #[test]
 fn privacy_native_ssh_child() {
     let Ok(kind) = std::env::var("TERMINALX_TEST_GITHUB_ENTRIES") else { return };
+    let part = std::env::var("TERMINALX_TEST_NATIVE_SSH").expect("the part of the OpenSSH run: identity or transfer");
     let root = store::root().unwrap();
     fixture(&root);
-    pull::native_review_ssh(&root, kind == "managed");
+    pull::native_review_ssh(&root, kind == "managed", &part);
 }
 
 #[test]
