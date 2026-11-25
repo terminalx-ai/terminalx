@@ -33,7 +33,7 @@ vi.mock("@/lib/cloudCatalog", async (importOriginal) => ({
   refreshCloudCatalog: mocks.refreshCatalog,
 }));
 vi.mock("@/lib/account", () => {
-  const account = { status: { state: "signed-in", identity: { name: null, email: "a@b.c", organization: "Acme", organizationId: "org-1" }, expiresAt: null, lastError: null, get phase2Readiness() { return mocks.readiness; }, get memberWorkspaces() { return mocks.memberWorkspaces; }, organizations: [{ id: "org-1", name: "Acme", cloud: { enabled: true, flags: {} }, get role() { return mocks.role; } }] } };
+  const account = { status: { state: "signed-in", identity: { name: null, email: "a@b.c", organization: "Acme", organizationId: "org-1" }, expiresAt: null, lastError: null, context: { scope: "scope", revision: "revision" }, get phase2Readiness() { return mocks.readiness; }, get memberWorkspaces() { return mocks.memberWorkspaces; }, organizations: [{ id: "org-1", name: "Acme", cloud: { enabled: true, flags: {} }, get role() { return mocks.role; } }] } };
   return { useAccount: () => account, getAccount: () => account, subscribeAccount: () => () => undefined, refreshAccount: vi.fn() };
 });
 vi.mock("@/lib/dataPrivacy", async (original) => ({
@@ -257,12 +257,13 @@ class FakeRuntime implements WorkspaceTransport {
       runtimeGeneration: this.generation,
       runtimeEpoch: this.epoch,
       runtimeVersion: "0.3.0",
-      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", ...this.composer(), ...(this.followUps ? (["follow-ups/1"] as const) : [])],
+      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", ...this.composer(), ...(this.followUps ? (["follow-ups/1"] as const) : []), ...(this.transfer ? (["workspace-transfer/1"] as const) : [])],
       authority,
     });
   }
   /** #1328: whether the runtime takes changes to its held follow-ups (`follow-ups/1`). */
   followUps = false;
+  transfer = false;
   /** PRO-22: what `session.commands` answers; null is a runtime from before `composer/1`. */
   commands: { commands: { name: string; description: string; source: string }[]; restricted: boolean } | null = null;
   /** PRO-22: what `session.files` answers; null is a runtime from before `composer/2`. */
@@ -494,6 +495,26 @@ describe("cloud desktop center tab", () => {
     fireEvent.click(desktop);
     expect(await screen.findByText("Cloud desktop is unavailable in this runtime.")).toBeTruthy();
     expect(runtime.sent.some(({ method }) => method === "desktop.open")).toBe(false);
+  });
+});
+
+describe("transfer to local", () => {
+  it("keeps the action held when a different organisation is ready", async () => {
+    mocks.privacyReady = true;
+    mocks.readiness = { "other-org": ["cloud.workspaces.transfer-to-local.v1"] };
+    runtime.transfer = true;
+    await openConnected();
+    expect(screen.queryByRole("button", { name: "Transfer to local…" })).toBeNull();
+  });
+
+  it("offers the action to a manager with readiness and the negotiated attachment", async () => {
+    mocks.privacyReady = true;
+    mocks.readiness = { [ORG]: ["cloud.workspaces.transfer-to-local.v1"] };
+    runtime.transfer = true;
+    await openConnected();
+    fireEvent.click(await screen.findByRole("button", { name: "Transfer to local…" }));
+    expect(await screen.findByRole("dialog", { name: "Transfer to local" })).toBeTruthy();
+    expect(runtime.sent.some(({ method }) => method === "transfer.open")).toBe(false);
   });
 });
 

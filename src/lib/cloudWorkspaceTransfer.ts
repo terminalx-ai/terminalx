@@ -52,3 +52,56 @@ export async function importCloudWorkspace(
     },
   };
 }
+
+const CHUNK_BYTES = 128 * 1024;
+
+export interface TransferManifest {
+  transferId: string;
+  branch: string;
+  commit: string;
+  bundleBytes: number | null;
+  transcriptBytes: number;
+  title: string;
+  harness: string;
+}
+
+interface TransferRpc {
+  call<T>(method: string, params: Record<string, unknown>): Promise<T>;
+}
+
+export async function readCloudTransfer(
+  client: TransferRpc,
+  scope: { sessionId: string; tabId: string },
+  current: () => boolean,
+) {
+  function checkScope() {
+    if (!current()) throw Error("The cloud account or workspace connection changed.");
+  }
+  checkScope();
+  const manifest = await client.call<TransferManifest>("transfer.open", { ...scope, requestId: crypto.randomUUID() });
+  const request = { ...scope, transferId: manifest.transferId };
+  async function read(part: "bundle" | "transcript", size: number, maximum: number) {
+    if (!Number.isSafeInteger(size) || size <= 0 || size > maximum) throw Error("The export reported an invalid size.");
+    let binary = "";
+    while (binary.length < size) {
+      checkScope();
+      const chunk = await client.call<{ offset: number; data: string }>("transfer.read", { ...request, part, offset: binary.length });
+      checkScope();
+      if (chunk.offset !== binary.length || typeof chunk.data !== "string" || chunk.data.length > Math.ceil(CHUNK_BYTES / 3) * 4) {
+        throw Error("The export returned an invalid chunk.");
+      }
+      const decoded = atob(chunk.data);
+      if (decoded.length === 0 || decoded.length > CHUNK_BYTES || binary.length + decoded.length > size) throw Error("The export returned an invalid chunk.");
+      binary += decoded;
+    }
+    return btoa(binary);
+  }
+  try {
+    const transcript = await read("transcript", manifest.transcriptBytes, 4 * 1024 * 1024);
+    const bundle = manifest.bundleBytes === null ? null : await read("bundle", manifest.bundleBytes, 32 * 1024 * 1024);
+    checkScope();
+    return { branch: manifest.branch, commit: manifest.commit, harness: manifest.harness, title: manifest.title, transcript, bundle };
+  } finally {
+    if (current()) void client.call("transfer.close", request).catch(() => undefined);
+  }
+}

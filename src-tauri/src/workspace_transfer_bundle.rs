@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const BUNDLE_TIMEOUT: Duration = Duration::from_secs(60);
-const CHUNK_BYTES: u64 = 128 * 1024;
+pub(crate) const CHUNK_BYTES: u64 = 128 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BranchCommit {
@@ -16,6 +16,16 @@ pub(crate) struct BranchCommit {
 }
 
 impl BranchCommit {
+    pub(crate) fn commit(&self) -> &str {
+        &self.commit
+    }
+
+    pub(crate) fn branch(&self) -> &str {
+        self.branch_ref
+            .strip_prefix("refs/heads/")
+            .expect("validated branch")
+    }
+
     pub(crate) fn new(branch: &str, commit: &str) -> Result<Self> {
         ensure!(
             crate::remote::git::valid_ref_name(branch),
@@ -62,7 +72,7 @@ impl TransferBundle {
     }
 }
 
-fn git(repo: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git(repo: &Path, args: &[&str]) -> Result<String> {
     let mut command = crate::git::git_in(repo, args);
     command
         .args(args)
@@ -171,6 +181,98 @@ pub(crate) fn ensure_local_branch(repo: &Path, expected: &BranchCommit) -> Resul
         bail!("a local branch with this name already points to a different commit");
     }
     create.map(|_| ())
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(tag = "role", rename_all = "lowercase")]
+pub(crate) enum TranscriptMessage {
+    User { text: String },
+    Assistant { text: String },
+}
+
+pub(crate) fn transcript(events: &[crate::events::AgentEvent]) -> Result<Vec<u8>> {
+    use crate::events::Payload;
+    let mut messages = Vec::new();
+    let mut assistant_seen = false;
+    for event in events {
+        match &event.payload {
+            Payload::UserMessage {
+                text,
+                queued: false,
+                ..
+            } => {
+                messages.push(TranscriptMessage::User { text: text.clone() });
+                assistant_seen = false;
+            }
+            Payload::TurnStarted { .. } => assistant_seen = false,
+            Payload::AssistantText { text, .. }
+                if event.subagent.is_none() && !text.trim().is_empty() =>
+            {
+                messages.push(TranscriptMessage::Assistant { text: text.clone() });
+                assistant_seen = true;
+            }
+            Payload::TurnCompleted {
+                final_text: Some(text),
+                ..
+            } if !assistant_seen && event.subagent.is_none() => {
+                messages.push(TranscriptMessage::Assistant { text: text.clone() });
+                assistant_seen = true;
+            }
+            _ => {}
+        }
+    }
+    Ok(serde_json::to_vec(&messages)?)
+}
+
+#[cfg(feature = "desktop")]
+pub(crate) fn save_transcript(
+    session: &crate::store::index::SessionEntry,
+    messages: Vec<TranscriptMessage>,
+) -> Result<()> {
+    use crate::events::AgentEvent;
+    use serde_json::json;
+    use std::io::Write;
+    let tab = session.tabs.first().context("No local conversation")?;
+    let mut log = Vec::new();
+    let mut sequence = 0;
+    let mut write_event = |payload| -> Result<()> {
+        sequence += 1;
+        let event: AgentEvent = serde_json::from_value(json!({
+            "id": uuid::Uuid::new_v4().to_string(), "sessionId": session.id, "tabId": tab.id,
+            "harness": tab.harness, "seq": sequence, "ts": session.created,
+            "payload": payload,
+        }))?;
+        serde_json::to_writer(&mut log, &event)?;
+        log.push(b'\n');
+        Ok(())
+    };
+    let mut turn = false;
+    for message in messages {
+        match message {
+            TranscriptMessage::User { text } => {
+                if turn {
+                    write_event(json!({ "type": "turn_completed", "status": "ok" }))?;
+                }
+                write_event(json!({ "type": "user_message", "text": text }))?;
+            }
+            TranscriptMessage::Assistant { text } => {
+                write_event(json!({ "type": "assistant_text", "text": text }))?
+            }
+        }
+        turn = true;
+    }
+    if turn {
+        write_event(json!({ "type": "turn_completed", "status": "ok" }))?;
+    }
+    let path = crate::store::log_path(&session.id, &tab.id)?;
+    let mut staged =
+        tempfile::NamedTempFile::new_in(path.parent().context("No transcript directory")?)?;
+    staged.write_all(&log)?;
+    staged.as_file().sync_all()?;
+    staged
+        .persist_noclobber(path)
+        .context("The local conversation already has a transcript")?;
+    Ok(())
 }
 
 #[cfg(test)]

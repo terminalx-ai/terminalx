@@ -12,6 +12,9 @@
 //!   there is no prefix matching.
 //! - Mutations are answered from the idempotency cache when resent.
 
+#[path = "workspace_transfer.rs"]
+mod workspace_transfer;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -501,6 +504,8 @@ pub struct WorkspaceRpc {
     removed_agent_tabs: Mutex<VecDeque<String>>,
     session_subs: Mutex<HashMap<String, SessionSubscription>>,
     subscriptions: Mutex<HashMap<String, Subscription>>,
+    transfers: Mutex<HashMap<u64, workspace_transfer::Export>>,
+    transfer_preparing: Mutex<()>,
     idempotency: Mutex<IdempotencyCache>,
     /// One lock per `(attachment, clientRequestId)` in flight, so a resend
     /// racing its original waits for the cached result instead of running
@@ -638,6 +643,8 @@ impl WorkspaceRpc {
             removed_agent_tabs: Mutex::new(VecDeque::new()),
             session_subs: Mutex::new(HashMap::new()),
             subscriptions: Mutex::new(HashMap::new()),
+            transfers: Mutex::new(HashMap::new()),
+            transfer_preparing: Mutex::new(()),
             idempotency: Mutex::new(IdempotencyCache::default()),
             in_flight: Mutex::new(HashMap::new()),
             collab: Arc::new(Collaboration::new()),
@@ -1995,6 +2002,7 @@ impl WorkspaceRpc {
             "session.handoff" => self.session_handoff(peer, params),
             "session.handoffContext" => self.session_handoff_context(peer, params),
             "session.subscribe" => self.session_subscribe(peer, params),
+            "transfer.open" | "transfer.read" | "transfer.close" => self.workspace_transfer(peer, method, &params),
             "session.tabs" => self.session_tabs(peer),
             "session.commands" => self.session_commands(peer, params),
             "session.files" => self.session_files(peer, params),
@@ -2097,6 +2105,7 @@ impl WorkspaceRpc {
 
     /// Drop everything a closed connection subscribed to.
     pub fn disconnect(&self, peer: &Peer) {
+        self.transfers.lock().unwrap().remove(&peer.id());
         for project in self.served_projects() {
             project.files.disconnect(peer.id);
         }
@@ -4797,6 +4806,7 @@ impl WorkspaceRpc {
         protocol::served(self.is_machine()).into_iter().filter(|capability| match *capability {
             protocol::AGENT_COMMANDS => self.agent_commands.get().is_some(),
             protocol::CLOUD_DESKTOP => desktop,
+            "workspace-transfer/1" => self.is_cloud_transfer_runtime(),
             _ => true,
         }).collect()
     }

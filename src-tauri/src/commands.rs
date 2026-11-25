@@ -2244,6 +2244,73 @@ pub async fn stats_usage_refresh(state: State<'_, AppState>, scope: String, gene
         .map_err(err)?
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudTransferImport {
+    org_id: String,
+    account_revision: String,
+    project_path: String,
+    title: String,
+    harness: String,
+    branch: String,
+    commit: String,
+    bundle: Option<String>,
+    transcript: String,
+}
+
+#[tauri::command]
+pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, input: CloudTransferImport) -> CmdResult<SessionEntry> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use crate::workspace_transfer_bundle as transfer;
+    let account = state.account.clone();
+    let authorized = |account: &crate::account::AccountManager, input: &CloudTransferImport| {
+        account.current_revision().is_some_and(|(_, revision)| revision == input.account_revision)
+            && account.phase2_ready("cloud.workspaces.transfer-to-local.v1", Some(&input.org_id), None)
+    };
+    if !authorized(&account, &input) { return Err("The cloud account changed.".into()); }
+    if !git::is_repo(Path::new(&input.project_path)) {
+        return Err("Choose a local Git project.".into());
+    }
+    if !crate::configuration_commands::review(&app, &input.project_path).await? {
+        return Err("Repository configuration was not trusted.".into());
+    }
+    let sessions = state.sessions().map_err(err)?;
+    let ticket = crate::github_process::ticket();
+    github_work(move || crate::github_process::with_ticket(ticket, || -> anyhow::Result<SessionEntry> {
+        anyhow::ensure!(authorized(&account, &input), "The cloud account changed.");
+        anyhow::ensure!(input.transcript.len() <= 6 * 1024 * 1024, "Conversation is too large.");
+        let transcript = serde_json::from_slice::<Vec<transfer::TranscriptMessage>>(&STANDARD.decode(&input.transcript)?)?;
+        let pin = transfer::BranchCommit::new(&input.branch, &input.commit)?;
+        let project = Path::new(&input.project_path);
+        if let Some(encoded) = &input.bundle {
+            anyhow::ensure!(encoded.len() <= 45 * 1024 * 1024, "Git bundle is too large.");
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("workspace.bundle");
+            std::fs::write(&path, STANDARD.decode(encoded)?)?;
+            transfer::import_objects(project, &path, &pin)?;
+        } else {
+            let branch = format!("refs/heads/{}", pin.branch());
+            transfer::git(project, &["fetch", "--no-tags", "origin", &branch])?;
+            let fetched = transfer::git(project, &["rev-parse", "--verify", "FETCH_HEAD"])?;
+            anyhow::ensure!(fetched.trim() == pin.commit(), "The local project's origin does not have the transferred commit.");
+        }
+        anyhow::ensure!(authorized(&account, &input), "The cloud account changed.");
+        transfer::ensure_local_branch(project, &pin)?;
+        let name = format!("transfer-{}", uuid::Uuid::now_v7().simple());
+        let worktree = git::checkout_worktree(project, &name, pin.branch())?;
+        anyhow::ensure!(worktree.base == pin.commit(), "The local branch moved during checkout.");
+        anyhow::ensure!(authorized(&account, &input), "The cloud account changed.");
+        let mut request: NewSession = serde_json::from_value(serde_json::json!({
+            "projectPath": input.project_path, "title": input.title, "useWorktree": false,
+            "cwd": worktree.path, "tab": { "harness": input.harness },
+        }))?;
+        crate::session_ops::prefer_native_codex_session(&mut request);
+        let local = sessions.create_on(&request, None)?;
+        transfer::save_transcript(&local, transcript)?;
+        Ok(local)
+    })).await.map_err(err)?.map_err(err)
+}
+
 /// Create a session: an index entry around an existing checkout, or a new
 /// worktree and its first tab. The index entry lands before anything else can
 /// fail after it, so a session whose agent never starts is still visible and

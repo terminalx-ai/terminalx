@@ -115,7 +115,7 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 /// list, which every runtime of this build knows: see [`served`].
 pub const CAPABILITIES: &[&str] = &[
     "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "composer/5", "ports/1",
-    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1", "follow-ups/1", "bots/1", "cloud-desktop/1",
+    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1", "follow-ups/1", "bots/1", "cloud-desktop/1", "workspace-transfer/1",
 ];
 
 /// Private RFB transport for an eligible cloud workspace.
@@ -388,6 +388,9 @@ pub const METHODS: &[Method] = &[
     method("ports.write", "ports/1", Participate, false),
     method("ports.ack", "ports/1", Participate, false),
     method("ports.close", "ports/1", Participate, false),
+    method("transfer.open", "workspace-transfer/1", Manage, false),
+    method("transfer.read", "workspace-transfer/1", Manage, false),
+    method("transfer.close", "workspace-transfer/1", Manage, false),
     method("desktop.open", "cloud-desktop/1", Participate, false),
     method("desktop.write", "cloud-desktop/1", Participate, false),
     method("desktop.ack", "cloud-desktop/1", Participate, false),
@@ -449,6 +452,7 @@ pub const METHODS: &[Method] = &[
 /// leases.
 pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
     match capability {
+        "workspace-transfer/1" => &["transfer."],
         "collab/1" => &["collab.", "presence.", "notes.", "lease."],
         "pty/1" | "pty/2" => &["pty."],
         "fs/1" => &["fs."],
