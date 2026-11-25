@@ -7,7 +7,10 @@ import { privacyEnabled, subscribeDataPrivacy, PRIVACY_MESSAGE } from "@/lib/dat
 import { CloudInboxSubscriber, validInboxCursor, type InboxStorage, type InboxTransport } from "@/lib/cloudInbox";
 import { configureCloudReadMarkers, enableCloudReadMarkerWrites, reconcileCloudReadMarker } from "@/lib/cloudReadMarkers";
 import { cloudOrgArg, getCloudCatalog, invalidateCloudInboxWorkspace, liveCloudOrgIds, resyncCloudInboxCatalog, subscribeCloudCatalog, type OrgCatalog } from "@/lib/cloudCatalog";
-import { notifyOrganizationEvent } from "@/lib/notify";
+import { notifyMention, notifyOrganizationEvent } from "@/lib/notify";
+import { clearMentionNotices, configureMentionMarks, dropWorkspaceMentions, forgetMentionMarks, lookUpMentionQuote, markMentioned, showMentionNotice } from "@/lib/mentionNotices";
+import { getPrefs } from "@/lib/prefs";
+import { readOrganizationRoster } from "@/lib/organizationRoster";
 
 /** Exact commands implemented by the shared contracts worker. Use the existing
  * privacy-aware invoke wrapper; tokens and account fencing remain native.
@@ -37,6 +40,7 @@ export function applyDesktopInboxEvent(event: DesktopInboxEvent) {
         publishNotices(notices.filter((notice) => notice.workspaceId !== event.workspaceId));
       }
       invalidateCloudInboxWorkspace(event.workspaceId, undefined, true);
+      dropWorkspaceMentions(event.workspaceId);
       break;
     case "workspace.presence-changed":
       cloudPresence.hint(event.organizationId);
@@ -44,6 +48,8 @@ export function applyDesktopInboxEvent(event: DesktopInboxEvent) {
       break;
     case "workspace.reassigned":
     case "workspace.share-added":
+    // A mention made this person a follower: the catalog lists it under Following.
+    case "workspace.mentioned":
       invalidateCloudInboxWorkspace(event.workspaceId, event.organizationId);
       break;
     case "workspace.read-marker-changed":
@@ -57,9 +63,42 @@ export interface ReassignedNotice { id: string; organizationId: string; workspac
 let notices: ReassignedNotice[] = [];
 const noticeListeners = new Set<() => void>();
 function publishNotices(next: ReassignedNotice[]) { notices = next; for (const listener of noticeListeners) listener(); }
-type NoticeEvent = DesktopInboxEvent & { type: "workspace.share-added" | "workspace.reassigned" };
+type NoticeEvent = DesktopInboxEvent & { type: "workspace.share-added" | "workspace.reassigned" | "workspace.mentioned" };
 function isNoticeEvent(event: DesktopInboxEvent): event is NoticeEvent {
-  return event.type === "workspace.share-added" || event.type === "workspace.reassigned";
+  return event.type === "workspace.share-added" || event.type === "workspace.reassigned" || event.type === "workspace.mentioned";
+}
+const ID = /^[A-Za-z0-9._:@-]{1,128}$/;
+function validMention(event: NoticeEvent): boolean {
+  if (event.type !== "workspace.mentioned") return true;
+  const { actorId, sessionId, tabId, messageId } = event.payload ?? {};
+  return [actorId, sessionId, tabId, messageId].every((id) => typeof id === "string" && ID.test(id));
+}
+
+/** Who mentioned this person, by the roster's name for them; a generic word where it has none. */
+async function actorName(orgId: string, actorId: string): Promise<string> {
+  try {
+    const member = (await readOrganizationRoster(orgId))?.members.find((candidate) => candidate.userId === actorId);
+    return member?.displayName?.trim() || member?.email || "A teammate";
+  } catch {
+    return "A teammate";
+  }
+}
+
+/**
+ * A confirmed mention (PRO-141): the @ on its session's row, and, when it
+ * arrived live and the setting is on, the in-app notification quoting the
+ * message from this device's own transcript, and a banner without it.
+ */
+async function deliverMention(pending: PendingNotice, workspace: CloudWorkspace, authorized: () => boolean) {
+  const event = pending.event as NoticeEvent & { type: "workspace.mentioned" };
+  const { actorId, sessionId, tabId, messageId } = event.payload;
+  const where = { organizationId: event.organizationId, workspaceId: event.workspaceId, sessionId, tabId, messageId };
+  markMentioned({ id: event.id, ...where });
+  if (!pending.banner || !getPrefs().mentionNotifications) return;
+  const [name, quote] = await Promise.all([actorName(event.organizationId, actorId), lookUpMentionQuote(where)]);
+  if (!authorized()) return;
+  showMentionNotice({ id: event.id, ...where, actorId, actorName: name, workspaceName: workspace.name, quote, at: Date.parse(event.createdAt) || Date.now() });
+  await notifyMention(name, workspace.name, authorized);
 }
 
 interface PendingNotice {
@@ -125,6 +164,13 @@ function flushInboxNotices() {
       const notice = { id, organizationId: event.organizationId, workspaceId: event.workspaceId, name: workspace.name, actorId, previousOwnerId, ...(typeof note === "string" ? { note: note.slice(0, 500) } : {}) };
       noticeAccess.set(notice, pending);
       publishNotices([...notices, notice].slice(-10));
+    }
+    if (event.type === "workspace.mentioned") {
+      const authorized = () => pendingNotices.get(id) === pending && !!confirmedWorkspace(pending);
+      void deliverMention(pending, workspace, authorized).catch(() => undefined).finally(() => {
+        if (pendingNotices.get(id) === pending) pendingNotices.delete(id);
+      });
+      continue;
     }
     if (!pending.banner) {
       pendingNotices.delete(id);
@@ -206,12 +252,14 @@ export function bootDesktopInbox() {
     const banner = replay === null;
     if (!banner && event.type === "workspace.share-added") return;
     if (event.type === "workspace.reassigned" && (!event.payload.actorId || !event.payload.previousOwnerId)) return;
+    if (!validMention(event)) return;
     const current = () => {
       const status = getAccount().status;
       return token === generation && !privacyEnabled() && status.context?.account === account
         && status.context.revision === revisionAtEvent && liveCloudOrgIds(status).includes(event.organizationId)
         && phase2Ready(status, event.organizationId, "events")
-        && (event.type !== "workspace.reassigned" || phase2Ready(status, event.organizationId, "followReassign"));
+        && (event.type !== "workspace.reassigned" || phase2Ready(status, event.organizationId, "followReassign"))
+        && (event.type !== "workspace.mentioned" || phase2Ready(status, event.organizationId, "mentions"));
     };
     if (!current()) return;
     if (pendingNotices.size >= 100) pendingNotices.delete(pendingNotices.keys().next().value!);
@@ -268,13 +316,15 @@ export function bootDesktopInbox() {
     // Replaying retained events can repair the catalog and unread state after
     // a cleared checkpoint. Only subsequent live events may raise banners.
     replay = nextEventOrgs && nextEventOrgs !== "[]" ? {} : null;
-    pendingNotices.clear(); publishNotices([]);
+    pendingNotices.clear(); publishNotices([]); clearMentionNotices();
     // Clear durable delivery state on an actual identity change; context changes fence in-flight work.
     subscriber.stop(identity !== next);
     if (identity && identity !== next) {
       // Readiness may still be pending, so the subscriber may not have loaded this account yet.
       try { storage.removeItem(`terminalx.inbox.v1:${encodeURIComponent(identity)}`); } catch { /* Account keys remain isolated. */ }
+      forgetMentionMarks(identity);
     }
+    configureMentionMarks(next);
     identity = next;
     revision = nextRevision;
     // Catalog polling can answer before readiness; its authorized markers must be retained
@@ -297,4 +347,4 @@ export function bootDesktopInbox() {
   stop = () => { ++generation; catalog(); account(); privacy(); subscriber.stop(); configureCloudReadMarkers(null, null); };
   sync();
 }
-export function resetDesktopInbox() { stop?.(); stop = null; pendingNotices.clear(); publishNotices([]); }
+export function resetDesktopInbox() { stop?.(); stop = null; pendingNotices.clear(); publishNotices([]); clearMentionNotices(); configureMentionMarks(null); }

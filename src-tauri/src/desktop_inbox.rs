@@ -79,6 +79,19 @@ pub enum InboxEvent {
         #[serde(rename = "createdAt")]
         created_at: String,
     },
+    /// Requested with `mentions=1` (PRO-141). Ids only: the message is read from the local transcript.
+    #[serde(rename = "workspace.mentioned")]
+    Mentioned {
+        #[serde(deserialize_with = "cursor")]
+        id: String,
+        #[serde(rename = "workspaceId")]
+        workspace_id: String,
+        #[serde(rename = "organizationId")]
+        organization_id: String,
+        payload: MentionedPayload,
+        #[serde(rename = "createdAt")]
+        created_at: String,
+    },
 }
 impl InboxEvent {
     pub fn id(&self) -> &str {
@@ -87,7 +100,8 @@ impl InboxEvent {
             | Self::ShareRemoved { id, .. }
             | Self::ReadMarkerChanged { id, .. }
             | Self::PresenceChanged { id, .. }
-            | Self::Reassigned { id, .. } => id,
+            | Self::Reassigned { id, .. }
+            | Self::Mentioned { id, .. } => id,
         }
     }
 }
@@ -102,6 +116,16 @@ pub struct ReassignedPayload {
     pub previous_owner_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+/// Who mentioned this person, and where. Never the message text.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MentionedPayload {
+    pub actor_id: String,
+    pub session_id: String,
+    pub tab_id: String,
+    pub message_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -206,6 +230,19 @@ mod tests {
         let event: InboxEvent = serde_json::from_value(serde_json::json!({"id":"4","type":"workspace.reassigned","organizationId":"org","workspaceId":"workspace","createdAt":"2026-11-15T12:00:00Z","payload":{"actorId":"actor","previousOwnerId":"old","note":"Away until Monday\nPlease finish.","receiptDigest":"must-not-cross"}})).unwrap();
         let value = serde_json::to_value(event).unwrap();
         assert_eq!(value["payload"], serde_json::json!({"actorId":"actor","previousOwnerId":"old","note":"Away until Monday\nPlease finish."}));
+    }
+
+    #[test]
+    fn phase2_mention_event_carries_ids_only_and_drops_anything_else() {
+        let mention = serde_json::json!({"id":"21","type":"workspace.mentioned","organizationId":"org","workspaceId":"workspace","createdAt":"2026-11-25T10:00:00Z",
+            "payload":{"actorId":"actor","sessionId":"session-1","tabId":"tab-1","messageId":"msg-1","text":"must-not-cross"}});
+        let event: InboxEvent = serde_json::from_value(mention).unwrap();
+        assert_eq!(event.id(), "21");
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["type"], "workspace.mentioned");
+        assert_eq!(value["payload"], serde_json::json!({"actorId":"actor","sessionId":"session-1","tabId":"tab-1","messageId":"msg-1"}));
+        let incomplete = serde_json::json!({"id":"22","type":"workspace.mentioned","organizationId":"org","workspaceId":"workspace","createdAt":"2026-11-25T10:00:00Z","payload":{"actorId":"actor"}});
+        assert!(serde_json::from_value::<InboxEvent>(incomplete).is_err());
     }
 
     #[test]

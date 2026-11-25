@@ -55,6 +55,8 @@ export interface Prefs {
   editorShowWhitespace: boolean;
   updateChannel: "stable" | "beta";
   sounds: boolean;
+  /** PRO-141: an in-app notification and a macOS banner when a teammate @mentions you. Who follows is unchanged. */
+  mentionNotifications: boolean;
   animations: boolean;
   fontScale: "sm" | "md" | "lg";
   transcriptLayout: "wide" | "chat";
@@ -193,6 +195,7 @@ const DEFAULTS: Prefs = {
   editorShowWhitespace: false,
   updateChannel: "stable",
   sounds: true,
+  mentionNotifications: true,
   animations: true,
   fontScale: "md",
   transcriptLayout: "chat",

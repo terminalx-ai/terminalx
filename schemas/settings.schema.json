@@ -579,6 +579,10 @@
           ],
           "type": "string"
         },
+        "mentionNotifications": {
+          "description": "When a teammate @mentions you in a shared session.",
+          "type": "boolean"
+        },
         "sounds": {
           "description": "A short tone when a session finishes or asks for you. Silent while another app has focus; the desktop notification makes its own noise there.",
           "type": "boolean"

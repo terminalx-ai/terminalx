@@ -70,6 +70,9 @@ import { useWorkspaceSetup } from "@/lib/workspaceSetup";
 import { useProjectForge } from "@/lib/projectForge";
 import { checkAgentReadiness, useSignInReadiness } from "@/lib/agentReadiness";
 import { AccountGoneNotice, AccountSwitchNote, useAccountSwitch } from "@/components/session/AccountSwitch";
+import { MentionPeopleContext, useMentionPeople } from "@/components/chat/useMentionPeople";
+import { parseCloudWorkspaceKey } from "@/types/target";
+import { markMentionsRead } from "@/lib/mentionMarks";
 
 const newLoginIncident = () => ({ loginPane: null as string | null, launched: false, opening: false, consumed: false, cancelled: false, paused: false });
 
@@ -167,6 +170,7 @@ export function TabView({
 }) {
   const backend = given ?? localSessionBackend(session.id);
   const local = backend.caps.local;
+  const transcriptPeople = useMentionPeople(local ? null : parseCloudWorkspaceKey(backend.key)?.orgId, null);
   // Local VM task cards are behind Settings → Experimental → Local VM tasks (PRO-114).
   const localVmTasks = useExperimentalSettings(local)?.localVmTasks === true;
   const setup = useWorkspaceSetup(local ? session.id : null);
@@ -346,6 +350,11 @@ export function TabView({
   );
 
   useTabRead(active, backend.key, tab, backend.markRead);
+  // A mention's @ on the session row goes once the session is on screen here (PRO-141).
+  const mentionedWorkspace = local ? null : parseCloudWorkspaceKey(backend.key);
+  useEffect(() => {
+    if (active && mentionedWorkspace) markMentionsRead(mentionedWorkspace.orgId, mentionedWorkspace.workspaceId, backend.logSessionId);
+  }, [active, mentionedWorkspace?.orgId, mentionedWorkspace?.workspaceId, backend.logSessionId]);
 
   // Nothing is running in a conversation that is only being read. A remote session offers it
   // through its runtime (#1326) when that keeps the turns' checkpoints; `unavailable` says why not.
@@ -1072,6 +1081,7 @@ export function TabView({
           // in order, its command list held up the terminal view of the tab that is (#449).
           commands={local || active ? backend.commands?.(tab) : null}
           files={backend.files?.()}
+          people={local ? null : backend.people?.()}
           prs={local ? null : backend.prs?.()}
           remote={!local}
           attachFiles={backend.caps.files}
@@ -1209,7 +1219,8 @@ export function TabView({
   // The body sits in a flex column: the chat (`flex-1`) takes the height left
   // under the bars above and scrolls inside it. In a plain block it grew as
   // tall as its transcript and pushed the composer out of the window.
-  const wrap = (body: React.ReactNode) => <div className="flex h-full min-h-0 flex-col bg-chat">
+  // `@Name` chips in the transcript (PRO-141), for every reader: oneself included.
+  const wrap = (body: React.ReactNode) => <MentionPeopleContext.Provider value={transcriptPeople}><div className="flex h-full min-h-0 flex-col bg-chat">
     {collabLive && shared?.client && (
       <LeaseBar
         collabKey={shared.key}
@@ -1333,7 +1344,7 @@ export function TabView({
     ) : (
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">{body}</div>
     )}
-  </div>;
+  </div></MentionPeopleContext.Provider>;
 
   // A PTY-first tab keeps its terminal mounted under the chat: the pane holds
   // the live CLI, so unmounting it to show the transcript would throw away the

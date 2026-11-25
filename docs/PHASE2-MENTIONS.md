@@ -1,0 +1,70 @@
+# PRO-141 chat mentions
+
+Mentioning a teammate in a shared cloud session's chat makes them follow the
+workspace and notifies them. The server only ever receives ids. Readiness is
+`team.mentions.v1` (with `team.roster.v1` for the people list), per organization.
+The saas side is described in its `docs/phase2/mentions-contract.md`.
+
+## Sending (screens 13.02, 13.03, 14.07)
+
+- `@` in a cloud session's composer lists **People** (the organization roster
+  from the PRO-128 cache, minus oneself) above **Files**. Each row shows the
+  person's avatar, email and, while they are in the workspace, their role and
+  where they are. Local and machine tabs list files only, as before.
+- A picked person goes into the text as plain `@Name`, so the agent reads it as
+  typed. The composer shows a chip per mentioned person, and a chip's × removes
+  every `@Name` for that person from the draft. In the transcript, a person's
+  message draws `@Name` of an organization member as the same chip (with the
+  avatar and name; a copy gives back `@Name`). Two members with the same name
+  are never turned into chips.
+- Before the message is sent, `POST …/cloud-workspaces/:id/mentions` with
+  `check: true` asks who cannot watch the workspace. If anyone cannot, or the
+  check fails, nothing is sent and nobody is told. The composer then shows
+  14.07's warning with a **Share** button, which opens the workspace's Share
+  dialog. The draft stays as it was.
+- Once the sent message appears in the tab's transcript (its own
+  `user_message` event after the send's sequence), the same route is called
+  with `sessionId`, `tabId`, `messageId` and `userIds`. The body has no field
+  for text: the native client denies unknown fields, and the server answers
+  422 to any. If access changed between the check and the record, the server
+  writes nothing and the warning appears again.
+
+## Receiving (screens 13.03, 13.16, 17.06)
+
+- The inbox asks for `mentions=1` alongside `presence=1`. A
+  `workspace.mentioned` event (`actorId`, `sessionId`, `tabId`, `messageId`) is a
+  notice event. It needs `team.mentions.v1` readiness for its organization and
+  passes the same live-list access confirmation as a share grant before
+  anything shows. It also refreshes the catalog, since the person now follows
+  the workspace.
+- A confirmed mention puts an `@` on the session's sidebar row and makes the
+  title bold until the session is opened here. The marks are kept per account
+  in local storage (session keys and inbox ids only, never text), are dropped
+  when the share is removed, and are cleared on an account change.
+- When the event arrives live (not in catch-up after sign-in) and **Mention
+  notifications** is on:
+  - The in-app notification reads "<name> mentioned you", then the workspace
+    name and the message quoted, with **Open** and **Mark as read**. The quote
+    is looked up by `messageId` in this device's own transcript: the loaded
+    tab log, then the saved cache, then the decrypted checkpoint. It waits at
+    most 1.5 s and otherwise shows no quote.
+  - The macOS banner reads "<first name> mentioned you" with the workspace
+    name. It never carries the message, because banners can show on the lock
+    screen.
+- With **Mention notifications** off (Settings › General), there is no notice
+  and no banner. The server still adds the follower, and the `@` row mark
+  still shows.
+
+## Deliberate differences from the designs
+
+- The 17.06 banner shows the quote; ours does not (lock-screen policy).
+- 14.07 refers to the workspace as "#18"; ours uses the workspace's name and
+  "them".
+- 13.03 draws the chip inline in the text field. The composer is a plain
+  textarea, so ours draws the chips in a row above the text, while the text
+  keeps `@Name`.
+- 13.16's dedicated Notifications panel, unread total and next-unread shortcut
+  are still deferred (see PHASE2-DESKTOP-EVENTS.md). Mentions show as the
+  in-app notification and as the row's `@` and bold title.
+- There is no per-sender rate limit beyond the 10-people cap per message and
+  the route's member and body limits.

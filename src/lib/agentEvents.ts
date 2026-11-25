@@ -405,18 +405,22 @@ export function setTabStatus(sessionId: string, tabId: string, status: TabStatus
   }
 }
 
+/** Called when the tab's log changes, outside React; returns the unsubscribe. */
+export function subscribeTabLog(sessionId: string, tabId: string, cb: () => void): () => void {
+  const k = key(sessionId, tabId);
+  let set = listeners.get(k);
+  if (!set) listeners.set(k, (set = new Set()));
+  set.add(cb);
+  return () => {
+    set!.delete(cb);
+    if (!set!.size) listeners.delete(k);
+  };
+}
+
 export function useTabLog(sessionId: string, tabId: string): TabLog {
   const k = key(sessionId, tabId);
   return useSyncExternalStore(
-    (cb) => {
-      let set = listeners.get(k);
-      if (!set) listeners.set(k, (set = new Set()));
-      set.add(cb);
-      return () => {
-        set!.delete(cb);
-        if (!set!.size) listeners.delete(k);
-      };
-    },
+    (cb) => subscribeTabLog(sessionId, tabId, cb),
     () => logs.get(k) ?? EMPTY,
     () => EMPTY,
   );

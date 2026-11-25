@@ -513,6 +513,8 @@ export const api = {
   cloudWorkspaceFollow: (orgId: string, workspaceId: string) => invoke<WorkspaceFollowingResponse>("cloud_workspace_follow_put", { orgId, workspaceId, input: {} }),
   cloudWorkspaceUnfollow: (orgId: string, workspaceId: string) => invoke<WorkspaceFollowingResponse>("cloud_workspace_follow_delete", { orgId, workspaceId, input: {} }),
   cloudWorkspaceReassign: (orgId: string, workspaceId: string, input: WorkspaceReassignInput) => invoke<WorkspaceReassignResponse>("cloud_workspace_reassign", { orgId, workspaceId, input }),
+  /** PRO-141: who could be mentioned (`check`), or record a sent message's mentions. Ids only. */
+  cloudWorkspaceMentions: (orgId: string, workspaceId: string, input: WorkspaceMentionsInput) => invoke<WorkspaceMentionsResponse>("cloud_workspace_mentions", { orgId, workspaceId, input }),
   desktopPresencePut: (orgId: string, input: PresencePutInput) => invoke<PresencePutResponse>("desktop_presence_put", { orgId, input }),
   desktopPresenceRead: (orgId: string, input: PresenceReadInput) => invoke<PresenceReadResponse>("desktop_presence_read", { orgId, input }),
   desktopInbox: (after = "0", waitMs = 25000) => invoke<DesktopInboxPage>("desktop_inbox", { after, waitMs }),
@@ -1820,8 +1822,14 @@ export type DesktopInboxEvent =
   | { id: string; type: "workspace.share-removed"; workspaceId: string; createdAt: string }
   | { id: string; type: "workspace.share-added" | "workspace.presence-changed"; workspaceId: string; organizationId: string; payload: Record<string, never>; createdAt: string }
   | { id: string; type: "workspace.reassigned"; workspaceId: string; organizationId: string; payload: WorkspaceReassignedPayload; createdAt: string }
-  | { id: string; type: "workspace.read-marker-changed"; workspaceId: string; organizationId: string; payload: DesktopReadMarker; createdAt: string };
+  | { id: string; type: "workspace.read-marker-changed"; workspaceId: string; organizationId: string; payload: DesktopReadMarker; createdAt: string }
+  | { id: string; type: "workspace.mentioned"; workspaceId: string; organizationId: string; payload: WorkspaceMentionedPayload; createdAt: string };
 export interface WorkspaceReassignedPayload { actorId: string; previousOwnerId: string; note?: string }
+/** PRO-141: ids only. The quoted text is read from this device's own transcript. */
+export interface WorkspaceMentionedPayload { actorId: string; sessionId: string; tabId: string; messageId: string }
+/** Without `messageId` (and with `check`), the server only answers who could be mentioned. */
+export interface WorkspaceMentionsInput { sessionId: string; tabId: string; messageId?: string; userIds: string[]; check?: boolean }
+export interface WorkspaceMentionsResponse { workspaceId: string; mentioned: string[]; noAccess: string[] }
 export interface DesktopInboxPage { v: 1; cursor: string; hasMore: boolean; events: DesktopInboxEvent[] }
 export interface DesktopInboxStreamPage { cursor: string; events: DesktopInboxEvent[] }
 
@@ -2068,6 +2076,7 @@ export type CloudWorkspaceSafeErrorCode =
   | "workspace_reassign_idempotency_conflict"
   | "cloud_workspace_last_admin"
   | "workspace_following_unavailable"
+  | "workspace_mentions_unavailable"
   | "presence_rate_limited"
   | "presence_device_limit"
   | "presence_capacity_exceeded"

@@ -1557,6 +1557,11 @@ pub async fn cloud_workspace_reassign(org_id: String, workspace_id: String, inpu
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.workspace_reassign(&org_id, &workspace_id, input))
 }
 
+#[tauri::command]
+pub async fn cloud_workspace_mentions(org_id: String, workspace_id: String, input: serde_json::Value, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::WorkspaceMentionsResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.workspace_mentions(&org_id, &workspace_id, input))
+}
+
 // Internal transport surface only; the service holds production activation.
 #[tauri::command]
 pub async fn desktop_presence_put(org_id: String, input: serde_json::Value, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::PresencePutResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {

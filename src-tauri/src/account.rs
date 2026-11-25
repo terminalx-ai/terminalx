@@ -333,6 +333,8 @@ struct Capabilities {
 pub(crate) const PHASE2_EVENTS: &str = "team.events.v1";
 pub(crate) const PHASE2_PRESENCE: &str = "team.presence.v1";
 pub(crate) const PHASE2_FOLLOW_REASSIGN: &str = "team.follow-reassign.v1";
+/// Chat @mentions (PRO-141): ids to the server, the quote read from the local transcript.
+pub(crate) const PHASE2_MENTIONS: &str = "team.mentions.v1";
 pub(crate) const PHASE2_RESTART_DETAILS: &str = "cloud.workspaces.restart-details.v1";
 pub(crate) const PHASE2_FRESH_WORKSPACE: &str = "cloud.automations.fresh-workspace.v1";
 pub(crate) const PHASE2_GITHUB_TRIGGER: &str = "cloud.automations.github-trigger.v1";
@@ -341,8 +343,8 @@ pub(crate) const PHASE2_WORKSPACE_GROUPS: &str = "cloud.workspace-groups.v1";
 pub(crate) const PHASE2_AFFECTED_WORKSPACES: &str = "cloud.agent-logins.affected-workspaces.v1";
 pub(crate) const PHASE2_GENERAL_ACCESS: &str = "cloud.workspaces.general-access.v1";
 pub(crate) const PHASE2_PRECREATE_USAGE: &str = "cloud.workspaces.precreate-usage.v1";
-const PHASE2_FEATURES: [&str; 17] = [
-    PHASE2_EVENTS, PHASE2_PRESENCE, PHASE2_FOLLOW_REASSIGN, PHASE2_RESTART_DETAILS,
+const PHASE2_FEATURES: [&str; 18] = [
+    PHASE2_EVENTS, PHASE2_PRESENCE, PHASE2_FOLLOW_REASSIGN, PHASE2_MENTIONS, PHASE2_RESTART_DETAILS,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_WEBHOOK_TRIGGER,
     "cloud.environment-info.v1",
     "cloud.workspaces.start-progress.v1",

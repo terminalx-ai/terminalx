@@ -1,4 +1,5 @@
 import { cloudActivityRead, subscribeCloudReadMarkers, writeCloudReadMarker } from "@/lib/cloudReadMarkers";
+import { markMentionsRead } from "@/lib/mentionMarks";
 import { keepMessageTime, newestMessageTime } from "@/lib/messageActivity";
 import { useSyncExternalStore } from "react";
 import { WorkspaceRpcError, type RuntimeIssuePipeline, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
@@ -1047,6 +1048,8 @@ export function setViewing(scope: CloudAgentScope, tabId: string, on: boolean) {
 export async function markCloudAgentRead(scope: CloudAgentScope, tabId: string, client: WorkspaceRpcClient | null) {
   const s = store(scope);
   const tab = s.tabs.get(tabId);
+  // A mention's @ goes once its session is read here, whether or not the tab was unread (PRO-141).
+  if (tab?.info.sessionId && !isDevScope(scope)) markMentionsRead(scope.organizationId, scope.workspaceId, tab.info.sessionId);
   if (!tab || (!tab.unread && tab.info.status !== "completed")) return;
   tab.unread = false;
   // Use the runtime session row ID and the message actually rendered, never the desktop tab ID or wall clock.

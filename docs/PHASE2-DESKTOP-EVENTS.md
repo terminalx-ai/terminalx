@@ -101,7 +101,8 @@ read, and `⌘⌥L` next unread are deferred. For screen 17.06, the main window 
 the existing macOS focus and permission path, with a second authorization and
 focus check before sending. Banners use generic copy without names, notes,
 identifiers or activation targets. Mention copy and actions belong to the
-mention contract. The existing attention badges continue counting session
+mention contract (PRO-141, [PHASE2-MENTIONS.md](PHASE2-MENTIONS.md)): its banner names
+the person and the workspace, never the message. The existing attention badges continue counting session
 activity.
 
 ## Verification and remaining acceptance

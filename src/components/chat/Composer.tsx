@@ -54,6 +54,11 @@ import { useComposerHistory } from "./useComposerHistory";
 import { usePrMention } from "./usePrMention";
 import { tokenAtCaret } from "@/lib/pickers";
 import type { ComposerCommandList, ComposerCommands, ComposerFiles, ComposerPrs } from "@/lib/cloudComposer";
+import type { ComposerPeople } from "@/lib/mentionSends";
+import { matchMentionPeople, mentionText, mentionedPeople, noAccessMessage, withoutMention, type MentionPerson } from "@/lib/mentions";
+import { useMentionPeople } from "./useMentionPeople";
+import { MentionChips, MentionRefusal, PersonAvatar, personDetail, type MentionRefused } from "./ComposerMentions";
+import { useCollab } from "@/lib/cloudCollab";
 
 const NO_COMMANDS: ComposerCommandList = { commands: [], note: null };
 
@@ -72,6 +77,8 @@ const savedSnippets = () => getPrefs().promptSnippets;
 const aiEditorOn = () => getPrefs().aiEditor;
 /** A picker row that is a saved snippet, not an agent command: its id follows. */
 const SNIPPET = "snippet:";
+/** A picker row that is a teammate (PRO-141): their user id follows. */
+const PERSON = "person:";
 const NO_HISTORY: string[] = [];
 
 /**
@@ -80,6 +87,12 @@ const NO_HISTORY: string[] = [];
  * run parallel instead of meeting at different arcs.
  */
 const CORNER = "rounded-[calc(var(--radius-2xl)-10px)]";
+
+/** Screen 14.07's no-access message for the people the server named, by the names the draft used. */
+function refusal(noAccess: readonly string[], mentioned: readonly MentionPerson[], people: ComposerPeople): MentionRefused {
+  const names = noAccess.map((id) => mentioned.find((person) => person.userId === id)?.name ?? "Someone you mentioned");
+  return { kind: "no-access", message: noAccessMessage(names, people.workspaceName()) };
+}
 
 /** A one-click next step above the input. */
 export type Handoff = { label: string; prompt: string } | { label: string; run: () => void };
@@ -109,6 +122,7 @@ export function Composer({
   cwd,
   commands: givenCommands,
   files: givenFiles,
+  people = null,
   prs = null,
   remote = false,
   attachFiles,
@@ -162,6 +176,13 @@ export function Composer({
   commands?: ComposerCommands | null;
   /** Where the `@` list comes from for such a tab. Without it and without `cwd` there is no file list. */
   files?: ComposerFiles | null;
+  /**
+   * Teammates for the `@` list (PRO-141), above the files: a shared cloud
+   * session's. A picked person goes in the text as `@Name` and is shown as a
+   * chip; once the message is sent, the server is told who (ids only) and
+   * they start following the workspace and are notified.
+   */
+  people?: ComposerPeople | null;
   /**
    * Where the `#` list comes from for such a tab (its runtime's `gh`, #1329).
    * Without it a remote tab has no `#` list; a local tab asks this computer in `cwd`.
@@ -266,6 +287,13 @@ export function Composer({
     [givenFiles?.key, cwd],
   );
   const [fileHits, setFileHits] = useState<FileHit[]>([]);
+  const peopleList = useMentionPeople(people?.orgId, people?.selfUserId);
+  const mentioning = !!people && peopleList.length > 0;
+  const collab = useCollab(people?.collabKey ?? "");
+  // Draft mentions resolve against the roster: a recalled or restored draft gets its chips back too.
+  const draftMentions = useMemo(() => (mentioning ? mentionedPeople(draft, peopleList) : []), [mentioning, draft, peopleList]);
+  const [mentionRefused, setMentionRefused] = useState<MentionRefused | null>(null);
+  const [checkingMentions, setCheckingMentions] = useState(false);
   const [highlight, setHighlight] = useState<{ list: string | null; row: number }>({ list: null, row: 0 });
   const [dismissedToken, setDismissedToken] = useState<string | null>(null);
   const sending = !!useComposerSend(sendScope).pending;
@@ -412,7 +440,7 @@ export function Composer({
   const prMention = usePrMention(!disabled && dismissedToken !== tokenKey ? prSource : null, draft, caret, onDraftChange, ref, setCaret, { onAttachFile: (file) => void attach.addInputs([file]) });
   // Prompts kept from a turn's menu (PRO-379), offered beside the agent's commands.
   const snippets = useSyncExternalStore(subscribePrefs, savedSnippets, savedSnippets);
-  const pickerOpen = !!token && token.kind !== "pr" && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource : commands.length > 0 || snippets.length > 0 || !!commandList.note);
+  const pickerOpen = !!token && token.kind !== "pr" && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource || mentioning : commands.length > 0 || snippets.length > 0 || !!commandList.note);
 
   // File hits follow the query, lightly debounced.
   useEffect(() => {
@@ -442,8 +470,20 @@ export function Composer({
         .slice(0, 30)
         .map((c) => ({ id: c.name, label: `/${c.name}`, detail: c.description, hint: c.argumentHint ?? (c.source !== "builtin" ? c.source : undefined), icon: <SlashSquare className="size-3.5" /> }))];
     }
-    return fileHits.map((h) => ({ id: h.path, label: h.name, detail: h.path, icon: <FileText className="size-3.5" /> }));
-  }, [token, commands, fileHits, snippets]);
+    const files: PickerItem[] = fileSource ? fileHits.map((h) => ({ id: h.path, label: h.name, detail: h.path, icon: <FileText className="size-3.5" /> })) : [];
+    if (!mentioning) return files;
+    // People first, then files (design 13.02).
+    const here = collab.participants;
+    const persons: PickerItem[] = matchMentionPeople(peopleList, token.query).map((person) => ({
+      id: `${PERSON}${person.userId}`,
+      label: person.name,
+      detail: personDetail(person, here.find((p) => p.userId === person.userId), tab.id),
+      icon: <PersonAvatar person={person} online={here.some((p) => p.userId === person.userId)} />,
+      section: "People",
+      stacked: true,
+    }));
+    return [...persons, ...files.map((file) => ({ ...file, section: "Files" }))];
+  }, [token, commands, fileHits, snippets, fileSource, mentioning, peopleList, collab.participants, tab.id]);
 
   // The highlighted row belongs to the list it was chosen in: another token, or a list of another
   // length, starts at its first row. That is read off while rendering, never reset in an effect. A
@@ -482,7 +522,8 @@ export function Composer({
         setFilling({ text: snippet.text, start: token.start, end: caret });
         return;
       }
-      const replacement = snippet ? snippet.text : token.kind === "slash" ? `/${item.id} ` : `@${item.id} `;
+      const person = item.id.startsWith(PERSON) ? peopleList.find((candidate) => `${PERSON}${candidate.userId}` === item.id) : undefined;
+      const replacement = snippet ? snippet.text : person ? `${mentionText(person)} ` : token.kind === "slash" ? `/${item.id} ` : `@${item.id} `;
       const before = draft.slice(0, token.start);
       const after = draft.slice(caret);
       const next = before + replacement + after;
@@ -497,7 +538,7 @@ export function Composer({
         }
       });
     },
-    [token, draft, caret, onDraftChange, snippets],
+    [token, draft, caret, onDraftChange, snippets, peopleList],
   );
 
   const [reviewReceiptError, setReviewReceiptError] = useState<{ message: string; retry: () => Promise<void> } | null>(null);
@@ -517,7 +558,7 @@ export function Composer({
   // `override`: the text to send when the draft state has not caught up with it yet.
   const send = useCallback(async (alternate = false, override?: string) => {
     const text = (override ?? draft).trim();
-    if ((!text && !sendable.length) || disabled || heldReason || prMention.attaching) return;
+    if ((!text && !sendable.length) || disabled || heldReason || prMention.attaching || checkingMentions) return;
     const goalProblem = goalCommandProblem(text, tab.harness, !!sendable.length, commands);
     if (goalProblem) {
       // Goals are Codex's (#256): a bare "/goal" says nothing to set, and another agent has none to set.
@@ -537,9 +578,31 @@ export function Composer({
         return;
       }
     }
+    // Everyone mentioned must be able to watch the workspace, or nothing is sent and nobody is told (PRO-141).
+    const mentioned = people && mentioning ? mentionedPeople(text, peopleList) : [];
+    if (people && mentioned.length) {
+      setCheckingMentions(true);
+      let noAccess: string[];
+      try {
+        noAccess = await people.check(mentioned.map((person) => person.userId), tab.id);
+      } catch {
+        setMentionRefused({ kind: "unchecked" });
+        return;
+      } finally {
+        if (mounted.current) setCheckingMentions(false);
+      }
+      if (noAccess.length) {
+        setMentionRefused(refusal(noAccess, mentioned, people));
+        return;
+      }
+      // Typed into while the check ran: that newer draft is the reader's, not this send's.
+      if (override === undefined && latestDraft.current.trim() !== text) return;
+    }
+    setMentionRefused(null);
     const previews = sendable.flatMap((a) => (a.image && a.previewUrl ? [{ url: a.previewUrl, name: a.name }] : []));
     const fileNames = sendable.flatMap((a) => (a.file ? [{ name: a.name, ...(a.size != null ? { size: a.size } : {}) }] : []));
-    const operation = beginComposerSend(sendScope, { text, images: previews, ...(fileNames.length ? { files: fileNames } : {}), pressedAt: Date.now(), afterSeq: sentAfter?.() ?? 0 });
+    const afterSeq = sentAfter?.() ?? 0;
+    const operation = beginComposerSend(sendScope, { text, images: previews, ...(fileNames.length ? { files: fileNames } : {}), pressedAt: Date.now(), afterSeq });
     if (!operation) return;
     // The message goes to the chat at once, drawn as sending, and the composer
     // is free for the next one (#727): what was set aside to send a recalled
@@ -570,13 +633,19 @@ export function Composer({
       return;
     }
     images.settle(true);
+    if (people && mentioned.length) {
+      // Ids only, once the message has its own id in the transcript. Access lost since the check: nobody was told.
+      void people.record(mentioned.map((person) => person.userId), tab.id, text, afterSeq).then((noAccess) => {
+        if (noAccess.length && mounted.current) setMentionRefused(refusal(noAccess, mentioned, people));
+      }, () => undefined);
+    }
     void markReviewsSent(reviewSend).catch((error) => {
       if (mounted.current) setReviewReceiptError({ retry: () => markReviewsSent(reviewSend), message: String(error) });
     });
     // Learning belongs to this accepted send even if a newer draft is visible.
     learnOnSuccess();
     finishComposerSend(sendScope, operation);
-  }, [draft, sendable, attach, disabled, heldReason, prMention.attaching, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, tab.harness, tab.title, commands, onOpenCodexTab, dictation.prepareSend]);
+  }, [draft, sendable, attach, disabled, heldReason, prMention.attaching, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, tab.harness, tab.title, commands, onOpenCodexTab, dictation.prepareSend, people, mentioning, peopleList, checkingMentions]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing) return;
@@ -692,6 +761,7 @@ export function Composer({
     // A column that may shrink (`min-h-0`) when the chat is too short for it: the microphone row gives up its height and scrolls.
     <div className="@container mx-auto flex min-h-0 w-full max-w-3xl flex-col justify-end px-6 pb-4 pt-2" data-tab-composer={tab.id}>
       {disabledReason && <div className="mb-2 rounded-md bg-warning/10 px-3 py-2 text-xs text-warning">{disabledReason}</div>}
+      {mentionRefused && people && <MentionRefusal refused={mentionRefused} onShare={people.share} onDismiss={() => setMentionRefused(null)} />}
       <DictationStatus dictation={dictation} />
       {reviewsReady > 0 && (
         <div data-testid="review-comments-ready" className="mb-2 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
@@ -720,8 +790,12 @@ export function Composer({
             onPick={complete}
             onHover={setHighlighted}
             title={token?.kind === "slash" ? "Commands" : "Files"}
-            empty={token?.kind === "slash" ? "No matching command" : "No matching file"}
+            empty={token?.kind === "slash" ? "No matching command" : mentioning ? "No matching person or file" : "No matching file"}
             note={token?.kind === "slash" ? commandList.note : null}
+            footer={token?.kind === "mention" && mentioning ? <>
+              <span>{fileSource ? "People first, then files" : "People"}</span>
+              <span>A person you mention starts following this workspace</span>
+            </> : null}
           />
         )}
         {prMention.menu}
@@ -745,6 +819,14 @@ export function Composer({
           </div>
         )}
         <AttachmentChips attach={attach} />
+        <MentionChips
+          people={draftMentions}
+          onRemove={(person: MentionPerson) => {
+            onDraftChange(withoutMention(draft, person, peopleList));
+            setMentionRefused(null);
+            requestAnimationFrame(() => ref.current?.focus({ preventScroll: true }));
+          }}
+        />
         {attach.notice && (
           <div className="mb-1 px-1.5 text-xs text-warning" role="status" data-testid="attach-notice">
             {attach.notice}
@@ -759,6 +841,7 @@ export function Composer({
             onDraftChange(e.target.value);
             setCaret(e.target.selectionStart ?? e.target.value.length);
             setDismissedToken(null);
+            if (mentionRefused) setMentionRefused(null);
             if (emptyGoal && !isEmptyGoal(e.target.value)) setEmptyGoal(false);
           }}
           onSelect={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
@@ -890,13 +973,13 @@ export function Composer({
               turns={turns} compacting={compacting} compactDisabled={disabled || !!heldReason || busy || sending}
               onCompact={() => onSend("/compact", [])} />
             {percent != null && <span aria-hidden className="-ml-1 pr-1 text-[11.5px] tabular-nums text-muted-foreground" data-testid="context-percent">{percent}%</span>}
-            {fileSource && (
-              <WithTooltip label="Mention a file" keys={["@"]}>
+            {(fileSource || mentioning) && (
+              <WithTooltip label={mentioning ? "Mention a person or file" : "Mention a file"} keys={["@"]}>
                 <Button
                   variant="ghost"
                   size="icon-sm"
                   className="shrink-0"
-                  aria-label="Mention a file"
+                  aria-label={mentioning ? "Mention a person or file" : "Mention a file"}
                   disabled={disabled}
                   onClick={() => {
                     const sep = draft && !/\s$/.test(draft) ? " " : "";
@@ -924,7 +1007,7 @@ export function Composer({
                 onOpenChange={setAiEditorOpen}
                 disabled={disabled || !aiEditor || dictation.dictating || reviewsReady > 0 || !draft.trim()}
                 reason={!aiEditor ? aiEditorUnavailable : dictation.dictating ? "Finish dictating first" : reviewsReady > 0 ? "Send or remove the review comments first" : !draft.trim() ? "Type something to edit" : null}
-                canSend={!disabled && !heldReason && !sending && !prMention.attaching}
+                canSend={!disabled && !heldReason && !sending && !checkingMentions && !prMention.attaching}
                 onApply={(text) => {
                   setAiApplied({ before: draft, after: text, label: "AI Editor changed your draft." });
                   onDraftChange(text);
@@ -963,7 +1046,7 @@ export function Composer({
                     variant={draft.trim() || sendable.length ? "accent" : "secondary"}
                     aria-label={sending ? "Sending" : "Send"}
                     aria-busy={sending}
-                    disabled={disabled || !!heldReason || sending || prMention.attaching || (!draft.trim() && !sendable.length)}
+                    disabled={disabled || !!heldReason || sending || checkingMentions || prMention.attaching || (!draft.trim() && !sendable.length)}
                     onClick={() => void send()}
                   >
                     <ArrowUp />

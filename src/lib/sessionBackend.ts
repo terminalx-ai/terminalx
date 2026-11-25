@@ -1,4 +1,5 @@
 import type { AgentProcessState, AgentTabInfo, HeldFollowUpInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
+import { cloudComposerPeople, type ComposerPeople } from "@/lib/mentionSends";
 import { agent, attachments, errorMessage, experimental, type FileInput, type ImageInput, type SendOutcome } from "@/lib/api";
 import type { ContinuationContext } from "@terminalx/portable/continuation";
 import type { FileRef } from "@/types/events";
@@ -397,6 +398,12 @@ export interface SessionBackend {
    * runtime from before `composer/2`.
    */
   files?(): ComposerFiles | null;
+  /**
+   * Cloud only (PRO-141): teammates for the composer's `@` list, ahead of
+   * the files. Null for a view-only reader and a machine. Who is listed is
+   * the organization roster, while the server says mentions are ready.
+   */
+  people?(): ComposerPeople | null;
   /**
    * Cloud and machine tabs (#1329): the composer's `#` list, from the
    * runtime's own `gh`, a picked pull request attached as a context file.
@@ -951,6 +958,9 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     commands: (tab) =>
       write ? cloudComposerCommands({ workspaceKey: ctx.workspaceKey, sessionId: ctx.sessionId, tabId: tab.id, harness: tab.harness, client, you }) : null,
     files: () => (write ? cloudComposerFiles({ workspaceKey: ctx.workspaceKey, sessionId: ctx.sessionId, client }) : null),
+    people: () => (write && !isDevScope(scope)
+      ? cloudComposerPeople({ orgId: scope.organizationId, workspaceId: scope.workspaceId, sessionId: ctx.sessionId, collabKey: ctx.workspaceKey, selfUserId: you?.userId ?? null })
+      : null),
     prs: () => (write ? cloudComposerPrs({ workspaceKey: ctx.workspaceKey, sessionId: ctx.sessionId, client }) : null),
     agentTerminal: terminalBase && {
       workspaceKey: ctx.workspaceKey,
