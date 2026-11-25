@@ -113,7 +113,7 @@ function RequestPane({ context, target, onBack, onRecheck }: {
             {activeShares.state === "failed" && <p role="alert">The access list is unavailable.</p>}
             {activeShares.state === "ready" && (activeShares.rows.length ? (
               <ul className="max-h-48 space-y-1 overflow-y-auto text-sm">
-                {activeShares.rows.map((row) => <li key={row.userId} className="break-words">{row.name || row.email} · {roles[row.role]}</li>)}
+                {activeShares.rows.map((row) => <li key={row.userId} className="break-words">{row.name?.trim() || "Organization member"} · {roles[row.role]}</li>)}
               </ul>
             ) : <p>No explicit shares.</p>)}
           </DialogContent>
