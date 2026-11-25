@@ -5,7 +5,6 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 const EXPORT_TTL: Duration = Duration::from_secs(180);
 const MAX_EXPORTS: usize = 4;
-const MAX_BUNDLE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 4 * 1024 * 1024;
 
 pub(super) struct Export {
@@ -71,7 +70,7 @@ impl WorkspaceRpc {
                 let mut transfers = self.transfers.lock().unwrap();
                 transfers.retain(|_, entry| entry.expires > Instant::now());
                 let entry = transfers
-                    .get(&peer.id())
+                    .get_mut(&peer.id())
                     .filter(|entry| {
                         entry.id == token
                             && entry.session == session
@@ -104,6 +103,7 @@ impl WorkspaceRpc {
                     }
                     _ => return Err(RpcError::invalid("Unknown transfer part")),
                 };
+                entry.expires = Instant::now() + EXPORT_TTL;
                 Ok(json!({ "offset": offset, "data": STANDARD.encode(bytes) }))
             }
             _ => Err(RpcError::new("method_not_found", "Unknown transfer method")),
@@ -182,28 +182,23 @@ impl WorkspaceRpc {
             .map_err(RpcError::internal)?;
         let pin = BranchCommit::new(branch.trim(), head.trim()).map_err(RpcError::internal)?;
         let log = crate::store::log_path(session_id, tab_id).map_err(RpcError::internal)?;
-        if log
-            .metadata()
-            .is_ok_and(|stat| stat.len() > MAX_TRANSCRIPT_BYTES as u64)
-        {
-            return Err(RpcError::invalid(
-                "The conversation is too large to transfer",
-            ));
-        }
-        let events = self
-            .manager()?
-            .load_events(session_id, tab_id)
-            .map_err(RpcError::internal)?;
-        let transcript = bundle::transcript(&events).map_err(RpcError::internal)?;
-        if transcript.len() > MAX_TRANSCRIPT_BYTES {
-            return Err(RpcError::invalid(
-                "The conversation is too large to transfer",
-            ));
-        }
+        let transcript = bundle::transcript_file(&log, MAX_TRANSCRIPT_BYTES).map_err(|error| {
+            if error.is::<bundle::TransferTooLarge>() {
+                RpcError::new(
+                    "transfer_too_large",
+                    "This conversation is too large to transfer",
+                )
+            } else {
+                RpcError::internal(error)
+            }
+        })?;
         still_allowed()?;
         let bundle = bundle::export(&checkout, &pin).map_err(RpcError::internal)?;
-        if bundle.size() > MAX_BUNDLE_BYTES {
-            return Err(RpcError::invalid("The Git bundle is too large to transfer"));
+        if bundle.size() > bundle::MAX_BUNDLE_BYTES {
+            return Err(RpcError::new(
+                "transfer_too_large",
+                "This Git bundle is too large to transfer",
+            ));
         }
         let _admission = self.collab.enter_admission();
         still_allowed()?;

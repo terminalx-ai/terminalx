@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
@@ -13,18 +13,44 @@ import { selectSession } from "@/lib/sessions";
 
 type Imported = Awaited<ReturnType<typeof importCloudWorkspace>>;
 
+interface TransferState {
+  opened: boolean;
+  busy: boolean;
+  notice: string | null;
+  imported: Imported | null;
+  archiveChosen: boolean;
+}
+
+const EMPTY: TransferState = { opened: false, busy: false, notice: null, imported: null, archiveChosen: false };
+const transfers = new Map<string, TransferState>();
+const listeners = new Set<() => void>();
+
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+
+function updateTransfer(key: string, patch: Partial<TransferState>) {
+  const next = { ...(transfers.get(key) ?? EMPTY), ...patch };
+  transfers.delete(key);
+  transfers.set(key, next);
+  for (const [candidate, state] of transfers) {
+    if (transfers.size <= 16) break;
+    if (candidate !== key && !state.busy) transfers.delete(candidate);
+  }
+  for (const listener of listeners) listener();
+}
+
 export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevision }: {
   cloud: CloudSessionModel;
   sessionId: string;
   tabId: string;
   accountRevision: string;
 }) {
-  const [opened, setOpened] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [imported, setImported] = useState<Imported | null>(null);
-  const [archiveChosen, setArchiveChosen] = useState(false);
   const { client, workspaceId, orgId } = cloud;
+  const key = JSON.stringify([accountRevision, orgId, workspaceId, sessionId, tabId]);
+  const { opened, busy, notice, imported, archiveChosen } = useSyncExternalStore(subscribe, () => transfers.get(key) ?? EMPTY);
+  const update = (patch: Partial<TransferState>) => updateTransfer(key, patch);
 
   const current = () => {
     const { status } = getAccount();
@@ -32,9 +58,8 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
   };
 
   const start = async () => {
-    if (!client || !current()) return;
-    setBusy(true);
-    setNotice(null);
+    if (!client || !current() || transfers.get(key)?.busy) return;
+    update({ busy: true, notice: null });
     try {
       const projectPath = await open({ directory: true, multiple: false, title: "Choose a local Git project" });
       if (typeof projectPath !== "string" || !current()) return;
@@ -45,18 +70,19 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
         });
         return { sessionId: local.id, worktreePath: local.cwd };
       }, current);
-      setImported(transfer);
+      update({ imported: transfer });
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
+      const code = error && typeof error === "object" && "code" in error ? error.code : null;
+      update({ notice: code === "transfer_too_large" ? "This workspace is too large to transfer."
+        : error instanceof Error ? error.message : String(error) });
     } finally {
-      setBusy(false);
+      update({ busy: false });
     }
   };
 
   const archive = async () => {
-    if (!imported || !current()) return;
-    setArchiveChosen(true);
-    setBusy(true);
+    if (!imported || !current() || transfers.get(key)?.busy) return;
+    update({ archiveChosen: true, busy: true });
     try {
       let result = await imported.archiveCloudCopy();
       if (result.status === "queued") {
@@ -76,19 +102,19 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
         }
         if (!settled) result = { status: "unconfirmed" };
       }
-      setNotice(result.status === "archived" ? "Cloud workspace archived."
+      update({ notice: result.status === "archived" ? "Cloud workspace archived."
         : result.status === "failed" ? "The cloud workspace was not archived. Your local worktree is ready."
-        : "Archive could not be confirmed. Your local worktree is ready.");
+        : "Archive could not be confirmed. Your local worktree is ready." });
     } catch {
-      setNotice("Archive could not be confirmed. Your local worktree is ready.");
+      update({ notice: "Archive could not be confirmed. Your local worktree is ready." });
     } finally {
-      setBusy(false);
+      update({ busy: false });
     }
   };
 
   return <>
-    <Button size="sm" variant="ghost" onClick={() => setOpened(true)}>Transfer to local…</Button>
-    <Dialog open={opened} onOpenChange={(next) => { if (!busy) setOpened(next); }}>
+    <Button size="sm" variant="ghost" onClick={() => update({ opened: true })}>Transfer to local…</Button>
+    <Dialog open={opened} onOpenChange={(next) => { if (!busy) update({ opened: next }); }}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Transfer to local</DialogTitle>
@@ -98,10 +124,10 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
         </DialogHeader>
         {notice && <p role="status" className="text-sm">{notice}</p>}
         <DialogFooter>
-          <Button variant="ghost" disabled={busy} onClick={() => setOpened(false)}>{imported ? "Close" : "Cancel"}</Button>
+          <Button variant="ghost" disabled={busy} onClick={() => update({ opened: false })}>{imported ? "Close" : "Cancel"}</Button>
           {!imported && <Button disabled={busy} onClick={() => void start()}>{busy ? "Transferring…" : "Choose project…"}</Button>}
           {imported && !archiveChosen && <Button variant="outline" disabled={busy} onClick={() => void archive()}>Archive cloud workspace</Button>}
-          {imported && <Button disabled={busy} onClick={() => { setOpened(false); selectSession(imported.local.sessionId); }}>Open local worktree</Button>}
+          {imported && <Button disabled={busy} onClick={() => { update({ opened: false }); selectSession(imported.local.sessionId); }}>Open local worktree</Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>

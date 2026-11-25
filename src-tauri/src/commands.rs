@@ -2282,25 +2282,57 @@ pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, i
         let transcript = serde_json::from_slice::<Vec<transfer::TranscriptMessage>>(&STANDARD.decode(&input.transcript)?)?;
         let pin = transfer::BranchCommit::new(&input.branch, &input.commit)?;
         let project = Path::new(&input.project_path);
-        anyhow::ensure!(input.bundle.len() <= 45 * 1024 * 1024, "Git bundle is too large.");
+        anyhow::ensure!(input.bundle.len() as u64 <= transfer::MAX_BUNDLE_BYTES.div_ceil(3) * 4, "Git bundle is too large.");
         let bundle_directory = tempfile::tempdir()?;
         let bundle_path = bundle_directory.path().join("workspace.bundle");
         std::fs::write(&bundle_path, STANDARD.decode(&input.bundle)?)?;
         transfer::import_objects(project, &bundle_path, &pin)?;
+        transfer::validate_checkout(project, &pin)?;
         anyhow::ensure!(authorized(&account, &input), "The cloud account changed.");
-        transfer::ensure_local_branch(project, &pin)?;
+        let created_branch = transfer::ensure_local_branch(project, &pin)?;
         let name = format!("transfer-{}", uuid::Uuid::now_v7().simple());
-        let worktree = git::checkout_worktree(project, &name, pin.branch())?;
-        anyhow::ensure!(worktree.base == pin.commit(), "The local branch moved during checkout.");
-        anyhow::ensure!(authorized(&account, &input), "The cloud account changed.");
-        let mut request: NewSession = serde_json::from_value(serde_json::json!({
-            "projectPath": input.project_path, "title": input.title, "useWorktree": false,
-            "cwd": worktree.path, "tab": { "harness": input.harness },
-        }))?;
-        crate::session_ops::prefer_native_codex_session(&mut request);
-        let local = sessions.create_on(&request, None)?;
-        transfer::save_transcript(&local, transcript)?;
-        Ok(local)
+        let path = git::worktree_path(project, &name);
+        let mut checkout_created = false;
+        let mut session_created = None;
+        let imported = (|| -> anyhow::Result<SessionEntry> {
+            transfer::checkout(project, &path, &pin)?;
+            checkout_created = true;
+            anyhow::ensure!(authorized(&account, &input), "The cloud account changed.");
+            let mut request: NewSession = serde_json::from_value(serde_json::json!({
+                "projectPath": input.project_path, "title": input.title, "useWorktree": false,
+                "cwd": path, "tab": { "harness": input.harness },
+            }))?;
+            crate::session_ops::prefer_native_codex_session(&mut request);
+            let local = sessions.create_on(&request, None)?;
+            session_created = Some(local.clone());
+            transfer::save_transcript(&local, transcript)?;
+            Ok(local)
+        })();
+        match imported {
+            Ok(local) => Ok(local),
+            Err(error) => {
+                let cleanup = (|| -> anyhow::Result<()> {
+                    if let Some(local) = session_created {
+                        let tab = local.tabs.first().ok_or_else(|| anyhow::anyhow!("No transfer conversation"))?;
+                        let log = crate::store::log_path(&local.id, &tab.id)?;
+                        anyhow::ensure!(!log.exists(), "The local conversation acquired a transcript and was kept.");
+                        sessions.delete_session(&local.id)?;
+                    }
+                    if checkout_created {
+                        transfer::rollback_checkout(project, &path, &pin)?;
+                    }
+                    if created_branch {
+                        anyhow::ensure!(!path.exists(), "The unfinished checkout was kept with its branch.");
+                        transfer::rollback_branch(project, &pin)?;
+                    }
+                    Ok(())
+                })();
+                match cleanup {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(error.context(format!("Transfer rollback was incomplete: {cleanup}"))),
+                }
+            }
+        }
     })).await.map_err(err)?.map_err(err)
 }
 

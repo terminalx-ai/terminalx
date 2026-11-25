@@ -7,7 +7,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const BUNDLE_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(feature = "desktop")]
+const MAX_CHECKOUT_BYTES: u64 = 512 * 1024 * 1024;
+#[cfg(feature = "desktop")]
+const MAX_CHECKOUT_ENTRIES: usize = 100_000;
 pub(crate) const CHUNK_BYTES: u64 = 128 * 1024;
+pub(crate) const MAX_BUNDLE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BranchCommit {
@@ -144,7 +149,24 @@ pub(crate) fn import_objects(repo: &Path, bundle: &Path, expected: &BranchCommit
     check_head(repo, bundle, expected)?;
     let bundle = path_argument(bundle)?;
     git(repo, &["bundle", "verify", bundle])?;
-    git(repo, &["bundle", "unbundle", bundle])?;
+    git(
+        repo,
+        &[
+            "-c",
+            "fetch.fsckObjects=true",
+            "-c",
+            "transfer.fsckObjects=true",
+            "-c",
+            "fetch.unpackLimit=1",
+            "fetch",
+            "--no-write-fetch-head",
+            "--no-tags",
+            "--no-auto-maintenance",
+            "--no-recurse-submodules",
+            bundle,
+            &expected.branch_ref,
+        ],
+    )?;
     git(
         repo,
         &["cat-file", "-e", &format!("{}^{{commit}}", expected.commit)],
@@ -152,10 +174,51 @@ pub(crate) fn import_objects(repo: &Path, bundle: &Path, expected: &BranchCommit
     Ok(())
 }
 
+/// Bound the contents Git will materialize before creating a worktree.
+#[cfg(feature = "desktop")]
+pub(crate) fn validate_checkout(repo: &Path, expected: &BranchCommit) -> Result<()> {
+    let args = ["ls-tree", "-r", "-l", "-z", expected.commit()];
+    let command = crate::git::git_in(repo, &args);
+    let listing = crate::git::output_with_limit(command, &args, BUNDLE_TIMEOUT, 16 * 1024 * 1024)
+        .map_err(|error| anyhow::anyhow!("transfer tree: {error}"))?;
+    validate_listing(&listing, MAX_CHECKOUT_BYTES, MAX_CHECKOUT_ENTRIES)
+}
+
+#[cfg(feature = "desktop")]
+fn validate_listing(listing: &str, max_bytes: u64, max_entries: usize) -> Result<()> {
+    let mut size = 0u64;
+    for (index, record) in listing.split_terminator('\0').enumerate() {
+        ensure!(
+            index < max_entries,
+            "The Git checkout has too many entries to transfer"
+        );
+        let (metadata, _) = record.split_once('\t').context("Invalid Git tree entry")?;
+        let mut fields = metadata.split_whitespace();
+        let mode = fields.next().context("Missing Git tree mode")?;
+        let object = fields.next().context("Missing Git tree object type")?;
+        fields.next().context("Missing Git tree object ID")?;
+        let bytes = fields.next().context("Missing Git tree object size")?;
+        match (mode, object) {
+            ("100644" | "100755" | "120000", "blob") => {
+                size = size
+                    .checked_add(bytes.parse()?)
+                    .context("The Git checkout is too large to transfer")?;
+                ensure!(
+                    size <= max_bytes,
+                    "The Git checkout is too large to transfer"
+                );
+            }
+            ("160000", "commit") => {}
+            _ => bail!("Unsupported Git tree entry"),
+        }
+    }
+    Ok(())
+}
+
 /// Install the pinned commit only after the caller has verified the imported
 /// transcript and selected the destination. A concurrent branch creation
 /// wins. An existing matching branch can be used on retry.
-pub(crate) fn ensure_local_branch(repo: &Path, expected: &BranchCommit) -> Result<()> {
+pub(crate) fn ensure_local_branch(repo: &Path, expected: &BranchCommit) -> Result<bool> {
     let commit = format!("{}^{{commit}}", expected.commit);
     let resolved = git(repo, &["rev-parse", "--verify", &commit])?;
     ensure!(
@@ -174,7 +237,7 @@ pub(crate) fn ensure_local_branch(repo: &Path, expected: &BranchCommit) -> Resul
         ],
     );
     if create.is_ok() {
-        return Ok(());
+        return Ok(true);
     }
 
     let existing = git(repo, &["rev-parse", "--verify", &expected.branch_ref]);
@@ -182,12 +245,103 @@ pub(crate) fn ensure_local_branch(repo: &Path, expected: &BranchCommit) -> Resul
         .as_ref()
         .is_ok_and(|head| head.trim() == expected.commit)
     {
-        return Ok(());
+        return Ok(false);
     }
     if existing.is_ok() {
         bail!("a local branch with this name already points to a different commit");
     }
-    create.map(|_| ())
+    create.map(|_| true)
+}
+
+#[cfg(feature = "desktop")]
+pub(crate) fn checkout(repo: &Path, path: &Path, expected: &BranchCommit) -> Result<()> {
+    ensure!(!path.exists(), "Transfer checkout path already exists");
+    std::fs::create_dir_all(path.parent().context("No worktree directory")?)?;
+    git(
+        repo,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "worktree",
+            "add",
+            "--no-checkout",
+            path_argument(path)?,
+            expected.branch(),
+        ],
+    )?;
+    let populate = (|| {
+        let actual = git(path, &["rev-parse", "--verify", "HEAD"])?;
+        ensure!(
+            actual.trim() == expected.commit(),
+            "The local branch moved during checkout"
+        );
+        git(
+            path,
+            &[
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "filter.lfs.process=",
+                "-c",
+                "filter.lfs.smudge=",
+                "-c",
+                "filter.lfs.required=false",
+                "reset",
+                "--hard",
+                expected.commit(),
+            ],
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = populate {
+        let cleanup = git(
+            repo,
+            &["worktree", "remove", "--force", path_argument(path)?],
+        );
+        return match cleanup {
+            Ok(_) => Err(error),
+            Err(cleanup) => Err(error.context(format!(
+                "Could not remove the unfinished transfer checkout: {cleanup}"
+            ))),
+        };
+    }
+    Ok(())
+}
+
+#[cfg(feature = "desktop")]
+pub(crate) fn rollback_branch(repo: &Path, expected: &BranchCommit) -> Result<()> {
+    let attached = git(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(worktreepath)",
+            &expected.branch_ref,
+        ],
+    )?;
+    ensure!(
+        attached.trim().is_empty(),
+        "The transfer branch is checked out and was kept"
+    );
+    git(
+        repo,
+        &["update-ref", "-d", &expected.branch_ref, expected.commit()],
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "desktop")]
+pub(crate) fn rollback_checkout(repo: &Path, path: &Path, expected: &BranchCommit) -> Result<()> {
+    ensure!(
+        crate::git::is_worktree_of(repo, path),
+        "Transfer checkout ownership changed"
+    );
+    let actual = git(path, &["rev-parse", "--verify", "HEAD"])?;
+    ensure!(
+        actual.trim() == expected.commit(),
+        "Transfer checkout has changed"
+    );
+    git(repo, &["worktree", "remove", path_argument(path)?])?;
+    Ok(())
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -202,38 +356,89 @@ pub(crate) enum TranscriptMessage {
     Assistant { text: String },
 }
 
-pub(crate) fn transcript(events: &[crate::events::AgentEvent]) -> Result<Vec<u8>> {
-    use crate::events::Payload;
-    let mut messages = Vec::new();
-    let mut assistant_seen = false;
-    for event in events {
-        match &event.payload {
+#[derive(Debug, thiserror::Error)]
+#[error("This workspace is too large to transfer")]
+pub(crate) struct TransferTooLarge;
+
+#[derive(Default)]
+struct TranscriptExport {
+    bytes: Vec<u8>,
+    assistant_seen: bool,
+}
+
+impl TranscriptExport {
+    fn event(&mut self, event: &crate::events::AgentEvent, max_bytes: usize) -> Result<()> {
+        use crate::events::Payload;
+        let (text, user) = match &event.payload {
             Payload::UserMessage {
                 text,
                 queued: false,
                 ..
             } => {
-                messages.push(TranscriptMessage::User { text: text.clone() });
-                assistant_seen = false;
+                self.assistant_seen = false;
+                (text, true)
             }
-            Payload::TurnStarted { .. } => assistant_seen = false,
+            Payload::TurnStarted { .. } => {
+                self.assistant_seen = false;
+                return Ok(());
+            }
             Payload::AssistantText { text, .. }
                 if event.subagent.is_none() && !text.trim().is_empty() =>
             {
-                messages.push(TranscriptMessage::Assistant { text: text.clone() });
-                assistant_seen = true;
+                self.assistant_seen = true;
+                (text, false)
             }
             Payload::TurnCompleted {
                 final_text: Some(text),
                 ..
-            } if !assistant_seen && event.subagent.is_none() => {
-                messages.push(TranscriptMessage::Assistant { text: text.clone() });
-                assistant_seen = true;
+            } if !self.assistant_seen && event.subagent.is_none() => {
+                self.assistant_seen = true;
+                (text, false)
             }
-            _ => {}
+            _ => return Ok(()),
+        };
+        let remaining = max_bytes.saturating_sub(self.bytes.len());
+        if text.len() >= remaining {
+            return Err(TransferTooLarge.into());
+        }
+        let message = if user {
+            TranscriptMessage::User { text: text.clone() }
+        } else {
+            TranscriptMessage::Assistant { text: text.clone() }
+        };
+        let encoded = serde_json::to_vec(&message)?;
+        if encoded.len().saturating_add(2) > remaining {
+            return Err(TransferTooLarge.into());
+        }
+        self.bytes
+            .push(if self.bytes.is_empty() { b'[' } else { b',' });
+        self.bytes.extend_from_slice(&encoded);
+        Ok(())
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.bytes.is_empty() {
+            self.bytes.push(b'[');
+        }
+        self.bytes.push(b']');
+        self.bytes
+    }
+}
+
+pub(crate) fn transcript_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
+    use std::io::BufRead;
+    let mut export = TranscriptExport::default();
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(export.finish()),
+        Err(error) => return Err(error.into()),
+    };
+    for line in std::io::BufReader::new(file).lines() {
+        if let Ok(event) = serde_json::from_str::<crate::events::AgentEvent>(&line?) {
+            export.event(&event, max_bytes)?;
         }
     }
-    Ok(serde_json::to_vec(&messages)?)
+    Ok(export.finish())
 }
 
 #[cfg(feature = "desktop")]
@@ -350,6 +555,16 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn refuses_an_oversized_or_overpopulated_checkout() {
+        let listing = "100644 blob abcd 8\tsource\0".repeat(2);
+        assert!(validate_listing(&listing, 16, 2).is_ok());
+        assert!(validate_listing(&listing, 15, 2).is_err());
+        assert!(validate_listing(&listing, 16, 1).is_err());
+        assert!(validate_listing("invalid\0", 16, 1).is_err());
+    }
+
     #[test]
     fn exports_an_origin_delta_without_updating_the_remote_branch() {
         let temp = tempfile::tempdir().unwrap();
@@ -387,8 +602,8 @@ mod tests {
         let first = commit(&local);
         let second = commit(&local);
         let selected = BranchCommit::new("topic", &first).unwrap();
-        ensure_local_branch(&local, &selected).unwrap();
-        ensure_local_branch(&local, &selected).unwrap();
+        assert!(ensure_local_branch(&local, &selected).unwrap());
+        assert!(!ensure_local_branch(&local, &selected).unwrap());
         let conflicting = BranchCommit::new("topic", &second).unwrap();
         assert!(ensure_local_branch(&local, &conflicting).is_err());
         assert_eq!(git(&local, &["rev-parse", "topic"]).unwrap().trim(), first);
