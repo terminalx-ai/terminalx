@@ -327,11 +327,12 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -428,11 +429,15 @@ jobs:
           name: rust-junit-${{ matrix.part }}
           path: src-tauri/target/nextest/ci/junit.xml
           if-no-files-found: warn
+      # Built once, as macos-native builds the library's tests: without the
+      # OUT_DIR dates put back, the test step below compiled the crate again
+      # (190 s in run 45442275413). The script fails unless a second
+      # `--no-run` finds every unit fresh.
       - name: Build the other test binaries
         id: build
         if: matrix.part == 'binaries'
         working-directory: src-tauri
-        run: cargo test --locked --bins --test '*' --no-run
+        run: ../infra/ci-runners/cargo-build-once.sh --bins --test '*'
       - name: cargo test (the other test binaries and the doc tests)
         if: matrix.part == 'binaries'
         working-directory: src-tauri
@@ -447,11 +452,12 @@ jobs:
       # `binaries` builds every dependency the four parts do, so it alone
       # saves: also when a test failed, as long as its build was whole.
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ !cancelled() && steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -636,19 +642,13 @@ jobs:
       # under build/raccoon/<hash>/out, and dating those back makes them stale.
       # The second `--no-run` must find every unit fresh: if the crate is
       # compiled a second time again, the job fails here and prints cargo's
-      # reason.
+      # reason. The commands are infra/ci-runners/cargo-build-once.sh, which
+      # sets pipefail itself; linux-rust-tests (binaries) builds through it too.
       - name: build the library's tests by themselves
         id: build
         if: ${{ !cancelled() && steps.helper.outcome == 'success' }}
         working-directory: src-tauri
-        # `shell: bash` sets pipefail: a cargo failure in the check must fail it.
-        shell: bash
-        run: |
-          cargo test --locked --lib --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/build.jsonl"
-          out_dir=$(jq -r 'select(.reason == "build-script-executed" and (.package_id | test("[#/]raccoon@"))) | .out_dir' "$RUNNER_TEMP/build.jsonl")
-          test -d "$out_dir"
-          find "$out_dir" -type f -exec touch -t 200001010000 {} +
-          cargo test --locked --lib --no-run -v --message-format=json 2> "$RUNNER_TEMP/fresh.log" | jq -s -e '[.[] | select(.reason == "compiler-artifact")] | (length > 0) and all(.fresh)' || { sed -E 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/fresh.log" | grep -E '^ *Dirty' | cut -c1-600; exit 1; }
+        run: ../infra/ci-runners/cargo-build-once.sh --lib
 
       # Saved as soon as the dependencies are built, before any test runs: a
       # suite that fails or runs out of time must not leave every later run to
@@ -664,7 +664,7 @@ jobs:
           cp -cpR "$RUNNER_TEMP/target" target
           cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ !cancelled() && steps.aside.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -766,11 +766,12 @@ jobs:
       - name: Self-test under the cloud workspace unit's sandbox (ProtectHome, own user)
         run: bash scripts/remote-runtime/cloud-unit-self-test.sh src-tauri/target/debug/terminalx-serve
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ !cancelled() && steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -786,6 +787,13 @@ jobs:
   # feature it needs. A new file under tests/ runs here without being named.
   # It builds what headless-serve builds, so it restores that job's cache and
   # saves none.
+  #
+  # They run under cargo-nextest's `ci` profile, as the library's tests do:
+  # every test in a process of its own and the binaries side by side, where
+  # `cargo test` ran the binaries one after another (433 s in run 45442275413).
+  # The slowest test is then the floor. local_supervisor has no libtest
+  # harness (`harness = false`), so nextest cannot list it: it runs under
+  # `cargo test` in a step of its own, as it did before.
   serve-tests:
     needs: macos-rust-changes
     if: needs.macos-rust-changes.outputs.rust == 'true'
@@ -807,6 +815,16 @@ jobs:
         run: |
           rustup show && cargo --version && command -v rg && command -v zsh
           echo "rustc=$(rustc --version | tr -c '[:alnum:].\n' '-')" >> "$GITHUB_OUTPUT"
+      # The release linux-rust-tests installs, by version and by the SHA-256 of its archive.
+      - name: Install cargo-nextest
+        env:
+          NEXTEST_VERSION: "0.9.152"
+          NEXTEST_SHA256: d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --max-time 120 -o "$RUNNER_TEMP/nextest.tar.gz" "https://get.nexte.st/$NEXTEST_VERSION/x86_64-unknown-linux-gnu.tar.gz"
+          echo "$NEXTEST_SHA256  $RUNNER_TEMP/nextest.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/nextest.tar.gz" -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+          cargo nextest --version
       - name: Restore the cargo cache
         id: cargo-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -823,18 +841,42 @@ jobs:
       - name: Build the runtime the tests start
         working-directory: src-tauri/serve
         run: cargo build --locked --bin terminalx-serve
-      - name: cargo test (every serve test binary without a job of its own)
+      - name: cargo nextest (every serve test binary without a job of its own)
         working-directory: src-tauri/serve
         run: |
+          set -o pipefail
           tests=()
           for file in tests/*.rs; do
             name=$(basename "$file" .rs)
             case "$name" in
               machine_compat|machines_e2e|machine_routes|local_issue_start) ;;
+              local_supervisor) ;;
               *) tests+=(--test "$name") ;;
             esac
           done
-          cargo test --locked --bins "${tests[@]}"
+          cargo nextest run --locked --profile ci --bins "${tests[@]}" 2>&1 | tee "$RUNNER_TEMP/nextest.log"
+      - name: cargo test (the serve test binaries without libtest's harness)
+        if: ${{ !cancelled() }}
+        working-directory: src-tauri/serve
+        run: cargo test --locked --test local_supervisor
+      # As in the library's parts: a flaky test passed on a retry its override
+      # allows; a leaky one left a process or a pipe open.
+      - name: Name the flaky and leaky tests in the summary
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo "### Flaky and leaky tests, serve-tests"
+            echo '```'
+            grep -aE '^[[:space:]]*(FLAKY|LEAK)[[:space:]]' "$RUNNER_TEMP/nextest.log" | sort -u || echo "none"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep the JUnit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: serve-junit
+          path: src-tauri/target/nextest/ci/junit.xml
+          if-no-files-found: warn
 
   # PRO-354: this build against the previous two released runtimes, both
   # ways (docs/MACHINES.md "Versions and updates"). The released runtimes
@@ -897,11 +939,12 @@ jobs:
           TERMINALX_MACHINE_COMPAT: ${{ runner.temp }}/machine-compat/manifest.json
         run: cargo test --locked --test machine_compat -- --test-threads=1
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ !cancelled() && steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -990,11 +1033,12 @@ jobs:
       # Saved from main, schedule and dispatch runs only: uploading the
       # target directory would eat a pull request's ten minutes.
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ steps.relevant.outputs.run == 'true' && github.event_name != 'pull_request' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ steps.relevant.outputs.run == 'true' && github.event_name != 'pull_request' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -1098,11 +1142,12 @@ jobs:
         shell: pwsh
         run: ./native/computer-use-windows/runtime-render.test.ps1
       - name: Leave this crate's own output out of the cache
+        id: clean
         if: ${{ runner.os != 'Linux' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
-        if: ${{ runner.os != 'Linux' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ steps.clean.outcome == 'success' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
