@@ -2282,6 +2282,12 @@ impl From<anyhow::Error> for CloudTransferImportError {
         if let Some(missing) = error.downcast_ref::<crate::workspace_transfer_bundle::MissingPrerequisite>() {
             return Self { code: "transfer_fetch_first", message: missing.to_string() };
         }
+        if error.is::<crate::workspace_transfer_bundle::TooManyPrerequisites>() {
+            return Self { code: "transfer_too_many_prerequisites", message: error.to_string() };
+        }
+        if error.is::<crate::workspace_transfer_bundle::TransferSubmodules>() {
+            return Self { code: "transfer_submodules", message: error.to_string() };
+        }
         err(error).into()
     }
 }
@@ -2310,6 +2316,7 @@ pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, i
         let transcript = serde_json::from_slice::<Vec<transfer::TranscriptMessage>>(&STANDARD.decode(&input.transcript)?)?;
         let pin = transfer::BranchCommit::new(&input.branch, &input.commit)?;
         let project = Path::new(&input.project_path);
+        transfer::check_branch_namespace(project, &pin)?;
         if let Some(encoded) = &input.bundle {
             anyhow::ensure!(encoded.len() as u64 <= transfer::MAX_BUNDLE_BYTES.div_ceil(3) * 4, "Git bundle is too large.");
             let bundle_directory = tempfile::tempdir()?;

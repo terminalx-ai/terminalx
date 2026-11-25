@@ -46,7 +46,7 @@ impl WorkspaceRpc {
     }
 
     pub(super) fn workspace_transfer(
-        &self,
+        self: &Arc<Self>,
         peer: &Arc<Peer>,
         method: &str,
         params: &Value,
@@ -117,7 +117,7 @@ impl WorkspaceRpc {
     }
 
     fn open_transfer(
-        &self,
+        self: &Arc<Self>,
         peer: &Arc<Peer>,
         session_id: &str,
         tab_id: &str,
@@ -199,7 +199,13 @@ impl WorkspaceRpc {
             }
         })?;
         still_allowed()?;
-        let bundle = bundle::export(&checkout, &pin).map_err(RpcError::internal)?;
+        let bundle = bundle::export(&checkout, &pin).map_err(|error| {
+            if error.is::<bundle::NoTransferBase>() {
+                RpcError::new("transfer_no_base", error.to_string())
+            } else {
+                RpcError::internal(error)
+            }
+        })?;
         if bundle
             .as_ref()
             .is_some_and(|bundle| bundle.size() > bundle::MAX_BUNDLE_BYTES)
@@ -221,7 +227,7 @@ impl WorkspaceRpc {
         self.transfers.lock().unwrap().insert(
             peer.id(),
             Export {
-                id,
+                id: id.clone(),
                 request,
                 manifest: result.clone(),
                 session: session_id.into(),
@@ -234,7 +240,27 @@ impl WorkspaceRpc {
                 transcript,
             },
         );
+        self.schedule_export_expiry(peer.id(), id, created + EXPORT_TTL);
         Ok(result)
+    }
+
+    fn schedule_export_expiry(self: &Arc<Self>, peer: u64, id: String, mut deadline: Instant) {
+        let rpc = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                let Some(rpc) = rpc.upgrade() else { return };
+                let mut transfers = rpc.transfers.lock().unwrap();
+                let Some(entry) = transfers.get(&peer).filter(|entry| entry.id == id) else {
+                    return;
+                };
+                if entry.expires <= Instant::now() {
+                    transfers.remove(&peer);
+                    return;
+                }
+                deadline = entry.expires;
+            }
+        });
     }
 }
 
@@ -245,6 +271,44 @@ fn renew_expiry(now: Instant, hard_expires: Instant) -> Instant {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn expired_exports_are_reclaimed_without_an_rpc() {
+        let directory = tempfile::tempdir().unwrap();
+        let server = WorkspaceRpc::new(
+            directory.path(),
+            1,
+            Arc::new(crate::sink::BroadcastSink::new(8)),
+            Arc::new(Terminals::new()),
+            None,
+        )
+        .unwrap();
+        let expires = Instant::now() + Duration::from_millis(25);
+        server.transfers.lock().unwrap().insert(
+            1,
+            Export {
+                id: "expiry-test".into(),
+                request: uuid::Uuid::new_v4(),
+                manifest: Value::Null,
+                session: "session".into(),
+                tab: "tab".into(),
+                generation: 1,
+                stamp: None,
+                expires,
+                hard_expires: expires,
+                bundle: None,
+                transcript: vec![],
+            },
+        );
+        server.schedule_export_expiry(1, "expiry-test".into(), expires);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !server.transfers.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
 
     #[test]
     fn a_read_renews_the_idle_deadline_only_to_the_hard_limit() {

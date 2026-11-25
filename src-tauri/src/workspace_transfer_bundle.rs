@@ -33,7 +33,11 @@ impl BranchCommit {
 
     pub(crate) fn new(branch: &str, commit: &str) -> Result<Self> {
         ensure!(
-            crate::remote::git::valid_ref_name(branch) && !branch.eq_ignore_ascii_case("HEAD"),
+            crate::remote::git::valid_ref_name(branch)
+                && !branch.eq_ignore_ascii_case("HEAD")
+                && !branch
+                    .split_once('/')
+                    .is_some_and(|(prefix, _)| prefix.eq_ignore_ascii_case("refs")),
             "invalid transfer branch"
         );
         ensure!(
@@ -118,7 +122,33 @@ fn path_argument(path: &Path) -> Result<&str> {
     path.to_str().context("unsupported transfer bundle path")
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("Cannot transfer {branch} because the cloud checkout has no usable upstream base.")]
+pub(crate) struct NoTransferBase {
+    branch: String,
+}
+
+pub(crate) fn check_branch_namespace(repo: &Path, expected: &BranchCommit) -> Result<()> {
+    if expected.branch().contains('/') {
+        let branch = expected.branch().to_lowercase();
+        let remotes = git(repo, &["remote"])?;
+        let conflicts = std::iter::once("origin")
+            .chain(remotes.lines())
+            .any(|remote| {
+                branch
+                    .strip_prefix(&remote.to_lowercase())
+                    .is_some_and(|tail| tail.starts_with('/'))
+            });
+        ensure!(
+            !conflicts,
+            "The transfer branch name conflicts with a remote namespace"
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn export(repo: &Path, expected: &BranchCommit) -> Result<Option<TransferBundle>> {
+    check_branch_namespace(repo, expected)?;
     let head = git(repo, &["rev-parse", "--verify", &expected.branch_ref])?;
     ensure!(
         head.trim() == expected.commit,
@@ -127,24 +157,17 @@ pub(crate) fn export(repo: &Path, expected: &BranchCommit) -> Result<Option<Tran
     let boundary = ["@{upstream}", "refs/remotes/origin/HEAD"]
         .into_iter()
         .find_map(|reference| git(repo, &["merge-base", expected.commit(), reference]).ok());
-    let parents;
-    let bases = if let Some(boundary) = &boundary {
-        if boundary.trim() == expected.commit() {
-            return Ok(None);
+    let Some(boundary) = boundary else {
+        return Err(NoTransferBase {
+            branch: expected.branch().into(),
         }
-        vec![boundary.trim()]
-    } else {
-        parents = git(
-            repo,
-            &["rev-list", "--parents", "-n", "1", expected.commit()],
-        )?;
-        let parents: Vec<_> = parents.split_whitespace().skip(1).collect();
-        if parents.is_empty() {
-            return Ok(None);
-        }
-        parents
+        .into());
     };
-    let exclusions: Vec<_> = bases.into_iter().map(|base| format!("^{base}")).collect();
+    let boundary = boundary.trim();
+    if boundary == expected.commit() {
+        return Ok(None);
+    }
+    let exclusion = format!("^{boundary}");
     let directory = tempfile::Builder::new()
         .prefix("terminalx-transfer-")
         .tempdir()?;
@@ -155,7 +178,7 @@ pub(crate) fn export(repo: &Path, expected: &BranchCommit) -> Result<Option<Tran
         path_argument(&path)?,
         &expected.branch_ref,
     ];
-    args.extend(exclusions.iter().map(String::as_str));
+    args.push(&exclusion);
     git(repo, &args)?;
     check_head(repo, &path, expected)?;
     let size = std::fs::metadata(&path)?.len();
@@ -205,7 +228,7 @@ pub(crate) fn require_commit(repo: &Path, expected: &BranchCommit, commit: &str)
 }
 
 #[cfg(any(feature = "desktop", test))]
-fn check_prerequisites(repo: &Path, bundle: &Path, expected: &BranchCommit) -> Result<()> {
+fn check_prerequisites(repo: &Path, bundle: &Path, expected: &BranchCommit) -> Result<Vec<String>> {
     use std::io::BufRead;
     let file = std::fs::File::open(bundle)?;
     let mut header = std::io::BufReader::new(file).take(64 * 1024);
@@ -215,7 +238,7 @@ fn check_prerequisites(repo: &Path, bundle: &Path, expected: &BranchCommit) -> R
         matches!(line.as_slice(), b"# v2 git bundle\n" | b"# v3 git bundle\n"),
         "Invalid Git bundle header"
     );
-    let mut prerequisites = 0;
+    let mut prerequisites = Vec::new();
     loop {
         line.clear();
         header.read_until(b'\n', &mut line)?;
@@ -224,22 +247,31 @@ fn check_prerequisites(repo: &Path, bundle: &Path, expected: &BranchCommit) -> R
             "The Git bundle header is incomplete or too large"
         );
         if line == b"\n" {
-            return Ok(());
+            ensure!(
+                !prerequisites.is_empty(),
+                "A transfer bundle must have an upstream prerequisite"
+            );
+            return Ok(prerequisites);
         }
         if let Some(prerequisite) = line.strip_prefix(b"-") {
-            prerequisites += 1;
-            ensure!(
-                prerequisites <= 32,
-                "The Git bundle has too many prerequisites"
-            );
+            if prerequisites.len() >= 32 {
+                return Err(TooManyPrerequisites.into());
+            }
             let end = prerequisite
                 .iter()
                 .position(|byte| *byte == b' ')
                 .context("Malformed bundle prerequisite")?;
-            require_commit(repo, expected, std::str::from_utf8(&prerequisite[..end])?)?;
+            let commit = std::str::from_utf8(&prerequisite[..end])?;
+            require_commit(repo, expected, commit)?;
+            prerequisites.push(commit.to_owned());
         }
     }
 }
+
+#[cfg(any(feature = "desktop", test))]
+#[derive(Debug, thiserror::Error)]
+#[error("This Git bundle has more than 32 upstream prerequisites and cannot be transferred.")]
+pub(crate) struct TooManyPrerequisites;
 
 #[cfg(any(feature = "desktop", test))]
 fn strict_fetch(repo: &Path, bundle: &Path, expected: &BranchCommit) -> Result<()> {
@@ -267,14 +299,15 @@ fn strict_fetch(repo: &Path, bundle: &Path, expected: &BranchCommit) -> Result<(
 
 #[cfg(any(feature = "desktop", test))]
 pub(crate) struct ValidatedBundle<'a> {
-    path: &'a Path,
+    _quarantine: tempfile::TempDir,
+    path: PathBuf,
     expected: &'a BranchCommit,
 }
 
 #[cfg(any(feature = "desktop", test))]
 impl ValidatedBundle<'_> {
     pub(crate) fn promote(&self, destination: &Path) -> Result<()> {
-        strict_fetch(destination, self.path, self.expected)
+        strict_fetch(destination, &self.path, self.expected)
     }
 }
 
@@ -283,10 +316,10 @@ impl ValidatedBundle<'_> {
 #[cfg(any(feature = "desktop", test))]
 pub(crate) fn validate_bundle<'a>(
     repo: &Path,
-    bundle: &'a Path,
+    bundle: &Path,
     expected: &'a BranchCommit,
 ) -> Result<ValidatedBundle<'a>> {
-    check_prerequisites(repo, bundle, expected)?;
+    let prerequisites = check_prerequisites(repo, bundle, expected)?;
     check_head(repo, bundle, expected)?;
     let format = if expected.commit().len() == 64 {
         "sha256"
@@ -323,8 +356,33 @@ pub(crate) fn validate_bundle<'a>(
     )?;
     strict_fetch(quarantine.path(), bundle, expected)?;
     validate_checkout(quarantine.path(), expected)?;
+    // Repack only the history reachable from the selected branch. Promoting
+    // the original pack would also retain unrelated objects supplied with it.
+    git(
+        quarantine.path(),
+        &["update-ref", &expected.branch_ref, expected.commit()],
+    )?;
+    let path = quarantine.path().join("validated.bundle");
+    let exclusions: Vec<_> = prerequisites
+        .iter()
+        .map(|commit| format!("^{commit}"))
+        .collect();
+    let mut args = vec![
+        "bundle",
+        "create",
+        path_argument(&path)?,
+        &expected.branch_ref,
+    ];
+    args.extend(exclusions.iter().map(String::as_str));
+    git(quarantine.path(), &args)?;
+    ensure!(
+        path.metadata()?.len() <= MAX_BUNDLE_BYTES,
+        "The validated Git bundle is too large to transfer"
+    );
+    check_head(quarantine.path(), &path, expected)?;
     Ok(ValidatedBundle {
-        path: bundle,
+        _quarantine: quarantine,
+        path,
         expected,
     })
 }
@@ -341,11 +399,17 @@ pub(crate) fn validate_checkout(repo: &Path, expected: &BranchCommit) -> Result<
     let command = git_command(repo, &args);
     let listing = crate::git::output_with_limit(command, &args, BUNDLE_TIMEOUT, 16 * 1024 * 1024)
         .map_err(|error| anyhow::anyhow!("transfer tree: {error}"))?;
-    validate_listing(&listing, MAX_CHECKOUT_BYTES, MAX_CHECKOUT_ENTRIES)
+    let links = validate_listing(&listing, MAX_CHECKOUT_BYTES, MAX_CHECKOUT_ENTRIES)?;
+    validate_links(repo, links)
 }
 
 #[cfg(any(feature = "desktop", test))]
-fn validate_listing(listing: &str, max_bytes: u64, max_entries: usize) -> Result<()> {
+fn validate_listing(
+    listing: &str,
+    max_bytes: u64,
+    max_entries: usize,
+) -> Result<Vec<(&str, &str, usize)>> {
+    let mut links = Vec::new();
     let mut size = 0u64;
     for (index, record) in listing.split_terminator('\0').enumerate() {
         ensure!(
@@ -363,21 +427,156 @@ fn validate_listing(listing: &str, max_bytes: u64, max_entries: usize) -> Result
         let mut fields = metadata.split_whitespace();
         let mode = fields.next().context("Missing Git tree mode")?;
         let object = fields.next().context("Missing Git tree object type")?;
-        fields.next().context("Missing Git tree object ID")?;
+        let oid = fields.next().context("Missing Git tree object ID")?;
         let bytes = fields.next().context("Missing Git tree object size")?;
         match (mode, object) {
-            ("100644" | "100755", "blob") => {
+            ("100644" | "100755" | "120000", "blob") => {
+                let bytes: usize = bytes.parse()?;
                 size = size
-                    .checked_add(bytes.parse()?)
+                    .checked_add(bytes as u64)
                     .context("The Git checkout is too large to transfer")?;
                 ensure!(
                     size <= max_bytes,
                     "The Git checkout is too large to transfer"
                 );
+                if mode == "120000" {
+                    ensure!(
+                        links.len() < 256
+                            && bytes <= 1024
+                            && matches!(oid.len(), 40 | 64)
+                            && oid.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                        "Too many or oversized symbolic links to transfer"
+                    );
+                    ensure!(
+                        portable_link_path(path),
+                        "A symbolic link has an unsupported path"
+                    );
+                    links.push((path, oid, bytes));
+                }
             }
-            ("120000", "blob") => bail!("Git checkout contains symbolic links"),
-            ("160000", "commit") => bail!("Git checkout contains submodules"),
+            ("160000", "commit") => return Err(TransferSubmodules.into()),
             _ => bail!("Unsupported Git tree entry"),
+        }
+    }
+    Ok(links)
+}
+
+#[cfg(any(feature = "desktop", test))]
+#[derive(Debug, thiserror::Error)]
+#[error("This checkout contains Git submodules. Transfer supports the main repository only.")]
+pub(crate) struct TransferSubmodules;
+
+#[cfg(any(feature = "desktop", test))]
+fn portable_link_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.is_ascii()
+        && !path.starts_with('/')
+        && !path
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || matches!(byte, b'\\' | b':' | b'~'))
+        && path.split('/').all(|part| {
+            if matches!(part, "" | "." | "..") {
+                return true;
+            }
+            let device = part
+                .split('.')
+                .next()
+                .unwrap_or_default()
+                .trim_end()
+                .to_ascii_uppercase();
+            let numbered = device
+                .as_bytes()
+                .get(3)
+                .is_some_and(|digit| matches!(digit, b'1'..=b'9'))
+                && device.len() == 4
+                && (device.starts_with("COM") || device.starts_with("LPT"));
+            !part.eq_ignore_ascii_case(".git")
+                && !part.ends_with(['.', ' '])
+                && !matches!(
+                    device.as_str(),
+                    "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+                )
+                && !numbered
+        })
+}
+
+#[cfg(any(feature = "desktop", test))]
+fn validate_links(repo: &Path, links: Vec<(&str, &str, usize)>) -> Result<()> {
+    if links.is_empty() {
+        return Ok(());
+    }
+    let args = ["cat-file", "--batch"];
+    let mut command = git_command(repo, &args);
+    command.args(args);
+    let mut input = Vec::new();
+    for (_, oid, _) in &links {
+        input.extend_from_slice(oid.as_bytes());
+        input.push(b'\n');
+    }
+    let response = crate::git::output_feeding(command, input, BUNDLE_TIMEOUT)
+        .map_err(|error| anyhow::anyhow!("Could not inspect symbolic links: {error}"))?;
+    let mut rest = response.as_str();
+    let mut targets = std::collections::HashMap::new();
+    for (path, oid, size) in links {
+        let (header, data) = rest
+            .split_once('\n')
+            .context("Missing symbolic link object")?;
+        ensure!(
+            header == format!("{oid} blob {size}"),
+            "Invalid symbolic link object"
+        );
+        let target = data.get(..size).context("Invalid symbolic link target")?;
+        ensure!(
+            portable_link_path(target),
+            "A symbolic link target must stay inside the worktree"
+        );
+        ensure!(
+            targets.insert(path.to_ascii_lowercase(), target).is_none(),
+            "Symbolic link paths differ only by case"
+        );
+        rest = data
+            .get(size..)
+            .and_then(|tail| tail.strip_prefix('\n'))
+            .context("Invalid symbolic link record")?;
+    }
+    ensure!(rest.is_empty(), "Unexpected symbolic link records");
+    for (link, target) in &targets {
+        resolve_link(link, target, &targets)?;
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "desktop", test))]
+fn resolve_link<'a>(
+    link: &'a str,
+    target: &'a str,
+    targets: &'a std::collections::HashMap<String, &'a str>,
+) -> Result<()> {
+    use std::collections::VecDeque;
+    let mut stack: Vec<_> = link.split('/').collect();
+    stack.pop();
+    let mut pending: VecDeque<_> = target.split('/').collect();
+    let mut followed = 0;
+    while let Some(component) = pending.pop_front() {
+        match component {
+            "" | "." => {}
+            ".." => {
+                ensure!(
+                    stack.pop().is_some(),
+                    "A symbolic link target escapes the worktree"
+                );
+            }
+            name => {
+                stack.push(name);
+                if let Some(target) = targets.get(&stack.join("/").to_ascii_lowercase()) {
+                    followed += 1;
+                    ensure!(followed <= 40, "Symbolic link chain is cyclic or too deep");
+                    stack.pop();
+                    for part in target.rsplit('/') {
+                        pending.push_front(part);
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -675,19 +874,8 @@ pub(crate) fn transcript_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>> 
         {
             break;
         }
-        if line.len() > line_limit && !line.ends_with(b"\n") {
-            let visible = [
-                b"\"type\":\"user_message\"".as_slice(),
-                b"\"type\":\"assistant_text\"",
-                b"\"type\":\"turn_completed\"",
-            ]
-            .into_iter()
-            .any(|tag| line.windows(tag.len()).any(|window| window == tag));
-            if visible {
-                return Err(TransferTooLarge.into());
-            }
-            reader.skip_until(b'\n')?;
-            continue;
+        if line.len() > line_limit {
+            return Err(TransferTooLarge.into());
         }
         if let Ok(event) = serde_json::from_slice::<crate::events::AgentEvent>(&line) {
             export.event(&event, max_bytes)?;
@@ -774,13 +962,44 @@ mod tests {
         git(repo, &["rev-parse", "HEAD"]).unwrap().trim().into()
     }
 
+    fn mark_upstream(repo: &Path, commit: &str) {
+        git(repo, &["update-ref", "refs/remotes/origin/main", commit]).unwrap();
+        git(
+            repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        )
+        .unwrap();
+    }
+
     #[test]
-    fn exports_the_branch_without_a_remote_and_imports_its_objects_without_moving_a_local_ref() {
+    fn an_unpublished_branch_without_a_base_returns_a_typed_refusal() {
+        let temp = tempfile::tempdir().unwrap();
+        let cloud = temp.path().join("cloud");
+        repository(&cloud);
+        for _ in 0..3 {
+            let pin = BranchCommit::new("main", &commit(&cloud)).unwrap();
+            assert!(export(&cloud, &pin).err().unwrap().is::<NoTransferBase>());
+        }
+        assert!(BranchCommit::new("refs/heads/main", &"a".repeat(40)).is_err());
+        let bad_namespace = BranchCommit::new("origin/topic", &"a".repeat(40)).unwrap();
+        assert!(check_branch_namespace(&cloud, &bad_namespace).is_err());
+        git(&cloud, &["remote", "add", "team/fork", "unused"]).unwrap();
+        let nested = BranchCommit::new("Team/Fork/topic", &"a".repeat(40)).unwrap();
+        assert!(check_branch_namespace(&cloud, &nested).is_err());
+    }
+
+    #[test]
+    fn exports_from_a_cached_base_and_imports_objects_without_moving_a_local_ref() {
         let temp = tempfile::tempdir().unwrap();
         let cloud = temp.path().join("cloud");
         let local = temp.path().join("local");
         repository(&cloud);
-        commit(&cloud);
+        let base = commit(&cloud);
+        mark_upstream(&cloud, &base);
         git(
             temp.path(),
             &[
@@ -904,6 +1123,129 @@ mod tests {
     }
 
     #[test]
+    fn an_actual_tree_counts_unpacked_blob_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        repository(&repo);
+        std::fs::write(repo.join("compressible"), vec![b'x'; 8192]).unwrap();
+        git(&repo, &["add", "--all"]).unwrap();
+        let commit = commit(&repo);
+        let listing = git(&repo, &["ls-tree", "-r", "-l", "-z", &commit]).unwrap();
+        assert!(validate_listing(&listing, 8192, 1).is_ok());
+        assert!(validate_listing(&listing, 8191, 1).is_err());
+    }
+
+    #[test]
+    fn prerequisite_limit_has_a_typed_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        repository(&repo);
+        let base = commit(&repo);
+        let pinned = BranchCommit::new("main", &base).unwrap();
+        let bundle = temp.path().join("overscoped.bundle");
+        std::fs::write(
+            &bundle,
+            format!(
+                "# v2 git bundle\n{}\n",
+                format!("-{base} prerequisite\n").repeat(33)
+            ),
+        )
+        .unwrap();
+        let error = check_prerequisites(&repo, &bundle, &pinned).unwrap_err();
+        assert!(error.is::<TooManyPrerequisites>());
+    }
+
+    #[test]
+    fn an_oversized_record_cannot_be_silently_omitted() {
+        use std::io::Write;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("transcript");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(br#"{ "payload": { "type" : "assistant_text", "text": ""#)
+            .unwrap();
+        file.set_len(6 * 1024 * 1024 + 10).unwrap();
+        assert!(transcript_file(&path, 64)
+            .unwrap_err()
+            .is::<TransferTooLarge>());
+    }
+
+    #[test]
+    fn promotion_drops_objects_unreachable_from_the_selected_commit() {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let temp = tempfile::tempdir().unwrap();
+        let cloud = temp.path().join("cloud");
+        let local = temp.path().join("local");
+        repository(&cloud);
+        let base = commit(&cloud);
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "-q",
+                cloud.to_str().unwrap(),
+                local.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        let pinned = commit(&cloud);
+        let file = cloud.join("unrelated");
+        std::fs::write(&file, b"This object does not belong to the transfer").unwrap();
+        let unrelated = git(&cloud, &["hash-object", "-w", file.to_str().unwrap()]).unwrap();
+        let unrelated = unrelated.trim();
+
+        let mut pack = git_command(&cloud, &["pack-objects"]);
+        let mut pack = pack
+            .args(["pack-objects", "--stdout", "--revs"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(pack.stdin.take().unwrap(), "{pinned}\n^{base}\n{unrelated}").unwrap();
+        let result = pack.wait_with_output().unwrap();
+        assert!(result.status.success());
+        let path = temp.path().join("with-unrelated.bundle");
+        let mut bytes =
+            format!("# v2 git bundle\n-{base} base\n{pinned} refs/heads/main\n\n").into_bytes();
+        bytes.extend(result.stdout);
+        std::fs::write(&path, bytes).unwrap();
+
+        let expected = BranchCommit::new("main", &pinned).unwrap();
+        let refs = git(&local, &["show-ref"]).unwrap();
+        import_objects(&local, &path, &expected).unwrap();
+        assert_eq!(git(&local, &["show-ref"]).unwrap(), refs);
+        assert!(git(&local, &["cat-file", "-e", &pinned]).is_ok());
+        assert!(git(&local, &["cat-file", "-e", unrelated]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepts_in_tree_symbolic_links_and_refuses_composed_escapes() {
+        assert!(!portable_link_path("nested/COM1.txt"));
+        assert!(!portable_link_path("nested/NUL"));
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        repository(&repo);
+        std::fs::create_dir(repo.join("nested")).unwrap();
+        std::fs::write(repo.join("inside"), b"text").unwrap();
+        std::os::unix::fs::symlink("../inside", repo.join("nested/relative")).unwrap();
+        std::os::unix::fs::symlink("nested/relative", repo.join("chain")).unwrap();
+        std::os::unix::fs::symlink(".", repo.join("root-alias")).unwrap();
+        git(&repo, &["add", "--all"]).unwrap();
+        let pin = BranchCommit::new("main", &commit(&repo)).unwrap();
+        validate_checkout(&repo, &pin).unwrap();
+        std::os::unix::fs::symlink("root-alias/../outside", repo.join("escape")).unwrap();
+        git(&repo, &["add", "--all"]).unwrap();
+        let pin = BranchCommit::new("main", &commit(&repo)).unwrap();
+        let error = validate_checkout(&repo, &pin).unwrap_err();
+        assert!(
+            error.to_string().contains("escapes the worktree"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn a_rejected_gitlink_or_multi_head_bundle_leaves_the_destination_unchanged() {
         let temp = tempfile::tempdir().unwrap();
         let cloud = temp.path().join("cloud");
@@ -911,7 +1253,8 @@ mod tests {
         repository(&cloud);
         let base = commit(&cloud);
         let root = BranchCommit::new("main", &base).unwrap();
-        assert!(export(&cloud, &root).unwrap().is_none());
+        assert!(export(&cloud, &root).err().unwrap().is::<NoTransferBase>());
+        mark_upstream(&cloud, &base);
         git(
             temp.path(),
             &[
@@ -936,12 +1279,14 @@ mod tests {
         let pin = BranchCommit::new("main", &head).unwrap();
         let bundle = export(&cloud, &pin).unwrap().unwrap();
         let objects_before = git(&local, &["count-objects", "-v"]).unwrap();
+        let refs_before = git(&local, &["show-ref"]).unwrap();
         let error = validate_bundle(&local, &bundle.path, &pin).err().unwrap();
         assert!(error.to_string().contains("submodules"), "{error:#}");
         assert_eq!(
             git(&local, &["count-objects", "-v"]).unwrap(),
             objects_before
         );
+        assert_eq!(git(&local, &["show-ref"]).unwrap(), refs_before);
         assert!(git(&local, &["cat-file", "-e", &head]).is_err());
 
         git(&cloud, &["branch", "second"]).unwrap();
@@ -963,6 +1308,7 @@ mod tests {
             git(&local, &["count-objects", "-v"]).unwrap(),
             objects_before
         );
+        assert_eq!(git(&local, &["show-ref"]).unwrap(), refs_before);
     }
 
     #[cfg(feature = "desktop")]
@@ -1073,7 +1419,8 @@ mod tests {
         let local = temp.path().join("local");
         repository(&cloud);
         repository(&local);
-        commit(&cloud);
+        let base = commit(&cloud);
+        mark_upstream(&cloud, &base);
         let initial = BranchCommit::new("main", &commit(&cloud)).unwrap();
         let bundle = export(&cloud, &initial).unwrap().unwrap();
         let moved = BranchCommit::new("main", &commit(&cloud)).unwrap();
