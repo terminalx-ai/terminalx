@@ -336,6 +336,45 @@ the transcript renders from another folder), and a selected one merged with
 its `webkit-mac-only` red. Every other WebKit check runs on every frontend pull
 request.
 
+#### One rerun, alone, on the Linux parts
+
+A Linux part runs its checks several at once, and a check can fail there only
+because the others hold the processor. So, by the owner's decision (#1514,
+item 21), each check that failed runs once more after the part's other checks
+have ended, by itself, with nothing else running in that part. The part passes
+only if every such check passes alone; one that fails again fails the part.
+There is exactly one rerun: `reruns` in `run-all.mjs` is 1, `rerunFailed`
+refuses any other number, and `infra/ci-runners/test_webkit_reruns.py` fails
+when either allows a second (or a retry loop is added around the one). The
+macOS job (`--only mac-only`) and runs on a Mac make none.
+
+A check that passed only alone is not hidden. The log prints `<name> FAILED
+under load, passed alone` with the output of its first run, the part's last
+lines name it again, and the job summary (`GITHUB_STEP_SUMMARY`) lists it under
+the heading "FAILED under load, passed alone", with that output. A check on
+run-all's `alone` list ran by itself the first time too, so it is said to have
+"failed, passed when run again", in the same list. It is a check to fix: it
+failed once, on a runner like the next one.
+
+Nobody opens the summary of a green job, so each such check also gets one
+warning annotation, titled `WebKit check passed only when run again: <name>,
+part <i>/4`. It shows on the run's page and among the pull request's checks,
+and the API returns it without the log.
+
+**The list is read with `node scripts/webkit/rerun-tally.mjs`.** For the last
+completed CI runs (20 by default, `--runs N` up to 100, `--branch main` for
+one branch, `--json` for JSON, `--help` for these), it reads those annotations
+for every attempt of every Linux part, through `gh api`, and prints each check
+that passed only when run again, with in how many runs and which (link,
+branch, commit, part). A run counts once for a check, however many of its
+attempts said so. It sends four requests at once and says each run on stderr
+as it is read: 20 runs take about 20 seconds, 100 about 70. A request GitHub
+answers with a 5xx is sent again, up to four times, backing off.
+
+A rerun takes the check's own time again, after the part. A check that timed
+out (ten minutes) and is rerun can take the part past its 25-minute limit; the
+part then fails, as it would have without the rerun.
+
 The legacy runtime diagnostic's macOS leg is gone: its tests patch
 `platform.system` to Linux and to Darwin themselves.
 
