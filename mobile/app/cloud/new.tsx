@@ -10,7 +10,7 @@ import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider
 import type { CloudCatalog } from "@mobile/cloud/catalog";
 import { EMPTY_FIRST_TASK, FIRST_TASK_PLACEHOLDER, FIRST_TASK_TOO_LONG, NO_AGENT_TICKED, keptTaskKey, launchOf, taskAgent, taskAgents, taskEffort, taskEffortChoices, taskFacts, taskModel, taskModelChoices, taskModels, taskTooLong, taskWritten, type FirstTaskDraft } from "@mobile/cloud/first-task";
 import { EMPTY_FIRST_TASK_CHECKED_LIVE } from "@mobile/cloud/live-checks";
-import { ACCESS_NOTICE, LaunchAttempt, QUOTE_EXPIRED, SPEND_NOTICE, agentLogins, credentialName, firstRunSetup, idleChoiceLabel, idleChoices, idleValue, launchOrganization, launchProviders, launchRefusal, loginDetail, preflightProblems, pricingNote, problemsTitle, providerLabel, quotedSize, repositoriesRow, repositoryLine, sizeDetail, sizeNamesMachine, sizeValue, unanswered, type LaunchRefusal, type LaunchRepository, type PreflightProblems } from "@mobile/cloud/launch";
+import { ACCESS_NOTICE, LaunchAttempt, QUOTE_EXPIRED, SPEND_NOTICE, agentLogins, credentialName, firstRunSetup, idleChoiceLabel, idleChoices, idleValue, launchOrganization, launchProviders, launchRefusal, loginDetail, preflightProblems, pricingNote, problemsTitle, providerLabel, quotedSize, repositoriesRow, repositoryLine, repositoryOf, sizeDetail, sizeNamesMachine, sizeValue, unanswered, type LaunchRefusal, type LaunchRepository, type PreflightProblems } from "@mobile/cloud/launch";
 import { stepHref } from "@mobile/cloud/setup-routes";
 import { useOrganizationSetups } from "@mobile/cloud/useSetup";
 import { useApp } from "@mobile/state/AppProvider";
@@ -39,7 +39,8 @@ const NAME_MAX = 80;
  */
 export default function NewWorkspaceScreen() {
   // `from`: a canceled launch whose unsent first task the form opens with (Launch again).
-  const params = useLocalSearchParams<{ orgId?: string; from?: string }>();
+  // `repository`: the repository the form opens with, for a workspace whose machine is gone (#1581).
+  const params = useLocalSearchParams<{ orgId?: string; from?: string; repository?: string }>();
   const { palette } = useTheme();
   const router = useRouter();
   const catalog = useCloudCatalog();
@@ -65,7 +66,7 @@ export default function NewWorkspaceScreen() {
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
     <Stack.Screen options={{ title: "New workspace", headerShown: false }} />
     {catalog && organization
-      ? <LaunchFlow key={organization.orgId} catalog={catalog} organization={organization} organizations={organizations} onOrganization={setChosen} again={params.orgId === organization.orgId ? params.from ?? null : null} />
+      ? <LaunchFlow key={organization.orgId} catalog={catalog} organization={organization} organizations={organizations} onOrganization={setChosen} again={params.orgId === organization.orgId ? params.from ?? null : null} repositoryGiven={params.orgId === organization.orgId ? params.repository ?? "" : ""} />
       : <>
         <ScreenHeader title="New workspace" onBack={() => router.back()} />
         {catalog
@@ -133,7 +134,13 @@ function useMacModels(): ModelInfo[] | null {
   return listed;
 }
 
-function LaunchFlow({ catalog, organization, organizations, onOrganization, again }: { catalog: CloudCatalog; organization: CloudOrganization; organizations: CloudOrganization[]; onOrganization(orgId: string): void; again: string | null }) {
+/** The repository a workspace whose machine is gone (#1581) opens the form with, as one typed entry at its default branch. */
+function givenRepositories(given: string): LaunchRepository[] {
+  const parsed = given ? repositoryOf(given) : null;
+  return parsed ? [{ ...parsed, ref: "", typed: true }] : [];
+}
+
+function LaunchFlow({ catalog, organization, organizations, onOrganization, again, repositoryGiven = "" }: { catalog: CloudCatalog; organization: CloudOrganization; organizations: CloudOrganization[]; onOrganization(orgId: string): void; again: string | null; repositoryGiven?: string }) {
   const { palette } = useTheme();
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -144,7 +151,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   const [offer, setOffer] = useState<Offer>({ status: "reading" });
   const [setup, setSetup] = useState<CloudProviderSetup | null>(null);
   // Launch again after a cancel opens with the first task that was not sent, taken from where the launch kept it.
-  const [draft, setDraft] = useState<Draft>(() => ({ name: "", providerId: null, sizeId: "", locationId: "", sourceId: "", idleMinutes: 0, repositories: [], withoutAgents: [], task: (again ? takeConversationState<FirstTaskDraft>(keptTaskKey(orgId, again)) : undefined) ?? NO_TASK }));
+  const [draft, setDraft] = useState<Draft>(() => ({ name: "", providerId: null, sizeId: "", locationId: "", sourceId: "", idleMinutes: 0, repositories: givenRepositories(repositoryGiven), withoutAgents: [], task: (again ? takeConversationState<FirstTaskDraft>(keptTaskKey(orgId, again)) : undefined) ?? NO_TASK }));
   const [step, setStep] = useState<"form" | "repository" | "review">("form");
   const [sheet, setChosenSheet] = useState<Sheet>(null);
   // The task is the form's last field: while it is typed in, the form keeps its end in view, above the keyboard

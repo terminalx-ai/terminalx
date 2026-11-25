@@ -1,3 +1,4 @@
+import { MACHINE_GONE_MESSAGE, machineGone } from "@terminalx/portable/cloudMachineGone";
 import { useSyncExternalStore } from "react";
 import { thisComputer } from "@/lib/platform";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
@@ -242,6 +243,9 @@ const MESSAGES: Record<string, string> = {
   provider_cleanup_pending: "The provider is still removing resources.",
   cloud_workspace_request_outcome_unknown: "No answer arrived. The action may have been applied; the list below is the source of truth.",
   cloud_workspace_not_found: "This workspace no longer exists.",
+  // A provider the organization cannot use, or a machine the provider no longer has. A failed resume
+  // that ends with it says the machine is gone (`machineGone`, @terminalx/portable/cloudMachineGone).
+  cloud_provider_not_found: "The provider could not find what this action needs: this organization cannot use it, or it no longer has this workspace's machine.",
   // PRO-73: a workspace is managed by its creator and by owners and admins. Offered because the app
   // thought this person was one of them: the role, or the list, changed since.
   cloud_workspace_manager_required: managerRefusedMessage("stop, resume, archive or delete it"),
@@ -262,8 +266,8 @@ export function lifecycleErrorMessage(code: string): string {
  * Why a lifecycle operation stopped: the message for its code, followed by
  * the provider's own safe error code when the server reports one.
  */
-export function operationFailureText(operation: Pick<CloudWorkspaceOperation, "errorCode" | "providerErrorCode">): string {
-  const message = lifecycleErrorMessage(operation.errorCode ?? "cloud_workspace_unknown_error");
+export function operationFailureText(operation: Pick<CloudWorkspaceOperation, "errorCode" | "providerErrorCode"> & Partial<Pick<CloudWorkspaceOperation, "action" | "state" | "detailCode">>): string {
+  const message = machineGone(operation) ? MACHINE_GONE_MESSAGE : lifecycleErrorMessage(operation.errorCode ?? "cloud_workspace_unknown_error");
   return operation.providerErrorCode ? `${message} (Provider code: ${operation.providerErrorCode})` : message;
 }
 

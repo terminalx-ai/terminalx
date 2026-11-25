@@ -3,6 +3,7 @@ import { ChevronRight, Cloud } from "lucide-react-native";
 import type { CloudWorkspaceItem } from "@mobile/cloud/api";
 import { useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { useProviderName } from "@mobile/cloud/provider-names";
+import { machineGone } from "@mobile/cloud/resume";
 import { listStatus, roleLabel } from "@mobile/cloud/words";
 import { agoTime } from "@mobile/data/session-list";
 import { StatusDot } from "./primitives";
@@ -33,7 +34,8 @@ export function CloudWorkspaceRow({ item, title, first, last, onPress, cloud = f
 }) {
   const { palette } = useTheme();
   const { workspace } = item;
-  const status = listStatus(workspace);
+  // Said as what happened when its machine is gone (#1581): the workspace page says what is left to do.
+  const status = workspace.state === "attention-required" && machineGone(item.latestOperation) ? { words: "Machine gone", mark: "attention" as const } : listStatus(workspace);
   const role = roleLabel(workspace.you?.role);
   // The provider by its name (PRO-566): the workspace's own when the server sends one, else the one its
   // organization's provider list gives the id. The bare id only while neither is known, as when offline.
