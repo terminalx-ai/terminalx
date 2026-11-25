@@ -124,6 +124,8 @@ struct Observer {
     completed: Mutex<Vec<(String, String, Option<String>)>>,
     interrupts: std::sync::atomic::AtomicUsize,
     answered: Mutex<Vec<(String, String)>>,
+    /// Automation failures and lost runs, by message.
+    failed: Mutex<Vec<String>>,
 }
 
 impl SessionObserver for Observer {
@@ -132,6 +134,12 @@ impl SessionObserver for Observer {
     }
     fn answered(&self, session: &str, tab: &str) {
         self.answered.lock().unwrap().push((session.into(), tab.into()));
+    }
+    fn automation_failed(&self, _session: &str, _tab: &str, message: &str) {
+        self.failed.lock().unwrap().push(message.into());
+    }
+    fn automation_execution_lost(&self, _session: &str, _tab: &str, message: &str) {
+        self.failed.lock().unwrap().push(message.into());
     }
     fn automation_completed(&self, session: &str, tab: &str, message: Option<String>, _generation: u64) {
         let rt = self.rt.lock().unwrap().upgrade().unwrap();
@@ -1957,6 +1965,32 @@ fn a_transcript_end_waits_out_the_hooks_before_the_watcher_closes_it() {
     rig.tick();
     assert_eq!(rig.completed_turns(), 1, "one turn, closed once");
     assert_eq!(*rig.observer.completed.lock().unwrap(), [(SESSION.to_string(), TAB.to_string(), Some("pong".to_string()))]);
+}
+
+/// `/clear` ends Claude Code's session to start a new one (#1498): the turn
+/// the composer opened for it is a command that ran, not a stopped turn, and
+/// an automation that sent it completed. Any other end still aborts.
+#[test]
+fn clear_ends_its_turn_as_a_command_that_ran() {
+    for (reason, ended) in [("clear", TurnStatus::Ok), ("other", TurnStatus::Aborted), ("logout", TurnStatus::Aborted)] {
+        let rig = Rig::new();
+        rig.start_turn();
+        rig.hook("SessionEnd", json!({ "reason": reason }));
+        assert!(!rig.turn_open(), "{reason}");
+        let ends: Vec<TurnStatus> = rig.events().iter().filter_map(|e| match &e.payload { Payload::TurnCompleted { status, .. } => Some(*status), _ => None }).collect();
+        assert_eq!(ends, [ended], "{reason}");
+        let failed = rig.observer.failed.lock().unwrap().clone();
+        let completed = rig.observer.completed.lock().unwrap().clone();
+        if ended == TurnStatus::Ok {
+            assert!(failed.is_empty(), "{reason}: {failed:?}");
+            assert_eq!(completed, [(SESSION.to_string(), TAB.to_string(), None)], "{reason}");
+        } else {
+            assert_eq!(failed.len(), 1, "{reason}");
+            assert!(completed.is_empty(), "{reason}");
+        }
+        // One rig at a time: each holds the test home.
+        drop(rig);
+    }
 }
 
 /// With no `Stop` hook at all, the watcher closes the turn once the hooks

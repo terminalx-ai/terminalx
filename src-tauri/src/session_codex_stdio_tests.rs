@@ -1841,6 +1841,44 @@ fn a_busy_refusal_says_the_words_the_window_knows_it_by() {
     assert!(window.contains(&format!("\"{BUSY_WORDS}\"")), "the window's copy of the words drifted");
 }
 
+/// `/clear`, or any slash command but `/compact`, has no native Codex request
+/// (#1498). It is refused as the request it is: no agent error, no "Needs
+/// you", nothing published, and words the window shows in the composer.
+#[test]
+fn a_command_native_codex_cannot_run_is_refused_as_a_request() {
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(),
+        "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto",
+            "providerSessionId":"thread", "created":index::now()}]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
+        Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    let rt_arc = manager.runtime("stdio-owner", "tab").unwrap();
+    let status = rt_arc.lock().unwrap().status;
+    for (typed, said) in [
+        ("/clear", "Native Codex can't clear its conversation, so /clear was not sent. Open a new Codex tab to start fresh."),
+        ("  /review the diff", "Native Codex can't run /review, so it was not sent. Only /compact works in native Codex."),
+    ] {
+        let error = manager.send("stdio-owner", "tab", typed.into(), Vec::new()).expect_err(typed);
+        assert!(error.is::<UnsupportedCommand>(), "{typed}: {error:#}");
+        assert_eq!(error.to_string(), said);
+        let rt = rt_arc.lock().unwrap();
+        assert!(!rt.turn_open && rt.recovery.is_none() && rt.status == status, "{typed}: the tab is left as it was");
+        assert!(matches!(rt.engine, Engine::None), "{typed}: and Codex is not started for it");
+    }
+    let log = store::log_path("stdio-owner", "tab").unwrap();
+    let events = if log.exists() { store::read_lines::<AgentEvent>(&log).unwrap() } else { Vec::new() };
+    assert!(events.is_empty(), "nothing is published: {:?}", events.iter().map(|event| &event.payload).collect::<Vec<_>>());
+    // The window's `requestRefusalNotice` knows these words.
+    let window = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../packages/portable/src/recovery.ts")).unwrap();
+    assert!(window.contains("Native Codex can't"), "the window's copy of the words drifted");
+}
+
 #[cfg(unix)]
 #[test]
 fn child_fixture() {
