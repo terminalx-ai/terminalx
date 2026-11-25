@@ -1,3 +1,4 @@
+import { MACHINE_GONE_MESSAGE, machineGone } from "@terminalx/portable/cloudMachineGone";
 import { CloudApiError, type CloudWorkspaceItem } from "./api";
 import { codeText } from "./words";
 
@@ -104,26 +105,11 @@ export function listedAsStarting(item: Pick<CloudWorkspaceItem, "workspace" | "l
   return operation?.action === "resume" && (operation.state === "queued" || operation.state === "running");
 }
 
-/** Server details that come with `cloud_provider_not_found` on an operation but are about something other than the machine. */
-const NOT_FOUND_ELSEWHERE = new Set(["environment_image_missing", "platform_organization_not_found", "region_account_missing", "region_not_configured"]);
-
 /** What the phone says once the workspace's machine is gone (#1581), as the desktop says it. */
 export const MACHINE_GONE_TITLE = "This workspace's machine is gone";
-export const MACHINE_GONE_TEXT = "This workspace's machine no longer exists at the provider. It may have been deleted outside TerminalX.";
+export const MACHINE_GONE_TEXT = MACHINE_GONE_MESSAGE;
 export const MACHINE_GONE_KEPT = "Its files, and anything that was running on it, went with the machine. Conversations saved before it stopped can still be read here until the workspace is deleted.";
-
-/**
- * A stop, resume or archive the provider answered with "not found": the
- * machine is gone, and the same action cannot bring it back (#1581). A
- * provider the organization cannot use is refused with the same code before
- * any operation exists, so on an operation it means the machine. The
- * desktop's `machineGone` (src/lib/cloudLifecycle.ts) decides the same way.
- */
-export function machineGone(operation: { state: string; action?: string | null; errorCode?: string | null; detailCode?: string | null } | null | undefined): boolean {
-  if (!operation || operation.state !== "failed" || operation.errorCode !== "cloud_provider_not_found") return false;
-  if (operation.action !== "suspend" && operation.action !== "resume" && operation.action !== "archive") return false;
-  return !operation.detailCode || !NOT_FOUND_ELSEWHERE.has(operation.detailCode);
-}
+export { machineGone };
 
 /** Whether "Retry resume" is offered for a workspace that needs attention: its last resume failed, as the desktop offers it, unless its machine is gone. */
 export function resumeRetryable(operation: { state: string; action?: string | null; errorCode?: string | null; detailCode?: string | null } | null | undefined): boolean {

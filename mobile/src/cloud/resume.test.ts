@@ -97,7 +97,10 @@ describe("a workspace that needs attention after a failed resume (#1290)", () =>
 
   // #1581: the provider no longer has the machine, so the same resume cannot work.
   it("does not offer Retry resume once the workspace's machine is gone", () => {
-    for (const action of ["resume", "suspend", "archive"]) expect(machineGone({ state: "failed", action, errorCode: "cloud_provider_not_found" })).toBe(true);
+    expect(machineGone({ state: "failed", action: "resume", errorCode: "cloud_provider_not_found" })).toBe(true);
+    expect(machineGone({ state: "failed", action: "resume", errorCode: "cloud_provider_not_found", detailCode: "box_lost_without_checkpoint" })).toBe(true);
+    // A stop or archive of a missing machine: a resume may still restore it.
+    for (const action of ["suspend", "archive"]) expect(machineGone({ state: "failed", action, errorCode: "cloud_provider_not_found", detailCode: "box_missing" })).toBe(false);
     expect(resumeRetryable({ state: "failed", action: "resume", errorCode: "cloud_provider_not_found" })).toBe(false);
     // Not the machine: a missing environment image, a delete (which finishes without it), a launch, or an operation still running.
     expect(machineGone({ state: "failed", action: "resume", errorCode: "cloud_provider_not_found", detailCode: "environment_image_missing" })).toBe(false);

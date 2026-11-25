@@ -1,8 +1,9 @@
 import type { RuntimeSession, WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import type { CloudWorkspaceListItem } from "@/lib/api";
 import { agentLoginFailure, createErrorMessage, failureMessage, launchFailed, PROVISIONING_TIMEOUT_CODE } from "@/lib/cloudCreate";
-import { archiving, deleteFailure, deletion, machineGone, operationFailureStands, provisioningFailureKey, workspaceFailureText } from "@/lib/cloudLifecycle";
+import { archiving, deleteFailure, deletion, operationFailureStands, provisioningFailureKey, workspaceFailureText } from "@/lib/cloudLifecycle";
 import { cloudProviderIsPlatform, cloudProviderLabel } from "@/lib/cloudProviders";
+import { machineGone } from "@terminalx/portable/cloudMachineGone";
 import type { TabStatus } from "@/types/session";
 
 export interface CloudAttentionInput {

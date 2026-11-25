@@ -1,3 +1,4 @@
+import { MACHINE_GONE_MESSAGE, machineGone } from "@terminalx/portable/cloudMachineGone";
 import { useSyncExternalStore } from "react";
 import { thisComputer } from "@/lib/platform";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
@@ -232,8 +233,8 @@ const MESSAGES: Record<string, string> = {
   provider_cleanup_pending: "The provider is still removing resources.",
   cloud_workspace_request_outcome_unknown: "No answer arrived. The action may have been applied; the list below is the source of truth.",
   cloud_workspace_not_found: "This workspace no longer exists.",
-  // Refused before any operation starts, it names a provider the organization cannot use. An operation
-  // that ends with it lost the workspace's machine: `machineGone` tells the two apart.
+  // A provider the organization cannot use, or a machine the provider no longer has. A failed resume
+  // that ends with it says the machine is gone (`machineGone`, @terminalx/portable/cloudMachineGone).
   cloud_provider_not_found: "The provider could not find what this action needs: this organization cannot use it, or it no longer has this workspace's machine.",
   // PRO-73: a workspace is managed by its creator and by owners and admins. Offered because the app
   // thought this person was one of them: the role, or the list, changed since.
@@ -249,28 +250,6 @@ const MESSAGES: Record<string, string> = {
 
 export function lifecycleErrorMessage(code: string): string {
   return MESSAGES[code] ?? `The action failed (${code}).`;
-}
-
-/**
- * Server details that come with `cloud_provider_not_found` on an operation
- * but are about something other than the workspace's machine.
- */
-const NOT_FOUND_ELSEWHERE = new Set(["environment_image_missing", "platform_organization_not_found", "region_account_missing", "region_not_configured"]);
-
-export const MACHINE_GONE_MESSAGE = "This workspace's machine no longer exists at the provider. It may have been deleted outside TerminalX.";
-
-/**
- * A stop, resume or archive the provider answered with "not found": the
- * workspace's machine is gone, and retrying the same action cannot bring it
- * back (#1581). The server reports a request for a provider the organization
- * cannot use with the same code, but refuses it before any operation exists,
- * so on an operation the code means the machine. A delete is excluded: the
- * server finishes one whose machine is already gone.
- */
-export function machineGone(operation: Partial<Pick<CloudWorkspaceOperation, "action" | "state" | "errorCode" | "detailCode">> | null | undefined): boolean {
-  if (!operation || operation.state !== "failed" || operation.errorCode !== "cloud_provider_not_found") return false;
-  if (operation.action !== "suspend" && operation.action !== "resume" && operation.action !== "archive") return false;
-  return !operation.detailCode || !NOT_FOUND_ELSEWHERE.has(operation.detailCode);
 }
 
 /**
