@@ -81,6 +81,11 @@ try {
   await page.getByRole("button", { name: "Back to app", exact: true }).click(); // Settings leaves by its one Back.
   await link.click();
   await chooser.waitFor();
+  // Radix listens for a press outside the chooser from a zero-delay timer, set by the effect that runs before the one
+  // that focuses the chooser. Clicked before that timer ran (a busy Linux runner, main's run 45414596732), the press was
+  // not seen and the chooser stayed open. So: focus inside it, then a timer set after Radix's has run.
+  await page.waitForFunction(() => document.querySelector('[role="dialog"][aria-label="Open website link"]')?.contains(document.activeElement));
+  await page.evaluate(() => new Promise((resolve) => setTimeout(resolve)));
   await page.mouse.click(800, 45);
   await chooser.waitFor({ state: "hidden" });
   assert.equal((await opened()).system.length, 2);
