@@ -35,9 +35,11 @@ impl BranchCommit {
         ensure!(
             crate::remote::git::valid_ref_name(branch)
                 && !branch.eq_ignore_ascii_case("HEAD")
-                && !branch
-                    .split_once('/')
-                    .is_some_and(|(prefix, _)| prefix.eq_ignore_ascii_case("refs")),
+                && !branch.split_once('/').is_some_and(|(prefix, _)| [
+                    "refs", "remotes", "tags", "heads"
+                ]
+                .iter()
+                .any(|reserved| prefix.eq_ignore_ascii_case(reserved))),
             "invalid transfer branch"
         );
         ensure!(
@@ -154,7 +156,8 @@ pub(crate) fn export(repo: &Path, expected: &BranchCommit) -> Result<Option<Tran
         head.trim() == expected.commit,
         "cloud branch changed before export"
     );
-    let boundary = ["@{upstream}", "refs/remotes/origin/HEAD"]
+    let upstream = format!("{}@{{upstream}}", expected.branch());
+    let boundary = [upstream.as_str(), "refs/remotes/origin/HEAD"]
         .into_iter()
         .find_map(|reference| git(repo, &["merge-base", expected.commit(), reference]).ok());
     let Some(boundary) = boundary else {
@@ -355,6 +358,22 @@ pub(crate) fn validate_bundle<'a>(
         &["bundle", "verify", path_argument(bundle)?],
     )?;
     strict_fetch(quarantine.path(), bundle, expected)?;
+    for prerequisite in &prerequisites {
+        ensure!(
+            prerequisite != expected.commit()
+                && git(
+                    quarantine.path(),
+                    &[
+                        "merge-base",
+                        "--is-ancestor",
+                        prerequisite,
+                        expected.commit()
+                    ]
+                )
+                .is_ok(),
+            "A Git bundle prerequisite is not an ancestor of the selected commit"
+        );
+    }
     validate_checkout(quarantine.path(), expected)?;
     // Repack only the history reachable from the selected branch. Promoting
     // the original pack would also retain unrelated objects supplied with it.
@@ -1170,6 +1189,77 @@ mod tests {
     }
 
     #[test]
+    fn rejects_an_unrelated_local_prerequisite_before_promoting() {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let temp = tempfile::tempdir().unwrap();
+        let cloud = temp.path().join("cloud");
+        let local = temp.path().join("local");
+        repository(&cloud);
+        let base = commit(&cloud);
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "-q",
+                cloud.to_str().unwrap(),
+                local.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        let tree = git(&local, &["rev-parse", "HEAD^{tree}"]).unwrap();
+        let unrelated = git(
+            &local,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit-tree",
+                tree.trim(),
+                "-m",
+                "unrelated root",
+            ],
+        )
+        .unwrap();
+        let unrelated = unrelated.trim();
+        git(&local, &["update-ref", "refs/heads/unrelated", unrelated]).unwrap();
+
+        let pin = BranchCommit::new("main", &commit(&cloud)).unwrap();
+        let mut command = git_command(&cloud, &["pack-objects"]);
+        let mut pack = command
+            .args(["pack-objects", "--stdout", "--revs"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(pack.stdin.take().unwrap(), "{}\n^{base}", pin.commit()).unwrap();
+        let result = pack.wait_with_output().unwrap();
+        assert!(result.status.success());
+        let path = temp.path().join("unrelated-prerequisite.bundle");
+        let mut bytes = format!(
+            "# v2 git bundle\n-{unrelated} unrelated\n{} refs/heads/main\n\n",
+            pin.commit()
+        )
+        .into_bytes();
+        bytes.extend(result.stdout);
+        std::fs::write(&path, bytes).unwrap();
+
+        let refs = git(&local, &["show-ref"]).unwrap();
+        let objects = git(&local, &["count-objects", "-v"]).unwrap();
+        let error = import_objects(&local, &path, &pin).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("prerequisite is not an ancestor"),
+            "{error:#}"
+        );
+        assert_eq!(git(&local, &["show-ref"]).unwrap(), refs);
+        assert_eq!(git(&local, &["count-objects", "-v"]).unwrap(), objects);
+    }
+
+    #[test]
     fn promotion_drops_objects_unreachable_from_the_selected_commit() {
         use std::io::Write;
         use std::process::Stdio;
@@ -1217,6 +1307,41 @@ mod tests {
         assert_eq!(git(&local, &["show-ref"]).unwrap(), refs);
         assert!(git(&local, &["cat-file", "-e", &pinned]).is_ok());
         assert!(git(&local, &["cat-file", "-e", unrelated]).is_err());
+    }
+
+    #[test]
+    fn refuses_ambiguous_or_escaping_link_paths() {
+        use std::collections::HashMap;
+
+        for path in ["/absolute", "folder\\outside", "./.Git/config"] {
+            assert!(!portable_link_path(path), "{path}");
+        }
+
+        let targets = HashMap::from([
+            ("b".into(), "../.."),
+            ("dir/up".into(), ".."),
+            ("cycle-a".into(), "cycle-b/"),
+            ("cycle-b".into(), "cycle-a"),
+        ]);
+        assert!(resolve_link("a", "b/", &targets).is_err());
+        assert!(resolve_link("link", "DIR/up/../outside", &targets).is_err());
+        assert!(resolve_link("cycle-a", "cycle-b/", &targets).is_err());
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        repository(&repo);
+        let file = repo.join("target");
+        std::fs::write(&file, b".").unwrap();
+        let oid = git(&repo, &["hash-object", "-w", file.to_str().unwrap()]).unwrap();
+        let links = vec![("Link", oid.trim(), 1), ("link", oid.trim(), 1)];
+        assert!(validate_links(&repo, links)
+            .unwrap_err()
+            .to_string()
+            .contains("differ only by case"));
+
+        for branch in ["heads/topic", "tags/topic", "REMOTES/topic"] {
+            assert!(BranchCommit::new(branch, &"a".repeat(40)).is_err());
+        }
     }
 
     #[cfg(unix)]
