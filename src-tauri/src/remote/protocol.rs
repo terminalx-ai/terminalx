@@ -714,15 +714,22 @@ pub fn backoff(attempt: u32, jitter: f64) -> Duration {
     Duration::from_millis(half + (half as f64 * jitter.clamp(0.0, 1.0)) as u64).max(BACKOFF_FLOOR)
 }
 
-/// The reason text of a relay close frame, kept only when it has the shape of
-/// the relay's own reason codes (`relay_unknown_control_message`): lowercase
-/// words and underscores, at most 64 bytes. Anything else, which could carry
-/// an identifier or a credential, is dropped (#1579).
+/// The relay's typed runtime close reasons (`RUNTIME_CLOSE` in the relay's
+/// `close-codes.ts`). Its other reasons all start with `relay_`.
+const RUNTIME_CLOSE_REASONS: &[&str] = &["runtime_unavailable", "stale_generation", "auth_expired", "update_required", "backpressure"];
+
+/// The reason text of a relay close frame, kept only when it is one of the
+/// relay's own reason codes: `relay_` and lowercase words and underscores
+/// (`relay_unknown_control_message`), at most 64 bytes, or one of its typed
+/// runtime reasons. Anything else, which could carry an identifier or a
+/// credential, is dropped (#1579).
 pub fn close_reason(reason: &str) -> Option<String> {
-    let mut bytes = reason.bytes();
-    let starts_with_letter = bytes.next().is_some_and(|byte| byte.is_ascii_lowercase());
-    (starts_with_letter && reason.len() <= 64 && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'))
-        .then(|| reason.to_string())
+    let relay_code = reason.len() <= 64
+        && reason.strip_prefix("relay_").is_some_and(|rest| {
+            rest.bytes().next().is_some_and(|byte| byte.is_ascii_lowercase())
+                && rest.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        });
+    (relay_code || RUNTIME_CLOSE_REASONS.contains(&reason)).then(|| reason.to_string())
 }
 
 /// The wait before registering again after the relay refused `refusals`
@@ -1006,7 +1013,9 @@ mod tests {
     fn close_reasons_keep_relay_codes_and_drop_anything_else() {
         assert_eq!(close_reason("relay_unknown_control_message").as_deref(), Some("relay_unknown_control_message"));
         assert_eq!(close_reason("relay_control_not_active").as_deref(), Some("relay_control_not_active"));
-        for unsafe_reason in ["", "Relay closed", "relay host abcDEF0123456789", "token=secret", "relay-x", "_relay", &"a".repeat(65), "relay_ü"] {
+        assert_eq!(close_reason("stale_generation").as_deref(), Some("stale_generation"));
+        let long = format!("relay_{}", "a".repeat(59));
+        for unsafe_reason in ["", "Relay closed", "relay host abcDEF0123456789", "token=secret", "relay-x", "_relay", "relay_", "relay__x", "relay_ü", &long, "abcdef0123456789", "user_1234", "draining"] {
             assert_eq!(close_reason(unsafe_reason), None, "{unsafe_reason:?}");
         }
     }

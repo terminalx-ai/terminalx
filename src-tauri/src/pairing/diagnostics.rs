@@ -292,9 +292,21 @@ impl Record {
 }
 
 /// The close of a relay control socket, for [`DiagnosticLog::record_close`].
+/// The window's own control closes carry it as an error's context.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Close {
     pub code: u16,
     pub reason: Option<String>,
+}
+
+impl std::fmt::Display for Close {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "relay control closed with {}", self.code)?;
+        if let Some(reason) = &self.reason {
+            write!(f, " ({reason})")?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]

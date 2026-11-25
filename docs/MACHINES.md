@@ -1397,9 +1397,11 @@ the window's phone route when present, or to the runtime's phone host. Its link 
   schemas do not take (`relay_unknown_control_message`) and for a socket it
   no longer counts as the host's control (`relay_control_not_active`). The
   close's reason is logged when it has the shape of a relay reason code
-  (`remote::protocol::close_reason`). The first refusal is retried as a drop;
-  from the second in a row the wait doubles from 30 s to 30 min
-  (`refused_backoff`), and the status says `retrying` with `relayRefused`
+  (`remote::protocol::close_reason`: `relay_…` codes and the relay's typed
+  runtime reasons only). The first refusal is retried as a drop; from the
+  second in a row the wait doubles from 30 s to 30 min (`refused_backoff`). A
+  refusal after a registration that served 5 min or more starts the count
+  again, and the status says `retrying` with `relayRefused`
   (`code`, `reason`, `refusals`, `retryAt`).
 - The window's control requests are checked against the relay's key sets
   before they are sent (`remote::host`, `forwarded_keys`): one the relay would

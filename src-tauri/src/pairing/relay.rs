@@ -616,7 +616,10 @@ where
             }
             Err(error) => {
                 let failure = Failure::from_error(&error);
-                manager.record_relay_diagnostic(Event::Failed, retry.attempts, Some(failure));
+                match error.downcast_ref::<super::diagnostics::Close>() {
+                    Some(close) => manager.record_relay_close(retry.attempts, failure, close.clone()),
+                    None => manager.record_relay_diagnostic(Event::Failed, retry.attempts, Some(failure)),
+                }
                 manager.set_relay_unavailable(failure.message(), retry.attempts);
             }
         }
@@ -751,6 +754,18 @@ impl PairingManager {
         }
         if category == Category::Refused {
             self.set_relay_unavailable(failure.message(), refusal.refusals);
+        }
+    }
+
+    /// A failure of the window's own control socket that the relay closed:
+    /// recorded with its code and reason code (#1579).
+    fn record_relay_close(&self, attempt: u32, failure: Failure, close: super::diagnostics::Close) {
+        log::warn!(
+            "relay failure stage={:?} category={:?} close_code={} close_reason={} attempt={}",
+            failure.stage, failure.category, close.code, close.reason.as_deref().unwrap_or("none"), attempt
+        );
+        if self.diagnostics.lock().unwrap().record_close(Event::Failed, attempt, Some(failure), close).is_err() {
+            log::warn!("relay diagnostics write failed (category=local-storage)");
         }
     }
 }
@@ -1039,7 +1054,7 @@ async fn next_control_json(socket: &mut ControlSocket) -> Result<serde_json::Val
             match socket.next().await.ok_or_else(|| anyhow!(Category::Network))?? {
                 Message::Text(text) => return serde_json::from_str(&text).context("decode relay control message"),
                 Message::Ping(_) | Message::Pong(_) => socket.flush().await?,
-                Message::Close(frame) => return Err(anyhow!(close_category(frame.as_ref().map(|frame| u16::from(frame.code))))),
+                Message::Close(frame) => return Err(control_closed(frame.as_ref())),
                 _ => return Err(anyhow!(Category::Protocol)),
             }
         }
@@ -1138,7 +1153,7 @@ async fn control_loop(
                 live.signals.frame_received(now_ms());
                 let Message::Text(text) = incoming else {
                     if let Message::Close(frame) = incoming {
-                        return Err(anyhow!(close_category(frame.as_ref().map(|frame| u16::from(frame.code)))));
+                        return Err(control_closed(frame.as_ref()));
                     }
                     // WebSocket control pings are legal independently of the
                     // relay's JSON heartbeat. Tungstenite queues the pong.
@@ -1252,6 +1267,22 @@ async fn control_loop(
                 }
             }
         }
+    }
+}
+
+/// The error for a close frame on the window's own control socket: its
+/// category, with the code and the relay's reason code as context for the
+/// diagnostics (#1579). The reason is never interpreted, and kept only in the
+/// shape `crate::remote::protocol::close_reason` allows.
+fn control_closed(frame: Option<&tokio_tungstenite::tungstenite::protocol::CloseFrame>) -> anyhow::Error {
+    let code = frame.map(|frame| u16::from(frame.code));
+    let error = anyhow!(close_category(code));
+    match code {
+        Some(code) => error.context(super::diagnostics::Close {
+            code,
+            reason: frame.and_then(|frame| crate::remote::protocol::close_reason(&frame.reason)),
+        }),
+        None => error,
     }
 }
 
@@ -1423,6 +1454,19 @@ mod tests {
         assert!(runtime_returns_soon(&refused(5_000), now));
         assert!(!runtime_returns_soon(&refused(RUNTIME_WAIT.as_millis() as i64), now));
         assert!(!runtime_returns_soon(&refused(30 * 60_000), now));
+        // The window's own closes keep the code and a relay reason code, and
+        // the category still reads through them.
+        use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
+        let frame = |reason: &str| CloseFrame { code: CloseCode::from(4401), reason: reason.into() };
+        let error = control_closed(Some(&frame("relay_control_not_active"))).context(Stage::ControlSession);
+        assert_eq!(Failure::from_error(&error).category, Category::Authentication);
+        assert_eq!(
+            error.downcast_ref::<super::super::diagnostics::Close>(),
+            Some(&super::super::diagnostics::Close { code: 4401, reason: Some("relay_control_not_active".into()) })
+        );
+        let error = control_closed(Some(&frame("host abcDEF0123456789")));
+        assert_eq!(error.downcast_ref::<super::super::diagnostics::Close>().unwrap().reason, None);
+        assert!(control_closed(None).downcast_ref::<super::super::diagnostics::Close>().is_none());
         // Retired by the runtime's registration: not a network failure.
         assert_eq!(close_category(Some(4101)), Category::RuntimeTookOver);
         assert_eq!(close_category(Some(4401)), Category::Authentication);

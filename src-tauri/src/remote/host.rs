@@ -850,6 +850,7 @@ impl RelayHost {
             }
             fenced = None;
             self.status.send_replace(HostStatus::Connecting);
+            let attempted_at = Instant::now();
             match self.clone().connect_once(session, identity.clone()).await {
                 Ok(()) => {
                     attempt = 0;
@@ -870,7 +871,7 @@ impl RelayHost {
                 Err(error) => {
                     attempt += 1;
                     if let Some(closed) = refusal_of(&error) {
-                        refusals = refusals.saturating_add(1);
+                        refusals = refusals_after(refusals, attempted_at.elapsed());
                         let delay = protocol::refused_backoff(refusals, jitter());
                         log::warn!(
                             "relay host: {closed}; the relay refused {refusals} registration(s) in a row, registering again in {}s",
@@ -1685,6 +1686,16 @@ impl std::fmt::Display for ControlClosed {
 
 impl std::error::Error for ControlClosed {}
 
+/// A registration that served this long before the relay refused it
+/// counts as working: the refusal starts a new count (#1579).
+const REFUSAL_STREAK_RESET: Duration = Duration::from_secs(5 * 60);
+
+/// Refusals in a row after one more, the attempt having taken `lived` from
+/// connecting to the relay's close.
+fn refusals_after(refusals: u32, lived: Duration) -> u32 {
+    if lived >= REFUSAL_STREAK_RESET { 1 } else { refusals.saturating_add(1) }
+}
+
 /// The relay's close of the control socket in `error`, when it refused the
 /// registration (4401) rather than dropped it.
 fn refusal_of(error: &anyhow::Error) -> Option<ControlClosed> {
@@ -2351,6 +2362,20 @@ mod tests {
         ] {
             assert!(!forwardable(&frame), "{frame}");
         }
+    }
+
+    /// #1579: refusals seconds apart add up; one after a registration that
+    /// served a while starts the count again, so occasional refusals never
+    /// climb to the 30 min wait.
+    #[test]
+    fn a_refusal_after_a_working_registration_starts_a_new_count() {
+        assert_eq!(refusals_after(0, Duration::from_secs(1)), 1);
+        assert_eq!(refusals_after(4, Duration::from_secs(1)), 5);
+        assert_eq!(refusals_after(4, REFUSAL_STREAK_RESET - Duration::from_secs(1)), 5);
+        assert_eq!(refusals_after(7, REFUSAL_STREAK_RESET), 1);
+        assert_eq!(refusals_after(7, Duration::from_secs(6 * 3600)), 1);
+        assert_eq!(refusals_after(u32::MAX, Duration::ZERO), u32::MAX);
+        assert!(protocol::refused_backoff(refusals_after(7, REFUSAL_STREAK_RESET), 1.0) <= protocol::BACKOFF_CEILING);
     }
 
     /// #1579: the relay's close reason reaches the log and the status when

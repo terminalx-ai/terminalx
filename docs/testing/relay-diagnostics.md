@@ -93,10 +93,13 @@ before them, they become repeats of it. Such a record says `repeats` (how many
 more times it happened) and `lastTimestampMs`, and keeps the latest `attempt`.
 A connect/fail loop that runs for hours keeps two records, and the records
 from before it began stay. A single retry is not folded and keeps its order.
-A failed control session the runtime reports (a registration the relay closed
-with `4401`) carries `closeCode` and `closeReason`, the relay's reason code
-when it has that shape (`relay_unknown_control_message`); any other reason
-text is not written. Its category is `authentication` the first time and
+A control socket the relay closed, the window's own or one the runtime reports
+(a registration the relay closed with `4401`), carries `closeCode` and
+`closeReason`: the relay's reason code when it is one, `relay_` and lowercase
+words (`relay_unknown_control_message`) or a typed runtime reason
+(`stale_generation`). Any other reason text is not written. The runtime's
+refusals count as "in a row" only while each registration lasted under
+5 minutes. Its category is `authentication` the first time and
 `refused` from the second refusal in a row. The window's own registration
 retired by the runtime's (`4101`) is `runtime-took-over` and is not recorded
 as a failure. Attempt 1 is
