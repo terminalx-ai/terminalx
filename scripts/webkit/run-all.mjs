@@ -12,6 +12,8 @@
 //   pnpm test:webkit-layout --jobs 1                        one at a time (or WEBKIT_JOBS=1)
 //   node scripts/webkit/run-all.mjs --shard 2/4             the second of four parts (one CI job each)
 //   node scripts/webkit/run-all.mjs --shard 2/4 --list      the names that part runs, one per line; nothing runs
+//   node scripts/webkit/run-all.mjs --times part-*.log > scripts/webkit/check-times.json
+//                                                           the times --shard deals by, from parts' logs; nothing runs
 //
 //   node scripts/webkit/run-all.mjs --only mac-only        the checks in `macOnly` below and no other, on any host
 //
@@ -36,7 +38,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism, freemem, loadavg } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
@@ -208,17 +210,92 @@ function run(name) {
 }
 
 /**
- * Part `index` (from 1) of `count` of `names`, each name in exactly one part. Each kind is dealt out in turn, in the
- * list's order: the Vite checks first, so every part gets its share of them (they start slowest); then the
- * `dealtApart` ones, which run alone, after the rest of their part; then the others. Which part a check is in does not
- * depend on the host: the checks left out on Linux are left out after the parts are dealt.
+ * Each check's median seconds on CI's Linux runner (check-times.json, beside this file), which `shard` deals by.
+ * `--times` rebuilds the file from parts' logs. Read when first needed, so `--list` without --shard does not need it.
  */
-export function shard(names, index, count) {
-  const kinds = [names.filter((name) => startsVite(name) && !dealtApart.has(name)), names.filter((name) => dealtApart.has(name)), names.filter((name) => !startsVite(name) && !dealtApart.has(name))];
-  const parts = Array.from({ length: count }, () => []);
-  let next = 0;
-  for (const kind of kinds) for (const name of kind) parts[next++ % count].push(name);
-  return names.filter((name) => parts[index - 1].includes(name));
+const checkTimesFile = fileURLToPath(new URL("./check-times.json", import.meta.url));
+let measured;
+export const checkTimes = () => (measured ??= JSON.parse(readFileSync(checkTimesFile, "utf8")).seconds);
+
+/** The checks a CI part runs at once (`--jobs`' default on the 4-core Linux runner); a constant, so no host changes the dealing. */
+const partJobs = 4;
+
+const median = (values) => {
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length ? (sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2) : 0;
+};
+
+/**
+ * What a check adds to its part's time on Linux, in tenths of a second (whole numbers, so no sum depends on the
+ * order it was added in). Its measured seconds, or the median of all of them for a check the file does not have yet
+ * (new or renamed), so it is dealt like an ordinary check; 0 for one in `macOnly`, which a Linux part leaves out. A
+ * check in `alone` counts its full time, since it runs by itself after the rest; any other shares the part with
+ * `partJobs - 1` others, so it counts a `partJobs`th of its time.
+ */
+export function shardWeights(names, times = checkTimes()) {
+  const otherwise = median(Object.values(times));
+  return new Map(names.map((name) => {
+    const tenths = macOnly.has(name) ? 0 : Math.round((times[name] ?? otherwise) * 10);
+    return [name, alone.has(name) ? tenths * partJobs : tenths];
+  }));
+}
+
+/**
+ * Part `index` (from 1) of `count` of `names`, each name in exactly one part, dealt by measured time (`shardWeights`)
+ * so each part's checks take about as long. The kinds are dealt one after another: the Vite checks first, so every
+ * part gets its share of them (they start slowest, and at most `viteAtOnce` run at once); then the `dealtApart` ones,
+ * which run alone, after the rest of their part; then the others. Within a kind, the longest check (ties: by name) goes
+ * first, to the part with the least time so far among those with the fewest of its kind; for the others that is any
+ * part. Ties between parts go to the lower part number. So which part a check is in depends only on the names, the
+ * scripts and the times, never on the host or on the order of check-times.json: the checks left out on Linux are left
+ * out after the parts are dealt.
+ */
+export function shard(names, index, count, times = checkTimes()) {
+  const weight = shardWeights(names, times);
+  const kinds = [
+    { names: names.filter((name) => startsVite(name) && !dealtApart.has(name)), spread: true },
+    { names: names.filter((name) => dealtApart.has(name)), spread: true },
+    { names: names.filter((name) => !startsVite(name) && !dealtApart.has(name)), spread: false },
+  ];
+  const parts = Array.from({ length: count }, () => ({ names: new Set(), time: 0 }));
+  for (const kind of kinds) {
+    const held = parts.map(() => 0);
+    const order = [...kind.names].sort((a, b) => weight.get(b) - weight.get(a) || (a < b ? -1 : a > b ? 1 : 0));
+    for (const name of order) {
+      const fewest = Math.min(...held);
+      let chosen = -1;
+      for (let i = 0; i < count; i++) {
+        if (kind.spread && held[i] !== fewest) continue;
+        if (chosen < 0 || parts[i].time < parts[chosen].time) chosen = i;
+      }
+      parts[chosen].names.add(name);
+      parts[chosen].time += weight.get(name);
+      held[chosen]++;
+    }
+  }
+  return names.filter((name) => parts[index - 1].names.has(name));
+}
+
+/**
+ * check-times.json's content from parts' logs (`--times <log>...`): each check's median over the logs' "── name
+ * (12.3s) ok" lines (with or without Actions' timestamps in front), its number of those runs, and where they came
+ * from. A failed run is not counted; a check that passed only when run again counts that run.
+ */
+export function timesFromLogs(logs) {
+  const seen = new Map();
+  for (const { text } of logs) {
+    for (const line of text.split(/\r?\n/)) {
+      const match = /── ([a-z0-9-]+(?::\d+)?) \((\d+(?:\.\d+)?)s\) ok\s*$/.exec(line.replace(/\x1b\[[0-9;]*m/g, ""));
+      if (match) seen.set(match[1], [...(seen.get(match[1]) ?? []), Number(match[2])]);
+    }
+  }
+  const names = [...seen.keys()].sort();
+  return {
+    source: `node scripts/webkit/run-all.mjs --times over ${logs.length} part log${logs.length === 1 ? "" : "s"} (${logs.map((log) => log.name).join(", ")}), seconds per check, median of the runs it passed in`,
+    seconds: Object.fromEntries(names.map((name) => [name, Math.round(median(seen.get(name)) * 10) / 10])),
+    runs: Object.fromEntries(names.map((name) => [name, seen.get(name).length])),
+  };
 }
 
 /**
@@ -362,14 +439,23 @@ export function stepSummary(results, part) {
 /** The command line: run the checks it names, or list them. */
 async function main() {
   const usage = (message) => {
-    console.error(`${message}\nUsage: node scripts/webkit/run-all.mjs [--jobs <number>] [--shard <i>/<n>] [--list] [--only mac-only | check ...]`);
+    console.error(`${message}\nUsage: node scripts/webkit/run-all.mjs [--jobs <number>] [--shard <i>/<n>] [--list] [--only mac-only | check ...]\n       node scripts/webkit/run-all.mjs --times <log> ...`);
     process.exit(2);
   };
   let parsed;
   try {
-    parsed = parseArgs({ options: { jobs: { type: "string" }, shard: { type: "string" }, list: { type: "boolean" }, only: { type: "string" } }, allowPositionals: true });
+    parsed = parseArgs({ options: { jobs: { type: "string" }, shard: { type: "string" }, list: { type: "boolean" }, only: { type: "string" }, times: { type: "boolean" } }, allowPositionals: true });
   } catch (error) {
     usage(error.message);
+  }
+  if (parsed.values.times) {
+    // Its arguments are logs, not checks.
+    if (!parsed.positionals.length) usage("--times takes the parts' logs to read.");
+    const read = parsed.positionals.map((path) => ({ name: basename(path), text: readFileSync(path, "utf8") }));
+    const found = timesFromLogs(read);
+    if (!Object.keys(found.seconds).length) usage(`No "── name (12.3s) ok" line in ${parsed.positionals.join(", ")}.`);
+    console.log(JSON.stringify(found, null, 2));
+    process.exit(0);
   }
   const args = parsed.positionals;
   const jobsValue = parsed.values.jobs ?? process.env.WEBKIT_JOBS;
