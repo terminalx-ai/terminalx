@@ -3,6 +3,7 @@ import { StyleSheet, Text, View } from "react-native";
 import { useFocusEffect } from "expo-router";
 import type { CloudProvider } from "@mobile/cloud/api";
 import type { CloudCatalog } from "@mobile/cloud/catalog";
+import { BAR_TITLE_MAX_SCALE } from "./text-size";
 import { useTheme } from "./theme";
 
 /** The provider list as the compute pages hold it: the server's last answer, and why a later read failed. */
@@ -52,8 +53,8 @@ export function useProviders(catalog: CloudCatalog, orgId: string): ProvidersRea
 export function TitleWithOrganization({ title, organization }: { title: string; organization?: string | null }) {
   const { palette } = useTheme();
   return <View accessible accessibilityRole="header" accessibilityLabel={organization ? `${title}, ${organization}` : title} style={styles.title}>
-    <Text numberOfLines={1} style={[styles.name, { color: palette.ink }]}>{title}</Text>
-    {organization ? <Text numberOfLines={1} style={[styles.organization, { color: palette.muted }]}>{organization}</Text> : null}
+    <Text numberOfLines={1} maxFontSizeMultiplier={BAR_TITLE_MAX_SCALE} style={[styles.name, { color: palette.ink }]}>{title}</Text>
+    {organization ? <Text numberOfLines={1} maxFontSizeMultiplier={BAR_TITLE_MAX_SCALE} style={[styles.organization, { color: palette.muted }]}>{organization}</Text> : null}
   </View>;
 }
 

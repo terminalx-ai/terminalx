@@ -24,7 +24,7 @@ it.each([
   await page.show(<StateBadge testID="badge" state={state} />);
   expect(pill().textContent).toBe(words);
   expect(badgeLabel(state)).toBe(words);
-  expect(page.styleOf(pill())).toMatchObject({ height: 22, borderRadius: 7, paddingHorizontal: 8, backgroundColor: fill });
+  expect(page.styleOf(pill())).toMatchObject({ minHeight: 22, borderRadius: 7, paddingHorizontal: 8, backgroundColor: fill });
   expect(page.styleOf(pill().firstElementChild)).toMatchObject({ color, fontSize: 12, fontWeight: "600" });
 });
 

@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Pressable, StyleSheet, Text, View, type LayoutChangeEvent, type StyleProp, type ViewStyle } from "react-native";
 import { GlassView, isLiquidGlassAvailable } from "expo-glass-effect";
+import { LARGE_TITLE_MAX_SCALE } from "./text-size";
 import { useTheme } from "./theme";
 
 // Liquid Glass on iOS 26 and later; a quiet raised surface everywhere else.
@@ -29,11 +30,15 @@ export function GlassIconButton({ icon, label, onPress, disabled, prominent, siz
   </Pressable>;
 }
 
-/** A tab's title, large and in the page as iOS draws it, with its actions on the right. */
+/**
+ * A tab's title, large and in the page as iOS draws it, with its actions on the right.
+ * It grows with the text size only so far, then shrinks to fit: a title is one word,
+ * and at the accessibility sizes "Machines" was cut to "Mac…" (PRO-563).
+ */
 export function LargeTitle({ title, children, onLayout }: { title: string; children?: ReactNode; onLayout?(event: LayoutChangeEvent): void }) {
   const { palette } = useTheme();
   return <View onLayout={onLayout} style={styles.titleRow}>
-    <Text accessibilityRole="header" numberOfLines={1} style={[styles.title, { color: palette.ink }]}>{title}</Text>
+    <Text accessibilityRole="header" numberOfLines={1} maxFontSizeMultiplier={LARGE_TITLE_MAX_SCALE} adjustsFontSizeToFit minimumFontScale={0.7} style={[styles.title, { color: palette.ink }]}>{title}</Text>
     {children ? <View style={styles.actions}>{children}</View> : null}
   </View>;
 }

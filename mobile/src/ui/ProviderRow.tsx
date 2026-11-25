@@ -1,6 +1,7 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { Box, ChevronRight, Cloud, Container, Server, Ship, type LucideIcon } from "lucide-react-native";
 import { badgeLabel, StateBadge, type BadgeState } from "./StateBadge";
+import { useLargeText } from "./text-size";
 import { useTheme } from "./theme";
 
 // The server names a shape, not a provider (the desktop reads the same words).
@@ -15,7 +16,8 @@ export function ProviderMark({ icon, letter, testID }: { icon?: string; letter?:
   const { palette } = useTheme();
   const Glyph = (icon && Object.hasOwn(GLYPHS, icon) ? GLYPHS[icon] : null) ?? Box;
   return <View testID={testID} accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={[styles.mark, { backgroundColor: palette.raised, borderColor: palette.border }]}>
-    {letter ? <Text style={[styles.letter, { color: palette.muted }]}>{letter.slice(0, 1).toUpperCase()}</Text> : <Glyph size={17} color={palette.muted} />}
+    {/* An initial in a tile of fixed size, as the shapes beside it are: it keeps its size (PRO-563). */}
+    {letter ? <Text allowFontScaling={false} style={[styles.letter, { color: palette.muted }]}>{letter.slice(0, 1).toUpperCase()}</Text> : <Glyph size={17} color={palette.muted} />}
   </View>;
 }
 
@@ -24,6 +26,10 @@ export function ProviderMark({ icon, letter, testID }: { icon?: string; letter?:
  * description, then how it bills. An agent login is the same row with an
  * initial and no billing line (25.04). It opens something only when it is
  * given somewhere to go.
+ *
+ * The state goes under the name when the two do not fit one line, and at the
+ * accessibility text sizes also where it is drawn at the end (PRO-563): side
+ * by side the name was cut to its first letter.
  */
 export function ProviderRow({ name, description, billing, icon, letter, badge, badgeAtEnd, divided, onPress, testID }: {
   name: string;
@@ -40,17 +46,19 @@ export function ProviderRow({ name, description, billing, icon, letter, badge, b
   testID?: string;
 }) {
   const { palette } = useTheme();
+  const large = useLargeText();
+  const atEnd = !!badgeAtEnd && !large;
   const body = <>
     <ProviderMark icon={icon} letter={letter} />
     <View style={styles.body}>
       <View style={styles.heading}>
-        <Text numberOfLines={1} style={[styles.name, { color: palette.ink }]}>{name}</Text>
-        {badge && !badgeAtEnd ? <StateBadge state={badge} /> : null}
+        <Text numberOfLines={large ? undefined : 1} style={[styles.name, { color: palette.ink }]}>{name}</Text>
+        {badge && !atEnd ? <StateBadge state={badge} /> : null}
       </View>
       {description ? <Text style={[styles.detail, { color: palette.muted }]}>{description}</Text> : null}
       {billing ? <Text style={[styles.detail, { color: palette.faint }]}>{billing}</Text> : null}
     </View>
-    {badge && badgeAtEnd ? <StateBadge state={badge} /> : null}
+    {badge && atEnd ? <StateBadge state={badge} /> : null}
     {onPress ? <View style={styles.trailing}><ChevronRight size={18} color={palette.faint} /></View> : null}
   </>;
   const line = divided ? { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border } : null;
@@ -65,7 +73,7 @@ const styles = StyleSheet.create({
   row: { minHeight: 56, flexDirection: "row", alignItems: "flex-start", gap: 12, paddingHorizontal: 14, paddingVertical: 12 },
   level: { alignItems: "center" },
   body: { flex: 1, minWidth: 0 },
-  heading: { flexDirection: "row", alignItems: "center", gap: 8 },
+  heading: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 8, rowGap: 4 },
   name: { flexShrink: 1, fontSize: 16, lineHeight: 21, fontWeight: "600" },
   detail: { fontSize: 13, lineHeight: 18, marginTop: 2 },
   trailing: { height: 21, justifyContent: "center" },
