@@ -1,5 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// These cover the switches as a Mac runs them, where they work.
+vi.mock("@/lib/platform", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/platform")>()), isMac: true, hasSecureDialog: true }));
 const { invoke, open } = vi.hoisted(() => ({ invoke: vi.fn(), open: vi.fn() }));
 vi.mock("@/lib/api", () => ({ invoke, errorMessage: (e: unknown) => String(e) }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open }));

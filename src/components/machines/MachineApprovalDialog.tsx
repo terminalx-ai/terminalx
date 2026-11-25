@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { thisComputer } from "@/lib/platform";
+import { isMac, thisComputer } from "@/lib/platform";
 import { Check, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
@@ -83,11 +83,12 @@ export function MachineApprovalDialog({ request }: { request: PendingComputer })
             <p className="text-[12.5px] leading-[19px] text-muted-foreground">Its terminals and agents run as you, so they can reach anything your account can.</p>
           </section>
           <label className="flex items-center gap-3 border-t border-hairline pt-4">
-            <span className="text-[13px]">Keep {thisComputer} awake while it is connected</span>
+            <span className="text-[13px]">Keep {thisComputer} awake while it is connected{!isMac && <span className="block text-xs text-muted-foreground">Available on macOS only.</span>}</span>
             <Switch
               className="ml-auto"
               aria-label={`Keep ${thisComputer} awake while it is connected`}
-              checked={keepAwake}
+              disabled={!isMac}
+              checked={isMac && keepAwake}
               onCheckedChange={(enabled) => void setMachinesKeepAwake(enabled)}
             />
           </label>

@@ -4638,6 +4638,19 @@ pub async fn issue_pipeline_merge_cloud(
 mod command_tests {
     use crate::paths::Canonical;
     #[test]
+    fn a_switch_this_computer_cannot_run_reads_off_and_says_why() {
+        let saved = crate::store::settings::ExperimentalSettings { bots: true, local_vm_tasks: true, ..Default::default() };
+        let read = super::supported_only(saved);
+        assert_eq!(read.bots, crate::bots::SUPPORTED, "Bots read as saved only where they run");
+        assert_eq!(read.local_vm_tasks, super::LOCAL_VM_TASKS_SUPPORTED);
+        let why = super::experimental_unsupported_here();
+        assert_eq!(why.bots.is_some(), !crate::bots::SUPPORTED);
+        assert_eq!(why.local_vm_tasks.is_some(), !super::LOCAL_VM_TASKS_SUPPORTED);
+        #[cfg(windows)]
+        assert!(why.bots.is_some() && why.local_vm_tasks.is_some(), "Windows runs neither");
+    }
+
+    #[test]
     fn turn_fork_preserves_subdirectory_or_reports_root_fallback() {
         use crate::{events::{Payload, TurnStatus}, git, session_ops, store::{self, index::SessionKind}};
         let _home = store::temp_home();
@@ -6271,7 +6284,46 @@ pub fn set_agent_idle_stop_minutes(minutes: u32) -> CmdResult<crate::store::sett
 /// the next new session and leaves existing ones as they are.
 #[tauri::command]
 pub fn experimental_settings() -> crate::store::settings::ExperimentalSettings {
-    store::settings::load().experimental
+    supported_only(store::settings::load().experimental)
+}
+
+/// Why a switch in Settings → Experimental cannot be on here, by switch: a
+/// switch named here is off, and its row says why.
+#[derive(serde::Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentalUnsupported {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_vm_tasks: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bots: Option<&'static str>,
+}
+
+/// Local VM tasks run macOS guests, which only a Mac with Apple silicon hosts.
+const LOCAL_VM_TASKS_SUPPORTED: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+
+fn experimental_unsupported_here() -> ExperimentalUnsupported {
+    ExperimentalUnsupported {
+        local_vm_tasks: (!LOCAL_VM_TASKS_SUPPORTED).then_some("Local VM tasks need a Mac with Apple silicon."),
+        bots: (!crate::bots::SUPPORTED).then_some(crate::bots::UNSUPPORTED_MESSAGE),
+    }
+}
+
+#[tauri::command]
+pub fn experimental_unsupported() -> ExperimentalUnsupported {
+    experimental_unsupported_here()
+}
+
+/// A switch saved on where its feature cannot run (a settings file copied
+/// from a Mac) reads as off, so nothing offers what would only fail.
+fn supported_only(mut experimental: crate::store::settings::ExperimentalSettings) -> crate::store::settings::ExperimentalSettings {
+    let unsupported = experimental_unsupported_here();
+    if unsupported.local_vm_tasks.is_some() {
+        experimental.local_vm_tasks = false;
+    }
+    if unsupported.bots.is_some() {
+        experimental.bots = false;
+    }
+    experimental
 }
 
 /// Each switch is optional: the one the reader flipped is changed and the
@@ -6286,6 +6338,12 @@ pub async fn set_experimental_settings(
     opencode: Option<bool>,
     bots: Option<bool>,
 ) -> CmdResult<crate::store::settings::ExperimentalSettings> {
+    let unsupported = experimental_unsupported_here();
+    for (wanted, why) in [(local_vm_tasks, unsupported.local_vm_tasks), (bots, unsupported.bots)] {
+        if let (Some(true), Some(why)) = (wanted, why) {
+            return Err(why.to_string());
+        }
+    }
     let mut settings = store::settings::load();
     if let Some(on) = bots {
         settings.experimental.bots = on;
@@ -6313,7 +6371,7 @@ pub async fn set_experimental_settings(
             log::warn!("hold the bots' sessions after Bots was switched {}: {error}", if on { "on" } else { "off" });
         }
     }
-    Ok(settings.experimental)
+    Ok(supported_only(settings.experimental))
 }
 
 // ---------------------------------------------------------------- bots (PRO-466)

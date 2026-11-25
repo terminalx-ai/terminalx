@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { thisComputer } from "@/lib/platform";
+import { isMac, thisComputer } from "@/lib/platform";
 import QRCode from "qrcode";
 import { Check, Copy, Loader2, RefreshCw, Smartphone, X } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -135,11 +135,12 @@ function PairPhoneBody() {
             <li>Approve here when the phone asks</li>
           </ol>
           <label className="mt-1 flex items-center gap-3">
-            <span className="text-[12.5px]">Keep {thisComputer} awake while a phone is connected</span>
+            <span className="text-[12.5px]">Keep {thisComputer} awake while a phone is connected{!isMac && <span className="block text-xs text-muted-foreground">Available on macOS only.</span>}</span>
             <Switch
               className="ml-auto"
               aria-label={`Keep ${thisComputer} awake while a phone is connected`}
-              checked={status.keepAwake}
+              disabled={!isMac}
+              checked={isMac && status.keepAwake}
               onCheckedChange={(enabled) => void setKeepAwake(enabled)}
             />
           </label>

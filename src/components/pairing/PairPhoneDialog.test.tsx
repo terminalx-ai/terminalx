@@ -1,6 +1,9 @@
 import "@testing-library/dom";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// These cover the switches as a Mac runs them, where they work.
+vi.mock("@/lib/platform", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/platform")>()), isMac: true, hasSecureDialog: true }));
 import type { QRCodeToDataURLOptions } from "qrcode";
 import type { PairingStatus } from "@/types/pairing";
 import { code, device, emptyStatus, localCode, relayReady } from "./pairingFixtures.test-utils";

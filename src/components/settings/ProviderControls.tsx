@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { listedProviders } from "@/lib/hiddenProviders";
 import { cloudProviderInPlace, cloudProviderIsPlatform, cloudProviderLabel, cloudProviderReady } from "@/lib/cloudProviders";
+import { hasSecureDialog, SECURE_DIALOG_OFF } from "@/lib/platform";
 import {
   api,
   type CloudProviderConnection,
@@ -358,9 +359,10 @@ export function ProviderControls({
                     />
                     I understand provider billing and organization use.
                   </label>
+                  {!hasSecureDialog && <p role="note" className="text-warning">{SECURE_DIALOG_OFF}</p>}
                   <Button
                     size="sm"
-                    disabled={busy || !consented}
+                    disabled={busy || !consented || !hasSecureDialog}
                     onClick={() =>
                       void run(() =>
                         api.cloudProviderConnect(provider!.id, {

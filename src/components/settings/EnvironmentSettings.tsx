@@ -1,5 +1,5 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
-import { thisComputer, secretStoreShort, secretStoreWord } from "@/lib/platform";
+import { isMac, thisComputer, secretStoreShort, secretStoreWord } from "@/lib/platform";
 import { open } from "@tauri-apps/plugin-dialog";
 import { RegisteredSetting, resolveSetting } from "./settingsRegistry";
 import { RepositoryEnvironmentSettings } from "./RepositoryEnvironmentSettings";
@@ -279,7 +279,7 @@ function VariableRow({ row, label, project, editable, disabled, reset, run, edit
     <td className="hidden px-3 py-1.5 align-middle text-muted-foreground @xl:table-cell"><AppliesTo row={row} label={label} /></td>
     <td className="px-2 py-1.5 align-middle"><div className="flex items-center justify-end gap-0.5">
       {own && secret && <Button size="icon-xs" variant="ghost" className={icon} disabled={disabled} title={revealed === null ? "Reveal for 30 seconds" : "Hide"} aria-label={`${revealed === null ? "Reveal" : "Hide"} ${row.name}`} onClick={() => { if (revealed !== null) setRevealed(null); else void run(async () => setRevealed(await environment.reveal(scope, row.name)), `Couldn't reveal ${row.name}`); }}>{revealed === null ? <Eye /> : <EyeOff />}</Button>}
-      {own && <Button size="icon-xs" variant="ghost" className={icon} disabled={disabled} title="Copy for 30 seconds" aria-label={`Copy ${row.name}`} onClick={() => void run(async () => environment.copy(scope, row.name), `Couldn't copy ${row.name}`)}><Copy /></Button>}
+      {own && <Button size="icon-xs" variant="ghost" className={icon} disabled={disabled || !isMac} title={isMac ? "Copy for 30 seconds" : "Copying a value is available on macOS only"} aria-label={`Copy ${row.name}`} onClick={() => void run(async () => environment.copy(scope, row.name), `Couldn't copy ${row.name}`)}><Copy /></Button>}
       {editable && <><Button size="icon-xs" variant="ghost" className={icon} disabled={disabled} title="Edit" aria-label={`Edit ${row.name}`} onClick={() => void run(async () => edit(secret ? await environment.reveal(scope, row.name) : row.value ?? ""), `Couldn't open ${row.name}`)}><Pencil /></Button><Button size="icon-xs" variant="ghost" className={icon} disabled={disabled} title="Delete" aria-label={`Delete ${row.name}`} onClick={() => void run(remove, `Couldn't delete ${row.name}`)}><Trash2 /></Button></>}
     </div></td>
   </tr>;
