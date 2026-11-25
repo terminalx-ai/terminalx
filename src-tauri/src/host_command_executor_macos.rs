@@ -17,7 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
-const CLEANUP_GRACE: Duration = Duration::from_millis(100);
+const CLEANUP_GRACE: Duration = Duration::from_millis(750);
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 const COMMAND_PATH: &std::ffi::CStr = c"PATH=/usr/bin:/bin";
@@ -198,24 +198,10 @@ pub(in super::super) fn run(
         Err(state) => (ExecutionOutcome::Stopped(request.finish(state)), None),
     };
 
-    // Usually the group drains before result delivery. If the OS delays cleanup, deliver the
-    // terminal result on time while this worker retains the group and the only execution slot.
-    let mut process = pending_cleanup;
-    if let Some(child) = &mut process {
-        let started = Instant::now();
-        while child.pid.is_some() && started.elapsed() < CLEANUP_GRACE {
-            if child.cleanup_step().is_none() && child.pid.is_some() {
-                thread::sleep(POLL_INTERVAL);
-            }
-        }
+    if let Some(mut child) = pending_cleanup {
+        child.bounded_cleanup();
         if let ExecutionOutcome::LaunchedWithOutputWithheld { reason, .. } = outcome {
             outcome = child.withheld(reason);
-        }
-        if child.pid.is_some() {
-            let _ = sender.send(outcome);
-            drop(process);
-            drop(slot);
-            return;
         }
     }
     drop(slot);
@@ -232,17 +218,17 @@ fn launch(request: &Request, paths: ApprovedPaths) -> Result<(Process, Instant),
         before_spawn();
     }
 
-    let mut registry = request.policy.lock().map_err(|_| State::Revoked)?;
-    let entry = request
-        .checked(&mut registry, State::Starting)
+    let registry = request.policy.lock().map_err(|_| State::Revoked)?;
+    let mut entry = request
+        .checked(&registry, State::Starting)
         .map_err(|_| State::Revoked)?;
     paths
         .verify_directory(request.input())
         .map_err(|_| State::SpawnFailed)?;
     paths.verify_executable().map_err(|_| State::SpawnFailed)?;
     // Path verification performs syscalls. Check the clock again at the spawn boundary.
-    if request.policy.now_ms() >= request.input().expires_at_ms {
-        return Err(State::Expired);
+    if request.policy.now_ms() >= entry.expires_at_ms {
+        return Err(State::ExpiredBeforeLaunch);
     }
     let started_at = Instant::now();
     let process = launch
@@ -337,6 +323,7 @@ impl Launch {
         Ok(Process {
             pid: Some(pid),
             exit_status: None,
+            cleanup_attempted: false,
             stdout: Some(self.stdout),
             stderr: Some(self.stderr),
             #[cfg(test)]
@@ -348,6 +335,7 @@ impl Launch {
 struct Process {
     pid: Option<c_int>,
     exit_status: Option<ExitStatus>,
+    cleanup_attempted: bool,
     stdout: Option<PipeReader>,
     stderr: Option<PipeReader>,
     #[cfg(test)]
@@ -443,15 +431,27 @@ impl Process {
     }
 }
 
-impl Drop for Process {
-    fn drop(&mut self) {
-        self.close_pipes();
-        while self.pid.is_some() {
+impl Process {
+    fn bounded_cleanup(&mut self) {
+        if std::mem::replace(&mut self.cleanup_attempted, true) {
+            return;
+        }
+        let started = Instant::now();
+        // A stuck OS cleanup must not strand the execution slot. After this
+        // budget we stop polling and never signal this group again.
+        while self.pid.is_some() && started.elapsed() < CLEANUP_GRACE {
             self.cleanup_step();
             if self.pid.is_some() {
                 thread::sleep(POLL_INTERVAL);
             }
         }
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        self.close_pipes();
+        self.bounded_cleanup();
     }
 }
 
@@ -652,6 +652,68 @@ unsafe extern "C" {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn sandbox_denies_loopback_network() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        let arguments = ["-z", "-v", "-G", "1", "127.0.0.1", &port];
+        let baseline = Command::new("/usr/bin/nc")
+            .args(arguments)
+            .env_clear()
+            .output()
+            .unwrap();
+        assert!(baseline.status.success());
+        let blocked = Command::new(SANDBOX_EXEC)
+            .args(["-p", &sandbox_profile("/usr/bin/nc"), "/usr/bin/nc"])
+            .args(arguments)
+            .env_clear()
+            .output()
+            .unwrap();
+        assert_eq!(blocked.status.code(), Some(1));
+        let error = String::from_utf8_lossy(&blocked.stderr);
+        assert!(error.contains("Operation not permitted"), "{error}");
+    }
+
+    #[test]
+    fn sandbox_denies_fork() {
+        // This harmless shell is a probe only. Production never admits shells.
+        let blocked = Command::new(SANDBOX_EXEC)
+            .args(["-p", &sandbox_profile("/bin/bash"), "/bin/bash"])
+            .args(["--noprofile", "--norc", "-c", "printf child & wait"])
+            .env_clear()
+            .current_dir("/")
+            .output()
+            .unwrap();
+        assert!(!blocked.status.success());
+        assert!(blocked.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&blocked.stderr).contains("fork: Operation not permitted"));
+    }
+
+    #[test]
+    fn spawned_child_receives_only_the_fixed_path() {
+        let mut input = super::super::super::tests::input("env-probe");
+        let mut paths = ApprovedPaths::open(&input).unwrap();
+        // Use the actual launcher with a test-only probe image.
+        paths.program = "/usr/bin/env";
+        input.arguments.clear();
+        let mut process = Launch::prepare(&input, &paths)
+            .unwrap()
+            .spawn(None)
+            .unwrap();
+        let started = Instant::now();
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        while process.stdout.is_some() || process.stderr.is_some() {
+            assert!(started.elapsed() < Duration::from_secs(2));
+            drain(&mut process.stdout, &mut stdout, 128).unwrap();
+            drain(&mut process.stderr, &mut stderr, 128).unwrap();
+            thread::sleep(POLL_INTERVAL);
+        }
+        process.bounded_cleanup();
+        assert!(process.exit_status.is_some_and(|status| status.success()));
+        assert_eq!(stdout, b"PATH=/usr/bin:/bin\n");
+        assert!(stderr.is_empty());
+    }
 
     #[test]
     fn sandbox_denies_local_file_access_and_unapproved_exec() {
