@@ -343,9 +343,12 @@ mod transfers;
 #[path = "git_openssh_privacy_tests.rs"]
 mod openssh;
 
-pub(super) fn native_review_ssh(root: &Path, managed: bool) {
-    openssh::identity(root, managed);
-    openssh::run(root, managed, None);
+pub(super) fn native_review_ssh(root: &Path, managed: bool, part: &str) {
+    match part {
+        "identity" => openssh::identity(root, managed),
+        "transfer" => openssh::run(root, managed, None),
+        _ => panic!("unknown OpenSSH part {part}"),
+    }
 }
 
 #[path = "git_native3_privacy_tests.rs"]
