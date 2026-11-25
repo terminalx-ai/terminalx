@@ -52,7 +52,7 @@ WEBKIT_PART_RUN = "node scripts/webkit/run-all.mjs --shard ${{ matrix.part }}/4"
 WEBKIT_MAC_RUN = "node scripts/webkit/run-all.mjs --only mac-only"
 # The Linux Rust suite: the library's tests in four parts, then the rest of `cargo test`.
 PARTS = ["1", "2", "3", "4", "binaries"]
-LIBRARY_PART = 'set -o pipefail\ncargo nextest run --locked --lib --profile ci --partition count:${{ matrix.part }}/4 2>&1 | tee "$RUNNER_TEMP/nextest.log"\n'
+LIBRARY_PART = 'set -o pipefail\ncargo nextest run --locked --lib --profile ci --test-threads 8 --partition count:${{ matrix.part }}/4 2>&1 | tee "$RUNNER_TEMP/nextest.log"\n'
 VITEST_PARTS = ["1", "2", "3", "4"]
 LOCK = "${{ hashFiles('src-tauri/Cargo.lock') }}"
 CACHE_MISS = "!endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock'))"

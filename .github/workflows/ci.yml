@@ -410,7 +410,7 @@ jobs:
         working-directory: src-tauri
         run: |
           set -o pipefail
-          cargo nextest run --locked --lib --profile ci --partition count:${{ matrix.part }}/4 2>&1 | tee "$RUNNER_TEMP/nextest.log"
+          cargo nextest run --locked --lib --profile ci --test-threads 8 --partition count:${{ matrix.part }}/4 2>&1 | tee "$RUNNER_TEMP/nextest.log"
       # A flaky test passed on a retry its override allows; a leaky one left a
       # process or a pipe open. Neither fails the run, so both are said here.
       - name: Name the flaky and leaky tests in the summary
