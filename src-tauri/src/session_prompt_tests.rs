@@ -3468,9 +3468,51 @@ fn phase2_collaboration_v2_legacy_submit_retries_a_full_pty_buffer() {
     }
 }
 
+// Each change is a rig of its own: independent tests, run side by side.
 #[cfg(unix)]
 #[test]
-fn phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure() {
+fn phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure_local() {
+    phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure("local");
+}
+
+#[cfg(unix)]
+#[test]
+fn phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure_v1() {
+    phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure("v1");
+}
+
+#[cfg(unix)]
+#[test]
+fn phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure_v2() {
+    phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure("v2");
+}
+
+#[cfg(unix)]
+#[test]
+fn phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure_revision() {
+    phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure("revision");
+}
+
+#[cfg(unix)]
+#[test]
+fn phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure_pending() {
+    phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure("pending");
+}
+
+#[cfg(unix)]
+#[test]
+fn phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure_raw_report() {
+    phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure("raw-report");
+}
+
+#[cfg(unix)]
+#[test]
+fn phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure_disconnect() {
+    phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure("disconnect");
+}
+
+#[cfg(unix)]
+fn phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure(change: &str) {
     use crate::remote::collab::v2::{Action, Snapshot, Permit};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     struct FullOnSubmit {
@@ -3492,10 +3534,13 @@ fn phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure(
         }
         fn flush(&mut self) -> std::io::Result<()> { self.inner.flush() }
     }
-    for change in ["local", "v1", "v2", "revision", "pending", "raw-report", "disconnect"] {
+    {
         let rig = Rig::of(CliKind::Claude, "");
         let received = rig._dir.path().join("received");
-        rig.run_in_pane(&format!("stty raw -echo; echo CLI-IS-UP; cat > '{}'", received.display()));
+        // It draws what it reads, as a CLI does: the writer waits for a draw after
+        // the paste before Enter, and a CLI that drew nothing would make each case
+        // wait that out.
+        rig.run_in_pane(&format!("stty raw -echo; echo CLI-IS-UP; tee '{}'", received.display()));
         let entry: index::SessionEntry = serde_json::from_value(json!({
             "id":SESSION,"projectPath":rig._dir.path(),"cwd":rig._dir.path(),"title":"submit fixture","created":index::now(),"modified":index::now(),
             "tabs":[{"id":TAB,"harness":"claude","permissionMode":"plan","pane":rig.pane,"created":index::now()}]
