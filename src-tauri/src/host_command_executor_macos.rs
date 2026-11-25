@@ -12,11 +12,14 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
 use std::ptr;
-use std::sync::mpsc::SyncSender;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, SyncSender};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
+const MAX_REAPER_CHILDREN: usize = 16;
 const CLEANUP_GRACE: Duration = Duration::from_millis(750);
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
@@ -306,6 +309,7 @@ impl Launch {
         self,
         #[cfg(test)] group_events: Option<std::sync::Arc<std::sync::Mutex<Vec<GroupEvent>>>>,
     ) -> io::Result<Process> {
+        let reaper = ReaperPermit::reserve()?;
         let envp = [COMMAND_PATH.as_ptr(), ptr::null()];
         let mut pid = 0;
         // SAFETY: strings and null-terminated pointer vectors live through the call. The
@@ -324,6 +328,7 @@ impl Launch {
             pid: Some(pid),
             exit_status: None,
             cleanup_attempted: false,
+            reaper: Some(reaper),
             stdout: Some(self.stdout),
             stderr: Some(self.stderr),
             #[cfg(test)]
@@ -336,6 +341,7 @@ struct Process {
     pid: Option<c_int>,
     exit_status: Option<ExitStatus>,
     cleanup_attempted: bool,
+    reaper: Option<ReaperPermit>,
     stdout: Option<PipeReader>,
     stderr: Option<PipeReader>,
     #[cfg(test)]
@@ -448,29 +454,92 @@ impl Process {
     }
 }
 
+struct ReaperPermit {
+    queue: &'static SyncSender<ReapRequest>,
+}
+
+static REAPER_QUEUE: OnceLock<io::Result<SyncSender<ReapRequest>>> = OnceLock::new();
+static OWNED_CHILDREN: AtomicUsize = AtomicUsize::new(0);
+
+impl ReaperPermit {
+    fn reserve() -> io::Result<Self> {
+        // Start the one fallible worker before spawning a child. Drop then
+        // needs only an already-reserved queue slot and never starts a thread.
+        let queue = REAPER_QUEUE.get_or_init(|| {
+            let (sender, receiver) = mpsc::sync_channel(MAX_REAPER_CHILDREN);
+            thread::Builder::new()
+                .name("host-command-reaper".into())
+                .spawn(move || reap_children(receiver))?;
+            Ok(sender)
+        });
+        let queue = queue
+            .as_ref()
+            .map_err(|error| io::Error::new(error.kind(), "could not start host command reaper"))?;
+        if OWNED_CHILDREN.fetch_add(1, Ordering::AcqRel) >= MAX_REAPER_CHILDREN {
+            OWNED_CHILDREN.fetch_sub(1, Ordering::AcqRel);
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "host command cleanup is at capacity",
+            ));
+        }
+        Ok(Self { queue })
+    }
+}
+
+impl Drop for ReaperPermit {
+    fn drop(&mut self) {
+        OWNED_CHILDREN.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+struct ReapRequest {
+    pid: c_int,
+    _permit: ReaperPermit,
+    #[cfg(test)]
+    events: Option<std::sync::Arc<std::sync::Mutex<Vec<GroupEvent>>>>,
+}
+
+fn reap_children(receiver: mpsc::Receiver<ReapRequest>) {
+    let mut waiting: Vec<ReapRequest> = Vec::with_capacity(MAX_REAPER_CHILDREN);
+    loop {
+        if waiting.is_empty() {
+            let Ok(child) = receiver.recv() else { break };
+            waiting.push(child);
+        } else if let Ok(child) = receiver.recv_timeout(POLL_INTERVAL) {
+            waiting.push(child);
+        }
+        waiting.retain(|child| {
+            let mut status = 0;
+            // SAFETY: the queue took exclusive ownership of this child.
+            // No group signal is sent from the reaper.
+            let result = unsafe { waitpid(child.pid, &mut status, WNOHANG) };
+            if result == child.pid {
+                #[cfg(test)]
+                if let Some(events) = &child.events {
+                    if let Ok(mut events) = events.lock() {
+                        events.push(GroupEvent::Reaped(child.pid));
+                    }
+                }
+                return false;
+            }
+            result == 0 || io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
+        });
+    }
+}
+
 impl Drop for Process {
     fn drop(&mut self) {
         self.close_pipes();
         self.bounded_cleanup();
-        if let Some(pid) = self.pid.take() {
-            #[cfg(test)]
-            let events = self.group_events.clone();
-            // The bounded path already signalled the owned group. Transfer
-            // sole ownership of the unreaped child and never signal it again.
-            thread::spawn(move || loop {
-                let mut status = 0;
-                // SAFETY: this thread exclusively owns waiting on this child.
-                let result = unsafe { waitpid(pid, &mut status, 0) };
-                if result == pid {
-                    #[cfg(test)]
-                    if let Some(events) = events {
-                        events.lock().unwrap().push(GroupEvent::Reaped(pid));
-                    }
-                    break;
-                }
-                if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-                    break;
-                }
+        if let (Some(pid), Some(permit)) = (self.pid.take(), self.reaper.take()) {
+            let queue = permit.queue;
+            // Every child holds a permit from before spawn. Therefore the
+            // queue, whose capacity matches the permit count, has room.
+            let _ = queue.try_send(ReapRequest {
+                pid,
+                _permit: permit,
+                #[cfg(test)]
+                events: self.group_events.take(),
             });
         }
     }
