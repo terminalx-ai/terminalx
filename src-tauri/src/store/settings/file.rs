@@ -595,7 +595,7 @@ pub fn install(app: &tauri::AppHandle) -> Result<()> {
             let settings = super::load();
             crate::status::set_menu_checked(&ui, settings.status_bar.visible);
             let _ = ui.emit(crate::status::SETTINGS_EVENT, &settings.status_bar);
-            let _ = ui.emit("experimental_settings_changed", &crate::commands::supported_only(settings.experimental.clone()));
+            let _ = ui.emit("experimental_settings_changed", &settings.experimental.clone().supported_only());
             let _ = ui.emit("merged_cleanup_settings", &settings.merged_cleanup);
             let (floating_changed, claims_changed) = {
                 let mut before = applied.lock().unwrap_or_else(|e| e.into_inner());
