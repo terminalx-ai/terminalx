@@ -13,8 +13,8 @@ use url::Url;
 
 use crate::account::{
     AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN,
-    PHASE2_FRESH_WORKSPACE, PHASE2_GENERAL_ACCESS, PHASE2_GITHUB_TRIGGER, PHASE2_PRESENCE,
-    PHASE2_RESTART_DETAILS, PHASE2_AFFECTED_WORKSPACES, PHASE2_WEBHOOK_TRIGGER,
+    PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_PRESENCE, PHASE2_RESTART_DETAILS,
+    PHASE2_AFFECTED_WORKSPACES, PHASE2_GENERAL_ACCESS, PHASE2_WEBHOOK_TRIGGER, PHASE2_WORKSPACE_GROUPS,
 };
 
 const CONTRACT: &str = "providers-v1";
@@ -1706,10 +1706,12 @@ pub struct ShareViewer {
 pub struct CloudWorkspaceShares {
     pub shares: Vec<CloudWorkspaceShare>,
     pub you: ShareViewer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_shares: Option<Vec<CloudGroupShare>>,
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub general_access: Option<GeneralAccess>,
-    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
-    pub access_revision: Option<String>,
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<ShareCapabilities>,
 }
@@ -1747,6 +1749,102 @@ fn valid_access_revision(value: &str) -> bool {
     !value.is_empty() && (value == "0" || !value.starts_with('0'))
         && value.bytes().all(|byte| byte.is_ascii_digit())
         && value.parse::<i64>().is_ok()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyWorkspaceShares {
+    shares: Vec<CloudWorkspaceShare>,
+    you: ShareViewer,
+    #[serde(default, deserialize_with = "lenient")]
+    general_access: Option<GeneralAccess>,
+    #[serde(default, deserialize_with = "lenient")]
+    access_revision: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    capabilities: Option<ShareCapabilities>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudGroup {
+    id: String,
+    name: String,
+    member_count: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudGroupPage {
+    groups: Vec<CloudGroup>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudGroupShare {
+    group_id: String,
+    group: CloudGroup,
+    role: ShareRole,
+    can_approve: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ShareSubjectType { User, Group }
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ShareSubject {
+    #[serde(rename = "type")]
+    kind: ShareSubjectType,
+    id: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "op", rename_all = "lowercase", rename_all_fields = "camelCase", deny_unknown_fields)]
+enum AccessChange {
+    Put { id: String, subject: ShareSubject, role: ShareRole, can_approve: bool },
+    Remove { id: String, subject: ShareSubject },
+}
+
+impl AccessChange {
+    fn identifiers(&self) -> (&str, &str) {
+        match self {
+            Self::Put { id, subject, .. } | Self::Remove { id, subject } => (id, &subject.id),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloudAccessApply {
+    access_revision: String,
+    request_id: String,
+    changes: Vec<AccessChange>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "lowercase", rename_all_fields = "camelCase")]
+enum AccessResult {
+    Applied { id: String },
+    Failed { id: String, code: String, message: String },
+}
+
+impl AccessResult {
+    fn id(&self) -> &str {
+        match self {
+            Self::Applied { id } | Self::Failed { id, .. } => id,
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudAccessApplied {
+    access_revision: String,
+    shares: Vec<CloudWorkspaceShare>,
+    group_shares: Vec<CloudGroupShare>,
+    results: Vec<AccessResult>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -2515,18 +2613,19 @@ impl Client {
         risk: RequestRisk,
         limit: u64,
     ) -> Result<T, CloudWorkspaceClientError> {
-        let mut url = self.base.clone();
-        {
-            let mut segments = url.path_segments_mut().map_err(|_| {
-                CloudWorkspaceClientError::local("cloud_workspace_client_invalid", false)
-            })?;
-            segments.extend(["v1", "desktop", "orgs", context.organization_id.as_str()]);
-            segments.extend(tail.iter().copied());
-        }
+        let mut url = self.organization_url(context, tail)?;
         if let Some((key, value)) = query {
             url.query_pairs_mut().append_pair(key, value);
         }
         self.send_url(method, context, url, body, idempotency_key, risk, limit)
+    }
+
+    fn organization_url(&self, context: &AccountContext, tail: &[&str]) -> Result<Url, CloudWorkspaceClientError> {
+        let mut url = self.base.clone();
+        url.path_segments_mut().map_err(|_| {
+            CloudWorkspaceClientError::local("cloud_workspace_client_invalid", false)
+        })?.extend(["v1", "desktop", "orgs", context.organization_id.as_str()]).extend(tail.iter().copied());
+        Ok(url)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3878,11 +3977,11 @@ impl CloudWorkspaceService {
     /// (§21.2), `private` hides it from everyone but its creator and revokes
     /// every share in the same transaction. Only an organization owner or
     /// admin may; anyone else gets `organization_admin_required`.
-    pub fn set_access(&self, org: Option<&str>, workspace_id: &str, access_mode: WorkspaceAccessMode) -> Result<CloudWorkspace, CloudWorkspaceClientError> {
+    pub fn set_access(&self, org: Option<&str>, workspace_id: &str, access_mode: WorkspaceAccessMode, context_revision: Option<&str>) -> Result<CloudWorkspace, CloudWorkspaceClientError> {
         if !valid_resource_id(workspace_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        self.run_in(org, RequestRisk::Mutation, |client, context| {
+        let change = |client: &Client, context: &AccountContext| {
             let result: CloudWorkspace = client.request(
                 context,
                 &["cloud-workspaces", workspace_id, "access"],
@@ -3897,19 +3996,31 @@ impl CloudWorkspaceService {
                 return Err(post_send_error(RequestRisk::Mutation));
             }
             Ok(result)
-        })
+        };
+        if let Some(revision) = context_revision {
+            self.run_group_sharing(org, revision, RequestRisk::Mutation, |client, context| {
+                // The visibility endpoint keeps the legacy organization
+                // scope rules, even when invoked from the staged editor.
+                if !self.account.current_scope().is_some_and(|scope| scope.allows(&context.organization_id)) {
+                    return Err(CloudWorkspaceClientError::local("cloud_organization_unavailable", false));
+                }
+                change(client, context)
+            })
+        } else {
+            self.run_in(org, RequestRisk::Mutation, change)
+        }
     }
 
-    /// Share routes use the accepted target-membership contract here.
+    /// Only explicit shares use the accepted target-membership contract here.
     /// Keep the initiating active context as well as target membership: neither
     /// a late success nor an HTTP error may escape into a replacement session.
-    fn run_share_in<T>(&self, org: Option<&str>, risk: RequestRisk, expected_revision: Option<&str>,
+    fn run_share_in<T>(&self, org: Option<&str>, context_revision: Option<&str>, risk: RequestRisk,
         operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
         if org.is_some_and(|org| !valid_resource_id(org)) { return Err(inbox_invalid()); }
         // An explicit member target does not require an active organization.
         let active = self.account.context()
             .ok_or_else(|| CloudWorkspaceClientError::local("account_signed_out", false))?;
-        if expected_revision.is_some_and(|revision| AccountManager::context_revision(&active) != revision) {
+        if context_revision.is_some_and(|revision| revision != AccountManager::context_revision(&active)) {
             return Err(context_changed_error(risk));
         }
         if org.is_none() && active.organization_id.is_empty() {
@@ -3921,18 +4032,44 @@ impl CloudWorkspaceService {
             .map_err(|code| CloudWorkspaceClientError::local(code, false))?;
         // is_current includes generation/user/profile/active org, but not token
         // rotation. Fence the captured token too, even without a generation bump.
-        let session_is_current = || self.account.context().is_some_and(|now|
-            now.access_token == active.access_token && self.account.is_current(&active));
+        let scope_is_current = || self.account.is_current(&active) && self.account.inbox_member_is_current(&context, target);
+        let token_is_current = || self.account.context().is_some_and(|now| now.access_token == active.access_token);
         if context.generation != active.generation || context.user_id != active.user_id
             || context.profile_id != active.profile_id || context.access_token != active.access_token
-            || !session_is_current() || !self.account.inbox_member_is_current(&context, target) {
+            || !token_is_current() || !scope_is_current() {
             return Err(context_changed_error(risk));
         }
         let result = operation(&self.client, &context);
-        if !session_is_current() || !self.account.inbox_member_is_current(&context, target) {
+        let same_token = token_is_current();
+        if !scope_is_current() {
             return Err(context_changed_error(risk));
         }
+        if !same_token {
+            // A rotated token fences the reply. Within the same group editor
+            // scope, a mutation may already have committed under the old token.
+            return Err(if context_revision.is_some() && matches!(risk, RequestRisk::Mutation) {
+                post_send_error(risk)
+            } else {
+                context_changed_error(risk)
+            });
+        }
         result
+    }
+
+    fn run_group_sharing<T>(&self, org: Option<&str>, context_revision: &str, risk: RequestRisk,
+        operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
+        self.run_share_in(org, Some(context_revision), risk, |client, context| {
+            let gate = || self.phase2_gate(PHASE2_WORKSPACE_GROUPS, Some(&context.organization_id), Some(context), "cloud_workspace_groups_unavailable");
+            gate()?;
+            let result = operation(client, context);
+            // Reads can be hidden when readiness is withdrawn. A sent
+            // mutation must keep its confirmed result or unknown outcome so
+            // the caller can resolve it through the same request receipt.
+            if matches!(risk, RequestRisk::Read) {
+                gate()?;
+            }
+            result
+        })
     }
 
     /// The workspace's idle window and what it may be changed to (PRO-410),
@@ -3983,31 +4120,42 @@ impl CloudWorkspaceService {
     }
 
     /// Who the workspace is shared with, and what the caller may do (§21.2).
-    pub fn shares(&self, org: Option<&str>, workspace_id: &str) -> Result<CloudWorkspaceShares, CloudWorkspaceClientError> {
+    pub fn shares(&self, org: Option<&str>, workspace_id: &str, context_revision: Option<&str>) -> Result<CloudWorkspaceShares, CloudWorkspaceClientError> {
         if !valid_resource_id(workspace_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        self.run_share_in(org, RequestRisk::Read, None, |client, context| {
-            let mut result: CloudWorkspaceShares = client.request(
-                context,
-                &["cloud-workspaces", workspace_id, "shares"],
-                None,
-                None,
-                None,
-                RequestRisk::Read,
-            )?;
-            if result.shares.iter().any(|share| !valid_resource_id(&share.user_id)) {
-                return Err(invalid_response());
-            }
+        let read = |client: &Client, context: &AccountContext| {
+            let tail = ["cloud-workspaces", workspace_id, "shares"];
+            let mut result = if context_revision.is_some() {
+                let result: CloudWorkspaceShares = client.request(context, &tail, None, None, None, RequestRisk::Read)?;
+                if !result.access_revision.as_deref().is_some_and(valid_share_id)
+                    || !result.group_shares.as_deref().is_some_and(valid_group_shares)
+                    || result.shares.iter().any(|share| !valid_share_id(&share.user_id)) {
+                    return Err(invalid_response());
+                }
+                result
+            } else {
+                let LegacyWorkspaceShares { shares, you, access_revision, general_access, capabilities } =
+                    client.request(context, &tail, None, None, None, RequestRisk::Read)?;
+                if shares.iter().any(|share| !valid_resource_id(&share.user_id)) {
+                    return Err(invalid_response());
+                }
+                CloudWorkspaceShares { shares, you, access_revision, group_shares: None, general_access, capabilities }
+            };
             if !self.phase2_ready(PHASE2_GENERAL_ACCESS, Some(&context.organization_id), Some(context))
                 || matches!(result.general_access, Some(GeneralAccess::Organisation { role: GeneralAccessRole::Write }))
                 || !result.access_revision.as_deref().is_some_and(valid_access_revision) {
                 result.general_access = None;
-                result.access_revision = None;
                 result.capabilities = None;
+                if result.group_shares.is_none() { result.access_revision = None; }
             }
             Ok(result)
-        })
+        };
+        if let Some(revision) = context_revision {
+            self.run_group_sharing(org, revision, RequestRisk::Read, read)
+        } else {
+            self.run_share_in(org, None, RequestRisk::Read, read)
+        }
     }
 
     pub fn general_access_put(
@@ -4024,7 +4172,7 @@ impl CloudWorkspaceService {
         if matches!(general_access, GeneralAccess::Organisation { role: GeneralAccessRole::Write }) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_runtime_unsupported", false));
         }
-        self.run_share_in(org, RequestRisk::Mutation, Some(context_revision), |client, context| {
+        self.run_share_in(org, Some(context_revision), RequestRisk::Mutation, |client, context| {
             self.phase2_gate(
                 PHASE2_GENERAL_ACCESS, Some(&context.organization_id), Some(context),
                 "cloud_workspace_general_access_unavailable",
@@ -4036,6 +4184,65 @@ impl CloudWorkspaceService {
             )?;
             if result.general_access != general_access || !valid_access_revision(&result.access_revision) {
                 return Err(post_send_error(RequestRisk::Mutation));
+            }
+            Ok(result)
+        })
+    }
+
+    pub fn workspace_groups(&self, org: &str, query: &str, cursor: Option<&str>, context_revision: &str) -> Result<CloudGroupPage, CloudWorkspaceClientError> {
+        if query.trim().encode_utf16().count() > 120 || query.contains('\0') || cursor.is_some_and(|cursor| !valid_share_id(cursor)) {
+            return Err(inbox_invalid());
+        }
+        self.run_group_sharing(Some(org), context_revision, RequestRisk::Read, |client, context| {
+            let mut url = client.organization_url(context, &["groups"])?;
+            url.query_pairs_mut().append_pair("q", query).extend_pairs(cursor.map(|cursor| ("cursor", cursor)));
+            let result: CloudGroupPage = client.send_url("GET", context, url, None, None, RequestRisk::Read, RESPONSE_LIMIT_BYTES)?;
+            if result.groups.len() > 50 || result.groups.iter().any(|group| !valid_share_id(&group.id))
+                || result.next_cursor.as_deref().is_some_and(|next| !valid_share_id(next) || Some(next) == cursor) {
+                return Err(invalid_response());
+            }
+            Ok(result)
+        })
+    }
+
+    pub fn apply_shares(&self, org: &str, workspace_id: &str, request: CloudAccessApply, context_revision: &str) -> Result<CloudAccessApplied, CloudWorkspaceClientError> {
+        let mut ids = std::collections::HashSet::with_capacity(request.changes.len().min(128));
+        if !valid_resource_id(workspace_id) || !valid_share_id(&request.access_revision) || !valid_share_id(&request.request_id)
+            || !(1..=128).contains(&request.changes.len())
+            || request.changes.iter().any(|change| {
+                let (id, subject) = change.identifiers();
+                !valid_share_id(id) || !valid_share_id(subject) || !ids.insert(id)
+            }) {
+            return Err(inbox_invalid());
+        }
+        let risk = RequestRisk::Mutation;
+        self.run_group_sharing(Some(org), context_revision, risk, |client, context| {
+            let mut result: CloudAccessApplied = client.request(
+                context, &["cloud-workspaces", workspace_id, "shares", "apply"], None, Some(json!(request)), None, risk,
+            ).map_err(|mut error| {
+                if error.code == "cloud_workspace_request_outcome_unknown" || error.status.is_some_and(|status| status == 408 || status == 429 || status >= 500) {
+                    error.retry_with_same_idempotency_key = true;
+                    error.requires_original_account_context = true;
+                }
+                error
+            })?;
+            if !valid_share_id(&result.access_revision) || !valid_group_shares(&result.group_shares)
+                || result.shares.iter().any(|share| !valid_share_id(&share.user_id))
+                || result.results.len() != request.changes.len()
+                || result.results.iter().zip(&request.changes).any(|(result, change)| result.id() != change.identifiers().0) {
+                let mut error = post_send_error(risk);
+                error.retry_with_same_idempotency_key = true;
+                return Err(error);
+            }
+            // Project only recognized failure codes and use local copy. The
+            // server message itself is unnecessary for unrecognized failures.
+            for outcome in &mut result.results {
+                if let AccessResult::Failed { code, message, .. } = outcome {
+                    if !known_error_code(code) {
+                        *code = "cloud_workspace_unknown_error".into();
+                        *message = "The server refused this change.".into();
+                    }
+                }
             }
             Ok(result)
         })
@@ -4068,7 +4275,7 @@ impl CloudWorkspaceService {
                 return Err(CloudWorkspaceClientError::local("cloud_workspace_runtime_not_ready", true));
             }
         }
-        self.run_share_in(org, RequestRisk::Mutation, None, |client, context| {
+        self.run_share_in(org, None, RequestRisk::Mutation, |client, context| {
             let result: CloudWorkspaceShareChange = client.request_as(
                 "PUT",
                 context,
@@ -4096,7 +4303,7 @@ impl CloudWorkspaceService {
         if !valid_resource_id(workspace_id) || !valid_resource_id(user_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        self.run_share_in(org, RequestRisk::Mutation, None, |client, context| {
+        self.run_share_in(org, None, RequestRisk::Mutation, |client, context| {
             let result: CloudWorkspaceShareChange = client.request_as(
                 "DELETE",
                 context,
@@ -4470,6 +4677,11 @@ fn known_error_code(code: &str) -> bool {
             | "workspace_reassign_runtime_unsupported"
             | "workspace_reassign_idempotency_conflict"
             | "cloud_workspace_last_admin"
+            | "cloud_workspace_access_revision_conflict"
+            | "cloud_workspace_general_access_unavailable"
+            | "cloud_workspace_groups_unavailable"
+            | "cloud_workspace_group_share_not_found"
+            | "organization_group_not_found"
             | "workspace_following_unavailable"
             | "presence_rate_limited"
             | "presence_device_limit"
@@ -4560,8 +4772,6 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_share_requires_organization_access"
             | "cloud_workspace_share_limit"
             | "cloud_workspace_share_forbidden"
-            | "cloud_workspace_general_access_unavailable"
-            | "cloud_workspace_access_revision_conflict"
             | "cloud_workspace_share_credential_restricted"
             | "cloud_workspace_share_personal_route"
             | "cloud_workspace_collaboration_forbidden"
@@ -4590,6 +4800,14 @@ fn valid_idempotency_key(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+}
+
+fn valid_share_id(value: &str) -> bool {
+    (1..=128).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-' | b'@'))
+}
+
+fn valid_group_shares(shares: &[CloudGroupShare]) -> bool {
+    shares.len() <= 64 && shares.iter().all(|share| share.group_id == share.group.id && valid_share_id(&share.group_id))
 }
 
 fn invalid_response() -> CloudWorkspaceClientError {
@@ -4932,6 +5150,17 @@ mod tests {
         mpsc::Receiver<()>,
         thread::JoinHandle<CapturedRequest>,
     ) {
+        serve_once_after(response, move || thread::sleep(response_delay))
+    }
+
+    fn serve_once_after(
+        response: String,
+        before_reply: impl FnOnce() + Send + 'static,
+    ) -> (
+        String,
+        mpsc::Receiver<()>,
+        thread::JoinHandle<CapturedRequest>,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -4972,7 +5201,7 @@ mod tests {
                 }
             }
             let _ = accepted_tx.send(());
-            thread::sleep(response_delay);
+            before_reply();
             let _ = stream.write_all(response.as_bytes());
             drop(stream);
             thread::sleep(Duration::from_millis(40));
@@ -8390,6 +8619,140 @@ mod tests {
         })
     }
 
+    fn enable_workspace_groups(account: &AccountManager, org: &str) -> String {
+        account.apply_phase2_readiness_for_test(json!({
+            "version": 1,
+            "organizations": { (org): { (PHASE2_WORKSPACE_GROUPS): true } }
+        }));
+        AccountManager::context_revision(&account.context().unwrap())
+    }
+
+    fn workspace_group_access_request(body: &Value) -> CloudAccessApply {
+        serde_json::from_value(body.clone()).unwrap()
+    }
+
+    #[test]
+    fn workspace_group_sharing_projects_target_search_pages_and_held_share_reads() {
+        let group = json!({"id": "group@opaque", "name": "Release crew", "memberCount": 3});
+        let you = json!({"role": "manager", "canApprove": true, "canManageShares": true});
+        let legacy = json!({"shares": [], "you": you});
+        let response_snapshot = json!({"shares": [], "you": you, "accessRevision": "rev:1",
+            "groupShares": [{"groupId": "group@opaque", "role": "viewer", "canApprove": true, "group": group}]});
+        let mut future_snapshot = response_snapshot.clone();
+        future_snapshot["groupShares"][0]["role"] = json!("unknown-role");
+        let search = json!({"groups": [group], "nextCursor": "next+not-a-valid-id"});
+        let (base, captured) = serve_each(vec![
+            response("200 OK", &future_snapshot.to_string(), ""),
+            response("200 OK", &response_snapshot.to_string(), ""),
+            response("200 OK", &json!({"groups": [group], "nextCursor": "next@opaque"}).to_string(), ""),
+            response("200 OK", &json!({"groups": [], "nextCursor": null}).to_string(), ""),
+            response("200 OK", &search.to_string(), ""),
+        ]);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], false);
+        let revision = enable_workspace_groups(&account, "org-2");
+        assert_eq!(service.workspace_groups("org-1", "", None, &revision).unwrap_err().code, "cloud_workspace_groups_unavailable");
+        assert_eq!(service.workspace_groups("org-non-member", "", None, &revision).unwrap_err().code, "cloud_organization_unavailable");
+        assert_eq!(service.workspace_groups("org-2", "", None, "another-account").unwrap_err().code, "account_context_changed");
+        assert_eq!(serde_json::to_value(service.shares(Some("org-1"), "workspace-1", None).unwrap()).unwrap(), legacy);
+        assert_eq!(serde_json::to_value(service.shares(Some("org-2"), "workspace-1", Some(&revision)).unwrap()).unwrap(), response_snapshot);
+        let first = service.workspace_groups("org-2", "Rel & % É", None, &revision).unwrap();
+        assert_eq!(first.groups[0].member_count, 3);
+        service.workspace_groups("org-2", "Rel & % É", first.next_cursor.as_deref(), &revision).unwrap();
+        assert_eq!(service.workspace_groups("org-2", "", None, &revision).unwrap_err().code, "cloud_workspace_invalid_response");
+        let requests = captured.join().unwrap();
+        assert!(requests[0].starts_with("GET /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/shares "));
+        assert!(requests[1].starts_with("GET /v1/desktop/orgs/org-2/cloud-workspaces/workspace-1/shares "));
+        assert!(requests[2].starts_with("GET /v1/desktop/orgs/org-2/groups?q=Rel+%26+%25+%C3%89 "));
+        assert!(requests[3].starts_with("GET /v1/desktop/orgs/org-2/groups?q=Rel+%26+%25+%C3%89&cursor=next%40opaque "));
+        for request in requests { phase2_headers(&request); }
+    }
+
+    #[test]
+    fn workspace_group_sharing_applies_one_envelope_preserves_partial_results_and_same_payload_retries() {
+        let submit = json!({"accessRevision": "opaque:r1", "requestId": "request-1", "changes": [
+            {"id": "one", "op": "put", "subject": {"type": "group", "id": "group-1"}, "role": "viewer", "canApprove": false},
+            {"id": "two", "op": "remove", "subject": {"type": "user", "id": "user-1"}}
+        ]});
+        let snapshot = json!({"accessRevision": "opaque:r2", "shares": [], "groupShares": [], "results": [
+            {"id": "one", "status": "applied"},
+            {"id": "two", "status": "failed", "code": "cloud_workspace_last_admin", "message": "Keep an administrator."}
+        ]});
+        let mut invalid = snapshot.clone();
+        invalid["results"][0]["id"] = json!("unexpected");
+        let (base, captured) = serve_each(vec![
+            response("503 Service Unavailable", r#"{"error":"cloud_workspace_share_unavailable"}"#, ""),
+            response("200 OK", &snapshot.to_string(), ""),
+            response("200 OK", &invalid.to_string(), ""),
+            response("409 Conflict", r#"{"error":"cloud_workspace_access_revision_conflict"}"#, ""),
+        ]);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1"], false);
+        let revision = enable_workspace_groups(&account, "org-1");
+        let mut duplicate = submit.clone();
+        duplicate["changes"][1]["id"] = json!("one");
+        let apply = |body: &Value| {
+            service.apply_shares("org-1", "workspace-1", workspace_group_access_request(body), &revision)
+                .map(|response| serde_json::to_value(response).unwrap())
+        };
+        assert_eq!(apply(&duplicate).unwrap_err().code, "cloud_workspace_request_invalid");
+        let unavailable = apply(&submit).unwrap_err();
+        assert_eq!(unavailable.code, "cloud_workspace_share_unavailable");
+        assert!(unavailable.retry_with_same_idempotency_key && unavailable.requires_original_account_context);
+        assert_eq!(apply(&submit).unwrap(), snapshot);
+        let unknown = apply(&submit).unwrap_err();
+        assert_eq!(unknown.code, "cloud_workspace_request_outcome_unknown");
+        assert!(unknown.retry_with_same_idempotency_key);
+        let conflict = apply(&submit).unwrap_err();
+        assert_eq!(conflict.code, "cloud_workspace_access_revision_conflict");
+        assert!(!conflict.retry_with_same_idempotency_key);
+        for request in captured.join().unwrap() {
+            assert!(request.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/shares/apply "));
+            phase2_headers(&request);
+            assert_eq!(serde_json::from_str::<Value>(request.split_once("\r\n\r\n").unwrap().1).unwrap(), submit);
+        }
+    }
+
+    #[test]
+    fn workspace_group_sharing_preserves_sent_mutation_outcomes_when_readiness_is_withdrawn() {
+        let submit = json!({"accessRevision": "rev:1", "requestId": "request-1", "changes": [
+            {"id": "one", "op": "remove", "subject": {"type": "user", "id": "user-1"}}
+        ]});
+        let reply = json!({"accessRevision": "rev:2", "shares": [], "groupShares": [],
+            "results": [{"id": "one", "status": "applied"}]});
+        let fixtures = [
+            (response("200 OK", &reply.to_string(), ""), None, false),
+            (response("409 Conflict", r#"{"error":"cloud_workspace_access_revision_conflict"}"#, ""),
+                Some("cloud_workspace_access_revision_conflict"), false),
+            (response("200 OK", "", ""), Some("cloud_workspace_request_outcome_unknown"), true),
+        ];
+        for (response, expected_error, retry) in fixtures {
+            let (release, wait) = mpsc::channel();
+            let (base, accepted, captured) =
+                serve_once_after(response, move || wait.recv_timeout(Duration::from_secs(2)).unwrap());
+            let (account, service) = test_service(&base);
+            account.set_memberships_for_test(&["org-1"], false);
+            let revision = enable_workspace_groups(&account, "org-1");
+            let request = workspace_group_access_request(&submit);
+            let worker = thread::spawn(move || service.apply_shares("org-1", "workspace-1", request, &revision));
+            accepted.recv_timeout(Duration::from_secs(2)).unwrap();
+            account.apply_phase2_readiness_for_test(json!({"version": 1, "organizations": {}}));
+            assert!(!account.phase2_ready(PHASE2_WORKSPACE_GROUPS, Some("org-1"), None));
+            release.send(()).unwrap();
+            match (worker.join().unwrap(), expected_error) {
+                (Ok(value), None) => assert_eq!(serde_json::to_value(value).unwrap(), reply),
+                (Err(error), Some(code)) => {
+                    assert_eq!(error.code, code);
+                    assert_eq!(error.retry_with_same_idempotency_key, retry);
+                }
+                _ => panic!("readiness withdrawal changed the mutation outcome"),
+            }
+            let request = captured.join().unwrap();
+            assert_eq!(serde_json::from_str::<Value>(request.text.split_once("\r\n\r\n").unwrap().1).unwrap(), submit);
+            assert!(!request.extra_request);
+        }
+    }
+
     #[test]
     fn phase2_admin_share_contract_get_mixed_nullable_rows_and_effective_you() {
         for effective in ["manager", "driver", "viewer", "none"] {
@@ -8402,7 +8765,7 @@ mod tests {
                 "you": {"role": effective, "canApprove": true, "canManageShares": effective == "manager"}});
             let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
             let (_, service) = test_service(&base);
-            let listed = service.shares(None, "workspace-1").unwrap();
+            let listed = service.shares(None, "workspace-1", None).unwrap();
             assert_eq!(serde_json::to_value(&listed).unwrap(), body);
             assert_eq!(listed.shares[0].role, ShareRole::Manager);
             assert_eq!(listed.shares[0].name, None);
@@ -8465,7 +8828,7 @@ mod tests {
             for invalid in ["", "../user", "user/2", "user?x", ".", ".."] {
                 assert_eq!(service.share_put(None, "workspace-1", invalid, ShareRole::Manager, true).unwrap_err().code, "cloud_workspace_request_invalid");
                 assert_eq!(service.share_revoke(None, "workspace-1", invalid).unwrap_err().code, "cloud_workspace_request_invalid");
-                assert_eq!(service.shares(None, invalid).unwrap_err().code, "cloud_workspace_request_invalid");
+                assert_eq!(service.shares(None, invalid, None).unwrap_err().code, "cloud_workspace_request_invalid");
                 assert_eq!(service.share_put(None, invalid, "user-2", ShareRole::Viewer, false).unwrap_err().code, "cloud_workspace_request_invalid");
                 assert_eq!(service.share_revoke(Some(invalid), "workspace-1", "user-2").unwrap_err().code, "cloud_workspace_request_invalid");
             }
@@ -8517,13 +8880,13 @@ mod tests {
             account.set_context_for_test(Some(current));
             account.set_memberships_for_test(&["org-2"], false);
             if active_org.is_empty() {
-                let error = service.shares(None, "workspace-1").unwrap_err();
+                let error = service.shares(None, "workspace-1", None).unwrap_err();
                 assert_eq!(error.code, "account_organization_unavailable");
                 assert!(error.status.is_none());
                 assert_eq!(service.share_put(None, "workspace-1", "user-2", ShareRole::Viewer, false).unwrap_err().code, "account_organization_unavailable");
                 assert_eq!(service.share_revoke(None, "workspace-1", "user-2").unwrap_err().code, "account_organization_unavailable");
             }
-            service.shares(Some("org-2"), "workspace-1").unwrap();
+            service.shares(Some("org-2"), "workspace-1", None).unwrap();
             service.share_put(Some("org-2"), "workspace-1", "user-2", ShareRole::Viewer, false).unwrap();
             service.share_revoke(Some("org-2"), "workspace-1", "user-2").unwrap();
             for (request, method) in requests.join().unwrap().iter().zip(["GET", "PUT", "DELETE"]) {
@@ -8540,7 +8903,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let (_, service) = test_service(&format!("http://{}", listener.local_addr().unwrap()));
-        assert_eq!(service.shares(Some("org-2"), "workspace-1").unwrap_err().code, "cloud_organization_unavailable");
+        assert_eq!(service.shares(Some("org-2"), "workspace-1", None).unwrap_err().code, "cloud_organization_unavailable");
         assert_eq!(service.share_put(Some("org-2"), "workspace-1", "user-2", ShareRole::Viewer, false).unwrap_err().code, "cloud_organization_unavailable");
         assert_eq!(service.share_revoke(Some("org-2"), "workspace-1", "user-2").unwrap_err().code, "cloud_organization_unavailable");
         assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
@@ -8549,7 +8912,7 @@ mod tests {
             let (account, service) = test_service(&base);
             account.set_memberships_for_test(&["org-1", "org-2"], false);
             let error = match method {
-                "GET" => service.shares(Some("org-2"), "private-workspace").unwrap_err(),
+                "GET" => service.shares(Some("org-2"), "private-workspace", None).unwrap_err(),
                 "PUT" => service.share_put(Some("org-2"), "private-workspace", "user-2", ShareRole::Viewer, false).unwrap_err(),
                 _ => service.share_revoke(Some("org-2"), "private-workspace", "user-2").unwrap_err(),
             };
@@ -8571,7 +8934,7 @@ mod tests {
                     let (account, service) = phase2_service(&base);
                     account.set_memberships_for_test(&["org-1", "org-2"], false);
                     let pending = thread::spawn(move || match method {
-                        "GET" => service.shares(Some("org-2"), "workspace-1").map(|_| ()),
+                        "GET" => service.shares(Some("org-2"), "workspace-1", None).map(|_| ()),
                         "PUT" => service.share_put(Some("org-2"), "workspace-1", "user-2", ShareRole::Manager, true).map(|_| ()),
                         _ => service.share_revoke(Some("org-2"), "workspace-1", "user-2").map(|_| ()),
                     });
@@ -8622,7 +8985,7 @@ mod tests {
                 let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
                 let (_, service) = phase2_service(&base);
                 let error = match method {
-                    "GET" => service.shares(None, "workspace-1").unwrap_err(),
+                    "GET" => service.shares(None, "workspace-1", None).unwrap_err(),
                     "PUT" => service.share_put(None, "workspace-1", "user-2", ShareRole::Manager, true).unwrap_err(),
                     _ => service.share_revoke(None, "workspace-1", "user-2").unwrap_err(),
                 };
@@ -8632,7 +8995,7 @@ mod tests {
         }
         let (base, _, request) = serve_once(response("200 OK", &json!({"shares": [], "you": {"role": "owner", "canApprove": true, "canManageShares": true}}).to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        assert_eq!(service.shares(None, "workspace-1").unwrap_err().code, "cloud_workspace_invalid_response");
+        assert_eq!(service.shares(None, "workspace-1", None).unwrap_err().code, "cloud_workspace_invalid_response");
         assert!(!request.join().unwrap().extra_request);
     }
 
@@ -8660,7 +9023,7 @@ mod tests {
                 let (base, _, request) = serve_once(response(status, &json!({"error": code, "message": "private diagnostic must not cross"}).to_string(), "Retry-After: 17\r\n"), Duration::ZERO);
                 let (_, service) = phase2_service(&base);
                 let error = match method {
-                    "GET" => service.shares(None, "workspace-1").unwrap_err(),
+                    "GET" => service.shares(None, "workspace-1", None).unwrap_err(),
                     "PUT" => service.share_put(None, "workspace-1", "user-2", ShareRole::Manager, true).unwrap_err(),
                     _ => service.share_revoke(None, "workspace-1", "user-2").unwrap_err(),
                 };
@@ -8694,7 +9057,7 @@ mod tests {
                 service.force_phase2_for_test = true;
                 let started = Instant::now();
                 let error = match method {
-                    "GET" => service.shares(None, "workspace-1").unwrap_err(),
+                    "GET" => service.shares(None, "workspace-1", None).unwrap_err(),
                     "PUT" => service.share_put(None, "workspace-1", "user-2", ShareRole::Manager, true).unwrap_err(),
                     _ => service.share_revoke(None, "workspace-1", "user-2").unwrap_err(),
                 };
@@ -8711,25 +9074,114 @@ mod tests {
     }
 
     #[test]
-    fn general_access_contract_projects_only_ready_camel_case_share_fields() {
-        for enabled in [false, true] {
-            let payload = json!({
-                "shares": [],
-                "you": { "role": "manager", "canApprove": true, "canManageShares": true },
-                "accessRevision": "9007199254740993",
-                "generalAccess": { "mode": "organisation", "role": "read" },
-                "capabilities": { "canChangeGeneralAccess": true, "canGrantAdmin": false, "canUseOrganisationWrite": false }
-            });
-            let (base, _, request) = serve_once(response("200 OK", &payload.to_string(), ""), Duration::ZERO);
+    fn shares_list_reads_the_caller_standing() {
+        let body = json!({
+            "shares": [share_json("user-2", "viewer")],
+            "you": { "role": "manager", "canApprove": true, "canManageShares": true }
+        });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let listed = service.shares(None, "workspace-1", None).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/shares HTTP/1.1"));
+        assert_eq!(listed.shares.len(), 1);
+        assert_eq!(listed.shares[0].role, ShareRole::Viewer);
+        assert_eq!(listed.you.role, CollaborationRole::Manager);
+        assert!(listed.you.can_manage_shares);
+        // Serialized for the webview in camelCase.
+        let value = serde_json::to_value(&listed).unwrap();
+        assert_eq!(value["you"]["canManageShares"], json!(true));
+        assert_eq!(value["shares"][0]["userId"], json!("user-2"));
+    }
+
+    #[test]
+    fn share_put_sends_the_strict_body_with_put() {
+        let body = json!({ "share": share_json("user-2", "driver"), "created": true });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let changed = service.share_put(None, "workspace-1", "user-2", ShareRole::Driver, true).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("PUT /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/shares/user-2 HTTP/1.1"));
+        let sent: Value = serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(sent, json!({ "v": 1, "role": "driver", "canApprove": true }));
+        assert_eq!(changed.created, Some(true));
+        assert_eq!(changed.share.role, ShareRole::Driver);
+    }
+
+    #[test]
+    fn share_revoke_uses_delete_and_checks_the_answer_is_that_person() {
+        let body = json!({ "share": share_json("user-2", "viewer") });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        service.share_revoke(None, "workspace-1", "user-2").unwrap();
+        assert!(request
+            .join()
+            .unwrap()
+            .text
+            .starts_with("DELETE /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/shares/user-2 HTTP/1.1"));
+
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.share_revoke(None, "workspace-1", "user-3").unwrap_err();
+        request.join().unwrap();
+        assert_eq!(error.code, "cloud_workspace_request_outcome_unknown");
+    }
+
+    #[test]
+    fn share_refusals_keep_their_codes() {
+        for (status, code) in [
+            ("409 Conflict", "cloud_workspace_share_redundant"),
+            ("409 Conflict", "cloud_workspace_share_requires_organization_access"),
+            ("429 Too Many Requests", "cloud_workspace_share_limit"),
+            ("403 Forbidden", "cloud_workspace_share_forbidden"),
+            ("409 Conflict", "cloud_workspace_share_credential_restricted"),
+            ("409 Conflict", "cloud_workspace_share_personal_route"),
+            ("404 Not Found", "organization_member_not_found"),
+            ("404 Not Found", "cloud_workspace_share_not_found"),
+        ] {
+            let (base, _, request) = serve_once(response(status, &json!({ "error": code }).to_string(), ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            let error = service.share_put(None, "workspace-1", "user-2", ShareRole::Viewer, false).unwrap_err();
+            request.join().unwrap();
+            assert_eq!(error.code, code);
+        }
+    }
+
+    #[test]
+    fn catalog_creator_accepts_the_name_without_a_presence_photo() {
+        let mut workspace: Value = serde_json::from_str::<Value>(&snapshot_body(None)).unwrap()["workspace"].clone();
+        workspace["createdBy"] = json!("creator-1");
+        workspace["creator"] = json!({ "userId": "creator-1", "displayName": "Aisha" });
+        let parsed: CloudWorkspace = serde_json::from_value(workspace).unwrap();
+        let creator = parsed.creator.unwrap();
+        assert_eq!(creator.user_id, "creator-1");
+        assert_eq!(creator.display_name.as_deref(), Some("Aisha"));
+        assert!(creator.photo_url.is_none());
+    }
+
+    #[test]
+    fn general_access_contract_projects_the_two_editors_independently() {
+        let body = json!({
+            "shares": [],
+            "you": { "role": "manager", "canApprove": true, "canManageShares": true },
+            "groupShares": [],
+            "accessRevision": "9007199254740993",
+            "generalAccess": { "mode": "organisation", "role": "read" },
+            "capabilities": { "canChangeGeneralAccess": true, "canGrantAdmin": false, "canUseOrganisationWrite": false }
+        });
+        for (groups, general) in [(false, false), (false, true), (true, false), (true, true)] {
+            let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
             let (account, service) = test_service(&base);
             account.set_memberships_for_test(&["org-1"], true);
             account.apply_phase2_readiness_for_test(json!({ "version": 1, "organizations": {
-                "org-1": { (PHASE2_GENERAL_ACCESS): enabled }
+                "org-1": { (PHASE2_GENERAL_ACCESS): general, (PHASE2_WORKSPACE_GROUPS): groups }
             } }));
-            let shares = service.shares(None, "workspace-1").unwrap();
-            assert_eq!(shares.access_revision.is_some(), enabled);
-            assert_eq!(shares.general_access.is_some(), enabled);
-            assert_eq!(shares.capabilities.is_some(), enabled);
+            let revision = AccountManager::context_revision(&context());
+            let result = service.shares(None, "workspace-1", groups.then_some(revision.as_str())).unwrap();
+            assert_eq!(result.group_shares.is_some(), groups);
+            assert_eq!(result.access_revision.is_some(), groups || general, "groups={groups}, general={general}");
+            assert_eq!(result.general_access.is_some(), general);
+            assert_eq!(result.capabilities.is_some(), general);
             assert!(request.join().unwrap().text.starts_with("GET /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/shares HTTP/"));
         }
     }
@@ -8812,92 +9264,6 @@ mod tests {
     }
 
     #[test]
-    fn shares_list_reads_the_caller_standing() {
-        let body = json!({
-            "shares": [share_json("user-2", "viewer")],
-            "you": { "role": "manager", "canApprove": true, "canManageShares": true }
-        });
-        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
-        let (_, service) = test_service(&base);
-        let listed = service.shares(None, "workspace-1").unwrap();
-        let captured = request.join().unwrap();
-        assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/shares HTTP/1.1"));
-        assert_eq!(listed.shares.len(), 1);
-        assert_eq!(listed.shares[0].role, ShareRole::Viewer);
-        assert_eq!(listed.you.role, CollaborationRole::Manager);
-        assert!(listed.you.can_manage_shares);
-        // Serialized for the webview in camelCase.
-        let value = serde_json::to_value(&listed).unwrap();
-        assert_eq!(value["you"]["canManageShares"], json!(true));
-        assert_eq!(value["shares"][0]["userId"], json!("user-2"));
-    }
-
-    #[test]
-    fn share_put_sends_the_strict_body_with_put() {
-        let body = json!({ "share": share_json("user-2", "driver"), "created": true });
-        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
-        let (_, service) = test_service(&base);
-        let changed = service.share_put(None, "workspace-1", "user-2", ShareRole::Driver, true).unwrap();
-        let captured = request.join().unwrap();
-        assert!(captured.text.starts_with("PUT /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/shares/user-2 HTTP/1.1"));
-        let sent: Value = serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-        assert_eq!(sent, json!({ "v": 1, "role": "driver", "canApprove": true }));
-        assert_eq!(changed.created, Some(true));
-        assert_eq!(changed.share.role, ShareRole::Driver);
-    }
-
-    #[test]
-    fn share_revoke_uses_delete_and_checks_the_answer_is_that_person() {
-        let body = json!({ "share": share_json("user-2", "viewer") });
-        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
-        let (_, service) = test_service(&base);
-        service.share_revoke(None, "workspace-1", "user-2").unwrap();
-        assert!(request
-            .join()
-            .unwrap()
-            .text
-            .starts_with("DELETE /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/shares/user-2 HTTP/1.1"));
-
-        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
-        let (_, service) = test_service(&base);
-        let error = service.share_revoke(None, "workspace-1", "user-3").unwrap_err();
-        request.join().unwrap();
-        assert_eq!(error.code, "cloud_workspace_request_outcome_unknown");
-    }
-
-    #[test]
-    fn share_refusals_keep_their_codes() {
-        for (status, code) in [
-            ("409 Conflict", "cloud_workspace_share_redundant"),
-            ("409 Conflict", "cloud_workspace_share_requires_organization_access"),
-            ("429 Too Many Requests", "cloud_workspace_share_limit"),
-            ("403 Forbidden", "cloud_workspace_share_forbidden"),
-            ("409 Conflict", "cloud_workspace_share_credential_restricted"),
-            ("409 Conflict", "cloud_workspace_share_personal_route"),
-            ("404 Not Found", "organization_member_not_found"),
-            ("404 Not Found", "cloud_workspace_share_not_found"),
-        ] {
-            let (base, _, request) = serve_once(response(status, &json!({ "error": code }).to_string(), ""), Duration::ZERO);
-            let (_, service) = test_service(&base);
-            let error = service.share_put(None, "workspace-1", "user-2", ShareRole::Viewer, false).unwrap_err();
-            request.join().unwrap();
-            assert_eq!(error.code, code);
-        }
-    }
-
-    #[test]
-    fn catalog_creator_accepts_the_name_without_a_presence_photo() {
-        let mut workspace: Value = serde_json::from_str::<Value>(&snapshot_body(None)).unwrap()["workspace"].clone();
-        workspace["createdBy"] = json!("creator-1");
-        workspace["creator"] = json!({ "userId": "creator-1", "displayName": "Aisha" });
-        let parsed: CloudWorkspace = serde_json::from_value(workspace).unwrap();
-        let creator = parsed.creator.unwrap();
-        assert_eq!(creator.user_id, "creator-1");
-        assert_eq!(creator.display_name.as_deref(), Some("Aisha"));
-        assert!(creator.photo_url.is_none());
-    }
-
-    #[test]
     fn list_items_carry_the_callers_role_and_share_count_leniently() {
         let mut workspace: Value = serde_json::from_str::<Value>(&snapshot_body(None)).unwrap()["workspace"].clone();
         workspace["you"] = json!({ "role": "driver", "canApprove": true });
@@ -8930,7 +9296,7 @@ mod tests {
         workspace["accessMode"] = json!("organization");
         let (base, _, request) = serve_once(response("200 OK", &workspace.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let changed = service.set_access(None, "workspace-1", WorkspaceAccessMode::Organization).unwrap();
+        let changed = service.set_access(None, "workspace-1", WorkspaceAccessMode::Organization, None).unwrap();
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/access HTTP/1.1"));
         let sent: Value = serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
@@ -8941,7 +9307,7 @@ mod tests {
         workspace["accessMode"] = json!("private");
         let (base, _, request) = serve_once(response("200 OK", &workspace.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let changed = service.set_access(None, "workspace-1", WorkspaceAccessMode::Private).unwrap();
+        let changed = service.set_access(None, "workspace-1", WorkspaceAccessMode::Private, None).unwrap();
         let captured = request.join().unwrap();
         let sent: Value = serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
         assert_eq!(sent, json!({ "accessMode": "private" }));
@@ -8951,7 +9317,7 @@ mod tests {
         workspace["id"] = json!("workspace-9");
         let (base, _, request) = serve_once(response("200 OK", &workspace.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let error = service.set_access(None, "workspace-1", WorkspaceAccessMode::Private).unwrap_err();
+        let error = service.set_access(None, "workspace-1", WorkspaceAccessMode::Private, None).unwrap_err();
         request.join().unwrap();
         assert_eq!(error.code, "cloud_workspace_request_outcome_unknown");
     }
@@ -8960,11 +9326,11 @@ mod tests {
     fn set_access_keeps_the_refusal_of_a_member_and_checks_the_id_first() {
         let (base, _, request) = serve_once(response("403 Forbidden", r#"{"error":"organization_admin_required"}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let error = service.set_access(None, "workspace-1", WorkspaceAccessMode::Organization).unwrap_err();
+        let error = service.set_access(None, "workspace-1", WorkspaceAccessMode::Organization, None).unwrap_err();
         request.join().unwrap();
         assert_eq!((error.code.as_str(), error.status), ("organization_admin_required", Some(403)));
         let (_, service) = test_service("http://127.0.0.1:9");
-        assert_eq!(service.set_access(None, "../x", WorkspaceAccessMode::Private).unwrap_err().code, "cloud_workspace_request_invalid");
+        assert_eq!(service.set_access(None, "../x", WorkspaceAccessMode::Private, None).unwrap_err().code, "cloud_workspace_request_invalid");
     }
 
     #[test]
@@ -9029,7 +9395,7 @@ mod tests {
         let (_, service) = test_service("http://127.0.0.1:9");
         assert_eq!(service.share_put(None, "workspace-1", "../x", ShareRole::Viewer, false).unwrap_err().code, "cloud_workspace_request_invalid");
         assert_eq!(service.share_revoke(None, "", "user-2").unwrap_err().code, "cloud_workspace_request_invalid");
-        assert_eq!(service.shares(None, "a/b").unwrap_err().code, "cloud_workspace_request_invalid");
+        assert_eq!(service.shares(None, "a/b", None).unwrap_err().code, "cloud_workspace_request_invalid");
     }
 
     #[test]

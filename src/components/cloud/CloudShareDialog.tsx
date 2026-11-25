@@ -8,110 +8,83 @@ import { api, type AccountStatus, type CloudShareRole, type CloudWorkspaceGenera
 import { VISIBILITY_ADMIN_REASON, notifyAccessChanged } from "@/lib/cloudCollab";
 import { loadRoster, loadRosterIn, rememberPeople } from "@/lib/cloudPeople";
 import { readOrganizationRoster, useOrganizationRoster } from "@/lib/organizationRoster";
+import { privacyEnabled, useDataPrivacy } from "@/lib/dataPrivacy";
 import { featureFlags, useFeatureFlag } from "@/lib/featureFlags";
+import { phase2Ready } from "@/lib/phase2Readiness";
 import type { OrganizationMember } from "@/lib/organizationMembers";
 import { MemberProfile } from "@/components/people/MemberProfile";
-import { phase2Ready } from "@/lib/phase2Readiness";
+import { alwaysHasAccess, codeOf, MANAGER_APPROVAL_REASON, OUTCOME_UNKNOWN, shareErrorMessage, shareRoleLabel, yourAccessText } from "@/lib/cloudShareLabels";
+import { CloudGeneralAccessControls } from "./CloudGeneralAccessControls";
+import { CloudShareEditor } from "./CloudShareEditor";
 
-/**
- * This person's access in words: Owner, Admin, Creator, Driver or Viewer.
- * Organization and creator provenance must come from their own evidence.
- */
-export function yourAccessText(
-  you: CloudWorkspaceShares["you"],
-  /** This person's role in the workspace's organization (`owner`, `admin`, `member`); null when not known. */
-  orgRole: string | null,
-  /** Whether they created the workspace; null when not known. */
-  creator: boolean | null = null,
-): string {
-  const approves = you.canApprove ? ", can approve permissions" : "";
-  switch (you.role) {
-    case "manager":
-      if (creator) return `Creator (you created this workspace: manages this workspace and who it is shared with)${approves}`;
-      if (orgRole === "owner") return "Owner (the organization's owner: manages this workspace and who it is shared with)";
-      if (orgRole === "admin") return "Admin (an organization admin: manages this workspace and who it is shared with)";
-      return `${orgRole === "member" ? "Workspace Admin" : "Admin"} (manages this workspace and who it is shared with)${approves}`;
-    case "driver":
-      if (creator) return you.canApprove
-        ? "Creator (you created this workspace: can send to agents, type in terminals, approve permissions and manage who it is shared with)"
-        : "Creator (you created this workspace: can send to agents and manage who it is shared with; typing in terminals also needs the right to approve permissions)";
-      // Typing in a terminal (a shell, or an agent's own) needs the approval right too (PRO-88).
-      return you.canApprove ? `Driver (can send to agents and type in terminals)${approves}` : "Driver (can send to agents; typing in terminals also needs the right to approve permissions)";
-    case "viewer":
-      return `Viewer (can read everything, not send)${approves}`;
-    case "none":
-      return "No access to this workspace's content";
-    default:
-      return String(you.role);
-  }
-}
+export { alwaysHasAccess, shareErrorMessage, yourAccessText } from "@/lib/cloudShareLabels";
 
-/** Owners, admins and the workspace's creator see it without a share; the server refuses one for them. */
-export function alwaysHasAccess(member: { userId: string; role: string }, createdBy: string | null): boolean {
-  return member.role === "owner" || member.role === "admin" || (!!createdBy && member.userId === createdBy);
-}
-
-function codeOf(error: unknown): string {
-  if (error && typeof error === "object" && "code" in error) return String((error as { code: unknown }).code);
-  return error instanceof Error ? error.message : String(error);
-}
-
-/** What a refused share change means, in words. */
-export function shareErrorMessage(error: unknown, who?: string): string {
-  const code = codeOf(error);
-  switch (code) {
-    case "cloud_workspace_share_redundant":
-      return `${who ?? "This person"} already has access as owner/admin/creator.`;
-    case "cloud_workspace_share_credential_restricted":
-      return "Can send is not available here while the organization has an agent login that only owners and admins may use. Share as view only, or share that login with the whole organization first (Settings → Organizations → Agent logins).";
-    case "cloud_workspace_share_personal_route":
-      return "This workspace was handed its creator's own model credential (Settings → Organizations → Your model access) since it last started, and its sessions may still hold it, so it can't be opened to the organization or shared with Can send yet. Share as view only, or the creator switches that agent to the organization login or a credential helper and then stops and resumes the workspace.";
-    case "cloud_workspace_share_requires_organization_access":
-      return "Make the workspace visible to the organization first.";
-    case "cloud_workspace_share_limit":
-      return "This workspace is already shared with the maximum number of people (64). Revoke someone first.";
-    case "cloud_workspace_share_forbidden":
-      return "Only organization admins and the workspace's creator can change who it is shared with.";
-    case "organization_member_not_found":
-      return `${who ?? "This person"} is no longer a member of this organization.`;
-    case "cloud_workspace_share_not_found":
-      return "That share was already revoked.";
-    case "cloud_workspace_last_admin":
-      return "A workspace must have at least one admin.";
-    case "cloud_workspace_runtime_unsupported":
-      return MANAGER_APPROVAL_REASON;
-    case "cloud_workspace_not_found":
-      return "This workspace no longer exists.";
-    case "cloud_workspace_manager_required":
-      return "Only this workspace's creator or an organization owner or admin can change whether it is private or visible to the organization. Ask one of them to change it.";
-    case "organization_admin_required":
-      return "Only an organization owner or admin can change whether a workspace is private or visible to the organization. Ask one to change it.";
-    case "cloud_workspace_request_outcome_unknown":
-      return "The server did not answer, so it is unknown whether this changed. Check the list and try again.";
-    default:
-      return `Could not change the share (${code}).`;
-  }
-}
-
-type AccessMode = "private" | "organization";
+export type AccessMode = "private" | "organization";
 /** `unknown`: a visibility change got no answer and the workspace could not be read back. */
-type Access = AccessMode | "unknown";
+export type Access = AccessMode | "unknown";
 type Confirming = { kind: "share" } | { kind: "private" } | null;
 type Person = { userId: string; role: CloudShareRole; canApprove: boolean };
 const REVISION_CONFLICT = "cloud_workspace_access_revision_conflict";
 const GENERAL_ACCESS_UNAVAILABLE = "cloud_workspace_general_access_unavailable";
 
-function shareRoleLabel(role: CloudShareRole): string {
-  switch (role) {
-    case "viewer": return "Viewer";
-    case "driver": return "Driver";
-    case "manager": return "Admin";
-  }
+export type ShareDialogProps = {
+  orgId?: string | null;
+  workspaceId: string;
+  name: string;
+  accessMode?: AccessMode;
+  createdBy?: string | null;
+  canManage?: boolean;
+  onClose: () => void;
+};
+
+function editorScope(status: AccountStatus, orgId: string | undefined | null): string | null {
+  if (status.state !== "signed-in" || !status.context?.revision || !orgId) return null;
+  if (status.organizations && !status.organizations.some((org) => org.id === orgId)) return null;
+  const { account, scope, revision } = status.context;
+  return JSON.stringify([account, scope, revision, status.identity?.organizationId, orgId]);
 }
 
-const MANAGER_APPROVAL_REASON = "Admin without permission approval is not supported by this workspace runtime.";
+function shareAccountScope(status: AccountStatus): string {
+  return JSON.stringify([status.state, status.identity?.email, status.identity?.organizationId,
+    status.context?.account, status.context?.scope, status.context?.revision]);
+}
 
-const OUTCOME_UNKNOWN = "cloud_workspace_request_outcome_unknown";
+export function CloudShareDialog(props: ShareDialogProps) {
+  const { status } = useAccount();
+  const privacy = useDataPrivacy();
+  const orgId = props.orgId ?? status.identity?.organizationId;
+  const contextRevision = status.context?.revision;
+  const generalReady = !!orgId && !!contextRevision && !privacy.enabled && phase2Ready(status, orgId, "generalAccess");
+  const accountScope = shareAccountScope(status);
+  const [openedIn] = useState(accountScope);
+  const [generalUsed, setGeneralUsed] = useState(generalReady);
+  const currentAccount = accountScope === openedIn;
+  const closed = (generalReady || generalUsed) && !currentAccount;
+  const { onClose } = props;
+  useEffect(() => {
+    if (generalReady && currentAccount) setGeneralUsed(true);
+    if (closed) onClose();
+  }, [generalReady, currentAccount, closed, onClose]);
+  const scope = editorScope(status, orgId);
+  const isCurrentScope = useCallback(() => {
+    const now = getAccount().status;
+    return scope !== null && scope === editorScope(now, props.orgId ?? now.identity?.organizationId);
+  }, [scope, props.orgId]);
+  const canRequest = useCallback(() =>
+    !privacyEnabled() && !!orgId && isCurrentScope() && phase2Ready(getAccount().status, orgId, "workspaceGroups"),
+  [orgId, isCurrentScope]);
+  if (closed) return null;
+  const fallback = <LegacyCloudShareDialog {...props} status={status} generalReady={generalReady} />;
+  if (scope && orgId && contextRevision) {
+    const organization = status.organizations?.find((item) => item.id === orgId);
+    const organizationName = organization?.name ?? (orgId === status.identity?.organizationId ? status.identity?.organization : undefined);
+    return <CloudShareEditor key={JSON.stringify([scope, props.workspaceId])} {...props}
+      orgId={orgId} organization={organizationName || "this organization"} orgRole={organization?.role ?? null} contextRevision={contextRevision}
+      ready={phase2Ready(status, orgId, "workspaceGroups")} privacy={privacy.enabled}
+      isCurrentScope={isCurrentScope} canRequest={canRequest} generalReady={generalReady} fallback={fallback} />;
+  }
+  return fallback;
+}
 
 /**
  * Who a cloud workspace is shared with; managers and the creator can change it
@@ -127,43 +100,7 @@ const OUTCOME_UNKNOWN = "cloud_workspace_request_outcome_unknown";
  * member only manages the shares of a workspace that is already
  * organization-visible, and is told who can change its visibility.
  */
-interface CloudShareDialogProps {
-  orgId?: string | null;
-  workspaceId: string;
-  name: string;
-  /** What the workspace list says; the dialog follows its own changes after that. */
-  accessMode?: AccessMode;
-  /** The workspace's creator, to say who still sees it once private. */
-  createdBy?: string | null;
-  /** What the list says about managing shares, for the title before the share list has loaded. */
-  canManage?: boolean;
-  onClose: () => void;
-}
-
-function shareAccountScope(status: AccountStatus): string {
-  return JSON.stringify([status.state, status.identity?.email, status.identity?.organizationId,
-    status.context?.account, status.context?.scope, status.context?.revision]);
-}
-
-export function CloudShareDialog(props: CloudShareDialogProps) {
-  const { status } = useAccount();
-  const org = props.orgId ?? status.identity?.organizationId;
-  const ready = !!org && !!status.context?.revision && phase2Ready(status, org, "generalAccess");
-  const scope = shareAccountScope(status);
-  const [openedIn] = useState(scope);
-  const [usedGeneralAccess, setUsedGeneralAccess] = useState(ready);
-  const scoped = ready || usedGeneralAccess;
-  const sameContext = !scoped || (status.state === "signed-in" && scope === openedIn);
-  const { onClose } = props;
-  useEffect(() => {
-    if (ready && sameContext) setUsedGeneralAccess(true);
-    if (!sameContext) onClose();
-  }, [ready, sameContext, onClose]);
-  if (!sameContext) return null;
-  return <CloudShareEditor key={JSON.stringify([props.orgId, props.workspaceId])} status={status} scoped={scoped} {...props} />;
-}
-
-function CloudShareEditor({
+function LegacyCloudShareDialog({
   orgId = null,
   workspaceId,
   name,
@@ -172,8 +109,8 @@ function CloudShareEditor({
   canManage: manageHint,
   onClose,
   status,
-  scoped,
-}: CloudShareDialogProps & { status: AccountStatus; scoped: boolean }) {
+  generalReady,
+}: ShareDialogProps & { status: AccountStatus; generalReady: boolean }) {
   // The default organization's roster comes with the account; another
   // organization's (every one is live, PRO-71) is read by its own id.
   const defaultOrg = !orgId || !status.identity?.organizationId || status.identity.organizationId === orgId;
@@ -246,7 +183,7 @@ function CloudShareEditor({
   }, [reload, loadMembers]);
 
   const manage = listed?.you.canManageShares ?? false;
-  const generalAccess = scoped && org && access === "organization" && phase2Ready(status, org, "generalAccess")
+  const generalAccess = generalReady && org && access === "organization"
     ? listed?.generalAccess : undefined;
   const everyoneLabel = `Everyone at ${status.organizations?.find((candidate) => candidate.id === org)?.name
     || (status.identity?.organizationId === org ? status.identity?.organization : null)
@@ -340,7 +277,7 @@ function CloudShareEditor({
   const saveGeneralAccess = async () => {
     if (!org || !generalAccess || !pendingGeneralMode || generalAccess.mode === pendingGeneralMode
       || !generalRevision || busy || confirming || !isCurrentAccount()
-      || !phase2Ready(getAccount().status, org, "generalAccess")) return;
+      || privacyEnabled() || !phase2Ready(getAccount().status, org, "generalAccess")) return;
     const policy: CloudWorkspaceGeneralAccess = pendingGeneralMode === "organisation"
       ? { mode: "organisation", role: "read" }
       : { mode: "invited_only" };
@@ -646,34 +583,10 @@ function CloudShareEditor({
               </div>
             )}
             {generalAccess && (
-              <section aria-labelledby="cloud-share-general-heading" className="flex flex-col gap-2 border-t border-hairline pt-3">
-                <h3 id="cloud-share-general-heading" className="text-sm font-medium">General access</h3>
-                <div className="flex flex-wrap items-center gap-2">
-                  {generalRevision ? (
-                    <select
-                      aria-label="General access"
-                      className={select}
-                      value={pendingGeneralMode ?? generalAccess.mode}
-                      disabled={busy !== null || confirming !== null}
-                      onChange={(event) => setGeneralDraft({ mode: event.target.value as CloudWorkspaceGeneralAccess["mode"], revision: generalRevision })}
-                    >
-                      <option value="invited_only">Only people invited</option>
-                      <option value="organisation">{everyoneLabel}</option>
-                    </select>
-                  ) : (
-                    <span>{generalAccess.mode === "organisation" ? everyoneLabel : "Only people invited"}</span>
-                  )}
-                  {(pendingGeneralMode ?? generalAccess.mode) === "organisation" && <span>Read</span>}
-                  {pendingGeneralMode && pendingGeneralMode !== generalAccess.mode && (
-                    <Button size="sm" className="ms-auto" disabled={busy !== null || confirming !== null} onClick={() => void saveGeneralAccess()}>
-                      Save General access
-                    </Button>
-                  )}
-                </div>
-                {(pendingGeneralMode ?? generalAccess.mode) === "organisation" && (
-                  <p className="text-muted-foreground">Any member can open and read this workspace.</p>
-                )}
-              </section>
+              <CloudGeneralAccessControls mode={generalAccess.mode} pending={pendingGeneralMode}
+                everyone={everyoneLabel} editable={!!generalRevision} disabled={busy !== null || confirming !== null}
+                onChoose={(mode) => setGeneralDraft(generalRevision ? { mode, revision: generalRevision } : null)}
+                onSave={() => void saveGeneralAccess()} />
             )}
             {manage && access === "organization" && confirming?.kind !== "private" && !unshared && (
               <div className="flex items-center gap-2 border-t border-hairline pt-3 text-muted-foreground">

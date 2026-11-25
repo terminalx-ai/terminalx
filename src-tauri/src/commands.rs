@@ -1688,8 +1688,31 @@ pub async fn cloud_workspace_shares(
     workspace_id: String,
     state: tauri::State<'_, crate::AppState>,
     org_id: Option<String>,
+    context_revision: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceShares, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.shares(org_id.as_deref(), &workspace_id))
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.shares(org_id.as_deref(), &workspace_id, context_revision.as_deref()))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_groups(
+    org_id: String,
+    query: String,
+    cursor: Option<String>,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudGroupPage, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.workspace_groups(&org_id, &query, cursor.as_deref(), &context_revision))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_shares_apply(
+    workspace_id: String,
+    org_id: String,
+    request: crate::cloud_workspaces::CloudAccessApply,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudAccessApplied, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.apply_shares(&org_id, &workspace_id, request, &context_revision))
 }
 
 #[tauri::command]
@@ -1813,9 +1836,10 @@ pub async fn cloud_workspace_set_access(
     access_mode: crate::cloud_workspaces::WorkspaceAccessMode,
     state: tauri::State<'_, crate::AppState>,
     org_id: Option<String>,
+    context_revision: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspace, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
-        .set_access(org_id.as_deref(), &workspace_id, access_mode))
+        .set_access(org_id.as_deref(), &workspace_id, access_mode, context_revision.as_deref()))
 }
 
 #[tauri::command]
