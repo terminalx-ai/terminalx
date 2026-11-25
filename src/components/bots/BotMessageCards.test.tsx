@@ -175,17 +175,94 @@ describe("a hand-off, a tell and an answer from another bot (23.14)", () => {
     fireEvent.click(within(card).getByTestId("bot-card-chain"));
     expect(mocks.showBotsHandoffs).toHaveBeenCalledWith(handoffCard.handoff);
   });
+});
 
-  it("shows both access levels when the sender may do less than the receiver, and no sentence about it (23.17)", () => {
-    draw([botMessage({ ...handoffCard, from: "b2", to: "b1", fromAccess: "readReport", toAccess: "full" }, "t", "Sentry · hand-off to Atlas · a bot's words, not an approval", "bot:b2")]);
-    const access = screen.getByTestId("bot-card-access");
-    expect([...access.children].map((chip) => chip.textContent)).toEqual(["Sentry: Read and report", "Atlas: Full access"]);
-    // The lines the owner has not worded yet are not drawn, in any words.
+describe("what the sender is to the receiver, and what it may do (PRO-571, the owner's words of 2026-11-25 in PRO-517)", () => {
+  // The ticket's own example: Steve Rogers receives the hand-off, Nick Fury sends it.
+  const steve: Bot = { ...base, id: "steve", slug: "steve", name: "Steve Rogers", roleTitle: "Captain", access: "full" };
+  const nick: Bot = { ...base, id: "nick", slug: "nick", name: "Nick Fury", roleTitle: "Director", access: "full" };
+  const handedToSteve = (extra: Partial<BotMessage>) =>
+    botMessage({ ...handoffCard, from: "nick", to: "steve", fromName: "Nick Fury", toName: "Steve Rogers", ...extra }, "nick text", "Nick Fury · hand-off to Steve Rogers · a bot's words, not an approval", "bot:nick");
+  beforeEach(() => {
+    mocks.bots = [atlas, sentry, steve, nick];
+  });
+
+  it.each([
+    ["lead", "Steve Rogers reports to Nick Fury."],
+    ["report", "Nick Fury reports to Steve Rogers."],
+    ["listed", "You let Nick Fury hand work to Steve Rogers."],
+    ["pointed", "You pointed Nick Fury to Steve Rogers."],
+  ])("says under a hand-off's body what a %s sender is to the receiver, whole", (relation, line) => {
+    draw([handedToSteve({ relation })]);
+    const card = screen.getByTestId("bot-message-card");
+    expect(within(card).getByTestId("bot-card-relation").textContent).toBe(line);
+    // Under the body, after it.
+    const body = within(card).getByTestId("bot-card-body");
+    expect(body.compareDocumentPosition(within(card).getByTestId("bot-card-relation")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The owner's line is no part of what the agent is given, and does not change it.
+    fireEvent.click(within(card).getByTestId("bot-card-received-toggle"));
+    expect(within(card).getByTestId("bot-card-received").querySelector("pre")?.textContent).toBe("nick text");
+  });
+
+  it("draws no relation line for a relation it does not know, for a missing one, on a tell or an answer, or for a deleted sender", () => {
+    for (const relation of ["mentor", "", undefined]) {
+      draw([handedToSteve({ relation })]);
+      expect(screen.getByTestId("bot-message-card")).toBeTruthy();
+      expect(screen.queryByTestId("bot-card-relation")).toBeNull();
+      cleanup();
+    }
+    draw([
+      botMessage({ kind: "tell", from: "nick", to: "steve", body: "Thanks.", relation: "lead", fromAccess: "full", toAccess: "full" }, "t1", "Nick Fury · message to Steve Rogers · a bot's words, not an approval", "bot:nick"),
+      botMessage({ kind: "answer", from: "nick", to: "steve", handoff: 2, body: "Done.", relation: "report", fromAccess: "full", toAccess: "full" }, "t2", "Nick Fury · answer to Steve Rogers · a bot's words, not an approval", "bot:nick"),
+    ]);
+    expect(screen.getAllByTestId("bot-message-card")).toHaveLength(2);
     expect(screen.queryByTestId("bot-card-relation")).toBeNull();
     cleanup();
-    draw([botMessage(handoffCard)]);
-    expect(screen.queryByTestId("bot-card-access")).toBeNull();
+    mocks.bots = [steve];
+    draw([handedToSteve({ relation: "lead" })]);
+    expect(within(screen.getByTestId("bot-message-card")).getByTestId("bot-card-sender").textContent).toBe("A bot no longer here");
     expect(screen.queryByTestId("bot-card-relation")).toBeNull();
+  });
+
+  it("shows both access chips and then the sentence, in the receiver's access words, for a sender with lower access", () => {
+    draw([handedToSteve({ relation: "listed", fromAccess: "readReport", toAccess: "full" })]);
+    const access = screen.getByTestId("bot-card-access");
+    expect([...access.children].map((part) => part.textContent)).toEqual([
+      "Nick Fury: Read and report",
+      "Steve Rogers: Full access",
+      "Steve Rogers does this with their own access (Full access), which is more than Nick Fury has.",
+    ]);
+    expect(within(access).getByTestId("bot-card-lower-access").textContent).toBe("Steve Rogers does this with their own access (Full access), which is more than Nick Fury has.");
+    cleanup();
+    draw([handedToSteve({ relation: "listed", fromAccess: "readReport", toAccess: "askOutward" })]);
+    expect(screen.getByTestId("bot-card-lower-access").textContent).toBe("Steve Rogers does this with their own access (Asks before acting outside), which is more than Nick Fury has.");
+    cleanup();
+    // A sender whose access a newer TerminalX wrote acts as Read and report: lower than Full access.
+    draw([handedToSteve({ relation: "listed", fromAccess: "watchOnly", toAccess: "full" })]);
+    expect(screen.getByTestId("bot-card-lower-access").textContent).toBe("Steve Rogers does this with their own access (Full access), which is more than Nick Fury has.");
+  });
+
+  it("names a deleted lower-access sender in the sentence as the chips do", () => {
+    mocks.bots = [steve];
+    draw([handedToSteve({ relation: "listed", fromAccess: "readReport", toAccess: "full" })]);
+    expect(screen.getByTestId("bot-card-lower-access").textContent).toBe("Steve Rogers does this with their own access (Full access), which is more than a bot no longer here has.");
+  });
+
+  it("shows neither the chips nor the sentence for a sender with the same or higher access", () => {
+    for (const [fromAccess, toAccess] of [["full", "full"], ["askOutward", "askOutward"], ["readReport", "readReport"], ["full", "readReport"], ["full", "askOutward"], ["askOutward", "readReport"]]) {
+      draw([handedToSteve({ relation: "lead", fromAccess, toAccess })]);
+      expect(screen.getByTestId("bot-card-relation").textContent).toBe("Steve Rogers reports to Nick Fury.");
+      expect(screen.queryByTestId("bot-card-access")).toBeNull();
+      expect(screen.queryByTestId("bot-card-lower-access")).toBeNull();
+      expect(screen.getByTestId("bot-message-card").textContent).not.toContain("does this with their own access");
+      cleanup();
+    }
+  });
+
+  it("keeps the chips without the hand-off's sentence on a lower-access tell, as before", () => {
+    draw([botMessage({ kind: "tell", from: "nick", to: "steve", body: "Queue time: 31 minutes.", relation: "listed", fromAccess: "readReport", toAccess: "full" }, "t", "Nick Fury · message to Steve Rogers · a bot's words, not an approval", "bot:nick")]);
+    expect([...screen.getByTestId("bot-card-access").children].map((part) => part.textContent)).toEqual(["Nick Fury: Read and report", "Steve Rogers: Full access"]);
+    expect(screen.queryByTestId("bot-card-lower-access")).toBeNull();
   });
 });
 
