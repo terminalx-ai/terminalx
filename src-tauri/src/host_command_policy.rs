@@ -1,6 +1,6 @@
 //! Dormant PRO-220 policy and executor. The native owner must authenticate turn-start attribution
 //! and publish authority changes synchronously through this policy. Only the trusted local
-//! person-only prompt may record a decision. None of these APIs is a transport or prompt boundary.
+//! AppKit prompt may approve a command. This module exposes no transport boundary.
 
 #[path = "host_command_executor.rs"]
 mod executor;
@@ -123,7 +123,7 @@ impl State {
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub enum LocalDecision {
+enum LocalDecision {
     #[default]
     Deny,
     AllowOnce,
@@ -137,6 +137,14 @@ pub enum ExecutionOutcome {
         stdout: Vec<u8>,
         stderr: Vec<u8>,
     },
+    /// The OS accepted the sandboxed launch, but output could not be handed off.
+    /// A status is available only when the worker observed the process exit.
+    LaunchedWithOutputWithheld {
+        code: Option<i32>,
+        signal: Option<i32>,
+        reason: State,
+    },
+    /// Execution was refused or expired before a sandboxed launch was admitted.
     Stopped(State),
 }
 
@@ -204,13 +212,14 @@ pub struct Request {
 
 /// One exact prompt binding. The trusted native prompt displays input() and consumes the binding
 /// on a human decision. Closing a prompt should call cancel. Keep this out of automation/RPC.
-pub struct LocalDecisionBinding {
+struct LocalDecisionBinding {
     input: Arc<RequestInput>,
     paths: executor::ApprovedPaths,
 }
 
+#[cfg(test)]
 impl LocalDecisionBinding {
-    pub fn input(&self) -> &RequestInput {
+    fn input(&self) -> &RequestInput {
         &self.input
     }
 }
@@ -287,12 +296,18 @@ impl Policy {
         })
     }
 
-    pub fn prepare_local_decision(
-        &self,
-        request: &Request,
-    ) -> Result<LocalDecisionBinding, Rejection> {
+    /// Present the exact request in an AppKit modal on the main thread.
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
+    #[allow(dead_code, reason = "The native executor is dormant")]
+    pub fn prompt_once(&self, request: &Request) -> Result<State, Rejection> {
+        consent::prompt(self, request)
+    }
+
+    fn prepare_local_decision(&self, request: &Request) -> Result<LocalDecisionBinding, Rejection> {
         self.require_owner(request)?;
         request.require_pending()?;
+        approved_program(&request.input)?;
+        prompt_text(&request.input)?;
         let paths = executor::ApprovedPaths::open(&request.input)?;
         request.require_pending()?;
         Ok(LocalDecisionBinding {
@@ -301,12 +316,12 @@ impl Policy {
         })
     }
 
-    pub fn record_local_decision(
+    fn record_local_decision(
         &self,
         request: &Request,
-        binding: LocalDecisionBinding,
-        decision: LocalDecision,
+        approval: consent::Decision,
     ) -> Result<State, Rejection> {
+        let (binding, decision) = approval.into_parts();
         self.require_owner(request)?;
         let mut registry = self.lock()?;
         let entry = request.checked(&mut registry, State::Pending)?;
@@ -472,15 +487,23 @@ impl Execution {
             .receiver
             .recv()
             .map_err(|_| Rejection::WorkerUnavailable)?;
-        if matches!(&outcome, ExecutionOutcome::Exited { .. }) {
+        if let ExecutionOutcome::Exited { code, signal, .. } = &outcome {
             let registry = self.request.policy.lock()?;
-            if !Arc::ptr_eq(&registry.epoch, &self.request.epoch)
+            let reason = if !Arc::ptr_eq(&registry.epoch, &self.request.epoch)
                 || check_context(&registry.context, &self.request.input).is_err()
             {
-                return Ok(ExecutionOutcome::Stopped(State::Revoked));
-            }
-            if check_fresh(&self.request.input, self.request.policy.now_ms()).is_err() {
-                return Ok(ExecutionOutcome::Stopped(State::Expired));
+                Some(State::Revoked)
+            } else if check_fresh(&self.request.input, self.request.policy.now_ms()).is_err() {
+                Some(State::Expired)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                return Ok(ExecutionOutcome::LaunchedWithOutputWithheld {
+                    code: *code,
+                    signal: *signal,
+                    reason,
+                });
             }
         }
         Ok(outcome)
@@ -504,6 +527,107 @@ fn clean_absolute(value: &str) -> bool {
         || value.strip_prefix('/').is_some_and(|rest| {
             rest.split('/').all(|part| !matches!(part, "" | "." | "..")) && !rest.contains('\0')
         })
+}
+
+/// Resolve only exact spellings to fixed system images. In particular the caller
+/// cannot supply a PATH lookup, shell, file operand, or an option-bearing format.
+fn approved_program(input: &RequestInput) -> Result<&'static str, Rejection> {
+    let arguments = input.arguments.as_slice();
+    match (input.executable.as_str(), arguments) {
+        ("/usr/bin/printf", [format, values @ ..])
+            if format == "%s" && (1..=4).contains(&values.len()) =>
+        {
+            Ok("/usr/bin/printf")
+        }
+        ("/bin/sleep", [seconds])
+            if !seconds.is_empty()
+                && seconds.bytes().all(|byte| byte.is_ascii_digit())
+                && seconds
+                    .parse::<u64>()
+                    .is_ok_and(|n| n <= MAX_TIMEOUT_MS / 1000) =>
+        {
+            Ok("/bin/sleep")
+        }
+        ("/usr/bin/true", []) => Ok("/usr/bin/true"),
+        ("/usr/bin/false", []) => Ok("/usr/bin/false"),
+        _ => Err(Rejection::ExecutableUnavailable),
+    }
+}
+
+fn prompt_text(input: &RequestInput) -> Result<String, Rejection> {
+    fn quoted(value: &str) -> String {
+        format!(
+            "\"{}\"",
+            value
+                .chars()
+                .flat_map(char::escape_default)
+                .collect::<String>()
+        )
+    }
+    let mut text = format!(
+        "Account: {}\nOrganization: {}\nWorkspace: {}\nProgram: {}\nWorking directory: {}\nTimeout: {} ms\nOutput limit: {} bytes",
+        quoted(&input.origin.account),
+        quoted(&input.origin.organization),
+        quoted(&input.origin.workspace),
+        quoted(&input.executable),
+        quoted(&input.cwd),
+        input.timeout_ms,
+        input.output_limit_bytes,
+    );
+    for (index, arg) in input.arguments.iter().enumerate() {
+        use std::fmt::Write;
+        write!(text, "\nArgument {}: {}", index + 1, quoted(arg))
+            .expect("writing to a String cannot fail");
+    }
+    if text.len() > 1_024 {
+        return Err(Rejection::InvalidRequest);
+    }
+    Ok(text)
+}
+
+mod consent {
+    use super::*;
+
+    // The fields and constructors live in this module. The production path can
+    // construct a decision only after the native AppKit modal returns.
+    pub(super) struct Decision {
+        binding: LocalDecisionBinding,
+        choice: LocalDecision,
+    }
+
+    impl Decision {
+        pub(super) fn into_parts(self) -> (LocalDecisionBinding, LocalDecision) {
+            (self.binding, self.choice)
+        }
+
+        #[cfg(test)]
+        pub(super) fn fixture(binding: LocalDecisionBinding, choice: LocalDecision) -> Self {
+            Self { binding, choice }
+        }
+    }
+
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
+    pub(super) fn prompt(policy: &Policy, request: &Request) -> Result<State, Rejection> {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::{NSAlert, NSAlertSecondButtonReturn, NSAlertStyle};
+        use objc2_foundation::NSString;
+
+        let main = MainThreadMarker::new().ok_or(Rejection::ContextUnavailable)?;
+        let binding = policy.prepare_local_decision(request)?;
+        let text = prompt_text(&binding.input)?;
+        let alert = NSAlert::new(main);
+        alert.setAlertStyle(NSAlertStyle::Warning);
+        alert.setMessageText(&NSString::from_str("Run this command on your Mac?"));
+        alert.setInformativeText(&NSString::from_str(&text));
+        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+        alert.addButtonWithTitle(&NSString::from_str("Run Once"));
+        let choice = if alert.runModal() == NSAlertSecondButtonReturn {
+            LocalDecision::AllowOnce
+        } else {
+            LocalDecision::Deny
+        };
+        policy.record_local_decision(request, Decision { binding, choice })
+    }
 }
 
 fn validate_input(input: &RequestInput) -> Result<(), Rejection> {

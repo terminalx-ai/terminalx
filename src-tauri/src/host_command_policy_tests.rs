@@ -279,8 +279,6 @@ fn poison_fails_closed() {
 mod native {
     use super::*;
     use std::fs;
-    use std::io::Write;
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
     use std::time::Duration;
@@ -291,7 +289,10 @@ mod native {
         assert_eq!(binding.input().cwd, request.input().cwd);
         assert_eq!(binding.input().executable, request.input().executable);
         assert_eq!(
-            policy.record_local_decision(request, binding, LocalDecision::AllowOnce),
+            policy.record_local_decision(
+                request,
+                consent::Decision::fixture(binding, LocalDecision::AllowOnce)
+            ),
             Ok(State::Approved)
         );
     }
@@ -305,7 +306,21 @@ mod native {
     fn assert_stopped(execution: Execution, expected: State) {
         match execution.wait().unwrap() {
             ExecutionOutcome::Stopped(state) => assert_eq!(state, expected),
-            ExecutionOutcome::Exited { .. } => panic!("unexpected command output"),
+            _ => panic!("unexpected sandboxed launch"),
+        }
+    }
+
+    fn assert_withheld(execution: Execution, expected: State) -> (Option<i32>, Option<i32>) {
+        match execution.wait().unwrap() {
+            ExecutionOutcome::LaunchedWithOutputWithheld {
+                code,
+                signal,
+                reason,
+            } => {
+                assert_eq!(reason, expected);
+                (code, signal)
+            }
+            _ => panic!("expected a sandboxed launch with withheld output"),
         }
     }
 
@@ -317,7 +332,10 @@ mod native {
                 stdout,
                 stderr,
             } => (code, signal, stdout, stderr),
-            ExecutionOutcome::Stopped(state) => panic!("command stopped: {state:?}"),
+            ExecutionOutcome::Stopped(state)
+            | ExecutionOutcome::LaunchedWithOutputWithheld { reason: state, .. } => {
+                panic!("command stopped: {state:?}")
+            }
         }
     }
 
@@ -332,11 +350,17 @@ mod native {
         let denied = policy.prepare_local_decision(&request).unwrap();
         let duplicate = policy.prepare_local_decision(&request).unwrap();
         assert_eq!(
-            policy.record_local_decision(&request, denied, LocalDecision::default()),
+            policy.record_local_decision(
+                &request,
+                consent::Decision::fixture(denied, LocalDecision::default())
+            ),
             Ok(State::Denied)
         );
         assert_eq!(
-            policy.record_local_decision(&request, duplicate, LocalDecision::AllowOnce),
+            policy.record_local_decision(
+                &request,
+                consent::Decision::fixture(duplicate, LocalDecision::AllowOnce)
+            ),
             Err(Rejection::InvalidTransition)
         );
         assert_eq!(
@@ -349,7 +373,10 @@ mod native {
         request.cancel().unwrap();
         let next = policy.submit(input("three")).unwrap();
         assert_eq!(
-            policy.record_local_decision(&next, binding, LocalDecision::AllowOnce),
+            policy.record_local_decision(
+                &next,
+                consent::Decision::fixture(binding, LocalDecision::AllowOnce)
+            ),
             Err(Rejection::DecisionMismatch)
         );
         assert_eq!(next.state(), Ok(State::Denied));
@@ -363,7 +390,10 @@ mod native {
         let other = foreign.submit(input("four")).unwrap();
         let binding = foreign.prepare_local_decision(&other).unwrap();
         assert_eq!(
-            policy.record_local_decision(&request, binding, LocalDecision::AllowOnce),
+            policy.record_local_decision(
+                &request,
+                consent::Decision::fixture(binding, LocalDecision::AllowOnce)
+            ),
             Err(Rejection::DecisionMismatch)
         );
 
@@ -371,7 +401,10 @@ mod native {
         let late = policy.prepare_local_decision(&request).unwrap();
         set_time(&policy, 100);
         assert_eq!(
-            policy.record_local_decision(&request, late, LocalDecision::AllowOnce),
+            policy.record_local_decision(
+                &request,
+                consent::Decision::fixture(late, LocalDecision::AllowOnce)
+            ),
             Err(Rejection::Expired)
         );
         assert_eq!(request.state(), Ok(State::Expired));
@@ -442,13 +475,6 @@ mod native {
         }
     }
 
-    fn shell(id: &str, script: &str) -> RequestInput {
-        let mut proposal = input(id);
-        proposal.executable = "/bin/bash".into();
-        proposal.arguments = vec!["-c".into(), script.into()];
-        proposal
-    }
-
     #[test]
     fn context_cancel_and_expiry_win_at_the_actual_spawn_gate() {
         type BeforeSpawn = fn(&Policy, &Request);
@@ -491,7 +517,7 @@ mod native {
                 worker.wait();
             }));
             let directory = Directory::new();
-            let mut proposal = shell("one", "printf spawned > spawn-marker");
+            let mut proposal = input("one");
             directory.apply(&mut proposal);
             let request = approved(&policy, proposal);
             let execution = policy.start(&request).unwrap();
@@ -524,7 +550,7 @@ mod native {
         );
         alias.cancel().unwrap();
 
-        let mut proposal = shell("one", "printf spawned > spawn-marker");
+        let mut proposal = input("one");
         proposal.cwd = original.to_str().unwrap().into();
         let request = approved(&policy, proposal);
         fs::rename(&original, &replaced).unwrap();
@@ -556,79 +582,103 @@ mod native {
     }
 
     #[test]
-    fn empty_environment_closed_stdin_no_inherited_fds_and_anchored_cwd() {
-        let directory = Directory::new();
-        let policy = policy();
-        let mut env = input("env");
-        env.executable = "/usr/bin/env".into();
-        env.arguments.clear();
-        let (_, _, stdout, stderr) = output(policy.start(&approved(&policy, env)).unwrap());
-        assert!(stdout.is_empty());
-        assert!(stderr.is_empty());
-
-        // F_DUPFD creates a deliberately inheritable descriptor. The child must not see it.
-        unsafe extern "C" {
-            fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    fn shell_startup_files_and_argument_options_are_refused() {
+        const FIXTURE: &str = "PRO220_STARTUP_FIXTURE";
+        if let Some(fixture) = std::env::var_os(FIXTURE) {
+            run_startup_fixture(&PathBuf::from(fixture));
+            return;
         }
-        let mut file = fs::File::create(directory.0.join("local-fixture")).unwrap();
-        file.write_all(b"synthetic fixture").unwrap();
-        let fd = unsafe { fcntl(file.as_raw_fd(), 0, 200i32) };
-        assert!(fd >= 200);
-        let inherited = unsafe { OwnedFd::from_raw_fd(fd) };
-        let mut proposal = shell("stdio", "if read -r ignored || [ -e /dev/fd/\"$1\" ]; then exit 9; fi; pwd -P; printf '\\377' >&2");
-        directory.apply(&mut proposal);
-        proposal.arguments.extend(["test".into(), fd.to_string()]);
-        let (code, signal, stdout, stderr) =
-            output(policy.start(&approved(&policy, proposal)).unwrap());
-        drop(inherited);
-        assert_eq!((code, signal), (Some(0), None));
-        assert_eq!(stdout, format!("{}\n", directory.0.display()).as_bytes());
-        assert_eq!(stderr, [0xff]);
+
+        let directory = Directory::new();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("shell_startup_files_and_argument_options_are_refused")
+            .env(FIXTURE, &directory.0)
+            .env("HOME", &directory.0)
+            .env("ZDOTDIR", &directory.0)
+            .env("PATH", &directory.0)
+            .env("DYLD_LIBRARY_PATH", &directory.0)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(
+            result.status.success() && stdout.contains("1 passed"),
+            "{stdout}"
+        );
+    }
+
+    fn run_startup_fixture(directory: &std::path::Path) {
+        let marker = directory.join("startup-marker");
+        fs::write(
+            directory.join(".zshenv"),
+            format!("touch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        let policy = policy();
+        for (id, program, args) in [
+            ("shell", "/bin/zsh", vec!["-c", "true"]),
+            ("environment", "/usr/bin/env", vec![]),
+            ("format", "/usr/bin/printf", vec!["%b", "text"]),
+            ("option", "/usr/bin/printf", vec!["--help"]),
+            ("duration", "/bin/sleep", vec!["1e2"]),
+        ] {
+            let mut proposal = input(id);
+            proposal.cwd = directory.to_str().unwrap().to_owned();
+            proposal.executable = program.into();
+            proposal.arguments = args.into_iter().map(str::to_owned).collect();
+            let request = policy.submit(proposal).unwrap();
+            assert_eq!(
+                policy.prepare_local_decision(&request).err(),
+                Some(Rejection::ExecutableUnavailable)
+            );
+            request.cancel().unwrap();
+        }
+
+        let mut proposal = input("literal");
+        proposal.cwd = directory.to_str().unwrap().to_owned();
+        proposal.arguments[1] = "DYLD_INSERT_LIBRARIES=fixture PATH=/fixture".into();
+        let (_, _, stdout, _) = output(policy.start(&approved(&policy, proposal)).unwrap());
+        assert_eq!(stdout, b"DYLD_INSERT_LIBRARIES=fixture PATH=/fixture");
+        assert!(!marker.exists());
     }
 
     #[test]
-    fn exact_combined_output_limit_and_typed_exit_status() {
+    fn approval_text_escapes_controls_and_rejects_truncation() {
         let policy = policy();
-        let mut proposal = shell("one", "printf abc; printf def >&2; exit 7");
+        let mut proposal = input("one");
+        let text = prompt_text(&proposal).unwrap();
+        assert!(text.contains(r"\n\u{202e}"));
+        assert!(!text.contains('\u{202e}'));
+        proposal.arguments[1] = "x".repeat(1_024);
+        let request = policy.submit(proposal).unwrap();
+        assert_eq!(
+            policy.prepare_local_decision(&request).err(),
+            Some(Rejection::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn exact_output_limit_and_typed_exit_status() {
+        let policy = policy();
+        let mut proposal = input("one");
+        proposal.arguments[1] = "abcdef".into();
         proposal.output_limit_bytes = 6;
         let (code, signal, stdout, stderr) =
             output(policy.start(&approved(&policy, proposal.clone())).unwrap());
-        assert_eq!((code, signal), (Some(7), None));
-        assert_eq!(stdout, b"abc");
-        assert_eq!(stderr, b"def");
+        assert_eq!((code, signal), (Some(0), None));
+        assert_eq!(stdout, b"abcdef");
+        assert!(stderr.is_empty());
         proposal.id = "two".into();
         proposal.output_limit_bytes = 5;
-        assert_stopped(
+        assert_withheld(
             policy.start(&approved(&policy, proposal)).unwrap(),
             State::OutputLimitExceeded,
         );
 
         let mut proposal = input("three");
-        proposal.executable = "/usr/bin/head".into();
-        proposal.arguments = vec!["-c".into(), "65536".into(), "/dev/zero".into()];
-        proposal.output_limit_bytes = 32;
-        assert_stopped(
-            policy.start(&approved(&policy, proposal)).unwrap(),
-            State::OutputLimitExceeded,
-        );
-    }
-
-    #[test]
-    fn child_creation_is_denied_before_a_process_can_leave_its_group() {
-        let directory = Directory::new();
-        let policy = policy();
-        let mut proposal = shell("fork", "(/bin/pwd > child-marker) & wait");
-        directory.apply(&mut proposal);
-        let (code, _, _, stderr) = output(policy.start(&approved(&policy, proposal)).unwrap());
-        assert_ne!(code, Some(0));
-        assert!(!stderr.is_empty());
-        assert!(!directory.0.join("child-marker").exists());
-
-        let mut proposal = shell("exec", "exec /usr/bin/true");
-        directory.apply(&mut proposal);
-        let (code, _, _, stderr) = output(policy.start(&approved(&policy, proposal)).unwrap());
-        assert_ne!(code, Some(0));
-        assert!(!stderr.is_empty());
+        proposal.executable = "/usr/bin/false".into();
+        proposal.arguments.clear();
+        let (code, signal, _, _) = output(policy.start(&approved(&policy, proposal)).unwrap());
+        assert_eq!((code, signal), (Some(1), None));
     }
 
     #[test]
@@ -671,16 +721,25 @@ mod native {
                 State::Expired => set_time(&policy, 100),
                 _ => {}
             }
-            assert_stopped(execution, expected);
+            assert_withheld(execution, expected);
             assert_eq!(request.state(), Ok(expected));
-            let events = group_events.lock().unwrap();
-            let Some((executor::GroupEvent::Reaped(pid), signals)) = events.split_last() else {
-                panic!("expected group cleanup to finish with reaping");
-            };
-            assert!(!signals.is_empty());
-            assert!(signals
-                .iter()
-                .all(|event| *event == executor::GroupEvent::Signal(*pid)));
+            // Output can be withheld before the OS finishes group cleanup.
+            let cleanup_deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                {
+                    let events = group_events.lock().unwrap();
+                    if let Some((executor::GroupEvent::Reaped(pid), signals)) = events.split_last()
+                    {
+                        assert!(!signals.is_empty());
+                        assert!(signals
+                            .iter()
+                            .all(|event| *event == executor::GroupEvent::Signal(*pid)));
+                        break;
+                    }
+                }
+                assert!(Instant::now() < cleanup_deadline, "group was not reaped");
+                thread::sleep(Duration::from_millis(5));
+            }
         }
     }
 
@@ -699,7 +758,7 @@ mod native {
             .update_trusted_context(TrustedContext::default())
             .unwrap();
         policy.update_trusted_context(context()).unwrap();
-        assert_stopped(execution, State::Revoked);
+        assert_eq!(assert_withheld(execution, State::Revoked), (Some(0), None));
         assert_eq!(request.state(), Ok(State::Completed));
     }
 
