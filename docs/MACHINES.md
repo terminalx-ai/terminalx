@@ -872,6 +872,9 @@ the pull request that adds it.
 | `desktop.write` | `cloud-desktop/1` | Not served | Cloud workspace display |
 | `desktop.ack` | `cloud-desktop/1` | Not served | Cloud workspace display |
 | `desktop.close` | `cloud-desktop/1` | Not served | Cloud workspace display |
+| `transfer.open` | `workspace-transfer/1` | Not served | Cloud workspace transfer to a local checkout |
+| `transfer.read` | `workspace-transfer/1` | Not served | Cloud workspace transfer to a local checkout |
+| `transfer.close` | `workspace-transfer/1` | Not served | Cloud workspace transfer to a local checkout |
 | `machine.describe` | `machine/1` | Served | Only a runtime that serves its machine; see [machine/1](#machine1) |
 | `machine.projects` | `machine/1` | Served | As `machine.describe` |
 | `machine.relayAccess` | `machine/2` | Served | A paired computer's relay invite, or `{ relay: null }` with no relay registration (PRO-345) |
