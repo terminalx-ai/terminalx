@@ -380,6 +380,7 @@ pub struct Bootstrapped {
     /// Set while the server rejects the runtime credential (the workspace
     /// was revoked or rotated); the relay host stops serving meanwhile.
     rejected: std::sync::atomic::AtomicBool,
+    desktop_refresh_failures: Mutex<u8>,
     baseline_path: PathBuf,
     /// The generation the baseline was last recorded for.
     baseline_generation: std::sync::atomic::AtomicU64,
@@ -425,6 +426,10 @@ impl Policy {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("the refresh answered for a different workspace or organization")]
+struct RefreshIdentityMismatch;
+
 /// One attempt's failure.
 enum Failure {
     /// Retry: the server could not be reached, or it said no (which lasts
@@ -454,6 +459,7 @@ pub fn establish(config: &Config, api: &dyn Api, policy: &Policy) -> Result<Boot
                     session: Mutex::new(session),
                     credential,
                     rejected: std::sync::atomic::AtomicBool::new(false),
+                    desktop_refresh_failures: Mutex::new(0),
                     baseline_path: config.baseline_path(),
                     baseline_generation: std::sync::atomic::AtomicU64::new(u64::MAX),
                     environment_attempted: Mutex::new(None),
@@ -515,7 +521,7 @@ fn attempt(config: &Config, api: &dyn Api, key: &HostKey) -> Result<(Session, Ze
         Ok(refreshed) => {
             let session = session_from_refresh(refreshed, &relay_host_id).map_err(Failure::Fatal)?;
             if session.workspace_id != stored.workspace_id || session.organization_id != stored.organization_id {
-                return Err(Failure::Fatal(anyhow!("the server answered for a different workspace")));
+                return Err(Failure::Fatal(RefreshIdentityMismatch.into()));
             }
             // A previous run stored the credential but was stopped before
             // it could delete the token it spent. A different token is a
@@ -565,14 +571,12 @@ fn redeem(config: &Config, api: &dyn Api, key: &HostKey, stored: Option<(&str, &
     let bytes = Zeroizing::new(serde_json::to_vec(&stored).map_err(|error| Failure::Fatal(error.into()))?);
     write_durable(&config.state_dir.join(STATE_FILE), &bytes).map_err(Failure::Fatal)?;
     crash_point("identity-persisted");
-    remove_spent_token(&config.token_path, &stored.token_sha256).map_err(Failure::Fatal)?;
-    crash_point("token-removed");
     // The redeem answer has no attachments; ask for them now rather than at
     // the first tick.
     let session = match api.refresh(&stored.runtime_credential) {
         Ok(refreshed) => {
             if refreshed.workspace_id != stored.workspace_id || refreshed.organization_id != stored.organization_id {
-                return Err(Failure::Fatal(anyhow!("the server answered for a different workspace")));
+                return Err(Failure::Fatal(RefreshIdentityMismatch.into()));
             }
             session_from_refresh(refreshed, &relay_host_id).map_err(Failure::Fatal)?
         }
@@ -595,28 +599,47 @@ fn redeem(config: &Config, api: &dyn Api, key: &HostKey, stored: Option<(&str, &
             }
         }
     };
+    remove_spent_token(&config.token_path, &stored.token_sha256).map_err(Failure::Fatal)?;
+    crash_point("token-removed");
     Ok((session, Zeroizing::new(stored.runtime_credential.clone())))
 }
 
 impl Bootstrapped {
     /// Refresh once, replacing the session on success.
     pub fn refresh(&self, api: &dyn Api) -> Result<(), CallError> {
-        let refreshed = match api.refresh(&self.credential) {
-            Err(CallError::Rejected) => {
-                self.rejected.store(true, std::sync::atomic::Ordering::SeqCst);
-                return Err(CallError::Rejected);
-            }
-            other => other?,
-        };
-        self.rejected.store(false, std::sync::atomic::Ordering::SeqCst);
+        const DESKTOP_REFRESH_FAILURE_LIMIT: u8 = 3;
         let relay_host_id = self.key.relay_host_id();
-        let session = session_from_refresh(refreshed, &relay_host_id).map_err(CallError::Transient)?;
+        let refreshed = api.refresh(&self.credential);
+        let mut failures = self
+            .desktop_refresh_failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut current = self.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if session.workspace_id != current.workspace_id || session.organization_id != current.organization_id {
-            return Err(CallError::Transient(anyhow!("the server answered for a different workspace")));
+        let refreshed = refreshed.and_then(|response| {
+            if response.workspace_id != current.workspace_id || response.organization_id != current.organization_id {
+                return Err(CallError::Transient(RefreshIdentityMismatch.into()));
+            }
+            session_from_refresh(response, &relay_host_id).map_err(CallError::Transient)
+        });
+        match refreshed {
+            Ok(session) => {
+                self.rejected.store(false, std::sync::atomic::Ordering::SeqCst);
+                *failures = 0;
+                *current = session;
+                Ok(())
+            }
+            Err(error) => {
+                let rejected = matches!(error, CallError::Rejected);
+                if rejected {
+                    self.rejected.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                *failures = failures.saturating_add(1);
+                if rejected || *failures >= DESKTOP_REFRESH_FAILURE_LIMIT {
+                    current.desktop_ready = false;
+                }
+                Err(error)
+            }
         }
-        *current = session;
-        Ok(())
     }
 
     /// The runtime credential, for calls made outside this module
@@ -1061,6 +1084,8 @@ mod tests {
         refreshes: RefCell<usize>,
         no_replay: bool,
         down: RefCell<bool>,
+        refresh_desktop_ready: bool,
+        foreign_refresh: bool,
     }
 
     impl FakeServer {
@@ -1095,6 +1120,45 @@ mod tests {
         };
         assert!(session_from_refresh(response(Some(ready)), "host_1").unwrap().desktop_ready);
         assert!(!session_from_refresh(response(None), "host_1").unwrap().desktop_ready);
+    }
+
+    #[test]
+    fn cloud_desktop_holds_after_three_failed_refreshes_and_recovers() {
+        let token = random_credential();
+        let mut server = FakeServer::with_token(&token);
+        server.refresh_desktop_ready = true;
+        let (_dir, config) = setup(&token);
+        let boot = establish(&config, &server, &quick()).unwrap();
+        assert!(boot.session.lock().unwrap().desktop_ready);
+        *server.down.borrow_mut() = true;
+        for expected in [true, true, false, false] {
+            assert!(boot.refresh(&server).is_err());
+            assert_eq!(boot.session.lock().unwrap().desktop_ready, expected);
+        }
+        *server.down.borrow_mut() = false;
+        boot.refresh(&server).unwrap();
+        assert!(boot.session.lock().unwrap().desktop_ready);
+        *server.down.borrow_mut() = true;
+        assert!(boot.refresh(&server).is_err());
+        assert!(boot.session.lock().unwrap().desktop_ready);
+        *server.down.borrow_mut() = false;
+        *server.credential.borrow_mut() = None;
+        assert!(matches!(boot.refresh(&server), Err(CallError::Rejected)));
+        assert!(boot.is_rejected());
+        assert!(!boot.session.lock().unwrap().desktop_ready);
+    }
+
+    #[test]
+    fn foreign_first_refresh_is_typed_and_preserves_the_token() {
+        let token = random_credential();
+        let mut server = FakeServer::with_token(&token);
+        server.foreign_refresh = true;
+        let (_dir, config) = setup(&token);
+        let original_token_file = fs::read(&config.token_path).unwrap();
+        let error = establish(&config, &server, &quick()).err().unwrap();
+        assert!(error.downcast_ref::<RefreshIdentityMismatch>().is_some());
+        assert_eq!(fs::read(&config.token_path).unwrap(), original_token_file);
+        assert!(read_identity(&config.state_dir).unwrap().is_some());
     }
 
     fn session_fields() -> (String, String, String, u64, String) {
@@ -1133,7 +1197,7 @@ mod tests {
             Ok(Refreshed {
                 v: 1,
                 workspace_id,
-                organization_id,
+                organization_id: if self.foreign_refresh { "different_org".into() } else { organization_id },
                 relay_token,
                 relay_token_expires_at,
                 director_url,
@@ -1143,7 +1207,9 @@ mod tests {
                 access_mode: Some(AccessMode::Organization),
                 quiesce: None,
                 collaboration: None,
-                phase2_readiness: None,
+                phase2_readiness: self.refresh_desktop_ready.then(|| serde_json::json!({
+                    "version": 1, "flags": { "cloud.desktop.v1": true }
+                })),
             })
         }
     }

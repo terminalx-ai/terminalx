@@ -1506,7 +1506,7 @@ impl WorkspaceRpc {
         if !ticket.valid() { return Err(RpcError::forbidden(crate::data_privacy::MESSAGE)); }
         if method == "rpc.hello" {
             let _privacy = ticket.scope().map_err(|error| RpcError::forbidden(error.to_string()))?;
-            let granted = protocol::negotiate(&params, &self.offered())?;
+            let granted = protocol::negotiate(&params, &self.offered(peer))?;
             *peer.granted.lock().unwrap() = Some(granted.iter().cloned().collect());
             peer.phone.store(params["client"]["app"].as_str() == Some(MOBILE_APP), Ordering::SeqCst);
             if self.peers.lock().unwrap().insert(peer.id, Arc::downgrade(peer)).is_none() {
@@ -4798,9 +4798,11 @@ impl WorkspaceRpc {
     /// What this runtime offers in `rpc.hello`: what it serves as a
     /// workspace or a machine (`protocol::served`), less `agent-commands/1`
     /// beside a mailbox.
-    fn offered(&self) -> Vec<&'static str> {
+    fn offered(&self, _peer: &Peer) -> Vec<&'static str> {
         #[cfg(any(target_os = "linux", all(test, unix)))]
-        let desktop = self.desktop_ready.load(Ordering::SeqCst);
+        let desktop = self.desktop_ready.load(Ordering::SeqCst)
+            && _peer.user_id.as_deref().is_some_and(|id| !id.is_empty()
+                && self.collab.access_of(Some(id)).can_view());
         #[cfg(not(any(target_os = "linux", all(test, unix))))]
         let desktop = false;
         protocol::served(self.is_machine()).into_iter().filter(|capability| match *capability {

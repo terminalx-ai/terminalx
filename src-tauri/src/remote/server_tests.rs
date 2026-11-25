@@ -4184,22 +4184,28 @@ async fn cloud_desktop_requires_readiness_and_watchers_cannot_open_control_or_ge
     use base64::{engine::general_purpose, Engine as _};
 
     let f = fixture();
-    listed(&f.rpc);
     let (viewer, mut events) = Peer::for_user("desktop-viewer".into(), Authority::Participate, Some("viewer".into()));
-    let (editor, mut editor_events) = Peer::for_user("desktop-editor".into(), Authority::Manage, Some("admin".into()));
+    let (editor, mut editor_events) = Peer::for_user("desktop-editor".into(), Authority::Participate, Some("editor".into()));
     let (stranger, _) = Peer::for_user("desktop-stranger".into(), Authority::Participate, Some("stranger".into()));
     let hello = json!({ "protocol": PROTOCOL, "want": ["ports/1", protocol::CLOUD_DESKTOP] });
     assert_eq!(call(&f.rpc, &viewer, "rpc.hello", hello.clone()).await.unwrap()["capabilities"], json!(["ports/1"]));
     assert_eq!(code(call(&f.rpc, &viewer, "desktop.open", json!({})).await), "capability_not_granted");
 
     f.rpc.set_desktop_readiness(7, true);
+    assert_eq!(call(&f.rpc, &viewer, "rpc.hello", hello.clone()).await.unwrap()["capabilities"], json!(["ports/1"]));
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "editor", "role": "driver", "canApprove": true },
+        { "userId": "viewer", "role": "viewer" },
+    ])));
+    let (anonymous, _) = Peer::for_user("desktop-anonymous".into(), Authority::Participate, None);
+    assert_eq!(call(&f.rpc, &anonymous, "rpc.hello", hello.clone()).await.unwrap()["capabilities"], json!(["ports/1"]));
     let tools = tempfile::tempdir().unwrap();
     let pool = super::super::cloud_desktop::DesktopPool::new(vec![tools.path().to_string_lossy().into_owned()], Duration::from_millis(10));
     assert!(f.rpc.desktop.set(pool).is_ok());
     call(&f.rpc, &viewer, "rpc.hello", hello.clone()).await.unwrap();
     call(&f.rpc, &editor, "rpc.hello", hello.clone()).await.unwrap();
     call(&f.rpc, &stranger, "rpc.hello", hello).await.unwrap();
-    assert_eq!(code(call(&f.rpc, &stranger, "desktop.open", json!({})).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &stranger, "desktop.open", json!({})).await), "capability_not_granted");
     assert_eq!(code(call(&f.rpc, &viewer, "desktop.open", json!({"control":true})).await), "forbidden");
     assert_eq!(code(call(&f.rpc, &viewer, "ports.open", json!({"port":5900})).await), "forbidden");
     assert_eq!(code(call(&f.rpc, &viewer, "desktop.open", json!({})).await), "cloud_desktop_image_unavailable");
@@ -4237,7 +4243,7 @@ async fn cloud_desktop_requires_readiness_and_watchers_cannot_open_control_or_ge
     assert_eq!(echo["params"]["data"], "eA==");
 
     f.rpc.set_collaboration(members(json!([
-        { "userId": "admin", "role": "viewer" },
+        { "userId": "editor", "role": "viewer" },
         { "userId": "viewer", "role": "viewer" },
     ])));
     let ended = tokio::time::timeout(Duration::from_secs(5), async {

@@ -6,11 +6,15 @@ import { CloudDesktopPane } from "./CloudDesktopPane";
 
 const fixture = vi.hoisted(() => ({
   fail: null as ((error: unknown) => void) | null,
+  opens: [] as boolean[],
 }));
 
 vi.mock("@/lib/cloudDesktopChannel", () => ({
   CloudDesktopChannel: class {
-    constructor(_client: unknown, _control: boolean, fail: (error: unknown) => void) { fixture.fail = fail; }
+    constructor(_client: unknown, control: boolean, fail: (error: unknown) => void) {
+      fixture.opens.push(control);
+      fixture.fail = fail;
+    }
   },
 }));
 
@@ -23,7 +27,7 @@ vi.mock("@/components/computer/VncView", () => ({
   </div>,
 }));
 
-afterEach(() => { cleanup(); fixture.fail = null; });
+afterEach(() => { cleanup(); fixture.fail = null; fixture.opens.length = 0; });
 
 const client = {
   connection: { state: "connected" },
@@ -70,4 +74,17 @@ it("shows a stopped workspace without opening VNC or offering to wake it", () =>
   expect(screen.queryByTestId("fixture-vnc")).toBeNull();
   expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
   expect(reconnect).not.toHaveBeenCalled();
+});
+
+
+it("falls back to watch when the runtime refuses control", () => {
+  render(<CloudDesktopPane client={client} asleep={false} control onReconnect={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: "Connected" }));
+  act(() => fixture.fail?.({ code: "forbidden" }));
+  expect(screen.getByTestId("fixture-vnc").getAttribute("data-control")).toBe("false");
+  expect(screen.getByRole("status").textContent).toBe("Connecting…");
+  fireEvent.click(screen.getByRole("button", { name: "Connected" }));
+  expect(fixture.opens).toEqual([true, false]);
+  act(() => fixture.fail?.({ code: "forbidden" }));
+  expect(screen.getByRole("status").textContent).toBe("Cloud desktop access is unavailable.");
 });

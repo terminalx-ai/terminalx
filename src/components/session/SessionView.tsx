@@ -542,12 +542,18 @@ export function SessionView({
   const desktopTabsId = useId();
   const desktopScope = cloud && !machine && !compact && !start && !cloud.locked
     && privacy.ready && !privacy.enabled && phase2Ready(desktopAccount, cloud.orgId, "cloudDesktop")
-    ? `${desktopAccount.context?.account ?? desktopAccount.identity?.email}:${session.id}` : null;
-  const [desktopFor, setDesktopFor] = useState<string | null>(null);
-  const desktopShown = !!desktopScope && desktopFor === desktopScope;
+    ? `${desktopAccount.context?.account ?? desktopAccount.identity?.email}:${cloud.orgId}:${cloud.workspaceId}:${session.id}` : null;
+  const [desktopView, setDesktopView] = useState<{ scope: string; shown: boolean } | null>(null);
+  const desktopMounted = !!desktopScope && desktopView?.scope === desktopScope;
+  const desktopShown = desktopMounted && desktopView.shown;
+  const selectDesktop = (shown: boolean) => {
+    if (!desktopScope) return;
+    setDesktopView((previous) => shown || previous?.scope === desktopScope
+      ? { scope: desktopScope, shown } : previous);
+  };
   useEffect(() => {
-    if (desktopFor && desktopFor !== desktopScope) setDesktopFor(null);
-  }, [desktopFor, desktopScope]);
+    setDesktopView((previous) => previous?.scope === desktopScope ? previous : null);
+  }, [desktopScope]);
   const local = backend.caps.local;
   const isGit = useSessionIsGit(session, local);
   const quick = isQuickChat(session);
@@ -1112,12 +1118,12 @@ export function SessionView({
               return <button key={label} type="button" role="tab" id={identity}
                 aria-controls={`${identity}-panel`} aria-selected={active} tabIndex={active ? 0 : -1}
                 className={cn("border-b-2 px-3 py-1.5 text-xs", active ? "border-ring text-foreground" : "border-transparent text-muted-foreground")}
-                onClick={() => setDesktopFor(isDesktop ? desktopScope : null)}
+                onClick={() => selectDesktop(isDesktop)}
                 onKeyDown={(event) => {
                   if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
                   event.preventDefault();
                   const next = event.key === "Home" ? false : event.key === "End" ? true : !isDesktop;
-                  setDesktopFor(next ? desktopScope : null);
+                  selectDesktop(next);
                   document.getElementById(`${desktopTabsId}-${next ? "Desktop" : "Session"}`)?.focus();
                 }}>{label}</button>;
             })}
@@ -1131,8 +1137,8 @@ export function SessionView({
           {desktopScope && cloud && <div role="tabpanel" id={`${desktopTabsId}-Desktop-panel`}
             aria-labelledby={`${desktopTabsId}-Desktop`} hidden={!desktopShown}
             className={cn("min-h-0 flex-1", desktopShown && "flex")}>
-            {desktopShown && <CloudDesktopPane key={`${desktopScope}:${cloud.mayControlTerminals}`}
-              client={cloud.client} asleep={cloud.asleep} control={cloud.mayControlTerminals}
+            {desktopMounted && <CloudDesktopPane key={`${desktopScope}:${cloud.mayControlTerminals}`}
+              client={cloud.client} asleep={cloud.asleep} control={cloud.mayControlTerminals} visible={desktopShown}
               onReconnect={() => reconnectCloudWorkspace({ orgId: cloud.orgId, workspaceId: cloud.workspaceId })} />}
           </div>}
           <div role={desktopScope ? "tabpanel" : undefined} id={desktopScope ? `${desktopTabsId}-Session-panel` : undefined}
