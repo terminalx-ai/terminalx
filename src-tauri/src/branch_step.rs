@@ -340,7 +340,7 @@ pub fn account(session: &SessionEntry, action: Action) -> Result<Account> {
         }
         let login = if urls[0].starts_with("https://") {
             let helper = git::run(cwd, &["config", "--get-urlmatch", "credential.helper", urls[0]]).unwrap_or_default();
-            let gh = crate::binpath::resolve("gh").context("Install the GitHub CLI first.")?;
+            let gh = crate::binpath::resolve("gh").context(crate::github::GH_MISSING)?;
             if !gh_credential_helper(&helper, &gh.to_string_lossy()) {
                 bail!("The HTTPS push account could not be verified. Configure Git to use gh auth git-credential, or use an SSH remote.");
             }

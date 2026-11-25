@@ -101,7 +101,7 @@ it("opens a question as a sheet with the recommended answer on top and room to t
   expect(container.querySelector("[data-testid='bot-question-sheet']")).toBeNull();
 });
 
-it("keeps the sheet open with the Mac's refusal when the question was answered elsewhere", async () => {
+it("keeps the sheet open with the computer's refusal when the question was answered elsewhere", async () => {
   mocks.app.api.answerBot = vi.fn(async () => { throw new Error("Atlas no longer asks this on item #2."); });
   await show();
   await click("Atlas asks: Token written to a log. Fix now or file it?");

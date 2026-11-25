@@ -149,6 +149,8 @@ fn phone_create_child() {
             // A desktop-only switch the phone neither shows nor changes (PRO-273).
             let mut desktop = store::settings::load();
             desktop.experimental.session_cost = true;
+            // Saved on where Bots cannot run, as a settings file copied from a Mac would be.
+            desktop.experimental.bots = true;
             store::settings::save(&desktop).unwrap();
             assert_eq!(call("tablet", "settings", json!({})).unwrap(), json!({"nativeCodex":false}));
             assert_eq!(call("phone", "setSettings", json!({"nativeCodex":true})).unwrap(), json!({"nativeCodex":true}));
@@ -159,6 +161,7 @@ fn phone_create_child() {
             let published = std::iter::from_fn(|| events.try_recv().ok()).find(|published| &*published.event == "experimental_settings_changed").unwrap();
             let published: Value = serde_json::from_str(&published.payload).unwrap();
             assert_eq!((&published["nativeCodex"], &published["sessionCost"]), (&json!(true), &json!(true)));
+            assert_eq!(published["bots"], json!(crate::bots::SUPPORTED), "a switch this computer cannot run is published as off");
             assert_eq!(call("tablet", "settings", json!({})).unwrap(), json!({"nativeCodex":true}));
             assert!(call("phone", "setSettings", json!({"nativeCodex":"yes"})).is_err());
         }

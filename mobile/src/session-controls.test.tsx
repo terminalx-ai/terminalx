@@ -196,7 +196,7 @@ describe("a resume that fails on the phone (#1290)", () => {
     await render([recovery("failed")]);
     mocks.app.api.sendSession.mockRejectedValueOnce(new Error("Host is disconnected"));
     await click("Continue here");
-    expect(container.textContent).toContain("Not resumed: the connection to your Mac dropped before it could be sent. Reconnect, then try again.");
+    expect(container.textContent).toContain("Not resumed: the connection to your computer dropped before it could be sent. Reconnect, then try again.");
     expect(container.textContent).not.toContain("Host is disconnected");
     expect(mocks.app.connection.note).toHaveBeenCalledWith("error", "Session resume failed", "Continue here · step connect · code dropped");
     // Reconnect is offered once the screen shows the connection gone.
@@ -206,11 +206,11 @@ describe("a resume that fails on the phone (#1290)", () => {
     expect(mocks.app.retryConnection).toHaveBeenCalledTimes(1);
   });
 
-  it("shows a resume the Mac has not answered in time as under way, not as an error", async () => {
+  it("shows a resume the computer has not answered in time as under way, not as an error", async () => {
     await render([recovery("failed")]);
     mocks.app.api.sendSession.mockRejectedValueOnce(new Error("RPC timed out: session.send"));
     await click("Continue here");
-    expect(container.textContent).toContain("Your Mac has not answered yet, so the resume may still be under way.");
+    expect(container.textContent).toContain("Your computer has not answered yet, so the resume may still be under way.");
     expect(container.textContent).not.toContain("RPC timed out");
     expect(mocks.app.connection.note).toHaveBeenCalledWith("warning", "Session resume not confirmed", "Continue here · step send · code no-answer");
     expect(() => button("Reconnect")).toThrow();
@@ -241,11 +241,11 @@ describe("a resume that fails on the phone (#1290)", () => {
     expect(button("Retry safely").disabled).toBe(true);
   });
 
-  it("says the Mac's refusal with the step it refused and the next step", async () => {
+  it("says the computer's refusal with the step it refused and the next step", async () => {
     await render([recovery("failed")]);
     mocks.app.api.sendSession.mockResolvedValueOnce({ sent: false, message: "The agent is not running", code: "agent_not_running" });
     await click("Retry safely");
-    expect(container.textContent).toContain("The agent was stopped, but your Mac did not send the prompt. It said: The agent is not running. Try again, or open the session on the Mac to see more.");
+    expect(container.textContent).toContain("The agent was stopped, but your computer did not send the prompt. It said: The agent is not running. Try again, or open the session on the computer to see more.");
     expect(mocks.app.connection.note).toHaveBeenCalledWith("error", "Session resume failed", "Retry safely · step send · code agent_not_running");
   });
 });

@@ -13,6 +13,7 @@ import { mergeEvents, type AttachmentInput, type ChatNote } from "@mobile/data/h
 import { draftContent, draftIdFor, readDraftId, type DraftId } from "@mobile/data/draft-id";
 import { retryHaltedTranscript, TranscriptHaltedError, watchTranscript } from "@mobile/data/transcript-sync";
 import { useApp } from "@mobile/state/AppProvider";
+import { useHostWords, type HostWords } from "@mobile/state/host-words";
 import { connectionWords, useConnectionState, type ConnectionState } from "@mobile/state/connection-view";
 import { useMachines } from "@mobile/state/useMachines";
 import { hostDisplayName } from "@mobile/store/host-name";
@@ -58,6 +59,7 @@ interface MobileAttachment extends AttachmentInput {
 interface TranscriptNotice { text: string; action: string; onPress(): void }
 
 export default function SessionScreen() {
+  const words = useHostWords();
   // `botId` and `item`: a bot's question to show as a sheet over this chat, its home chat (PRO-479).
   const params = useLocalSearchParams<{ sessionId: string; tabId?: string; hostId?: string; title?: string; botId?: string; item?: string }>();
   const router = useRouter();
@@ -87,7 +89,7 @@ export default function SessionScreen() {
   const [notifying, setNotifying] = useState(false);
   const override = useSessionOverride(app.activeHost?.id ?? "", sessionId);
 
-  if (!app.activeHost || !tabId || (params.hostId && params.hostId !== app.activeHost.id)) return <View style={[styles.center, { backgroundColor: palette.page }]}><EmptyState title="Session unavailable" detail="Reconnect to its Mac and open this session again." /></View>;
+  if (!app.activeHost || !tabId || (params.hostId && params.hostId !== app.activeHost.id)) return <View style={[styles.center, { backgroundColor: palette.page }]}><EmptyState title="Session unavailable" detail={`Reconnect to ${words.your} and open this session again.`} /></View>;
   const key = conversationKey(app.activeHost.id, sessionId, tabId);
   const conversation = summary ? agentConversations(summary).find((item) => item.id === tabId) : undefined;
   const available = !summary || !!conversation;
@@ -103,7 +105,7 @@ export default function SessionScreen() {
     const at = tabs.findIndex((tab) => tab.id === closing);
     const next = tabs[at + 1] ?? tabs[at - 1];
     const name = tabs[at]?.title?.trim() || "this chat";
-    Alert.alert(`Close ${name}?`, "Its agent stops. The conversation stays on your Mac.", [{ text: "Cancel", style: "cancel" }, { text: "Close", style: "destructive", onPress: () => void app.api.closeTab(sessionId, closing).then(async (result) => {
+    Alert.alert(`Close ${name}?`, `Its agent stops. The conversation stays on ${words.your}.`, [{ text: "Cancel", style: "cancel" }, { text: "Close", style: "destructive", onPress: () => void app.api.closeTab(sessionId, closing).then(async (result) => {
       if (!result.done) return Alert.alert("Could not close the chat", result.message);
       if (next) select(next.id);
       await app.refreshSessions();
@@ -117,7 +119,7 @@ export default function SessionScreen() {
     <SessionNotificationsSheet visible={notifying} hostId={hostId} sessionId={sessionId} name={summary?.title?.trim() || named} onClose={() => setNotifying(false)} />
     {summary && (summary.tabs.length > 1 || canAdd) ? <ChatTabs key={JSON.stringify([hostId, sessionId])} session={summary} selectedTabId={tabId} onSelect={select} onAdd={canAdd ? () => setAdding(true) : undefined} onClose={canClose ? close : undefined} actionsDisabled={!linked} /> : null}
     <NewChatSheet visible={adding} sessionId={sessionId} tabId={tabId} onClose={() => setAdding(false)} onStarted={(next) => { setAdding(false); select(next); }} />
-    {!available ? <Text style={{ color: palette.warning, paddingHorizontal: 16 }}>This conversation is no longer available on the Mac.</Text> : null}
+    {!available ? <Text style={{ color: palette.warning, paddingHorizontal: 16 }}>This conversation is no longer available on {words.the}.</Text> : null}
     {!terminal ? <ChatPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} available={available} connected={available && linked} state={state} machine={machine} epoch={app.connectionEpoch ?? 0} answersQuestions={answersQuestions} /> : <TerminalPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && linked} state={state} />}
   </View>;
 }
@@ -145,11 +147,12 @@ const CHIP_SLOP = {
   mode: { top: 13, bottom: 13, left: 2, right: 24 },
 };
 
-/** What a question's card says on a phone paired with a Mac that takes no answer from it (#979). */
-const ANSWER_ON_MAC = "Answer this question from your Mac.";
+/** What a question's card says on a phone paired with a computer that takes no answer from it (#979). */
+const answerThere = (words: HostWords) => `Answer this question from ${words.your}.`;
 
 function ChatPane({ hostId, sessionId, tabId, available, connected, state, machine, epoch, answersQuestions }: { hostId: string; sessionId: string; tabId: string; available: boolean; connected: boolean; state: ConnectionState; machine: string; epoch: number; answersQuestions: boolean | null }) {
   const app = useApp();
+  const words = useHostWords();
   const router = useRouter();
   const { palette } = useTheme();
   const insets = useSafeAreaInsets();
@@ -561,7 +564,7 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
   </>;
   // The subtitle shows the one spinner; an empty conversation only says what it is waiting for.
   const emptyTranscript = !connected
-    ? loading ? undefined : <EmptyState title="No saved messages" detail="This conversation shows once the phone connects to your Mac." />
+    ? loading ? undefined : <EmptyState title="No saved messages" detail={`This conversation shows once the phone connects to ${words.your}.`} />
     // A failed read is said by the line above; "no transcript" would not be true.
     : loadError ? undefined
     : loading ? <EmptyState title="Loading transcript" detail={`Reading the latest turns from ${machine}.`} />
@@ -576,7 +579,7 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
   // The view makes room for the keyboard with padding, which a floating composer ignores: the inner view is what shrinks, and the composer floats at its foot.
   return <PromptImageContext.Provider value={imageSource}><KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}><View style={styles.flex}>{noticeLine}<TranscriptList inset={composerHeight} data={items} keyExtractor={(item) => item.key} contentContainerStyle={styles.transcriptRows} earlier={transcriptHeader} ListEmptyComponent={emptyTranscript} renderItem={({ item }) => item.kind === "turn" ? <TranscriptRow row={item.row} /> : <NoteCard note={item.note} first={item.first} />} latest={<>{transcript.compacting ? <CompactingLine /> : null}{transcript.pendingAsks.map((ask) => ask.kind === "questions"
   // Until the Mac has said what it takes, nothing can be sent; one that takes no answer shows the question to be answered there.
-  ? <QuestionCard key={ask.requestId} ask={ask} stateKey={stateKey} connected={connected} answering={answeringPermission !== null || (connected && answersQuestions === null)} readOnly={answersQuestions === false ? ANSWER_ON_MAC : null} error={permissionErrors[ask.requestId]} onAnswer={(answers) => void answerQuestions(ask, answers)} />
+  ? <QuestionCard key={ask.requestId} ask={ask} stateKey={stateKey} connected={connected} answering={answeringPermission !== null || (connected && answersQuestions === null)} readOnly={answersQuestions === false ? answerThere(words) : null} error={permissionErrors[ask.requestId]} onAnswer={(answers) => void answerQuestions(ask, answers)} />
   : <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission !== null} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><SessionControls sessionId={sessionId} tabId={tabId} events={events} asks={transcript.pendingAsks.length} connected={connected} onOpenTab={(next) => router.setParams({ tabId: next, hostId })}>{(controls) => {
     // Send stays Send while the agent works; the turn is stopped from the status line (22.03).
     const ready = !sendDisabled;
@@ -682,6 +685,8 @@ const TERMINAL_KEYS: { key: TerminalKey; label: string; name: string }[] = [
  */
 function TerminalPane({ hostId, sessionId, tabId, connected, state }: { hostId: string; sessionId: string; tabId: string; connected: boolean; state: ConnectionState }) {
   const app = useApp();
+  const words = useHostWords();
+  const endedText = `${words.The} ended the terminal view.`;
   const { palette } = useTheme();
   const stateKey = conversationKey(hostId, sessionId, tabId);
   const [mode, setMode] = useConversationState<"direct" | "buffered">(`${stateKey}:mode`, "direct");
@@ -722,7 +727,7 @@ function TerminalPane({ hostId, sessionId, tabId, connected, state }: { hostId: 
       parsed = parsed.then(async () => { if (active && screen.current) await step(screen.current); }).then(draw, draw);
     };
     const ended = app.connection.onEvent((message) => {
-      if (active && message.method === "terminal.closed") setProblem((message.params as { message?: string } | null)?.message ?? "The Mac ended the terminal view.");
+      if (active && message.method === "terminal.closed") setProblem((message.params as { message?: string } | null)?.message ?? endedText);
     });
     void app.api.openTerminal(sessionId, tabId).then((opened) => {
       if (!active) return;
@@ -730,7 +735,7 @@ function TerminalPane({ hostId, sessionId, tabId, connected, state }: { hostId: 
       if (!opened.opened) { setProblem(opened.message); return; }
       unsubscribe = app.api.subscribeTerminal(sessionId, tabId, (packet) => {
         if (!active) return;
-        if (packet.type === "error") setProblem(packet.message ?? "The Mac ended the terminal view.");
+        if (packet.type === "error") setProblem(packet.message ?? endedText);
         else if (packet.type === "scrollback") {
           // A new subscription (also after a reconnect) starts from the retained output.
           screen.current?.dispose();
@@ -744,7 +749,7 @@ function TerminalPane({ hostId, sessionId, tabId, connected, state }: { hostId: 
         else if (packet.type === "data" && packet.chunk) feed(packet.chunk);
       });
     // The connection's own failure is the connection state's to say; the Mac's refusal is said as it is.
-    }, (cause: unknown) => { if (active) { setOpening(false); setProblem(isTransportError(cause) ? null : screenMessage(cause, "The Mac ended the terminal view.")); } });
+    }, (cause: unknown) => { if (active) { setOpening(false); setProblem(isTransportError(cause) ? null : screenMessage(cause, endedText)); } });
     return () => { active = false; if (frame) clearTimeout(frame); ended(); unsubscribe(); screen.current?.dispose(); screen.current = null; };
   }, [app.api, app.connection, connected, sessionId, tabId, attempt]);
 
@@ -770,7 +775,7 @@ function TerminalPane({ hostId, sessionId, tabId, connected, state }: { hostId: 
 
   const offline = connectionWords(state === "connected" || state === "updating" ? "connecting" : state) ?? "Connecting…";
   const status = !connected ? offline : opening ? "Opening…" : problem ? "Unavailable" : refusal ? "Refused" : "Live";
-  const statusDetail = !connected ? `${offline} · what you type is kept` : opening ? "Opening the terminal…" : problem ? "The terminal isn't available" : refusal ? "Input refused" : "Live · typing here pauses typing on the Mac";
+  const statusDetail = !connected ? `${offline} · what you type is kept` : opening ? "Opening the terminal…" : problem ? "The terminal isn't available" : refusal ? "Input refused" : `Live · typing here pauses typing on ${words.the}`;
   // Enter is the key most pressed: the big button at the thumb. Writing first, it sends the text and then Enter.
   const enter = () => {
     if (mode === "buffered" && input) return void write(pasteSequence(input, modes()) + keySequence("enter", modes())).then((accepted) => { if (accepted) setInput(""); });

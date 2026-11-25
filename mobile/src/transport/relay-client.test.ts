@@ -83,7 +83,7 @@ describe("the code the phone closes with", () => {
     expect(socket.closedWith).toBe(4002);
   });
 
-  it("matches the codes the Mac reads (src-tauri/src/phone/mod.rs)", () => {
+  it("matches the codes the computer reads (src-tauri/src/phone/mod.rs)", () => {
     expect(PHONE_CLOSE).toEqual({ closed: 4000, probeTimeout: 4001, failed: 4002 });
   });
 });
@@ -356,7 +356,7 @@ const attachment = { mediaType: "image/png", data: "A".repeat(4_000_000), name: 
 
 // Sealing and opening 4 MB takes 1–2 s on an idle machine and more than 5 s on a loaded one, which is not a failure.
 describe("messages larger than one relay frame (#669)", { timeout: 30_000 }, () => {
-  it("cross as fragments both ways once the Mac agrees, and the connection stays usable", async () => {
+  it("cross as fragments both ways once the computer agrees, and the connection stays usable", async () => {
     const transcript = { events: [], blob: "🦝 \"tool\" output\n".repeat(150_000) };
     const socket = new EncryptedPeer({ fragments: true, reply: (method) => method === "session.sync" ? transcript : undefined });
     const client = relayClient(socket);
@@ -375,7 +375,7 @@ describe("messages larger than one relay frame (#669)", { timeout: 30_000 }, () 
     } finally { client.close(); }
   });
 
-  it("are refused before sending when the Mac cannot reassemble them, and nothing else fails", async () => {
+  it("are refused before sending when the computer cannot reassemble them, and nothing else fails", async () => {
     const socket = new EncryptedPeer();
     const client = relayClient(socket);
     try {
@@ -383,7 +383,7 @@ describe("messages larger than one relay frame (#669)", { timeout: 30_000 }, () 
       socket.onopen?.();
       await connected;
       await expect(client.request("session.send", { tabId: "tab", text: "", attachments: [attachment] }))
-        .rejects.toThrow("This is too large to send over Relay (4.0 MB; the limit is 0.8 MB). Update TerminalX on your Mac, or send it on the same Wi-Fi as your Mac.");
+        .rejects.toThrow("This is too large to send over Relay (4.0 MB; the limit is 0.8 MB). Update TerminalX on your computer, or send it on the same Wi-Fi as your computer.");
       expect(socket.requests.map((request) => request.method)).not.toContain("session.send");
       expect(socket.largestFromPhone).toBeLessThanOrEqual(RELAY_MESSAGE_BYTES_LIMIT);
       expect(await client.request("status.get")).toMatchObject({ ok: true });
@@ -416,7 +416,7 @@ it("keeps the close frame's reason while connecting, which tells an oversized me
 });
 
 /** #730: a Mac app newer than its runtime offered a feature the runtime then refused, and passed the refusal on as it was. */
-it("says the Mac needs updating when it refuses an operation it does not know, and stays usable", async () => {
+it("says the computer needs updating when it refuses an operation it does not know, and stays usable", async () => {
   const socket = new EncryptedPeer({ refuse: (method) => method === "terminal.open" ? { code: "unavailable", message: "internal: Unsupported paired-device owner operation." }
     : method === "session.stop" ? { code: "unavailable", message: "The tab is not running." } : undefined });
   const client = new RelayClient({ deviceToken: "test-device-token", desktopPublicKeyB64: encodeBase64(socket.key.publicKey), createSocket: () => socket as unknown as WebSocket, transport: "direct", endpoint: "ws://example.test" });
@@ -431,7 +431,7 @@ it("says the Mac needs updating when it refuses an operation it does not know, a
 });
 
 // PRO-314: the Mac holds a QR pairing until the person compares the fingerprint and approves (docs/PAIRING-APPROVAL.md).
-describe("waiting for the Mac's approval while pairing", () => {
+describe("waiting for the computer's approval while pairing", () => {
   afterEach(() => { vi.useRealTimers(); });
   const pairing = (socket: EncryptedPeer, onWaiting = vi.fn()) => ({ onWaiting, client: new RelayClient({
     transport: "direct", endpoint: "ws://example.test", deviceToken: "test-device-token",
@@ -457,7 +457,7 @@ describe("waiting for the Mac's approval while pairing", () => {
     client.close();
   });
 
-  it("maps the Mac's pairing_refused to not approved, with its reason", async () => {
+  it("maps the computer's pairing_refused to not approved, with its reason", async () => {
     const socket = new EncryptedPeer({ gate: true });
     const { client } = pairing(socket);
     const connecting = client.connect();
@@ -469,7 +469,7 @@ describe("waiting for the Mac's approval while pairing", () => {
     expect((error as PairingNotApprovedError).reason).toBe("another-phone");
   });
 
-  it("keeps a connection that drops while waiting an ordinary failure: the Mac may still approve", async () => {
+  it("keeps a connection that drops while waiting an ordinary failure: the computer may still approve", async () => {
     const socket = new EncryptedPeer({ gate: true });
     const { client } = pairing(socket);
     const connecting = client.connect();
@@ -503,7 +503,7 @@ describe("waiting for the Mac's approval while pairing", () => {
     client.close();
   });
 
-  it("keeps a local protocol error while waiting an ordinary failure, not a refusal by the Mac", async () => {
+  it("keeps a local protocol error while waiting an ordinary failure, not a refusal by the computer", async () => {
     const socket = new EncryptedPeer({ gate: true });
     const { client } = pairing(socket);
     const connecting = client.connect();

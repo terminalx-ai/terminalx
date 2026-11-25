@@ -19,7 +19,7 @@ import type { LocalPathInfo } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "@/components/ui/menu";
 import { copyText } from "@/lib/clipboard";
-import { isMac } from "@/lib/platform";
+import { fileManager, isMac, revealInFileManager } from "@/lib/platform";
 import { citedFileKind, type CitedFileKind } from "@/lib/codexCitations";
 import { File, FileImage, FilePdf, FileSpreadsheet, FileText, Presentation } from "@/icons";
 
@@ -184,13 +184,13 @@ export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, clas
               <ContextMenuItem disabled>Checking destination…</ContextMenuItem>
             ) : info ? <>
               {info.kind === "directory" ? (
-                <ContextMenuItem onSelect={() => run(() => openChatLink(destination, context))}>Open in file manager</ContextMenuItem>
+                <ContextMenuItem onSelect={() => run(() => openChatLink(destination, context))}>Open in {fileManager}</ContextMenuItem>
               ) : <>
                 {chatLinkCanOpenInternally(info) && (
                   <ContextMenuItem onSelect={() => run(() => openChatLink(destination, context))}>Open internally</ContextMenuItem>
                 )}
                 <ContextMenuItem onSelect={() => run(() => openChatLinkExternally(destination, context, info))}>Open with default application</ContextMenuItem>
-                <ContextMenuItem onSelect={() => run(() => revealChatLink(destination, context, info))}>Reveal in file manager</ContextMenuItem>
+                <ContextMenuItem onSelect={() => run(() => revealChatLink(destination, context, info))}>{revealInFileManager}</ContextMenuItem>
               </>}
             </> : (
               <ContextMenuItem disabled>Destination unavailable</ContextMenuItem>

@@ -22,7 +22,7 @@ afterEach(async () => { await act(async () => root.unmount()); container.remove(
 const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 
 describe("a prompt's images in its bubble", () => {
-  it("asks the Mac for each once, and opens one full screen", async () => {
+  it("asks the computer for each once, and opens one full screen", async () => {
     const load = vi.fn(async () => ({ uri: "data:image/png;base64,cG5n" }));
     const images = [{ url: "/mac/attachments/s/a.png", name: "a.png" }];
     const draw = () => root.render(<PromptImageContext.Provider value={{ scope: "once", load }}><PromptImages images={images} /></PromptImageContext.Provider>);
@@ -35,10 +35,10 @@ describe("a prompt's images in its bubble", () => {
   });
 
   it("names an image it cannot draw, saying why", async () => {
-    const load = vi.fn(async () => ({ error: "The image is no longer on the Mac." }));
+    const load = vi.fn(async () => ({ error: "The image is no longer on the computer." }));
     await act(async () => root.render(<PromptImageContext.Provider value={{ scope: "gone", load }}><PromptImages images={[{ url: "/mac/b.png", name: "b.png" }]} /></PromptImageContext.Provider>));
     await settle();
-    expect(container.textContent).toContain("The image is no longer on the Mac.");
+    expect(container.textContent).toContain("The image is no longer on the computer.");
     expect(container.querySelector("img")).toBeNull();
   });
 

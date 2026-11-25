@@ -5,7 +5,7 @@ import { CredentialRefusedError, RelayOuterError } from "./relay-client";
 
 describe("an attempt that failed on every path (#1316)", () => {
   it("keeps a path's classification once its message is redacted and wrapped", () => {
-    const wrapped = new ConnectionAttemptError("https://relay.example: relay_outer_4404 (the Mac is not connected to Relay)", "mac-offline");
+    const wrapped = new ConnectionAttemptError("https://relay.example: relay_outer_4404 (the computer is not connected to Relay)", "mac-offline");
     expect(connectionProblem(wrapped)).toBe("mac-offline");
     expect(connectionProblem(new ConnectionAttemptError("ws://192.168.1.2:6768: Direct handshake timed out", null))).toBeNull();
     // Still the connection's own, worded for the log and never for a screen.
@@ -39,21 +39,21 @@ describe("an attempt that failed on every path (#1316)", () => {
 
 describe("transport failures in plain words (#670)", () => {
   it.each([
-    [4401, "pairing-invalid", "this phone is no longer paired with your Mac; pair it again from Machines"],
-    [4404, "mac-offline", "your Mac is offline"],
-    [4408, "dropped", "the connection to your Mac dropped"],
-    [1001, "dropped", "the connection to your Mac dropped"],
-    [4409, "reconnecting", "the phone is reconnecting to your Mac"],
-    [1006, "network", "a network problem interrupted the connection to your Mac"],
-    [4413, "too-large", "a message too large for Relay dropped the connection to your Mac"],
-    [4999, "dropped", "the connection to your Mac dropped"],
+    [4401, "pairing-invalid", "this phone is no longer paired with your computer; pair it again from Machines"],
+    [4404, "mac-offline", "your computer is offline"],
+    [4408, "dropped", "the connection to your computer dropped"],
+    [1001, "dropped", "the connection to your computer dropped"],
+    [4409, "reconnecting", "the phone is reconnecting to your computer"],
+    [1006, "network", "a network problem interrupted the connection to your computer"],
+    [4413, "too-large", "a message too large for Relay dropped the connection to your computer"],
+    [4999, "dropped", "the connection to your computer dropped"],
   ] as const)("reads close %i as %s", (code, problem, text) => {
     expect(connectionProblem(new RelayOuterError(code, "", false))).toBe(problem);
     expect(problemText(problem)).toBe(text);
     expect(problemText(problem)).not.toMatch(/\d/);
   });
 
-  it("reads this side's own transport errors, and leaves the Mac's answers alone", () => {
+  it("reads this side's own transport errors, and leaves the computer's answers alone", () => {
     expect(connectionProblem(new Error("Host is disconnected"))).toBe("dropped");
     expect(connectionProblem(new Error("Relay connection unavailable"))).toBe("dropped");
     expect(connectionProblem(new Error("Relay connection closed"))).toBe("dropped");
@@ -68,7 +68,7 @@ describe("transport failures in plain words (#670)", () => {
     for (const problem of ["mac-offline", "dropped", "reconnecting", "network", "too-large", "no-answer"] as const) expect(canRetry(problem)).toBe(true);
   });
 
-  it("takes only an unanswered request to have most likely reached the Mac", () => {
+  it("takes only an unanswered request to have most likely reached the computer", () => {
     expect(mayHaveArrived("no-answer")).toBe(true);
     for (const problem of ["pairing-invalid", "mac-offline", "dropped", "reconnecting", "network", "too-large"] as const) expect(mayHaveArrived(problem)).toBe(false);
   });
@@ -98,7 +98,7 @@ describe("no transport message reaches a screen (#983)", () => {
   };
   // What is not the connection's: the Mac's refusal, said as it said it, and the pairing sheet's
   // own plain words for a pairing the person did not approve on the Mac in time.
-  const theMacs = new Set(["${result.refusal.code}: ${result.refusal.message}", "The Mac did not answer the pairing request in time"]);
+  const theMacs = new Set(["${result.refusal.code}: ${result.refusal.message}", "The computer did not answer the pairing request in time"]);
   const messages = [...thrown("./connection.ts"), ...thrown("./relay-client.ts")].filter((message) => !theMacs.has(message) && !message.includes("${"));
 
   it("finds the messages to check", () => {
@@ -113,8 +113,8 @@ describe("no transport message reaches a screen (#983)", () => {
     expect(screenMessage(error, "fallback")).toBe("fallback");
   });
 
-  it("keeps the Mac's own message, and never an address", () => {
-    expect(screenMessage(new Error("Open this conversation on your Mac."), "fallback")).toBe("Open this conversation on your Mac.");
+  it("keeps the computer's own message, and never an address", () => {
+    expect(screenMessage(new Error("Open this conversation on your computer."), "fallback")).toBe("Open this conversation on your computer.");
     expect(screenMessage(new Error("Could not reach 192.0.2.4"), "fallback")).toBe("fallback");
     expect(screenMessage(new Error("ws://mac.local:6768 refused"), "fallback")).toBe("fallback");
     expect(screenMessage(new RelayOuterError(4408, "", false), "fallback")).toBe("fallback");

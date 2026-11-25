@@ -136,7 +136,7 @@ export function CloudGitView({
           )}
         </div>
         {!connected && <p className="px-3 py-1 text-xs text-muted-foreground">Git appears once {machine ? machine.name : "the workspace"} is connected.</p>}
-        {error && <p role="alert" className="px-3 py-1 text-xs text-destructive">{error}</p>}
+        {error && <p role="alert" className="px-3 py-1 text-xs text-destructive">{error} <Button size="xs" variant="outline" onClick={refresh}>Retry</Button></p>}
         {connected && repositories?.length === 0 && <p className="px-3 py-3 text-xs text-muted-foreground">{machine ? machine.name : "This workspace"} has no Git repository.</p>}
         {connected && repositories && repositories.length > 1 && !selected && (
           <p className="px-3 py-3 text-xs text-muted-foreground" data-testid="cloud-git-choose">

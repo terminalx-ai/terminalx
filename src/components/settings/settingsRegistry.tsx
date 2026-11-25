@@ -1,5 +1,5 @@
 import { cloneElement, createContext, useContext, type ComponentProps, type ReactElement, type ReactNode } from "react";
-import { ThisComputer, thisComputer, secretStore, secretStoreShort, secretStoreThe, secretStoreWord } from "@/lib/platform";
+import { ThisComputer, thisComputer, profile, secretStore, secretStoreShort, secretStoreThe, secretStoreWord } from "@/lib/platform";
 import { createPortal } from "react-dom";
 import { SETTING_ROW_CLASS, type SettingRow } from "@/components/ui/controls";
 import { cn } from "@/lib/cn";
@@ -274,7 +274,7 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "appearance.mode", section: "appearance", title: "Mode",
-    description: "System follows macOS and switches with it.",
+    description: `System follows ${profile.osName} and switches with it.`,
     searchTerms: ["appearance", "mode", "dark", "light", "dark mode", "light mode", "system"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.mode" },
   }),

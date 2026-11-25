@@ -6,6 +6,7 @@ import { chatRows, filterCounts, isCloudRow, LIST_FILTERS, listSections, PINNED_
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { pinnedCloudRows } from "@mobile/cloud/pins";
 import { useApp } from "@mobile/state/AppProvider";
+import { useHostWords } from "@mobile/state/host-words";
 import { useMacPins } from "@mobile/state/mac-pins";
 import { connectionUsable, connectionWords, useConnectionState } from "@mobile/state/connection-view";
 import { Button, EmptyState } from "@mobile/ui/primitives";
@@ -29,6 +30,7 @@ const rememberFilter = (filter: ListFilter) => { chosen.filter = filter; };
 
 export default function SessionsScreen() {
   const app = useApp();
+  const words = useHostWords();
   const { palette } = useTheme();
   const router = useRouter();
   const [filter, setFilterState] = useState<ListFilter>(() => chosen.filter);
@@ -73,7 +75,7 @@ export default function SessionsScreen() {
   const counts = useMemo(() => filterCounts(rows), [rows]);
   const sections = useMemo(() => withPinnedCloud(listSections(rows, filter, querying), cloudRows, filter, querying), [cloudRows, filter, querying, rows]);
 
-  if (!app.activeHost) return <View style={[styles.page, { backgroundColor: palette.page }]}><EmptyState title="Choose a Mac" detail="Connect to a paired Mac before opening its sessions." /><Button label="Open Machines" onPress={() => router.navigate("/(tabs)")} /></View>;
+  if (!app.activeHost) return <View style={[styles.page, { backgroundColor: palette.page }]}><EmptyState title="Choose a computer" detail="Connect to a paired computer before opening its sessions." /><Button label="Open Machines" onPress={() => router.navigate("/(tabs)")} /></View>;
 
   const host = app.activeHost;
   const connected = connectionUsable(state);
@@ -89,12 +91,12 @@ export default function SessionsScreen() {
     closeSearch();
     void app.connectHost(machine.host);
   };
-  const empty = state === "updating" && !app.sessions.length ? <EmptyState title="Loading sessions" detail="Reading summaries from your Mac." />
+  const empty = state === "updating" && !app.sessions.length ? <EmptyState title="Loading sessions" detail={`Reading summaries from ${words.your}.`} />
     : query.trim() && !rows.length ? <EmptyState title="No matches" detail="No session's title, branch, project or tabs have those words." />
     : filter === "needs" && rows.length ? <EmptyState title="Nothing waits for you" detail="Sessions waiting for your answer or approval will appear here." />
     : filter === "working" && rows.length ? <EmptyState title="Nothing is working" detail="Sessions whose agent is working will appear here." />
-    : connected ? <EmptyState title="No sessions" detail="Sessions running on this Mac will appear here." />
-    : <EmptyState title="No saved sessions" detail="This Mac's sessions appear here once the phone connects." />;
+    : connected ? <EmptyState title="No sessions" detail={`Sessions running on ${words.this} will appear here.`} />
+    : <EmptyState title="No saved sessions" detail={`${words.This}'s sessions appear here once the phone connects.`} />;
   const waiting = filter === "needs" && counts.needs ? <Text style={[styles.footnote, { color: palette.muted }]}>{counts.needs === 1 ? "1 session is waiting for you." : `${counts.needs} sessions are waiting for you.`}</Text> : undefined;
 
   // The Mac, search and the filters stay at the top as the list scrolls under them, fading away there.

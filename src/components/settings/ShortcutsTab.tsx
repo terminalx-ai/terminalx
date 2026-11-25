@@ -5,6 +5,7 @@ import { cn } from "@/lib/cn";
 import { suspendHotkeys, useHotkey } from "@/lib/hotkeys";
 import { useOrganizationSwitchingEnabled } from "@/lib/organizationVisibilityGate";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
+import { dictationAvailable } from "@/lib/dictation";
 import { SystemShortcutSection } from "./FloatingWindowSettings";
 import { ChordCap, SHORTCUT_CARD, SHORTCUT_GROUP_TITLE } from "./Keycap";
 import { Pencil, Plus } from "@/icons";
@@ -112,6 +113,17 @@ const ROW_BUTTON = "grid size-6 shrink-0 place-items-center rounded-md text-fain
 
 const spoken = (binding: string) => (holdCode(binding) != null ? `hold ${bindingText(binding)}` : bindingText(binding));
 
+/** Beside the dictation shortcut where dictation cannot run: the keys are kept, and do nothing here. */
+function DictationOffNote() {
+  const [available, setAvailable] = useState<boolean | null>(null);
+  useEffect(() => {
+    let live = true;
+    void dictationAvailable().then((ok) => { if (live) setAvailable(ok); });
+    return () => { live = false; };
+  }, []);
+  return available === false ? <span className="ml-2 text-xs text-muted-foreground">{isMac ? "Not available" : "macOS only"}</span> : null;
+}
+
 function ShortcutRow({
   action,
   keymap,
@@ -152,7 +164,7 @@ function ShortcutRow({
   const item = (
     <li ref={row} className="flex flex-col px-3 text-[13px]" data-shortcut={action.id}>
       <div className="flex min-h-[35px] min-w-0 items-center gap-3 py-1">
-        <span className="min-w-0 flex-1">{action.label}</span>
+        <span className="min-w-0 flex-1">{action.label}{action.id === "composer.dictate" && <DictationOffNote />}</span>
         <span className="flex shrink-0 items-center gap-1">
           {action.fixed ? (
             <>

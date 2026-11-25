@@ -72,7 +72,7 @@ export const DIRECT_GRACE_MS = 3_000;
 export const FLAP_WINDOW_MS = 5_000;
 export const FLAP_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;
 /** Relay close codes a phone can be given, in words, where the number alone tells a person nothing. */
-const RELAY_REFUSALS: Partial<Record<number, string>> = { 4404: "the Mac is not connected to Relay" };
+const RELAY_REFUSALS: Partial<Record<number, string>> = { 4404: "the computer is not connected to Relay" };
 
 /**
  * The connection to a paired Mac.
@@ -278,7 +278,7 @@ export class HostConnection {
    */
   retryNow(): void {
     if (!this.active || this.client || this.backgrounded) return;
-    if (this.heldByMac) return this.restart("reconnect was chosen after a disconnect on the Mac", true);
+    if (this.heldByMac) return this.restart("reconnect was chosen after a disconnect on the computer", true);
     if (this.skipDelay) this.skipDelay();
     else if (this.attempting !== this.generation) this.restart();
   }
@@ -528,7 +528,7 @@ export class HostConnection {
         clearInterval(this.refreshTimer);
         this.client = null;
         if (this.heldByMac) {
-          this.log("info", "Disconnected on the Mac", `${hostDisplayName(host)} · reconnect from this phone to connect again`, { kind: "disconnected-on-mac" });
+          this.log("info", "Disconnected on the computer", `${hostDisplayName(host)} · reconnect from this phone to connect again`, { kind: "disconnected-on-mac" });
           this.emitStage("disconnected-on-mac", 0);
           return;
         }
@@ -584,7 +584,7 @@ export class HostConnection {
   private holdForMac(params: unknown): void {
     this.heldByMac = true;
     const reason = params && typeof params === "object" && typeof (params as { reason?: unknown }).reason === "string" ? (params as { reason: string }).reason : "";
-    this.log("info", "The Mac disconnected this phone", reason ? safeError(reason) : undefined);
+    this.log("info", "The computer disconnected this phone", reason ? safeError(reason) : undefined);
     if (!this.active) return;
     const held = { ...this.active.host, disconnectedOnMacAt: Date.now() };
     this.active.host = held;

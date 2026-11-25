@@ -9,13 +9,14 @@ const mocks = vi.hoisted(() => ({
   setOrchestratorRuns: vi.fn(),
   setOpenCode: vi.fn(),
   setBots: vi.fn(),
+  unsupported: vi.fn(),
   refreshHarnesses: vi.fn(async () => {}),
   refreshModels: vi.fn(async () => {}),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 
 vi.mock("@/lib/api", () => ({
-  experimental: { settings: mocks.settings, setNativeCodex: mocks.setNativeCodex, setSessionCost: mocks.setSessionCost, setOrchestratorRuns: mocks.setOrchestratorRuns, setOpenCode: mocks.setOpenCode, setBots: mocks.setBots },
+  experimental: { settings: mocks.settings, setNativeCodex: mocks.setNativeCodex, setSessionCost: mocks.setSessionCost, setOrchestratorRuns: mocks.setOrchestratorRuns, setOpenCode: mocks.setOpenCode, setBots: mocks.setBots, unsupported: mocks.unsupported },
   errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)),
 }));
 
@@ -38,6 +39,7 @@ beforeEach(() => {
   mocks.setOrchestratorRuns.mockReset();
   mocks.setOpenCode.mockReset();
   mocks.setBots.mockReset();
+  mocks.unsupported.mockReset().mockResolvedValue({});
   mocks.refreshHarnesses.mockClear();
   mocks.refreshModels.mockClear();
 });
@@ -221,5 +223,24 @@ describe("Settings → Experimental: OpenCode (PRO-157)", () => {
     expect((await screen.findByRole("alert")).textContent).toBe("The settings file has a problem.");
     expect(openCode().getAttribute("aria-checked")).toBe("false");
     expect(mocks.refreshHarnesses).not.toHaveBeenCalled();
+  });
+});
+
+describe("Settings → Experimental: switches this computer cannot run", () => {
+  it("keeps a switch the runtime says cannot run here off and disabled, and says why", async () => {
+    mocks.settings.mockResolvedValue({ nativeCodex: false, localVmTasks: true, bots: true });
+    mocks.unsupported.mockResolvedValue({ localVmTasks: "Local VM tasks need a Mac with Apple silicon, or Linux." });
+    render(<ExperimentalTab />);
+    const vm = () => screen.getByRole("switch", { name: "Local VM tasks" });
+    await waitFor(() => expect(screen.getByTestId("experimental-unsupported-note").textContent).toBe("Local VM tasks need a Mac with Apple silicon, or Linux."));
+    expect(vm().hasAttribute("disabled")).toBe(true);
+    expect(vm().getAttribute("aria-checked")).toBe("false");
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Bots" }).hasAttribute("disabled")).toBe(false));
+  });
+
+  it("says nothing where every switch can run", async () => {
+    render(<ExperimentalTab />);
+    await waitFor(() => expect(toggle().hasAttribute("disabled")).toBe(false));
+    expect(screen.queryByTestId("experimental-unsupported-note")).toBeNull();
   });
 });

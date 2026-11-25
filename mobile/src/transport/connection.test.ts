@@ -396,7 +396,7 @@ describe("path failures, cancellations and network changes", () => {
     director(); mocks.refused.set("relay", 4404);
     connection.start(relayHost, relayCredential); await flush();
     // Reported while the LAN addresses are still pending, as the connection card shows it.
-    expect(logged("Relay path failed").map((entry) => entry.detail)).toEqual(["https://relay.example: relay_outer_4404 (the Mac is not connected to Relay)"]);
+    expect(logged("Relay path failed").map((entry) => entry.detail)).toEqual(["https://relay.example: relay_outer_4404 (the computer is not connected to Relay)"]);
     expect(logged("Connection attempt failed")).toEqual([]);
     await vi.advanceTimersByTimeAsync(DIRECT_GRACE_MS - 1);
     expect(logged("Connection attempt failed")).toEqual([]);
@@ -582,12 +582,12 @@ describe("a lost connection", () => {
 });
 
 // PRO-314 (docs/PAIRING-APPROVAL.md): the phone's name, and Disconnect on the Mac.
-describe("the Mac's paired-device controls", () => {
+describe("the computer's paired-device controls", () => {
   const device = { label: "Google Pixel 8", platform: "android" as const };
   const live = () => mocks.clients.filter((client) => client.state === "connected");
   const sockets = () => mocks.clients.length;
 
-  it.each(["refuse", "fail"] as const)("tells the Mac the phone's name on every connection, and stays connected when it can't take it (%s)", async (answer) => {
+  it.each(["refuse", "fail"] as const)("tells the computer the phone's name on every connection, and stays connected when it can't take it (%s)", async (answer) => {
     mocks.describe = answer;
     connection = new HostConnection(device);
     const stages: string[] = []; connection.onStage((stage) => stages.push(stage));
@@ -626,7 +626,7 @@ describe("the Mac's paired-device controls", () => {
     expect(mocks.writes.mock.calls.at(-1)![0]).not.toHaveProperty("disconnectedOnMacAt");
   });
 
-  it("lets Retry resume after a disconnect on the Mac", async () => {
+  it("lets Retry resume after a disconnect on the computer", async () => {
     mocks.reachable.add(lan); connection.start(host, credential); await flush();
     live()[0].notify({ method: "pairing.disconnected", params: { reason: "disconnected-on-mac" } });
     live()[0].drop(new RelayOuterError(1000)); await flush();
@@ -680,7 +680,7 @@ describe("a refused credential", () => {
     expect(reported()).toEqual({ events: [], retainedSince: undefined, pairings: [] });
   });
 
-  it("keeps the pairing through a network failure, another relay refusal, a refused grace credential and a disconnect on the Mac", async () => {
+  it("keeps the pairing through a network failure, another relay refusal, a refused grace credential and a disconnect on the computer", async () => {
     mocks.refused.set("relay:grace", new CredentialRefusedError()); mocks.refused.set("relay:current", 4404);
     mocks.reachable.add(lan); connection.start(owned, relayCredential); await flush();
     live()[0].drop(new RelayOuterError(1006)); await vi.advanceTimersByTimeAsync(FLAP_DELAYS_MS[0]); await flush();
@@ -699,7 +699,7 @@ describe("a refused credential", () => {
     const failures = () => (reported().events as { kind: string; classification?: string }[]).filter(({ kind }) => kind === "attempt-failed");
     const failedDetails = () => logs.filter((entry) => entry.message === "Connection attempt failed").map((entry) => entry.detail ?? "");
 
-    it("reports the Mac offline when the relay says so and the LAN addresses never answer", async () => {
+    it("reports the computer offline when the relay says so and the LAN addresses never answer", async () => {
       mocks.refused.set("relay", 4404);
       connection.start(owned, relayCredential); await flush();
       await vi.advanceTimersByTimeAsync(DIRECT_GRACE_MS); await flush();

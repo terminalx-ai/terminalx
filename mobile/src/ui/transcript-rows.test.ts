@@ -238,7 +238,7 @@ describe("where the reader's message is", () => {
     expect(rows.map((row) => row.kind === "prompt" ? row.note : undefined)).toEqual([expect.stringMatching(/^Delivery was not confirmed/), expect.stringMatching(/^Not sent/)]);
   });
 
-  it("still ticks a message the Mac had that changed on the way, or that the agent passed over", () => {
+  it("still ticks a message the computer had that changed on the way, or that the agent passed over", () => {
     expect(messageDelivery({ sent: "what was typed" }, false)).toBe("delivered");
     expect(messageDelivery({ replaced: true }, false)).toBe("delivered");
     expect(messageDelivery({}, true)).toBe("queued");

@@ -400,7 +400,7 @@ impl<'a> Store<'a> {
         validate_key(key)?;
         let revision = uuid::Uuid::new_v4().to_string();
         self.secrets.set(SERVICE, &account(agent, &revision), key.as_bytes())
-            .map_err(|_| anyhow::anyhow!("Could not save the key to the Keychain. Nothing changed."))?;
+            .map_err(|_| anyhow::anyhow!(crate::platform_profile::localize("Could not save the key to the Keychain. Nothing changed.")))?;
         let imported = from_shell.is_some();
         let committed = self.update(agent, |entry| {
             let old = entry.key.replace(Saved { revision: revision.clone(), saved_at: chrono::Utc::now().to_rfc3339(), from_shell });
@@ -438,7 +438,7 @@ impl<'a> Store<'a> {
         })?;
         if let Some(old) = old {
             self.secrets.delete(SERVICE, &account(agent, &old.revision))
-                .map_err(|_| anyhow::anyhow!("TerminalX no longer uses the key, but could not delete it from the Keychain. Delete the item {SERVICE} in Keychain Access."))?;
+                .map_err(|_| anyhow::anyhow!(undeleted_key()))?;
         }
         Ok(())
     }
@@ -481,11 +481,11 @@ impl<'a> Store<'a> {
     fn item(&self, agent: Agent, revision: &str) -> Result<Zeroizing<String>> {
         let bytes = Zeroizing::new(
             self.secrets.get(SERVICE, &account(agent, revision))
-                .map_err(|_| anyhow::anyhow!("Could not read {}'s API key from the Keychain.", agent.label()))?
-                .with_context(|| format!("{}'s API key is missing from the Keychain. Save it again in Settings → Agents.", agent.label()))?,
+                .map_err(|_| anyhow::anyhow!(crate::platform_profile::localize(&format!("Could not read {}'s API key from the Keychain.", agent.label()))))?
+                .with_context(|| crate::platform_profile::localize(&format!("{}'s API key is missing from the Keychain. Save it again in Settings → Agents.", agent.label())))?,
         );
-        let key = Zeroizing::new(String::from_utf8(bytes.to_vec()).map_err(|_| anyhow::anyhow!("The Keychain item for {}'s API key is not a key.", agent.label()))?);
-        validate_key(&key).map_err(|_| anyhow::anyhow!("The Keychain item for {}'s API key is not a key.", agent.label()))?;
+        let key = Zeroizing::new(String::from_utf8(bytes.to_vec()).map_err(|_| anyhow::anyhow!("The saved item for {}'s API key is not a key.", agent.label()))?);
+        validate_key(&key).map_err(|_| anyhow::anyhow!("The saved item for {}'s API key is not a key.", agent.label()))?;
         Ok(key)
     }
 
@@ -506,7 +506,7 @@ impl<'a> Store<'a> {
         validate_key(key)?;
         let revision = uuid::Uuid::new_v4().to_string();
         self.secrets.set(SERVICE, &account(agent, &revision), key.as_bytes())
-            .map_err(|_| anyhow::anyhow!("Could not save the key to the Keychain. Nothing changed."))?;
+            .map_err(|_| anyhow::anyhow!(crate::platform_profile::localize("Could not save the key to the Keychain. Nothing changed.")))?;
         let id = crate::agent_accounts::new_id();
         let stored = crate::agent_accounts::Stored::key(&id, label, Saved { revision: revision.clone(), saved_at: chrono::Utc::now().to_rfc3339(), from_shell: None });
         match self.update(agent, |entry| {
@@ -525,7 +525,17 @@ impl<'a> Store<'a> {
     /// Keychain item is deleted.
     pub(crate) fn delete_key_item(&self, agent: Agent, revision: &str) -> Result<()> {
         self.secrets.delete(SERVICE, &account(agent, revision))
-            .map_err(|_| anyhow::anyhow!("TerminalX no longer uses the key, but could not delete it from the Keychain. Delete the item {SERVICE} in Keychain Access."))
+            .map_err(|_| anyhow::anyhow!(undeleted_key()))
+    }
+}
+
+/// A key nothing uses any more is still saved: what to tell the person. Only
+/// a Mac has an app to delete it by hand.
+fn undeleted_key() -> String {
+    if crate::platform_profile::FAMILY == "macos" {
+        format!("TerminalX no longer uses the key, but could not delete it from the Keychain. Delete the item {SERVICE} in Keychain Access.")
+    } else {
+        crate::platform_profile::localize("TerminalX no longer uses the key, but could not delete it from the Keychain.")
     }
 }
 
@@ -1326,7 +1336,7 @@ mod tests {
         secrets.fail_writes(true);
         let store = store(dir.path(), &secrets);
         let error = store.save_key(Agent::Claude, KEY, None).unwrap_err().to_string();
-        assert_eq!(error, "Could not save the key to the Keychain. Nothing changed.");
+        assert_eq!(error, crate::platform_profile::localize("Could not save the key to the Keychain. Nothing changed."));
         assert_eq!(store.entry(Agent::Claude).unwrap(), Entry::default());
         assert!(!dir.path().join(INDEX).exists());
     }
@@ -1346,7 +1356,7 @@ mod tests {
         secrets.set(SERVICE, &account(Agent::Claude, revision), b"not a key\nat all").unwrap();
         std::fs::write(dir.path().join(INDEX), serde_json::to_vec(&json_index(Agent::Claude, revision)).unwrap()).unwrap();
         let error = store.read(Agent::Claude).unwrap_err().to_string();
-        assert_eq!(error, "The Keychain item for Claude Code's API key is not a key.");
+        assert_eq!(error, "The saved item for Claude Code's API key is not a key.");
         // An index someone broke by pasting a key into it is not echoed back.
         std::fs::write(dir.path().join(INDEX), format!("{{\"claude\": {KEY}")).unwrap();
         let error = store.index().unwrap_err().to_string();
@@ -1801,7 +1811,7 @@ mod tests {
         let revision = store.entry(Agent::Claude).unwrap().key.unwrap().revision;
         secrets.delete(SERVICE, &account(Agent::Claude, &revision)).unwrap();
         let status = status_of(&store, Agent::Claude).unwrap();
-        assert_eq!(status.problem.as_deref(), Some("Claude Code's API key is missing from the Keychain. Save it again in Settings → Agents."));
+        assert_eq!(status.problem.as_deref(), Some(crate::platform_profile::localize("Claude Code's API key is missing from the Keychain. Save it again in Settings → Agents.").as_str()));
     }
 
     #[test]

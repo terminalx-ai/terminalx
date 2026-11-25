@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fileManager } from "@/lib/platform";
 
 vi.mock("@tauri-apps/api/core", async () => {
   const { backend } = await import("@/test/tabsBackend");
@@ -194,7 +195,7 @@ describe("a tab's right-click menu", () => {
       "Tab title",
       "Working directory",
       "Conversation id",
-      "Reveal working directory in the file manager",
+      `Reveal working directory in ${fileManager}`,
       "Skills for this agent…",
       "Session “Session a”",
       "Archive",
@@ -229,7 +230,7 @@ describe("a tab's right-click menu", () => {
     for (const absent of ["Switch to terminal view", "Fork conversation to new session", "Open in floating window", "Restart agent", "Restart shell", "Reload", "Conversation id", "Page address", "Skills for this agent…", "Mute notifications for this tab"]) {
       expect(offered(absent)).toBe(false);
     }
-    for (const present of ["Rename tab…", "Duplicate tab", "Working directory", "Reveal working directory in the file manager", "Session “Session a”", "Pin tab", "Close tab"]) expect(offered(present)).toBe(true);
+    for (const present of ["Rename tab…", "Duplicate tab", "Working directory", `Reveal working directory in ${fileManager}`, "Session “Session a”", "Pin tab", "Close tab"]) expect(offered(present)).toBe(true);
     // An exited shell can be started again.
     act(() => backend.emit("pty_exit", { id: shell, code: 1 }));
     expect(offered("Restart shell")).toBe(true);
@@ -238,7 +239,7 @@ describe("a tab's right-click menu", () => {
     render(<Menu tab="browser:page-feature" />);
     for (const present of ["Reload", "Page address", "Tab title", "Duplicate tab", "Pin tab"]) expect(offered(present)).toBe(true);
     // A page belongs to the workspace, not to a session or a folder of its own.
-    for (const absent of ["Working directory", "Reveal working directory in the file manager", "Session “Session a”", "Restart agent", "Mute notifications for this tab", "Fork conversation to new session"]) {
+    for (const absent of ["Working directory", `Reveal working directory in ${fileManager}`, "Session “Session a”", "Restart agent", "Mute notifications for this tab", "Fork conversation to new session"]) {
       expect(offered(absent)).toBe(false);
     }
   });
@@ -308,7 +309,7 @@ describe("a tab's right-click menu", () => {
     expect(copied()).toEqual({ text: "Fix flaky test" });
     await choose("Working directory");
     expect(copied()).toEqual({ text: FEATURE });
-    await choose("Reveal working directory in the file manager");
+    await choose(`Reveal working directory in ${fileManager}`);
     expect(native.reveal).toHaveBeenCalledWith(FEATURE);
 
     await choose("Fork conversation to new session");
@@ -437,7 +438,7 @@ describe("a tab's right-click menu", () => {
     const off = ["Rename chat…", "Mark as unread", "Duplicate tab", "Fork conversation to new session", "Hand off to Claude Code", "Restart agent", "Pin tab", "Mute notifications for this tab", "Archive", "Delete…", "Move tab right", "Close tab", "Close other tabs", "Close all tabs…", "New agent tab", "New terminal", "New browser tab"];
     for (const name of off) expect(item(name).getAttribute("aria-disabled")).toBe("true");
     // Looking is still allowed.
-    for (const name of ["Tab title", "Working directory", "Reveal working directory in the file manager", "Skills for this agent…"]) expect(item(name).getAttribute("aria-disabled")).toBeNull();
+    for (const name of ["Tab title", "Working directory", `Reveal working directory in ${fileManager}`, "Skills for this agent…"]) expect(item(name).getAttribute("aria-disabled")).toBeNull();
     for (const name of ["Close tab", "Pin tab", "New terminal", "Duplicate tab"]) await choose(name);
     expect(backend.calls.filter((call) => ["remove_tab", "set_tab_layout", "pty_spawn", "add_tab"].includes(call.command))).toEqual([]);
   });

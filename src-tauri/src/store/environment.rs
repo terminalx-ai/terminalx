@@ -49,7 +49,7 @@ pub struct Launch {
 
 impl Launch {
     pub(crate) fn require_available(&self) -> Result<()> {
-        ensure!(!self.stamp.unavailable, "Environment overrides are unavailable. Open TerminalX Settings → Environment, restore Keychain access, then retry.");
+        ensure!(!self.stamp.unavailable, "{}", crate::platform_profile::localize("Environment overrides are unavailable. Open TerminalX Settings → Environment, restore access to the Keychain, then retry."));
         Ok(())
     }
 }
@@ -210,13 +210,14 @@ impl Store<'_> {
             return Ok(Values::new());
         }
         let bytes = self.secrets.get(SERVICE, &scope.revision)
-            .map_err(|_| anyhow::anyhow!("Could not read environment values from Keychain."))?
-            .context("Environment values are missing from Keychain. Restore the Keychain item to use these overrides.")?;
+            .map_err(|_| anyhow::anyhow!(crate::platform_profile::localize("Could not read environment values from the Keychain.")))?
+            .with_context(|| crate::platform_profile::localize("Environment values are missing from the Keychain. Save them again in Settings → Environment to use these overrides."))?;
         let values: Values = serde_json::from_slice(&bytes)
-            .map_err(|_| anyhow::anyhow!("Invalid environment values in Keychain."))?;
+            .map_err(|_| anyhow::anyhow!(crate::platform_profile::localize("Invalid environment values in the Keychain.")))?;
         ensure!(
             values.keys().cloned().collect::<BTreeSet<_>>() == scope.names,
-            "Environment index and Keychain disagree."
+            "{}",
+            crate::platform_profile::localize("Environment index and the Keychain disagree.")
         );
         validate_values(&values)?;
         Ok(values)
@@ -255,9 +256,9 @@ impl Store<'_> {
                 self.secrets
                     .set(SERVICE, &scope.revision, &serde_json::to_vec(&values)?)
                     .map_err(|_| {
-                        anyhow::anyhow!(
-                            "Could not save environment values to Keychain. Nothing changed."
-                        )
+                        anyhow::anyhow!(crate::platform_profile::localize(
+                            "Could not save environment values to the Keychain. Nothing changed."
+                        ))
                     })?;
             }
             let committed = self.transaction(|| {
@@ -666,7 +667,7 @@ pub fn wait_ready(project: Option<&str>) -> bool {
 /// instead of silently sending a prompt with different credentials/endpoints.
 pub fn prepare_unattended(cwd: &str, running: Option<Status>) -> Result<()> {
     if let Some(status) = running {
-        ensure!(!status.unavailable, "This agent started without environment overrides. Restart the agent after restoring Keychain access, then retry this run. No prompt was sent.");
+        ensure!(!status.unavailable, "{}", crate::platform_profile::localize("This agent started without environment overrides. Restart the agent after restoring access to the Keychain, then retry this run. No prompt was sent."));
         return Ok(());
     }
     check_unattended(prepare_launch(cwd))
@@ -681,7 +682,7 @@ fn prepare_launch(cwd: &str) -> bool { wait_ready(Some(cwd)) }
 fn prepare_launch(_cwd: &str) -> bool { true }
 
 fn check_unattended(ready: bool) -> Result<()> {
-    ensure!(ready, "Environment overrides are unavailable. Open TerminalX Settings → Environment, unlock Keychain if requested, then retry this run. No prompt was sent.");
+    ensure!(ready, "{}", crate::platform_profile::localize("Environment overrides are unavailable. Open TerminalX Settings → Environment, unlock the Keychain if asked, then retry this run. No prompt was sent."));
     Ok(())
 }
 

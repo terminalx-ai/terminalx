@@ -12,6 +12,7 @@ import { cn } from "@/lib/cn";
 import { providerActionMessage } from "@/components/settings/ProviderControls";
 import { FieldLabel, PrimaryButton, StepActions, StepError, StepPage } from "./FlowLayout";
 import type { StepProps } from "./stepProps";
+import { hasSecureDialog, SECURE_DIALOG_OFF } from "@/lib/platform";
 
 const DISCLOSURE_VERSION = "cloud-provider-connections-2026-08-13";
 
@@ -470,6 +471,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
                 A secure system dialog asks for the key, so it never passes through this window. It is saved only after {provider.displayName} accepts it
                 {connection.state !== "not-connected" ? ", and only for the same provider account" : ""}.
               </p>
+              {!hasSecureDialog && <p role="note" className="mt-2 text-[12.5px] leading-[19px] text-warning">{SECURE_DIALOG_OFF}</p>}
               <label className="mt-2.5 flex items-start gap-2 text-[12.5px] leading-[19px]">
                 <input type="checkbox" className="mt-[3px]" checked={consented} disabled={busy === "connect"} onChange={(event) => setConsented(event.target.checked)} />
                 <span>
@@ -477,7 +479,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
                 </span>
               </label>
               <div className="mt-3 flex gap-2">
-                <Button size="sm" disabled={!consented || Boolean(busy)} onClick={() => void connect()}>
+                <Button size="sm" disabled={!consented || Boolean(busy) || !hasSecureDialog} onClick={() => void connect()}>
                   {busy === "connect" && <Loader2 className="animate-spin" />}
                   {connection.state === "not-connected" ? `Connect ${provider.displayName}` : "Enter the new key"}
                 </Button>

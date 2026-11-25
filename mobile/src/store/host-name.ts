@@ -18,7 +18,15 @@ import type { StoredHost } from "./hosts";
  * anything. The host id does.
  */
 export const HOST_NAME_MAX = 64;
-export const FALLBACK_HOST_LABEL = "Paired Mac";
+export const FALLBACK_HOST_LABEL = "Paired computer";
+/** The label pairing stored before it named no system: kept on older entries, and never shown for a PC. */
+const LEGACY_FALLBACK_LABEL = "Paired Mac";
+
+/** Whether a stored label is only the stand-in pairing gave, not a name. */
+export function isFallbackLabel(label: string | null | undefined): boolean {
+  const cleaned = cleanHostName(label);
+  return cleaned === FALLBACK_HOST_LABEL || cleaned === LEGACY_FALLBACK_LABEL;
+}
 
 // Controls, and the invisible characters that reorder or hide text.
 const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
@@ -35,7 +43,7 @@ type Named = Pick<StoredHost, "label" | "hostName" | "customName">;
 
 /** The one name to show for a computer. */
 export function hostDisplayName(host: Named): string {
-  return cleanHostName(host.customName) ?? cleanHostName(host.hostName) ?? cleanHostName(host.label) ?? FALLBACK_HOST_LABEL;
+  return cleanHostName(host.customName) ?? cleanHostName(host.hostName) ?? (isFallbackLabel(host.label) ? null : cleanHostName(host.label)) ?? FALLBACK_HOST_LABEL;
 }
 
 /** Whether the name shown was typed on this phone. */

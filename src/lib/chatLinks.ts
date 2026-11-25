@@ -2,6 +2,7 @@ import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { fs, type LocalPathInfo } from "@/lib/api";
 import { openBrowserTab } from "@/lib/browser";
 import { fileKind, openFile } from "@/lib/editors";
+import { fileManager } from "@/lib/platform";
 import { getPrefs } from "@/lib/prefs";
 import { scrollToInOwnScroller } from "@/lib/shellScroll";
 
@@ -240,7 +241,7 @@ export async function openChatLinkExternally(destination: ChatLinkDestination, c
 }
 
 export async function revealChatLink(destination: ChatLinkDestination, context: ChatLinkContext, info?: LocalPathInfo): Promise<void> {
-  if (destination.kind !== "local") throw new Error("Only files can be revealed in the file manager.");
+  if (destination.kind !== "local") throw new Error(`Only files can be revealed in ${fileManager}.`);
   const target = info ?? (await inspectChatFile(destination, context));
   await revealItemInDir(target.path);
 }
