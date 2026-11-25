@@ -3645,9 +3645,20 @@ fn restartable(rig: &Rig) {
     index::save(&[entry]).unwrap();
 }
 
+// Each stop of the unconfirmed launch waits out the product's kill wait
+// (`RESTART_WAIT`): the two cases are independent tests, run side by side.
 #[test]
-fn restart_stop_retains_unconfirmed_launch_during_wait_and_after_failed_completion() {
-    for complete_failure in [false, true] {
+fn restart_stop_retains_unconfirmed_launch_during_wait_and_after_failed_completion_during_wait() {
+    restart_stop_retains_unconfirmed_launch(false);
+}
+
+#[test]
+fn restart_stop_retains_unconfirmed_launch_during_wait_and_after_failed_completion_after_failed_completion() {
+    restart_stop_retains_unconfirmed_launch(true);
+}
+
+fn restart_stop_retains_unconfirmed_launch(complete_failure: bool) {
+    {
         let rig = Rig::with_live_pane();
         restartable(&rig);
         let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
