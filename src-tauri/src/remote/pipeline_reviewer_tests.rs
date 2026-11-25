@@ -50,10 +50,13 @@ async fn reviewer_rpc_survives_real_list_limits_replacement_and_history_eviction
     assert_eq!(listed["truncated"], true);
     assert_eq!(request(&rpc, &peer, "pipeline.reviewers", json!({})).await, identities);
     // Replacement and eviction happen while this desktop is disconnected.
+    // The large note has served the list limit above. Dropped with the
+    // replacement, it is not read and written again by every insert below
+    // until this record is evicted.
+    pipeline.note = None;
     pipeline.reviewer.as_mut().unwrap().session_id = "replacement".into();
     crate::issue_pipeline::store::commit(&mut pipeline).unwrap();
     crate::issue_pipeline::store::set_switches(&pipeline.id, |p| p.stopped = true).unwrap();
-    pipeline.note = None;
     pipeline.stopped = true;
     pipeline.reviewer.as_mut().unwrap().session_id = "foreign".into();
     for n in 0..200 {
