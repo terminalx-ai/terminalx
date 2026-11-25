@@ -67,7 +67,13 @@ fn main() {
     }).unwrap();
     let reply = policy.prompt_once(&request, &window).expect("could not present the fixture");
     std::thread::spawn(move || {
-        let result = reply.recv().expect("consent sheet disconnected");
+        let result = match reply.recv() {
+            Ok(result) => result,
+            Err(error) => {
+                eprintln!("consent sheet disconnected: {error}");
+                std::process::exit(1);
+            }
+        };
         println!("Consent: {result:?}, state: {:?}", request.state());
         std::process::exit(0);
     });
