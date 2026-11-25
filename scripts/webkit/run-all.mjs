@@ -245,18 +245,28 @@ export function shardWeights(names, times = checkTimes()) {
  * Part `index` (from 1) of `count` of `names`, each name in exactly one part, dealt by measured time (`shardWeights`)
  * so each part's checks take about as long. The kinds are dealt one after another: the Vite checks first, so every
  * part gets its share of them (they start slowest, and at most `viteAtOnce` run at once); then the `dealtApart` ones,
- * which run alone, after the rest of their part; then the others. Within a kind, the longest check (ties: by name) goes
- * first, to the part with the least time so far among those with the fewest of its kind; for the others that is any
- * part. Ties between parts go to the lower part number. So which part a check is in depends only on the names, the
- * scripts and the times, never on the host or on the order of check-times.json: the checks left out on Linux are left
- * out after the parts are dealt.
+ * which run alone, after the rest of their part; then each split script's entries (`name:part`), which `pool` runs one
+ * at a time, so that they are in different parts while there are parts enough; then the others. Within a kind, the
+ * longest check (ties: by name) goes first, to the part with the least time so far among those with the fewest of its
+ * kind; for the others that is any part. Ties between parts go to the lower part number. So which part a check is in
+ * depends only on the names, the scripts and the times, never on the host or on the order of check-times.json: the
+ * checks left out on Linux are left out after the parts are dealt.
+ *
+ * The part is returned longest first (ties: by name), the order `pool` starts them in. In `checks`' order a check of
+ * 86 to 120 s was among the last two of its part in three of the four parts, so it started when the rest were nearly
+ * done and its part ran on alone with it (#1514: the replay of 12 runs in its pull request).
  */
 export function shard(names, index, count, times = checkTimes()) {
   const weight = shardWeights(names, times);
+  const entry = (name) => name.includes(":");
+  const ordinary = names.filter((name) => !entry(name) && !dealtApart.has(name));
   const kinds = [
-    { names: names.filter((name) => startsVite(name) && !dealtApart.has(name)), spread: true },
+    { names: ordinary.filter(startsVite), spread: true },
     { names: names.filter((name) => dealtApart.has(name)), spread: true },
-    { names: names.filter((name) => !startsVite(name) && !dealtApart.has(name)), spread: false },
+    // Each split script's entries, a kind of their own: `pool` runs them one at a time, so two in one part are a floor
+    // of their summed time under that part however even its sum is (agent-dashboard's :1 and :2, 312 s in one part).
+    ...[...new Set(names.filter(entry).map((name) => name.split(":")[0]))].map((script) => ({ names: names.filter((name) => entry(name) && name.split(":")[0] === script), spread: true })),
+    { names: ordinary.filter((name) => !startsVite(name)), spread: false },
   ];
   const parts = Array.from({ length: count }, () => ({ names: new Set(), time: 0 }));
   for (const kind of kinds) {
@@ -274,7 +284,7 @@ export function shard(names, index, count, times = checkTimes()) {
       held[chosen]++;
     }
   }
-  return names.filter((name) => parts[index - 1].names.has(name));
+  return [...parts[index - 1].names].sort((a, b) => weight.get(b) - weight.get(a) || (a < b ? -1 : a > b ? 1 : 0));
 }
 
 /**
