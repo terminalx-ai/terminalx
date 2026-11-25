@@ -6,6 +6,7 @@ import { ChevronLeft, ChevronRight, Clock, MessageSquare, Pause, Play } from "lu
 import { ago, dutyOutcome, dutyWhen, type BotHome, type BotItem } from "@mobile/data/bots";
 import { useApp } from "@mobile/state/AppProvider";
 import { useBotHome, useNow } from "@mobile/state/bots";
+import { botsOffDetail, useHostWords, type HostWords } from "@mobile/state/host-words";
 import { connectionUsable, useConnectionState } from "@mobile/state/connection-view";
 import { screenMessage } from "@mobile/transport/connection-errors";
 import { BotAvatar, BotQuestionCard, BotSection, NeedsYouHeading, useBotAnswer } from "@mobile/ui/bots";
@@ -22,7 +23,7 @@ const PARTS = ["Home", "Chat", "Duties", "Role"] as const;
 type Part = (typeof PARTS)[number];
 
 /** Where a bot "runs on", in words; a place a newer Mac writes is shown as itself. */
-const runsOn = (place: string) => place === "thisMac" ? "This Mac" : place;
+const runsOn = (place: string, words: HostWords) => place === "thisMac" ? words.This : place;
 
 /**
  * A bot's home on the phone (23.08): Home, Chat, Duties and Role, with Pause
@@ -31,6 +32,7 @@ const runsOn = (place: string) => place === "thisMac" ? "This Mac" : place;
 export default function BotScreen() {
   const params = useLocalSearchParams<{ botId: string; name?: string; item?: string }>();
   const app = useApp();
+  const words = useHostWords();
   const router = useRouter();
   const { palette } = useTheme();
   const insets = useSafeAreaInsets();
@@ -51,7 +53,7 @@ export default function BotScreen() {
     const act = bot.paused ? app.api.resumeBot(bot.id) : app.api.pauseBot(bot.id);
     setSwitching(true);
     void act.then(() => home.refresh())
-      .catch((cause: unknown) => Alert.alert(bot.paused ? `Could not resume ${bot.name}` : `Could not pause ${bot.name}`, screenMessage(cause, "Couldn’t reach the Mac. Try again once it is connected.")))
+      .catch((cause: unknown) => Alert.alert(bot.paused ? `Could not resume ${bot.name}` : `Could not pause ${bot.name}`, screenMessage(cause, `Couldn’t reach ${words.the}. Try again once it is connected.`)))
       .finally(() => setSwitching(false));
   };
   const openChat = (sessionId: string, tabId: string | null, title: string) => {
@@ -68,7 +70,7 @@ export default function BotScreen() {
       {bot ? <BotAvatar bot={bot} size={36} /> : null}
       <View style={styles.titles}>
         <Text accessibilityRole="header" numberOfLines={1} style={[styles.name, { color: palette.ink }]}>{name}</Text>
-        {bot ? <Text numberOfLines={1} style={[styles.role, { color: bot.paused ? palette.muted : sheetItem ? palette.warning : palette.muted }]}>{bot.paused ? `Paused · ${bot.roleTitle}` : `${bot.roleTitle} · ${runsOn(bot.runsOn)}`}</Text> : null}
+        {bot ? <Text numberOfLines={1} style={[styles.role, { color: bot.paused ? palette.muted : sheetItem ? palette.warning : palette.muted }]}>{bot.paused ? `Paused · ${bot.roleTitle}` : `${bot.roleTitle} · ${runsOn(bot.runsOn, words)}`}</Text> : null}
       </View>
       {bot ? <GlassIconButton testID="bot-pause" label={bot.paused ? `Resume ${bot.name}` : `Pause ${bot.name}`} disabled={switching || !connected} icon={bot.paused ? <Play size={18} color={palette.ink} strokeWidth={1.8} /> : <Pause size={18} color={palette.ink} strokeWidth={1.8} />} onPress={togglePause} /> : null}
     </View>
@@ -81,8 +83,8 @@ export default function BotScreen() {
       })}
     </View>
     <ScrollView style={styles.page} contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 32 }]} refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} tintColor={palette.accent} />}>
-      {home.offered === false ? <EmptyState title="Bots are off" detail="Turn them on on your Mac in Settings → Experimental → Bots." />
-        : !value ? home.error ? <EmptyState title="Bot unavailable" detail={home.error} /> : <EmptyState busy title={`Loading ${name}`} detail="Reading from your Mac." />
+      {home.offered === false ? <EmptyState title="Bots are off" detail={botsOffDetail(app.activeHost?.platform)} />
+        : !value ? home.error ? <EmptyState title="Bot unavailable" detail={home.error} /> : <EmptyState busy title={`Loading ${name}`} detail={`Reading from ${words.your}.`} />
         : part === "Home" ? <HomePart home={value} connected={connected} answering={answers.answering} errors={answers.errors} onAnswer={(item, index) => void answers.answer(value.bot, item, { answer: index })} onOpen={setOpen} onResume={togglePause} />
         : part === "Chat" ? <ChatPart home={value} onOpen={openChat} />
         : part === "Duties" ? <DutiesPart home={value} />
@@ -136,9 +138,10 @@ function ItemRow({ item, first, now }: { item: BotItem; first: boolean; now: num
 }
 
 function ChatPart({ home, onOpen }: { home: BotHome; onOpen(sessionId: string, tabId: string | null, title: string): void }) {
+  const words = useHostWords();
   const { palette } = useTheme();
   const now = useNow();
-  if (!home.chats.length) return <EmptyState title="No chats yet" detail={`Open ${home.bot.name} on your Mac to start its home chat.`} />;
+  if (!home.chats.length) return <EmptyState title="No chats yet" detail={`Open ${home.bot.name} on ${words.your} to start its home chat.`} />;
   return <Card>{home.chats.map((chat, index) => <Pressable key={chat.sessionId} accessibilityRole="button" accessibilityLabel={chat.home ? `Home chat, ${chat.title}` : chat.title} onPress={() => onOpen(chat.sessionId, chat.tabId, chat.title)}
     style={({ pressed }) => [styles.item, index > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }, pressed && { backgroundColor: palette.selected }]}>
     {chat.running ? <Spinner size={18} color={palette.info} /> : <MessageSquare size={18} color={palette.muted} strokeWidth={1.8} />}
@@ -151,8 +154,9 @@ function ChatPart({ home, onOpen }: { home: BotHome; onOpen(sessionId: string, t
 }
 
 function DutiesPart({ home }: { home: BotHome }) {
+  const words = useHostWords();
   const { palette } = useTheme();
-  if (!home.duties.length) return <EmptyState title="No duties" detail={`Give ${home.bot.name} duties on your Mac: what wakes it, and when.`} />;
+  if (!home.duties.length) return <EmptyState title="No duties" detail={`Give ${home.bot.name} duties on ${words.your}: what wakes it, and when.`} />;
   return <>
     <Card>{home.duties.map((duty, index) => <View key={duty.id} accessibilityLabel={`${duty.name}, ${duty.enabled ? "on" : "off"}`} style={[styles.item, index > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }]}>
       <View style={[styles.state, { backgroundColor: duty.enabled ? palette.success : palette.faint }]} />
@@ -161,18 +165,19 @@ function DutiesPart({ home }: { home: BotHome }) {
         <Text numberOfLines={1} style={[styles.itemMeta, { color: palette.muted }]}>{[dutyWhen(duty), duty.enabled ? dutyOutcome(duty.lastOutcome) : "Off"].join(" · ")}</Text>
       </View>
     </View>)}</Card>
-    <Text style={[styles.footnote, { color: palette.muted }]}>Duties are added and changed on your Mac.</Text>
+    <Text style={[styles.footnote, { color: palette.muted }]}>Duties are added and changed on {words.your}.</Text>
   </>;
 }
 
 function RolePart({ home }: { home: BotHome }) {
+  const words = useHostWords();
   const { palette } = useTheme();
   if ("unreadable" in home.role) return <EmptyState title="Role unavailable" detail={home.role.unreadable} />;
   if (!home.role.text.trim()) return <EmptyState title="No role written" detail={`${home.bot.name}'s standing instructions show here.`} />;
   return <>
     <Card style={styles.roleCard}><Markdown text={home.role.text} /></Card>
-    {home.role.cut ? <Text style={[styles.footnote, { color: palette.muted }]}>The rest is on your Mac.</Text> : null}
-    <Text style={[styles.footnote, { color: palette.muted }]}>The role is edited on your Mac.</Text>
+    {home.role.cut ? <Text style={[styles.footnote, { color: palette.muted }]}>The rest is on {words.your}.</Text> : null}
+    <Text style={[styles.footnote, { color: palette.muted }]}>The role is edited on {words.your}.</Text>
   </>;
 }
 

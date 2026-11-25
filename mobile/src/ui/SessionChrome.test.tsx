@@ -129,13 +129,13 @@ describe("a new chat in the branch", () => {
     expect(mocks.app.api.continueInNewTab).toHaveBeenCalledWith("s", "a", { harness: "codex", model: "", effort: null, permissionMode: "plan" }, "Draw a butterfly");
   });
 
-  it("says why the Mac would not start it, and stays open", async () => {
-    mocks.app.api.continueInNewTab.mockResolvedValueOnce({ started: false, message: "The Mac is busy." });
+  it("says why the computer would not start it, and stays open", async () => {
+    mocks.app.api.continueInNewTab.mockResolvedValueOnce({ started: false, message: "The computer is busy." });
     const onStarted = vi.fn();
     await render(<NewChatSheet visible sessionId="s" tabId="a" onClose={vi.fn()} onStarted={onStarted} />);
     await type("Hello");
     await act(async () => button("Start chat")!.click());
-    expect(container.textContent).toContain("The Mac is busy.");
+    expect(container.textContent).toContain("The computer is busy.");
     expect(onStarted).not.toHaveBeenCalled();
   });
 });

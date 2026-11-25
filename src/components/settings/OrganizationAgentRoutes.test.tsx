@@ -1,5 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// These cover the forms as a Mac runs them, where the secure system dialog exists.
+vi.mock("@/lib/platform", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/platform")>()), hasSecureDialog: true }));
 import { api, type AgentRoute, type AgentRoutes, type AgentRouteTemplate } from "@/lib/api";
 import { OrganizationAgentRoutes } from "./OrganizationAgentRoutes";
 

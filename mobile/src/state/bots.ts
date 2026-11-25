@@ -38,7 +38,7 @@ function useFollowedRead<T>(api: HostApi, key: string | null, on: boolean, epoch
       setShown({ key, value: next, error: null });
     } catch (cause) {
       if (ticket !== latest.current) return;
-      const error = screenMessage(cause, "Couldn’t reach the Mac. Try again once it is connected.");
+      const error = screenMessage(cause, "Couldn’t reach the computer. Try again once it is connected.");
       setShown((current) => ({ key, value: current?.key === key ? current.value : (kept.get(key) as T | undefined) ?? null, error }));
     }
   }, [key, on]);

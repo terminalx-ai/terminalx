@@ -125,6 +125,8 @@ pub struct Peer {
     /// ended with `pty.lagged` instead of growing without bound.
     queued: Arc<AtomicUsize>,
     granted: Mutex<Option<HashSet<String>>>,
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    wants_desktop: std::sync::atomic::AtomicBool,
     /// What this connection is looking at (`presence.update`).
     presence: Mutex<Presence>,
     /// Raised when the runtime closes the connection (access revoked).
@@ -198,6 +200,8 @@ impl Peer {
             outbound,
             queued: queued.clone(),
             granted: Mutex::new(None),
+            #[cfg(any(target_os = "linux", all(test, unix)))]
+            wants_desktop: std::sync::atomic::AtomicBool::new(false),
             presence: Mutex::new(Presence { tab_id: None, activity: "viewing", since: crate::cloud_agents::now_ms() }),
             closed: tokio::sync::Notify::new(),
             gone: std::sync::atomic::AtomicBool::new(false),
@@ -1346,6 +1350,8 @@ impl WorkspaceRpc {
                 // after a start, or a demotion) stops streaming now.
                 self.drop_peer_subscriptions(peer);
             }
+            #[cfg(any(target_os = "linux", all(test, unix)))]
+            self.offer_desktop(peer);
             if peer.granted("collab/1") && (first || diff.changed.iter().any(|changed| changed == user)) {
                 peer.notify("collab.you", json!({ "you": self.you(peer) }));
             }
@@ -1506,7 +1512,15 @@ impl WorkspaceRpc {
         if !ticket.valid() { return Err(RpcError::forbidden(crate::data_privacy::MESSAGE)); }
         if method == "rpc.hello" {
             let _privacy = ticket.scope().map_err(|error| RpcError::forbidden(error.to_string()))?;
-            let granted = protocol::negotiate(&params, &self.offered())?;
+            // Install the negotiated grant and register the peer in the same
+            // admission window as collaboration and readiness reconciliation.
+            let admission = self.collab.enter_admission();
+            let granted = protocol::negotiate(&params, &self.offered(peer))?;
+            #[cfg(any(target_os = "linux", all(test, unix)))]
+            peer.wants_desktop.store(
+                params["want"].as_array().is_some_and(|wanted| wanted.iter().any(|value| value == protocol::CLOUD_DESKTOP)),
+                Ordering::SeqCst,
+            );
             *peer.granted.lock().unwrap() = Some(granted.iter().cloned().collect());
             peer.phone.store(params["client"]["app"].as_str() == Some(MOBILE_APP), Ordering::SeqCst);
             if self.peers.lock().unwrap().insert(peer.id, Arc::downgrade(peer)).is_none() {
@@ -1517,6 +1531,7 @@ impl WorkspaceRpc {
             // Register first so a concurrent role refresh either sees this
             // peer, or finishes before we read its current access here.
             self.count_attachment(peer);
+            drop(admission);
             let collab = granted.iter().any(|capability| capability == "collab/1");
             if collab {
                 self.broadcast_presence();
@@ -1695,10 +1710,30 @@ impl WorkspaceRpc {
         if self.desktop_ready.load(Ordering::SeqCst) == ready { return; }
         self.desktop_epoch.fetch_add(1, Ordering::SeqCst);
         self.desktop_ready.store(ready, Ordering::SeqCst);
-        if !ready {
-            for peer in self.live_peers() {
+        for peer in self.live_peers() {
+            if ready {
+                self.offer_desktop(&peer);
+            } else {
                 self.desktop_ports.revoke(&peer);
             }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    fn desktop_offer_allowed(&self, peer: &Peer) -> bool {
+        !self.is_machine() && !peer.hung_up() && self.desktop_ready.load(Ordering::SeqCst)
+            && peer.user_id.as_deref().is_some_and(|id| !id.is_empty()
+                && self.collab.access_of(Some(id)).can_view())
+    }
+
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    fn offer_desktop(&self, peer: &Peer) {
+        if !peer.wants_desktop.load(Ordering::SeqCst) || !self.desktop_offer_allowed(peer) {
+            return;
+        }
+        let mut granted = peer.granted.lock().unwrap();
+        if granted.as_mut().is_some_and(|capabilities| capabilities.insert(protocol::CLOUD_DESKTOP.to_owned())) {
+            peer.notify("desktop.available", json!({ "runtimeGeneration": self.generation(), "runtimeEpoch": self.epoch }));
         }
     }
 
@@ -4798,9 +4833,9 @@ impl WorkspaceRpc {
     /// What this runtime offers in `rpc.hello`: what it serves as a
     /// workspace or a machine (`protocol::served`), less `agent-commands/1`
     /// beside a mailbox.
-    fn offered(&self) -> Vec<&'static str> {
+    fn offered(&self, _peer: &Peer) -> Vec<&'static str> {
         #[cfg(any(target_os = "linux", all(test, unix)))]
-        let desktop = self.desktop_ready.load(Ordering::SeqCst);
+        let desktop = self.desktop_offer_allowed(_peer);
         #[cfg(not(any(target_os = "linux", all(test, unix))))]
         let desktop = false;
         protocol::served(self.is_machine()).into_iter().filter(|capability| match *capability {

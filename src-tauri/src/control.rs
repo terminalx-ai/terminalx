@@ -2003,7 +2003,7 @@ impl ControlService {
             return Err(ControlError::new(
                 "agent_unavailable",
                 format!("{} is not installed or not on PATH.", available.name),
-                Some(available.install_hint),
+                Some(if available.install_hint.is_empty() { format!("Install it with its setup guide: {}", available.install_url) } else { available.install_hint }),
             ));
         }
         if let Some(mode) = p.mode.as_deref() {

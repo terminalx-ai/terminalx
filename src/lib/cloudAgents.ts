@@ -24,6 +24,7 @@ import type { AgentEvent } from "@/types/events";
 import { inputRefusalText } from "@/lib/cloudCollab";
 import { DEFAULT_PERMISSION_MODE } from "@/lib/models";
 import { clearDrafts, getDraft, setDraft, subscribeDrafts } from "@/lib/drafts";
+import { dismissErrorKey, showError } from "@/lib/errorToasts";
 
 /**
  * Agent tabs of cloud workspaces (PRO-22), per organization and workspace.
@@ -470,8 +471,14 @@ async function persistNow(s: Store, tabId: string, owner: string) {
     draft: tab.draft || undefined,
     updatedAt: Date.now(),
   };
-  await mutateCache(s, owner, tabId, entry).catch(() => {});
+  // The cache carries the tab's unsent text: a save that fails says so, and the next change saves it again.
+  await mutateCache(s, owner, tabId, entry).then(
+    () => dismissErrorKey(CLOUD_DRAFT_KEY),
+    () => { if (entry.draft) showError("Couldn’t save a cloud tab’s unsent text. It stays in this window and is saved again with your next change", undefined, { key: CLOUD_DRAFT_KEY, tone: "warning" }); },
+  );
 }
+
+const CLOUD_DRAFT_KEY = "cloud-draft-save";
 
 /** Cloud tabs with a draft in `@/lib/drafts`, to forget with this account (a tab the runtime closed keeps its id there). */
 const draftTabs = new Set<string>();

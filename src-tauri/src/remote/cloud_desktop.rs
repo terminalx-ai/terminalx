@@ -75,12 +75,38 @@ impl Tools {
 }
 
 /// Dropping a process stops its group while the child's id is still owned.
-struct Process(Child);
+struct Process {
+    child: Option<Child>,
+    files: Option<Arc<tempfile::TempDir>>,
+    #[cfg(target_os = "linux")]
+    runtime_lifetime: Option<std::io::PipeWriter>,
+}
 
 impl Process {
+    fn spawn(command: &mut Command, files: Option<Arc<tempfile::TempDir>>) -> io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        let runtime_lifetime = watch_runtime(command)?;
+        Ok(Self {
+            child: Some(command.spawn()?),
+            files,
+            #[cfg(target_os = "linux")]
+            runtime_lifetime: Some(runtime_lifetime),
+        })
+    }
+
+    fn child(&mut self) -> &mut Child {
+        self.child
+            .as_mut()
+            .expect("desktop child is owned until drop")
+    }
+
+    fn id(&self) -> Option<u32> {
+        self.child.as_ref().and_then(Child::id)
+    }
+
     #[cfg(target_os = "linux")]
     fn is_running(&mut self) -> bool {
-        let Some(pid) = self.0.id() else { return false };
+        let Some(pid) = self.id() else { return false };
         // Observe the exit without reaping. Drop still owns the process group
         // and can stop its remaining members before Tokio reaps its leader.
         let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -97,20 +123,88 @@ impl Process {
 
     #[cfg(not(target_os = "linux"))]
     fn is_running(&mut self) -> bool {
-        matches!(self.0.try_wait(), Ok(None))
+        matches!(self.child().try_wait(), Ok(None))
     }
 }
 
 impl Drop for Process {
     fn drop(&mut self) {
-        if let Some(pid) = self.0.id() {
-            // SAFETY: command() created a private group whose leader has not been reaped.
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if let Some(pid) = child.id() {
+            // SAFETY: the private group leader is still owned by this child.
             unsafe {
                 libc::kill(-(pid as i32), libc::SIGKILL);
             }
-            let _ = self.0.start_kill();
+            let _ = child.start_kill();
+            if let Some(files) = self.files.take() {
+                // Keep X authority and the browser profile until the group
+                // kill has been issued and the leader has been collected.
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move {
+                        let _ = child.wait().await;
+                        drop(files);
+                    });
+                }
+            }
         }
+        #[cfg(target_os = "linux")]
+        drop(self.runtime_lifetime.take());
     }
+}
+
+/// Give each Linux process group a watchdog with a read end of a pipe owned
+/// by the runtime. Even SIGKILL closes the write end. A group member, unlike
+/// the old runtime, cannot mistake a reused PGID for its own group.
+#[cfg(target_os = "linux")]
+fn watch_runtime(command: &mut Command) -> io::Result<std::io::PipeWriter> {
+    use std::os::fd::AsRawFd;
+    let (reader, writer) = std::io::pipe()?;
+    // SAFETY: pre_exec and the watchdog use only async-signal-safe operations.
+    // The leader execs normally. The watchdog retains only the pipe read end.
+    unsafe {
+        command.pre_exec(move || {
+            let read_fd = reader.as_raw_fd();
+            // Raw fork-style clone avoids inherited pthread atfork handlers.
+            let watcher = libc::syscall(
+                libc::SYS_clone,
+                libc::SIGCHLD as libc::c_ulong,
+                0usize,
+                0usize,
+                0usize,
+                0usize,
+            );
+            if watcher < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if watcher == 0 {
+                // This process is a fork of the runtime and must stay opaque
+                // to other processes belonging to the desktop user.
+                if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) == 0
+                    && libc::dup2(read_fd, 0) >= 0
+                {
+                    // Close inherited sockets, stdio and all copies of the writer.
+                    if libc::syscall(libc::SYS_close_range, 1u32, u32::MAX, 0u32) == 0 {
+                        let mut byte = 0u8;
+                        loop {
+                            let read = libc::read(0, (&mut byte as *mut u8).cast(), 1);
+                            if read == 0 {
+                                break;
+                            }
+                            if read < 0 && *libc::__errno_location() != libc::EINTR {
+                                break;
+                            }
+                        }
+                    }
+                }
+                libc::kill(-libc::getpgrp(), libc::SIGKILL);
+                libc::_exit(1);
+            }
+            Ok(())
+        });
+    }
+    Ok(writer)
 }
 
 fn command(path: &Path) -> Command {
@@ -130,24 +224,25 @@ fn command(path: &Path) -> Command {
 async fn write_cookie(
     xauth: &Path,
     authority: &Path,
+    files: &Arc<tempfile::TempDir>,
     display: &str,
     cookie: &str,
 ) -> io::Result<()> {
-    let mut process = Process(
+    let mut process = Process::spawn(
         command(xauth)
             .arg("-q")
             .arg("-f")
             .arg(authority)
             .args(["source", "-"])
-            .stdin(Stdio::piped())
-            .spawn()?,
-    );
-    let mut input = process.0.stdin.take().expect("piped xauth stdin");
+            .stdin(Stdio::piped()),
+        Some(files.clone()),
+    )?;
+    let mut input = process.child().stdin.take().expect("piped xauth stdin");
     input
         .write_all(format!("add {display} MIT-MAGIC-COOKIE-1 {cookie}\n").as_bytes())
         .await?;
     drop(input);
-    if process.0.wait().await?.success() && authority.is_file() {
+    if process.child().wait().await?.success() && authority.is_file() {
         Ok(())
     } else {
         Err(io::Error::other("could not write desktop X authority"))
@@ -168,7 +263,7 @@ pub(crate) struct Desktop {
     chrome: Process,
     manager: Process,
     xvfb: Process,
-    files: tempfile::TempDir,
+    files: Arc<tempfile::TempDir>,
     display: String,
     vnc: PathBuf,
 }
@@ -199,15 +294,17 @@ impl Desktop {
     }
 
     async fn launch(tools: Tools) -> Result<Self, DesktopError> {
-        let files = tempfile::Builder::new()
-            .prefix("terminalx-desktop-")
-            .tempdir()?;
+        let files = Arc::new(
+            tempfile::Builder::new()
+                .prefix("terminalx-desktop-")
+                .tempdir()?,
+        );
         let authority = files.path().join("Xauthority");
         let cookie = uuid::Uuid::new_v4().simple().to_string();
         // Xvfb loads the authorization protocol and cookie before assigning its
         // display number. Write the selected number for clients after startup.
-        write_cookie(&tools.xauth, &authority, ":0", &cookie).await?;
-        let mut xvfb = Process(
+        write_cookie(&tools.xauth, &authority, &files, ":0", &cookie).await?;
+        let mut xvfb = Process::spawn(
             command(&tools.xvfb)
                 .args([
                     "-displayfd",
@@ -220,11 +317,15 @@ impl Desktop {
                     "-auth",
                 ])
                 .arg(&authority)
-                .stdout(Stdio::piped())
-                .spawn()?,
-        );
+                .stdout(Stdio::piped()),
+            Some(files.clone()),
+        )?;
         let mut number = Vec::new();
-        let mut output = xvfb.0.stdout.take().expect("piped Xvfb display number");
+        let mut output = xvfb
+            .child()
+            .stdout
+            .take()
+            .expect("piped Xvfb display number");
         for _ in 0..6 {
             let byte = output.read_u8().await?;
             number.push(byte);
@@ -234,7 +335,7 @@ impl Desktop {
         }
         let display = format!(":{}", parse_display(&number)?);
         if display != ":0" {
-            write_cookie(&tools.xauth, &authority, &display, &cookie).await?;
+            write_cookie(&tools.xauth, &authority, &files, &display, &cookie).await?;
         }
         let launch = |path: &Path| {
             let mut app = command(path);
@@ -244,17 +345,16 @@ impl Desktop {
                 .current_dir(files.path());
             app
         };
-        let manager = Process(launch(&tools.window_manager).spawn()?);
-        let chrome = Process(
-            launch(&tools.chrome)
-                .args([
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "about:blank",
-                ])
-                .spawn()
-                .map_err(|_| DesktopError::ChromeStartupFailed)?,
-        );
+        let manager = Process::spawn(&mut launch(&tools.window_manager), Some(files.clone()))?;
+        let chrome = Process::spawn(
+            launch(&tools.chrome).args([
+                "--no-first-run",
+                "--no-default-browser-check",
+                "about:blank",
+            ]),
+            Some(files.clone()),
+        )
+        .map_err(|_| DesktopError::ChromeStartupFailed)?;
         Ok(Self {
             chrome,
             manager,
@@ -312,7 +412,7 @@ impl Desktop {
         if access == DesktopAccess::Watch {
             process.arg("-viewonly");
         }
-        let server = Process(process.spawn()?);
+        let server = Process::spawn(&mut process, Some(self.files.clone()))?;
         Ok(DesktopConnection {
             rfb: Some(rfb),
             _server: server,
@@ -515,7 +615,88 @@ mod tests {
             .unwrap()
             .starts_with("add :42 MIT-MAGIC-COOKIE-1 "));
         drop(desktop);
-        assert!(!files.exists());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while files.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("desktop files are removed after the processes exit");
+    }
+
+    #[tokio::test]
+    async fn concurrent_opens_share_one_cold_desktop_start() {
+        let tools = tempfile::tempdir().unwrap();
+        let counter = tools.path().join("starts");
+        fixture(tools.path(), "xauth", "umask 077; cat > \"$3\"");
+        fixture(
+            tools.path(),
+            "Xvfb",
+            &format!(
+                "printf 'start\\n' >> '{}'; printf '42\\n'; exec /bin/sleep 15",
+                counter.display(),
+            ),
+        );
+        fixture(tools.path(), "openbox", "exec /bin/sleep 15");
+        fixture(tools.path(), "x11vnc", "exec /bin/cat");
+        fixture(tools.path(), "chromium", "exec /bin/sleep 15");
+        let pool = DesktopPool::new(
+            vec![tools.path().to_string_lossy().into_owned()],
+            Duration::from_secs(1),
+        );
+        let (watch, control) = tokio::join!(
+            pool.connect(DesktopAccess::Watch, || true),
+            pool.connect(DesktopAccess::Control, || true),
+        );
+        let (watch, control) = (watch.unwrap(), control.unwrap());
+        assert_eq!(std::fs::read_to_string(counter).unwrap(), "start\n");
+        assert_ne!(
+            watch.connection._server.id(),
+            control.connection._server.id()
+        );
+        assert_eq!(pool.state.lock().await.connected, 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn watchdog_kills_the_desktop_group_when_runtime_pipe_closes() {
+        use std::os::unix::process::ExitStatusExt;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let mut leader = Process::spawn(
+            command(Path::new("/bin/sh"))
+                .args(["-c", "sleep 15 & printf '%s\\n' \"$!\"; wait"])
+                .stdout(Stdio::piped()),
+            None,
+        )
+        .unwrap();
+        let mut line = String::new();
+        let mut out = BufReader::new(leader.child().stdout.take().unwrap());
+        tokio::time::timeout(Duration::from_secs(3), out.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        let member: u32 = line.trim().parse().unwrap();
+        let stat = PathBuf::from(format!("/proc/{member}/stat"));
+        assert!(stat.exists());
+        assert!(leader.is_running());
+
+        drop(leader.runtime_lifetime.take());
+        let status = tokio::time::timeout(Duration::from_secs(3), leader.child().wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while std::fs::read_to_string(&stat).is_ok_and(|line| {
+                line.rsplit_once(") ")
+                    .is_some_and(|(_, state)| !state.starts_with('Z'))
+            }) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the descendant was terminated with its leader");
     }
 
     #[tokio::test]
@@ -604,9 +785,32 @@ mod tests {
         let old_files = {
             let mut state = pool.state.lock().await;
             let desktop = state.desktop.as_mut().unwrap();
-            desktop.xvfb.0.kill().await.unwrap();
+            desktop.xvfb.child().kill().await.unwrap();
             desktop.files.path().to_owned()
         };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while pool.state.lock().await.desktop.is_some() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            old_files.exists(),
+            "the old stream still owns its X authority"
+        );
+
+        let (watch, control) = tokio::join!(
+            pool.connect(DesktopAccess::Watch, || true),
+            pool.connect(DesktopAccess::Control, || true),
+        );
+        let _leases = (watch.unwrap(), control.unwrap());
+        {
+            let mut state = pool.state.lock().await;
+            assert_eq!(state.connected, 3);
+            assert!(state.desktop.as_mut().unwrap().is_running());
+        }
+        drop(old_lease);
         tokio::time::timeout(Duration::from_secs(5), async {
             while old_files.exists() {
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -614,16 +818,6 @@ mod tests {
         })
         .await
         .unwrap();
-
-        let (watch, control) = tokio::join!(
-            pool.connect(DesktopAccess::Watch, || true),
-            pool.connect(DesktopAccess::Control, || true),
-        );
-        let _leases = (old_lease, watch.unwrap(), control.unwrap());
-        let mut state = pool.state.lock().await;
-        assert_eq!(state.connected, 3);
-        assert!(state.desktop.as_mut().unwrap().is_running());
-        assert!(!old_files.exists());
         assert_eq!(
             std::fs::read(tools.path().join("Xvfb.starts")).unwrap(),
             b"xxx"
@@ -637,7 +831,7 @@ mod tests {
         use std::collections::HashSet;
 
         fn assert_no_listeners(process: &Process) -> io::Result<()> {
-            let pid = process.0.id().expect("live process");
+            let pid = process.id().expect("live process");
             let proc = PathBuf::from(format!("/proc/{pid}"));
             let mut sockets = HashSet::new();
             for entry in std::fs::read_dir(proc.join("fd"))? {
@@ -694,18 +888,100 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires the real desktop tools and xdotool on Linux"]
+    async fn real_viewer_pointer_input_is_discarded() -> io::Result<()> {
+        async fn handshake(socket: &mut TcpStream) -> io::Result<()> {
+            let mut version = [0; 12];
+            socket.read_exact(&mut version).await?;
+            assert_eq!(&version, b"RFB 003.008\n");
+            socket.write_all(&version).await?;
+            let method_count = socket.read_u8().await?;
+            let mut methods = vec![0; usize::from(method_count)];
+            socket.read_exact(&mut methods).await?;
+            assert!(methods.contains(&1));
+            socket.write_u8(1).await?;
+            assert_eq!(socket.read_u32().await?, 0);
+            socket.write_u8(1).await?;
+            let mut init = [0; 24];
+            socket.read_exact(&mut init).await?;
+            let length = u32::from_be_bytes(init[20..24].try_into().unwrap()) as usize;
+            assert!(length <= 4096);
+            socket.read_exact(&mut vec![0; length]).await?;
+            Ok(())
+        }
+
+        async fn move_pointer(socket: &mut TcpStream, x: u8, y: u8) -> io::Result<()> {
+            socket.write_all(&[5, 0, 0, x, 0, y]).await
+        }
+
+        async fn pointer(desktop: &Desktop, xdotool: &Path) -> io::Result<(u16, u16)> {
+            let output = command(xdotool)
+                .env("DISPLAY", &desktop.display)
+                .env("XAUTHORITY", desktop.files.path().join("Xauthority"))
+                .args(["getmouselocation", "--shell"])
+                .output()
+                .await?;
+            assert!(output.status.success());
+            let pos = String::from_utf8(output.stdout).unwrap();
+            let coordinate = |axis| {
+                pos.lines()
+                    .find_map(|line| line.strip_prefix(axis))
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            };
+            Ok((coordinate("X="), coordinate("Y=")))
+        }
+
+        let dirs = ["/usr/bin", "/bin"];
+        let Ok(xdotool) = executable(&dirs, &["xdotool"]) else {
+            eprintln!("Skipping real cloud desktop pointer test because xdotool is absent");
+            return Ok(());
+        };
+        if Tools::discover(&dirs).is_err() {
+            eprintln!("Skipping real cloud desktop pointer test because desktop tools are absent");
+            return Ok(());
+        }
+        let desktop = Desktop::start(&dirs).await.expect("real desktop starts");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut control = desktop.connect(DesktopAccess::Control).await.unwrap();
+            let control = control.rfb.as_mut().unwrap();
+            handshake(control).await?;
+            move_pointer(control, 30, 40).await?;
+            while pointer(&desktop, &xdotool).await? != (30, 40) {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+
+            let mut watch = desktop.connect(DesktopAccess::Watch).await.unwrap();
+            let watch = watch.rfb.as_mut().unwrap();
+            handshake(watch).await?;
+            move_pointer(watch, 140, 150).await?;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(pointer(&desktop, &xdotool).await?, (30, 40));
+            move_pointer(control, 140, 150).await?;
+            while pointer(&desktop, &xdotool).await? != (140, 150) {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+            Ok::<_, io::Error>(())
+        })
+        .await??;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn each_connection_gets_its_own_process_and_watch_mode() {
         let files = tempfile::tempdir().unwrap();
         let vnc = files.path().join("rfb-fixture");
         std::fs::write(&vnc, b"#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
         std::fs::set_permissions(&vnc, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let idle = || Process(command(Path::new("/bin/sleep")).arg("15").spawn().unwrap());
+        let idle = || Process::spawn(command(Path::new("/bin/sleep")).arg("15"), None).unwrap();
         let desktop = Desktop {
             chrome: idle(),
             manager: idle(),
             xvfb: idle(),
-            files,
+            files: Arc::new(files),
             display: ":42".into(),
             vnc,
         };

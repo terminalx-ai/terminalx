@@ -86,7 +86,12 @@ fn system_host_name() -> Option<String> {
 pub(crate) const PLACEHOLDER_HOST_NAME: &str = "This Mac";
 
 /// What others are shown when nothing names this computer.
+#[cfg(target_os = "macos")]
 pub(crate) const UNNAMED_HOST: &str = "Unnamed Mac";
+#[cfg(windows)]
+pub(crate) const UNNAMED_HOST: &str = "Unnamed PC";
+#[cfg(not(any(target_os = "macos", windows)))]
+pub(crate) const UNNAMED_HOST: &str = "Unnamed computer";
 
 /// This Mac's name: the one chosen in Settings → Account, else one an earlier
 /// version saved, else the computer's own. `chosen` when it does not follow

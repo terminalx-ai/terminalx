@@ -149,7 +149,7 @@ describe("the Machines section", () => {
     expect(label()).toBe("Needs update");
     setState("m1", { state: "accessRemoved" });
     expect(label()).toBe("Access removed");
-    expect(headerButton("Mac mini").getAttribute("title")).toBe("Revoked on that Mac");
+    expect(headerButton("Mac mini").getAttribute("title")).toBe("Revoked on Mac mini");
   });
 
   it("says a last-seen time on the 24-hour clock (PRO-398)", () => {

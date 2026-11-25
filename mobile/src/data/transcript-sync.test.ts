@@ -228,7 +228,7 @@ describe("a read that keeps dropping the connection", () => {
     expect(h.error).toHaveBeenLastCalledWith(expect.any(RelayOuterError));
     await connection(h, "halt");
     expect(h.error).toHaveBeenLastCalledWith(expect.any(TranscriptHaltedError));
-    expect(h.error.mock.lastCall![0].message).toBe("This conversation is too large to load over Relay; open it on the same Wi-Fi as your Mac.");
+    expect(h.error.mock.lastCall![0].message).toBe("This conversation is too large to load over Relay; open it on the same Wi-Fi as your computer.");
     h.request.mockClear(); h.error.mockClear();
     // The next reconnect sends nothing, and neither does the poll or a live notification.
     h.start(true, "halt"); await settle();
@@ -259,14 +259,14 @@ describe("a read that keeps dropping the connection", () => {
   it("says it stopped, without blaming Relay, on a direct connection", async () => {
     const h = host(100); h.path("direct"); h.drop(1006);
     await connection(h, "direct"); await connection(h, "direct");
-    expect(h.error.mock.lastCall![0].message).toBe("Loading this conversation dropped the connection to your Mac twice, so the phone stopped asking. Retry to ask once more.");
+    expect(h.error.mock.lastCall![0].message).toBe("Loading this conversation dropped the connection to your computer twice, so the phone stopped asking. Retry to ask once more.");
   });
 
   it("does not blame the page's size on a Mac that sizes its pages to Relay (#669)", async () => {
     const h = host(100); h.path("relay"); h.fits(true); h.drop(1001);
     await connection(h, "fitted"); await connection(h, "fitted");
     expect(h.error).toHaveBeenLastCalledWith(expect.any(TranscriptHaltedError));
-    expect(h.error.mock.lastCall![0].message).toBe("Loading this conversation dropped the connection to your Mac twice, so the phone stopped asking. Retry to ask once more.");
+    expect(h.error.mock.lastCall![0].message).toBe("Loading this conversation dropped the connection to your computer twice, so the phone stopped asking. Retry to ask once more.");
     h.request.mockClear();
     await connection(h, "fitted");
     expect(syncs(h)).toEqual([]);
@@ -317,8 +317,8 @@ describe("a read that keeps dropping the connection", () => {
   });
 });
 
-describe("whether the conversation is caught up with the Mac's (#644)", () => {
-  it("is caught up only by a read to the end of the Mac's history that went out after the subscription was confirmed", async () => {
+describe("whether the conversation is caught up with the computer's (#644)", () => {
+  it("is caught up only by a read to the end of the computer's history that went out after the subscription was confirmed", async () => {
     const h = host();
     // The Mac records more after the first read and before it confirms the subscription.
     h.race(() => h.append(2));
@@ -355,7 +355,7 @@ describe("whether the conversation is caught up with the Mac's (#644)", () => {
 });
 
 describe("a prefetch while a conversation is open (#1337)", () => {
-  it("asks the Mac not to send the conversations open on screen, and only those of that Mac", async () => {
+  it("asks the computer not to send the conversations open on screen, and only those of that Mac", async () => {
     const h = host(20);
     const stop = h.start(false, "host");
     h.start(false, "other");

@@ -316,7 +316,8 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
  * held makes it an ordinary combination, and a dictation it started stops.
  */
 export function useDictationShortcuts(dictation: Dictation, enabled = true) {
-  useShortcut("composer.dictate", dictation.toggle, { enabled });
+  // Where dictation is not available the chord does nothing: it would only say so in an error.
+  useShortcut("composer.dictate", dictation.toggle, { enabled: enabled && dictation.available !== false });
   // Only a dictation this hold opened is closed by its release; one toggled on stays on.
   const holding = useRef(false);
   useHeldShortcut(

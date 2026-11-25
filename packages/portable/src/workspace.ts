@@ -2237,6 +2237,12 @@ export class WorkspaceRpcClient {
     }
     if (typeof record.event === "string" && record.params && typeof record.params === "object") {
       const notification = record as unknown as WorkspaceNotification;
+      if (notification.event === "desktop.available" && this.state.state === "connected"
+        && notification.params.runtimeGeneration === this.state.runtimeGeneration
+        && notification.params.runtimeEpoch === this.state.runtimeEpoch
+        && !this.state.capabilities.includes("cloud-desktop/1")) {
+        this.changeState({ ...this.state, capabilities: [...this.state.capabilities, "cloud-desktop/1"] });
+      }
       for (const listener of this.notificationListeners) listener(notification);
       const target = notification.params.subscriptionId;
       let routed = false;

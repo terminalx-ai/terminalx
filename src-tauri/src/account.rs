@@ -105,10 +105,12 @@ const ROLES_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 /// is one question.
 const ROLES_REFRESH_FLOOR: Duration = Duration::from_secs(2);
 /// Where the account session is kept, as a message names it.
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 macro_rules! secret_store { () => { "macOS Keychain" } }
 #[cfg(windows)]
-macro_rules! secret_store { () => { "the Windows secret store" } }
+macro_rules! secret_store { () => { "the Windows encrypted store" } }
+#[cfg(not(any(target_os = "macos", windows)))]
+macro_rules! secret_store { () => { "the secret store" } }
 
 const REFRESH_NOT_SAVED: &str = concat!("The account session refreshed, but ", secret_store!(), " could not save it.");
 
@@ -1629,13 +1631,13 @@ impl AccountManager {
     /// Callers hold `store_gate` and not the account lock.
     /// `Err` only when the Keychain itself could not be read.
     fn load_session(&self) -> Result<Stored> {
-        let Some(bytes) = self.secrets().get(self.service()?, KEYCHAIN_ACCOUNT).context("read account session from Keychain")? else {
+        let Some(bytes) = self.secrets().get(self.service()?, KEYCHAIN_ACCOUNT).with_context(|| crate::platform_profile::localize("read account session from the Keychain"))? else {
             return Ok(Stored::Session(None));
         };
         let bytes = Zeroizing::new(bytes);
         let session = match serde_json::from_slice(bytes.as_slice()) {
             Ok(session) => session,
-            Err(error) => return Ok(Stored::Unusable(anyhow::Error::from(error).context("decode account session from Keychain"))),
+            Err(error) => return Ok(Stored::Unusable(anyhow::Error::from(error).context(crate::platform_profile::localize("decode account session from the Keychain")))),
         };
         Ok(match normalize_session(session) {
             Ok(session) => Stored::Session(Some(Box::new(session))),
@@ -1648,12 +1650,12 @@ impl AccountManager {
         let bytes = Zeroizing::new(serde_json::to_vec(session).context("encode account session")?);
         self.secrets()
             .set(self.service()?, KEYCHAIN_ACCOUNT, bytes.as_slice())
-            .context("save account session to Keychain")
+            .with_context(|| crate::platform_profile::localize("save account session to the Keychain"))
     }
 
     /// Callers hold `store_gate` and not the account lock.
     fn delete_session(&self) -> Result<()> {
-        self.secrets().delete(self.service()?, KEYCHAIN_ACCOUNT).context("delete account session from Keychain")
+        self.secrets().delete(self.service()?, KEYCHAIN_ACCOUNT).with_context(|| crate::platform_profile::localize("delete account session from the Keychain"))
     }
 }
 

@@ -333,7 +333,12 @@ have).
 
 The Linux workspace runtime offers `cloud-desktop/1` only when its
 authenticated bootstrap or refresh response enables `cloud.desktop.v1` with
-a version-1 readiness map and a literal boolean true.
+a version-1 readiness map and a literal boolean true. The handshake also
+requires an identified peer and a loaded workspace membership list. A peer
+that requested the capability receives `desktop.available` on the same link
+when its membership arrives. The runtime holds the feature after three
+consecutive periodic refresh failures. A credential rejection or refresh
+identity mismatch holds it immediately.
 
 - `desktop.open` takes `{ control?: boolean }` and returns
   `{ streamId, window, maxWriteBytes }`. The default is watch-only. A control
@@ -347,15 +352,24 @@ a version-1 readiness map and a literal boolean true.
   A watch-mode stream still carries the RFB handshake and framebuffer
   requests. Clipboard access and VNC remote commands are disabled.
 
+After the first Desktop selection, the session view keeps its RFB connection
+when you switch back to Session. Returning during startup reuses the pending
+open. A hidden desktop does not accept local input. Closing the session view
+releases its stream, and the runtime reclaims the desktop 60 seconds after
+the last stream closes. If the runtime refuses control, the app retries in
+watch-only mode.
+
 Reconnect replaces the desktop if Xvfb, the window manager, or Chrome exited.
 When Chrome fails to launch or exits during startup, the runtime returns
 `cloud_desktop_chrome_start_failed`. Chrome still requires a working sandbox.
 
 Run the opt-in real-binary check as an unprivileged user in the target Linux
 workspace image before enabling the flag. The test skips if any required
-desktop tools are missing.
+desktop tools are missing. The viewer input check also requires `xdotool`.
 
 ```sh
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib \
   real_binaries_exchange_rfb_without_a_tcp_listener -- --ignored --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib \
+  real_viewer_pointer_input_is_discarded -- --ignored --nocapture
 ```

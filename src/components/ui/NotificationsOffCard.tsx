@@ -3,6 +3,7 @@ import { getIdentifier } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { BellSlash, X } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { isMac, profile } from "@/lib/platform";
 
 /**
  * "Notifications are off for TerminalX" (PRO-327). A session needs the reader
@@ -89,7 +90,7 @@ export function NotificationsOffCard() {
       <div className="min-w-0 flex-1">
         <div className="font-medium">Notifications are off for TerminalX</div>
         <div className="mt-0.5 text-xs text-muted-foreground [overflow-wrap:anywhere]">
-          “{title}” needs your approval, but macOS blocks TerminalX banners and the dock badge.
+          “{title}” needs your approval, but {isMac ? "macOS blocks TerminalX banners and the dock badge" : `${profile.osName} blocks TerminalX notifications`}.
         </div>
         <div className="mt-2.5 flex flex-wrap gap-2">
           <Button variant="outline" size="sm" className="border" onClick={() => void openNotificationSettings()}>

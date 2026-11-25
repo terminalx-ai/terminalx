@@ -33,10 +33,9 @@ use serde_json::{json, Value};
 use super::budget::{self, Login, Pause, RunLimits};
 use super::ladder::{self, Step, Verdict};
 use super::plan::{self, Plan, PlanError};
-use super::routing::{self, LeadModel};
+use super::routing::{self, Installed, LeadModel};
 use super::verify::{self as checks, Gate, GateResult, Tally, Verification, Verifier};
 use super::{brief, guard, plan as plans, store, Approval, AutoStep, Hold, LeadFor, MergeState, Outcome, Piece, PieceState, Run, RunEvent, RunState, SessionRef, ToLead, Try, TryReport};
-use crate::models::Model;
 use crate::status::usage::UsageWindow;
 use crate::store::settings::{AutoDecide, OrchestratorLimits};
 use crate::worker_report::Status;
@@ -185,8 +184,9 @@ pub trait Host: Send + Sync {
     fn lead(&self, session_id: &str) -> Result<Lead, EngineError>;
     /// The agents a worker can be here.
     fn worker_agents(&self) -> Vec<String>;
-    /// The models the agents' CLIs list: a tier is resolved against them.
-    fn models(&self) -> Vec<Model>;
+    /// The models the agents' CLIs list, and where each list came from: a
+    /// tier is resolved against them.
+    fn models(&self) -> Installed;
     /// What a worker's session has used so far (`session_usage`).
     fn worker_cost(&self, worker: &SessionRef) -> Cost;
     /// A piece of `run_id` fell short and its next try waits for a worker: start it
@@ -337,17 +337,27 @@ fn stored(id: &str) -> Result<Run, EngineError> {
     store::get(id).map_err(|_| EngineError::not_found(id))
 }
 
-fn rules_for<'a>(limits: &'a OrchestratorLimits, lead: &'a Lead, agents: &'a [String], models: &'a [Model]) -> plan::Rules<'a> {
+fn rules_for<'a>(limits: &'a OrchestratorLimits, lead: &'a Lead, agents: &'a [String], models: &'a Installed) -> plan::Rules<'a> {
     plan::Rules { piece_limit: limits.piece_limit, default_agent: &lead.agent, agents, worker_mode: &limits.worker_mode, approval: limits.require_approval, routing: &limits.routing, models, lead_model: &lead.model, checkout: Some(std::path::Path::new(&lead.cwd)) }
 }
 
 /// The installed models, when the plan leaves a model or an effort to the
 /// routing table. A plan that names both for every piece asks no CLI.
-fn models_for(host: &dyn Host, plan: &Plan) -> Vec<Model> {
+fn models_for(host: &dyn Host, plan: &Plan, lead: &Lead) -> Installed {
     let named = |text: Option<&str>| text.is_some_and(|text| !text.trim().is_empty());
     match plan.pieces.iter().all(|piece| named(Some(&piece.model)) && named(piece.effort.as_deref())) {
-        true => Vec::new(),
-        false => host.models(),
+        true => Installed::default(),
+        false => host.models().with_lead(&lead.agent, &lead.model),
+    }
+}
+
+/// The installed models as the ladder reads them: the lead's own model is
+/// among them whatever a CLI's list says, since the lead runs on it (#1533).
+fn installed(host: &dyn Host, lead: &SessionRef) -> Installed {
+    let models = host.models();
+    match host.lead(&lead.session_id) {
+        Ok(lead) => models.with_lead(&lead.agent, &lead.model),
+        Err(_) => models,
     }
 }
 
@@ -367,7 +377,7 @@ pub fn create(host: &dyn Host, plan: &Plan, lead_session: &str, lead_tab: Option
     let mut limits = host.limits(&lead.project_path);
     limits.require_approval |= lead.ask_first;
     let agents = host.worker_agents();
-    let models = models_for(host, plan);
+    let models = models_for(host, plan, &lead);
     let pieces = plan::validate(plan, &rules_for(&limits, &lead, &agents, &models))?;
     let now = crate::store::index::now();
     let run = Run {
@@ -417,7 +427,7 @@ pub fn update_plan(host: &dyn Host, id: &str, plan: &Plan) -> Result<Run, Engine
     // The run asks for approval or not as it did when it was made: an edit does not change who must see it.
     let mut limits = host.limits(&run.project_path);
     limits.require_approval = run.state == RunState::AwaitingApproval;
-    let models = models_for(host, plan);
+    let models = models_for(host, plan, &lead);
     let pieces = plan::validate(plan, &rules_for(&limits, &lead, &agents, &models))?;
     let reading = read_usage(host, &Run { pieces: pieces.clone(), ..run.clone() });
     let (run, ()) = store::update(id, |run| {
@@ -1036,8 +1046,11 @@ fn read_workers(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         .filter(|piece| reading.iter().any(|(id, _, _, now, _)| *id == piece.id && *now != VerifierNow::Working))
         .filter_map(|piece| Some((piece.id.clone(), host.result_commit(piece.worker.as_ref()?))))
         .collect();
-    // The ladder needs the installed models only when a try fell short.
-    let models = if seen.iter().any(|(_, _, now, _)| fell_short(now)) || reading.iter().any(|(_, _, _, now, _)| *now != VerifierNow::Working) { host.models() } else { Vec::new() };
+    // The ladder needs the installed models only when a try may fall short: a worker's report, or
+    // a review counted below, which is counted for every piece being verified and not only one
+    // whose verifier answered on this read. An empty list would read as no model above being
+    // installed (#1533).
+    let models = if seen.iter().any(|(_, _, now, _)| fell_short(now)) || run.pieces.iter().any(|piece| piece.state == PieceState::Verifying) { installed(host, &run.lead) } else { Installed::default() };
     let mut back_at_work: Vec<SessionRef> = Vec::new();
     let usage = read_usage(host, &run);
     // What the lead's session has cost, while it resolves a conflict a person gave it.
@@ -1258,7 +1271,7 @@ fn gate_failure(gate: &GateResult) -> String {
 /// gives the next one. Inconclusive: the piece is blocked, and `said` is why;
 /// with the run asking its reviewer again (#1004), its verifiers were asked
 /// again already, and the piece goes to the lead to review the diff.
-fn conclude(piece: &mut Piece, outcome: checks::Outcome, said: Option<String>, models: &[Model], rules: &ladder::Rules, auto: &AutoDecide) {
+fn conclude(piece: &mut Piece, outcome: checks::Outcome, said: Option<String>, models: &Installed, rules: &ladder::Rules, auto: &AutoDecide) {
     let at = crate::store::index::now();
     let Some(attempt) = piece.tries.last_mut() else { return };
     let check = attempt.verification.get_or_insert_with(Verification::default);
@@ -1294,7 +1307,7 @@ fn conclude(piece: &mut Piece, outcome: checks::Outcome, said: Option<String>, m
 
 /// Count the verdicts of a piece's review once every verifier has given
 /// one or stopped without, and end the check with what they come to.
-fn counted(piece: &mut Piece, models: &[Model], rules: &ladder::Rules, auto: &AutoDecide) {
+fn counted(piece: &mut Piece, models: &Installed, rules: &ladder::Rules, auto: &AutoDecide) {
     let Some(attempt) = piece.tries.last_mut() else { return };
     let Some(check) = attempt.verification.as_mut().filter(|check| check.review_open()) else { return };
     let Some(review) = check.review.as_ref() else { return };
@@ -1382,7 +1395,7 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         };
         // Gates 1 to 4 passed and nothing calls for a reader, or a gate failed: settled with no session.
         if reasons.is_empty() {
-            let models = if failed.is_some() { host.models() } else { Vec::new() };
+            let models = if failed.is_some() { installed(host, &run.lead) } else { Installed::default() };
             let (after, ()) = store::update(id, |run| {
                 let rules = run.ladder();
                 if let Some(piece) = checked_try(run, &piece_id, &worker, &started) {
@@ -1402,8 +1415,11 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         }
         // The model step: the routing table's `verify` row, not the worker's model.
         let (voters, threshold) = checks::panel(piece);
-        let models = host.models();
         let lead = host.lead(&run.lead.session_id).ok();
+        let models = match &lead {
+            Some(lead) => host.models().with_lead(&lead.agent, &lead.model),
+            None => host.models(),
+        };
         let chosen = routing::choose("verify", &piece.agent, "", None, &limits.routing, &models, &LeadModel { agent: lead.as_ref().map_or(piece.agent.as_str(), |lead| lead.agent.as_str()), model: lead.as_ref().map_or("", |lead| lead.model.as_str()) });
         let report: Vec<GateResult> = piece.tries.last().and_then(|attempt| attempt.verification.as_ref()).map(|check| check.gates.clone()).unwrap_or_default();
         let prompt = checks::prompt(piece, &checked.base, &report, &checked, &reasons);
@@ -1604,7 +1620,7 @@ fn on(model: &str, effort: Option<&str>) -> String {
 /// already carries its outcome. Safe to repeat on a piece that is blocked.
 /// A ladder that ends for want of a model above, not of tries, hands the
 /// piece to the lead when the run decides that itself (#1004).
-fn climb(piece: &mut Piece, failure: &str, models: &[Model], rules: &ladder::Rules, auto: &AutoDecide) {
+fn climb(piece: &mut Piece, failure: &str, models: &Installed, rules: &ladder::Rules, auto: &AutoDecide) {
     // A piece stored before tries were kept has no ladder to climb.
     let Some(last) = piece.tries.last().cloned() else { return };
     let tries = piece.tries.len();
@@ -1686,7 +1702,7 @@ pub fn check_failed(host: &dyn Host, id: &str, piece_id: &str, output: &str) -> 
     // The checks as the plan wrote them: the next worker is held to the same ones.
     let checks: Vec<&str> = piece.done_checks.iter().map(super::Check::text).collect();
     let failure = format!("The done-check did not hold: {}\n{}", checks.join("; "), failure_text(output));
-    let models = host.models();
+    let models = installed(host, &run.lead);
     let auto = host.limits(&run.project_path).auto;
     let (run, ()) = store::update(id, |run| {
         let rules = run.ladder();
@@ -1812,7 +1828,7 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
     }
     // Its session is gone: a fresh worker on a branch cut from the lead's, which has the merged pieces in it.
     let failure = failure_text(&text);
-    let models = host.models();
+    let models = installed(host, &run.lead);
     let auto = host.limits(&run.project_path).auto;
     let (run, ()) = store::update(id, |run| {
         let rules = run.ladder();
@@ -2388,7 +2404,7 @@ fn decide(host: &dyn Host, id: &str, run: Run) -> Result<Run, EngineError> {
                 Ok(()) => tell_events(host, &after, std::slice::from_ref(&event)),
                 // Not asked after all: what it gave stands, and the review is counted with it.
                 Err(error) => {
-                    let models = host.models();
+                    let models = installed(host, &after.lead);
                     let auto = host.limits(&after.project_path).auto;
                     let (last, ()) = store::update(id, |run| {
                         let rules = run.ladder();

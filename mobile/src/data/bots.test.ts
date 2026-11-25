@@ -43,7 +43,7 @@ describe("reading the bots", () => {
 });
 
 describe("saying it", () => {
-  it("offers the recommended answer first, each with its index on the Mac", () => {
+  it("offers the recommended answer first, each with its index on the computer", () => {
     expect(answerOrder({ answers: ["Approve and start", "Start, but ask before merging", "Not now"], recommended: 1 })).toEqual([
       { index: 1, label: "Start, but ask before merging", recommended: true },
       { index: 0, label: "Approve and start", recommended: false },

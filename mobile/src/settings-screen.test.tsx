@@ -140,7 +140,7 @@ it("shows each theme's page and accent colours, with a tick on the current one",
 it("shows the app version and build, and links to the privacy page and the connection log", async () => {
   await show(<SettingsScreen />);
   expect(container.textContent).toContain("Version0.2.32 (118)");
-  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "How your data stays on your Mac")!.click());
+  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "How your data stays on your computer")!.click());
   expect(mocks.push).toHaveBeenLastCalledWith("/privacy");
   await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Connection log")!.click());
   expect(mocks.push).toHaveBeenLastCalledWith("/connection-log");

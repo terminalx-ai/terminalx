@@ -99,6 +99,8 @@ struct World {
     no_verifier_brief: BTreeSet<String>,
     /// Claude models that are not installed, by a part of their id.
     uninstalled: BTreeSet<String>,
+    /// The model of the lead's tab, when it is not `fable`.
+    lead_model: Option<String>,
 }
 
 struct Fake {
@@ -163,16 +165,17 @@ impl Host for Fake {
         if session_id == "nobody" {
             return Err(EngineError::new("lead_not_found", "No session nobody to lead the run.", None));
         }
-        Ok(Lead { project_path: "/repo".into(), agent: "claude".into(), model: "fable".into(), repository: self.repository, cwd: "/repo".into(), ask_first: self.ask_first })
+        let model = self.world().lead_model.clone().unwrap_or_else(|| "fable".into());
+        Ok(Lead { project_path: "/repo".into(), agent: "claude".into(), model, repository: self.repository, cwd: "/repo".into(), ask_first: self.ask_first })
     }
 
     fn worker_agents(&self) -> Vec<String> {
         vec!["claude".into(), "codex".into()]
     }
 
-    fn models(&self) -> Vec<crate::models::Model> {
+    fn models(&self) -> super::routing::Installed {
         let uninstalled = self.world().uninstalled.clone();
-        super::routing::tests::installed().into_iter().filter(|model| !(model.harness == "claude" && uninstalled.iter().any(|name| model.id.contains(name.as_str())))).collect()
+        super::routing::tests::installed().into_iter().filter(|model| !(model.harness == "claude" && uninstalled.iter().any(|name| model.id.contains(name.as_str())))).collect::<Vec<_>>().into()
     }
 
     fn worker_cost(&self, worker: &SessionRef) -> Cost {
@@ -3988,17 +3991,21 @@ fn a_ladder_with_no_model_above_hands_the_piece_to_the_lead_with_the_workers_par
     let _home = crate::store::temp_home();
     let (host, id) = approved_run("lead", json!([titles_piece("titles"), titles_piece("icons")]));
     let id = id.as_str();
+    // Nothing of the top tier is here: the CLI lists no Fable, and the lead runs Opus.
     host.world().uninstalled.insert("fable".into());
+    host.world().lead_model = Some("opus".into());
     run_out_of_models(&host, id, "titles");
     let run = store::get(id).unwrap();
     let piece = run.piece("titles").unwrap();
-    assert_eq!(tried(&run, "titles"), vec![(Step::First, "opus".to_string(), Some("medium".to_string()), Some(Outcome::Partial)), (Step::Effort, "opus".into(), Some("high".into()), Some(Outcome::Partial)), (Step::Lead, "fable".into(), None, None)]);
+    assert_eq!(tried(&run, "titles"), vec![(Step::First, "opus".to_string(), Some("medium".to_string()), Some(Outcome::Partial)), (Step::Effort, "opus".into(), Some("high".into()), Some(Outcome::Partial)), (Step::Lead, "opus".into(), None, None)]);
     assert_eq!(piece.state, PieceState::Lead);
     let (step, on, message) = events(&run).last().unwrap().clone();
     assert_eq!((step, on.as_deref()), (super::AutoStep::HandedToLead, Some("titles")));
     assert!(message.starts_with("Handed titles to the lead to finish: its try on opus at high fell short, and no top model of"), "{message}");
     let told = host.world().told.last().unwrap().clone();
     assert!(told.starts_with(&format!("TerminalX handed you piece titles (\"Session titles\") of run {id} by itself:")) && told.contains("One edge case is left: titles of resumed sessions."), "{told}");
+    // Each sentence of the hand-over ends with its full stop (#1533).
+    assert!(told.contains("so there is no model above it to move to. Its tries fell short"), "{told}");
     // Nobody widened it: a person approved its files, and the lead the run handed it to is held to them.
     assert!(told.contains("You are held to the files it owns") && !told.contains("You are not held"), "{told}");
     assert!(store::get(id).unwrap().piece("titles").unwrap().tries.last().unwrap().held_to_owns);
@@ -4023,6 +4030,21 @@ fn a_ladder_with_no_model_above_hands_the_piece_to_the_lead_with_the_workers_par
 }
 
 #[test]
+fn a_lead_on_the_top_model_is_a_top_model_installed_whatever_the_list_says() {
+    // #1533: the list the run read had no `fable`, while the lead itself ran on Fable 5.2.
+    let _home = crate::store::temp_home();
+    let (host, id) = approved_run("lead", json!([titles_piece("titles")]));
+    host.world().uninstalled.insert("fable".into());
+    host.world().lead_model = Some("claude-fable-5-2".into());
+    run_out_of_models(&host, &id, "titles");
+    let run = store::get(&id).unwrap();
+    let piece = run.piece("titles").unwrap();
+    // The third try moves up to the lead's model, one effort level lower; nothing goes to the lead.
+    assert_eq!(tried(&run, "titles").last().cloned(), Some((Step::Tier, "claude-fable-5-2".to_string(), Some("medium".to_string()), None)));
+    assert_eq!((piece.state, piece.to_lead.is_none(), run.events.len()), (PieceState::Queued, true, 0), "{:?}", piece.note);
+}
+
+#[test]
 fn a_ladder_that_used_all_its_tries_still_waits_for_the_person() {
     let _home = crate::store::temp_home();
     let (stuck, stuck_id) = one_piece_for("lead-stuck");
@@ -4043,6 +4065,7 @@ fn with_its_switch_off_a_ladder_with_no_model_above_blocks_the_piece_for_the_per
     let (host, id) = approved_run("lead", json!([titles_piece("titles")]));
     host.settings.lock().unwrap().lead_when_ladder_ends = false;
     host.world().uninstalled.insert("fable".into());
+    host.world().lead_model = Some("opus".into());
     run_out_of_models(&host, &id, "titles");
     let run = store::get(&id).unwrap();
     let piece = run.piece("titles").unwrap();

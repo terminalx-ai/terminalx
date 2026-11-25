@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { accessibilityPress, mouseClick } from "@/test/press";
@@ -53,6 +54,15 @@ vi.mock("@/lib/models", async (original) => ({
   PERMISSION_MODES: [{ id: "bypassPermissions", label: "Bypass permissions", hint: "" }],
   useModels: () => [],
   loadModels: vi.fn(),
+}));
+vi.mock("@/components/computer/VncView", () => ({
+  VncView: ({ openChannel }: { openChannel: () => { close(): void } }) => {
+    useEffect(() => {
+      const channel = openChannel();
+      return () => channel.close();
+    }, [openChannel]);
+    return <div data-testid="fixture-desktop-vnc" />;
+  },
 }));
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: ({ id }: { id: string }) => <div data-testid="xterm">{id}</div>, createTerminal: vi.fn() }));
 vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonRunner: () => null, RaccoonScene: () => null }));
@@ -233,6 +243,7 @@ class FakeRuntime implements WorkspaceTransport {
   send(frame: RpcWireRequest): boolean {
     if (!this.up) return false;
     this.sent.push(frame);
+    if (frame.method === "desktop.open" && this.pendingDesktopOpen) return true;
     const answer = this.answer(frame);
     queueMicrotask(() => {
       for (const listener of this.messages) listener(answer);
@@ -258,13 +269,14 @@ class FakeRuntime implements WorkspaceTransport {
       runtimeGeneration: this.generation,
       runtimeEpoch: this.epoch,
       runtimeVersion: "0.3.0",
-      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", ...this.composer(), ...(this.followUps ? (["follow-ups/1"] as const) : []), ...(this.transfer ? (["workspace-transfer/3"] as const) : [])],
+      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", ...this.composer(), ...(this.followUps ? (["follow-ups/1"] as const) : []), ...(this.transfer ? (["workspace-transfer/3"] as const) : []), ...(this.pendingDesktopOpen ? (["cloud-desktop/1"] as const) : [])],
       authority,
     });
   }
   /** #1328: whether the runtime takes changes to its held follow-ups (`follow-ups/1`). */
   followUps = false;
   transfer = false;
+  pendingDesktopOpen = false;
   /** PRO-22: what `session.commands` answers; null is a runtime from before `composer/1`. */
   commands: { commands: { name: string; description: string; source: string }[]; restricted: boolean } | null = null;
   /** PRO-22: what `session.files` answers; null is a runtime from before `composer/2`. */
@@ -304,6 +316,10 @@ class FakeRuntime implements WorkspaceTransport {
     const params = (frame.params ?? {}) as Record<string, unknown>;
     const ok = (result: unknown) => ({ id: frame.id, ok: true, result });
     switch (frame.method) {
+      case "desktop.open":
+        return ok({ streamId: `desktop-${this.methods("desktop.open").length}`, window: 262144, maxWriteBytes: 32768 });
+      case "desktop.close":
+        return ok({});
       case "session.tabs":
         return ok({ tabs: this.tabs });
       case "session.list":
@@ -487,6 +503,57 @@ describe("cloud desktop center tab", () => {
     expect(runtime.sent.some(({ method }) => method === "desktop.open")).toBe(false);
   });
 
+  it("keeps the pending Desktop stream across center-tab switches", async () => {
+    mocks.privacyReady = true;
+    mocks.readiness = { [ORG]: ["cloud.desktop.v1"] };
+    runtime.pendingDesktopOpen = true;
+    await openConnected();
+
+    const desktop = screen.getByRole("tab", { name: "Desktop" });
+    fireEvent.click(desktop);
+    await waitFor(() => expect(runtime.sent.filter(({ method }) => method === "desktop.open")).toHaveLength(1));
+    const rfb = screen.getByTestId("fixture-desktop-vnc");
+    fireEvent.click(screen.getByRole("tab", { name: "Session" }));
+    expect(rfb.closest("[role=tabpanel]")?.hasAttribute("hidden")).toBe(true);
+    fireEvent.click(desktop);
+    expect(screen.getByTestId("fixture-desktop-vnc")).toBe(rfb);
+    expect(runtime.sent.filter(({ method }) => method === "desktop.open")).toHaveLength(1);
+  });
+
+  it("starts Desktop on a late offer and replaces hidden control with watch after a downgrade", async () => {
+    mocks.privacyReady = true;
+    mocks.readiness = { [ORG]: ["cloud.desktop.v1"] };
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connectShared({ userId: "u-me", role: "driver", canApprove: true }));
+    await screen.findByText("Fix login redirect");
+    fireEvent.click(screen.getByRole("tab", { name: "Desktop" }));
+    expect(screen.getByText("Cloud desktop is unavailable in this runtime.")).toBeTruthy();
+    await act(async () => runtime.notify("desktop.available", {
+      runtimeGeneration: runtime.generation - 1,
+      runtimeEpoch: runtime.epoch,
+    }));
+    expect(runtime.methods("desktop.open")).toHaveLength(0);
+    await act(async () => runtime.notify("desktop.available", {
+      runtimeGeneration: runtime.generation,
+      runtimeEpoch: runtime.epoch,
+    }));
+    await waitFor(() => expect(runtime.methods("desktop.open").map((frame) => frame.params)).toEqual([{ control: true }]));
+    const initial = screen.getByTestId("fixture-desktop-vnc");
+    fireEvent.click(screen.getByRole("tab", { name: "Session" }));
+
+    const you = { userId: "u-me", role: "viewer", canApprove: false, listed: true };
+    runtime.collab!.you = you;
+    await act(async () => runtime.notify("collab.you", { you }));
+    await waitFor(() => expect(runtime.methods("desktop.open").map((frame) => frame.params)).toEqual([
+      { control: true }, { control: false },
+    ]));
+    expect(runtime.methods("desktop.close").map((frame) => frame.params)).toContainEqual({ streamId: "desktop-1" });
+    const watch = screen.getByTestId("fixture-desktop-vnc");
+    expect(watch).not.toBe(initial);
+    expect(watch.closest("[role=tabpanel]")?.hasAttribute("hidden")).toBe(true);
+  });
+
   it("is opt-in and shows an older runtime without starting a display", async () => {
     mocks.privacyReady = true;
     mocks.readiness = { [ORG]: ["cloud.desktop.v1"] };
@@ -497,6 +564,11 @@ describe("cloud desktop center tab", () => {
     fireEvent.click(desktop);
     expect(await screen.findByText("Cloud desktop is unavailable in this runtime.")).toBeTruthy();
     expect(runtime.sent.some(({ method }) => method === "desktop.open")).toBe(false);
+    const pane = screen.getByTestId("cloud-desktop");
+    fireEvent.click(screen.getByRole("tab", { name: "Session" }));
+    expect(pane.closest("[role=tabpanel]")?.hasAttribute("hidden")).toBe(true);
+    fireEvent.click(desktop);
+    expect(screen.getByTestId("cloud-desktop")).toBe(pane);
   });
 });
 

@@ -11,6 +11,7 @@ import type { ComputerContext, ComputerTarget } from "@/types/computer";
 import { computerKey } from "@/types/computer";
 import { localVmRequest } from "@/lib/localVm";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
+import { isMac } from "@/lib/platform";
 
 type Place = "local" | "cloud";
 type Busy = "start" | "stop" | "reset" | "runtime" | null;
@@ -163,7 +164,7 @@ function LocalVm({ active, target }: { active: boolean; target?: ComputerTarget 
   if (status.state === "no_runtime") {
     return idle(
       <Message title="Needs Docker or Podman" actions={check}>
-        The Local VM is a Linux desktop in a container. Install Docker Desktop, or Colima with <code className="font-mono">brew install colima docker</code>.
+        The Local VM is a Linux desktop in a container. {isMac ? <>Install Docker Desktop, or Colima with <code className="font-mono">brew install colima docker</code>.</> : "Install Docker Desktop or Podman."}
       </Message>,
     );
   }

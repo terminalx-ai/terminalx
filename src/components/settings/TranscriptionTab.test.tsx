@@ -17,7 +17,8 @@ vi.mock("@/lib/api", () => ({
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
-vi.mock("@/lib/dictation", () => ({ refreshDictationEngine: vi.fn() }));
+const dictation = vi.hoisted(() => ({ available: true }));
+vi.mock("@/lib/dictation", () => ({ refreshDictationEngine: vi.fn(), dictationAvailable: vi.fn(async () => dictation.available) }));
 vi.mock("@/components/chat/TranscriptionInputPicker", () => ({ TranscriptionInputPicker: () => null }));
 vi.mock("./TranscriptionPersonalization", () => ({ TranscriptionPersonalization: () => null }));
 
@@ -40,4 +41,21 @@ it("says on each model's card whether its words appear while you speak (#754)", 
   expect(card("Parakeet Unified EN 0.6B").textContent).toContain("Words appear as you speak.");
   expect(card("Whisper Small").textContent).toContain("Words appear when you stop.");
   expect(card("Whisper Small").textContent).not.toContain("as you speak");
+});
+
+it("says where dictation runs, and leaves nothing to download or record, on a computer without it", async () => {
+  dictation.available = false;
+  try {
+    render(
+      <TooltipProvider>
+        <TranscriptionTab />
+      </TooltipProvider>,
+    );
+    expect((await screen.findByTestId("dictation-unavailable")).textContent).toContain("macOS only");
+    const settings = screen.getByTestId("dictation-unavailable").nextElementSibling as HTMLFieldSetElement;
+    expect(settings.tagName).toBe("FIELDSET");
+    expect(settings.disabled).toBe(true);
+  } finally {
+    dictation.available = true;
+  }
 });

@@ -50,7 +50,7 @@ it("restores the finished local import and separate archive choice after a remou
 
 
 it.each([
-  ["transfer_no_base", "Cannot transfer topic because the cloud checkout has no usable upstream base.", "Cannot transfer topic because the cloud checkout has no usable upstream base. A common upstream commit is required to transfer this branch."],
+  ["transfer_no_base", "Cannot transfer topic because the cloud checkout has no usable upstream base.", "This cloud branch has no usable upstream base. A common upstream commit is required to transfer it."],
   ["transfer_submodules", "This checkout contains Git submodules. Transfer supports the main repository only.", "This checkout contains Git submodules. Transfer supports the main repository only."],
   ["transfer_too_large", "server limit", "This workspace is too large to transfer."],
   ["transfer_fetch_first", "Fetch commit abc in your local clone before transferring topic.", "Fetch commit abc in your local clone before transferring topic. Then retry the transfer."],

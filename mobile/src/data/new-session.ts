@@ -78,12 +78,12 @@ export function blocked(choices: NewSessionChoices, options: NewSessionOptions):
   if ("projectId" in choices.where) {
     const projectId = choices.where.projectId;
     const project = options.projects.find((candidate) => candidate.id === projectId);
-    if (!project) return "That project is no longer on this Mac.";
+    if (!project) return "That project is no longer on this computer.";
     if (choices.where.useWorktree && !project.git) return `${project.name} is not a Git repository, so it has no worktrees.`;
   }
   const agent = options.agents.find((candidate) => candidate.id === choices.agent);
   if (!agent) return "Choose an agent.";
-  if (!agent.available) return `${agent.name} is not installed on this Mac.`;
+  if (!agent.available) return `${agent.name} is not installed on this computer.`;
   if (!choices.text.trim()) return "Write the first message.";
   return null;
 }

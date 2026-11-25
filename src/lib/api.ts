@@ -3547,6 +3547,8 @@ export interface ExperimentalSettings {
 /** Read when a tab is made: a change applies to new sessions, not to existing ones. */
 export const experimental = {
   settings: () => invoke<ExperimentalSettings>("experimental_settings"),
+  /** Why a switch cannot be on here, by switch; absent where it can. */
+  unsupported: () => invoke<{ localVmTasks?: string; bots?: string }>("experimental_unsupported"),
   setNativeCodex: (nativeCodex: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { nativeCodex }),
   setSessionCost: (sessionCost: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { sessionCost }),
   setOrchestratorRuns: (orchestratorRuns: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { orchestratorRuns }),

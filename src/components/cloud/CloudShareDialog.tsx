@@ -418,7 +418,7 @@ function LegacyCloudShareDialog({
         </DialogHeader>
         {!listed && !loadError && <Loader2 className="size-4 animate-spin" />}
         {loadError && (
-          <div className="flex items-center gap-2 text-xs text-destructive">
+          <div role="alert" className="flex items-center gap-2 text-xs text-destructive">
             <p className="flex-1">Could not load who this workspace is shared with ({loadError}).</p>
             <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void reload()}>Try again</Button>
           </div>

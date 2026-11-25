@@ -109,9 +109,9 @@ export function machineStateHint(state: MachineConnectionState, name: string, no
     case "updating":
       return "Back in under a minute";
     case "accessRemoved":
-      return "Revoked on that Mac";
+      return `Revoked on ${name}`;
     case "disconnected":
-      return "Disconnected on that Mac";
+      return `Disconnected on ${name}`;
     default:
       return `Not connected from ${thisComputer}`;
   }

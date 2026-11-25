@@ -62,7 +62,7 @@
       "additionalProperties": false,
       "properties": {
         "recoveryIncidents": {
-          "description": "When a session warns that it needs attention, TerminalX notes on this computer when the warning was raised, how long it was on screen, what you pressed and what became of the turn, so a false warning can be reported with evidence. Only labels, counts and times are kept: never a message, code, a command's output or a file path. Export it to attach to a report; sessions are named by codes that change with every export.",
+          "description": "When a session warns that it needs attention, TerminalX notes on this Mac when the warning was raised, how long it was on screen, what you pressed and what became of the turn, so a false warning can be reported with evidence. Only labels, counts and times are kept: never a message, code, a command's output or a file path. Export it to attach to a report; sessions are named by codes that change with every export.",
           "type": "boolean"
         }
       },
@@ -708,7 +708,7 @@
       "additionalProperties": false,
       "properties": {
         "shareWithTeam": {
-          "description": "Teammates in an organization that connected a repository see which of its issues you have a session on: your name, the session’s title and branch, and whether an agent is working. Your other machines always see it, with this computer’s name. Prompts, transcripts, paths and code never leave this computer.",
+          "description": "Teammates in an organization that connected a repository see which of its issues you have a session on: your name, the session’s title and branch, and whether an agent is working. Your other machines always see it, with this Mac’s name. Prompts, transcripts, paths and code never leave this Mac.",
           "type": "boolean"
         }
       },

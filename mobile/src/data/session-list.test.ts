@@ -33,7 +33,7 @@ describe("a row's status", () => {
     });
   });
 
-  it("takes the status the Mac decided, as the desktop sidebar does, with the PR it is about", () => {
+  it("takes the status the computer decided, as the desktop sidebar does, with the PR it is about", () => {
     const cases: [SessionSummary, string, string][] = [
       [reported("w", [{ status: "in_progress" }]), "Working", "working"],
       [reported("q", [{ status: "waiting", activity: "needs_answer" }]), "Needs your answer", "answer"],
@@ -117,7 +117,7 @@ describe("the session list", () => {
     expect(one(session("q", { kind: "quick", project: QUICK_CHATS, branch: "main" })).branch).toBeNull();
   });
 
-  it("names a row as the Mac's project list does: by branch, else by title", () => {
+  it("names a row as the computer's project list does: by branch, else by title", () => {
     const named = (fields: Partial<SessionSummary>) => { const row = one(session("s", { title: "Fix the login", ...fields })); return [row.name, row.branched]; };
     expect(named({ branch: "dc/design-tweaks" })).toEqual(["dc/design-tweaks", true]);
     // The Mac says the branch has no real name: the title stands.
@@ -186,7 +186,7 @@ describe("the list's sections and filters", () => {
   });
 });
 
-describe("sessions pinned on the Mac (#1403)", () => {
+describe("sessions pinned on the computer (#1403)", () => {
   const sessions = [
     reported("asks", [{ status: "waiting", activity: "needs_answer" }], {}, { project: "beta", pinned: true, modified: "2026-11-07T09:58:00Z" }),
     reported("works", [{ status: "in_progress" }], {}, { project: "alpha", pinned: true, modified: "2026-11-07T10:00:00Z" }),
@@ -220,7 +220,7 @@ describe("sessions pinned on the Mac (#1403)", () => {
     ]);
   });
 
-  it("orders Pinned as the Mac's custom order places it", () => {
+  it("orders Pinned as the computer's custom order places it", () => {
     const ranked = [
       ...sessions.slice(0, 3).map((value, index) => ({ ...value, pinnedRank: [2, 1, 0][index] })),
       // A rank on a session that is not pinned means nothing.
@@ -245,7 +245,7 @@ describe("sessions pinned on the Mac (#1403)", () => {
     item: { workspace: { id, orgId: "org-1", name: id, state: "running" } } as CloudPinRow["item"],
   });
 
-  it("adds the pinned cloud workspaces to Pinned, by activity, or after the Mac's own in its custom order", () => {
+  it("adds the pinned cloud workspaces to Pinned, by activity, or after the computer's own in its custom order", () => {
     const works = Date.parse("2026-11-07T10:00:00Z");
     const sections = listSections(chatRows(sessions), "all");
     const withCloud = withPinnedCloud(sections, [cloud("early", works - 1), cloud("late", works + 1)], "all");
