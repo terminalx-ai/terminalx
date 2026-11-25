@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Animated, Platform, StyleSheet, Text, View, type LayoutChangeEvent, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { BAR_TITLE_MAX_SCALE } from "./text-size";
 import { useTheme } from "./theme";
 
 /** How tall the bar's title row stands under the status area, as 22.02 draws it. */
@@ -46,7 +47,7 @@ export function TopBar({ title, shown }: { title?: string; shown: boolean }) {
   return <View pointerEvents="box-none" testID="top-bar" style={styles.bar}>
     <View testID="top-bar-status" style={[styles.status, { height: top, backgroundColor: palette.page }]} />
     {title ? <Animated.View pointerEvents="none" testID="top-bar-title" accessibilityElementsHidden={!shown} importantForAccessibility={shown ? "auto" : "no-hide-descendants"} style={[styles.row, { opacity: fade, backgroundColor: palette.page, borderBottomColor: palette.border }]}>
-      <Text accessibilityRole="header" numberOfLines={1} style={[styles.title, { color: palette.ink }]}>{title}</Text>
+      <Text accessibilityRole="header" numberOfLines={1} maxFontSizeMultiplier={BAR_TITLE_MAX_SCALE} style={[styles.title, { color: palette.ink }]}>{title}</Text>
     </Animated.View> : null}
   </View>;
 }

@@ -35,7 +35,7 @@ export function StateBadge({ state, testID }: { state: BadgeState; testID?: stri
   const tone = TONES[state];
   const color = tone === "success" ? palette.success : tone === "warning" ? palette.warning : tone === "danger" ? palette.danger : palette.muted;
   return <View testID={testID} style={[styles.pill, { backgroundColor: tone === "muted" ? palette.raised : `${color}24` }]}>
-    <Text numberOfLines={1} style={[styles.text, { color }]}>{WORDS[state]}</Text>
+    <Text style={[styles.text, { color }]}>{WORDS[state]}</Text>
   </View>;
 }
 
@@ -67,6 +67,7 @@ export function credentialBadge(state: string): BadgeState | null {
 }
 
 const styles = StyleSheet.create({
-  pill: { height: 22, paddingHorizontal: 8, borderRadius: 7, flexDirection: "row", alignItems: "center", flexShrink: 0 },
-  text: { fontSize: 12, fontWeight: "600" },
+  // As tall as its words: a fixed 22 cut "Not connected" in half at the accessibility sizes (PRO-563).
+  pill: { minHeight: 22, maxWidth: "100%", paddingHorizontal: 8, paddingVertical: 2, borderRadius: 7, flexDirection: "row", alignItems: "center", flexShrink: 0 },
+  text: { flexShrink: 1, fontSize: 12, fontWeight: "600" },
 });

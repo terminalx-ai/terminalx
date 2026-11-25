@@ -1,8 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { CloudApiError } from "./api";
-import { RUNTIME_PICKUP_MS, TASK_PHASES, agentLoginFailure, launchOf, taskAgent, taskAgents, taskFacts, taskFailure, taskProgress, taskSettled, taskTooLong, taskUnderWay } from "./first-task";
+import type { ModelInfo } from "@terminalx/portable/agentSettings";
+import { RUNTIME_PICKUP_MS, TASK_PHASES, agentLoginFailure, launchOf, taskAgent, taskAgents, taskEffort, taskEffortChoices, taskFacts, taskFailure, taskModel, taskModelChoices, taskModels, taskProgress, taskSettled, taskTooLong, taskUnderWay } from "./first-task";
 import { codexLogin, claudeKey, githubToken, operation, workspace } from "./testing/server";
 import { account } from "./testing/account";
+
+// What a Mac lists for its agents (`models.list`): Claude Code's families and the versions pinned on that Mac, Codex's models.
+const model = (harness: string, id: string, label: string, fields: Partial<ModelInfo> = {}): ModelInfo => ({ id, label, harness, efforts: ["low", "medium", "high"], defaultEffort: "medium", acceptsImages: true, isDefault: false, upgrade: null, description: null, ...fields });
+const MAC: ModelInfo[] = [
+  model("claude", "claude-opus-5-5", "Opus 5.5", { isDefault: true }),
+  model("claude", "opus", "Opus", { alias: true, resolved: "claude-opus-5-5", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high" }),
+  model("claude", "sonnet", "Sonnet", { alias: true, resolved: "claude-sonnet-5-5" }),
+  model("claude", "haiku", "Haiku", { alias: true, efforts: [], defaultEffort: null }),
+  model("codex", "gpt-6.1-sol", "GPT-6.1 Sol", { isDefault: true, efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "low" }),
+  model("codex", "gpt-6.1-mini", "GPT-6.1 Mini"),
+];
 
 // PRO-547 (25.09): the first task's own rules, apart from the screens.
 describe("the agents a first task can start", () => {
@@ -30,6 +42,45 @@ describe("the launch a first task sends", () => {
     expect(launchOf({ agent: "claude", mode: "auto", text: "x" }, [])).toBeUndefined();
   });
 
+  it("names the model and effort where the person's computer lists them: family names for another machine, the agent's defaults first (PRO-562)", () => {
+    // Claude Code: the families only, with no version claimed for another machine; a pinned version is not offered.
+    expect(taskModels(MAC, "claude").map((entry) => [entry.id, entry.resolved])).toEqual([["opus", null], ["sonnet", null], ["haiku", null]]);
+    expect(taskModelChoices(taskModels(MAC, "claude"))).toEqual([{ id: "opus", label: "Opus", detail: "latest" }, { id: "sonnet", label: "Sonnet", detail: "latest" }, { id: "haiku", label: "Haiku", detail: "latest" }]);
+    // Codex has no families: its models as listed.
+    expect(taskModels(MAC, "codex").map((entry) => entry.id)).toEqual(["gpt-6.1-sol", "gpt-6.1-mini"]);
+    // No Mac connected, or an agent the Mac lists nothing for: nothing to choose.
+    expect(taskModels(null, "claude")).toEqual([]);
+    expect(taskModels(MAC, "cursor")).toEqual([]);
+    // Nothing the server's parser would refuse is offered.
+    expect(taskModels([model("codex", "has space", "Bad"), model("codex", "ok", "Ok", { efforts: ["low", "Extra High"] })], "codex")).toEqual([expect.objectContaining({ id: "ok", efforts: ["low"] })]);
+
+    const codex = taskModels(MAC, "codex");
+    expect(taskModel(null, codex)?.id).toBe("gpt-6.1-sol");
+    expect(taskModel("gpt-6.1-mini", codex)?.id).toBe("gpt-6.1-mini");
+    // One picked for another agent is not this agent's: its default again.
+    expect(taskModel("opus", codex)?.id).toBe("gpt-6.1-sol");
+    // The default pinned on the Mac is not offered elsewhere: the first family.
+    expect(taskModel(undefined, taskModels(MAC, "claude"))?.id).toBe("opus");
+    expect(taskModel(null, [])).toBeNull();
+
+    const opus = taskModel("opus", taskModels(MAC, "claude"));
+    expect(taskEffort(null, opus)).toBe("high");
+    expect(taskEffort("max", opus)).toBe("max");
+    expect(taskEffort("max", taskModel(null, codex))).toBe("low");
+    expect(taskEffort("high", taskModel("haiku", taskModels(MAC, "claude")))).toBeNull();
+    expect(taskEffort("high", null)).toBeNull();
+    expect(taskEffortChoices(opus!)).toEqual([{ id: "low", label: "Low" }, { id: "medium", label: "Medium" }, { id: "high", label: "High" }, { id: "xhigh", label: "Extra high" }, { id: "max", label: "Max" }]);
+  });
+
+  it("sends the model and effort shown, and neither where the agent has no list", () => {
+    expect(launchOf({ agent: "claude", mode: "manual", text: "" }, agents, MAC)).toEqual({ v: 1, agent: "claude", model: "opus", effort: "high", mode: "manual" });
+    expect(launchOf({ agent: "claude", model: "haiku", effort: "high", mode: "manual", text: "" }, agents, MAC)).toEqual({ v: 1, agent: "claude", model: "haiku", mode: "manual" });
+    expect(launchOf({ agent: "codex", model: "gpt-6.1-mini", effort: "high", mode: "plan", text: "Go" }, agents, MAC)).toEqual({ v: 1, agent: "codex", model: "gpt-6.1-mini", effort: "high", mode: "plan", prompt: "Go" });
+    // A task kept by an app from before the rows, and a phone with no Mac connected.
+    expect(launchOf({ agent: "codex", mode: "manual", text: "" }, agents, null)).toEqual({ v: 1, agent: "codex", mode: "manual" });
+    expect(launchOf({ agent: "codex", model: "gpt-6.1-mini", effort: "high", mode: "manual", text: "" }, agents)).toEqual({ v: 1, agent: "codex", mode: "manual" });
+  });
+
   it("is at most 32 KB, counted in UTF-8 bytes as the server counts them", () => {
     expect(taskTooLong("a".repeat(32 * 1024))).toBe(false);
     expect(taskTooLong("a".repeat(32 * 1024 + 1))).toBe(true);
@@ -48,7 +99,10 @@ describe("the launch a first task sends", () => {
     expect(taskFacts({ v: 1, agent: "codex", mode: "acceptEdits", prompt: "Line one\nLine two" })).toEqual([
       { label: "Agent", value: "Codex" }, { label: "Model", value: "Agent’s default" }, { label: "Permission mode", value: "Accept edits" }, { label: "Task", value: "Line one\nLine two", block: true },
     ]);
-    expect(taskFacts({ v: 1, agent: "claude", model: "opus", effort: "high", mode: "manual" }).slice(1, 2)).toEqual([{ label: "Model", value: "opus · high" }]);
+    // The model by its name and the effort in the app's word, as 25.09 draws it; an id no list names reads as itself.
+    expect(taskFacts({ v: 1, agent: "claude", model: "opus", effort: "high", mode: "manual" }).slice(1, 2)).toEqual([{ label: "Model", value: "Opus · High" }]);
+    expect(taskFacts({ v: 1, agent: "codex", model: "gpt-6.1-sol", effort: "xhigh", mode: "manual" }, MAC).slice(1, 2)).toEqual([{ label: "Model", value: "GPT-6.1 Sol · Extra high" }]);
+    expect(taskFacts({ v: 1, agent: "codex", model: "gpt-6.1-sol", mode: "manual" }).slice(1, 2)).toEqual([{ label: "Model", value: "GPT-6.1 Sol" }]);
     expect(taskFacts({ v: 1, agent: "claude", mode: "manual" }).at(-1)).toEqual({ label: "Task", value: "None" });
   });
 });

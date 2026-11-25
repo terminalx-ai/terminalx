@@ -4052,9 +4052,10 @@ impl SessionManager {
             return outcome;
         }
         // Native Codex still on its turn refused the request, not the turn
-        // (#815): the turn goes on, nothing is raised in the tab, and the
-        // sender is told why in words of its own.
-        if outcome.as_ref().is_err_and(|error| error.is::<codex_stdio::Busy>() || error.is::<codex_stdio::QueueFull>()) {
+        // (#815), and a command it has no request for is the same (#1498):
+        // the turn goes on, nothing is raised in the tab, and the sender is
+        // told why in words of its own.
+        if outcome.as_ref().is_err_and(|error| error.is::<codex_stdio::Busy>() || error.is::<codex_stdio::QueueFull>() || error.is::<codex_stdio::UnsupportedCommand>()) {
             return outcome;
         }
         if let Err(error) = &outcome {
@@ -6904,7 +6905,7 @@ impl SessionManager {
         let model = match (route_model, substitute) {
             (Some(model), _) => model,
             (None, Some(sub)) => {
-                let text = format!("{} is not available on this account; using {}.", tab.model, sub.label);
+                let text = codex::models::substitution_notice(&tab.model, &sub);
                 self.publish(rt, Payload::Status { text, handoff: None }, None);
                 if let Err(error) = self.update_settings(rt, |s| s.model = sub.id.clone()) {
                     log::warn!("record the substituted Codex model: {error:#}");
@@ -8821,6 +8822,21 @@ impl SessionManager {
                 self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
                 drop(rt);
                 self.observer.automation_failed(&frame.session, &frame.tab, "The automation turn was interrupted.");
+            }
+            // `/clear` (#1498): Claude Code ends its session to start a new
+            // one. The turn the composer opened for the command is a command
+            // that ran, not an interrupted one, and an automation that sent it
+            // has completed.
+            "SessionEnd" if frame.payload["reason"].as_str() == Some("clear") => {
+                let mut rt = rt_arc.lock().unwrap();
+                if !mine(&rt) { return HookReply::default(); }
+                if rt.turn_open {
+                    let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
+                    self.end_open_turn(&mut rt, TurnStatus::Ok, None);
+                    self.after_turn_completed(&rt_arc, rt, None, completed);
+                    return HookReply::default();
+                }
+                self.set_status(&mut rt, TabStatus::Idle);
             }
             "SessionEnd" => {
                 let mut rt = rt_arc.lock().unwrap();

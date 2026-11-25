@@ -12,6 +12,7 @@ import { useOrganizationSetups } from "@mobile/cloud/useSetup";
 import { organizationRoleName } from "@mobile/cloud/words";
 import { useApp } from "@mobile/state/AppProvider";
 import { Button, Card, EmptyState } from "@mobile/ui/primitives";
+import { useLargeText } from "@mobile/ui/text-size";
 import { useTheme } from "@mobile/ui/theme";
 
 export const ORGANIZATION_TEXT = {
@@ -51,6 +52,8 @@ export default function SetupOrganizationScreen() {
   const snapshot = useCatalogSnapshot(catalog);
   const { palette } = useTheme();
   const insets = useSafeAreaInsets();
+  // At the accessibility text sizes a name is read in full: one line holds only its first word (PRO-563).
+  const large = useLargeText();
   const userId = app.session?.user.userId ?? null;
   const choice = useSetupChoice(app.ready === false ? undefined : userId);
   const { store, setups } = useOrganizationSetups(catalog);
@@ -85,7 +88,7 @@ export default function SetupOrganizationScreen() {
             return <Pressable key={organization.orgId} testID={`organization-${organization.orgId}`} accessibilityRole="button" accessibilityLabel={organization.name} accessibilityHint={detail} accessibilityState={{ selected: on }}
               onPress={() => setPicked(organization.orgId)} style={[styles.choice, line(index), { backgroundColor: on ? palette.selected : undefined }]}>
               <View style={styles.body}>
-                <Text numberOfLines={1} style={[styles.name, { color: palette.ink }]}>{organization.name}</Text>
+                <Text numberOfLines={large ? undefined : 1} style={[styles.name, { color: palette.ink }]}>{organization.name}</Text>
                 <Text style={[styles.detail, { color: palette.muted }]}>{detail}</Text>
               </View>
               {on ? <Check size={17} color={palette.accent} /> : null}

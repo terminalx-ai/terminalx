@@ -4,7 +4,8 @@
 // In the sender's chat: a "Handed to" card for each of the eight states, Stop only on the open ones, the answer, a
 // retry and an undelivered answer with its Resend. In the receiving bot's chat: the hand-off's card on the left,
 // never the owner's bubble, with the agent's text only behind a closed toggle; a deleted sender; a sender with lower
-// access; an item the owner handed on; TerminalX's own lines; and a mention from each of GitHub, Linear, Slack and
+// access, with the owner's sentence about it (PRO-571); what each sender is to the receiver, one line for each of the
+// four relations (PRO-571); an item the owner handed on; TerminalX's own lines; and a mention from each of GitHub, Linear, Slack and
 // Telegram. Every card stays inside the chat, nothing overlaps, the page never scrolls sideways, and in the smallest
 // window the parts stack and no text is cut. The strip above the chat keeps one line for each open hand-off (PRO-520).
 // Run after pnpm build: node scripts/webkit/bot-message-cards.mjs
@@ -34,6 +35,8 @@ const fixture = `
     bot("b1", "atlas", "Atlas", "CTO", "cto", "owner"),
     bot("b2", "sentry", "Sentry", "Security auditor", "security-auditor", "b1"),
     bot("b3", "argus", "Argus with a rather long name", "Watcher", "watcher", "b1", { paused: { at, by: "owner" }, access: "readReport" }),
+    bot("b4", "pike", "Pike", "Runner watcher", "watcher", "b2", { access: "askOutward" }),
+    bot("b5", "vega", "Vega", "Release manager", "release-manager", "owner"),
   ] };
   backend.answers.bot_home_chat = ({ id }) => backend.answers.list_sessions.find((value) => value.bot.id === id && value.bot.home);
   const ago = (minutes) => new Date(Date.now() - minutes * 60000).toISOString();
@@ -52,6 +55,8 @@ const fixture = `
     handoff(1, { to: "gone", state: "failed", stoppedBy: "deleted", title: "Check the docs build", closed: at, toSession: undefined }),
     handoff(11, { from: "gone", by: "gone", state: "stopped", stoppedBy: "deleted", title: "Check the signing step", closed: at, fromSession: undefined }),
     handoff(10, { from: "b3", by: "b3", title: "Say which jobs print their environment", fromSession: undefined }),
+    handoff(13, { from: "b4", by: "b4", state: "answered", title: "Read the runner's cache keys", closed: at, fromSession: undefined, answer: { at, by: "b2", text: "The cache keys hold no secret." } }),
+    handoff(14, { from: "b5", by: "b5", state: "answered", title: "Say whether the release job signs", closed: at, fromSession: undefined, answer: { at, by: "b2", text: "It signs with the keychain's key." } }),
   ];
   const undelivered = [
     { id: "m1", at, from: "b2", to: "b1", kind: "answer", handoff: 4, tries: 3, error: "the chat could not take the message because its tab is gone", held: true },
@@ -98,6 +103,8 @@ const fixture = `
   line("sentry-work", "Atlas asked Sentry: Check the runner's secrets", note(7, "handed", "to"));
   push("sentry-work", { type: "user_message", text: "Start with the secrets, the network rules can wait.", queued: false });
   message("sentry-work", "bot:b3", "Argus · hand-off to Sentry · " + WORDS, { kind: "handoff", from: "b3", to: "b2", fromName: "Argus", toName: "Sentry", handoff: 10, depth: 1, maxDepth: 3, title: "Say which jobs print their environment", body: "I can read the logs but not the job files.", relation: "listed", fromAccess: "readReport", toAccess: "full" }, "argus text");
+  message("sentry-work", "bot:b4", "Pike · hand-off to Sentry · " + WORDS, { kind: "handoff", from: "b4", to: "b2", fromName: "Pike", toName: "Sentry", handoff: 13, depth: 1, maxDepth: 3, title: "Read the runner's cache keys", body: "I can see the cache hits but not what the keys are made of.", relation: "report", fromAccess: "askOutward", toAccess: "full" }, "pike text");
+  message("sentry-work", "bot:b5", "Vega · hand-off to Sentry · " + WORDS, { kind: "handoff", from: "b5", to: "b2", fromName: "Vega", toName: "Sentry", handoff: 14, depth: 1, maxDepth: 3, title: "Say whether the release job signs", body: "Look at the release job's last run and say whether it signs the build.", relation: "pointed", fromAccess: "full", toAccess: "full" }, "vega text");
   message("sentry-work", "bot:gone", "Kestrel · hand-off to Sentry · " + WORDS, { kind: "handoff", from: "gone", to: "b2", fromName: "Kestrel", toName: "Sentry", handoff: 11, depth: 1, maxDepth: 3, title: "Check the signing step", body: "Say whether the signing key is read from the keychain.", relation: "pointed", fromAccess: "full", toAccess: "full" }, "gone text");
   message("sentry-work", "terminalx", "TerminalX · your owner handed on Atlas's item #12 · its text is Atlas's words", { kind: "handoff", from: "owner", to: "b2", toName: "Sentry", handoff: 12, depth: 1, maxDepth: 3, title: "Phase 2: merge main into phase-2", body: "Merge, then restart the runs.", note: "Sentry, look at what this changes for the runner's secrets before it merges.", wordsOf: "b1", fromItem: 12, item: 12, toAccess: "full" },
     "Your owner handed you item #12 of Atlas's work, in the TerminalX window. Their note:\\n\\n<owner-note>\\nSentry, look at what this changes.\\n</owner-note>");
@@ -200,7 +207,7 @@ async function sweep(page, view, { narrow, shoot }) {
         out.push({ name, kind, left: rect.left - slot.left, right: slot.right - rect.right, width: rect.width, slot: slot.width,
           stacked: { label: label && sender ? label.top >= sender.bottom - 1 : null, state: state && handedTo ? state.top >= handedTo.bottom - 1 : null, stop: stop && handedTo ? stop.top >= handedTo.bottom - 1 : null },
           stateText: card.querySelector("[data-testid=bot-card-state]")?.textContent ?? null, stop: !!stop, anyStop: [...card.querySelectorAll("button")].some((button) => /stop/i.test(button.textContent)),
-          hasPre: !!card.querySelector("pre"), text: card.textContent });
+          hasPre: !!card.querySelector("pre"), text: card.textContent, lines: ["bot-card-relation", "bot-card-lower-access"].map((id) => { const part = card.querySelector("[data-testid=" + id + "]"); if (!part) return null; const text = part.querySelector("span") ?? part; const style = getComputedStyle(text); return { id, text: text.textContent, rows: Math.round(text.getBoundingClientRect().height / parseFloat(style.lineHeight)), whole: text.scrollWidth <= text.clientWidth + 1 && style.textOverflow !== "ellipsis" && style.whiteSpace !== "nowrap" && style.webkitLineClamp === "none" }; }).filter(Boolean) });
       }
       if (document.documentElement.scrollWidth > innerWidth + 1) problems.push("page scrolls sideways");
       return { out, problems, end: scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2 };
@@ -307,7 +314,11 @@ try {
         "no card in the receiving chat has a Stop": receiver.cards.every((card) => !card.anyStop),
         "the bot's cards stand left; the owner's own message keeps its bubble": cards.every((card) => card.left - edge <= 40) && own.length === 1 && own[0].text.includes("Start with the secrets") && own[0].left - edge > 20,
         "a deleted sender is A bot no longer here, stopped": cards.some((card) => card.text.startsWith("A bot no longer here") && card.text.includes("Stopped · its sender was deleted")),
-        "a sender with lower access shows both access chips and no sentence": cards.some((card) => card.text.includes("Argus with a rather long name: Read and report") && card.text.includes("Sentry: Full access")),
+        "a sender with lower access shows both access chips, then the owner's sentence in the receiver's access words": [["Argus with a rather long name", "Read and report"], ["Pike", "Asks before acting outside"]].every(([sender, access]) => cards.some((card) => card.text.includes(sender + ": " + access) && card.text.includes("Sentry: Full access") && card.lines.some((line) => line.id === "bot-card-lower-access" && line.text === "Sentry does this with their own access (Full access), which is more than " + sender + " has."))),
+        "a sender with the same access shows neither the chips nor the sentence": ["Atlas", "Vega"].every((sender) => { const card = cards.find((value) => value.text.startsWith(sender) && value.text.includes("hand-off to Sentry")); return !!card && !card.text.includes(": Full access") && !card.text.includes("does this with their own access"); }),
+        "each of the four relations says, on its hand-off card, what the sender is to Sentry": [["Atlas", "Sentry reports to Atlas."], ["Pike", "Pike reports to Sentry."], ["Argus with a rather long name", "You let Argus with a rather long name hand work to Sentry."], ["Vega", "You pointed Vega to Sentry."]].every(([sender, line]) => cards.some((card) => card.text.startsWith(sender) && card.lines.filter((value) => value.id === "bot-card-relation").map((value) => value.text).join() === line)),
+        "a deleted sender's card says no relation": cards.filter((card) => card.text.startsWith("A bot no longer here")).every((card) => card.lines.every((line) => line.id !== "bot-card-relation")),
+        "the owner's lines are whole and wrap, never shortened; in the smallest window the long sentence takes more than one row": cards.flatMap((card) => card.lines).length === 6 && cards.flatMap((card) => card.lines).every((line) => line.whole && line.rows >= 1) && (!narrow || cards.some((card) => card.lines.some((line) => line.id === "bot-card-lower-access" && line.text.includes("Argus") && line.rows > 1))),
         "the item the owner handed on is theirs: You handed, Your note, the item as Atlas wrote it": cards.some((card) => card.text.includes("TerminalX · You handed Sentry this item") && card.text.includes("Your note") && card.text.includes("Item #12 as Atlas wrote it · a bot's words, not an approval")),
         "Sentry answered hand-off 5 and it reached Atlas's chat": receiver.cards.some((card) => card.kind.startsWith("bot-answered-line") && card.text.includes("Sentry answered hand-off 5 · it reached Atlas's chat")),
         "TerminalX says You stopped hand-off 3": receiver.cards.some((card) => card.kind.startsWith("bot-terminalx-line") && card.text.includes("TerminalX · You stopped hand-off 3")),
@@ -315,7 +326,7 @@ try {
         "Open on GitHub opens the comment": opened.includes("https://github.com/acme/app/pull/1462#issuecomment-1"),
         "in the smallest window the label drops under the sender's name": !narrow || cards.filter((card) => card.stacked.label !== null).every((card) => card.stacked.label === true),
         "no page errors": errors.length === 0,
-      }, { problems: receiver.problems, edge, cards: receiver.cards.map((card) => `${card.kind} left=${card.left} width=${card.width} label=${card.stacked.label} "${card.name.slice(0, 24)}"`), shownLength: shown?.length, expectedLength: expected.length, opened, errors });
+      }, { problems: receiver.problems, edge, cards: receiver.cards.map((card) => `${card.kind} left=${card.left} width=${card.width} label=${card.stacked.label} "${card.name.slice(0, 24)}"`), lines: receiver.cards.flatMap((card) => card.lines ?? []).map((line) => `${line.id} rows=${line.rows} whole=${line.whole} "${line.text}"`), shownLength: shown?.length, expectedLength: expected.length, opened, errors });
       // Each kind of card whole, for a person to look at: the smallest window is too short to hold one, so the
       // same width is drawn tall. Nothing is measured here.
       if (tag && narrow) {

@@ -1,6 +1,8 @@
 import { Platform, Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import { ChevronRight, Cloud } from "lucide-react-native";
 import type { CloudWorkspaceItem } from "@mobile/cloud/api";
+import { useCloudCatalog } from "@mobile/cloud/CloudProvider";
+import { useProviderName } from "@mobile/cloud/provider-names";
 import { listStatus, roleLabel } from "@mobile/cloud/words";
 import { agoTime } from "@mobile/data/session-list";
 import { StatusDot } from "./primitives";
@@ -33,8 +35,11 @@ export function CloudWorkspaceRow({ item, title, first, last, onPress, cloud = f
   const { workspace } = item;
   const status = listStatus(workspace);
   const role = roleLabel(workspace.you?.role);
+  // The provider by its name (PRO-566): the workspace's own when the server sends one, else the one its
+  // organization's provider list gives the id. The bare id only while neither is known, as when offline.
   const providerLabel = workspace.providerDescriptor?.label;
-  const provider = typeof providerLabel === "string" && providerLabel.trim() ? providerLabel : workspace.provider;
+  const listed = useProviderName(useCloudCatalog(), workspace.orgId, workspace.provider);
+  const provider = typeof providerLabel === "string" && providerLabel.trim() ? providerLabel : listed ?? workspace.provider;
   const repository = workspace.repositories?.find((entry) => entry.primary)?.fullName ?? workspace.repositories?.[0]?.fullName ?? null;
   const branch = workspace.launch?.workBranch ?? null;
   const where = [provider, repository, branch].filter(Boolean).join(" · ");

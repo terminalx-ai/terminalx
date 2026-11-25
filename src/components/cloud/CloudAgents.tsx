@@ -521,6 +521,7 @@ export function CloudOutbox({
           className={cn("flex items-baseline gap-2", entry.state === "outcome-unknown" && "text-warning")}
           data-testid="cloud-agent-command"
           data-state={entry.state}
+          data-category={entry.category ?? undefined}
         >
           <span className="shrink-0 text-muted-foreground">{KIND_TEXT[entry.kind] ?? entry.kind}:</span>
           <span className="min-w-0 flex-1 break-words">{outboxStateText(entry, nameOf)}</span>

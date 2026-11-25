@@ -3,20 +3,25 @@ import { Alert, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView,
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Crypto from "expo-crypto";
-import { Check, ChevronRight, CirclePause, CloudOff, ServerOff, WifiOff } from "lucide-react-native";
+import { Check, CirclePause, CloudOff, ServerOff, WifiOff } from "lucide-react-native";
 import { CloudApiError, type CloudApi, type CloudCredential, type CloudFirstRunSetup, type CloudLaunch, type CloudOrganization, type CloudProvider, type CloudProviderSetup, type CloudQuote } from "@mobile/cloud/api";
-import { BYPASS_NOT_FROM_PHONE, PHONE_DEFAULT_MODE, phoneModeLabel, phoneModes } from "@mobile/cloud/agent-settings";
+import { BYPASS_NOT_FROM_PHONE, PHONE_DEFAULT_MODE, effortLabel, phoneModeLabel, phoneModes } from "@mobile/cloud/agent-settings";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import type { CloudCatalog } from "@mobile/cloud/catalog";
-import { EMPTY_FIRST_TASK, FIRST_TASK_PLACEHOLDER, FIRST_TASK_TOO_LONG, NO_AGENT_TICKED, keptTaskKey, launchOf, taskAgent, taskAgents, taskFacts, taskTooLong, taskWritten, type FirstTaskDraft } from "@mobile/cloud/first-task";
+import { EMPTY_FIRST_TASK, FIRST_TASK_PLACEHOLDER, FIRST_TASK_TOO_LONG, NO_AGENT_TICKED, keptTaskKey, launchOf, taskAgent, taskAgents, taskEffort, taskEffortChoices, taskFacts, taskModel, taskModelChoices, taskModels, taskTooLong, taskWritten, type FirstTaskDraft } from "@mobile/cloud/first-task";
 import { EMPTY_FIRST_TASK_CHECKED_LIVE } from "@mobile/cloud/live-checks";
-import { ACCESS_NOTICE, LaunchAttempt, QUOTE_EXPIRED, REPOSITORY_INVALID, SPEND_NOTICE, agentLogins, credentialName, firstRunSetup, idleChoiceLabel, idleChoices, idleValue, launchProviders, launchRefusal, loginDetail, preflightProblems, pricingNote, problemsTitle, providerLabel, quotedSize, repositoryOf, sizeDetail, sizeValue, unanswered, type LaunchRefusal, type PreflightProblems } from "@mobile/cloud/launch";
+import { ACCESS_NOTICE, LaunchAttempt, QUOTE_EXPIRED, SPEND_NOTICE, agentLogins, credentialName, firstRunSetup, idleChoiceLabel, idleChoices, idleValue, launchOrganization, launchProviders, launchRefusal, loginDetail, preflightProblems, pricingNote, problemsTitle, providerLabel, quotedSize, repositoriesRow, repositoryLine, sizeDetail, sizeNamesMachine, sizeValue, unanswered, type LaunchRefusal, type LaunchRepository, type PreflightProblems } from "@mobile/cloud/launch";
+import { stepHref } from "@mobile/cloud/setup-routes";
+import { useOrganizationSetups } from "@mobile/cloud/useSetup";
+import { useApp } from "@mobile/state/AppProvider";
+import type { ModelInfo } from "@terminalx/portable/agentSettings";
 import { ChoiceSheet, type Choice } from "@mobile/ui/ChoiceSheet";
 import { FactRows } from "@mobile/ui/FactRows";
 import { Notice } from "@mobile/ui/Notice";
 import { AgentSettingsRows, PickRow } from "@mobile/ui/PickRow";
 import { PriceLines, priceText } from "@mobile/ui/PriceLines";
 import { Button, Card, EmptyState, SectionTitle } from "@mobile/ui/primitives";
+import { RepositoriesStep } from "@mobile/ui/repositories/RepositoriesStep";
 import { ScreenHeader } from "@mobile/ui/SessionChrome";
 import { TextField } from "@mobile/ui/TextField";
 import { useTheme } from "@mobile/ui/theme";
@@ -41,8 +46,22 @@ export default function NewWorkspaceScreen() {
   const snapshot = useCatalogSnapshot(catalog);
   const organizations = useMemo(() => snapshot.organizations.map((entry) => entry.organization), [snapshot.organizations]);
   const [chosen, setChosen] = useState<string | null>(params.orgId ?? null);
-  // Opened for one organization, it launches there; otherwise in the first, until another is picked on the form.
-  const organization = organizations.find((entry) => entry.orgId === chosen) ?? (chosen === null ? organizations[0] : undefined) ?? null;
+  // Opened for one organization, it launches there. Opened by + for none (PRO-557), it launches in the first that
+  // has a provider to launch on, read from each organization's provider list now, until another is picked.
+  const { store } = useOrganizationSetups(catalog);
+  const orgIds = organizations.map((entry) => entry.orgId).join(" ");
+  const finding = chosen === null && organizations.length > 1;
+  useEffect(() => {
+    if (!finding || !store) return;
+    let current = true;
+    void Promise.all(organizations.map((entry) => store.read(entry.orgId))).then(() => {
+      if (current) setChosen((held) => held ?? launchOrganization(organizations, (orgId) => store.getSnapshot().get(orgId)?.providers.value)?.orgId ?? null);
+    });
+    return () => { current = false; };
+    // `orgIds`, not the list: the same organizations read again are not asked about again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [finding, orgIds, store]);
+  const organization = organizations.find((entry) => entry.orgId === chosen) ?? (chosen === null && !finding ? organizations[0] : undefined) ?? null;
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
     <Stack.Screen options={{ title: "New workspace", headerShown: false }} />
     {catalog && organization
@@ -50,7 +69,8 @@ export default function NewWorkspaceScreen() {
       : <>
         <ScreenHeader title="New workspace" onBack={() => router.back()} />
         {catalog
-          ? <EmptyState title={snapshot.refreshedAt || snapshot.error ? "No organization to launch in" : "Reading your organizations…"} detail={snapshot.refreshedAt || snapshot.error ? "Cloud workspaces belong to an organization of your account." : "From your TerminalX account."} busy={!snapshot.refreshedAt && !snapshot.error} />
+          ? finding ? <View testID="launch-finding"><EmptyState busy title="Reading your organizations…" detail="To open the one that can launch." /></View>
+          : <EmptyState title={snapshot.refreshedAt || snapshot.error ? "No organization to launch in" : "Reading your organizations…"} detail={snapshot.refreshedAt || snapshot.error ? "Cloud workspaces belong to an organization of your account." : "From your TerminalX account."} busy={!snapshot.refreshedAt && !snapshot.error} />
           : <EmptyState title="Sign in to launch a workspace" detail="Cloud workspaces belong to your TerminalX account." />}
       </>}
   </View>;
@@ -69,8 +89,8 @@ interface Draft {
   locationId: string;
   sourceId: string;
   idleMinutes: number;
-  repository: string;
-  ref: string;
+  /** The repositories it clones (25.11): picked from the organization's list or typed, at most five, each with its branch. */
+  repositories: LaunchRepository[];
   /** Agent logins the person unticked; every other working one is given to the workspace. */
   withoutAgents: string[];
   /** The first task (25.09): which ticked agent starts, in which mode, and what it is told. */
@@ -82,16 +102,36 @@ interface Priced {
   name: string;
   quote: CloudQuote;
   setup: CloudFirstRunSetup | undefined;
-  repository: string | null;
+  /** One line each, with its branch. */
+  repositories: string[];
   agents: string[];
   provider: CloudProvider;
   /** The first task, as it is sent; none when no agent is ticked or the person cannot choose logins. */
   launch: CloudLaunch | undefined;
 }
 
-type Sheet = "organization" | "provider" | "size" | "region" | "image" | "idle" | "agent" | "mode" | null;
+type Sheet = "organization" | "provider" | "size" | "region" | "image" | "idle" | "agent" | "model" | "effort" | "mode" | null;
 
-const NO_TASK: FirstTaskDraft = { agent: null, mode: PHONE_DEFAULT_MODE, text: "" };
+const NO_TASK: FirstTaskDraft = { agent: null, model: null, effort: null, mode: PHONE_DEFAULT_MODE, text: "" };
+
+/**
+ * The models the person's own computer lists, where the desktop's create form
+ * has its choices from (PRO-562): read from the Mac this phone is connected
+ * to, and kept once read. Null with no Mac connected, or one that lists none.
+ */
+function useMacModels(): ModelInfo[] | null {
+  const app = useApp();
+  const connected = app.connectionStage === "connected";
+  const api = app.api;
+  const [listed, setListed] = useState<ModelInfo[] | null>(null);
+  useEffect(() => {
+    if (!connected || !api) return;
+    let current = true;
+    void api.models().then((models) => { if (current && models.length) setListed(models); }, () => undefined);
+    return () => { current = false; };
+  }, [api, connected]);
+  return listed;
+}
 
 function LaunchFlow({ catalog, organization, organizations, onOrganization, again }: { catalog: CloudCatalog; organization: CloudOrganization; organizations: CloudOrganization[]; onOrganization(orgId: string): void; again: string | null }) {
   const { palette } = useTheme();
@@ -99,11 +139,12 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   const insets = useSafeAreaInsets();
   const api: CloudApi = catalog.api;
   const orgId = organization.orgId;
+  const listedModels = useMacModels();
 
   const [offer, setOffer] = useState<Offer>({ status: "reading" });
   const [setup, setSetup] = useState<CloudProviderSetup | null>(null);
   // Launch again after a cancel opens with the first task that was not sent, taken from where the launch kept it.
-  const [draft, setDraft] = useState<Draft>(() => ({ name: "", providerId: null, sizeId: "", locationId: "", sourceId: "", idleMinutes: 0, repository: "", ref: "", withoutAgents: [], task: (again ? takeConversationState<FirstTaskDraft>(keptTaskKey(orgId, again)) : undefined) ?? NO_TASK }));
+  const [draft, setDraft] = useState<Draft>(() => ({ name: "", providerId: null, sizeId: "", locationId: "", sourceId: "", idleMinutes: 0, repositories: [], withoutAgents: [], task: (again ? takeConversationState<FirstTaskDraft>(keptTaskKey(orgId, again)) : undefined) ?? NO_TASK }));
   const [step, setStep] = useState<"form" | "repository" | "review">("form");
   const [sheet, setChosenSheet] = useState<Sheet>(null);
   // The task is the form's last field: while it is typed in, the form keeps its end in view, above the keyboard
@@ -201,22 +242,28 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   const changeTask = (patch: Partial<FirstTaskDraft>) => setDraft((held) => ({ ...held, task: { ...held.task, ...patch } }));
 
   const toOrganization = () => router.push({ pathname: "/organization/[orgId]", params: { orgId } });
+  // Compute is connected on its own page (25.03), which goes back here (PRO-559).
+  const toCompute = () => router.push(stepHref("compute", orgId));
+  const organizationSheet = { title: "Organization", chosen: orgId, choices: organizations.map((entry) => ({ id: entry.orgId, label: entry.name })), choose: onOrganization };
   const header = (title: string, onBack: () => void) => <ScreenHeader title={title} subtitle={organization.name} onBack={onBack} />;
 
   if (offer.status !== "open" || !setup) {
     const provider = offer.status === "open" ? offer.providers.find((entry) => entry.id === providerId) : null;
     return <>
       {header("New workspace", () => router.back())}
+      {/* Whatever this organization lacks, another may have: it is picked here as on the form (PRO-557). */}
+      {organizations.length > 1 ? <View style={styles.stateOrganization}><Card><PickRow label="Organization" value={organization.name} onPress={() => setSheet("organization")} first /></Card></View> : null}
       {offer.status === "closed" ? <View testID={`launch-${offer.kind}`}>
         <EmptyState
           title={offer.kind === "not-connected" ? "Connect compute first" : offer.kind === "paused" ? "New workspaces are paused" : offer.kind === "unavailable" ? "Not available yet" : "Sizes and prices could not be read"}
           detail={offer.text}
           icon={(color) => offer.kind === "not-connected" ? <ServerOff size={34} color={color} strokeWidth={1.6} /> : offer.kind === "unreachable" ? <CloudOff size={34} color={color} strokeWidth={1.6} /> : <CirclePause size={34} color={color} strokeWidth={1.6} />} />
         <View style={styles.stateAction}>
-          {offer.kind === "not-connected" ? <Button label="Connect compute" onPress={toOrganization} /> : null}
+          {offer.kind === "not-connected" ? <Button label="Connect compute" onPress={toCompute} /> : null}
           {offer.kind === "unreachable" ? <Button label="Try again" kind="secondary" onPress={() => { setOffer({ status: "reading" }); setReads((count) => count + 1); }} /> : null}
         </View>
       </View> : <EmptyState busy title="Reading sizes and prices…" detail={provider ? `From ${providerLabel(provider)}, for ${organization.name}.` : `For ${organization.name}.`} />}
+      {sheet === "organization" ? <ChoiceSheet title={organizationSheet.title} choices={organizationSheet.choices} chosen={organizationSheet.chosen} onChoose={organizationSheet.choose} onClose={() => setSheet(null)} /> : null}
     </>;
   }
 
@@ -232,9 +279,12 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   const agents = taskAgents(ticked);
   const firstTask = offer.loginsRead && logins.length > 0;
   const agent = firstTask ? taskAgent(draft.task.agent, agents) : null;
+  // The agent's models and the chosen one's efforts, where the person's computer lists them; else the agent's own default.
+  const models = agent ? taskModels(listedModels, agent.id) : [];
+  const model = taskModel(draft.task.model, models);
+  const effort = taskEffort(draft.task.effort, model);
   const tooLong = firstTask && taskTooLong(draft.task.text);
-  const typedRepository = draft.repository.trim();
-  const repository = typedRepository ? repositoryOf(typedRepository) : null;
+  const repositoryRow = repositoriesRow(draft.repositories);
   const hourly = (micros: number | undefined) => (micros == null ? null : priceText(micros, setup.currency));
 
   /** Check the setup, then ask for the price: the review opens on the quote. */
@@ -243,8 +293,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
     if (inFlight.current || noAnswer) return;
     const name = draft.name.trim();
     if (!name || !size || !place || !source || tooLong) return;
-    if (typedRepository && !repository) return setProblems({ items: [REPOSITORY_INVALID], repository: REPOSITORY_INVALID, ref: null, needsGithubToken: false });
-    const first = firstRunSetup({ repository, ref: draft.ref, agentIds: ticked.map((login) => login.id) }, offer.credentials);
+    const first = firstRunSetup({ repositories: draft.repositories, agentIds: ticked.map((login) => login.id) }, offer.credentials);
     inFlight.current = true;
     setBusy("pricing");
     setProblems(null);
@@ -253,7 +302,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
     setNoAnswer(false);
     try {
       if (first) {
-        const found = preflightProblems(await api.preflight(orgId, first), { repository }, offer.credentials);
+        const found = preflightProblems(await api.preflight(orgId, first), { repositories: draft.repositories }, offer.credentials);
         if (found) { if (alive.current) { setProblems(found); setStep("form"); } return; }
       }
       const quote = await api.quote(orgId, { provider: provider.id, sourceId: source.id, locationId: place.id, machineClassId: size.id, idleSuspendMinutes: draft.idleMinutes, retentionDays: setup.defaults.retentionDays, networkPolicy: setup.defaults.networkPolicy });
@@ -261,7 +310,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
       // A new price for what was already under review: said when it is not the same.
       const before = step === "review" && priced && priced.name === name && priced.quote.configuration.machineClassId === quote.configuration.machineClassId && priced.quote.provider === quote.provider ? priced.quote.activeHourlyMicros : null;
       setPriceBefore(before !== null && before !== quote.activeHourlyMicros ? before : null);
-      setPriced({ name, quote, setup: first, repository: repository ? [repository.fullName, draft.ref.trim()].filter(Boolean).join(" · ") : null, agents: ticked.map((login) => credentialName(login.provider)), provider, launch: firstTask ? launchOf(draft.task, agents) : undefined });
+      setPriced({ name, quote, setup: first, repositories: draft.repositories.map(repositoryLine), agents: ticked.map((login) => credentialName(login.provider)), provider, launch: firstTask ? launchOf(draft.task, agents, listedModels) : undefined });
       setExpired(false);
       setStep("review");
     } catch (error) {
@@ -315,17 +364,17 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
     { text: "Launch", onPress: () => void launch() },
   ]);
 
-  const page = (title: string, onBack: () => void, body: ReactNode, foot: ReactNode) => <KeyboardAvoidingView style={styles.page} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-    {header(title, onBack)}
+  // `subtitle`: a page about every workspace of the organization says so in place of its name (25.11's Choose repositories).
+  const page = (title: string, onBack: () => void, body: ReactNode, foot: ReactNode, subtitle?: string) => <KeyboardAvoidingView style={styles.page} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+    {subtitle ? <ScreenHeader title={title} subtitle={subtitle} onBack={onBack} /> : header(title, onBack)}
     <ScrollView ref={scroller} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}
       onContentSizeChange={() => { if (typing.current) scroller.current?.scrollToEnd({ animated: false }); }}>{body}</ScrollView>
-    <View style={[styles.foot, { paddingBottom: insets.bottom + 12 }]}>{foot}</View>
+    {foot ? <View style={[styles.foot, { paddingBottom: insets.bottom + 12 }]}>{foot}</View> : null}
   </KeyboardAvoidingView>;
 
   if (step === "repository") {
-    return <RepositoryStep organization={organization.name} repository={draft.repository} gitRef={draft.ref} problems={problems} page={page}
-      onUse={(next, ref) => { change({ repository: next, ref }); setStep("form"); }}
-      onNone={() => { change({ repository: "", ref: "" }); setStep("form"); }}
+    return <RepositoriesStep api={api} orgId={orgId} organization={organization.name} repositories={draft.repositories} problems={problems} page={page}
+      onUse={(repositories) => { change({ repositories }); setStep("form"); }}
       onBack={() => setStep("form")} onToken={toOrganization} />;
   }
 
@@ -340,19 +389,20 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
         { label: "Size", value: quotedSize(quote.configuration) },
         { label: "Region", value: quote.configuration.locationLabel },
         { label: "Stops when idle", value: idleValue(quote.configuration.idleSuspendMinutes) },
-        { label: "Repository", value: priced.repository ?? "None" },
+        // Several are listed one to a line, each with its branch, under the label.
+        priced.repositories.length > 1 ? { label: "Repositories", value: priced.repositories.join("\n"), block: true } : { label: "Repository", value: priced.repositories[0] ?? "None" },
         { label: "Agents", value: priced.agents.length ? priced.agents.join(", ") : "None" },
       ]} />
       {priced.launch ? <>
         <SectionTitle>First task</SectionTitle>
-        <FactRows testID="review-task" facts={taskFacts(priced.launch)} />
+        <FactRows testID="review-task" facts={taskFacts(priced.launch, listedModels)} />
         {!priced.launch.prompt && EMPTY_FIRST_TASK_CHECKED_LIVE ? <Text testID="review-empty-task" style={[styles.help, { color: palette.muted }]}>{EMPTY_FIRST_TASK}</Text> : null}
       </> : null}
       <SectionTitle>Price</SectionTitle>
       <PriceLines testID="review-price" quote={quote} now={api.serverNow} note={pricingNote(priced.provider, quote.pricing)} onExpired={() => setExpired(true)} />
       {noAnswer ? null : expired ? <Notice testID="price-expired" tone="warning" text={QUOTE_EXPIRED} />
         : priceBefore !== null ? <Notice testID="price-changed" tone="warning" text={`The price changed since you last looked: it was ${priceText(priceBefore, quote.currency)} per active hour.`} /> : null}
-      {refusal ? <Notice testID="launch-refusal" tone="danger" text={refusal.text} action={refusal.fix === "compute" ? { label: "Connect compute", onPress: toOrganization } : undefined} /> : null}
+      {refusal ? <Notice testID="launch-refusal" tone="danger" text={refusal.text} action={refusal.fix === "compute" ? { label: "Connect compute", onPress: toCompute } : undefined} /> : null}
       {noAnswer ? <Notice testID="launch-unanswered" tone="warning" icon={(color) => <WifiOff size={16} color={color} />} text="No answer came back. Checking whether the launch started; nothing is launched twice." /> : null}
     </>, noAnswer && !launching
       // The same launch, asked again under the same key: the person already said yes to this price. It stays
@@ -364,13 +414,15 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   }
 
   const sheets: Record<Exclude<Sheet, null>, { title: string; subtitle?: string; help?: string; chosen: string | null; choices: Choice[]; choose(id: string): void }> = {
-    organization: { title: "Organization", chosen: orgId, choices: organizations.map((entry) => ({ id: entry.orgId, label: entry.name })), choose: onOrganization },
+    organization: organizationSheet,
     provider: { title: "Provider", chosen: provider.id, choices: offer.providers.map((entry) => ({ id: entry.id, label: providerLabel(entry), detail: entry.descriptor.billing || undefined })), choose: (id) => change({ providerId: id }) },
-    size: { title: "Size", subtitle: `${providerName} · ${setup.pricing === "provider-rate" ? "Prices come from the provider's live rates." : "Prices shown are estimates."}`, chosen: draft.sizeId, choices: setup.machineClasses.map((entry) => ({ id: entry.id, label: entry.label, detail: sizeDetail(entry), ...(hourly(entry.activeHourlyMicros) ? { value: hourly(entry.activeHourlyMicros)!, valueDetail: "per active hour" } : {}) })), choose: (id) => change({ sizeId: id }) },
+    size: { title: "Size", subtitle: `${providerName} · ${setup.pricing === "provider-rate" ? "Prices come from the provider's live rates." : "Prices shown are estimates."}`, chosen: draft.sizeId, choices: setup.machineClasses.map((entry) => ({ id: entry.id, label: entry.label, ...(sizeNamesMachine(entry.label) ? {} : { detail: sizeDetail(entry) }), ...(hourly(entry.activeHourlyMicros) ? { value: hourly(entry.activeHourlyMicros)!, valueDetail: "per active hour" } : {}) })), choose: (id) => change({ sizeId: id }) },
     region: { title: "Region", subtitle: providerName, chosen: draft.locationId, choices: setup.locations.map((entry) => ({ id: entry.id, label: entry.label })), choose: (id) => change({ locationId: id }) },
     image: { title: "Image", subtitle: providerName, chosen: draft.sourceId, choices: setup.sources.map((entry) => ({ id: entry.id, label: entry.label, detail: entry.description })), choose: (id) => change({ sourceId: id }) },
     idle: { title: "Stop when idle", chosen: String(draft.idleMinutes), help: "A stopped workspace starts again when you send it a message.", choices: idleChoices(setup).map((minutes) => ({ id: String(minutes), label: idleChoiceLabel(minutes) })), choose: (id) => change({ idleMinutes: Number(id) }) },
-    agent: { title: "Agent", subtitle: "The agents ticked for this workspace", chosen: agent?.id ?? null, choices: agents.map((entry) => ({ id: entry.id, label: entry.label, detail: entry.detail })), choose: (id) => { changeTask({ agent: id }); setProblems(null); } },
+    agent: { title: "Agent", subtitle: "The agents ticked for this workspace", chosen: agent?.id ?? null, choices: agents.map((entry) => ({ id: entry.id, label: entry.label, detail: entry.detail })), choose: (id) => { changeTask({ agent: id, model: null, effort: null }); setProblems(null); } },
+    model: { title: "Model", subtitle: agent?.label, chosen: model?.id ?? null, choices: taskModelChoices(models), choose: (id) => changeTask({ model: id }) },
+    effort: { title: "Effort", subtitle: model?.label, chosen: effort, choices: model ? taskEffortChoices(model) : [], choose: (id) => changeTask({ effort: id }) },
     mode: { title: "Permission mode", help: BYPASS_NOT_FROM_PHONE, chosen: draft.task.mode, choices: phoneModes().map((mode) => ({ id: mode.id, label: mode.label, detail: mode.hint })), choose: (id) => changeTask({ mode: phoneModes().find((mode) => mode.id === id)?.id ?? PHONE_DEFAULT_MODE }) },
   };
   const open = sheet ? sheets[sheet] : null;
@@ -379,7 +431,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   return <>
     {page("New workspace", () => router.back(), <>
       {problems ? <Notice testID="preflight-problems" tone="danger" title={problemsTitle(problems.items.length)} items={problems.items} /> : null}
-      {formRefusal ? <Notice testID="form-refusal" tone="danger" text={formRefusal.text} action={formRefusal.fix === "compute" ? { label: "Connect compute", onPress: toOrganization } : undefined} /> : null}
+      {formRefusal ? <Notice testID="form-refusal" tone="danger" text={formRefusal.text} action={formRefusal.fix === "compute" ? { label: "Connect compute", onPress: toCompute } : undefined} /> : null}
       <TextField testID="workspace-name" label="Name" value={draft.name} onChangeText={(name) => change({ name })} placeholder="What it is for" maxLength={NAME_MAX} autoFocus={!draft.name} disabled={busy !== null} returnKeyType="done" />
       <SectionTitle>Machine</SectionTitle>
       <Card>
@@ -396,7 +448,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
       </Card>
       <SectionTitle>Repository and agents</SectionTitle>
       <Card>
-        <PickRow label="Repository" value={repository?.fullName ?? (typedRepository || "None")} bad={!!problems?.repository || !!problems?.ref} onPress={() => setStep("repository")} first />
+        <PickRow testID="pick-repository" label={repositoryRow.label} value={repositoryRow.value} bad={!!problems?.repository || !!problems?.ref} onPress={() => { Keyboard.dismiss(); setStep("repository"); }} first />
         {logins.map((login) => {
           const on = !draft.withoutAgents.includes(login.id);
           return <Pressable key={login.id} testID={`agent-${login.provider}`} accessibilityRole="checkbox" accessibilityLabel={`${credentialName(login.provider)}, ${loginDetail(login)}`} accessibilityState={{ checked: on }}
@@ -411,8 +463,8 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
       {firstTask ? <>
         <SectionTitle>First task</SectionTitle>
         {agent ? <>
-          <AgentSettingsRows testID="first-task-rows" agent={agent.label} model={null} effort={null} mode={phoneModeLabel(draft.task.mode)} badAgent={!!problems?.agents?.includes(agent.id)}
-            onAgent={() => setSheet("agent")} onMode={() => setSheet("mode")} />
+          <AgentSettingsRows testID="first-task-rows" agent={agent.label} model={model?.label ?? null} effort={effort ? effortLabel(effort) : null} mode={phoneModeLabel(draft.task.mode)} badAgent={!!problems?.agents?.includes(agent.id)}
+            onAgent={() => setSheet("agent")} onModel={() => setSheet("model")} onEffort={() => setSheet("effort")} onMode={() => setSheet("mode")} />
           <TextField testID="first-task" accessibilityLabel="First task" multiline onFocus={() => { typing.current = true; }} onBlur={() => { typing.current = false; }} value={draft.task.text} onChangeText={(text) => changeTask({ text })} placeholder={FIRST_TASK_PLACEHOLDER} disabled={busy !== null}
             error={tooLong ? FIRST_TASK_TOO_LONG : null} helper={!taskWritten(draft.task.text) && EMPTY_FIRST_TASK_CHECKED_LIVE ? EMPTY_FIRST_TASK : undefined} />
         </> : <Notice testID="first-task-none" tone="info" text={NO_AGENT_TICKED} />}
@@ -423,61 +475,16 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   </>;
 }
 
-/** The repository's own page: one typed or pasted GitHub URL and an optional branch, with what the last check said of each. */
-function RepositoryStep({ organization, repository, gitRef, problems, page, onUse, onNone, onBack, onToken }: {
-  organization: string;
-  repository: string;
-  gitRef: string;
-  problems: PreflightProblems | null;
-  page(title: string, onBack: () => void, body: ReactNode, foot: ReactNode): ReactNode;
-  onUse(repository: string, ref: string): void;
-  onNone(): void;
-  onBack(): void;
-  onToken(): void;
-}) {
-  const { palette } = useTheme();
-  const [url, setUrl] = useState(repository);
-  const [ref, setRef] = useState(gitRef);
-  const [invalid, setInvalid] = useState(false);
-  // What the last check said is about what was checked: gone once it is edited.
-  const unchanged = url === repository && ref === gitRef;
-  const empty = !url.trim();
-  const use = () => {
-    if (!repositoryOf(url)) return setInvalid(true);
-    onUse(url.trim(), ref.trim());
-  };
-  return page("Repository", onBack, <>
-    <Text style={[styles.lede, { color: palette.muted }]}>Optional. The repository is cloned before the workspace becomes available.</Text>
-    <TextField testID="repository-url" label="GitHub repository URL" value={url} onChangeText={(value) => { setUrl(value); setInvalid(false); }} placeholder="github.com/owner/repository" paste autoFocus={empty} autoCapitalize="none" autoCorrect={false} keyboardType="url"
-      error={invalid ? REPOSITORY_INVALID : unchanged ? problems?.repository : null} />
-    <TextField testID="repository-ref" label="Branch or tag" hint="optional" value={ref} onChangeText={setRef} placeholder="main" autoCapitalize="none" autoCorrect={false} error={unchanged ? problems?.ref : null} />
-    {unchanged && problems?.needsGithubToken
-      ? <Card><Pressable testID="add-github-token" accessibilityRole="button" accessibilityLabel={`Add a GitHub token, saved for ${organization}, in Agent logins`} onPress={onToken} style={({ pressed }) => [styles.row, styles.tokenRow, pressed ? { backgroundColor: palette.raised } : null]}>
-        <View style={styles.grow}>
-          <Text style={[styles.rowLabel, { color: palette.ink }]}>Add a GitHub token</Text>
-          <Text style={[styles.tokenDetail, { color: palette.muted }]}>{`Saved for ${organization}, in Agent logins`}</Text>
-        </View>
-        <ChevronRight size={18} color={palette.faint} />
-      </Pressable></Card>
-      : <Text style={[styles.help, { color: palette.muted }]}>A private repository is cloned with the GitHub token saved in Agent logins.</Text>}
-  </>, <>
-    <Button testID="use-repository" label="Use this repository" disabled={empty} onPress={use} />
-    {repository.trim() || !empty ? <Button testID="no-repository" label="Launch without a repository" kind="secondary" onPress={onNone} /> : null}
-  </>);
-}
-
 const styles = StyleSheet.create({
   page: { flex: 1 },
   content: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 16, gap: 12 },
   foot: { paddingHorizontal: 16, paddingTop: 10, gap: 8 },
   stateAction: { paddingHorizontal: 24, gap: 8 },
+  stateOrganization: { paddingHorizontal: 16, paddingTop: 8 },
   row: { minHeight: 48, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14, paddingVertical: 9 },
   rowLabel: { fontSize: 16, lineHeight: 21 },
   grow: { flex: 1, minWidth: 0 },
   tick: { width: 22, height: 22, borderRadius: 11, alignItems: "center", justifyContent: "center" },
   agentDetail: { flexShrink: 1, fontSize: 13, lineHeight: 18 },
   help: { fontSize: 13, lineHeight: 18, marginHorizontal: 4 },
-  lede: { fontSize: 15, lineHeight: 21, marginHorizontal: 4 },
-  tokenRow: { minHeight: 52 },
-  tokenDetail: { fontSize: 13, lineHeight: 18 },
 });

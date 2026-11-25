@@ -36,10 +36,24 @@ export function isBusyRefusal(error: unknown): boolean {
   return (error instanceof Error ? error.message : String(error)).includes(BUSY_REFUSAL);
 }
 
+/**
+ * A slash command native Codex has no request for (#1498, `session_codex_stdio.rs` `UnsupportedCommand`), such as
+ * `/clear`. Its words are the notice: they name the command and what to do instead.
+ */
+const UNSUPPORTED_COMMAND = /^Native Codex can't .+, so .+ was not sent\./;
+
+/** The words of a refused command, as the composer shows them whether or not a turn runs; `null` for anything else. */
+export function unsupportedCommandNotice(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : String(error);
+  return UNSUPPORTED_COMMAND.test(message) ? message : null;
+}
+
 /** Request-only refusals preserve the composer without failing the running turn. */
 export function requestRefusalNotice(error: unknown): string | null {
   if (isBusyRefusal(error)) return BUSY_NOTICE;
   const message = error instanceof Error ? error.message : String(error);
+  const command = unsupportedCommandNotice(message);
+  if (command) return command;
   return message.includes("Codex's follow-up queue is full.")
     ? "Codex's follow-up queue is full. Your message is back in the composer. Wait for a queued message to be delivered, then send it again." : null;
 }
