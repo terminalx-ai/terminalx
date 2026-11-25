@@ -303,14 +303,17 @@ fn strict_fetch(repo: &Path, bundle: &Path, expected: &BranchCommit) -> Result<(
 #[cfg(any(feature = "desktop", test))]
 pub(crate) struct ValidatedBundle<'a> {
     _quarantine: tempfile::TempDir,
-    path: PathBuf,
+    path: Option<PathBuf>,
     expected: &'a BranchCommit,
 }
 
 #[cfg(any(feature = "desktop", test))]
 impl ValidatedBundle<'_> {
     pub(crate) fn promote(&self, destination: &Path) -> Result<()> {
-        strict_fetch(destination, &self.path, self.expected)
+        match &self.path {
+            Some(path) => strict_fetch(destination, path, self.expected),
+            None => require_commit(destination, self.expected, self.expected.commit()),
+        }
     }
 }
 
@@ -375,35 +378,93 @@ pub(crate) fn validate_bundle<'a>(
         );
     }
     validate_checkout(quarantine.path(), expected)?;
-    // Repack only the history reachable from the selected branch. Promoting
-    // the original pack would also retain unrelated objects supplied with it.
-    git(
+    let path = repack_validated(
+        repo,
         quarantine.path(),
-        &["update-ref", &expected.branch_ref, expected.commit()],
+        expected,
+        &prerequisites,
+        MAX_BUNDLE_BYTES,
     )?;
-    let path = quarantine.path().join("validated.bundle");
-    let exclusions: Vec<_> = prerequisites
-        .iter()
-        .map(|commit| format!("^{commit}"))
-        .collect();
-    let mut args = vec![
-        "bundle",
-        "create",
-        path_argument(&path)?,
-        &expected.branch_ref,
-    ];
-    args.extend(exclusions.iter().map(String::as_str));
-    git(quarantine.path(), &args)?;
-    ensure!(
-        path.metadata()?.len() <= MAX_BUNDLE_BYTES,
-        "The validated Git bundle is too large to transfer"
-    );
-    check_head(quarantine.path(), &path, expected)?;
     Ok(ValidatedBundle {
         _quarantine: quarantine,
         path,
         expected,
     })
+}
+
+/// Use the same revision set for the size preflight and the resulting pack.
+#[cfg(any(feature = "desktop", test))]
+fn repack_validated(
+    repo: &Path,
+    quarantine: &Path,
+    expected: &BranchCommit,
+    prerequisites: &[String],
+    limit: u64,
+) -> Result<Option<PathBuf>> {
+    let refs = git(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(objectname) %(*objectname)",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ],
+    )?;
+    let mut exclusions = std::collections::BTreeSet::new();
+    for oid in prerequisites
+        .iter()
+        .map(String::as_str)
+        .chain(refs.split_whitespace())
+    {
+        ensure!(
+            oid.len() == expected.commit().len()
+                && oid.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "Invalid destination ref object ID"
+        );
+        exclusions.insert(oid);
+    }
+    git(
+        quarantine,
+        &["update-ref", &expected.branch_ref, expected.commit()],
+    )?;
+    let mut revisions = format!("{}\n", expected.branch_ref).into_bytes();
+    for excluded in exclusions {
+        revisions.push(b'^');
+        revisions.extend_from_slice(excluded.as_bytes());
+        revisions.push(b'\n');
+    }
+
+    let usage_args = ["rev-list", "--objects", "--disk-usage", "--stdin"];
+    let mut estimate = git_command(quarantine, &usage_args);
+    estimate.args(usage_args);
+    let usage = crate::git::output_feeding(estimate, revisions.clone(), BUNDLE_TIMEOUT)
+        .map_err(|error| anyhow::anyhow!("Could not estimate Git bundle size: {error}"))?;
+    let bytes: u64 = usage
+        .trim()
+        .parse()
+        .context("Invalid Git bundle size estimate")?;
+    ensure!(
+        bytes <= limit,
+        "The validated Git bundle is too large to transfer"
+    );
+    if bytes == 0 {
+        require_commit(repo, expected, expected.commit())?;
+        return Ok(None);
+    }
+
+    let path = quarantine.join("validated.bundle");
+    let args = ["bundle", "create", path_argument(&path)?, "--stdin"];
+    let mut repack = git_command(quarantine, &args);
+    repack.args(args);
+    crate::git::output_feeding(repack, revisions, BUNDLE_TIMEOUT)
+        .map_err(|error| anyhow::anyhow!("Could not create the validated Git bundle: {error}"))?;
+    ensure!(
+        path.metadata()?.len() <= limit,
+        "The validated Git bundle is too large to transfer"
+    );
+    check_head(quarantine, &path, expected)?;
+    Ok(Some(path))
 }
 
 #[cfg(test)]
@@ -1186,6 +1247,104 @@ mod tests {
         assert!(transcript_file(&path, 64)
             .unwrap_err()
             .is::<TransferTooLarge>());
+    }
+
+    #[test]
+    fn root_prerequisite_does_not_repack_history_already_in_the_destination() {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let temp = tempfile::tempdir().unwrap();
+        let cloud = temp.path().join("cloud");
+        let local = temp.path().join("local");
+        repository(&cloud);
+        let root = commit(&cloud);
+        let mut noise = 17u32;
+        let bytes: Vec<_> = (0..16384)
+            .map(|_| {
+                noise ^= noise << 13;
+                noise ^= noise >> 17;
+                noise ^= noise << 5;
+                noise as u8
+            })
+            .collect();
+        std::fs::write(cloud.join("local-history"), bytes).unwrap();
+        git(&cloud, &["add", "--all"]).unwrap();
+        let tip = commit(&cloud);
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "-q",
+                cloud.to_str().unwrap(),
+                local.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        // Only the remote-tracking ref retains the local tip.
+        git(&local, &["reset", "--hard", &root]).unwrap();
+        let pin = BranchCommit::new("main", &commit(&cloud)).unwrap();
+        let mut command = git_command(&cloud, &["pack-objects"]);
+        let mut pack = command
+            .args(["pack-objects", "--stdout", "--revs"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(pack.stdin.take().unwrap(), "{}\n^{tip}", pin.commit()).unwrap();
+        let result = pack.wait_with_output().unwrap();
+        assert!(result.status.success());
+        let path = temp.path().join("root-prerequisite.bundle");
+        let mut bytes = format!(
+            "# v2 git bundle\n-{root} root\n{} refs/heads/main\n\n",
+            pin.commit()
+        )
+        .into_bytes();
+        bytes.extend(result.stdout);
+        assert!(bytes.len() < 1024);
+        std::fs::write(&path, bytes).unwrap();
+        let original_usage: u64 = git(
+            &cloud,
+            &[
+                "rev-list",
+                "--objects",
+                "--disk-usage",
+                pin.commit(),
+                &format!("^{root}"),
+            ],
+        )
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+        assert!(original_usage > 1024);
+        let refs = git(&local, &["show-ref"]).unwrap();
+        let objects = git(&local, &["count-objects", "-v"]).unwrap();
+        let validated = validate_bundle(&local, &path, &pin).unwrap();
+        let repacked = validated.path.as_ref().unwrap();
+        assert!(repacked.metadata().unwrap().len() < 1024);
+        std::fs::remove_file(repacked).unwrap();
+        let quarantine = validated._quarantine.path();
+        assert!(repack_validated(&local, quarantine, &pin, &[root], 1).is_err());
+        assert!(
+            !repacked.exists(),
+            "preflight wrote a repack despite the size refusal"
+        );
+        assert_eq!(git(&local, &["show-ref"]).unwrap(), refs);
+        assert_eq!(git(&local, &["count-objects", "-v"]).unwrap(), objects);
+
+        validate_bundle(&local, &path, &pin)
+            .unwrap()
+            .promote(&local)
+            .unwrap();
+        git(
+            &local,
+            &["update-ref", "refs/remotes/origin/main", pin.commit()],
+        )
+        .unwrap();
+        let already_local = validate_bundle(&local, &path, &pin).unwrap();
+        assert!(already_local.path.is_none());
+        already_local.promote(&local).unwrap();
     }
 
     #[test]
