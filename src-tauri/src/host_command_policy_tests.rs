@@ -268,6 +268,28 @@ fn prompt_reservation_limits_parallel_and_repeated_attempts() {
 }
 
 #[test]
+fn failed_attempts_exhaust_only_their_workspaces_prompt_allowance() {
+    let policy = policy();
+    let request = policy.submit(input("bad-path")).unwrap();
+    for _ in 0..MAX_PROMPTS_PER_WINDOW {
+        // No attached sheet consumed the slot. Releasing the failed attempt
+        // still charges the workspace and prevents immediate retry monopolies.
+        drop(policy.reserve_prompt(&request).unwrap());
+    }
+    assert_eq!(
+        policy.reserve_prompt(&request).err(),
+        Some(Rejection::PromptRateLimited)
+    );
+    let mut other = input("other");
+    other.origin.workspace = "workspace-b".into();
+    let mut trusted = context();
+    trusted.origin = Some(other.origin.clone());
+    policy.update_trusted_context(trusted).unwrap();
+    let other = policy.submit(other).unwrap();
+    assert!(policy.reserve_prompt(&other).is_ok());
+}
+
+#[test]
 fn prompt_and_registry_budgets_survive_turn_changes() {
     let policy = policy();
     let first = policy.submit(input("first")).unwrap();
@@ -445,7 +467,10 @@ mod native {
             dismissed_biometrics: Cell<u8>,
             fail_alert: bool,
             fail_biometric: bool,
+            deferred_alert: bool,
         }
+
+        impl consent::TestPresenterSeal for Rc<Sheets> {}
 
         impl consent::Presenter for Rc<Sheets> {
             fn alert(&self, _: &RequestInput) -> Result<consent::Presented<bool>, Rejection> {
@@ -455,13 +480,10 @@ mod native {
                 let (send, replies) = mpsc::sync_channel(1);
                 self.alert.replace(Some(send));
                 let sheets = self.clone();
-                Ok(consent::Presented {
-                    replies,
-                    dismiss: Some(Box::new(move || {
-                        sheets
-                            .dismissed_alerts
-                            .set(sheets.dismissed_alerts.get() + 1)
-                    })),
+                consent::attached_alert(replies, !self.deferred_alert, move || {
+                    sheets
+                        .dismissed_alerts
+                        .set(sheets.dismissed_alerts.get() + 1);
                 })
             }
 
@@ -495,42 +517,60 @@ mod native {
             "cancel",
             "sign-out",
             "alert error",
+            "deferred alert",
+            "Touch ID cancel",
+            "Touch ID sign-out",
+            "preparation timeout",
             "biometric error",
             "preparation error",
             "preparation expiry",
             "disconnected",
         ] {
             let policy = policy();
-            let request = policy.submit(input("consent")).unwrap();
+            let mut proposal = input("consent");
+            if scenario == "preparation timeout" {
+                proposal.ttl_ms = MAX_TTL_MS;
+            }
+            let request = policy.submit(proposal).unwrap();
             let slot = policy.reserve_prompt(&request).unwrap();
             let sheets = Rc::new(Sheets {
                 fail_alert: scenario == "alert error",
                 fail_biometric: scenario == "biometric error",
+                deferred_alert: scenario == "deferred alert",
                 ..Sheets::default()
             });
             let (prepared, replies) = mpsc::sync_channel(1);
-            let (flow, result) = consent::Flow::new(request.clone(), slot, sheets.clone(), replies);
+            let (flow, result) =
+                consent::Flow::for_test(request.clone(), slot, sheets.clone(), replies);
             let flow = Cell::new(Some(flow));
             let tick = || !consent::Flow::tick(&flow);
             assert!(tick());
             assert!(policy.lock().unwrap().prompt_times.is_empty());
-            let binding = policy.prepare_local_decision(&request);
-            prepared
-                .send(if scenario == "preparation error" {
-                    Err(Rejection::InvalidDirectory)
-                } else {
-                    binding
-                })
-                .unwrap();
-            if scenario == "preparation expiry" {
-                set_time(&policy, 100);
-            }
+            let stalled_worker = if scenario == "preparation timeout" {
+                let worker = PreparationWorker::reserve(&request).unwrap();
+                set_time(&policy, 10 + PREPARATION_TIMEOUT_MS);
+                Some(worker)
+            } else {
+                let binding = policy.prepare_local_decision(&request);
+                prepared
+                    .send(if scenario == "preparation error" {
+                        Err(Rejection::InvalidDirectory)
+                    } else {
+                        binding
+                    })
+                    .unwrap();
+                if scenario == "preparation expiry" {
+                    set_time(&policy, 100);
+                }
+                None
+            };
             let mut shown = false;
             let mut biometric = false;
             let expected = if !tick() {
                 Err(match scenario {
                     "preparation error" => Rejection::InvalidDirectory,
                     "preparation expiry" => Rejection::Expired,
+                    "preparation timeout" => Rejection::PreparationTimedOut,
                     _ => Rejection::WorkerUnavailable,
                 })
             } else {
@@ -577,11 +617,22 @@ mod native {
                                 .unwrap()
                                 .send(LocalDecision::AllowOnce)
                                 .unwrap();
-                            if scenario == "late" {
-                                set_time(&policy, 100);
-                                Err(Rejection::Expired)
-                            } else {
-                                Ok(State::Approved)
+                            match scenario {
+                                "late" => {
+                                    set_time(&policy, 100);
+                                    Err(Rejection::Expired)
+                                }
+                                "Touch ID cancel" => {
+                                    request.cancel().unwrap();
+                                    Err(Rejection::InvalidTransition)
+                                }
+                                "Touch ID sign-out" => {
+                                    policy
+                                        .update_trusted_context(TrustedContext::default())
+                                        .unwrap();
+                                    Err(Rejection::InvalidTransition)
+                                }
+                                _ => Ok(State::Approved),
                             }
                         }
                     }
@@ -593,14 +644,32 @@ mod native {
             assert!(!consent::Flow::tick(&flow), "{scenario}");
             assert_eq!(result.try_recv(), Ok(expected), "{scenario}");
             assert_eq!(result.try_recv(), Err(mpsc::TryRecvError::Disconnected));
-            let registry = policy.lock().unwrap();
-            assert!(!registry.prompt_open, "{scenario}");
+            {
+                let registry = policy.lock().unwrap();
+                assert!(!registry.prompt_open, "{scenario}");
+                assert_eq!(registry.prompt_times.len(), 1, "{scenario}");
+            }
             assert_eq!(
-                registry.prompt_times.len(),
-                usize::from(shown),
+                sheets.dismissed_alerts.get(),
+                u8::from(shown || scenario == "deferred alert"),
                 "{scenario}"
             );
-            assert_eq!(sheets.dismissed_alerts.get(), u8::from(shown), "{scenario}");
+            if let Some(worker) = stalled_worker {
+                assert!(prepared.send(Err(Rejection::InvalidDirectory)).is_err());
+                assert_eq!(
+                    PreparationWorker::reserve(&request).err(),
+                    Some(Rejection::Busy)
+                );
+                let mut other = input("other-workspace");
+                other.origin.workspace = "workspace-b".into();
+                let mut trusted = context();
+                trusted.origin = Some(other.origin.clone());
+                policy.update_trusted_context(trusted).unwrap();
+                let other = policy.submit(other).unwrap();
+                assert!(policy.reserve_prompt(&other).is_ok());
+                assert!(PreparationWorker::reserve(&other).is_ok());
+                drop(worker);
+            }
             assert_eq!(
                 sheets.dismissed_biometrics.get(),
                 u8::from(biometric),

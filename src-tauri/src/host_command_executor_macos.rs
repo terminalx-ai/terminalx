@@ -43,6 +43,7 @@ fn sandbox_profile(program: &'static str) -> String {
 
 pub(in super::super) struct ApprovedPaths {
     cwd: File,
+    cwd_identity: (u64, u64),
     program: &'static str,
     // Holding the file keeps its inode from being recycled between approval and spawn.
     _executable: File,
@@ -52,22 +53,21 @@ pub(in super::super) struct ApprovedPaths {
 impl ApprovedPaths {
     pub(in super::super) fn open(input: &RequestInput) -> Result<Self, Rejection> {
         let cwd = open(&input.cwd, O_DIRECTORY).map_err(|_| Rejection::InvalidDirectory)?;
+        let cwd_identity = directory_identity(&cwd)?;
         let program = approved_program(input)?;
         let (executable, metadata) = protected_system_executable(program)?;
         Ok(Self {
             cwd,
+            cwd_identity,
             program,
             _executable: executable,
             executable_version: metadata,
         })
     }
 
-    fn verify_directory(&self, input: &RequestInput) -> Result<(), Rejection> {
-        let current = open(&input.cwd, O_DIRECTORY).map_err(|_| Rejection::InvalidDirectory)?;
-        if !same_file(&self.cwd, &current) {
-            return Err(Rejection::InvalidDirectory);
-        }
-        Ok(())
+    fn reopen_directory(input: &RequestInput) -> Result<((u64, u64), File), Rejection> {
+        let directory = open(&input.cwd, O_DIRECTORY).map_err(|_| Rejection::InvalidDirectory)?;
+        Ok((directory_identity(&directory)?, directory))
     }
 
     fn verify_executable(&self) -> Result<(), Rejection> {
@@ -155,13 +155,9 @@ fn open(path: &str, flags: c_int) -> io::Result<File> {
         .open(path)
 }
 
-fn same_file(approved: &File, current: &File) -> bool {
-    match (approved.metadata(), current.metadata()) {
-        (Ok(approved), Ok(current)) => {
-            (approved.dev(), approved.ino()) == (current.dev(), current.ino())
-        }
-        _ => false,
-    }
+fn directory_identity(file: &File) -> Result<(u64, u64), Rejection> {
+    let metadata = file.metadata().map_err(|_| Rejection::InvalidDirectory)?;
+    Ok((metadata.dev(), metadata.ino()))
 }
 
 pub(in super::super) fn run(
@@ -221,15 +217,19 @@ fn launch(request: &Request, paths: ApprovedPaths) -> Result<(Process, Instant),
         before_spawn();
     }
 
+    // Opening and statting the potentially remote cwd can stall. Retain the
+    // reopened fd and compare only its cached identity at the authority gate.
+    let (current_cwd, _reopened) =
+        ApprovedPaths::reopen_directory(request.input()).map_err(|_| State::SpawnFailed)?;
+    paths.verify_executable().map_err(|_| State::SpawnFailed)?;
+
     let registry = request.policy.lock().map_err(|_| State::Revoked)?;
     let mut entry = request
         .checked(&registry, State::Starting)
         .map_err(|_| State::Revoked)?;
-    paths
-        .verify_directory(request.input())
-        .map_err(|_| State::SpawnFailed)?;
-    paths.verify_executable().map_err(|_| State::SpawnFailed)?;
-    // Path verification performs syscalls. Check the clock again at the spawn boundary.
+    if current_cwd != paths.cwd_identity {
+        return Err(State::SpawnFailed);
+    }
     if request.policy.now_ms() >= entry.expires_at_ms {
         return Err(State::ExpiredBeforeLaunch);
     }
