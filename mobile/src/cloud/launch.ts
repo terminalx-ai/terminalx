@@ -1,4 +1,4 @@
-import { CloudApiError, type CloudApi, type CloudCredential, type CloudFirstRunSetup, type CloudLaunch, type CloudLifecycle, type CloudOperation, type CloudPreflight, type CloudProvider, type CloudProviderSetup, type CloudQuote, type CloudWorkspace } from "./api";
+import { CloudApiError, type CloudApi, type CloudCredential, type CloudFirstRunSetup, type CloudLaunch, type CloudLifecycle, type CloudOperation, type CloudOrganization, type CloudPreflight, type CloudProvider, type CloudProviderSetup, type CloudQuote, type CloudWorkspace } from "./api";
 
 /**
  * Launching a cloud workspace from the phone, and stopping and deleting one
@@ -29,6 +29,17 @@ export function launchProviders(providers: readonly CloudProvider[]): { choices:
   return { choices, blocked: paused ? "paused" : "not-connected" };
 }
 
+/**
+ * The organization + on the Cloud tab launches in (PRO-557): the first one,
+ * in the account's order, that has a provider to launch on. `providers` is
+ * each organization's provider list as just read; one whose list did not
+ * answer is not known to launch. With none that can, the first: its page
+ * says what is missing, and another can be picked there.
+ */
+export function launchOrganization<T extends Pick<CloudOrganization, "orgId">>(organizations: readonly T[], providers: (orgId: string) => readonly CloudProvider[] | null | undefined): T | null {
+  return organizations.find((organization) => launchProviders(providers(organization.orgId) ?? []).choices.length > 0) ?? organizations[0] ?? null;
+}
+
 /** A provider's name as the server gives it. */
 export const providerLabel = (provider: Pick<CloudProvider, "displayName" | "descriptor">): string => provider.descriptor.label || provider.displayName;
 
@@ -50,14 +61,26 @@ export const idleValue = (minutes: number): string => (minutes === 0 ? "Never" :
 const gib = (mib: number): string => String(Math.round((mib / 1024) * 10) / 10);
 
 type MachineClass = CloudProviderSetup["machineClasses"][number];
-/** A size on the form's row: its name, and its hourly rate (already written as a price) where the provider gives one. */
+/**
+ * Whether a size's name already is its machine: Agent37 names a size
+ * "2 vCPU · 4 GB RAM · 20 GB disk", where Boat names one "Small". Such a
+ * name is not followed by the machine again (PRO-565).
+ */
+export const sizeNamesMachine = (label: string): boolean => /\bvCPU\b/i.test(label);
+/**
+ * A size on the form's row: its name, and its hourly rate (already written as
+ * a price) where the provider gives one. After a name that is a machine the
+ * rate takes the row's second line, where the row's end does not cut it off.
+ */
 export function sizeValue(size: Pick<MachineClass, "label">, hourly: string | null): string {
-  return hourly === null ? size.label : `${size.label} · ${hourly} / hour`;
+  if (hourly === null) return size.label;
+  return `${size.label}${sizeNamesMachine(size.label) ? "\n" : " · "}${hourly} / hour`;
 }
 /** A size's machine in the sheet, as the console writes it. */
 export const sizeDetail = (size: Pick<MachineClass, "vcpu" | "memoryMiB" | "diskGiB">): string => `${size.vcpu} vCPU · ${gib(size.memoryMiB)} GiB memory · ${size.diskGiB} GiB disk`;
-/** The quoted machine on the review. */
+/** The quoted machine on the review: the size's name and its machine, said once. */
 export function quotedSize(configuration: CloudQuote["configuration"]): string {
+  if (sizeNamesMachine(configuration.machineClassLabel)) return configuration.machineClassLabel;
   return `${configuration.machineClassLabel} · ${configuration.vcpu} vCPU · ${gib(configuration.memoryMiB)} GiB · ${configuration.diskGiB} GiB`;
 }
 

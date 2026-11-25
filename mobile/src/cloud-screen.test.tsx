@@ -116,7 +116,7 @@ function world(options: { state?: string | null; role?: string | null; canApprov
     retain: vi.fn(() => release),
     opened: () => session,
     people: { subscribe: () => () => undefined, getVersion: () => 1, name: (userId: string | null | undefined) => NAMES[userId ?? ""] ?? "Someone", roster: vi.fn(async () => [{ userId: "u-me", email: "me@example.com", role: "admin" }, { userId: "u-alice", email: "alice@example.com", displayName: "Alice", role: "member" }, { userId: "u-bob", email: "bob@example.com", displayName: "Bob", role: "member" }]), remember: vi.fn() },
-    api: { shares: vi.fn(), putShare: vi.fn(async () => ({})), revokeShare: vi.fn(async () => undefined) },
+    api: { shares: vi.fn(), putShare: vi.fn(async () => ({})), revokeShare: vi.fn(async () => undefined), providers: vi.fn(async () => []), credentials: vi.fn(async () => []) },
   };
   return { session, release, snapshot };
 }
@@ -205,6 +205,9 @@ describe("the Cloud tab", () => {
     await click("5 organizations with no workspaces");
     expect(button("5 organizations with no workspaces").getAttribute("aria-expanded")).toBe("true");
     expect(text()).toContain("PersonalE2E BoxE2E VideoE2E IsolatedSandbox");
+    // PRO-561: each name opens that organization's setup steps.
+    await click("E2E Video, set up cloud workspaces");
+    expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/setup", params: { orgId: "e2" } });
   });
 
   it("never shows a blank page: placeholder rows under the title on a first load, the kept list on a later one (#988)", async () => {
