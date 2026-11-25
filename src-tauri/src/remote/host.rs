@@ -151,6 +151,8 @@ pub struct RelaySession {
     pub collaboration: Option<Value>,
     /// Native request context, never read from the server response or a link file.
     pub(crate) collaboration_v2: bool,
+    #[cfg_attr(not(any(target_os = "linux", all(test, unix))), allow(dead_code))]
+    pub(crate) desktop_ready: bool,
 }
 
 /// The runtime's identity and API session. Calls may block; the host runs
@@ -239,6 +241,7 @@ impl RuntimeLink for FileLink {
             revocations: contents.revocations,
             collaboration: contents.collaboration,
             collaboration_v2: false,
+            desktop_ready: false,
         })
     }
 
@@ -1510,7 +1513,10 @@ impl RelayHost {
 /// comes from the authenticated native link, never RPC parameters.
 pub(crate) fn install_session_collaboration(rpc: &WorkspaceRpc, session: &RelaySession, generation: u64) -> Result<()> {
     anyhow::ensure!(token_identity(&session.relay_token)?.runtime_generation == generation, "refresh token generation mismatch");
-    rpc.set_refresh_collaboration(session.collaboration.clone(), generation, session.collaboration_v2)
+    let policy = rpc.set_refresh_collaboration(session.collaboration.clone(), generation, session.collaboration_v2);
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    rpc.set_desktop_readiness(generation, policy.is_ok() && session.desktop_ready);
+    policy
 }
 
 /// Start serving a workspace through the relay: learn the runtime
@@ -1760,7 +1766,7 @@ where
                             let response = match request["method"].as_str() {
                                 // Connecting can take seconds, so from its own
                                 // task; answered in order with the stream's data.
-                                Some("ports.open") => {
+                                Some("ports.open" | "desktop.open") => {
                                     let rpc = rpc.clone();
                                     let peer = peer.clone();
                                     let ticket = crate::github_process::ticket();
@@ -2010,6 +2016,7 @@ mod tests {
                 collaboration:Some(json!({"v":2,"revision":revision,"members":[
                     {"userId":"driver","role":"driver","canApprove":true,"writeSource":source}
                 ]})),
+                desktop_ready: false,
             };
             super::super::bootstrap_link::relay_session(&session, capabilities)
         };
@@ -2126,7 +2133,7 @@ mod tests {
             let initial = RelaySession {
                 relay_token:jwt(json!({"sub":"host", "cloudProfileId":"profile", "organizationId":"org", "runtimeGeneration":7})),
                 director_url:"http://127.0.0.1:1".into(), attachments:attachments("old"), revocations:vec![],
-                collaboration:Some(json!({"v":2, "revision":"1", "members":[member.clone()]})), collaboration_v2:true,
+                collaboration:Some(json!({"v":2, "revision":"1", "members":[member.clone()]})), collaboration_v2:true, desktop_ready:false,
             };
             let link = Arc::new(Link { session:Mutex::new(initial), paired:Mutex::new(vec![]), revoked:Mutex::new(vec![]) });
             let devices_path = root.path().join("devices.json");

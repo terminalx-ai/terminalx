@@ -7,7 +7,7 @@ import { openWorkspaceRestore } from "@/lib/dialogs";
 import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { LocalShareButton } from "./ShareSessionDialog";
 import { PanelPresence } from "@/components/layout/PanelPresence";
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { CalendarClock, ChevronRight, CircleDot, Cloud, FolderOpen, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, PanelLeft, PanelRight, Server, SessionContinue, SquareTerminal } from "@/icons";
 import { describeGithubIdentity, refreshGithubIdentity, useGithubIdentity } from "@/lib/githubIdentity";
 import type { GithubIdentity } from "@/lib/api";
@@ -62,9 +62,13 @@ import { WorkspaceActionItems, WorkspaceLifecycleDialog, useLifecycleRun, type L
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { lastSavedText } from "@/lib/cloudLifecycle";
+import { reconnectCloudWorkspace } from "@/lib/cloudConnections";
 import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostics } from "@/components/cloud/CloudDiagnosticsDialog";
 import { CloudMirrorChip, CloudMirrorDialog, CloudMirrorMenuItem } from "@/components/cloud/CloudMirrorDialog";
+import { CloudDesktopPane } from "@/components/cloud/CloudDesktopPane";
+import { phase2Ready } from "@/lib/phase2Readiness";
+import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { CloudPortsView } from "@/components/cloud/CloudPorts";
 import { PortForwardChip } from "@/components/cloud/PortForwardChip";
 import { PortToasts } from "@/components/cloud/PortToast";
@@ -530,6 +534,17 @@ export function SessionView({
   // A session on a paired machine (PRO-347): the cloud views, with the machine's chip, strips and terminal dock.
   const machine = cloud?.machine;
   const start = useCloudStart(cloud);
+  const { status: desktopAccount } = useAccount();
+  const privacy = useDataPrivacy();
+  const desktopTabsId = useId();
+  const desktopScope = cloud && !machine && !compact && !start && !cloud.locked
+    && privacy.ready && !privacy.enabled && phase2Ready(desktopAccount, cloud.orgId, "cloudDesktop")
+    ? `${desktopAccount.context?.account ?? desktopAccount.identity?.email}:${session.id}` : null;
+  const [desktopFor, setDesktopFor] = useState<string | null>(null);
+  const desktopShown = !!desktopScope && desktopFor === desktopScope;
+  useEffect(() => {
+    if (desktopFor && desktopFor !== desktopScope) setDesktopFor(null);
+  }, [desktopFor, desktopScope]);
   const local = backend.caps.local;
   const isGit = useSessionIsGit(session, local);
   const quick = isQuickChat(session);
@@ -1081,7 +1096,34 @@ export function SessionView({
         </div>}
         {/* Hidden, not unmounted, behind the Run view: the chat and its terminals stay as they are. */}
         <section className={cn("flex min-h-0 flex-1 flex-col", runShown && "hidden")}>
-          <div className="@container/editor-host relative flex min-h-0 flex-1">
+          {desktopScope && <div role="tablist" aria-label="Cloud workspace view" className="flex shrink-0 gap-1 border-b border-hairline px-2">
+            {(["Session", "Desktop"] as const).map((label) => {
+              const isDesktop = label === "Desktop";
+              const active = isDesktop === desktopShown;
+              const identity = `${desktopTabsId}-${label}`;
+              return <button key={label} type="button" role="tab" id={identity}
+                aria-controls={`${identity}-panel`} aria-selected={active} tabIndex={active ? 0 : -1}
+                className={cn("border-b-2 px-3 py-1.5 text-xs", active ? "border-ring text-foreground" : "border-transparent text-muted-foreground")}
+                onClick={() => setDesktopFor(isDesktop ? desktopScope : null)}
+                onKeyDown={(event) => {
+                  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+                  event.preventDefault();
+                  const next = event.key === "Home" ? false : event.key === "End" ? true : !isDesktop;
+                  setDesktopFor(next ? desktopScope : null);
+                  document.getElementById(`${desktopTabsId}-${next ? "Desktop" : "Session"}`)?.focus();
+                }}>{label}</button>;
+            })}
+          </div>}
+          {desktopScope && cloud && <div role="tabpanel" id={`${desktopTabsId}-Desktop-panel`}
+            aria-labelledby={`${desktopTabsId}-Desktop`} hidden={!desktopShown}
+            className={cn("min-h-0 flex-1", desktopShown && "flex")}>
+            {desktopShown && <CloudDesktopPane key={`${desktopScope}:${cloud.mayControlTerminals}`}
+              client={cloud.client} asleep={cloud.asleep} control={cloud.mayControlTerminals}
+              onReconnect={() => reconnectCloudWorkspace({ orgId: cloud.orgId, workspaceId: cloud.workspaceId })} />}
+          </div>}
+          <div role={desktopScope ? "tabpanel" : undefined} id={desktopScope ? `${desktopTabsId}-Session-panel` : undefined}
+            aria-labelledby={desktopScope ? `${desktopTabsId}-Session` : undefined}
+            className={cn("@container/editor-host relative min-h-0 flex-1", desktopShown ? "hidden" : "flex")}>
             <div
               className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col"
               onPointerDownCapture={() => setLastFocused("chat")}

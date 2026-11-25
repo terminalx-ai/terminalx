@@ -518,6 +518,14 @@ pub struct WorkspaceRpc {
     peers: Mutex<HashMap<u64, Weak<Peer>>>,
     /// Streams to the workspace's own ports (PRO-28).
     pub(super) ports: Arc<super::ports::Ports>,
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    desktop_ports: Arc<super::ports::Ports>,
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    desktop: OnceLock<Arc<super::cloud_desktop::DesktopPool>>,
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    desktop_ready: std::sync::atomic::AtomicBool,
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    desktop_epoch: AtomicU64,
     tabs_changed: Arc<tokio::sync::Notify>,
     /// Raised when a session is created, updated or deleted; the list goes
     /// out as `session.sessions` to `session/2` connections.
@@ -637,6 +645,14 @@ impl WorkspaceRpc {
             agent_commands: OnceLock::new(),
             peers: Mutex::new(HashMap::new()),
             ports: Arc::new(super::ports::Ports::default()),
+            #[cfg(any(target_os = "linux", all(test, unix)))]
+            desktop_ports: Arc::new(super::ports::Ports::desktop()),
+            #[cfg(any(target_os = "linux", all(test, unix)))]
+            desktop: OnceLock::new(),
+            #[cfg(any(target_os = "linux", all(test, unix)))]
+            desktop_ready: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(target_os = "linux", all(test, unix)))]
+            desktop_epoch: AtomicU64::new(0),
             tabs_changed: Arc::new(tokio::sync::Notify::new()),
             sessions_changed: Arc::new(tokio::sync::Notify::new()),
             machine_changed: Arc::new(tokio::sync::Notify::new()),
@@ -1330,6 +1346,8 @@ impl WorkspaceRpc {
         self.revalidate_terminal_control();
         // A participant who may no longer open a port loses their streams.
         for peer in &self.live_peers() {
+            #[cfg(any(target_os = "linux", all(test, unix)))]
+            self.desktop_ports.revalidate_desktop(peer);
             let access = self.access(peer);
             if self.authority(peer) == Authority::Participate && !(access.can_drive() && access.can_configure()) {
                 self.ports.revoke(peer);
@@ -1447,6 +1465,8 @@ impl WorkspaceRpc {
     pub fn set_generation(&self, generation: u64) {
         let _admission = self.collab.enter_admission();
         if generation < self.generation.load(Ordering::SeqCst) { return; }
+        #[cfg(any(target_os = "linux", all(test, unix)))]
+        if generation != self.generation.load(Ordering::SeqCst) { self.apply_desktop_readiness(false); }
         self.collab.runtime_policy.set_generation(generation);
         self.generation.store(generation, Ordering::SeqCst);
     }
@@ -1646,8 +1666,96 @@ impl WorkspaceRpc {
             let response = response.await;
             let stream_id = response.pointer("/result/streamId").and_then(Value::as_str).map(str::to_string);
             peer.deliver(response);
-            if let Some(stream_id) = stream_id { self.ports.start(peer, &stream_id); }
+            if let Some(stream_id) = stream_id {
+                #[cfg(any(target_os = "linux", all(test, unix)))]
+                if request["method"] == "desktop.open" {
+                    self.desktop_ports.start(peer, &stream_id);
+                    return;
+                }
+                self.ports.start(peer, &stream_id);
+            }
         }
+    }
+
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    pub(super) fn set_desktop_readiness(&self, generation: u64, ready: bool) {
+        let _admission = self.collab.enter_admission();
+        if generation == self.generation() { self.apply_desktop_readiness(ready); }
+    }
+
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    fn apply_desktop_readiness(&self, ready: bool) {
+        if self.desktop_ready.load(Ordering::SeqCst) == ready { return; }
+        self.desktop_epoch.fetch_add(1, Ordering::SeqCst);
+        self.desktop_ready.store(ready, Ordering::SeqCst);
+        if !ready {
+            for peer in self.live_peers() {
+                self.desktop_ports.revoke(&peer);
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    fn desktop_access(&self, peer: &Peer, access: super::cloud_desktop::DesktopAccess) -> bool {
+        use super::cloud_desktop::DesktopAccess;
+        if self.is_machine() || !self.desktop_ready.load(Ordering::SeqCst) || peer.hung_up()
+            || peer.user_id.is_none() || !self.collab.known() || !peer.granted(protocol::CLOUD_DESKTOP) {
+            return false;
+        }
+        match access {
+            DesktopAccess::Watch => self.access(peer).can_view(),
+            // This display can contain a shell or a browser debugger, just
+            // like a forwarded port. Keep the same explicit authority rule.
+            DesktopAccess::Control => self.may_use_ports(peer),
+        }
+    }
+
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    async fn run_desktop(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
+        use super::cloud_desktop::{DesktopAccess, DesktopError, DesktopPool};
+        if !self.desktop_access(peer, DesktopAccess::Watch) {
+            return Err(RpcError::forbidden("Cloud desktop access is unavailable"));
+        }
+        if method != "desktop.open" {
+            let _privacy = ticket.enter().map_err(|error| RpcError::forbidden(error.to_string()))?;
+            return self.desktop_ports.desktop_message(peer, method, &params);
+        }
+        let access = match params.get("control") {
+            None | Some(Value::Bool(false)) => DesktopAccess::Watch,
+            Some(Value::Bool(true)) => DesktopAccess::Control,
+            _ => return Err(RpcError::invalid("control must be a boolean")),
+        };
+        if !self.desktop_access(peer, access) {
+            return Err(RpcError::forbidden("You need edit access to use the cloud desktop"));
+        }
+        let user = peer.user_id.as_deref().expect("desktop access requires an identified peer");
+        let stamp = self.collab.runtime_policy.stamp_for_peer(user, peer);
+        let generation = self.generation();
+        let epoch = self.desktop_epoch.load(Ordering::SeqCst);
+        let weak_rpc = Arc::downgrade(self);
+        let weak_peer = Arc::downgrade(peer);
+        let allowed = move || weak_rpc.upgrade().zip(weak_peer.upgrade()).is_some_and(|(rpc, peer)| {
+            rpc.generation() == generation && rpc.desktop_epoch.load(Ordering::SeqCst) == epoch
+                && rpc.desktop_access(&peer, access)
+                && rpc.collab.runtime_policy.attachment_current(stamp.as_ref())
+        });
+        self.desktop_ports.open_desktop(peer, ticket, async {
+            use std::time::Duration;
+            if !allowed() {
+                return Err(RpcError::forbidden("Cloud desktop access changed before open"));
+            }
+            let pool = self.desktop.get_or_init(|| DesktopPool::new(
+                vec!["/usr/bin".into(), "/bin".into()], Duration::from_secs(60),
+            ));
+            let lease = pool.connect(access, &allowed).await.map_err(|error| {
+                if error == DesktopError::AccessChanged { return RpcError::forbidden(error.to_string()); }
+                RpcError::new(match error {
+                    DesktopError::MissingTools => "cloud_desktop_image_unavailable",
+                    _ => "cloud_desktop_start_failed",
+                }, error.to_string())
+            })?;
+            Ok(super::ports::DesktopStream { collaboration: self.collab.clone(), allowed: Box::new(allowed), lease })
+        }).await
     }
 
     /// Run an admitted call. On a machine, a session made, a terminal opened
@@ -1679,6 +1787,10 @@ impl WorkspaceRpc {
                 ticket.valid() && !peer.hung_up() && peer.granted("environment/1") &&
                     self.authority(peer) == Authority::Manage
             }).await;
+        }
+        #[cfg(any(target_os = "linux", all(test, unix)))]
+        if method.starts_with("desktop.") {
+            return self.run_desktop(peer, method, params, ticket).await;
         }
         // Sockets, not blocking work: answered on the async runtime.
         if method.starts_with("ports.") {
@@ -1969,6 +2081,8 @@ impl WorkspaceRpc {
             project.files.disconnect(peer.id);
         }
         self.ports.revoke(peer);
+        #[cfg(any(target_os = "linux", all(test, unix)))]
+        self.desktop_ports.revoke(peer);
         let doomed: Vec<(String, Subscription)> = {
             let mut subscriptions = self.subscriptions.lock().unwrap();
             let ids: Vec<String> =
@@ -1996,6 +2110,8 @@ impl WorkspaceRpc {
         // connection that ended must not keep the workspace awake.
         *peer.attached.lock().unwrap() = None;
         self.ports.disconnect(peer.id);
+        #[cfg(any(target_os = "linux", all(test, unix)))]
+        self.desktop_ports.disconnect(peer.id);
         if self.peers.lock().unwrap().remove(&peer.id).is_some() {
             if let Some(agents) = self.agents.get() {
                 agents.client_detached();
@@ -4673,7 +4789,15 @@ impl WorkspaceRpc {
     /// workspace or a machine (`protocol::served`), less `agent-commands/1`
     /// beside a mailbox.
     fn offered(&self) -> Vec<&'static str> {
-        protocol::served(self.is_machine()).into_iter().filter(|capability| *capability != protocol::AGENT_COMMANDS || self.agent_commands.get().is_some()).collect()
+        #[cfg(any(target_os = "linux", all(test, unix)))]
+        let desktop = self.desktop_ready.load(Ordering::SeqCst);
+        #[cfg(not(any(target_os = "linux", all(test, unix))))]
+        let desktop = false;
+        protocol::served(self.is_machine()).into_iter().filter(|capability| match *capability {
+            protocol::AGENT_COMMANDS => self.agent_commands.get().is_some(),
+            protocol::CLOUD_DESKTOP => desktop,
+            _ => true,
+        }).collect()
     }
 
     /// Whether `spec` is answered from the durable receipts of

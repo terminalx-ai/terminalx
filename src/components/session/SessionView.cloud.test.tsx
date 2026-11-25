@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   /** This account's role in the session's organization. */
   role: "member",
   readiness: {} as Record<string, string[]>,
+  privacyReady: false,
   memberWorkspaces: false,
   /** Lists of the organization asked for by the session (never an attach or a resume). */
   refreshCatalog: vi.fn(async (_orgId?: string | null) => undefined),
@@ -35,6 +36,10 @@ vi.mock("@/lib/account", () => {
   const account = { status: { state: "signed-in", identity: { name: null, email: "a@b.c", organization: "Acme", organizationId: "org-1" }, expiresAt: null, lastError: null, get phase2Readiness() { return mocks.readiness; }, get memberWorkspaces() { return mocks.memberWorkspaces; }, organizations: [{ id: "org-1", name: "Acme", cloud: { enabled: true, flags: {} }, get role() { return mocks.role; } }] } };
   return { useAccount: () => account, getAccount: () => account, subscribeAccount: () => () => undefined, refreshAccount: vi.fn() };
 });
+vi.mock("@/lib/dataPrivacy", async (original) => ({
+  ...(await original<typeof import("@/lib/dataPrivacy")>()),
+  useDataPrivacy: () => ({ enabled: false, ready: mocks.privacyReady, managed: false }),
+}));
 vi.mock("@/lib/theme", () => ({ useTheme: () => ({ resolvedMode: "dark" }) }));
 vi.mock("@/lib/prefs", () => ({ usePrefs: () => mocks.prefs, getPrefs: () => mocks.prefs, setPrefs: vi.fn(), subscribePrefs: () => () => {} }));
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
@@ -438,6 +443,7 @@ beforeEach(() => {
   mocks.refreshCatalog.mockClear();
   mocks.role = "member";
   mocks.readiness = {};
+  mocks.privacyReady = false;
   mocks.memberWorkspaces = false;
   setCatalog(workspaceItem("ready"));
   // Tab selection is per session key and outlives a render.
@@ -468,6 +474,28 @@ async function openConnected(authority: "manage" | "participate" = "manage") {
   await act(async () => runtime.connect(authority));
   await screen.findByText("Fix login redirect");
 }
+
+describe("cloud desktop center tab", () => {
+  it("is held when only another organisation is ready", async () => {
+    mocks.privacyReady = true;
+    mocks.readiness = { "other-org": ["cloud.desktop.v1"] };
+    await openConnected();
+    expect(screen.queryByRole("tab", { name: "Desktop" })).toBeNull();
+    expect(runtime.sent.some(({ method }) => method === "desktop.open")).toBe(false);
+  });
+
+  it("is opt-in and shows an older runtime without starting a display", async () => {
+    mocks.privacyReady = true;
+    mocks.readiness = { [ORG]: ["cloud.desktop.v1"] };
+    await openConnected();
+    const desktop = screen.getByRole("tab", { name: "Desktop" });
+    expect(desktop.getAttribute("aria-selected")).toBe("false");
+    expect(screen.queryByTestId("cloud-desktop")).toBeNull();
+    fireEvent.click(desktop);
+    expect(await screen.findByText("Cloud desktop is unavailable in this runtime.")).toBeTruthy();
+    expect(runtime.sent.some(({ method }) => method === "desktop.open")).toBe(false);
+  });
+});
 
 describe("the same SessionView for local and cloud sessions", () => {
   it("keeps details/restart/copy held in the cloud location without waking compute", async () => {

@@ -868,6 +868,10 @@ the pull request that adds it.
 | `ports.write` | `ports/1` | Served | |
 | `ports.ack` | `ports/1` | Served | |
 | `ports.close` | `ports/1` | Served | |
+| `desktop.open` | `cloud-desktop/1` | Not served | Cloud workspace display |
+| `desktop.write` | `cloud-desktop/1` | Not served | Cloud workspace display |
+| `desktop.ack` | `cloud-desktop/1` | Not served | Cloud workspace display |
+| `desktop.close` | `cloud-desktop/1` | Not served | Cloud workspace display |
 | `machine.describe` | `machine/1` | Served | Only a runtime that serves its machine; see [machine/1](#machine1) |
 | `machine.projects` | `machine/1` | Served | As `machine.describe` |
 | `machine.relayAccess` | `machine/2` | Served | A paired computer's relay invite, or `{ relay: null }` with no relay registration (PRO-345) |
