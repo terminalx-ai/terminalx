@@ -9,6 +9,10 @@ const f = vi.hoisted(() => ({
   api: { phase2DesktopContractsAvailable: vi.fn(), desktopInboxStream: vi.fn(), desktopInbox: vi.fn(), desktopInboxReceipts: vi.fn(), cloudWorkspaceReadMarker: vi.fn(), cloudWorkspaces: vi.fn<(org: string) => Promise<CloudWorkspaceList>>() },
   presence: vi.fn(), catalog: { revision: "1", viewerUserId: "target", orgs: {} } as CloudCatalogState,
   notify: vi.fn((_kind: string, _authorized: () => boolean) => new Promise<void>(() => {})),
+  notifyMention: vi.fn(async (_name: string, _workspace: string, _authorized: () => boolean) => {}),
+  roster: vi.fn(async (_org: string) => ({ members: [{ userId: "actor", email: "aisha@example.test", displayName: "Aisha Khan", role: "member" }] })),
+  quote: vi.fn(async (_where: unknown): Promise<string | null> => "can you check the widths?"),
+  prefs: { mentionNotifications: true },
   resync: vi.fn(async (): Promise<void> => {}), invoke: vi.fn(), invalidate: vi.fn(), reconcile: vi.fn(), configure: vi.fn(), enable: vi.fn(),
 }));
 vi.mock("@/lib/api", () => ({ api: f.api, invoke: f.invoke }));
@@ -30,7 +34,15 @@ vi.mock("@/lib/cloudCatalog", () => ({
   subscribeCloudCatalog: (fn: () => void) => { f.catalogListeners.add(fn); return () => f.catalogListeners.delete(fn); },
 }));
 vi.mock("@/lib/cloudPresence", () => ({ cloudPresence: { hint: f.presence } }));
-vi.mock("@/lib/notify", () => ({ notifyOrganizationEvent: f.notify }));
+vi.mock("@/lib/notify", () => ({ notifyOrganizationEvent: f.notify, notifyMention: f.notifyMention }));
+vi.mock("@/lib/organizationRoster", () => ({ readOrganizationRoster: f.roster }));
+vi.mock("@/lib/prefs", () => ({ getPrefs: () => f.prefs }));
+vi.mock("@/lib/mentionNotices", async (original) => {
+  const actual = await original<typeof import("./mentionNotices")>();
+  return { ...actual, lookUpMentionQuote: f.quote };
+});
+vi.mock("@/lib/cloudAgents", () => ({ loadCloudAgents: vi.fn(), refreshFromCheckpoint: vi.fn() }));
+vi.mock("@/lib/cloudDashboard", () => ({ openCloudSession: vi.fn() }));
 vi.mock("@/lib/cloudReadMarkers", async (original) => {
   const actual = await original<typeof import("./cloudReadMarkers")>();
   f.configure.mockImplementation(actual.configureCloudReadMarkers);
@@ -39,12 +51,13 @@ vi.mock("@/lib/cloudReadMarkers", async (original) => {
   return { ...actual, configureCloudReadMarkers: f.configure, reconcileCloudReadMarker: f.reconcile, enableCloudReadMarkerWrites: f.enable };
 });
 import { cloudActivityRead, reconcileCloudReadMarker, writeCloudReadMarker } from "./cloudReadMarkers";
+import { getMentionNotices, mentionMarked } from "./mentionNotices";
 import { applyDesktopInboxEvent, bootDesktopInbox, resetDesktopInbox, desktopInboxTransport, getReassignedNotices } from "./desktopInbox";
 const sync = () => f.listeners.forEach((fn) => fn());
 beforeEach(() => {
   vi.useFakeTimers(); vi.clearAllMocks(); localStorage.clear();
   f.catalog = { revision: "1", viewerUserId: "target", orgs: {} } as CloudCatalogState;
-  f.private = false; f.liveOrgs = ["org"];
+  f.private = false; f.liveOrgs = ["org"]; f.prefs.mentionNotifications = true;
   f.status = { state: "signed-in", context: { account: "a", revision: "1" }, phase2Readiness: undefined };
   f.api.desktopInbox.mockReset().mockImplementation(async (after: string) => ({ cursor: after, events: [], hasMore: false }));
   f.api.desktopInboxStream.mockReset().mockImplementation(() => new Promise(() => {}));
@@ -448,4 +461,102 @@ it("checkpoints mixed presence and coalesced marker hints while retaining startu
   expect(JSON.parse(localStorage.getItem("terminalx.inbox.v1:a")!).cursor).toBe("22");
   expect(getReassignedNotices()).toEqual([]);
   expect(f.notify).not.toHaveBeenCalled();
+});
+
+describe("mentions (PRO-141)", () => {
+  const mention = { id: "21", type: "workspace.mentioned", organizationId: "org", workspaceId: "workspace", payload: { actorId: "actor", sessionId: "sess-1", tabId: "tab-1", messageId: "msg-1" }, createdAt: "2026-11-25T10:00:00Z" } as const;
+  const mentionReadiness = { org: ["team.events.v1", "team.mentions.v1"] };
+  const rowKey = "cloud:org:workspace:sess-1";
+
+  it("confirms access, then marks the row, shows the quoted notice, and bans the quote from the banner", async () => {
+    f.api.cloudWorkspaces.mockResolvedValue(listWorkspace());
+    deliver([mention], true, mentionReadiness);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.api.cloudWorkspaces).toHaveBeenCalledWith("org");
+    expect(f.invalidate).toHaveBeenCalledWith("workspace", "org");
+    expect(mentionMarked(rowKey)).toBe(true);
+    expect(f.quote).toHaveBeenCalledWith({ organizationId: "org", workspaceId: "workspace", sessionId: "sess-1", tabId: "tab-1", messageId: "msg-1" });
+    expect(getMentionNotices()).toMatchObject([{ id: "21", actorName: "Aisha Khan", workspaceName: "Visible", quote: "can you check the widths?", tabId: "tab-1" }]);
+    expect(f.notifyMention).toHaveBeenCalledExactlyOnceWith("Aisha Khan", "Visible", expect.any(Function));
+    expect(f.notify).not.toHaveBeenCalled();
+    expect(localStorage.getItem(inboxKey)).not.toContain("widths");
+  });
+
+  const readMarker = (id: string, readAt: string) => ({ id, type: "workspace.read-marker-changed", organizationId: "org", workspaceId: "workspace", payload: { sessionId: "sess-1", readAt }, createdAt: readAt }) as const;
+
+  it("shows the notice without waiting for the quote, and fills the quote in when this device has the message", async () => {
+    let found!: (quote: string | null) => void;
+    f.quote.mockImplementationOnce(() => new Promise((resolve) => { found = resolve; }));
+    f.api.cloudWorkspaces.mockResolvedValue(listWorkspace());
+    deliver([mention], true, mentionReadiness);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(getMentionNotices()).toMatchObject([{ id: "21", quote: null }]);
+    expect(f.notifyMention).toHaveBeenCalledOnce();
+    found("can you check the widths?");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(getMentionNotices()).toMatchObject([{ id: "21", quote: "can you check the widths?" }]);
+  });
+
+  it("does not mark or notify a mention the account already read past, as after signing in again", async () => {
+    f.api.cloudWorkspaces.mockResolvedValue(listWorkspace());
+    deliver([readMarker("20", "2026-11-25T10:05:00Z"), mention], true, mentionReadiness);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mentionMarked(rowKey)).toBe(false);
+    expect(getMentionNotices()).toEqual([]);
+    expect(f.notifyMention).not.toHaveBeenCalled();
+  });
+
+  it("drops the @ and the notice when the session is read on another device", async () => {
+    f.api.cloudWorkspaces.mockResolvedValue(listWorkspace());
+    deliver([mention], true, mentionReadiness);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mentionMarked(rowKey)).toBe(true);
+    // An older marker says nothing about the mention.
+    applyDesktopInboxEvent(readMarker("30", "2026-11-25T09:59:00Z"));
+    expect(mentionMarked(rowKey)).toBe(true);
+    applyDesktopInboxEvent(readMarker("31", "2026-11-25T10:00:00Z"));
+    expect(mentionMarked(rowKey)).toBe(false);
+    expect(getMentionNotices()).toEqual([]);
+  });
+
+  it("with Mention notifications off: no notice and no banner, but the catalog still learns of the follow", async () => {
+    f.prefs.mentionNotifications = false;
+    f.api.cloudWorkspaces.mockResolvedValue(listWorkspace());
+    deliver([mention], true, mentionReadiness);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.invalidate).toHaveBeenCalledWith("workspace", "org");
+    expect(getMentionNotices()).toEqual([]);
+    expect(f.notifyMention).not.toHaveBeenCalled();
+    expect(f.quote).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "without the mentions readiness", features: ["team.events.v1"], list: listWorkspace() },
+    { name: "when the live list no longer grants the workspace", features: mentionReadiness.org, list: listWorkspace({ you: { role: "none", canApprove: false } }) },
+  ])("stays quiet $name", async ({ features, list }) => {
+    f.api.cloudWorkspaces.mockResolvedValue(list);
+    deliver([mention], true, { org: features });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(getMentionNotices()).toEqual([]);
+    expect(mentionMarked(rowKey)).toBe(false);
+    expect(f.notifyMention).not.toHaveBeenCalled();
+  });
+
+  it("ignores a mention with malformed ids", async () => {
+    f.api.cloudWorkspaces.mockResolvedValue(listWorkspace());
+    deliver([{ ...mention, payload: { ...mention.payload, messageId: "bad id with spaces" } }], true, mentionReadiness);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(getMentionNotices()).toEqual([]);
+    expect(mentionMarked(rowKey)).toBe(false);
+  });
+
+  it("drops the mark and notice when the share is removed", async () => {
+    f.api.cloudWorkspaces.mockResolvedValue(listWorkspace());
+    deliver([mention], true, mentionReadiness);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mentionMarked(rowKey)).toBe(true);
+    applyDesktopInboxEvent(removal);
+    expect(mentionMarked(rowKey)).toBe(false);
+    expect(getMentionNotices()).toEqual([]);
+  });
 });

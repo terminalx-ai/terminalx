@@ -1,5 +1,5 @@
 {
-  "source": "node scripts/webkit/run-all.mjs --times over 24 part logs (45588208775-part-1.log, 45588208775-part-2.log, 45588208775-part-3.log, 45588208775-part-4.log, 45595771005-part-1.log, 45595771005-part-2.log, 45595771005-part-3.log, 45595771005-part-4.log, 45597409917-part-1.log, 45597409917-part-2.log, 45597409917-part-3.log, 45597409917-part-4.log, 45598717792-part-1.log, 45598717792-part-2.log, 45598717792-part-3.log, 45598717792-part-4.log, 45598884694-part-1.log, 45598884694-part-2.log, 45598884694-part-3.log, 45598884694-part-4.log, 45604228203-part-1.log, 45604228203-part-2.log, 45604228203-part-3.log, 45604228203-part-4.log), seconds per check, median of the runs it passed in",
+  "source": "node scripts/webkit/run-all.mjs --times over 24 part logs (45588208775-part-1.log, 45588208775-part-2.log, 45588208775-part-3.log, 45588208775-part-4.log, 45595771005-part-1.log, 45595771005-part-2.log, 45595771005-part-3.log, 45595771005-part-4.log, 45597409917-part-1.log, 45597409917-part-2.log, 45597409917-part-3.log, 45597409917-part-4.log, 45598717792-part-1.log, 45598717792-part-2.log, 45598717792-part-3.log, 45598717792-part-4.log, 45598884694-part-1.log, 45598884694-part-2.log, 45598884694-part-3.log, 45598884694-part-4.log, 45604228203-part-1.log, 45604228203-part-2.log, 45604228203-part-3.log, 45604228203-part-4.log), seconds per check, median of the runs it passed in. chat-mentions (PRO-141, new): one local run of 13 s until the next rebuild from CI logs.",
   "seconds": {
     "account-row": 22.7,
     "account-settings": 26.4,
@@ -26,6 +26,7 @@
     "chat-controls": 102.2,
     "chat-find": 171.3,
     "chat-links": 8.5,
+    "chat-mentions": 13,
     "chat-tables": 9.6,
     "chat-transcript": 19.3,
     "chat-wrapping": 12.8,
@@ -152,6 +153,7 @@
     "chat-controls": 6,
     "chat-find": 6,
     "chat-links": 6,
+    "chat-mentions": 1,
     "chat-tables": 6,
     "chat-transcript": 6,
     "chat-wrapping": 6,

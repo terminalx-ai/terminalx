@@ -296,6 +296,21 @@ export async function notifyOrganizationEvent(kind: "share-added" | "reassigned"
   } catch { /* A best-effort banner never affects inbox delivery. */ }
 }
 
+/**
+ * A teammate mentioned you (PRO-141, design 17.06): who, and in which
+ * workspace. Never the message: a banner can show on the lock screen, so its
+ * text stays in the app (the in-app notification quotes it). Off with the
+ * Mention notifications setting.
+ */
+export async function notifyMention(actorName: string, workspaceName: string, authorized: () => boolean): Promise<void> {
+  if (!isMac || !getPrefs().mentionNotifications || !sendsBanner() || !authorized()) return;
+  if (!await canNotify() || !sendsBanner() || !authorized()) return;
+  const first = actorName.trim().split(/\s+/)[0] || "A teammate";
+  try {
+    sendNotification({ title: `${first} mentioned you`, body: workspaceName });
+  } catch { /* A best-effort banner never affects inbox delivery. */ }
+}
+
 // ---- notifications turned off in macOS (PRO-327)
 
 /**

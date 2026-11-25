@@ -1,4 +1,5 @@
 import { PresenceFaces } from "@/components/dashboard/TeamOverview";
+import { useMentionMarked } from "@/lib/mentionMarks";
 import { MemberProfile, memberName } from "@/components/people/MemberProfile";
 import { featureFlags, useFeatureFlag } from "@/lib/featureFlags";
 import { readOrganizationRoster, useOrganizationRoster } from "@/lib/organizationRoster";
@@ -9,7 +10,7 @@ import { ManualStatusMenu } from "@/components/session/ManualStatus";
 import { manualStatusLabel } from "@terminalx/portable/manualStatus";
 import { StatusGroups } from "../StatusGroups";
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
-import { AppWindow, Archive, BookOpen, Check, ChevronDown, Cloud, Ellipsis, Folder, FolderGit2, FolderInput, FolderPlus, GitBranch, GitPullRequest, Pencil, Pin, PinOff, Plus, RefreshCw, Trash2, X } from "@/icons";
+import { AppWindow, Archive, AtSign, BookOpen, Check, ChevronDown, Cloud, Ellipsis, Folder, FolderGit2, FolderInput, FolderPlus, GitBranch, GitPullRequest, Pencil, Pin, PinOff, Plus, RefreshCw, Trash2, X } from "@/icons";
 import { confirmInApp } from "@/lib/confirm";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -557,6 +558,7 @@ function CloudSessionItem({ row, node, activity, status, projectedTabs, manage, 
   const asked = useTerminals().selected[row.key];
   const tabRows = useMemo(() => cloudTabRows(row, { projected: projectedTabs, shown, asked }), [row, projectedTabs, shown, asked]);
   const rowStatus = detailedStatus(row.rowStatus ?? { tabs: [{ status }] });
+  const mentioned = useMentionMarked(row.key);
   const menu = useRowMenu();
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState(row.title);
@@ -640,7 +642,13 @@ function CloudSessionItem({ row, node, activity, status, projectedTabs, manage, 
             {/* As local rows (02.04): the status mark leads; the PR number or the time follows the title. */}
             <StatusMarkIcon status={rowStatus} decorative /><span id={statusDescriptionId} hidden>{statusText(rowStatus)}. Status: {manualStatusLabel(row.manualStatus)}</span>
             {row.pinned && <Pin className="size-3 shrink-0 text-faint" />}
-            <span className={cn("min-w-0 flex-1 truncate text-[13px]", row.archived && "text-faint")}>{row.title}</span>
+            <span className={cn("min-w-0 flex-1 truncate text-[13px]", row.archived && "text-faint", mentioned && "font-semibold text-foreground")}>{row.title}</span>
+            {mentioned && (
+              // 13.16: a teammate mentioned you here and it is not read yet.
+              <span role="img" aria-label="Mentioned you" title="Mentioned you" data-testid="mention-mark" className="flex size-4 shrink-0 items-center justify-center rounded-full bg-mention/15 text-mention">
+                <AtSign aria-hidden className="size-2.5" />
+              </span>
+            )}
             {rowStatus.pr ? (
               <span data-row-meta="pr" className={cn("shrink-0 font-mono text-[12px] tabular-nums text-muted-foreground", yieldsToRowActions)}>PR #{rowStatus.pr}</span>
             ) : (

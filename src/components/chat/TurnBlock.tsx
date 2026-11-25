@@ -803,8 +803,8 @@ function ReaderMessage({
             ? splitMarkdownTables(message.text).map((part, i) =>
                 part.table
                   ? <div key={i} className="my-2 whitespace-normal"><Markdown text={part.text} streaming={false} linkContext={linkContext} webLinksOnly remoteImages={false} /></div>
-                  : <LinkedText key={i} text={part.text.replace(/^\n+|\n+$/g, "")} context={linkContext} />)
-            : <LinkedText text={message.text} context={linkContext} />}
+                  : <LinkedText key={i} text={part.text.replace(/^\n+|\n+$/g, "")} context={linkContext} mentions />)
+            : <LinkedText text={message.text} context={linkContext} mentions />}
         </div>
         {message.sent !== undefined && (
           <details className="mt-2 text-xs text-muted-foreground" data-testid="prompt-changed">

@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use url::Url;
 
 use crate::account::{
-    AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN,
+    AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN, PHASE2_MENTIONS,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_PRESENCE, PHASE2_RESTART_DETAILS,
     PHASE2_ADMIN_SHARE, PHASE2_AFFECTED_WORKSPACES, PHASE2_GENERAL_ACCESS, PHASE2_PRECREATE_USAGE, PHASE2_WEBHOOK_TRIGGER, PHASE2_WORKSPACE_GROUPS,
 };
@@ -2348,6 +2348,42 @@ fn reassign_input(body: Value) -> Result<WorkspaceReassignInput, CloudWorkspaceC
     Ok(input)
 }
 
+/// A chat mention (PRO-141). No text field exists, so none can be sent.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceMentionsInput {
+    session_id: String,
+    tab_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_id: Option<String>,
+    user_ids: Vec<String>,
+    #[serde(default)]
+    check: bool,
+}
+
+fn mentions_input(body: Value) -> Result<WorkspaceMentionsInput, CloudWorkspaceClientError> {
+    if !body.is_object() { return Err(inbox_invalid()); }
+    let input: WorkspaceMentionsInput = serde_json::from_value(body).map_err(|_| inbox_invalid())?;
+    let distinct: std::collections::HashSet<&String> = input.user_ids.iter().collect();
+    let tab_ok = !input.tab_id.is_empty() && input.tab_id.len() <= 128
+        && input.tab_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'));
+    if !valid_following_id(&input.session_id) || !tab_ok
+        || input.message_id.as_deref().map_or(!input.check, |id| !valid_following_id(id))
+        || input.user_ids.is_empty() || input.user_ids.len() > 10 || distinct.len() != input.user_ids.len()
+        || !input.user_ids.iter().all(|id| valid_following_id(id)) { return Err(inbox_invalid()); }
+    Ok(input)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceMentionsResponse {
+    pub workspace_id: String,
+    /// Now following the workspace and notified.
+    pub mentioned: Vec<String>,
+    /// Cannot watch the workspace; when any are listed nothing was written.
+    pub no_access: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceFollowingResponse {
@@ -2814,7 +2850,7 @@ impl CloudWorkspaceService {
         if !crate::desktop_inbox::valid_cursor(after) || wait_ms > 25_000 { return Err(inbox_invalid()); }
         self.inbox_account(RequestRisk::Read, |client, context| {
             let mut url = client.inbox_url(&[])?;
-            url.query_pairs_mut().append_pair("after", after).append_pair("waitMs", &wait_ms.to_string()).append_pair("presence", "1");
+            url.query_pairs_mut().append_pair("after", after).append_pair("waitMs", &wait_ms.to_string()).append_pair("presence", "1").append_pair("mentions", "1");
             let page: crate::desktop_inbox::InboxPage = client.send_url("GET", context, url, None, None, RequestRisk::Read, CATALOG_RESPONSE_LIMIT_BYTES)?;
             if page.v != 1 || page.events.len() > 100 || page.cursor.parse::<i64>().unwrap() < after.parse::<i64>().unwrap()
                 || page.events.iter().any(|event| event.id().parse::<i64>().unwrap() > page.cursor.parse::<i64>().unwrap()) { return Err(post_send_error(RequestRisk::Read)); }
@@ -2827,7 +2863,7 @@ impl CloudWorkspaceService {
         if !crate::desktop_inbox::valid_cursor(after) || last_event_id.is_some_and(|id| !crate::desktop_inbox::valid_cursor(id)) { return Err(inbox_invalid()); }
         self.inbox_account(RequestRisk::Read, |client, context| {
             let mut url = client.inbox_url(&["stream"])?;
-            url.query_pairs_mut().append_pair("after", after).append_pair("presence", "1");
+            url.query_pairs_mut().append_pair("after", after).append_pair("presence", "1").append_pair("mentions", "1");
             let mut request = client.authorized_request("GET", context, &url).set("accept", "text/event-stream");
             if let Some(id) = last_event_id { request = request.set("Last-Event-ID", id); }
             let response = match request.call() {
@@ -2878,7 +2914,13 @@ impl CloudWorkspaceService {
     /// Retain the original context across the entire request.
     fn following_in<T>(&self, org: &str, risk: RequestRisk,
         operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
-        self.phase2_gate(PHASE2_FOLLOW_REASSIGN, Some(org), None, "workspace_following_unavailable")?;
+        self.phase2_member_in(PHASE2_FOLLOW_REASSIGN, "workspace_following_unavailable", org, risk, operation)
+    }
+
+    /// A phase 2 call in an Organization the person belongs to, fenced like following.
+    fn phase2_member_in<T>(&self, feature: &str, unavailable: &'static str, org: &str, risk: RequestRisk,
+        operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
+        self.phase2_gate(feature, Some(org), None, unavailable)?;
         if !valid_following_path_id(org) { return Err(inbox_invalid()); }
         let original = self.account.context().ok_or_else(|| CloudWorkspaceClientError::local("account_signed_out", false))?;
         let context = self.account.inbox_member_context(org).map_err(|code| CloudWorkspaceClientError::local(code, false))?;
@@ -2886,7 +2928,7 @@ impl CloudWorkspaceService {
             || original.access_token != context.access_token {
             return Err(context_changed_error(risk));
         }
-        self.phase2_gate(PHASE2_FOLLOW_REASSIGN, Some(org), Some(&context), "workspace_following_unavailable")?;
+        self.phase2_gate(feature, Some(org), Some(&context), unavailable)?;
         let result = operation(&self.client, &context);
         // Generation fences A-B-A; active org, profile, session and membership are
         // checked again even for errors. There is no successful cached fallback.
@@ -2924,6 +2966,24 @@ impl CloudWorkspaceService {
             }
             // Both booleans are accepted. No retry, owner cache, UUID lifecycle or
             // tab/session/credential migration is implied by this receipt.
+            Ok(value)
+        })
+    }
+
+    /// PRO-141: ids only. The message text stays in the end-to-end encrypted transcript.
+    pub fn workspace_mentions(&self, org: &str, workspace: &str, body: Value) -> Result<WorkspaceMentionsResponse, CloudWorkspaceClientError> {
+        let input = mentions_input(body)?;
+        if !valid_following_path_id(workspace) { return Err(inbox_invalid()); }
+        self.phase2_member_in(PHASE2_MENTIONS, "workspace_mentions_unavailable", org, RequestRisk::Mutation, |client, context| {
+            let body: Value = client.request_as("POST", context, &["cloud-workspaces", workspace, "mentions"],
+                None, Some(json!(input)), None, RequestRisk::Mutation)?;
+            if !body.is_object() { return Err(post_send_error(RequestRisk::Mutation)); }
+            let value: WorkspaceMentionsResponse = serde_json::from_value(body).map_err(|_| post_send_error(RequestRisk::Mutation))?;
+            let asked = |id: &String| input.user_ids.contains(id) && id != &context.user_id;
+            if value.workspace_id != workspace || !value.mentioned.iter().all(asked) || !value.no_access.iter().all(asked)
+                || (input.check || !value.no_access.is_empty()) && !value.mentioned.is_empty() {
+                return Err(post_send_error(RequestRisk::Mutation));
+            }
             Ok(value)
         })
     }
@@ -4731,6 +4791,7 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_group_manager_unsupported"
             | "organization_group_not_found"
             | "workspace_following_unavailable"
+            | "workspace_mentions_unavailable"
             | "presence_rate_limited"
             | "presence_device_limit"
             | "presence_capacity_exceeded"
@@ -5339,6 +5400,67 @@ mod tests {
             assert!(!request.contains("presence=1"));
             assert_eq!(serde_json::from_str::<Value>(request.split_once("\r\n\r\n").unwrap().1).unwrap(), expected);
         }
+    }
+
+    fn mention_body() -> Value {
+        json!({"sessionId":"session-1", "tabId":"tab-1", "messageId":"msg-1", "userIds":["user-2", "user-3"]})
+    }
+
+    #[test]
+    fn phase2_mentions_contract_posts_ids_only_and_validates_the_reply() {
+        let (base, requests) = serve_each(vec![
+            response("200 OK", r#"{"workspaceId":"workspace-1","mentioned":["user-2","user-3"],"noAccess":[]}"#, ""),
+            response("200 OK", r#"{"workspaceId":"workspace-1","mentioned":[],"noAccess":["user-3"]}"#, ""),
+            // A follow the check must never report, someone not asked about, another workspace, an extra field.
+            response("200 OK", r#"{"workspaceId":"workspace-1","mentioned":["user-2"],"noAccess":[]}"#, ""),
+            response("200 OK", r#"{"workspaceId":"workspace-1","mentioned":["user-9"],"noAccess":[]}"#, ""),
+            response("200 OK", r#"{"workspaceId":"workspace-2","mentioned":[],"noAccess":[]}"#, ""),
+            response("200 OK", r#"{"workspaceId":"workspace-1","mentioned":[],"noAccess":[],"text":"x"}"#, ""),
+        ]);
+        let (account, service) = phase2_service(&base);
+        account.set_memberships_for_test(&["org-1"], false);
+        let done = service.workspace_mentions("org-1", "workspace-1", mention_body()).unwrap();
+        assert_eq!(done.mentioned, ["user-2", "user-3"]);
+        let check = json!({"sessionId":"session-1", "tabId":"tab-1", "userIds":["user-2", "user-3"], "check":true});
+        assert_eq!(service.workspace_mentions("org-1", "workspace-1", check.clone()).unwrap().no_access, ["user-3"]);
+        for body in [check.clone(), mention_body(), mention_body(), mention_body()] {
+            assert!(service.workspace_mentions("org-1", "workspace-1", body).is_err());
+        }
+        let requests = requests.join().unwrap();
+        assert_eq!(requests.len(), 6);
+        assert!(requests[0].starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/mentions HTTP/1.1"));
+        phase2_headers(&requests[0]);
+        assert_eq!(serde_json::from_str::<Value>(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap(),
+            json!({"sessionId":"session-1", "tabId":"tab-1", "messageId":"msg-1", "userIds":["user-2", "user-3"], "check":false}));
+        assert_eq!(serde_json::from_str::<Value>(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap(), check);
+    }
+
+    #[test]
+    fn phase2_mentions_contract_refuses_text_bad_ids_and_production_hold_without_http() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (account, service) = phase2_service(&base);
+        account.set_memberships_for_test(&["org-1"], false);
+        let mut production = CloudWorkspaceService::new(account.clone());
+        production.client = Client::for_test(&base, Duration::from_millis(30));
+        assert_eq!(production.workspace_mentions("org-1", "workspace-1", mention_body()).unwrap_err().code, "workspace_mentions_unavailable");
+        let with = |key: &str, value: Value| { let mut body = mention_body(); body[key] = value; body };
+        let without = |key: &str| { let mut body = mention_body(); body.as_object_mut().unwrap().remove(key); body };
+        for body in [
+            Value::Null, json!([]), json!("{}"),
+            // The message never goes to the server: there is no field for it.
+            with("text", json!("@Aisha can you check?")),
+            without("messageId"), without("tabId"), without("sessionId"), without("userIds"),
+            with("userIds", json!([])), with("userIds", json!(["user-2", "user-2"])),
+            with("userIds", json!((0..11).map(|i| format!("user-{i}")).collect::<Vec<_>>())),
+            with("userIds", json!(["has space"])), with("tabId", json!("a/b")), with("tabId", json!("")),
+            with("messageId", json!("x".repeat(129))), with("check", json!("yes")),
+        ] {
+            assert_eq!(service.workspace_mentions("org-1", "workspace-1", body).unwrap_err().code, "cloud_workspace_request_invalid");
+        }
+        assert_eq!(service.workspace_mentions("org-1", "bad/ws", mention_body()).unwrap_err().code, "cloud_workspace_request_invalid");
+        assert!(listener.accept().is_err(), "nothing reached the server");
     }
 
     #[test]
@@ -6102,7 +6224,7 @@ mod tests {
         let filtered = service.inbox(id, 0).unwrap();
         assert!(filtered.has_more && filtered.events.is_empty());
         let requests = requests.join().unwrap();
-        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox?after=0&waitMs=25000&presence=1 HTTP/1.1"));
+        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox?after=0&waitMs=25000&presence=1&mentions=1 HTTP/1.1"));
         assert!(requests[1].starts_with("POST /v1/desktop/organization-inbox/receipts HTTP/1.1"));
         assert_eq!(serde_json::from_str::<Value>(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap(), json!({"eventIds":[id]}));
         for request in requests { phase2_headers(&request); assert!(!request.contains("userId")); }
@@ -6135,7 +6257,7 @@ mod tests {
         assert!(service.inbox_stream(&page.cursor, None).is_err());
         assert_eq!(service.inbox(&page.cursor, 0).unwrap().cursor, page.cursor);
         let requests = requests.join().unwrap();
-        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox/stream?after=0&presence=1 HTTP/1.1"));
+        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox/stream?after=0&presence=1&mentions=1 HTTP/1.1"));
         assert!(requests[0].to_ascii_lowercase().contains("last-event-id: 9007199254740992"));
         assert!(requests[2].contains("after=9007199254740994"));
         for request in requests { phase2_headers(&request); }

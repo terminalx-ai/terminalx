@@ -524,6 +524,10 @@
           "description": "Choose a browser for website links, or ask each time.",
           "type": "boolean"
         },
+        "mentionNotifications": {
+          "description": "When a teammate @mentions you in a shared session.",
+          "type": "boolean"
+        },
         "mode": {
           "description": "System follows macOS and switches with it.",
           "enum": [

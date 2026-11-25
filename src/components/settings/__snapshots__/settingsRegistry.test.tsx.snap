@@ -79,6 +79,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "general.linkActions",
   "general.cloudControl",
   "general.commandLine",
+  "general.mentionNotifications",
   "general.sounds",
   "general.animations",
   "general.foldToolCalls",

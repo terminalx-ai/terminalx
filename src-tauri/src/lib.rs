@@ -768,6 +768,7 @@ pub fn run() {
             commands::cloud_workspace_follow_put,
             commands::cloud_workspace_follow_delete,
             commands::cloud_workspace_reassign,
+            commands::cloud_workspace_mentions,
             commands::desktop_presence_put,
             commands::desktop_presence_read,
             commands::desktop_inbox,

@@ -592,6 +592,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "~/.local/bin/terminalx, ~/.local/bin/tnx" },
   }),
   defineSetting({
+    id: "general.mentionNotifications", section: "general", title: "Mention notifications",
+    description: "When a teammate @mentions you in a shared session.",
+    searchTerms: ["general", "mention", "notifications", "@"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.mentionNotifications" },
+  }),
+  defineSetting({
     id: "general.sounds", section: "general", title: "Sounds",
     description: "A short tone when a session finishes or asks for you. Silent while another app has focus; the desktop notification makes its own noise there.",
     searchTerms: ["general", "sounds"], scope: "user",

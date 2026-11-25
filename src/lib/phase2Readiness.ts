@@ -4,6 +4,7 @@ export const phase2Features = {
   events: "team.events.v1",
   presence: "team.presence.v1",
   followReassign: "team.follow-reassign.v1",
+  mentions: "team.mentions.v1",
   restartDetails: "cloud.workspaces.restart-details.v1",
   workspaceGroups: "cloud.workspace-groups.v1",
   freshWorkspace: "cloud.automations.fresh-workspace.v1",

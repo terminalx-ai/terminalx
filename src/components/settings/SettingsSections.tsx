@@ -111,6 +111,9 @@ export function GeneralTab() {
       <LayeredConfiguration />
       <ComputerUseRows />
       <BrowserRuntimeRow />
+      <RegisteredSetting setting="general.mentionNotifications"
+        control={<Switch checked={prefs.mentionNotifications} onCheckedChange={(v) => setPrefs({ mentionNotifications: v })} />}
+      />
       <RegisteredSetting setting="general.sounds"
         control={<Switch checked={prefs.sounds} onCheckedChange={(v) => setPrefs({ sounds: v })} />}
       />

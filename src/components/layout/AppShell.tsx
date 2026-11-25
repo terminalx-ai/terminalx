@@ -1,5 +1,6 @@
 import { openSupportReport } from "@/components/SupportReportDialog";
 import { WorkspaceReassignedNotices } from "./WorkspaceReassignedNotices";
+import { MentionNotices } from "./MentionNotices";
 import { SettingsLeaveBoundaryContext, useSettingsLeaveBoundary } from "@/components/settings/settingsLeaveGuard";
 import { bootDataPrivacy } from "@/lib/dataPrivacy";
 import { bootSelfUi } from "@/lib/selfUi";
@@ -435,6 +436,7 @@ export function AppShell() {
         <ProjectAddedNotice />
         <WorktreeCopyNotices />
         <WorkspaceReassignedNotices />
+        <MentionNotices />
         <CleanupIndicator onOpenStorage={openStorageSettings} />
       </NoticeColumn>
       <BypassDialog />

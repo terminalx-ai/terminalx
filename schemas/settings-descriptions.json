@@ -152,6 +152,7 @@
   "preferences.shortcuts.session.tab7": "Session keyboard shortcut.",
   "preferences.shortcuts.session.tab8": "Session keyboard shortcut.",
   "preferences.shortcuts.session.toggleTerminalView": "Session keyboard shortcut.",
+  "preferences.mentionNotifications": "When a teammate @mentions you in a shared session.",
   "preferences.sounds": "A short tone when a session finishes or asks for you. Silent while another app has focus; the desktop notification makes its own noise there.",
   "preferences.tabStrip": "A session's agents, terminals and browser pages as a row of tabs under the title bar, in the same order as the sidebar. Off leaves them in the sidebar only.",
   "preferences.theme": "Choose the application color palette.",

@@ -7,6 +7,7 @@
   "branchSessions": "tabs",
   "updateChannel": "stable",
   "sounds": true,
+  "mentionNotifications": true,
   "animations": true,
   "fontScale": "md",
   "transcriptLayout": "chat",
