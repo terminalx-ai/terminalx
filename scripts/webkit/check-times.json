@@ -1,5 +1,5 @@
 {
-  "source": "Linux webkit-layout-linux parts 1-4 of CI runs 45442275413, 45449516280, 45454801706 (24 November 2026), seconds per check, median of the runs it ran in. Rebuilt with: node scripts/webkit/run-all.mjs --times <part logs>... > scripts/webkit/check-times.json",
+  "source": "Linux webkit-layout-linux parts 1-4 of CI runs 45442275413, 45449516280, 45454801706 (24 November 2026), seconds per check, median of the runs it ran in. Rebuilt with: node scripts/webkit/run-all.mjs --times <part logs>... > scripts/webkit/check-times.json chat-mentions (PRO-141, new): one local run of 13 s until the next rebuild from CI logs.",
   "seconds": {
     "account-row": 18,
     "account-settings": 26.1,
@@ -26,6 +26,7 @@
     "chat-controls": 88.5,
     "chat-find": 107.1,
     "chat-links": 7.3,
+    "chat-mentions": 13,
     "chat-tables": 6.4,
     "chat-transcript": 18.4,
     "chat-wrapping": 12.9,
@@ -152,6 +153,7 @@
     "chat-controls": 3,
     "chat-find": 3,
     "chat-links": 3,
+    "chat-mentions": 1,
     "chat-tables": 3,
     "chat-transcript": 3,
     "chat-wrapping": 3,

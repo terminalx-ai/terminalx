@@ -109,8 +109,22 @@ try {
           // It opens upward, over what is above the box, so only its sides are held to the column.
           menuInside: box(menu).left >= box(root).left - 1 && box(menu).right <= box(root).right + 1,
           messageChips: root.querySelectorAll("[data-message] [data-testid=mention-chip]").length,
-          // What a reader gets when they copy the message: the text as sent, without the avatars' initials.
-          messageText: (() => { const range = document.createRange(); range.selectNodeContents(root.querySelector("[data-message]")); getSelection().removeAllRanges(); getSelection().addRange(range); const text = getSelection().toString(); getSelection().removeAllRanges(); return text; })(),
+          // What a copy of the message keeps: its text without what cannot be selected (the avatars' initials), the
+          // hidden "@" included. Read from the text nodes, not the Selection API, which headless WebKit on Linux leaves empty.
+          messageText: (() => {
+            const message = root.querySelector("[data-message]");
+            const unselectable = (el) => {
+              for (let at = el; at && at !== message.parentElement; at = at.parentElement) {
+                const style = getComputedStyle(at);
+                if ((style.userSelect || style.webkitUserSelect) === "none") return true;
+              }
+              return false;
+            };
+            const walker = document.createTreeWalker(message, NodeFilter.SHOW_TEXT);
+            let copied = "";
+            for (let node = walker.nextNode(); node; node = walker.nextNode()) if (!unselectable(node.parentElement)) copied += node.textContent;
+            return copied;
+          })(),
           clipped: clipped(root),
         };
       };

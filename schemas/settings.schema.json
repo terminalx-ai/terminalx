@@ -524,6 +524,10 @@
           "description": "Choose a browser for website links, or ask each time.",
           "type": "boolean"
         },
+        "mentionNotifications": {
+          "description": "When a teammate @mentions you in a shared session.",
+          "type": "boolean"
+        },
         "mode": {
           "description": "System follows macOS and switches with it.",
           "enum": [
@@ -582,10 +586,6 @@
             "status"
           ],
           "type": "string"
-        },
-        "mentionNotifications": {
-          "description": "When a teammate @mentions you in a shared session.",
-          "type": "boolean"
         },
         "sounds": {
           "description": "A short tone when a session finishes or asks for you. Silent while another app has focus; the desktop notification makes its own noise there.",
