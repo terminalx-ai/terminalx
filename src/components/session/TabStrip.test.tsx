@@ -269,6 +269,7 @@ describe("the cloud new-tab menu's disabled hint", () => {
     asleep: false,
     canWakeForTerminal: false,
     manage: false,
+    unavailable: null,
     ...fields,
   }) as Parameters<typeof newTabBlockedReason>[0];
 
@@ -289,6 +290,16 @@ describe("the cloud new-tab menu's disabled hint", () => {
     expect(newTabBlockedReason(model({ machine, manage: true, connected: false }))).toBe("Tabs and terminals open once Mac mini is connected.");
     // The composer's reason while it is away is the one the menu shows too.
     expect(newTabBlockedReason(model({ machine, connected: false, backend: { readOnlyReason: "Can't send until Mac mini is back" } as never }))).toBe("Can't send until Mac mini is back");
+  });
+
+  // #1582: nothing is connecting to a workspace whose machine is gone; the hint says why instead.
+  it("says the workspace can't be reached, with the reason, never Connecting…", () => {
+    const reason = "The workspace needs attention: its machine was deleted at the provider.";
+    const hint = newTabBlockedReason(model({ connected: false, manage: true, unavailable: reason }));
+    expect(hint).toBe(`The workspace can't be reached, so no tabs or terminals can be opened. ${reason}`);
+    expect(hint).not.toMatch(/Connecting/);
+    // Not connected otherwise: still on its way.
+    expect(newTabBlockedReason(model({ connected: false, manage: true }))).toBe("Connecting to the workspace…");
   });
 
   it("reads as a sentence, not the uppercase section header", () => {

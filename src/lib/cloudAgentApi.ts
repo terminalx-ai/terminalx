@@ -151,6 +151,8 @@ export interface CachedTab {
 
 /** The API's refusal of a `wake: false` command for a workspace that is not running. Nothing was stored. */
 export const WORKSPACE_STOPPED = "cloud_workspace_stopped";
+/** A wait for a connection that cannot come: its workspace needs attention or was deleted (#1582). */
+export const WORKSPACE_NOT_REACHABLE = "cloud_workspace_not_reachable";
 
 export const cloudAgentApi = {
   /**

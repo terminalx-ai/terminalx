@@ -460,24 +460,16 @@ impl AttachSource for ApiSource {
                         | crate::cloud_workspaces::OperationState::CancelRequested
                 )
         });
-        match workspace.workspace.state {
-            // Already waking (this or another client asked): wait, never ask twice.
-            WorkspaceState::Suspended if resuming => return Ok(OpenOutcome::WaitingForRuntime),
-            WorkspaceState::Suspended if activation < Activation::Wake => return Ok(OpenOutcome::Suspended),
-            WorkspaceState::Suspended => {
-                // Only an interactive action wakes compute.
+        match open_gate(workspace.workspace.state, resuming, activation) {
+            Gate::Answer(outcome) => return Ok(outcome),
+            Gate::Fail(code) => anyhow::bail!(code),
+            Gate::Resume => {
                 self.service
                     .lifecycle(organization, &self.workspace_id, crate::cloud_workspaces::OperationAction::Resume)
                     .map_err(|e| error(e.code))?;
                 return Ok(OpenOutcome::WaitingForRuntime);
             }
-            // In the archive: its saved conversations are read without
-            // compute, and nothing wakes it until it is unarchived (§10.1).
-            WorkspaceState::Archived if activation < Activation::Wake => return Ok(OpenOutcome::Suspended),
-            WorkspaceState::Archived => anyhow::bail!("cloud_workspace_archived"),
-            WorkspaceState::Provisioning => return Ok(OpenOutcome::WaitingForRuntime),
-            WorkspaceState::Destroyed | WorkspaceState::AttentionRequired => anyhow::bail!("cloud_workspace_unavailable"),
-            WorkspaceState::Ready => {}
+            Gate::Attach => {}
         }
         let (organization_id, response) =
             self.service.open_attachment(organization, &self.workspace_id, &self.installation_id, refresh_pairing).map_err(|e| error(e.code))?;
@@ -485,6 +477,37 @@ impl AttachSource for ApiSource {
             anyhow::bail!("cloud_remote_identity_changed");
         }
         open_outcome(&response)
+    }
+}
+
+/// What `open` does with a workspace in the list's state, before any attach.
+enum Gate {
+    /// Answered from the state alone; nothing is asked of the API.
+    Answer(OpenOutcome),
+    Fail(&'static str),
+    /// Ask the API to resume compute, then wait for the runtime.
+    Resume,
+    /// Ready: ask for an attachment.
+    Attach,
+}
+
+fn open_gate(state: WorkspaceState, resuming: bool, activation: Activation) -> Gate {
+    match state {
+        // Already waking (this or another client asked): wait, never ask twice.
+        WorkspaceState::Suspended if resuming => Gate::Answer(OpenOutcome::WaitingForRuntime),
+        WorkspaceState::Suspended if activation < Activation::Wake => Gate::Answer(OpenOutcome::Suspended),
+        // Only an interactive action wakes compute.
+        WorkspaceState::Suspended => Gate::Resume,
+        // In the archive: its saved conversations are read without
+        // compute, and nothing wakes it until it is unarchived (§10.1).
+        WorkspaceState::Archived if activation < Activation::Wake => Gate::Answer(OpenOutcome::Suspended),
+        WorkspaceState::Archived => Gate::Fail("cloud_workspace_archived"),
+        WorkspaceState::Provisioning => Gate::Answer(OpenOutcome::WaitingForRuntime),
+        // Nothing to attach to, and retrying cannot change that: the
+        // supervisor parks until the workspace's state changes (#1582).
+        WorkspaceState::AttentionRequired => Gate::Answer(OpenOutcome::Unavailable { reason: "attention-required".into() }),
+        WorkspaceState::Destroyed => Gate::Answer(OpenOutcome::Unavailable { reason: "destroyed".into() }),
+        WorkspaceState::Ready => Gate::Attach,
     }
 }
 
@@ -724,6 +747,26 @@ mod intercept_tests {
         profile.profile_id = "profile-2".into();
         assert!(!a.allowed_by(Some(&profile)));
         assert!(!a.allowed_by(None));
+    }
+
+    #[test]
+    fn a_workspace_that_needs_attention_or_was_deleted_parks_instead_of_failing_the_open() {
+        // #1582: a failed open is retried on a backoff for ever; these states never attach, so they park.
+        for (state, reason) in [(WorkspaceState::AttentionRequired, "attention-required"), (WorkspaceState::Destroyed, "destroyed")] {
+            for activation in [Activation::Connect, Activation::Wake] {
+                match open_gate(state, false, activation) {
+                    Gate::Answer(OpenOutcome::Unavailable { reason: got }) => assert_eq!(got, reason),
+                    _ => panic!("{state:?} at {activation:?} must answer unavailable"),
+                }
+            }
+        }
+        // The other states keep their answers.
+        assert!(matches!(open_gate(WorkspaceState::Ready, false, Activation::Connect), Gate::Attach));
+        assert!(matches!(open_gate(WorkspaceState::Suspended, false, Activation::Connect), Gate::Answer(OpenOutcome::Suspended)));
+        assert!(matches!(open_gate(WorkspaceState::Suspended, true, Activation::Connect), Gate::Answer(OpenOutcome::WaitingForRuntime)));
+        assert!(matches!(open_gate(WorkspaceState::Suspended, false, Activation::Wake), Gate::Resume));
+        assert!(matches!(open_gate(WorkspaceState::Archived, false, Activation::Wake), Gate::Fail("cloud_workspace_archived")));
+        assert!(matches!(open_gate(WorkspaceState::Provisioning, false, Activation::Connect), Gate::Answer(OpenOutcome::WaitingForRuntime)));
     }
 
     #[test]

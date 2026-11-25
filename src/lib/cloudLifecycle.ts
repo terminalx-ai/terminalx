@@ -65,6 +65,16 @@ export function machineRunning(item: CloudWorkspaceListItem): boolean {
   return item.workspace.state === "ready" && !goingDown;
 }
 
+/**
+ * The list's state can be opened at all: anything but needing attention or
+ * deleted. A connection parked because its workspace could not be reached
+ * opens again once a list says so, whatever it says next: stopped, coming
+ * up or running (#1582).
+ */
+export function machineReachable(item: CloudWorkspaceListItem): boolean {
+  return item.workspace.state !== "attention-required" && item.workspace.state !== "destroyed";
+}
+
 /** A permanent delete still cleaning up, or one that stopped and can be resumed. */
 export function deletion(item: CloudWorkspaceListItem): "running" | "failed" | null {
   const operation = item.latestOperation;
