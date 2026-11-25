@@ -80,7 +80,7 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
         ? error.message : String(error);
       update({ notice: code === "transfer_too_large" ? "This workspace is too large to transfer."
         : code === "transfer_fetch_first" ? `${detail} Then retry the transfer.`
-        : code === "transfer_no_base" ? `${detail} A common upstream commit is required to transfer this branch.` : detail });
+        : code === "transfer_no_base" ? "This cloud branch has no usable upstream base. A common upstream commit is required to transfer it." : detail });
     } finally {
       update({ busy: false });
     }

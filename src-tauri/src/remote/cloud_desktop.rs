@@ -179,7 +179,11 @@ fn watch_runtime(command: &mut Command) -> io::Result<std::io::PipeWriter> {
                 return Err(io::Error::last_os_error());
             }
             if watcher == 0 {
-                if libc::dup2(read_fd, 0) >= 0 {
+                // This process is a fork of the runtime and must stay opaque
+                // to other processes belonging to the desktop user.
+                if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) == 0
+                    && libc::dup2(read_fd, 0) >= 0
+                {
                     // Close inherited sockets, stdio and all copies of the writer.
                     if libc::syscall(libc::SYS_close_range, 1u32, u32::MAX, 0u32) == 0 {
                         let mut byte = 0u8;

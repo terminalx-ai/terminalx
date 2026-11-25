@@ -4202,7 +4202,9 @@ async fn cloud_desktop_requires_readiness_and_watchers_cannot_open_control_or_ge
     let tools = tempfile::tempdir().unwrap();
     let pool = super::super::cloud_desktop::DesktopPool::new(vec![tools.path().to_string_lossy().into_owned()], Duration::from_millis(10));
     assert!(f.rpc.desktop.set(pool).is_ok());
-    call(&f.rpc, &viewer, "rpc.hello", hello.clone()).await.unwrap();
+    let available = next_event(&mut events, "desktop.available").await;
+    assert_eq!(available, json!({ "runtimeGeneration": 7, "runtimeEpoch": f.rpc.epoch }));
+    assert!(viewer.granted(protocol::CLOUD_DESKTOP));
     call(&f.rpc, &editor, "rpc.hello", hello.clone()).await.unwrap();
     call(&f.rpc, &stranger, "rpc.hello", hello).await.unwrap();
     assert_eq!(code(call(&f.rpc, &stranger, "desktop.open", json!({})).await), "capability_not_granted");
