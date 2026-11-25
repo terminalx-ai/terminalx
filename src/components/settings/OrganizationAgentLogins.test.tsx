@@ -85,6 +85,8 @@ describe("organization API key disconnect preview", () => {
     expect(dialog.getByText("API verification")).toBeTruthy();
     expect(dialog.getByText("Deployment tests")).toBeTruthy();
     expect(dialog.getByText(/Other running workspaces/)).toBeTruthy();
+    expect(dialog.getByText(/Any keys saved on this device stay in place/)).toBeTruthy();
+    expect(dialog.queryByText(/Keychain/)).toBeNull();
     expect(dialog.getByText("01234567…")).toBeTruthy();
     expect(confirm.hasAttribute("disabled")).toBe(false);
     fireEvent.click(dialog.getByRole("button", { name: "Cancel" }));
