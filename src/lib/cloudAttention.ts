@@ -3,7 +3,7 @@ import type { CloudWorkspaceListItem } from "@/lib/api";
 import { agentLoginFailure, createErrorMessage, failureMessage, launchFailed, PROVISIONING_TIMEOUT_CODE } from "@/lib/cloudCreate";
 import { archiving, deleteFailure, deletion, operationFailureStands, provisioningFailureKey, workspaceFailureText } from "@/lib/cloudLifecycle";
 import { cloudProviderIsPlatform, cloudProviderLabel } from "@/lib/cloudProviders";
-import { machineGone } from "@terminalx/portable/cloudMachineGone";
+import { MACHINE_GONE_MESSAGE, machineGone } from "@terminalx/portable/cloudMachineGone";
 import type { TabStatus } from "@/types/session";
 
 export interface CloudAttentionInput {
@@ -200,6 +200,15 @@ function launchRecovery(code: string, input: CloudAttentionInput): CloudRecovery
   return openSession(instructions[code] ?? "Open the session and inspect the failure before starting the agent yourself. Check whether the first prompt was sent before sending it again.");
 }
 
+function machineGoneAttention(message: string): CloudAttention {
+  return {
+    code: "cloud_workspace_machine_gone",
+    message,
+    recovery: recovery("delete-workspace", "Delete workspace", MACHINE_GONE_INSTRUCTIONS),
+    alternatives: [recovery("create-workspace", "Create new workspace", "Create a new workspace for the same project after reviewing the provider and spend confirmation. This one stays until you delete it.")],
+  };
+}
+
 /**
  * Shared UI/CLI attention decision. Pass current catalog and agent activity on
  * every render/read. Catalog ingestion retains launch recovery evidence with
@@ -212,6 +221,8 @@ export function resolveCloudAttention(item: CloudWorkspaceListItem, input: Cloud
   const { workspace, latestOperation: operation } = item;
   if (deletion(item) === "running" || archiving(item) || workspace.state === "destroyed") return null;
   if (workspace.state === "archived" && deletion(item) !== "failed") return null;
+  // The server says the machine is gone (#1589): its background check marks it before any operation fails for it.
+  if (machineGone(null, workspace)) return machineGoneAttention(MACHINE_GONE_MESSAGE);
   if (input.connection === "updateRequired" && deletion(item) !== "failed") return {
     code: "runtime-update-required",
     message: "The app and workspace runtime versions are incompatible. Update TerminalX before reconnecting.",
@@ -227,12 +238,7 @@ export function resolveCloudAttention(item: CloudWorkspaceListItem, input: Cloud
   if (operationFailureStands(item, recoveredOperation) && operation && (operation.action || !launchHasReason || operation.errorCode === PROVISIONING_TIMEOUT_CODE)) {
     const code = operation.errorCode ?? "cloud_workspace_operation_failed";
     let next: CloudRecovery;
-    if (machineGone(operation)) return {
-      code: "cloud_workspace_machine_gone",
-      message: workspaceFailureText(item, operation),
-      recovery: recovery("delete-workspace", "Delete workspace", MACHINE_GONE_INSTRUCTIONS),
-      alternatives: [recovery("create-workspace", "Create new workspace", "Create a new workspace for the same project after reviewing the provider and spend confirmation. This one stays until you delete it.")],
-    };
+    if (machineGone(operation)) return machineGoneAttention(workspaceFailureText(item, operation));
     if (code === PROVISIONING_TIMEOUT_CODE) next = recovery("create-workspace", "Create workspace again", "The timed-out machine was deleted. Create a new workspace after reviewing the provider and spend confirmation.");
     else if (operation.action === "delete" && !deleteFailure(operation, workspace.provider).retry) next = recovery("contact-provider", "Contact provider support", workspaceFailureText(item, operation));
     else if (code === "provider_permanent_delete_unavailable") next = recovery("contact-provider", "Contact provider support", "This provider connection cannot delete the workspace permanently. Check the resource in the provider's console or contact its support to finish removing it; retrying this unsupported action will not help.");

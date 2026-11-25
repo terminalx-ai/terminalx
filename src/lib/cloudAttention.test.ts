@@ -107,6 +107,22 @@ describe("shared attention and recovery", () => {
     expect(resolveCloudAttention(deleted)?.recovery).toMatchObject({ action: "retry-operation", label: "Retry delete" });
   });
 
+  // #1589: the server states the fact, on the failed operation or on the workspace itself.
+  it("reads the machine-gone fact the server sends, for a stop, a resume or an archive, or with no failed operation at all", () => {
+    for (const action of ["suspend", "resume", "archive"]) {
+      const row = item({ state: "attention-required" }, { state: "failed", action, errorCode: "cloud_provider_not_found", detailCode: "machine_missing" });
+      expect(resolveCloudAttention(row)).toMatchObject({ code: "cloud_workspace_machine_gone", message: "This workspace's machine no longer exists at the provider. It may have been deleted outside TerminalX.", recovery: { action: "delete-workspace" } });
+    }
+    // The background check marked it: the last operation is a stop that succeeded long before.
+    const marked = item({ state: "attention-required", machineMissingAt: 1_795_305_607_000 }, { state: "succeeded", action: "suspend" });
+    const attention = resolveCloudAttention(marked)!;
+    expect(attention).toMatchObject({ code: "cloud_workspace_machine_gone", message: "This workspace's machine no longer exists at the provider. It may have been deleted outside TerminalX.", recovery: { action: "delete-workspace", label: "Delete workspace" }, alternatives: [{ action: "create-workspace" }] });
+    expect(deriveCloudActivity(marked).tone).toBe("attention");
+    expect(resolveCloudAttention(item({ state: "attention-required", machineMissingAt: 1_795_305_607_000 }))?.code).toBe("cloud_workspace_machine_gone");
+    // Once it settles again the fact no longer applies.
+    expect(resolveCloudAttention(item({ state: "suspended", machineMissingAt: 1_795_305_607_000 }))).toBeNull();
+  });
+
   // PRO-452: a provider TerminalX itself provides has no key of the organization's to repair in Settings.
   it("sends a credential failure on a platform provider to TerminalX, not to a provider connection", () => {
     learnDescriptors();

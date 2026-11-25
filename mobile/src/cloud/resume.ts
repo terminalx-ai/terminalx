@@ -1,4 +1,4 @@
-import { MACHINE_GONE_MESSAGE, machineGone } from "@terminalx/portable/cloudMachineGone";
+import { MACHINE_GONE_MESSAGE, machineGone, type MachineGoneWorkspace } from "@terminalx/portable/cloudMachineGone";
 import { CloudApiError, type CloudWorkspaceItem } from "./api";
 import { codeText } from "./words";
 
@@ -112,8 +112,8 @@ export const MACHINE_GONE_KEPT = "Its files, and anything that was running on it
 export { machineGone };
 
 /** Whether "Retry resume" is offered for a workspace that needs attention: its last resume failed, as the desktop offers it, unless its machine is gone. */
-export function resumeRetryable(operation: { state: string; action?: string | null; errorCode?: string | null; detailCode?: string | null } | null | undefined): boolean {
-  return operation?.state === "failed" && operation.action === "resume" && !machineGone(operation);
+export function resumeRetryable(operation: { state: string; action?: string | null; errorCode?: string | null; detailCode?: string | null } | null | undefined, workspace?: MachineGoneWorkspace | null): boolean {
+  return operation?.state === "failed" && operation.action === "resume" && !machineGone(operation, workspace);
 }
 
 /** One line for the connection log: the stage and code of a failed resume, so a report can include them. */

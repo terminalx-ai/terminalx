@@ -1386,6 +1386,12 @@ export interface CloudWorkspace {
   deleteAfter?: number | null;
   deletedAt?: number | null;
   /**
+   * When the server learned the provider no longer has its machine and cannot bring it back
+   * (#1589). Sent only while the workspace is `attention-required` for that reason; absent from
+   * older servers. Read through `machineGone` (@terminalx/portable/cloudMachineGone).
+   */
+  machineMissingAt?: number | null;
+  /**
    * S1 list enrichment (PRO-56), optional because older servers do not send it: the
    * repositories it was built from (primary first), and when anything last
    * happened in it.

@@ -215,6 +215,8 @@ const workspaceSchema = z
     lastActivityAt: z.number().nullish(),
     archivedAt: z.number().nullish(),
     deletedAt: z.number().nullish(),
+    // The server's word that the machine is gone at the provider (#1589); a malformed value reads as absent.
+    machineMissingAt: z.number().nullish().catch(undefined),
     runtimeActivity: z
       .object({ online: z.boolean().optional(), activeTurns: z.number().optional(), pendingApprovals: z.number().optional(), reportedAt: z.number().optional(), stale: z.boolean().optional() })
       .passthrough()
