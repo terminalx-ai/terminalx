@@ -40,6 +40,23 @@ impl std::fmt::Display for Busy {
 
 impl std::error::Error for Busy {}
 
+/// A slash command native Codex has no request for (#1498): only `/compact`
+/// maps to one. Refused as [`Busy`] is: nothing is published, the tab is not
+/// failed, and the composer keeps the text and says why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedCommand(pub String);
+
+impl std::fmt::Display for UnsupportedCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0.as_str() {
+            "/clear" | "/new" => write!(f, "Native Codex can't clear its conversation, so {} was not sent. Open a new Codex tab to start fresh.", self.0),
+            command => write!(f, "Native Codex can't run {command}, so it was not sent. Only /compact works in native Codex."),
+        }
+    }
+}
+
+impl std::error::Error for UnsupportedCommand {}
+
 /// Refuse only the extra request; accepted queue entries and the turn survive.
 #[derive(Debug)]
 pub(super) struct QueueFull;
@@ -352,7 +369,10 @@ impl SessionManager {
         // the request alone says whether it is a command.
         let request = typed_request(&prompt.agent);
         let manual = request.trim() == "/compact";
-        anyhow::ensure!(!request.trim_start().starts_with('/') || manual, "Only /compact is supported in experimental Codex stdio");
+        if request.trim_start().starts_with('/') && !manual {
+            let command = request.split_whitespace().next().unwrap_or_default();
+            return Err(UnsupportedCommand(command.chars().take(40).collect()).into());
+        }
         anyhow::ensure!(!manual || images.is_empty(), "Compaction does not accept images");
         anyhow::ensure!(!manual || receipt.is_none(), "A continuation cannot be a compaction");
         anyhow::ensure!(tab.harness == "codex", "Experimental stdio requires Codex");
