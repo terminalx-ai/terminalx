@@ -229,10 +229,10 @@ describe("Settings → Experimental: OpenCode (PRO-157)", () => {
 describe("Settings → Experimental: switches this computer cannot run", () => {
   it("keeps a switch the runtime says cannot run here off and disabled, and says why", async () => {
     mocks.settings.mockResolvedValue({ nativeCodex: false, localVmTasks: true, bots: true });
-    mocks.unsupported.mockResolvedValue({ localVmTasks: "Local VM tasks need a Mac with Apple silicon." });
+    mocks.unsupported.mockResolvedValue({ localVmTasks: "Local VM tasks need a Mac with Apple silicon, or Linux." });
     render(<ExperimentalTab />);
     const vm = () => screen.getByRole("switch", { name: "Local VM tasks" });
-    await waitFor(() => expect(screen.getByTestId("experimental-unsupported-note").textContent).toBe("Local VM tasks need a Mac with Apple silicon."));
+    await waitFor(() => expect(screen.getByTestId("experimental-unsupported-note").textContent).toBe("Local VM tasks need a Mac with Apple silicon, or Linux."));
     expect(vm().hasAttribute("disabled")).toBe(true);
     expect(vm().getAttribute("aria-checked")).toBe("false");
     await waitFor(() => expect(screen.getByRole("switch", { name: "Bots" }).hasAttribute("disabled")).toBe(false));

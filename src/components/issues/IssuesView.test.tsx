@@ -1488,4 +1488,48 @@ describe("a read that fails (3.5)", () => {
     expect(await screen.findByText("First issue body.")).toBeTruthy();
     expect(screen.queryByText(/Couldn’t load this issue/)).toBeNull();
   });
+
+  it("reads the Linear teams again on Retry", async () => {
+    setPrefs({ issueProvider: "linear" });
+    let fail = true;
+    const backend = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => (command === "linear_teams" && fail ? Promise.reject(new Error("rate limited")) : backend(command, args)));
+    render(<IssuesView onCreated={vi.fn()} />);
+    const alert = (await screen.findByText(/Couldn’t read the Linear teams. rate limited/)).closest("[role=alert]") as HTMLElement;
+    const reads = () => invoke.mock.calls.filter(([command]) => command === "linear_teams").length;
+    const before = reads();
+    fail = false;
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    await waitFor(() => expect(screen.queryByText(/Couldn’t read the Linear teams/)).toBeNull());
+  });
+
+  it("says when the project's GitHub repository could not be read, and reads it again on Retry", async () => {
+    setPrefs({ issueProvider: "github" });
+    let fail = true;
+    const backend = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => (command === "github_repo" && fail ? Promise.reject(new Error("git failed")) : backend(command, args)));
+    render(<IssuesView onCreated={vi.fn()} />);
+    const alert = (await screen.findByText(/Couldn’t read this project’s GitHub repository. git failed/)).closest("[role=alert]") as HTMLElement;
+    const reads = () => invoke.mock.calls.filter(([command]) => command === "github_repo").length;
+    const before = reads();
+    fail = false;
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    await waitFor(() => expect(screen.queryByText(/Couldn’t read this project’s GitHub repository/)).toBeNull());
+  });
+
+  it("a session that failed to start offers Dismiss, not a Retry that would only re-read the list", async () => {
+    setPrefs({ issueProvider: "github" });
+    const backend = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => (command === "create_session" ? Promise.reject(new Error("no worktree")) : backend(command, args)));
+    render(<IssuesView onCreated={vi.fn()} />);
+    fireEvent.click(await screen.findByText("Fix login timeout"));
+    await screen.findByText("First issue body.");
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+    const alert = (await screen.findByText(/no worktree/)).closest("[role=alert]") as HTMLElement;
+    expect(within(alert).queryByRole("button", { name: "Retry" })).toBeNull();
+    fireEvent.click(within(alert).getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByText(/no worktree/)).toBeNull();
+  });
 });

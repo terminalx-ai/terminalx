@@ -206,7 +206,8 @@ it("refreshes the machine row and active host after the connection records a new
 });
 
 it("gives an entry paired as Paired Mac its real name on the next connection, and follows a rename of the computer", async () => {
-  expect(shown()).toEqual(["Paired Mac"]);
+  // A label stored by older pairing ("Paired Mac") is not shown for a computer of any system.
+  expect(shown()).toEqual(["Paired computer"]);
   fake.describeHost.mockResolvedValue(named("  Paresh’s Mac mini\u0000 "));
   await act(async () => app.connectHost(app.hosts[0]!));
   await connected();
@@ -256,17 +257,17 @@ it("keeps the fallback when an older desktop does not say its name", async () =>
   await act(async () => app.connectHost(app.hosts[0]!));
   await connected();
   expect(fake.describeHost).toHaveBeenCalled();
-  expect(shown()).toEqual(["Paired Mac"]);
+  expect(shown()).toEqual(["Paired computer"]);
 });
 
 it("takes the name from the pairing link at once, and falls back for a bare code", async () => {
   fake.storage.clear();
   await act(async () => app.pairCode("terminalx://pair?code=abc&name=Paresh%E2%80%99s+Mac+mini"));
   expect(shown()).toEqual(["Paresh’s Mac mini"]);
-  expect((await readHosts())[0]).toMatchObject({ label: "Paired Mac", hostName: "Paresh’s Mac mini" });
+  expect((await readHosts())[0]).toMatchObject({ label: "Paired computer", hostName: "Paresh’s Mac mini" });
   fake.storage.clear();
   await act(async () => app.pairCode("abc"));
-  expect(shown()).toEqual(["Paired Mac"]);
+  expect(shown()).toEqual(["Paired computer"]);
 });
 
 it("reconnects the active computer in place, and connects another one", async () => {

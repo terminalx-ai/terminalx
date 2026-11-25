@@ -7,6 +7,7 @@ import { DropdownMenuItem } from "@/components/ui/menu";
 import type { CloudMirrorDivergence } from "@/lib/api";
 import { loadCloudMirror, resolveCloudMirror, setCloudMirrorEnabled, useCloudMirror, type CloudMirrorState } from "@/lib/cloudMirror";
 import { cn } from "@/lib/cn";
+import { isMac } from "@/lib/platform";
 
 /**
  * The local mirror of a cloud workspace (PRO-25, docs/CLOUD-MIRROR.md): the
@@ -111,8 +112,7 @@ export function CloudMirrorDialog({ request, onClose }: { request: MirrorRequest
           <DialogTitle className="truncate">Local mirror · {request.workspaceName}</DialogTitle>
           <DialogDescription className="text-xs text-muted-foreground">
             A copy of the workspace's files on this computer, for local tools to read. It goes one way, from the workspace to here. Commands, agents and terminals still run in the
-            cloud workspace, and this is not a backup. The files come from the workspace as they are: treat them like a download. No file in the copy is marked executable, and macOS
-            asks before opening one. An editor or build tool opened on the folder may still build or index it, which runs the workspace's code on this computer. The folder cannot be
+            cloud workspace, and this is not a backup. The files come from the workspace as they are: treat them like a download. No file in the copy is marked executable{isMac ? ", and macOS asks before opening one" : ""}. An editor or build tool opened on the folder may still build or index it, which runs the workspace's code on this computer. The folder cannot be
             opened as a project or used by an agent here. The copy is removed from this computer if you lose access to the workspace, sign out, or the workspace is deleted; files you
             edited in it are kept aside.
           </DialogDescription>

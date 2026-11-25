@@ -167,6 +167,9 @@ export function PrPanel({
   const [draft, setDraft] = useState(false);
   const [base, setBase] = useState<string | null>(null);
   const [bases, setBases] = useState<string[]>([]);
+  // A failed read of the branches to choose a base from, and a way to read them again.
+  const [basesError, setBasesError] = useState<string | null>(null);
+  const [basesAttempt, setBasesAttempt] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [working, setWorking] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
@@ -319,12 +322,13 @@ export function PrPanel({
         for (const b of all) if (!b.remote) names.add(b.name);
         if (branch) names.delete(branch);
         setBases([...names].sort());
+        setBasesError(null);
       })
-      .catch(() => {});
+      .catch((e) => !cancelled && setBasesError(source.errorMessage(e)));
     return () => {
       cancelled = true;
     };
-  }, [source, creating, branch]);
+  }, [source, creating, branch, basesAttempt]);
 
   // Also discover externally created follow-ups when all known PRs are closed.
   useEffect(() => {
@@ -687,6 +691,7 @@ export function PrPanel({
           })}
         />
       )}
+      {showDraft && creating && basesError && <div role="alert" className="mx-3 mb-2 text-xs text-destructive">Couldn’t read the branches to choose from. {basesError} <Button size="xs" variant="outline" onClick={() => { setBasesError(null); setBasesAttempt((n) => n + 1); }}>Retry</Button></div>}
       {!inline && canCreate && !creating && source.canWrite && (
         <div className="px-3 py-3">
           <div className="mb-2 text-xs text-muted-foreground">
@@ -748,6 +753,7 @@ export function PrPanel({
               ))}
             </select>
           </label>
+          {basesError && <div role="alert" className="text-xs text-destructive">Couldn’t read the branches to choose from. {basesError} <Button size="xs" variant="outline" onClick={() => { setBasesError(null); setBasesAttempt((n) => n + 1); }}>Retry</Button></div>}
           <label className="flex items-center gap-2 text-xs text-muted-foreground">
             <input type="checkbox" checked={draft} onChange={(e) => setDraft(e.target.checked)} /> Draft
           </label>

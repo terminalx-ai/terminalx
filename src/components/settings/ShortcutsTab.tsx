@@ -116,7 +116,7 @@ function DictationOffNote() {
     void dictationAvailable().then((ok) => { if (live) setAvailable(ok); });
     return () => { live = false; };
   }, []);
-  return available === false ? <span className="ml-2 text-xs text-muted-foreground">macOS only</span> : null;
+  return available === false ? <span className="ml-2 text-xs text-muted-foreground">{isMac ? "Not available" : "macOS only"}</span> : null;
 }
 
 function ShortcutRow({

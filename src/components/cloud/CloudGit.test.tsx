@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RpcWireRequest } from "@terminalx/portable/rpc";
 import { WorkspaceRpcClient, type WorkspaceConnectionState, type WorkspaceTransport } from "@terminalx/portable/workspace";
@@ -211,5 +211,24 @@ describe("Git in a cloud workspace", () => {
     expect(screen.getByText("1 agent turn is running.")).toBeTruthy();
     await screen.findByText("app.txt");
     expect(screen.queryByPlaceholderText("Commit message (Ctrl+⏎ to commit)")).toBeNull();
+  });
+});
+
+describe("a repository list that fails to read (3.7)", () => {
+  it("says so, and reads the repositories again on Retry", async () => {
+    let fail = true;
+    const fake = runtime({
+      "git.repositories": () => {
+        if (fail) throw refusal("internal", "git is busy");
+        return { repositories: [{ repo: "app", branch: "feature/x", head: "abc", remote: "https://github.com/o/app.git", defaultBranch: "main" }] };
+      },
+    });
+    mount(fake);
+    const alert = (await screen.findByText(/git is busy/)).closest("[role=alert]") as HTMLElement;
+    const before = fake.calls("git.repositories").length;
+    fail = false;
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(fake.calls("git.repositories").length).toBeGreaterThan(before));
+    await waitFor(() => expect(screen.queryByText(/git is busy/)).toBeNull());
   });
 });

@@ -54,6 +54,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   const askDiscard = (file: DiscardTarget) => setDiscarding(workingDiscardTarget(file.path, staged, unstaged) ?? file);
   const [status, setStatus] = useState<SourceStatus | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [selectedStaged, setSelectedStaged] = useState(false);
@@ -90,7 +91,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
-    source.workStatus().then((next) => !cancelled && setStatus(next)).catch(() => {});
+    source.workStatus().then((next) => { if (!cancelled) { setStatus(next); setStatusError(null); } }).catch((e) => !cancelled && setStatusError(source.errorMessage(e)));
     return () => {
       cancelled = true;
     };
@@ -174,6 +175,9 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
       {error && (source.cloud ? <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} operation={operation} />)}
       {!error && readError != null && (
         source.cloud ? <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{source.errorMessage(readError)} <Button size="xs" variant="outline" onClick={refresh}>Retry</Button></div> : <GitError details={source.errorMessage(readError)} onRetry={refresh} />
+      )}
+      {!error && readError == null && statusError != null && (
+        <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">Couldn’t read the branch status. {statusError} <Button size="xs" variant="outline" onClick={refresh}>Retry</Button></div>
       )}
       {notice && <div role="status" className="mx-3 mb-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
       {(status?.operation || !!status?.conflicted?.length) && (
@@ -312,6 +316,7 @@ function CommitRow({ source, commit, open, onToggle, onReview }: { source: GitSo
   const [selected, setSelected] = useState<string | null>(null);
   const [base, setBase] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   const review = useReviewComments();
   useEffect(() => { review?.refresh(); }, [files, base, review?.refresh]);
   const current = files.find((file) => file.path === selected);
@@ -331,7 +336,7 @@ function CommitRow({ source, commit, open, onToggle, onReview }: { source: GitSo
     return () => {
       cancelled = true;
     };
-  }, [open, source, commit.sha, hideWhitespace]);
+  }, [open, source, commit.sha, hideWhitespace, attempt]);
   return (
     <div className="mb-0.5">
       <button
@@ -352,7 +357,7 @@ function CommitRow({ source, commit, open, onToggle, onReview }: { source: GitSo
           {commit.body && <div className="px-3 py-1 text-xs text-muted-foreground whitespace-pre-wrap select-text">{commit.body}</div>}
           {onReview && <Button size="xs" variant="ghost" onClick={() => onReview(commit.sha)}>Review this commit</Button>}
           <ReviewFileList workspace={source.key} base={base ?? undefined} files={files} selected={selected} onSelect={setSelected} empty="No files." />
-          {error && <p role="alert" className="p-2 text-xs text-destructive">{error}</p>}
+          {error && <p role="alert" className="p-2 text-xs text-destructive">Couldn’t read this commit. {error} <Button size="xs" variant="outline" onClick={() => { setError(null); setAttempt((n) => n + 1); }}>Retry</Button></p>}
           {current && base && <div className="h-96 border-t border-hairline">
             <FileDiff source={source} path={current.path} oldPath={current.oldPath} base={base} head={commit.tree} />
           </div>}

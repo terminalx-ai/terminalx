@@ -6298,12 +6298,13 @@ pub struct ExperimentalUnsupported {
     bots: Option<&'static str>,
 }
 
-/// Local VM tasks run macOS guests, which only a Mac with Apple silicon hosts.
-const LOCAL_VM_TASKS_SUPPORTED: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+/// Local VM tasks run their guests on a Mac with Apple silicon, or on 64-bit
+/// Linux (x86_64 or arm64): the platforms `local_vm::guest` installs for.
+const LOCAL_VM_TASKS_SUPPORTED: bool = cfg!(any(all(target_os = "macos", target_arch = "aarch64"), all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64"))));
 
 fn experimental_unsupported_here() -> ExperimentalUnsupported {
     ExperimentalUnsupported {
-        local_vm_tasks: (!LOCAL_VM_TASKS_SUPPORTED).then_some("Local VM tasks need a Mac with Apple silicon."),
+        local_vm_tasks: (!LOCAL_VM_TASKS_SUPPORTED).then_some("Local VM tasks need a Mac with Apple silicon, or Linux."),
         bots: (!crate::bots::SUPPORTED).then_some(crate::bots::UNSUPPORTED_MESSAGE),
     }
 }
@@ -6315,7 +6316,7 @@ pub fn experimental_unsupported() -> ExperimentalUnsupported {
 
 /// A switch saved on where its feature cannot run (a settings file copied
 /// from a Mac) reads as off, so nothing offers what would only fail.
-fn supported_only(mut experimental: crate::store::settings::ExperimentalSettings) -> crate::store::settings::ExperimentalSettings {
+pub(crate) fn supported_only(mut experimental: crate::store::settings::ExperimentalSettings) -> crate::store::settings::ExperimentalSettings {
     let unsupported = experimental_unsupported_here();
     if unsupported.local_vm_tasks.is_some() {
         experimental.local_vm_tasks = false;

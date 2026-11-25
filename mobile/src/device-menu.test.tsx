@@ -421,7 +421,7 @@ it("keeps the fallback for a desktop that never sent its name, and tells two sam
   const twin = host({ id: "host-bbbb2222", publicKeyB64: "k2" });
   mocks.app = { ...mocks.app, hosts: [old, host(), twin], activeHost: null };
   await show(<MachinesScreen />);
-  expect(button("Device options for Paired Mac"), container.textContent ?? "").toBeDefined();
+  expect(button("Device options for Paired computer"), container.textContent ?? "").toBeDefined();
   expect(button("Device options for Paresh’s Mac mini · 1111")).toBeDefined();
   expect(button("Device options for Paresh’s Mac mini · 2222")).toBeDefined();
 });

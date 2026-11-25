@@ -944,7 +944,7 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
             let mut settings = crate::store::settings::load();
             settings.experimental.native_codex = native_codex;
             crate::store::settings::save(&settings)?;
-            manager.sink().emit("experimental_settings_changed", &settings.experimental);
+            manager.sink().emit("experimental_settings_changed", &crate::commands::supported_only(settings.experimental.clone()));
             Ok(phone_settings(&settings))
         }
         "observe" => {

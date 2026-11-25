@@ -178,7 +178,11 @@ export function IssuesView({
   const [changedHere, setChangedHere] = useState<ReadonlySet<string>>(new Set());
   // Loading from the start: "no issues" is only said once they have been read.
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<{ message: string; organizationId: string | null } | null>(null);
+  // `start` marks a session that failed to start: re-reading the list would not retry it, so it gets no Retry.
+  const [error, setError] = useState<{ message: string; organizationId: string | null; start?: boolean } | null>(null);
+  // A failed read of what the list depends on (Linear’s connection, its teams, the GitHub repository): kept apart from
+  // the list’s own error, which each list read clears.
+  const [sideError, setSideError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Issue | null>(null);
   const [detail, setDetail] = useState<Issue | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -322,7 +326,7 @@ export function IssuesView({
   // Who is connected, and to what.
   useEffect(() => {
     let live = true;
-    issuesApi.linearStatus().then((s) => live && setLinear(s)).catch((e) => live && setError({ message: `Couldn’t check the Linear connection. ${errorMessage(e)}`, organizationId: null }));
+    issuesApi.linearStatus().then((s) => live && setLinear(s)).catch((e) => live && setSideError(`Couldn’t check the Linear connection. ${errorMessage(e)}`));
     gh.available().then((ok) => live && setGhOk(ok)).catch(() => live && setGhOk(false));
     return () => {
       live = false;
@@ -331,11 +335,11 @@ export function IssuesView({
   useEffect(() => {
     let live = true;
     if (!projectPath || !isGit) return setRepo(null);
-    issuesApi.githubRepo(projectPath).then((r) => live && setRepo(r)).catch(() => {});
+    issuesApi.githubRepo(projectPath).then((r) => live && setRepo(r)).catch((e) => live && setSideError(`Couldn’t read this project’s GitHub repository. ${errorMessage(e)}`));
     return () => {
       live = false;
     };
-  }, [projectPath, isGit]);
+  }, [projectPath, isGit, tick]);
   useEffect(() => {
     let live = true;
     // A cloud project's branches are its workspaces': nothing here to read.
@@ -349,11 +353,11 @@ export function IssuesView({
   useEffect(() => {
     if (provider !== "linear" || !linear?.connected) return;
     let live = true;
-    issuesApi.linearTeams().then((t) => live && setTeams(t)).catch((e) => live && setError({ message: `Couldn’t read the Linear teams. ${errorMessage(e)}`, organizationId: null }));
+    issuesApi.linearTeams().then((t) => live && setTeams(t)).catch((e) => live && setSideError(`Couldn’t read the Linear teams. ${errorMessage(e)}`));
     return () => {
       live = false;
     };
-  }, [provider, linear?.connected]);
+  }, [provider, linear?.connected, tick]);
 
   // The command palette's "New issue…".
   useEffect(() => {
@@ -567,6 +571,7 @@ export function IssuesView({
       setError({
         message: cloud ? cloudStartError(e, cloud.project.orgId) : errorMessage(e),
         organizationId: cloud?.project.orgId ?? null,
+        start: true,
       });
     } finally {
       setStarting(false);
@@ -843,11 +848,19 @@ export function IssuesView({
 
         {workNote && !emptyReason && <div className="px-4 pb-1.5 text-[11px] text-faint" data-testid="issues-work-note">{workNote}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
+          {sideError && (
+            <div role="alert" className="mx-4 mb-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              {sideError}
+              <Button size="xs" variant="outline" className="ml-2" onClick={() => { setSideError(null); setTick((n) => n + 1); }}>Retry</Button>
+            </div>
+          )}
           {error && (
             <div role="alert" className="mx-4 mb-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
               {error.message}
               {error.organizationId && <AgentLoginsLink message={error.message} organizationId={error.organizationId} className="ml-2" />}
-              <Button size="xs" variant="outline" className="ml-2" disabled={loading} onClick={() => { startedRows.current.keys.clear(); setError(null); setTick((n) => n + 1); }}>Retry</Button>
+              {error.start
+                ? <Button size="xs" variant="ghost" className="ml-2" onClick={() => setError(null)}>Dismiss</Button>
+                : <Button size="xs" variant="outline" className="ml-2" disabled={loading} onClick={() => { startedRows.current.keys.clear(); setError(null); setTick((n) => n + 1); }}>Retry</Button>}
             </div>
           )}
           {emptyReason && provider === "linear" && linear && !linear.connected ? (

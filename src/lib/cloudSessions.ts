@@ -8,6 +8,7 @@ import { onWorkspaceAccess } from "@/lib/cloudCollab";
 import { cloudTabTitle } from "@/lib/cloudRowState";
 import { onCloudConnected, retainCloudConnection, useCloudConnection, waitCloudConnected, type CloudTarget } from "@/lib/cloudConnections";
 import { dropCloudTerminals } from "@/lib/cloudTerminals";
+import { dismissErrorKey, showError } from "@/lib/errorToasts";
 import { getSessionStore, openWelcome } from "@/lib/sessions";
 import { clearSessionTabsUnder } from "@/lib/terminal";
 import { remoteLayoutKey } from "@/lib/sessionTabs";
@@ -169,11 +170,17 @@ function onConnected(target: CloudTarget, client: WorkspaceRpcClient): () => voi
     .then((sessions) => open && takeLive(target, sessions, capabilities, manage))
     .catch(() => undefined);
   // Sessions are read again on the poll below; the tabs are not, so a first read that fails is tried again a few
-  // times while the connection is open, rather than leaving the workspace without its agents.
-  const readTabs = (left: number) => void client
+  // times while the connection is open, rather than leaving the workspace without its agents. After the last try it
+  // says so, with a way to read them again.
+  const tabsErrorKey = `cloud-tabs:${key}`;
+  const readTabs = (left: number): void => void client
     .listAgentTabs()
-    .then((tabs) => open && applyLiveTabs(scope, tabs))
-    .catch(() => { if (open && left > 0) setTimeout(() => open && readTabs(left - 1), TABS_RETRY_MS); });
+    .then((tabs) => { if (!open) return; applyLiveTabs(scope, tabs); dismissErrorKey(tabsErrorKey); })
+    .catch((e: unknown) => {
+      if (!open) return;
+      if (left > 0) setTimeout(() => open && readTabs(left - 1), TABS_RETRY_MS);
+      else showError("Couldn’t read this workspace’s agent tabs", e, { key: tabsErrorKey, tone: "warning", actions: [{ label: "Try again", icon: "retry", primary: true, run: () => readTabs(0) }] });
+    });
   readTabs(3);
   let readingStatus = false;
   const statusTimer = setInterval(() => {
@@ -190,6 +197,7 @@ function onConnected(target: CloudTarget, client: WorkspaceRpcClient): () => voi
   const stopSessions = client.onSessions((sessions) => open && takeLive(target, sessions, capabilities, manage));
   return () => {
     open = false;
+    dismissErrorKey(tabsErrorKey);
     clearInterval(statusTimer);
     stopTabs();
     stopSessions();

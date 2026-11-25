@@ -32,7 +32,7 @@ export function ExperimentalTab() {
       .then(() => experimental.unsupported())
       .then((reasons) => { if (live) setUnsupported(reasons ?? {}); })
       .catch(() => {
-        if (live && familyNow() === "windows") setUnsupported({ localVmTasks: "Local VM tasks need a Mac with Apple silicon.", bots: "Bots are not available on Windows yet." });
+        if (live && familyNow() === "windows") setUnsupported({ localVmTasks: "Local VM tasks need a Mac with Apple silicon, or Linux.", bots: "Bots are not available on Windows yet." });
       });
     return () => { live = false; };
   }, []);

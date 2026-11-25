@@ -5,7 +5,7 @@ import { cloudGitSource } from "@/lib/gitSource";
 import { useFixCheckErrors } from "@/lib/fixCheckErrors";
 import { closeWorkspaceRemove, useDialogs } from "@/lib/dialogs";
 import { useState } from "react";
-import { act, cleanup, fireEvent, render as rtlRender, renderHook, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as rtlRender, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PrAssociation, PullRequest } from "@/lib/api";
 import type { WorkspaceDisposition } from "@/types/session";
@@ -1061,4 +1061,32 @@ describe("PrPanel load failure states", () => {
     expect(await screen.findByText("You're offline")).toBeTruthy();
     expect(screen.queryByText("Could not complete Git operation")).toBeNull();
   });
+});
+
+it("says the branches to choose a base from could not be read, and reads them again on Retry (3.6)", async () => {
+  let fail = true;
+  mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "gh_available") return true;
+    if (command === "gh_connection_status") return { state: "connected", details: null };
+    if (command === "git_has_remote") return true;
+    if (command === "pr_associations") return [];
+    if (command === "work_status") return workStatus("third-branch", 1);
+    if (command === "pr_list") return [];
+    if (command === "list_branches") {
+      if (fail) throw new Error("git branch failed");
+      return [{ name: "origin/release", remote: true }];
+    }
+    return null;
+  });
+  render(<PrPanel cwd={cwd} branch="third-branch" active busy={false} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Create pull request" }));
+  const alert = (await screen.findByText(/Couldn’t read the branches to choose from/)).closest("[role=alert]") as HTMLElement;
+  expect(alert.textContent).toContain("git branch failed");
+  const reads = () => mocks.invoke.mock.calls.filter(([command]) => command === "list_branches").length;
+  const before = reads();
+  fail = false;
+  fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(reads()).toBeGreaterThan(before));
+  expect(await screen.findByRole("option", { name: "release" })).toBeTruthy();
+  expect(screen.queryByText(/Couldn’t read the branches/)).toBeNull();
 });

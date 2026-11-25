@@ -115,7 +115,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
         lease = next;
         setHeld({ lease: next, name: item.workspace.name, provider: item.workspace.provider, workspaceState: item.workspace.state });
       })
-      .catch((e: unknown) => live && setError(errorCode(e)));
+      .catch((e: unknown) => live && setError(lifecycleErrorMessage(errorCode(e))));
     return () => {
       live = false;
       setHeld(null);
@@ -233,7 +233,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
         </div>
       )}
       {member && item && parsed && <CloudResourceNotice workspaceKey={cloudWorkspaceKey(parsed.orgId, parsed.workspaceId)} manage={state.state === "connected" && state.authority === "manage"} />}
-      {error && <p role="alert" className="shrink-0 px-4 py-1 text-xs text-destructive">Could not open this workspace ({error}). <Button size="xs" variant="outline" onClick={() => setAttempt((n) => n + 1)}>Try again</Button></p>}
+      {error && <p role="alert" className="shrink-0 px-4 py-1 text-xs text-destructive">Could not open this workspace. {error} <Button size="xs" variant="outline" onClick={() => setAttempt((n) => n + 1)}>Try again</Button></p>}
       {!member ? (
         <Centered>
           <span className="flex flex-col items-center gap-2">

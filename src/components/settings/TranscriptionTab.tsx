@@ -1,5 +1,5 @@
 import { useSettingsFile } from "@/lib/settingsFile";
-import { thisComputer } from "@/lib/platform";
+import { isMac, thisComputer } from "@/lib/platform";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
@@ -132,7 +132,7 @@ export function TranscriptionTab() {
 
   return (
     <div className="flex flex-col gap-5">
-      {available === false && <p role="note" data-testid="dictation-unavailable" className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">Dictation is available on macOS only. These settings take effect there.</p>}
+      {available === false && <p role="note" data-testid="dictation-unavailable" className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">{isMac ? `Dictation is not available on ${thisComputer}.` : "Dictation is available on macOS only. These settings take effect there."}</p>}
       {/* Off where dictation cannot run: the settings stay readable, and nothing here downloads or records. */}
       <fieldset disabled={available === false} className="contents">
       <div>

@@ -666,8 +666,8 @@ export class HostApi {
   }
 }
 
-/** Said when the Mac stopped naming `bots` (its Bots setting was turned off, or it is older). */
-export const BOTS_OFF = "Bots are off on this computer. Turn them on in Settings → Experimental → Bots.";
+/** Said when the computer stopped naming `bots`: its Bots setting is off, its system has no Bots yet (Windows), or it is older. */
+export const BOTS_OFF = "Bots are off on this computer, or its system does not have them yet. Where it does, turn them on in Settings → Experimental → Bots.";
 
 function isNewSessionOptions(value: unknown): value is NewSessionOptions {
   if (!value || typeof value !== "object") return false;
