@@ -135,6 +135,44 @@ pub(crate) fn import_objects(repo: &Path, bundle: &Path, expected: &BranchCommit
     Ok(())
 }
 
+/// Install the pinned commit only after the caller has verified the imported
+/// transcript and selected the destination. A concurrent branch creation
+/// wins. An existing matching branch can be used on retry.
+pub(crate) fn ensure_local_branch(repo: &Path, expected: &BranchCommit) -> Result<()> {
+    let commit = format!("{}^{{commit}}", expected.commit);
+    let resolved = git(repo, &["rev-parse", "--verify", &commit])?;
+    ensure!(
+        resolved.trim() == expected.commit,
+        "transfer object is not the pinned commit"
+    );
+
+    let absent = "0".repeat(expected.commit.len());
+    let create = git(
+        repo,
+        &[
+            "update-ref",
+            &expected.branch_ref,
+            &expected.commit,
+            &absent,
+        ],
+    );
+    if create.is_ok() {
+        return Ok(());
+    }
+
+    let existing = git(repo, &["rev-parse", "--verify", &expected.branch_ref]);
+    if existing
+        .as_ref()
+        .is_ok_and(|head| head.trim() == expected.commit)
+    {
+        return Ok(());
+    }
+    if existing.is_ok() {
+        bail!("a local branch with this name already points to a different commit");
+    }
+    create.map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,6 +234,22 @@ mod tests {
                 .trim(),
             "commit"
         );
+    }
+
+    #[test]
+    fn creates_only_the_pinned_local_branch_and_refuses_to_replace_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = temp.path().join("local");
+        repository(&local);
+        let first = commit(&local);
+        let second = commit(&local);
+        let selected = BranchCommit::new("topic", &first).unwrap();
+        ensure_local_branch(&local, &selected).unwrap();
+        ensure_local_branch(&local, &selected).unwrap();
+        let conflicting = BranchCommit::new("topic", &second).unwrap();
+        assert!(ensure_local_branch(&local, &conflicting).is_err());
+        assert_eq!(git(&local, &["rev-parse", "topic"]).unwrap().trim(), first);
+        assert_eq!(git(&local, &["rev-parse", "HEAD"]).unwrap().trim(), second);
     }
 
     #[test]
