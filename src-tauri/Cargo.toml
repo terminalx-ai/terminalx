@@ -23,6 +23,8 @@ desktop = [
     "dep:tauri-plugin-opener",
     "dep:tauri-plugin-deep-link",
     "dep:tauri-plugin-dialog",
+    # A start that fails says why before any window exists (`startup_error`).
+    "dep:rfd",
     "dep:tauri-plugin-process",
     "dep:tauri-plugin-shell",
     "dep:tauri-plugin-window-state",
@@ -67,6 +69,8 @@ tauri = { version = "2", features = ["protocol-asset", "macos-private-api", "tra
 tauri-plugin-opener = { version = "2", optional = true }
 tauri-plugin-deep-link = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
+# The version tauri-plugin-dialog uses, with its features: no new crates.
+rfd = { version = "0.16", optional = true, default-features = false }
 tauri-plugin-process = { version = "2", optional = true }
 tauri-plugin-shell = { version = "2", optional = true }
 tauri-plugin-window-state = { version = "2", optional = true }

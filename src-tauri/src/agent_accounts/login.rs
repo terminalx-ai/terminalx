@@ -380,7 +380,9 @@ pub(crate) fn start_in(store: &Store<'_>, agent: Agent, again: Option<&str>, pro
             if !crate::codex_device_login::runs_trusted(&program, &path) {
                 return Err(undo(anyhow::anyhow!("{}", crate::platform_profile::localize("The codex on this Mac could be replaced by another account, so TerminalX does not run it."))));
             }
-            let (login, code) = crate::codex_device_login::start_into(&program, &programs.codex_args, &path, &crate::codex_device_login::homes_parent(), &dir)
+            let parent = crate::codex_device_login::homes_parent()
+                .map_err(|error| undo(anyhow::anyhow!("TerminalX could not make a private folder for the Codex sign-in, so it did not begin: {error}")))?;
+            let (login, code) = crate::codex_device_login::start_into(&program, &programs.codex_args, &path, &parent, &dir)
                 .map_err(|error| undo(anyhow::anyhow!(match error {
                     crate::codex_device_login::DeviceLoginError::CliMissing => crate::platform_profile::localize_static("Codex is not installed on this Mac. Install it in Settings → Agents first."),
                     crate::codex_device_login::DeviceLoginError::CliUntrusted => crate::platform_profile::localize_static("The codex on this Mac could be replaced by another account, so TerminalX does not run it."),

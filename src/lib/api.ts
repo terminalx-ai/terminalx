@@ -591,8 +591,8 @@ export const api = {
   cloudWorkspaceGeneralAccessPut: (workspaceId: string, orgId: string, change: CloudWorkspaceGeneralAccessChange, contextRevision: string) =>
     invoke<CloudWorkspaceGeneralAccessChange>("cloud_workspace_general_access_put", { workspaceId, orgId, ...change, contextRevision }),
   /** Grant or change a member's share; only managers and the workspace's creator may. */
-  cloudWorkspaceSharePut: (workspaceId: string, userId: string, role: CloudShareRole, canApprove: boolean, orgId?: string | null) =>
-    invoke<{ share: CloudWorkspaceShare; created?: boolean }>("cloud_workspace_share_put", { workspaceId, userId, role, canApprove, orgId: orgId ?? null }),
+  cloudWorkspaceSharePut: (workspaceId: string, userId: string, role: CloudShareRole, canApprove: boolean, orgId?: string | null, contextRevision?: string) =>
+    invoke<{ share: CloudWorkspaceShare; created?: boolean }>("cloud_workspace_share_put", { workspaceId, userId, role, canApprove, orgId: orgId ?? null, ...(contextRevision === undefined ? {} : { contextRevision }) }),
   /** Revoke a member's share; their connections to the workspace close. */
   cloudWorkspaceShareRevoke: (workspaceId: string, userId: string, orgId?: string | null) =>
     invoke<{ share: CloudWorkspaceShare }>("cloud_workspace_share_revoke", { workspaceId, userId, orgId: orgId ?? null }),
@@ -1410,6 +1410,12 @@ export interface CloudWorkspace {
   deleteAfter?: number | null;
   deletedAt?: number | null;
   /**
+   * When the server learned the provider no longer has its machine and cannot bring it back
+   * (#1589). Sent only while the workspace is `attention-required` for that reason; absent from
+   * older servers. Read through `machineGone` (@terminalx/portable/cloudMachineGone).
+   */
+  machineMissingAt?: number | null;
+  /**
    * S1 list enrichment (PRO-56), optional because older servers do not send it: the
    * repositories it was built from (primary first), and when anything last
    * happened in it.
@@ -2075,6 +2081,7 @@ export type CloudWorkspaceSafeErrorCode =
   | "workspace_reassign_runtime_unsupported"
   | "workspace_reassign_idempotency_conflict"
   | "cloud_workspace_last_admin"
+  | "cloud_workspace_group_manager_unsupported"
   | "workspace_following_unavailable"
   | "workspace_mentions_unavailable"
   | "presence_rate_limited"
@@ -4001,7 +4008,7 @@ export function closeWorkspaceConnectionsIn(orgId: string): void {
   }
 }
 
-export interface TurnCheckpoint { number: number; reviewed: boolean; undone: boolean; files: ChangedFile[]; restored?: boolean; backupRef?: string | null; unavailableReason?: string | null }
+export interface TurnCheckpoint { number: number; reviewed: boolean; undone: boolean; files: ChangedFile[]; restored?: boolean; backupRef?: string | null; unavailableReason?: string | null; /** Turns left in this workspace before an unreviewed turn's Undo expires, when few. */ expiresIn?: number | null }
 export interface TurnUndoResult { overlap: string[]; token: string; undone: boolean; backupRef?: string | null }
 
 /** A saved action's run in a terminal tab of a local session (PRO-363). */

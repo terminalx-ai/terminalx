@@ -133,6 +133,13 @@ describe("where the reader's message is, under it", () => {
     expect(one("message-queued")).toBeNull();
   });
 
+  it("says the workspace has it in a cloud workspace, where there is no Mac", () => {
+    draw(<TurnCard turn={prompt()} deliveredTo="workspace" />);
+    expect(one("message-delivered")?.getAttribute("aria-label")).toBe("Delivered to the workspace");
+    draw(<TurnCard turn={prompt()} />);
+    expect(one("message-delivered")?.getAttribute("aria-label")).toBe("Delivered to your Mac");
+  });
+
   it("says Queued under a message waiting for the agent, in place of the tick", () => {
     drawRows({ ...prompt(), work: [{ kind: "queued", key: "q", seq: 2, text: "and then deploy", messageTs: "2026-11-15T10:23:00Z" }] });
     expect(all("message-delivered")).toHaveLength(1);

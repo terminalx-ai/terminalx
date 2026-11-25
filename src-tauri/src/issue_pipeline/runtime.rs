@@ -78,9 +78,13 @@ impl SessionObserver for RuntimeObserver {
         let (session, tab) = (session_id.to_string(), tab_id.to_string());
         if !store::takes_part(session_id, tab_id) {
             // Not a pipeline's tab: a worker that owes its lead a report is held to that instead.
-            if let Some(host) = self.host.get().cloned().filter(|_| crate::worker_report::expected(session_id, tab_id)) {
-                let spawned = std::thread::Builder::new().name("worker-report".into()).spawn(move || host.worker_turn_completed(&session, &tab, final_message.as_deref()));
-                self.started(spawned);
+            if let Some(host) = self.host.get().cloned() {
+                if crate::worker_report::expected(session_id, tab_id) {
+                    let spawned = std::thread::Builder::new().name("worker-report".into()).spawn(move || host.worker_turn_completed(&session, &tab, final_message.as_deref()));
+                    self.started(spawned);
+                } else {
+                    host.turn_ended_unowed(session_id, final_message.as_deref());
+                }
             }
             return;
         }

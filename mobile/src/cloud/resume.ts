@@ -1,3 +1,4 @@
+import { MACHINE_GONE_MESSAGE, machineGone, type MachineGoneWorkspace } from "@terminalx/portable/cloudMachineGone";
 import { CloudApiError, type CloudWorkspaceItem } from "./api";
 import { codeText } from "./words";
 
@@ -104,9 +105,15 @@ export function listedAsStarting(item: Pick<CloudWorkspaceItem, "workspace" | "l
   return operation?.action === "resume" && (operation.state === "queued" || operation.state === "running");
 }
 
-/** Whether "Retry resume" is offered for a workspace that needs attention: its last resume failed, as the desktop offers it. */
-export function resumeRetryable(operation: { state: string; action?: string | null } | null | undefined): boolean {
-  return operation?.state === "failed" && operation.action === "resume";
+/** What the phone says once the workspace's machine is gone (#1581), as the desktop says it. */
+export const MACHINE_GONE_TITLE = "This workspace's machine is gone";
+export const MACHINE_GONE_TEXT = MACHINE_GONE_MESSAGE;
+export const MACHINE_GONE_KEPT = "Its files, and anything that was running on it, went with the machine. Conversations saved before it stopped can still be read here until the workspace is deleted.";
+export { machineGone };
+
+/** Whether "Retry resume" is offered for a workspace that needs attention: its last resume failed, as the desktop offers it, unless its machine is gone. */
+export function resumeRetryable(operation: { state: string; action?: string | null; errorCode?: string | null; detailCode?: string | null } | null | undefined, workspace?: MachineGoneWorkspace | null): boolean {
+  return operation?.state === "failed" && operation.action === "resume" && !machineGone(operation, workspace);
 }
 
 /** One line for the connection log: the stage and code of a failed resume, so a report can include them. */

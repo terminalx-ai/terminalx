@@ -607,9 +607,19 @@ where
             Ok(()) => {
                 manager.set_relay_connecting(retry.attempts);
             }
+            // The runtime registered and retired this window's registration:
+            // not a failure. The runtime's status change wakes the wait below,
+            // and the window uses the runtime's registration.
+            Err(error) if error.downcast_ref::<Category>() == Some(&Category::RuntimeTookOver) => {
+                log::info!("the runtime's relay registration retired this window's");
+                manager.set_relay_connecting(retry.attempts);
+            }
             Err(error) => {
                 let failure = Failure::from_error(&error);
-                manager.record_relay_diagnostic(Event::Failed, retry.attempts, Some(failure));
+                match error.downcast_ref::<super::diagnostics::Close>() {
+                    Some(close) => manager.record_relay_close(retry.attempts, failure, close.clone()),
+                    None => manager.record_relay_diagnostic(Event::Failed, retry.attempts, Some(failure)),
+                }
                 manager.set_relay_unavailable(failure.message(), retry.attempts);
             }
         }
@@ -650,7 +660,12 @@ async fn connect_once(
             super::machine_route::RuntimeRelay::Registered(registration) => {
                 return through_runtime(manager, context, retry, registration).await;
             }
-            super::machine_route::RuntimeRelay::Connecting if waiting_since.elapsed() < RUNTIME_WAIT => {
+            // A runtime registering again soon is waited for as one making its
+            // first registration: the window registering in between would
+            // only be retired by it seconds later (#1579).
+            super::machine_route::RuntimeRelay::Connecting | super::machine_route::RuntimeRelay::Retrying { .. }
+                if waiting_since.elapsed() < RUNTIME_WAIT && runtime_returns_soon(&manager.runtime_relay(), now_ms()) =>
+            {
                 tokio::select! {
                     _ = tokio::time::sleep(CONTROL_TICK) => {}
                     _ = manager.relay_retry.notified() => {}
@@ -659,7 +674,7 @@ async fn connect_once(
                     return Ok(());
                 }
             }
-            super::machine_route::RuntimeRelay::Connecting => {
+            super::machine_route::RuntimeRelay::Connecting | super::machine_route::RuntimeRelay::Retrying { .. } => {
                 log::info!("the runtime has not registered with Relay; this window registers for its phones meanwhile");
                 break;
             }
@@ -717,6 +732,54 @@ async fn register_window(
     control_loop(manager, socket, rx, live, context, keypair, ControlTiming::default())
         .await
         .context(Stage::ControlSession)
+}
+
+impl PairingManager {
+    /// The runtime says the relay refused its registration (#1579): record
+    /// its close, which the window's own sockets never saw, and from the
+    /// second refusal in a row say so in the relay status instead of the
+    /// last error of the window's own.
+    pub(super) fn runtime_relay_refused(&self, refusal: &crate::machine_wire::RelayRefusal) {
+        let category = if refusal.refusals >= 2 { Category::Refused } else { close_category(Some(refusal.code)) };
+        let failure = Failure { stage: Stage::ControlSession, category, http_status: None };
+        log::warn!(
+            "the runtime's relay registration was closed with {} ({}), {} time(s) in a row",
+            refusal.code,
+            refusal.reason.as_deref().unwrap_or("no reason"),
+            refusal.refusals
+        );
+        let close = super::diagnostics::Close { code: refusal.code, reason: refusal.reason.clone() };
+        if self.diagnostics.lock().unwrap().record_close(Event::Failed, refusal.refusals, Some(failure), close).is_err() {
+            log::warn!("relay diagnostics write failed (category=local-storage)");
+        }
+        if category == Category::Refused {
+            self.set_relay_unavailable(failure.message(), refusal.refusals);
+        }
+    }
+
+    /// A failure of the window's own control socket that the relay closed:
+    /// recorded with its code and reason code (#1579).
+    fn record_relay_close(&self, attempt: u32, failure: Failure, close: super::diagnostics::Close) {
+        log::warn!(
+            "relay failure stage={:?} category={:?} close_code={} close_reason={} attempt={}",
+            failure.stage, failure.category, close.code, close.reason.as_deref().unwrap_or("none"), attempt
+        );
+        if self.diagnostics.lock().unwrap().record_close(Event::Failed, attempt, Some(failure), close).is_err() {
+            log::warn!("relay diagnostics write failed (category=local-storage)");
+        }
+    }
+}
+
+/// Whether the runtime, as `relay` says, registers again within
+/// [`RUNTIME_WAIT`] of `now_ms`. One the relay refused says when it retries;
+/// otherwise it retries within its 10 s backoff.
+fn runtime_returns_soon(relay: &super::machine_route::RuntimeRelay, now_ms: i64) -> bool {
+    match relay {
+        super::machine_route::RuntimeRelay::Retrying { refused: Some(refusal) } => {
+            refusal.retry_at.saturating_sub(now_ms) < RUNTIME_WAIT.as_millis() as i64
+        }
+        _ => true,
+    }
 }
 
 /// How long the window waits for the runtime's first relay registration
@@ -991,7 +1054,7 @@ async fn next_control_json(socket: &mut ControlSocket) -> Result<serde_json::Val
             match socket.next().await.ok_or_else(|| anyhow!(Category::Network))?? {
                 Message::Text(text) => return serde_json::from_str(&text).context("decode relay control message"),
                 Message::Ping(_) | Message::Pong(_) => socket.flush().await?,
-                Message::Close(frame) => return Err(anyhow!(close_category(frame.as_ref().map(|frame| u16::from(frame.code))))),
+                Message::Close(frame) => return Err(control_closed(frame.as_ref())),
                 _ => return Err(anyhow!(Category::Protocol)),
             }
         }
@@ -1090,7 +1153,7 @@ async fn control_loop(
                 live.signals.frame_received(now_ms());
                 let Message::Text(text) = incoming else {
                     if let Message::Close(frame) = incoming {
-                        return Err(anyhow!(close_category(frame.as_ref().map(|frame| u16::from(frame.code)))));
+                        return Err(control_closed(frame.as_ref()));
                     }
                     // WebSocket control pings are legal independently of the
                     // relay's JSON heartbeat. Tungstenite queues the pong.
@@ -1207,6 +1270,22 @@ async fn control_loop(
     }
 }
 
+/// The error for a close frame on the window's own control socket: its
+/// category, with the code and the relay's reason code as context for the
+/// diagnostics (#1579). The reason is never interpreted, and kept only in the
+/// shape `crate::remote::protocol::close_reason` allows.
+fn control_closed(frame: Option<&tokio_tungstenite::tungstenite::protocol::CloseFrame>) -> anyhow::Error {
+    let code = frame.map(|frame| u16::from(frame.code));
+    let error = anyhow!(close_category(code));
+    match code {
+        Some(code) => error.context(super::diagnostics::Close {
+            code,
+            reason: frame.and_then(|frame| crate::remote::protocol::close_reason(&frame.reason)),
+        }),
+        None => error,
+    }
+}
+
 // Interpret only documented numeric codes, never remote close-reason text
 // (which can contain identifiers or credentials).
 fn close_category(code: Option<u16>) -> Category {
@@ -1215,6 +1294,8 @@ fn close_category(code: Option<u16>) -> Category {
         Some(1002 | 1003 | 1007 | 1009) => Category::Protocol,
         Some(1008) => Category::AccessDenied,
         Some(4401) => Category::Authentication,
+        // The runtime's registration for this Mac retired the window's.
+        Some(4101) => Category::RuntimeTookOver,
         Some(4429) => Category::RateLimited,
         Some(1012 | 1013 | 4503) => Category::ServiceRestart,
         Some(4408) => Category::Timeout,
@@ -1358,6 +1439,39 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1579: the window waits for a runtime that registers again soon,
+    /// and registers itself only while a refused runtime waits long.
+    #[test]
+    fn the_window_waits_only_for_a_runtime_returning_soon() {
+        use super::super::machine_route::RuntimeRelay;
+        let now = 1_000_000;
+        assert!(runtime_returns_soon(&RuntimeRelay::Connecting, now));
+        assert!(runtime_returns_soon(&RuntimeRelay::Retrying { refused: None }, now), "a drop retries within 10 s");
+        let refused = |retry_in: i64| RuntimeRelay::Retrying {
+            refused: Some(crate::machine_wire::RelayRefusal { code: 4401, reason: None, refusals: 2, retry_at: now + retry_in }),
+        };
+        assert!(runtime_returns_soon(&refused(5_000), now));
+        assert!(!runtime_returns_soon(&refused(RUNTIME_WAIT.as_millis() as i64), now));
+        assert!(!runtime_returns_soon(&refused(30 * 60_000), now));
+        // The window's own closes keep the code and a relay reason code, and
+        // the category still reads through them.
+        use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
+        let frame = |reason: &str| CloseFrame { code: CloseCode::from(4401), reason: reason.into() };
+        let error = control_closed(Some(&frame("relay_control_not_active"))).context(Stage::ControlSession);
+        assert_eq!(Failure::from_error(&error).category, Category::Authentication);
+        assert_eq!(
+            error.downcast_ref::<super::super::diagnostics::Close>(),
+            Some(&super::super::diagnostics::Close { code: 4401, reason: Some("relay_control_not_active".into()) })
+        );
+        let error = control_closed(Some(&frame("host abcDEF0123456789")));
+        assert_eq!(error.downcast_ref::<super::super::diagnostics::Close>().unwrap().reason, None);
+        assert!(control_closed(None).downcast_ref::<super::super::diagnostics::Close>().is_none());
+        // Retired by the runtime's registration: not a network failure.
+        assert_eq!(close_category(Some(4101)), Category::RuntimeTookOver);
+        assert_eq!(close_category(Some(4401)), Category::Authentication);
+        assert_eq!(close_category(None), Category::Network);
+    }
 
     #[test]
     fn reconnect_ladder_escalates_and_never_stops() {

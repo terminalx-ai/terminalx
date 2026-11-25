@@ -872,6 +872,9 @@ the pull request that adds it.
 | `desktop.write` | `cloud-desktop/1` | Not served | Cloud workspace display |
 | `desktop.ack` | `cloud-desktop/1` | Not served | Cloud workspace display |
 | `desktop.close` | `cloud-desktop/1` | Not served | Cloud workspace display |
+| `transfer.open` | `workspace-transfer/3` | Not served | Cloud workspace transfer to a local checkout without pushing Git refs |
+| `transfer.read` | `workspace-transfer/3` | Not served | Cloud workspace transfer to a local checkout |
+| `transfer.close` | `workspace-transfer/3` | Not served | Cloud workspace transfer to a local checkout |
 | `machine.describe` | `machine/1` | Served | Only a runtime that serves its machine; see [machine/1](#machine1) |
 | `machine.projects` | `machine/1` | Served | As `machine.describe` |
 | `machine.relayAccess` | `machine/2` | Served | A paired computer's relay invite, or `{ relay: null }` with no relay registration (PRO-345) |
@@ -1396,6 +1399,21 @@ the window's phone route when present, or to the runtime's phone host. Its link 
 - `409 host_binding_owner_conflict` (another account binds this machine) ends
   the link too; the runtime asks again for that account after 10 minutes, or
   at once for another account. The window registers itself meanwhile.
+- A registration the relay accepts and then closes with `4401` is refused,
+  not dropped (#1579). The relay does this for a control frame its strict
+  schemas do not take (`relay_unknown_control_message`) and for a socket it
+  no longer counts as the host's control (`relay_control_not_active`). The
+  close's reason is logged when it has the shape of a relay reason code
+  (`remote::protocol::close_reason`: `relay_…` codes and the relay's typed
+  runtime reasons only). The first refusal is retried as a drop; from the
+  second in a row the wait doubles from 30 s to 30 min (`refused_backoff`). A
+  refusal after a registration that served 5 min or more starts the count
+  again, and the status says `retrying` with `relayRefused`
+  (`code`, `reason`, `refusals`, `retryAt`).
+- The window's control requests are checked against the relay's key sets
+  before they are sent (`remote::host`, `forwarded_keys`): one the relay would
+  close the registration for fails on its own instead. `device-revoke` takes
+  no `v`; sending one cost every registration while a revocation was queued.
 - Every other failure (the API or relay unreachable, a refresh the window
   could not make) is retried with the host's backoff.
 - The registration is in the status (`machine_wire::Status`): `relayState`
@@ -1403,7 +1421,8 @@ the window's phone route when present, or to the runtime's phone host. Its link 
   after one was lost or refused, `registered`, `superseded`) and, while
   registered, `relay` (`relayHostId`, `directorUrl`, `cellUrl`,
   `assignmentEpoch`, `generation`, `runtimeGeneration`). An older runtime says
-  neither, which reads as `off`.
+  neither, which reads as `off`. While `retrying` after the relay refused it,
+  `relayRefused` says why and when it tries again.
 
 **The account session.** The runtime reads the desktop Cloud Session from
 `<data dir>/account/session.json` (`machine_account`). A headless machine keeps
@@ -1436,10 +1455,17 @@ presented again (`desktopTokens.ts`), so:
 generation-fenced runtime retires the window's (`4101`), and refuses the window
 while its own control socket is open. So while the runtime is `registered` the
 window does not register itself, and while it is `connecting` the window waits
-up to 30 s for it (`pairing/relay.rs`, `connect_once`, `RUNTIME_WAIT`). When
-the runtime is `retrying`, or `connecting` for longer, the window registers
-for its phones as before; the runtime's registration retires the window's
-when it comes, and the window then uses it. While it is `registered`, the window uses that registration as
+up to 30 s for it (`pairing/relay.rs`, `connect_once`, `RUNTIME_WAIT`). It
+waits the same way while the runtime is `retrying`, unless `relayRefused`
+says the runtime tries again later than that (#1579): registering between two
+of the runtime's tries seconds apart only had the window's registration
+retired seconds later. When the runtime is `connecting` or `retrying` for
+longer, the window registers for its phones as before; the runtime's
+registration retires the window's (`4101`, recorded as `runtime-took-over`,
+not a failure) when it comes, and the window then uses it. The window records
+each refusal the runtime reports, with its close code and reason, in
+`relay-diagnostics.json`, and from the second in a row shows it in Settings →
+Devices. While it is `registered`, the window uses that registration as
 its own: a `RelayLive` whose control requests (`invite-create`, with
 `sessionShare` for a shared session, `device-revoke`,
 `device-credential-install`, `device-credential-install-status`,

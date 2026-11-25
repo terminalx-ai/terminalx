@@ -22,6 +22,9 @@ pub mod checkpoints;
 #[path = "git_worktree_identity.rs"]
 pub(crate) mod worktree_identity;
 
+#[path = "git_shared.rs"]
+pub(crate) mod shared;
+
 pub(crate) fn git() -> Command {
     let mut c = Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")));
     c.env("PATH", crate::binpath::login_path());
@@ -347,6 +350,22 @@ pub(crate) fn output_within(command: Command, timeout: std::time::Duration) -> s
     answer_of(capture_within(command, timeout))
 }
 
+/// Capture a complete result with a time and byte limit. If a pipe reaches
+/// the limit, close it and refuse the result rather than parsing a prefix.
+#[cfg(any(feature = "desktop", test))]
+pub(crate) fn output_with_limit(mut command: Command, args: &[&str], timeout: std::time::Duration, limit: usize) -> std::result::Result<String, RunError> {
+    command.args(args);
+    let captured = capture_limited(command, None, None, timeout, Some(limit));
+    let captured = captured.and_then(|output| {
+        if output.stdout.len() > limit || output.stderr.len() > limit {
+            Err(std::io::Error::other("Git output exceeds the transfer limit"))
+        } else {
+            Ok(output)
+        }
+    });
+    answer_of(captured)
+}
+
 /// [`output_within`] for a one-shot program given `input` on stdin, so long or
 /// private text is never on a command line. On Windows it runs without a
 /// console, and everything it started ends with it.
@@ -382,7 +401,11 @@ pub(crate) fn capture_within(command: Command, timeout: std::time::Duration) -> 
     capture(command, None, None, timeout)
 }
 
-fn capture(mut command: Command, input: Option<Vec<u8>>, cancel: Option<&std::sync::atomic::AtomicBool>, timeout: std::time::Duration) -> std::io::Result<std::process::Output> {
+fn capture(command: Command, input: Option<Vec<u8>>, cancel: Option<&std::sync::atomic::AtomicBool>, timeout: std::time::Duration) -> std::io::Result<std::process::Output> {
+    capture_limited(command, input, cancel, timeout, None)
+}
+
+fn capture_limited(mut command: Command, input: Option<Vec<u8>>, cancel: Option<&std::sync::atomic::AtomicBool>, timeout: std::time::Duration, limit: Option<usize>) -> std::io::Result<std::process::Output> {
     use std::io::{Read, Write};
     let cancelled = || cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst));
     use std::process::Stdio;
@@ -411,11 +434,15 @@ fn capture(mut command: Command, input: Option<Vec<u8>>, cancel: Option<&std::sy
         });
     }
     // Read as it comes, so a full pipe never blocks the child.
-    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+    let drain = move |pipe: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
             if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut bytes);
+                if let Some(limit) = limit {
+                    let _ = pipe.take(limit as u64 + 1).read_to_end(&mut bytes);
+                } else {
+                    let _ = pipe.read_to_end(&mut bytes);
+                }
             }
             bytes
         })
@@ -1823,7 +1850,7 @@ pub fn remove_worktree(project: &Path, name: &str, direct: DirectDelete) -> Resu
 }
 
 pub fn list_worktrees(project: &Path) -> Result<Vec<(String, Option<String>)>> {
-    let out = run(project, &["worktree", "list", "--porcelain"])?;
+    let out = shared::run(project, &["worktree", "list", "--porcelain"])?;
     let mut v = Vec::new();
     let mut cur: Option<String> = None;
     for line in out.lines() {

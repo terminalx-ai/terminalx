@@ -1092,9 +1092,40 @@ fn require_resolved_pr_creation(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The checkouts Git registers for each project, each read once for one pass
+/// over many sessions. Listing them costs a Git run that reads every
+/// worktree, and a pass over the index resolves every session (#1594).
+#[derive(Default)]
+struct Registered(std::collections::HashMap<PathBuf, std::result::Result<Vec<(PathBuf, PathBuf)>, String>>);
+
+impl Registered {
+    /// Each registered checkout of `project`, canonically and as Git spelled
+    /// it, or why Git could not list them.
+    fn listed(&mut self, project: &Path) -> std::result::Result<&[(PathBuf, PathBuf)], &str> {
+        match self.0.entry(project.to_path_buf()).or_insert_with(|| {
+            git::list_worktrees(project).map_err(|error| error.to_string()).map(|roots| roots.into_iter().map(|(root, _)| {
+                let root = PathBuf::from(root);
+                (crate::paths::canonicalize(&root).unwrap_or_else(|_| root.clone()), root)
+            }).collect())
+        }) {
+            Ok(roots) => Ok(roots),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// [`Self::listed`], with none when Git could not list them.
+    fn of(&mut self, project: &Path) -> &[(PathBuf, PathBuf)] {
+        self.listed(project).unwrap_or_default()
+    }
+}
+
+fn checkout_root_path(project: &Path, path: &Path) -> PathBuf {
+    checkout_root_path_in(project, path, &mut Registered::default())
+}
+
 // A missing descendant may have belonged to a pruned nested checkout. No
 // surviving ancestor can prove otherwise, even if Git still registers it.
-fn checkout_root_path(project: &Path, path: &Path) -> PathBuf {
+fn checkout_root_path_in(project: &Path, path: &Path, registered: &mut Registered) -> PathBuf {
     let mut ancestor = path;
     while !ancestor.exists() {
         let Some(parent) = ancestor.parent().filter(|parent| *parent != ancestor) else { break };
@@ -1106,8 +1137,7 @@ fn checkout_root_path(project: &Path, path: &Path) -> PathBuf {
     let project_root = crate::paths::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
     let git_root = git::run(ancestor, &["rev-parse", "--show-toplevel"]).ok()
         .and_then(|top| crate::paths::canonicalize(crate::git::path_line(&top)).ok());
-    let resolved = git::list_worktrees(project).unwrap_or_default().into_iter()
-        .map(|(root, _)| { let root = PathBuf::from(root); crate::paths::canonicalize(&root).unwrap_or(root) })
+    let resolved = registered.of(project).iter().map(|(root, _)| root.clone())
         .chain(git_root)
         .filter(|root| normalized.starts_with(root) && (path.exists() || *root == normalized))
         .max_by_key(|root| root.components().count());
@@ -1123,6 +1153,10 @@ fn checkout_root_path(project: &Path, path: &Path) -> PathBuf {
 }
 
 fn session_checkout_root(session: &SessionEntry) -> PathBuf {
+    session_checkout_root_in(session, &mut Registered::default())
+}
+
+fn session_checkout_root_in(session: &SessionEntry, registered: &mut Registered) -> PathBuf {
     let cwd = Path::new(&session.cwd);
     let project = Path::new(&session.project_path);
     if !cwd.exists() && !session.worktree_removed {
@@ -1133,8 +1167,8 @@ fn session_checkout_root(session: &SessionEntry) -> PathBuf {
         // checkout directory's name; use it only when it identifies one
         // registered ancestor and does not also name a missing descendant.
         if let Some(name) = session.worktree_name.as_deref() {
-            let matches: Vec<PathBuf> = git::list_worktrees(project).unwrap_or_default().into_iter()
-                .map(|(root, _)| PathBuf::from(root))
+            let matches: Vec<PathBuf> = registered.of(project).iter()
+                .map(|(_, root)| root.clone())
                 .filter(|root| root.file_name().is_some_and(|part| part == name) && cwd.starts_with(root))
                 .filter(|root| cwd.strip_prefix(root).is_ok_and(|tail| !tail.components().any(|part| part.as_os_str() == name)))
                 .collect();
@@ -1143,14 +1177,15 @@ fn session_checkout_root(session: &SessionEntry) -> PathBuf {
             }
         }
     }
-    checkout_root_path(project, cwd)
+    checkout_root_path_in(project, cwd, registered)
 }
 
 fn checkout_root(project: &Path, path: &Path) -> PathBuf {
     if !path.exists() {
+        let mut registered = Registered::default();
         let roots: std::collections::BTreeSet<_> = index::load().unwrap_or_default().iter()
             .filter(|session| identity_path(Path::new(&session.cwd)) == identity_path(path))
-            .map(|session| identity_path(&session_checkout_root(session))).collect();
+            .map(|session| identity_path(&session_checkout_root_in(session, &mut registered))).collect();
         if roots.len() == 1 { return roots.into_iter().next().unwrap(); }
     }
     checkout_root_path(project, path)
@@ -1181,6 +1216,7 @@ fn identity_path(path: &Path) -> PathBuf {
 /// neither a surviving ancestor nor a directory name proves its identity.
 pub(crate) fn ensure_workspace_identity(sessions: &[SessionEntry], path: &Path) -> Result<()> {
     let target = identity_path(path);
+    let mut registered = Registered::default();
     for session in sessions {
         let cwd = Path::new(&session.cwd);
         if session.worktree_removed {
@@ -1200,7 +1236,7 @@ pub(crate) fn ensure_workspace_identity(sessions: &[SessionEntry], path: &Path) 
             let project = Path::new(&session.project_path);
             let exact_retry = target == normalized && recorded.as_ref() == Some(&normalized)
                 && top.as_ref().is_none_or(|top| *top == identity_path(project))
-                && git::list_worktrees(project).is_ok();
+                && registered.listed(project).is_ok();
             // Git can walk through recreated directories to a surviving
             // parent after a nested worktree was pruned. A legacy descendant
             // cannot prove that parent was its checkout.
@@ -1209,18 +1245,18 @@ pub(crate) fn ensure_workspace_identity(sessions: &[SessionEntry], path: &Path) 
             }
             continue;
         }
-        let records = git::list_worktrees(Path::new(&session.project_path))
-            .map_err(|error| format!("Cannot verify the checkout for session ‘{}’: {error}. Nothing was removed.", session.title))?;
+        let records = registered.listed(Path::new(&session.project_path))
+            .map_err(|error| format!("Cannot verify the checkout for session ‘{}’: {error}. Nothing was removed.", session.title))?.to_vec();
         if session.checkout_root().is_some_and(|root| normalized.starts_with(identity_path(Path::new(root)))) {
             continue;
         }
-        let root = session_checkout_root(session);
+        let root = session_checkout_root_in(session, &mut registered);
         // An ancestor record cannot rule out an unregistered nested checkout
         // anywhere in the missing suffix, even if its name matches.
-        let registered = identity_path(&root) == normalized && records.into_iter().any(|(record, _)| {
-            identity_path(Path::new(&record)) == normalized
+        let known = identity_path(&root) == normalized && records.into_iter().any(|(_, record)| {
+            identity_path(&record) == normalized
         });
-        if !registered {
+        if !known {
             return Err(format!("Cannot establish the checkout for session ‘{}’ at {}. Nothing was removed.", session.title, cwd.display()));
         }
     }
@@ -1230,9 +1266,29 @@ pub(crate) fn ensure_workspace_identity(sessions: &[SessionEntry], path: &Path) 
 /// The sessions among `sessions` that run in the checkout at `path`.
 pub(crate) fn sessions_within(sessions: Vec<SessionEntry>, path: &Path) -> Vec<SessionEntry> {
     let target = identity_path(path);
+    let mut registered = Registered::default();
     sessions
         .into_iter()
-        .filter(|session| identity_path(&session_checkout_root(session)) == target)
+        .filter(|session| {
+            // A session's checkout holds its folder, so a folder outside
+            // the target is in another checkout, as is one inside a
+            // registered checkout nested deeper than the target. Neither
+            // needs resolving: the index holds every session of every
+            // project, and resolving costs Git runs.
+            let cwd = identity_path(Path::new(&session.cwd));
+            if !cwd.starts_with(&target) {
+                return false;
+            }
+            if Path::new(&session.cwd).exists() {
+                let depth = target.components().count();
+                let deeper = registered.of(Path::new(&session.project_path)).iter()
+                    .any(|(root, _)| root.components().count() > depth && cwd.starts_with(root));
+                if deeper {
+                    return false;
+                }
+            }
+            identity_path(&session_checkout_root_in(session, &mut registered)) == target
+        })
         .collect()
 }
 
@@ -3025,6 +3081,35 @@ mod tests {
         assert_eq!(std::fs::read(transcript).unwrap(), transcript_before);
         assert_eq!(std::fs::read(log).unwrap(), log_before);
         assert_eq!(std::fs::read_to_string(marker).unwrap(), "retained");
+    }
+
+    /// The index holds every session of every project, and a panel asks
+    /// for a workspace's sessions every 30 seconds: one Git listing per
+    /// session kept a dozen running at all times (#1594).
+    #[test]
+    fn a_workspace_s_sessions_are_found_with_one_worktree_listing() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let root = dir.path().canonical().unwrap();
+        let in_worktrees: Vec<_> = (0..4).map(|_| worktree_session(dir.path())).collect();
+        let at_root: Vec<_> = (0..3).map(|n| session_in(dir.path(), root.to_str().unwrap(), &format!("Root {n}"))).collect();
+        let companion = session_in(dir.path(), &in_worktrees[1].cwd, "Companion");
+        let ids = |sessions: Vec<SessionEntry>| sessions.into_iter().map(|s| s.id).collect::<std::collections::BTreeSet<_>>();
+        let listings = |find: &dyn Fn() -> Vec<SessionEntry>| {
+            let before = git::shared::REQUESTS.with(|requests| requests.get());
+            let found = find();
+            (ids(found), git::shared::REQUESTS.with(|requests| requests.get()) - before)
+        };
+
+        let (found, listed) = listings(&|| sessions_within(index::load().unwrap(), &root));
+        assert_eq!(found, ids(at_root.clone()));
+        assert_eq!(listed, 1, "one listing for the whole index");
+        let (found, listed) = listings(&|| sessions_within(index::load().unwrap(), Path::new(&in_worktrees[1].cwd)));
+        assert_eq!(found, ids(vec![in_worktrees[1].clone(), companion.clone()]));
+        assert_eq!(listed, 1);
+        let (found, listed) = listings(&|| sessions_in_workspace(Path::new(&in_worktrees[1].cwd)).unwrap());
+        assert_eq!(found, ids(vec![in_worktrees[1].clone(), companion]));
+        assert!(listed <= 2, "{listed} listings");
     }
 
     #[test]

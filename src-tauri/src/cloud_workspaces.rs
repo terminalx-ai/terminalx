@@ -14,7 +14,7 @@ use url::Url;
 use crate::account::{
     AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN, PHASE2_MENTIONS,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_PRESENCE, PHASE2_RESTART_DETAILS,
-    PHASE2_AFFECTED_WORKSPACES, PHASE2_GENERAL_ACCESS, PHASE2_PRECREATE_USAGE, PHASE2_WEBHOOK_TRIGGER, PHASE2_WORKSPACE_GROUPS,
+    PHASE2_ADMIN_SHARE, PHASE2_AFFECTED_WORKSPACES, PHASE2_GENERAL_ACCESS, PHASE2_PRECREATE_USAGE, PHASE2_WEBHOOK_TRIGGER, PHASE2_WORKSPACE_GROUPS,
 };
 
 const CONTRACT: &str = "providers-v1";
@@ -851,6 +851,11 @@ pub struct CloudWorkspace {
     pub delete_after: Option<i64>,
     #[serde(default)]
     pub deleted_at: Option<i64>,
+    /// When the server learned the provider no longer has this workspace's
+    /// machine and cannot bring it back (#1589): only while it is
+    /// `attention-required` for that reason. Absent from older servers.
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub machine_missing_at: Option<i64>,
     /// List enrichment (saas #137, PRO-56, contract §20.1). Every field is
     /// optional: older servers omit them, and create, open and lifecycle
     /// responses never carry them. A malformed value reads as absent rather
@@ -4304,6 +4309,16 @@ impl CloudWorkspaceService {
         }
         let risk = RequestRisk::Mutation;
         self.run_group_sharing(Some(org), context_revision, risk, |client, context| {
+            for change in &request.changes {
+                if let AccessChange::Put {
+                    subject: ShareSubject { kind: ShareSubjectType::User, .. },
+                    role: ShareRole::Manager,
+                    can_approve,
+                    ..
+                } = change {
+                    self.require_admin_share(context, *can_approve)?;
+                }
+            }
             let mut result: CloudAccessApplied = client.request(
                 context, &["cloud-workspaces", workspace_id, "shares", "apply"], None, Some(json!(request)), None, risk,
             ).map_err(|mut error| {
@@ -4337,32 +4352,37 @@ impl CloudWorkspaceService {
 
     /// Grant or change one member's share. Idempotent: the same body twice
     /// leaves one share.
-    pub fn share_put(
+    #[cfg(test)]
+    fn share_put(&self, org: Option<&str>, workspace_id: &str, user_id: &str, role: ShareRole, can_approve: bool) -> Result<CloudWorkspaceShareChange, CloudWorkspaceClientError> {
+        self.share_put_in_context(org, workspace_id, user_id, role, can_approve, None)
+    }
+
+    fn require_admin_share(&self, context: &AccountContext, can_approve: bool) -> Result<(), CloudWorkspaceClientError> {
+        if !can_approve {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_runtime_unsupported", false));
+        }
+        self.phase2_gate(PHASE2_ADMIN_SHARE, Some(&context.organization_id), Some(context), "cloud_workspace_runtime_not_ready")
+    }
+
+    pub fn share_put_in_context(
         &self,
         org: Option<&str>,
         workspace_id: &str,
         user_id: &str,
         role: ShareRole,
         can_approve: bool,
+        context_revision: Option<&str>,
     ) -> Result<CloudWorkspaceShareChange, CloudWorkspaceClientError> {
         if !valid_resource_id(workspace_id) || !valid_resource_id(user_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        // Native v1 cannot enforce a manager without approval. Never upgrade the
-        // requested boolean, downgrade the role or retry with a different body.
-        if role == ShareRole::Manager {
-            if !can_approve {
-                return Err(CloudWorkspaceClientError::local("cloud_workspace_runtime_unsupported", false));
-            }
-            #[cfg(test)]
-            let manager_ready = self.force_phase2_for_test;
-            #[cfg(not(test))]
-            let manager_ready = false;
-            if !manager_ready {
-                return Err(CloudWorkspaceClientError::local("cloud_workspace_runtime_not_ready", true));
-            }
+        if role == ShareRole::Manager && !can_approve {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_runtime_unsupported", false));
         }
-        self.run_share_in(org, None, RequestRisk::Mutation, |client, context| {
+        self.run_share_in(org, context_revision, RequestRisk::Mutation, |client, context| {
+            if role == ShareRole::Manager {
+                self.require_admin_share(context, can_approve)?;
+            }
             let result: CloudWorkspaceShareChange = client.request_as(
                 "PUT",
                 context,
@@ -4768,6 +4788,7 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_general_access_unavailable"
             | "cloud_workspace_groups_unavailable"
             | "cloud_workspace_group_share_not_found"
+            | "cloud_workspace_group_manager_unsupported"
             | "organization_group_not_found"
             | "workspace_following_unavailable"
             | "workspace_mentions_unavailable"
@@ -5599,6 +5620,7 @@ mod tests {
             ("409 Conflict", "workspace_reassign_credential_restricted"), ("409 Conflict", "workspace_reassign_runtime_unsupported"),
             ("409 Conflict", "cloud_workspace_member_concurrency_exceeded"), ("409 Conflict", "cloud_teardown_in_progress"),
             ("409 Conflict", "workspace_reassign_idempotency_conflict"), ("409 Conflict", "cloud_workspace_last_admin"),
+            ("409 Conflict", "cloud_workspace_group_manager_unsupported"),
             ("503 Service Unavailable", "workspace_following_unavailable"),
         ] {
             assert!(known_error_code(code));
@@ -7961,6 +7983,7 @@ mod tests {
                     archived_at: None,
                     delete_after: None,
                     deleted_at: None,
+                    machine_missing_at: None,
                     repositories: None,
                     created_by: None,
                     creator: None,
@@ -8690,13 +8713,31 @@ mod tests {
         assert!(workspace.repositories.is_none() && workspace.runtime_activity.is_none() && workspace.authority.is_none());
         assert!(listed.quota.is_none());
         let sent = serde_json::to_value(&listed).unwrap();
-        for field in ["repositories", "createdBy", "lastActivityAt", "runtimeActivity", "revision", "authority"] {
+        for field in ["repositories", "createdBy", "lastActivityAt", "runtimeActivity", "revision", "authority", "machineMissingAt"] {
             assert!(sent["workspaces"][0]["workspace"].get(field).is_none(), "{field}");
         }
         assert!(sent.get("quota").is_none());
         // A pre-PRO-76 quota has no running or total.
         let quota: CloudWorkspaceQuota = serde_json::from_value(json!({ "used": 1, "limit": 2 })).unwrap();
         assert_eq!(serde_json::to_value(quota).unwrap(), json!({ "used": 1, "limit": 2 }));
+    }
+
+    #[test]
+    fn a_machine_the_server_says_is_gone_reaches_the_webview() {
+        // #1589: the server states it on the workspace, and the page reads it there.
+        let mut list: Value = serde_json::from_str(&org_2_list_body().replace("org-2", "org-1")).unwrap();
+        list["workspaces"][0]["workspace"]["state"] = json!("attention-required");
+        list["workspaces"][0]["workspace"]["machineMissingAt"] = json!(1_795_305_607_000_i64);
+        let parsed: CloudWorkspaceList = serde_json::from_value(list).unwrap();
+        assert_eq!(parsed.workspaces[0].workspace.machine_missing_at, Some(1_795_305_607_000));
+        assert_eq!(serde_json::to_value(&parsed).unwrap()["workspaces"][0]["workspace"]["machineMissingAt"], json!(1_795_305_607_000_i64));
+
+        // A malformed value reads as absent rather than failing the list.
+        let mut list: Value = serde_json::from_str(&org_2_list_body().replace("org-2", "org-1")).unwrap();
+        list["workspaces"][0]["workspace"]["machineMissingAt"] = json!("yesterday");
+        let parsed: CloudWorkspaceList = serde_json::from_value(list).unwrap();
+        assert_eq!(parsed.workspaces[0].workspace.machine_missing_at, None);
+        assert!(serde_json::to_value(&parsed).unwrap()["workspaces"][0]["workspace"].get("machineMissingAt").is_none());
     }
 
     #[test]
@@ -8947,6 +8988,34 @@ mod tests {
             assert_eq!(captured.text.split_once("\r\n\r\n").unwrap().1, "");
             assert!(!captured.extra_request);
         }
+    }
+
+    #[test]
+    fn phase2_admin_grant_requires_target_readiness_and_the_original_context() {
+        let mut manager = share_json("user-2", "manager");
+        manager["canApprove"] = json!(true);
+        let body = json!({ "share": manager, "created": false });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], false);
+        account.apply_phase2_readiness_for_test(json!({
+            "version": 1, "organizations": { "org-2": { (PHASE2_ADMIN_SHARE): true } }
+        }));
+        let revision = AccountManager::context_revision(&context());
+        let held = service.share_put_in_context(
+            Some("org-1"), "workspace-1", "user-2", ShareRole::Manager, true, Some(&revision),
+        ).unwrap_err();
+        assert_eq!(held.code, "cloud_workspace_runtime_not_ready");
+        assert!(service.share_put_in_context(
+            Some("org-2"), "workspace-1", "user-2", ShareRole::Manager, true, Some("replaced"),
+        ).is_err());
+        assert_eq!(service.share_put_in_context(
+            Some("org-2"), "workspace-1", "user-2", ShareRole::Manager, true, Some(&revision),
+        ).unwrap().share.role, ShareRole::Manager);
+
+        let sent = request.join().unwrap().text;
+        assert!(sent.starts_with("PUT /v1/desktop/orgs/org-2/cloud-workspaces/workspace-1/shares/user-2 HTTP/"));
+        assert!(sent.contains(r#""canApprove":true"#));
     }
 
     #[test]

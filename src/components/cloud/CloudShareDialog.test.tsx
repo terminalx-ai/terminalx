@@ -119,6 +119,49 @@ afterEach(() => {
 
 const dialog = () => render(<CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments" onClose={() => undefined} />);
 
+describe("per-person Admin grants", () => {
+  const feature = "cloud.workspaces.admin-share.v1";
+  const label = "Admin — Manages the workspace and who it’s shared with";
+  const enable = (org = "org-1") => {
+    account.status = { ...account.status, phase2Readiness: { [org]: [feature] } };
+  };
+
+  it("offers Viewer, Driver and Admin and grants manager with approval", async () => {
+    enable();
+    dialog();
+    const select = await screen.findByRole("combobox", { name: "Role for Alice" });
+    expect(within(select).getAllByRole("option").map((option) => option.textContent)).toEqual(["Viewer", "Driver", label]);
+    fireEvent.change(select, { target: { value: "manager" } });
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith("ws-1", "u-alice", "manager", true, "org-1", account.status.context?.revision));
+    await waitFor(() => expect((screen.getByRole("switch", { name: "Can approve permissions: Alice" }) as HTMLButtonElement).disabled).toBe(true));
+  });
+
+  it("keeps Admin held for another organization or a non-manager", async () => {
+    enable("org-2");
+    const first = dialog();
+    const select = await screen.findByRole("combobox", { name: "Role for Alice" });
+    expect(within(select).queryByRole("option", { name: label })).toBeNull();
+    first.unmount();
+
+    enable();
+    listed = { ...listed, you: { role: "viewer", canApprove: false, canManageShares: false } };
+    dialog();
+    await screen.findByTestId("cloud-share-you");
+    expect(screen.queryByRole("option", { name: label })).toBeNull();
+  });
+
+  it("keeps the server's fixed refusal for demoting the last admin", async () => {
+    enable();
+    listed = { ...listed, shares: [share({ role: "manager", canApprove: true })] };
+    mocks.put.mockRejectedValueOnce({ code: "cloud_workspace_last_admin", status: 409, message: "Server wording" });
+    dialog();
+    const select = await screen.findByRole("combobox", { name: "Role for Alice" });
+    fireEvent.change(select, { target: { value: "driver" } });
+    expect(await screen.findByText("A workspace must have at least one admin.")).toBeTruthy();
+    expect((select as HTMLSelectElement).value).toBe("manager");
+  });
+});
+
 describe("General access", () => {
   const feature = "cloud.workspaces.general-access.v1";
   const invited = { mode: "invited_only" } as const;
@@ -417,6 +460,7 @@ describe("share dialog", () => {
     expect(yourAccessText({ role: "driver", canApprove: true, canManageShares: true }, "member")).toMatch(/^Driver \(/);
     expect(yourAccessText({ role: "driver", canApprove: false, canManageShares: true }, "member", true)).not.toContain("approve permissions and manage");
     expect(shareErrorMessage({ code: "cloud_workspace_last_admin" })).toBe("A workspace must have at least one admin.");
+    expect(shareErrorMessage({ code: "cloud_workspace_group_manager_unsupported" })).toBe("Admin access can only be granted to a person.");
     expect(shareErrorMessage({ code: "cloud_workspace_runtime_unsupported" })).toContain("not supported");
     expect(yourAccessText({ role: "driver", canApprove: false, canManageShares: false }, "member")).toBe("Driver (can send to agents; typing in terminals also needs the right to approve permissions)");
     expect(yourAccessText({ role: "driver", canApprove: true, canManageShares: false }, "member")).toBe("Driver (can send to agents and type in terminals), can approve permissions");
@@ -841,6 +885,23 @@ describe("organization workspace-group readiness", () => {
   const save = () => screen.getByRole("button", { name: "Save" });
   const search = () => screen.getByRole("searchbox", { name: /Add people or groups from/ });
   const role = (name: string) => screen.getByRole("combobox", { name: `Role for ${name}` });
+
+  it("stages a per-person Admin separately from group roles", async () => {
+    enabled("org-1", [{ groupId: group.id, group, role: "viewer", canApprove: false }]);
+    account.status.phase2Readiness = { "org-1": [feature, "cloud.workspaces.admin-share.v1"] };
+    mocks.apply.mockImplementationOnce(async (_workspace: string, _org: string, request: CloudAccessApply) =>
+      receipt({ shares: [share({ role: "manager", canApprove: true })], accessRevision: "opaque:2" },
+        request.changes.map(({ id }) => ({ id, status: "applied" }))));
+    renderEditor();
+    const alice = await screen.findByRole("combobox", { name: "Role for Alice" });
+    expect(within(alice).getByRole("option", { name: /Admin — Manages/ })).toBeTruthy();
+    expect(within(role(group.name)).queryByRole("option", { name: /Admin — Manages/ })).toBeNull();
+    fireEvent.change(alice, { target: { value: "manager" } });
+    fireEvent.click(save());
+    await waitFor(() => expect(mocks.apply).toHaveBeenCalledWith("ws-1", "org-1", expect.objectContaining({
+      changes: [expect.objectContaining({ subject: { type: "user", id: "u-alice" }, role: "manager", canApprove: true })],
+    }), revision));
+  });
 
   it("keeps General access and staged groups on the same revision without mixing mutations", async () => {
     enabled();

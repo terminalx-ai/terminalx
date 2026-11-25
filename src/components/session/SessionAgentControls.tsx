@@ -58,7 +58,7 @@ export function SessionAgentControls({ selection, pipeline, disabled = false, fi
   /** Stretch the pills across their row, each name left and its chevron right, so the row is as wide as what is under it. */
   fill?: boolean;
 }) {
-  const { harnesses, harness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode, unavailableModel, allowDefaultEffort, accounts, account, selectAccount, accountReason } = selection;
+  const { harnesses, harness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode, unavailableModel, agentDefault, allowDefaultEffort, accounts, account, selectAccount, accountReason } = selection;
   const agentMenu = useRowMenu();
   const accountMenu = useRowMenu();
   const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
@@ -104,7 +104,7 @@ export function SessionAgentControls({ selection, pipeline, disabled = false, fi
         </DropdownMenu>
       )}
 
-      {harness && (model || unavailableModel || allowDefaultEffort) && (
+      {harness && (model || unavailableModel || agentDefault || allowDefaultEffort) && (
         <DropdownMenu {...modelMenu.root}>
           <DropdownMenuTrigger asChild {...modelMenu.trigger}>
             <Button variant="secondary" size="sm" className={pill} title="Model" disabled={disabled}>

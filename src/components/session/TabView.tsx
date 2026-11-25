@@ -47,7 +47,7 @@ import { MachineMessage } from "@/components/machines/MachineMessage";
 import { cancelTerminalView, clearTabViewError, enterTerminalView, forgetTabView, isPtyFirst, leaveTerminalView, startTabAgent, useTabViews } from "@/lib/tabViews";
 import { byHandLock, isByHand, isTerminalTab, resumable, tabPaneId, tabViewIn, type Resumable } from "@/lib/tabFront";
 import { useSessionStore } from "@/lib/sessions";
-import { classifyRecovery, CONTINUE_PROMPT, requestRefusalNotice, RECOVERY_MESSAGES, RECOVERY_PROMPT, recoveryFromEvents } from "@/lib/recovery";
+import { classifyRecovery, CONTINUE_PROMPT, requestRefusalNotice, RECOVERY_MESSAGES, RECOVERY_PROMPT, recoveryFromEvents, unsupportedCommandNotice } from "@/lib/recovery";
 import { actionReports, inputOf, RecoveryReports, reporterFor, useExposure, type RecoveryAction, type Surface } from "@/lib/recoveryReports";
 import type { RecoveryKind } from "@/types/events";
 import { RecoveryBanner } from "./RecoveryBanner";
@@ -370,8 +370,10 @@ export function TabView({
   const turnSettings = useMemo(() => ({ effort: tab.effort, permissionMode: tab.permissionMode }), [tab.effort, tab.permissionMode]);
   // Switch account (#980): this computer's accounts, so a local tab's only, and not while it is only read.
   const accountSwitch = useAccountSwitch(session, tab, local && !readOnly);
-  // Only while the turn it met runs: once that has ended, the message in the composer is simply unsent.
-  const busyNotice = live ? sendNotice ?? busyRefused : null;
+  // Only while the turn it met runs: once that has ended, the message in the composer is simply unsent. A command
+  // native Codex cannot run (#1498) is refused whatever the turn is doing, so that notice stays until the next send.
+  const commandNotice = local && sendState.error != null ? unsupportedCommandNotice(sendState.error) : null;
+  const busyNotice = commandNotice ?? (live ? sendNotice ?? busyRefused : null);
   useEffect(() => {
     if (!live) setBusyRefused(null);
   }, [live]);
@@ -821,6 +823,11 @@ export function TabView({
     setError(null);
     void outbox.sendAgain(entry).catch((e) => setError(commandError(e)));
   }, [outbox]);
+  const removeCommand = useCallback((entry: OutboxEntry) => {
+    if (!outbox) return;
+    setError(null);
+    void outbox.remove(entry).catch((e) => setError(commandError(e)));
+  }, [outbox]);
   const deciding = transcript.pendingAsks.some(ask => log.permissionResponses?.get(ask.requestId) === "sending" || outbox?.deciding(ask.requestId));
 
   // Signed out of the agent itself (not TerminalX's account): Claude Code signs in
@@ -1004,6 +1011,7 @@ export function TabView({
           workspace={outbox.workspaceStatus}
           nameOf={nameOf}
           onSendAgain={!readOnly && !gate?.blocked ? resendCommand : undefined}
+          onRemove={!readOnly ? removeCommand : undefined}
           // Escape for the running turn; the runtime then sends what it holds.
           onSendNow={interrupts && live && !readOnly && !gate?.blocked ? interrupt : undefined}
         />

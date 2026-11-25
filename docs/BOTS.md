@@ -713,9 +713,13 @@ the engine: the bot drives the existing `terminalx runs …` commands, and
   stopped cannot be closed with `done`. A failed run counts as open: its pieces
   may still merge, so it also keeps its merge hold and its place on the item.
 - **Checking back.** `set ITEM --check-back TIME|report|off`. The automation
-  scheduler's tick (about every 30 s) wakes a bot whose time has come, and the
-  orchestrator's `tell_lead` wakes it when a worker of a linked run reports;
-  nothing else runs while it waits. The wake goes to the session that set it,
+  scheduler's tick (about every 30 s) wakes a bot whose time has come. A worker's
+  report wakes it sooner (`bots::runs::reported`, #1545): a linked run tells its
+  lead something (`tell_lead`), the run's lead ends a turn with a
+  `terminalx-report` block, one of the run's workers ends a turn with its report
+  (or with none after it was asked again: its piece moves on, blocked say), or
+  a session started with `--report` from the chat that set the check-back (or
+  linked to the item) does. Nothing else runs while it waits. The wake goes to the session that set it,
   or the home chat, as TerminalX's own words, never a worker's; a lead already
   told by the run is not woken twice, and its check-back's time still stands. A wake that cannot be sent is tried again
   five minutes later and logged.

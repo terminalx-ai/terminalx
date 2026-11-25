@@ -4,7 +4,7 @@ import { Check, ShieldAlert, MessageCircleQuestion, SquareTerminal } from "@/ico
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/tooltip";
 import { revealInOwnScroller } from "@/lib/shellScroll";
-import { hasEscapeOverlay, useShortcut, useShortcutKeys } from "@/lib/hotkeys";
+import { hasEscapeOverlay, inTerminal, isEditable, useShortcut, useShortcutKeys } from "@/lib/hotkeys";
 import { cn } from "@/lib/cn";
 import { usePromptTextProps } from "@/lib/autocorrect";
 import { askAgentNote, questionAnswers, questionsLabel, toggleQuestionChoice, type PendingAsk, type QuestionChoices } from "@/lib/transcript";
@@ -12,6 +12,17 @@ import { approvalFiles, rawPatch } from "@/lib/approvalDiff";
 import { ApprovalDiff, Counts } from "./ApprovalDiff";
 import type { ScreenPrompt } from "@/types/events";
 import { LinkedText } from "./LinkedText";
+
+/**
+ * Someone is typing outside the card: in the composer, a field, a terminal or
+ * the editor. A card that took the focus then would turn their next Return or
+ * Space into an answer they never meant, so it waits to be clicked or tabbed to.
+ */
+export function typingElsewhere(card: Element | null): boolean {
+  const active = document.activeElement;
+  if (!active || active === document.body || card?.contains(active)) return false;
+  return isEditable(active) || inTerminal(active) || !!active.closest(".editor-pane");
+}
 
 /**
  * A held tool call. The buttons are the harness's own options; the app only
@@ -162,7 +173,7 @@ export function PermissionCard({
     // The card is shown by its own scroller; focus alone would scroll every box above it too, the window included.
     // The primary answer, not Deny before it nor a control in the diff above it: Return still answers.
     const primary = ref.current?.querySelector<HTMLButtonElement>("[data-ask-actions] button[data-primary]");
-    primary?.focus({ preventScroll: true });
+    if (primary && !typingElsewhere(ref.current)) primary.focus({ preventScroll: true });
     if (primary) revealInOwnScroller(primary);
   }, []);
   // Escape denies, ahead of the interrupt it otherwise is: the turn is held on this card anyway.
@@ -288,7 +299,7 @@ export function QuestionCard({
   const ref = useRef<HTMLFormElement>(null);
   useEffect(() => {
     const first = ref.current?.querySelector<HTMLElement>("button[data-choice]");
-    first?.focus({ preventScroll: true });
+    if (first && !typingElsewhere(ref.current)) first.focus({ preventScroll: true });
     if (first) revealInOwnScroller(first);
   }, []);
   const questions = ask.questions ?? [];

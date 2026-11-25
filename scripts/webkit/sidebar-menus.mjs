@@ -173,6 +173,9 @@ try {
     await menu.getByRole("menuitem", { name: "Restore workspace…" }).click();
     const dialog = page.getByRole("dialog");
     await dialog.getByRole("heading", { name: "Restore on a new branch?" }).waitFor();
+    // The dialog asks for the home directory on its own, apart from the preview the heading waits for, and writes the
+    // path in full until it knows it: measured then, no path started with ~/ (a busy Linux runner). Measured once it does.
+    await dialog.locator("dd", { hasText: /^~\// }).waitFor();
     const restore = await dialog.evaluate((node) => {
       const path = [...node.querySelectorAll("dd")].find((dd) => dd.textContent.startsWith("~/"));
       const box = path?.getBoundingClientRect();

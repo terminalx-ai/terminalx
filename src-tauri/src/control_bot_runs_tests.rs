@@ -501,6 +501,99 @@ fn a_bot_is_woken_to_check_back_at_its_time_or_when_its_run_reports() {
     assert!(wakes[0].1.contains(&format!("Run {} told its lead something new", run.id)), "{}", wakes[0].1);
 }
 
+/// A session the bot's chat started, as `sessions create` from it stores one: it acts for the bot.
+fn started_by(lead: &Lead, id: &str, parent: &str) -> SessionEntry {
+    let mut entry: SessionEntry = serde_json::from_value(json!({
+        "id": id, "projectPath": "/fixture", "cwd": "/fixture", "title": id, "created": "now", "modified": "now",
+        "parent": {"sessionId": parent}, "tabs": [{"id": "t", "harness": "claude", "created": "now", "permissionMode": "bypassPermissions"}],
+    }))
+    .unwrap();
+    crate::bots::chat::inherit(&mut entry);
+    assert_eq!(crate::bots::chat::acting_bot(&entry).as_deref(), Some(lead.atlas.as_str()));
+    index::update(|entries| {
+        entries.push(entry.clone());
+        Ok(())
+    })
+    .unwrap();
+    entry
+}
+
+fn report(status: &str) -> String {
+    format!("Here is where it stands.\n\n```terminalx-report\n{{\"status\": \"{status}\", \"result\": \"Two of three steps; the third is the owner's call.\"}}\n```\n")
+}
+
+/// #1545: a check-back "when a worker reports" wakes the chat that set it when the run's lead ends its turn with a
+/// report, when a worker of the run reports (its piece blocked), and when a session the chat started with `--report`
+/// reports, not only when the run tells its lead something. A turn without a report, a lead's reply that is not one,
+/// or a session of another chat wakes nothing.
+#[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
+fn a_check_back_on_a_report_wakes_for_the_leads_report_a_workers_and_a_report_sessions() {
+    let _home = crate::store::temp_home();
+    let _switches = Switches;
+    let lead = Lead::new();
+    lead.bot("bots.items.add", json!({"title": "Runner move", "start": true})).unwrap();
+    let run_lead = started_by(&lead, "lead-of-atlas", &lead.chat.id);
+    let run = lead.run("run-asks", &run_lead.id, "running");
+    let worker = started_by(&lead, "worker-of-atlas", &run_lead.id);
+    crate::orchestration::store::update(&run.id, |run| {
+        let piece = &mut run.pieces[0];
+        piece.state = crate::orchestration::PieceState::Blocked;
+        piece.tries = vec![serde_json::from_value(json!({"step": "first", "model": "gpt", "worker": {"sessionId": worker.id, "tabId": "t"}, "outcome": "partial"})).unwrap()];
+        Ok(())
+    })
+    .unwrap();
+    lead.bot("bots.items.set", json!({"item": 1, "link": [format!("run:{}", run.id)], "checkBack": "2026-11-24T12:00:00Z"})).unwrap();
+    assert!(lead.item(1).activity.last().unwrap().text.contains("the run's lead or one of its workers ends a turn with its report"), "the item says which reports wake it");
+
+    // 1. The lead ends its turn with a question for the bot: woken, in the chat that set it, and the check-back is taken.
+    runs::reported(&lead.service.manager, &run_lead.id, Some("Shall I go on?"), false);
+    assert!(woken().is_empty(), "a lead's reply that is no report wakes nothing");
+    runs::reported(&lead.service.manager, &run_lead.id, Some(&report("partial")), false);
+    let wakes = woken();
+    assert_eq!(wakes.len(), 1, "{wakes:?}");
+    assert_eq!(wakes[0].0, lead.chat.id);
+    assert!(wakes[0].1.contains(&format!("The lead of run {}", run.id)) && wakes[0].1.contains("(partial)") && wakes[0].1.contains(&format!("terminalx sessions report {}", run_lead.id)), "{}", wakes[0].1);
+    assert!(lead.item(1).check_back.is_none(), "once");
+    assert!(lead.item(1).activity.iter().any(|entry| entry.by == runs::BY_TERMINALX && entry.text.contains("the lead of run")));
+    runs::reported(&lead.service.manager, &run_lead.id, Some(&report("partial")), false);
+    assert!(woken().is_empty(), "taken: the bot sets the next one");
+
+    // 2. A worker of the run reports and its piece is blocked: woken, with the piece named.
+    lead.bot("bots.items.set", json!({"item": 1, "checkBack": "report"})).unwrap();
+    runs::reported(&lead.service.manager, &worker.id, Some(&report("partial")), true);
+    let wakes = woken();
+    assert_eq!(wakes.len(), 1, "{wakes:?}");
+    assert!(wakes[0].1.contains(&format!("The worker of piece register of run {}", run.id)), "{}", wakes[0].1);
+    // One that owed a report and gave none after it was asked again wakes it too: its piece moved on all the same.
+    lead.bot("bots.items.set", json!({"item": 1, "checkBack": "report"})).unwrap();
+    runs::reported(&lead.service.manager, &worker.id, Some("I stopped."), true);
+    assert!(woken()[0].1.contains("no readable report"));
+
+    // 3. A session the chat started with --report, outside the run: woken in the chat that started it.
+    let helper = started_by(&lead, "report-of-atlas", &lead.chat.id);
+    lead.bot("bots.items.set", json!({"item": 1, "checkBack": "report"})).unwrap();
+    runs::reported(&lead.service.manager, &helper.id, Some(&report("done")), true);
+    let wakes = woken();
+    assert_eq!(wakes.len(), 1, "{wakes:?}");
+    assert!(wakes[0].1.contains(&format!("Session {}, which you started to report back", helper.id)) && wakes[0].1.contains("(done)"), "{}", wakes[0].1);
+
+    // Not the chat that set it, and not linked to the item: nothing.
+    let other = started_by(&lead, "other-of-atlas", &run_lead.id);
+    lead.bot("bots.items.set", json!({"item": 1, "checkBack": "report"})).unwrap();
+    runs::reported(&lead.service.manager, &other.id, Some(&report("done")), true);
+    assert!(woken().is_empty());
+    // A time-only wait is still a report wait (`--check-back TIME` wakes sooner on a report), and a paused bot waits.
+    crate::bots::pause(lead.service.sink.as_ref(), &lead.atlas, crate::bots::OWNER).unwrap();
+    runs::reported(&lead.service.manager, &helper.id, Some(&report("done")), true);
+    assert!(woken().is_empty(), "paused");
+    crate::bots::resume(lead.service.sink.as_ref(), &lead.atlas).unwrap();
+    // The bot's own chat ending a turn with a report block is not a worker's report.
+    runs::reported(&lead.service.manager, &lead.chat.id, Some(&report("done")), false);
+    assert!(woken().is_empty(), "the bot's own chat");
+    assert!(lead.item(1).check_back.is_some(), "still waiting");
+}
+
 /// The item links its run and the run's workers, and its spend counts what they cost once.
 #[test]
 #[cfg_attr(windows, ignore = "Bots are off on Windows")]

@@ -533,6 +533,10 @@
           ],
           "type": "string"
         },
+        "optionAsMeta": {
+          "description": "On a Mac, Option in a terminal works as Meta, for the shell's Option-B and Option-F. Off, Option types the characters your keyboard layout puts on it, such as @, [ or | on many European layouts.",
+          "type": "boolean"
+        },
         "organizationDisplay": {
           "description": "Local is always shown. These display preferences are saved on this desktop. Showing or switching organizations never wakes a workspace.",
           "enum": [

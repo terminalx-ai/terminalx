@@ -343,7 +343,8 @@ pub(crate) const PHASE2_WORKSPACE_GROUPS: &str = "cloud.workspace-groups.v1";
 pub(crate) const PHASE2_AFFECTED_WORKSPACES: &str = "cloud.agent-logins.affected-workspaces.v1";
 pub(crate) const PHASE2_GENERAL_ACCESS: &str = "cloud.workspaces.general-access.v1";
 pub(crate) const PHASE2_PRECREATE_USAGE: &str = "cloud.workspaces.precreate-usage.v1";
-const PHASE2_FEATURES: [&str; 18] = [
+pub(crate) const PHASE2_ADMIN_SHARE: &str = "cloud.workspaces.admin-share.v1";
+const PHASE2_FEATURES: [&str; 20] = [
     PHASE2_EVENTS, PHASE2_PRESENCE, PHASE2_FOLLOW_REASSIGN, PHASE2_MENTIONS, PHASE2_RESTART_DETAILS,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_WEBHOOK_TRIGGER,
     "cloud.environment-info.v1",
@@ -353,7 +354,9 @@ const PHASE2_FEATURES: [&str; 18] = [
     "cloud.workspaces.access-request-copy.v1",
     PHASE2_AFFECTED_WORKSPACES,
     PHASE2_GENERAL_ACCESS,
+    PHASE2_ADMIN_SHARE,
     "cloud.workspaces.session-placement.v1",
+    "cloud.workspaces.transfer-to-local.v1",
     PHASE2_PRECREATE_USAGE,
     "cloud.desktop.v1",
 ];

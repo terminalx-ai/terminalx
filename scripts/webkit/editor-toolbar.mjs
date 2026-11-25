@@ -208,8 +208,9 @@ try {
     await page.evaluate(change => window.configureToolbar({ change }), change);
     for (const width of [700, 440, 360]) {
       await page.locator('#pane').evaluate((pane, width) => { pane.style.width = `${width}px`; }, width);
-      const badge = toolbar.getByTestId('file-status');
-      await badge.waitFor();
+      // The toolbar re-renders after configureToolbar returns (as below): until then the badge drawn is the last
+      // change's, A+41 where M+3−2 was set (a busy Linux runner). Read once the badge is this change's.
+      await toolbar.locator(`[data-testid=file-status][data-status=${status}]`).waitFor();
       const result = await toolbar.evaluate(toolbar => {
         const box = el => el.getBoundingClientRect();
         const badge = toolbar.querySelector('[data-testid=file-status]');

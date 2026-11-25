@@ -15,6 +15,7 @@ it("shows the checkpoint's files even when no tool reported an edit, and persist
   expect(await screen.findByRole("button", { name: "Keep" })).toBeDefined();
   expect(screen.getByText("shell-edit.ts")).toBeDefined();
   fireEvent.click(screen.getByRole("button", { name: "Keep" }));
+  fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Keep" }));
   await waitFor(() => expect(screen.queryByRole("button", { name: "Undo turn" })).toBeNull());
   expect(api.keepTurn).toHaveBeenCalledWith("session", "tab", 7);
   expect(screen.getByRole("status").textContent).toBe("Kept");
@@ -150,4 +151,40 @@ it("shows a viewer what a remote turn changed, with nothing to keep, undo or res
   expect(await screen.findByText("shell-edit.ts")).toBeDefined();
   expect(await screen.findByText("Undone")).toBeDefined();
   for (const name of ["Undo turn", "Keep", "Restore what Undo removed"]) expect(screen.queryByRole("button", { name })).toBeNull();
+});
+
+it("warns that Undo is about to expire for an unreviewed turn", async () => {
+  vi.mocked(api.turnCheckpoint).mockResolvedValue({ ...saved, expiresIn: 3 } as never);
+  card();
+  expect(await screen.findByText("Undo for this turn expires after 3 more turns in this workspace.")).toBeDefined();
+  expect(screen.getByRole("button", { name: "Undo turn" })).toBeDefined();
+});
+
+it("says the next turn when only one is left, and nothing once the turn is reviewed", async () => {
+  vi.mocked(api.turnCheckpoint).mockResolvedValue({ ...saved, expiresIn: 1 } as never);
+  card();
+  expect(await screen.findByText("Undo for this turn expires after the next turn in this workspace.")).toBeDefined();
+  cleanup();
+  vi.mocked(api.turnCheckpoint).mockResolvedValue({ ...saved, reviewed: true, expiresIn: 1 } as never);
+  card();
+  expect(await screen.findByText("Kept")).toBeDefined();
+  expect(screen.queryByText(/expires after/)).toBeNull();
+});
+
+it("asks before Keep, and says Undo goes with it", async () => {
+  card();
+  fireEvent.click(await screen.findByRole("button", { name: "Keep" }));
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByText("Keep turn 2's changes?")).toBeDefined();
+  expect(within(dialog).getByText("Undo for this turn will no longer be offered.")).toBeDefined();
+  expect(api.keepTurn).not.toHaveBeenCalled();
+});
+
+it("cancelling Keep leaves Undo available", async () => {
+  card();
+  fireEvent.click(await screen.findByRole("button", { name: "Keep" }));
+  fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(api.keepTurn).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: "Undo turn" })).toBeDefined();
 });

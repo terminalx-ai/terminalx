@@ -25,7 +25,7 @@ import { noteListedOrgRole, refreshAccountRoles, roleAskStamp } from "@/lib/acco
 import { isMultiOrg } from "@/lib/multiOrg";
 import { phaseOf, settled } from "@/lib/cloudCreate";
 import { reconcileCloudAttention } from "@/lib/cloudAttention";
-import { forgetDeletedCloudWorkspaces, isArchived, isOpen, machineRunning, machineStarting, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
+import { forgetDeletedCloudWorkspaces, isArchived, isOpen, machineReachable, machineRunning, machineStarting, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
 import { closeCloudConnection, noteCloudWorkspaceListed } from "@/lib/cloudConnections";
 import { purgeCloudMirrors } from "@/lib/cloudMirror";
 import { onAccessChanged } from "@/lib/cloudCollab";
@@ -346,7 +346,7 @@ const listedAt = new Map<string, number>();
  */
 function tellConnections(workspaces: readonly CloudWorkspaceListItem[], at: number) {
   for (const item of workspaces) {
-    noteCloudWorkspaceListed({ orgId: item.workspace.orgId, workspaceId: item.workspace.id }, { running: machineRunning(item), starting: machineStarting(item), at });
+    noteCloudWorkspaceListed({ orgId: item.workspace.orgId, workspaceId: item.workspace.id }, { running: machineRunning(item), starting: machineStarting(item), reachable: machineReachable(item), at });
   }
 }
 

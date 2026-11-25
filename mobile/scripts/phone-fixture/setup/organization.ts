@@ -16,6 +16,7 @@ import type { SetupHandler } from "./types";
  * | `with-workspaces` | Northwind with two workspaces, and the personal one half-way |
  * | `member` | a member of Northwind, which has no compute, and the personal one |
  * | `several` | the personal one, Northwind (owner, compute connected) and Acme (member) |
+ * | `begun-elsewhere` | Northwind with two workspaces, the personal one with nothing, and Demo with Boat and Codex connected |
  * | `no-route` | `first-run` on a server that does not take creation from a phone |
  *
  * `fixtureCreate: slow` answers a creation after 20 s, `fixtureCreate: fail`
@@ -24,6 +25,7 @@ import type { SetupHandler } from "./types";
 const PERSONAL = { orgId: "org-personal", name: "Personal (alex@example.com)", role: "owner", isPersonal: true };
 const NORTHWIND = (role: string) => ({ orgId: "org-northwind", name: "Northwind", role });
 const ACME = { orgId: "org-acme", name: "Acme", role: "member" };
+const DEMO = { orgId: "org-demo", name: "Demo", role: "owner" };
 
 const MINUTE = 60_000;
 const started = Date.now();
@@ -57,7 +59,8 @@ const codex = { id: "cred-codex", provider: "codex", authKind: "api-key", finger
 function workspace(orgId: string, id: string, name: string, state: string, idleMinutes: number, repository: string) {
   return {
     workspace: {
-      id, orgId, name, provider: "box", providerDescriptor: { label: "Boat" }, state, accessMode: "organization",
+      // As the account service sends a workspace: its provider by id only. The row names it from the provider list (PRO-566).
+      id, orgId, name, provider: "box", state, accessMode: "organization",
       you: { role: "manager", canApprove: true, canManageShares: true }, sharedWith: 0, createdBy: "fixture", lastActivityAt: Date.now() - idleMinutes * MINUTE,
       runtimeActivity: null, repositories: [{ identity: repository, fullName: repository, primary: true }],
     },
@@ -79,6 +82,11 @@ function account(state: string): Account | null {
       const northwind = NORTHWIND("owner");
       return { ...base, organizations: [northwind, PERSONAL], compute: { [northwind.orgId]: "connected", [PERSONAL.orgId]: "connected" }, codex: [northwind.orgId],
         workspaces: { [northwind.orgId]: [workspace(northwind.orgId, "ws-checkout", "Checkout redesign", "provisioning", 0, "acme/app"), workspace(northwind.orgId, "ws-billing", "Billing export", "suspended", 2 * 24 * 60, "northwind/api")] } };
+    }
+    case "begun-elsewhere": {
+      const northwind = NORTHWIND("owner");
+      return { ...base, organizations: [northwind, PERSONAL, DEMO], compute: { [northwind.orgId]: "connected", [DEMO.orgId]: "connected" }, codex: [northwind.orgId, DEMO.orgId],
+        workspaces: { [northwind.orgId]: [workspace(northwind.orgId, "ws-checkout", "Checkout redesign", "ready", 0, "acme/app"), workspace(northwind.orgId, "ws-billing", "Billing export", "suspended", 2 * 24 * 60, "northwind/api")] } };
     }
     case "member": return { ...base, organizations: [NORTHWIND("member"), PERSONAL] };
     case "several": return { ...base, organizations: [PERSONAL, NORTHWIND("owner"), ACME], compute: { "org-northwind": "connected" } };

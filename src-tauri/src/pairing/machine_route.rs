@@ -68,20 +68,24 @@ pub(super) enum RuntimeRelay {
     /// while ([`super::relay`]'s `RUNTIME_WAIT`) rather than take the host id
     /// from it, which the relay would only close again.
     Connecting,
+    /// The runtime lost or was refused its registration and registers again,
+    /// at `refused.retry_at` when the relay refused it. The window waits for
+    /// it as for [`Self::Connecting`] when that is soon (#1579): registering
+    /// between two attempts seconds apart only has the window's registration
+    /// retired by the runtime's next one.
+    Retrying { refused: Option<wire::RelayRefusal> },
     /// The window uses this registration for its phones.
     Registered(wire::RelayRegistration),
 }
 
 /// What the window does about the runtime's relay registration in `status`.
-/// A runtime that lost or was refused its registration (`retrying`) is not
-/// waited for: the window registers itself until the runtime's registration
-/// retires it.
 fn runtime_relay(status: Option<&Status>) -> RuntimeRelay {
     let Some(status) = status.filter(|status| status.hosting()) else { return RuntimeRelay::Off };
     match (status.relay_state, &status.relay) {
         (wire::RelayState::Registered, Some(registration)) => RuntimeRelay::Registered(registration.clone()),
         (wire::RelayState::Registered | wire::RelayState::Connecting, _) => RuntimeRelay::Connecting,
-        (wire::RelayState::Off | wire::RelayState::SignedOut | wire::RelayState::Retrying | wire::RelayState::Superseded, _) => RuntimeRelay::Off,
+        (wire::RelayState::Retrying, _) => RuntimeRelay::Retrying { refused: status.relay_refused.clone() },
+        (wire::RelayState::Off | wire::RelayState::SignedOut | wire::RelayState::Superseded, _) => RuntimeRelay::Off,
     }
 }
 
@@ -110,6 +114,7 @@ impl MachineSide {
             runs_as: None,
             relay_state: wire::RelayState::Off,
             relay: None,
+            relay_refused: None,
         });
     }
 
@@ -197,8 +202,13 @@ impl PairingManager {
             log::info!("the runtime's relay registration is now {}", match relay {
                 RuntimeRelay::Off => "off",
                 RuntimeRelay::Connecting => "connecting",
+                RuntimeRelay::Retrying { refused: None } => "retrying",
+                RuntimeRelay::Retrying { refused: Some(_) } => "refused by Relay",
                 RuntimeRelay::Registered(_) => "registered",
             });
+            if let RuntimeRelay::Retrying { refused: Some(refusal) } = relay {
+                self.runtime_relay_refused(refusal);
+            }
         }
         // The runtime found no session to register with while this window
         // is signed in: give it this one (an app updated with the switch on).
@@ -462,6 +472,7 @@ mod tests {
             runs_as: None,
             relay_state: wire::RelayState::Off,
             relay: None,
+            relay_refused: None,
         };
         side.status = Some(status(false));
         assert!(!side.runtime_owns_direct());
@@ -500,6 +511,7 @@ mod tests {
             runs_as: None,
             relay_state,
             relay,
+            relay_refused: None,
         };
         assert_eq!(runtime_relay(None), RuntimeRelay::Off, "no runtime said anything");
         assert_eq!(
@@ -509,9 +521,13 @@ mod tests {
         assert_eq!(runtime_relay(Some(&status(true, wire::RelayState::Connecting, None))), RuntimeRelay::Connecting);
         // Registered, but its registration is not in the status yet.
         assert_eq!(runtime_relay(Some(&status(true, wire::RelayState::Registered, None))), RuntimeRelay::Connecting);
-        for state in [wire::RelayState::Off, wire::RelayState::SignedOut, wire::RelayState::Retrying, wire::RelayState::Superseded] {
+        for state in [wire::RelayState::Off, wire::RelayState::SignedOut, wire::RelayState::Superseded] {
             assert_eq!(runtime_relay(Some(&status(true, state, None))), RuntimeRelay::Off, "{state:?}: the window registers itself");
         }
+        assert_eq!(runtime_relay(Some(&status(true, wire::RelayState::Retrying, None))), RuntimeRelay::Retrying { refused: None });
+        let refusal = wire::RelayRefusal { code: 4401, reason: Some("relay_unknown_control_message".into()), refusals: 3, retry_at: 9 };
+        let refused = Status { relay_refused: Some(refusal.clone()), ..status(true, wire::RelayState::Retrying, None) };
+        assert_eq!(runtime_relay(Some(&refused)), RuntimeRelay::Retrying { refused: Some(refusal) }, "the window learns why");
         // Switched off: whatever it last said about the relay.
         assert_eq!(runtime_relay(Some(&status(false, wire::RelayState::Registered, Some(registration)))), RuntimeRelay::Off);
     }

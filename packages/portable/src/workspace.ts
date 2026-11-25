@@ -89,7 +89,7 @@ export const WORKSPACE_DETAILS_RESOURCE_INTERVAL_MS = 10_000;
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "composer/5", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1", "follow-ups/1", "bots/1", "cloud-desktop/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "composer/5", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1", "follow-ups/1", "bots/1", "cloud-desktop/1", "workspace-transfer/3"] as const;
 /**
  * Offered only by a runtime that serves every project of its machine (docs/MACHINES.md).
  * `machine/3` (PRO-354): `machine.updateStatus`, `machine.update` and the
@@ -160,6 +160,9 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "runtime.agents": "agents/1",
   "environment.report": "environment/1",
   "environment.cancel": "environment/1",
+  "transfer.open": "workspace-transfer/3",
+  "transfer.read": "workspace-transfer/3",
+  "transfer.close": "workspace-transfer/3",
   "desktop.open": "cloud-desktop/1",
   "desktop.write": "cloud-desktop/1",
   "desktop.ack": "cloud-desktop/1",
@@ -280,6 +283,12 @@ export type WorkspaceConnectionState =
   | { state: "idle" | "opening" | "waitingForRuntime" | "suspended" | "updateRequired" | "stopped" }
   | { state: "connecting"; attempt: number }
   | { state: "reconnecting"; attempt: number; reason: string; retryInMs: number }
+  /**
+   * The workspace cannot be reached as it stands: it needs attention (its
+   * machine is gone, a resume failed) or it was deleted. `reason` is that
+   * workspace state. Nothing is retried until the state changes (#1582).
+   */
+  | { state: "unavailable"; reason: string }
   | {
       state: "connected";
       runtimeGeneration: number;
@@ -505,6 +514,8 @@ export interface RemoteTurnCheckpoint {
   restored?: boolean;
   backupRef?: string | null;
   unavailableReason?: string | null;
+  /** An unreviewed turn whose Undo is about to expire: how many more turns in this workspace it lasts. */
+  expiresIn?: number | null;
 }
 
 /** An undo or restore of a turn: refused with what it would overwrite, and the token that confirms it. */
@@ -2270,7 +2281,7 @@ export class WorkspaceRpcClient {
   private connected(withinMs: number): Promise<void> {
     if (this.state.state === "connected") return new Promise((resolve) => setTimeout(resolve, 50));
     // Nothing reconnects from these on its own; do not hold input for them.
-    if (["suspended", "stopped", "updateRequired"].includes(this.state.state)) {
+    if (["suspended", "unavailable", "stopped", "updateRequired"].includes(this.state.state)) {
       return Promise.reject(new Error(`Workspace runtime is ${this.state.state}`));
     }
     return new Promise((resolve, reject) => {
@@ -2282,7 +2293,7 @@ export class WorkspaceRpcClient {
         // The drop turned out to be a stop (or an end): what was waiting to
         // be resent is refused now. It must never be sent when the workspace
         // is woken later, least of all terminal input typed before the stop.
-        if (["suspended", "stopped", "updateRequired"].includes(state.state)) {
+        if (["suspended", "unavailable", "stopped", "updateRequired"].includes(state.state)) {
           clearTimeout(timer);
           queueMicrotask(stop);
           reject(new Error(`Workspace runtime is ${state.state}`));

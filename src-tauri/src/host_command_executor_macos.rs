@@ -1,4 +1,6 @@
-use super::super::{ExecutionOutcome, ExecutionSlot, Rejection, Request, RequestInput, State};
+use super::super::{
+    approved_program, ExecutionOutcome, ExecutionSlot, Rejection, Request, RequestInput, State,
+};
 #[cfg(test)]
 use super::GroupEvent;
 use std::ffi::{c_char, c_int, c_short, c_uint, c_ulong, c_void, CString};
@@ -10,16 +12,38 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
 use std::ptr;
-use std::sync::mpsc::SyncSender;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, SyncSender};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
-const CLEANUP_GRACE: Duration = Duration::from_millis(100);
+const MAX_REAPER_CHILDREN: usize = 16;
+const CLEANUP_GRACE: Duration = Duration::from_millis(750);
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+
+const COMMAND_PATH: &std::ffi::CStr = c"PATH=/usr/bin:/bin";
+
+/// The only substituted value is an executor-owned allow-list constant.
+/// dyld needs to inspect the root directory and read its shared cache and
+/// system libraries. The allowed programs need no workspace file access.
+fn sandbox_profile(program: &'static str) -> String {
+    format!(
+        r#"(version 1)
+(deny default)
+(allow process-exec (literal "{program}"))
+(allow file-read*
+    (literal "/" "{program}")
+    (subpath "/usr/lib")
+    (subpath "/System/Library/dyld")
+    (subpath "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld"))"#
+    )
+}
 
 pub(in super::super) struct ApprovedPaths {
     cwd: File,
+    program: &'static str,
     // Holding the file keeps its inode from being recycled between approval and spawn.
     _executable: File,
     executable_version: Metadata,
@@ -28,9 +52,11 @@ pub(in super::super) struct ApprovedPaths {
 impl ApprovedPaths {
     pub(in super::super) fn open(input: &RequestInput) -> Result<Self, Rejection> {
         let cwd = open(&input.cwd, O_DIRECTORY).map_err(|_| Rejection::InvalidDirectory)?;
-        let (executable, metadata) = protected_system_executable(&input.executable)?;
+        let program = approved_program(input)?;
+        let (executable, metadata) = protected_system_executable(program)?;
         Ok(Self {
             cwd,
+            program,
             _executable: executable,
             executable_version: metadata,
         })
@@ -44,12 +70,12 @@ impl ApprovedPaths {
         Ok(())
     }
 
-    fn verify_executable(&self, input: &RequestInput) -> Result<(), Rejection> {
+    fn verify_executable(&self) -> Result<(), Rejection> {
         // Both paths stay on the protected system mount. The sandbox wrapper
         // installs a no-fork policy, then replaces itself with the approved
         // program in the new session. There is no unsandboxed launch path.
         protected_system_executable(SANDBOX_EXEC)?;
-        let (_, current) = protected_system_executable(&input.executable)?;
+        let (_, current) = protected_system_executable(self.program)?;
         if file_version(&self.executable_version) != file_version(&current) {
             return Err(Rejection::ExecutableUnavailable);
         }
@@ -144,23 +170,30 @@ pub(in super::super) fn run(
     sender: SyncSender<ExecutionOutcome>,
     slot: ExecutionSlot<'_>,
 ) {
-    let (outcome, pending_cleanup) = match launch(request, paths) {
+    let (mut outcome, pending_cleanup) = match launch(request, paths) {
         Ok((mut process, started_at)) => {
             let output = process.collect(request, started_at);
-            let state = request.finish(match &output {
-                Ok(_) => State::Completed,
-                Err(state) => *state,
-            });
             let outcome = match output {
-                Ok((status, stdout, stderr)) if state == State::Completed => {
-                    ExecutionOutcome::Exited {
-                        code: status.code(),
-                        signal: status.signal(),
-                        stdout,
-                        stderr,
+                // The allow-listed tools cannot emit the wrapper's diagnostic prefix.
+                Ok((status, _, stderr))
+                    if !status.success() && stderr.starts_with(b"sandbox-exec:") =>
+                {
+                    ExecutionOutcome::Stopped(request.finish(State::SpawnFailed))
+                }
+                Ok((status, stdout, stderr)) => {
+                    let state = request.finish(State::Completed);
+                    if state == State::Completed {
+                        ExecutionOutcome::Exited {
+                            code: status.code(),
+                            signal: status.signal(),
+                            stdout,
+                            stderr,
+                        }
+                    } else {
+                        process.withheld(state)
                     }
                 }
-                _ => ExecutionOutcome::Stopped(state),
+                Err(reason) => process.withheld(request.finish(reason)),
             };
             process.close_pipes();
             (outcome, Some(process))
@@ -168,21 +201,10 @@ pub(in super::super) fn run(
         Err(state) => (ExecutionOutcome::Stopped(request.finish(state)), None),
     };
 
-    // Usually the group drains before result delivery. If the OS delays cleanup, deliver the
-    // terminal result on time while this worker retains the group and the only execution slot.
-    let mut process = pending_cleanup;
-    if let Some(child) = &mut process {
-        let started = Instant::now();
-        while child.pid.is_some() && started.elapsed() < CLEANUP_GRACE {
-            if child.cleanup_step().is_none() && child.pid.is_some() {
-                thread::sleep(POLL_INTERVAL);
-            }
-        }
-        if child.pid.is_some() {
-            let _ = sender.send(outcome);
-            drop(process);
-            drop(slot);
-            return;
+    if let Some(mut child) = pending_cleanup {
+        child.bounded_cleanup();
+        if let ExecutionOutcome::LaunchedWithOutputWithheld { reason, .. } = outcome {
+            outcome = child.withheld(reason);
         }
     }
     drop(slot);
@@ -193,22 +215,24 @@ fn launch(request: &Request, paths: ApprovedPaths) -> Result<(Process, Instant),
     // Prepare OS inputs outside the authority lock. The final state/clock check occurs after
     // preparation and directly before posix_spawn, while holding the same lock as revocation.
     let launch = Launch::prepare(request.input(), &paths).map_err(|_| State::SpawnFailed)?;
-    paths
-        .verify_directory(request.input())
-        .map_err(|_| State::SpawnFailed)?;
 
     #[cfg(test)]
     if let Some(before_spawn) = &request.policy.test_before_spawn {
         before_spawn();
     }
 
-    let mut registry = request.policy.lock().map_err(|_| State::Revoked)?;
-    let entry = request
-        .checked(&mut registry, State::Starting)
+    let registry = request.policy.lock().map_err(|_| State::Revoked)?;
+    let mut entry = request
+        .checked(&registry, State::Starting)
         .map_err(|_| State::Revoked)?;
     paths
-        .verify_executable(request.input())
+        .verify_directory(request.input())
         .map_err(|_| State::SpawnFailed)?;
+    paths.verify_executable().map_err(|_| State::SpawnFailed)?;
+    // Path verification performs syscalls. Check the clock again at the spawn boundary.
+    if request.policy.now_ms() >= entry.expires_at_ms {
+        return Err(State::ExpiredBeforeLaunch);
+    }
     let started_at = Instant::now();
     let process = launch
         .spawn(
@@ -233,13 +257,8 @@ struct Launch {
 
 impl Launch {
     fn prepare(input: &RequestInput, paths: &ApprovedPaths) -> io::Result<Self> {
-        // The executable spelling was validated when approval was prepared.
-        // Limit runtime exec to the approved image as well as forbidding fork.
-        let profile = format!(
-            "(version 1) (allow default) (deny process-fork) (deny process-exec) (allow process-exec (literal \"{}\"))",
-            input.executable,
-        );
-        let arguments = [SANDBOX_EXEC, "-p", &profile, input.executable.as_str()]
+        let profile = sandbox_profile(paths.program);
+        let arguments = [SANDBOX_EXEC, "-p", &profile, paths.program]
             .into_iter()
             .chain(input.arguments.iter().map(String::as_str))
             .map(|arg| CString::new(arg.as_bytes()))
@@ -290,7 +309,8 @@ impl Launch {
         self,
         #[cfg(test)] group_events: Option<std::sync::Arc<std::sync::Mutex<Vec<GroupEvent>>>>,
     ) -> io::Result<Process> {
-        let envp = [ptr::null()];
+        let reaper = ReaperPermit::reserve()?;
+        let envp = [COMMAND_PATH.as_ptr(), ptr::null()];
         let mut pid = 0;
         // SAFETY: strings and null-terminated pointer vectors live through the call. The
         // initialized spawn objects and source FDs remain live until posix_spawn returns.
@@ -306,6 +326,9 @@ impl Launch {
         }
         Ok(Process {
             pid: Some(pid),
+            exit_status: None,
+            cleanup_attempted: false,
+            reaper: Some(reaper),
             stdout: Some(self.stdout),
             stderr: Some(self.stderr),
             #[cfg(test)]
@@ -316,6 +339,9 @@ impl Launch {
 
 struct Process {
     pid: Option<c_int>,
+    exit_status: Option<ExitStatus>,
+    cleanup_attempted: bool,
+    reaper: Option<ReaperPermit>,
     stdout: Option<PipeReader>,
     stderr: Option<PipeReader>,
     #[cfg(test)]
@@ -357,6 +383,14 @@ impl Process {
         }
     }
 
+    fn withheld(&self, reason: State) -> ExecutionOutcome {
+        ExecutionOutcome::LaunchedWithOutputWithheld {
+            code: self.exit_status.and_then(|status| status.code()),
+            signal: self.exit_status.and_then(|status| status.signal()),
+            reason,
+        }
+    }
+
     fn close_pipes(&mut self) {
         self.stdout = None;
         self.stderr = None;
@@ -373,7 +407,9 @@ impl Process {
                     self.pid = None;
                     #[cfg(test)]
                     self.record(GroupEvent::Reaped(pid));
-                    return Some(ExitStatus::from_raw(status));
+                    let status = ExitStatus::from_raw(status);
+                    self.exit_status = Some(status);
+                    return Some(status);
                 }
                 if result < 0 && io::Error::last_os_error().raw_os_error() == Some(ECHILD) {
                     self.pid = None;
@@ -401,14 +437,110 @@ impl Process {
     }
 }
 
-impl Drop for Process {
-    fn drop(&mut self) {
-        self.close_pipes();
-        while self.pid.is_some() {
+impl Process {
+    fn bounded_cleanup(&mut self) {
+        if std::mem::replace(&mut self.cleanup_attempted, true) {
+            return;
+        }
+        let started = Instant::now();
+        // A stuck OS cleanup must not strand the execution slot. After this
+        // budget we stop polling and never signal this group again.
+        while self.pid.is_some() && started.elapsed() < CLEANUP_GRACE {
             self.cleanup_step();
             if self.pid.is_some() {
                 thread::sleep(POLL_INTERVAL);
             }
+        }
+    }
+}
+
+struct ReaperPermit {
+    queue: &'static SyncSender<ReapRequest>,
+}
+
+static REAPER_QUEUE: OnceLock<io::Result<SyncSender<ReapRequest>>> = OnceLock::new();
+static OWNED_CHILDREN: AtomicUsize = AtomicUsize::new(0);
+
+impl ReaperPermit {
+    fn reserve() -> io::Result<Self> {
+        // Start the one fallible worker before spawning a child. Drop then
+        // needs only an already-reserved queue slot and never starts a thread.
+        let queue = REAPER_QUEUE.get_or_init(|| {
+            let (sender, receiver) = mpsc::sync_channel(MAX_REAPER_CHILDREN);
+            thread::Builder::new()
+                .name("host-command-reaper".into())
+                .spawn(move || reap_children(receiver))?;
+            Ok(sender)
+        });
+        let queue = queue
+            .as_ref()
+            .map_err(|error| io::Error::new(error.kind(), "could not start host command reaper"))?;
+        if OWNED_CHILDREN.fetch_add(1, Ordering::AcqRel) >= MAX_REAPER_CHILDREN {
+            OWNED_CHILDREN.fetch_sub(1, Ordering::AcqRel);
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "host command cleanup is at capacity",
+            ));
+        }
+        Ok(Self { queue })
+    }
+}
+
+impl Drop for ReaperPermit {
+    fn drop(&mut self) {
+        OWNED_CHILDREN.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+struct ReapRequest {
+    pid: c_int,
+    _permit: ReaperPermit,
+    #[cfg(test)]
+    events: Option<std::sync::Arc<std::sync::Mutex<Vec<GroupEvent>>>>,
+}
+
+fn reap_children(receiver: mpsc::Receiver<ReapRequest>) {
+    let mut waiting: Vec<ReapRequest> = Vec::with_capacity(MAX_REAPER_CHILDREN);
+    loop {
+        if waiting.is_empty() {
+            let Ok(child) = receiver.recv() else { break };
+            waiting.push(child);
+        } else if let Ok(child) = receiver.recv_timeout(POLL_INTERVAL) {
+            waiting.push(child);
+        }
+        waiting.retain(|child| {
+            let mut status = 0;
+            // SAFETY: the queue took exclusive ownership of this child.
+            // No group signal is sent from the reaper.
+            let result = unsafe { waitpid(child.pid, &mut status, WNOHANG) };
+            if result == child.pid {
+                #[cfg(test)]
+                if let Some(events) = &child.events {
+                    if let Ok(mut events) = events.lock() {
+                        events.push(GroupEvent::Reaped(child.pid));
+                    }
+                }
+                return false;
+            }
+            result == 0 || io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
+        });
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        self.close_pipes();
+        self.bounded_cleanup();
+        if let (Some(pid), Some(permit)) = (self.pid.take(), self.reaper.take()) {
+            let queue = permit.queue;
+            // Every child holds a permit from before spawn. Therefore the
+            // queue, whose capacity matches the permit count, has room.
+            let _ = queue.try_send(ReapRequest {
+                pid,
+                _permit: permit,
+                #[cfg(test)]
+                events: self.group_events.take(),
+            });
         }
     }
 }
@@ -604,4 +736,141 @@ unsafe extern "C" {
     fn posix_spawnattr_destroy(attributes: *mut *mut c_void) -> c_int;
     fn posix_spawnattr_setsigmask(attributes: *const *mut c_void, mask: *const c_uint) -> c_int;
     fn posix_spawnattr_setflags(attributes: *const *mut c_void, flags: c_short) -> c_int;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn leader_is_reaped_after_cleanup_hands_off_to_background() {
+        let mut input = super::super::super::tests::input("background-reap");
+        input.executable = "/bin/sleep".into();
+        input.arguments = vec!["2".into()];
+        let paths = ApprovedPaths::open(&input).unwrap();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = Launch::prepare(&input, &paths)
+            .unwrap()
+            .spawn(Some(events.clone()))
+            .unwrap();
+        let pid = process.pid.unwrap();
+        process.cleanup_step();
+        // Force the same transfer as an exhausted cleanup budget.
+        process.cleanup_attempted = true;
+        drop(process);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if events.lock().unwrap().last() == Some(&GroupEvent::Reaped(pid)) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background worker did not reap the leader"
+            );
+            thread::sleep(POLL_INTERVAL);
+        }
+        assert_eq!(
+            *events.lock().unwrap(),
+            [GroupEvent::Signal(pid), GroupEvent::Reaped(pid)]
+        );
+    }
+
+    #[test]
+    fn sandbox_denies_loopback_network() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        let arguments = ["-z", "-v", "-G", "1", "127.0.0.1", &port];
+        let baseline = Command::new("/usr/bin/nc")
+            .args(arguments)
+            .env_clear()
+            .output()
+            .unwrap();
+        assert!(baseline.status.success());
+        let blocked = Command::new(SANDBOX_EXEC)
+            .args(["-p", &sandbox_profile("/usr/bin/nc"), "/usr/bin/nc"])
+            .args(arguments)
+            .env_clear()
+            .output()
+            .unwrap();
+        assert_eq!(blocked.status.code(), Some(1));
+        let error = String::from_utf8_lossy(&blocked.stderr);
+        assert!(error.contains("Operation not permitted"), "{error}");
+    }
+
+    #[test]
+    fn sandbox_denies_fork() {
+        // This harmless shell is a probe only. Production never admits shells.
+        let blocked = Command::new(SANDBOX_EXEC)
+            .args(["-p", &sandbox_profile("/bin/bash"), "/bin/bash"])
+            .args(["--noprofile", "--norc", "-c", "printf child & wait"])
+            .env_clear()
+            .current_dir("/")
+            .output()
+            .unwrap();
+        assert!(!blocked.status.success());
+        assert!(blocked.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&blocked.stderr).contains("fork: Operation not permitted"));
+    }
+
+    #[test]
+    fn spawned_child_receives_only_the_fixed_path() {
+        let mut input = super::super::super::tests::input("env-probe");
+        let mut paths = ApprovedPaths::open(&input).unwrap();
+        // Use the actual launcher with a test-only probe image.
+        paths.program = "/usr/bin/env";
+        input.arguments.clear();
+        let mut process = Launch::prepare(&input, &paths)
+            .unwrap()
+            .spawn(None)
+            .unwrap();
+        let started = Instant::now();
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        while process.stdout.is_some() || process.stderr.is_some() {
+            assert!(started.elapsed() < Duration::from_secs(2));
+            drain(&mut process.stdout, &mut stdout, 128).unwrap();
+            drain(&mut process.stderr, &mut stderr, 128).unwrap();
+            thread::sleep(POLL_INTERVAL);
+        }
+        process.bounded_cleanup();
+        assert!(process.exit_status.is_some_and(|status| status.success()));
+        assert_eq!(stdout, b"PATH=/usr/bin:/bin\n");
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn sandbox_denies_local_file_access_and_unapproved_exec() {
+        let fixture = std::env::temp_dir().join(format!("pro220-sandbox-{}", std::process::id()));
+        std::fs::create_dir(&fixture).unwrap();
+        let existing = fixture.join("synthetic-secret");
+        let missing = fixture.join("must-not-be-created");
+        std::fs::write(&existing, b"synthetic fixture").unwrap();
+        let cat = Command::new(SANDBOX_EXEC)
+            .args(["-p", &sandbox_profile("/bin/cat"), "/bin/cat"])
+            .arg(&existing)
+            .env_clear()
+            .output();
+        let touch = Command::new(SANDBOX_EXEC)
+            .args(["-p", &sandbox_profile("/usr/bin/touch"), "/usr/bin/touch"])
+            .arg(&missing)
+            .env_clear()
+            .output();
+        let exec = Command::new(SANDBOX_EXEC)
+            .args(["-p", &sandbox_profile("/usr/bin/printf"), "/usr/bin/true"])
+            .env_clear()
+            .output();
+        let wrote = missing.exists();
+        std::fs::remove_dir_all(fixture).unwrap();
+        let cat = cat.unwrap();
+        let touch = touch.unwrap();
+        let exec = exec.unwrap();
+        assert_eq!(cat.status.code(), Some(1));
+        assert!(cat.stdout.is_empty());
+        assert!(cat.stderr.starts_with(b"cat: "));
+        assert_eq!(touch.status.code(), Some(1));
+        assert!(touch.stderr.starts_with(b"touch: "));
+        assert!(!wrote);
+        assert!(!exec.status.success());
+        assert!(exec.stderr.starts_with(b"sandbox-exec:"));
+    }
 }

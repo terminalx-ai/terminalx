@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { RefreshControl, ScrollView, StyleSheet, View } from "react-native";
-import { Stack, useFocusEffect, useRouter } from "expo-router";
+import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { SETUP_TEXT, setupView, type SetupStepKey } from "@mobile/cloud/setup";
@@ -19,6 +19,10 @@ import { useTheme } from "@mobile/ui/theme";
  * The steps of the organization being set up, on a page of their own (25.01):
  * opened from its folded row on the Cloud tab, once other organizations have
  * workspaces and the tab is their list. The same card, read the same way.
+ * The row says which organization (`orgId`): the one this phone chose, one
+ * whose setup the server holds (PRO-569), or one picked from the
+ * organizations with no workspaces (PRO-561). Opened with none, it is the
+ * one this phone chose.
  */
 export default function SetupStepsScreen() {
   const app = useApp();
@@ -28,10 +32,12 @@ export default function SetupStepsScreen() {
   const snapshot = useCatalogSnapshot(catalog);
   const { palette } = useTheme();
   const insets = useSafeAreaInsets();
+  const params = useLocalSearchParams<{ orgId?: string }>();
   const choice = useSetupChoice(app.ready === false ? undefined : app.session?.user.userId ?? null);
   const { store, setups } = useOrganizationSetups(catalog);
-  const organization = snapshot.organizations.find((entry) => entry.organization.orgId === choice.orgId)?.organization ?? null;
-  const orgId = snapshot.organizations.some((entry) => entry.organization.orgId === choice.orgId) ? choice.orgId : null;
+  const wanted = params.orgId ?? choice.orgId;
+  const organization = snapshot.organizations.find((entry) => entry.organization.orgId === wanted)?.organization ?? null;
+  const orgId = wanted && snapshot.organizations.some((entry) => entry.organization.orgId === wanted) ? wanted : null;
   const read = useCallback(() => Promise.all([catalog?.refresh(), orgId ? store?.read(orgId) : undefined]), [catalog, orgId, store]);
   useFocusEffect(useCallback(() => { void read(); }, [read]));
   const pull = usePullRefresh(read);

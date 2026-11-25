@@ -41,7 +41,11 @@ SELECTED = {
 }
 ANSWERS = ["required", "rust", "frontend", "phone", "mac-webkit", "machines"]
 # Only these may take a macOS runner.
+MACOS_NATIVE = {"macos-native"}
 MACOS = {"macos-native", "machine-compat", "webkit-mac-only"}
+# A pull request is not held to these (the owner's decisions, 24 November 2026, and for machine-compat 25 November
+# 2026): `check` does not need them, and `check-macos` holds every other run to them.
+NOT_HELD = ["macos-native", "machine-compat", "webkit-mac-only"]
 # The WebKit layout checks: the Linux parts, the required status that stands for them, and the mac-only ones.
 WEBKIT_PARTS = ["1", "2", "3", "4"]
 WEBKIT_PART_RUN = "node scripts/webkit/run-all.mjs --shard ${{ matrix.part }}/4"
@@ -53,6 +57,31 @@ VITEST_PARTS = ["1", "2", "3", "4"]
 LOCK = "${{ hashFiles('src-tauri/Cargo.lock') }}"
 CACHE_MISS = "!endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock'))"
 CLEAN = "cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental"
+# macos-native saves its cache before the tests, which need this crate's output: it cleans a clone and puts the build back.
+ASIDE = f'mv target "$RUNNER_TEMP/target"\ncp -cpR "$RUNNER_TEMP/target" target\n{CLEAN}\n'
+PUT_BACK = 'test -d "$RUNNER_TEMP/target"\nrm -rf target && mv "$RUNNER_TEMP/target" target\n'
+# A build of this crate's tests dates the crate's OUT_DIR files back (tauri::generate_context! writes them during the
+# compile), then proves a second cargo command finds every unit fresh. One script does it for both jobs that build
+# the desktop crate's tests: its commands, every line that is not a comment, and the call in each job.
+BUILD_ONCE = ROOT / "infra/ci-runners/cargo-build-once.sh"
+BUILD_ONCE_COMMANDS = [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    'if [ "$#" -eq 0 ]; then',
+    '  echo "usage: cargo-build-once.sh <cargo test target arguments>, for example --lib" >&2',
+    "  exit 2",
+    "fi",
+    'dir="${RUNNER_TEMP:-$(mktemp -d)}"',
+    'cargo test --locked "$@" --no-run --message-format=json-render-diagnostics > "$dir/build.jsonl"',
+    "out_dir=$(jq -r 'select(.reason == \"build-script-executed\" and (.package_id | test(\"[#/]raccoon@\"))) | .out_dir' \"$dir/build.jsonl\")",
+    'test -d "$out_dir"',
+    'find "$out_dir" -type f -exec touch -t 200001010000 {} +',
+    "cargo test --locked \"$@\" --no-run -v --message-format=json 2> \"$dir/fresh.log\" | jq -s -e '[.[] | select(.reason == \"compiler-artifact\")] | (length > 0) and all(.fresh)' || { sed -E 's/\\x1b\\[[0-9;]*m//g' \"$dir/fresh.log\" | grep -E '^ *Dirty' | cut -c1-600; exit 1; }",
+]
+BUILD_ONCE_CALLS = {
+    "macos-native": "../infra/ci-runners/cargo-build-once.sh --lib",
+    "linux-rust-tests": "../infra/ci-runners/cargo-build-once.sh --bins --test '*'",
+}
 # The cache each job restores. serve-tests builds what headless-serve builds: it restores that job's and saves none.
 CACHES = {
     "linux-rust": "linux-rust", "linux-rust-tests": "linux-rust-tests", "macos-native": "macos-native",
@@ -65,7 +94,17 @@ SERVE_ELSEWHERE = {
     "machine_compat": "machine-compat", "machines_e2e": "machines-e2e", "machine_routes": "machines-e2e",
     "local_issue_start": "headless-serve",
 }
+# The serve tests run under nextest's `ci` profile, all binaries at once; a binary without libtest's harness cannot be
+# listed by nextest and runs under `cargo test` in the same job.
+SERVE_NEXTEST = 'cargo nextest run --locked --profile ci --bins "${tests[@]}" 2>&1 | tee "$RUNNER_TEMP/nextest.log"'
+SERVE_CARGO = ROOT / "src-tauri/serve/Cargo.toml"
+FLAKY_SUMMARY = "grep -aE '^[[:space:]]*(FLAKY|LEAK)[[:space:]]' \"$RUNNER_TEMP/nextest.log\" | sort -u || echo \"none\""
 STAND_IN = "mkdir -p dist && printf '<!doctype html><title>TerminalX</title>\\n' > dist/index.html"
+
+
+def without_harness():
+    """The serve test binaries built with `harness = false`."""
+    return sorted(test["name"] for test in tomllib.loads(SERVE_CARGO.read_text()).get("test", []) if test.get("harness") is False)
 
 
 def cache_key(name, scope, lock=LOCK):
@@ -76,16 +115,16 @@ def load(path):
     return yaml.load(path.read_text(), Loader=yaml.BaseLoader)
 
 
-def gate_passes(workflow, needs):
+def gate_passes(workflow, needs, gate="check"):
     """Run the aggregate's own script against these job results."""
-    script = workflow["jobs"]["check"]["steps"][0]["run"]
+    script = workflow["jobs"][gate]["steps"][0]["run"]
     done = subprocess.run(["bash", "-c", script], env={**os.environ, "RESULTS": json.dumps(needs)}, capture_output=True)
     return done.returncode == 0
 
 
 def results(workflow, skipped=(), ended=None, **answers):
     """Every job succeeded and every answer was "true", but for the jobs `skipped` or `ended` otherwise and for `answers`."""
-    needs = {name: {"result": "success", "outputs": {}} for name in workflow["jobs"] if name != "check"}
+    needs = {name: {"result": "success", "outputs": {}} for name in workflow["jobs"]["check"]["needs"]}
     needs["macos-rust-changes"]["outputs"] = {answer: answers.get(answer, "true") for answer in ANSWERS}
     for name, result in {**{name: "skipped" for name in skipped}, **(ended or {})}.items():
         needs[name]["result"] = result
@@ -198,20 +237,53 @@ def validate_common(workflow):
                 assert calls and all(step["run"].count(option) == calls for option in ("Acquire::Retries=5", "Acquire::http::Timeout=30", "Acquire::https::Timeout=30")) and ("timeout-minutes" in step or "timeout-minutes" in job), "a package install without retries, a stall limit and a time limit of its own or its job's"
 
 
+def save_condition(clean):
+    """What a cache save's `if` must be: its clean step succeeded, and nothing else.
+
+    A save with the clean step's own `if` ran also when the clean failed, and saved this crate's output. A clean
+    step that runs after a failed test (`!cancelled()`) keeps its save running then too.
+    """
+    assert clean.get("id"), "the clean step before a cache save has an id"
+    prefix = "!cancelled() && " if clean.get("if", "").startswith("${{ !cancelled() && ") else ""
+    return f"${{{{ {prefix}steps.{clean['id']}.outcome == 'success' }}}}"
+
+
+def validate_saves(workflow):
+    """Every job that saves a cargo cache saves only after its clean step, the step right before, succeeded."""
+    saving = 0
+    for name, job in workflow["jobs"].items():
+        steps = job["steps"]
+        for i, step in enumerate(steps):
+            if "/save@" not in step.get("uses", ""):
+                continue
+            saving += 1
+            clean = steps[i - 1]
+            assert clean.get("name") == "Leave this crate's own output out of the cache", f"{name}: the save comes right after the clean step"
+            assert step.get("if") == save_condition(clean), f"{name}: the cache is saved only once its clean step succeeded"
+    assert saving == len(CACHES) - len(RESTORE_ONLY), "every job that keeps a cache saves it"
+
+
 def validate(workflow):
     validate_common(workflow)
+    validate_saves(workflow)
     assert set(workflow["on"]) == {"pull_request", "push", "schedule", "workflow_dispatch"}, "unexpected trigger"
     assert workflow["on"]["pull_request"] == "", "a pull request based on any branch runs CI"
     assert workflow["on"]["push"]["branches"] == ["main"], "push scope"
     assert workflow["env"]["CI_CACHE_SCOPE"] == CACHE_SCOPE, "cache trust scope"
     jobs = workflow["jobs"]
     assert {"check", "frontend", "webkit-layout"} <= jobs.keys(), "required status names"
-    assert set(jobs["check"]["needs"]) == jobs.keys() - {"check"}, "aggregate must require every job"
+    # A pull request is not held to the macOS Rust suite, the build against the released runtimes or the mac-only
+    # WebKit checks; every other run is, through check-macos.
+    assert set(jobs["check"]["needs"]) == jobs.keys() - {"check", "check-macos", *NOT_HELD}, "aggregate must require every job but the macOS jobs"
     assert jobs["check"]["if"] == "always()", "aggregate must report failures and cancellations"
+    held = jobs.get("check-macos")
+    assert held, "main, nightly and manual runs are held to the macOS jobs"
+    assert held["needs"] == ["check", *NOT_HELD] and held["if"] == "${{ always() && github.event_name != 'pull_request' }}", "main, nightly and manual runs are held to check and the macOS jobs"
+    assert held["runs-on"] == "ubuntu-latest" and "permissions" not in held and len(held["steps"]) == 1, "a gate and nothing else"
     gate = jobs["check"]["steps"][0]["run"]
     assert '$selector.result == "success"' in gate, "a skip is accepted on a failed selector's word"
     accepted = re.search(r"(\{[^{}]*\}) as \$selected", gate)
-    assert accepted and json.loads(accepted.group(1)) == SELECTED, "aggregate must reject every other skipped dependency"
+    assert accepted and json.loads(accepted.group(1)) == {name: answer for name, answer in SELECTED.items() if name not in NOT_HELD}, "aggregate must reject every other skipped dependency"
     assert '$selector.outputs[$selected[$job]] == "false"' in gate and "$selected[$job] != null" in gate, "a skip is accepted only on the selector's own answer"
     selector = jobs["macos-rust-changes"]
     assert set(selector["outputs"]) == set(ANSWERS), "the selector's answers"
@@ -222,7 +294,7 @@ def validate(workflow):
             assert job["needs"] == "macos-rust-changes", "selection dependency"
         elif name in {"check", "webkit-layout"}:
             assert job.get("if") == "always()", f"{name} must report a failed or cancelled part"
-        else:
+        elif name != "check-macos":
             assert "if" not in job, "a job the aggregate would see skipped"
         if name in {"macos-native", "machine-compat"}:
             assert job["concurrency"] == {
@@ -249,8 +321,8 @@ def validate(workflow):
                 if "/save@" in action:
                     assert restored and name not in RESTORE_ONLY, "save without a restore, or by a job that only restores"
                     assert inputs["key"] == "${{ steps.cargo-cache.outputs.cache-primary-key }}", "save must use restored scope"
-                    assert CACHE_MISS in step["if"], "a cache is saved only when none built from this lock file was restored"
-                    assert previous.get("run") == CLEAN and previous.get("if") == step["if"] and previous.get("working-directory") == "src-tauri", "a cache must not hold this crate's own output"
+                    assert CACHE_MISS in previous.get("if", ""), "a cache is saved only when none built from this lock file was restored"
+                    assert previous.get("run") == (ASIDE if name in MACOS_NATIVE else CLEAN) and previous.get("working-directory") == "src-tauri", "a cache must not hold this crate's own output"
                 else:
                     assert "/restore@" in action, "a cache action that saves by itself"
                     assert step["id"] == "cargo-cache", "cache step name"
@@ -279,6 +351,13 @@ def validate(workflow):
     assert any(s.get("run") == LIBRARY_PART and s.get("if") == "matrix.part != 'binaries'" for s in tests["steps"]), "the library's tests, every part"
     others = next((s for s in tests["steps"] if s.get("run", "").startswith("cargo test --locked --bins --test '*'\n")), None)
     assert others and others["if"] == "matrix.part == 'binaries'" and others["run"].split("\n")[:2] == ["cargo test --locked --bins --test '*'", "cargo test --locked --doc"], "the other test binaries and the doc tests"
+    # Built once: the step that runs them finds every unit fresh, because the build put the OUT_DIR dates back.
+    built = [i for i, s in enumerate(tests["steps"]) if s.get("run") == BUILD_ONCE_CALLS["linux-rust-tests"]]
+    assert len(built) == 1 and tests["steps"][built[0]].get("id") == "build" and tests["steps"][built[0]].get("if") == "matrix.part == 'binaries'" and tests["steps"][built[0]].get("working-directory") == "src-tauri", "binaries builds the other test binaries once, through cargo-build-once.sh"
+    assert built[0] < tests["steps"].index(others), "binaries builds before it runs the tests"
+    assert not any("--no-run" in s.get("run", "") for s in tests["steps"]), "binaries builds its tests through cargo-build-once.sh alone"
+    validate_build_once(BUILD_ONCE.read_text())
+    assert os.access(BUILD_ONCE, os.X_OK), "cargo-build-once.sh is run by its path"
     assert any(s.get("run") == "cargo test --locked --no-default-features --features local-ui --lib control::issue_tests" and s.get("if") == "matrix.part == 'binaries'" for s in tests["steps"]), "the local owner path without desktop features"
     nextest = next(s for s in tests["steps"] if s.get("name") == "Install cargo-nextest")
     assert re.fullmatch(r"\d+\.\d+\.\d+", nextest["env"]["NEXTEST_VERSION"]) and re.fullmatch(r"[0-9a-f]{64}", nextest["env"]["NEXTEST_SHA256"]), "cargo-nextest by version and checksum"
@@ -301,15 +380,23 @@ def validate(workflow):
     for steps in [rust, tests["steps"], native["steps"], jobs["serve-tests"]["steps"]]:
         assert any("command -v rg && command -v zsh" in s.get("run", "") for s in steps), "security fixtures must not skip missing tools"
     assert any(s.get("run") == "cargo test --locked" and s.get("if") == "${{ !cancelled() && steps.build.outcome == 'success' && github.event_name != 'pull_request' }}" for s in native["steps"]), "macOS full suite on main, nightly and manual runs"
-    assert any(s.get("run") == '"$BINARY" $(python3 ../infra/ci-runners/macos-rust.py --filters)' and s.get("env") == {"BINARY": "${{ steps.build.outputs.binary }}"} and s.get("if") == "${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'pull_request' }}" for s in native["steps"]), "the Apple-only and system-dependent tests on a selected pull request"
+    assert any(s.get("run") == "cargo test --locked --lib -- $(python3 ../infra/ci-runners/macos-rust.py --filters)" and s.get("if") == "${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'pull_request' }}" for s in native["steps"]), "the Apple-only and system-dependent tests on a selected pull request"
     # Clippy on every run of the job, a pull request's too, ahead of the tests; and a Clippy failure does not stop
     # the build or the suite: they wait only on the last step before Clippy, and nothing continues on error.
     after_helper = "${{ !cancelled() && steps.helper.outcome == 'success' }}"
     names = [s.get("run", "") for s in native["steps"]]
     clippy = [i for i, run in enumerate(names) if run.startswith("cargo clippy")]
-    build = next(i for i, run in enumerate(names) if run.startswith("cargo test --locked --lib --no-run --message-format=json-render-diagnostics > "))
-    # The build names the binary and a pull request runs it: another `cargo test` compiles the crate again.
-    assert 'echo "binary=$binary" >> "$GITHUB_OUTPUT"' in names[build] and 'test -x "$binary"' in names[build], "the build says which binary a pull request runs"
+    assert BUILD_ONCE_CALLS["macos-native"] in names, "the macOS build dates its OUT_DIR back and proves the next cargo command compiles nothing"
+    build = names.index(BUILD_ONCE_CALLS["macos-native"])
+    steps = native["steps"]
+    assert steps[build].get("working-directory") == "src-tauri" and steps[build].get("name") == "build the library's tests by themselves", "the macOS build of the library's tests"
+    # The cache is saved once the dependencies are built, before any test: a suite that fails or runs out of time
+    # still leaves it. The crate's own output is cleaned from a clone, and the build is put back for the tests.
+    save = next(i for i, s in enumerate(steps) if "/save@" in s.get("uses", ""))
+    tests = [i for i, s in enumerate(steps) if s.get("name", "").startswith("cargo test")]
+    assert tests and build < save - 1 and steps[save - 1].get("id") == "aside" and steps[save - 1]["if"].startswith("${{ !cancelled() && steps.build.outcome == 'success' && "), "the cache is saved right after the build"
+    assert steps[save + 1].get("run") == PUT_BACK and steps[save + 1].get("if") == "${{ !cancelled() && steps.aside.outcome != 'skipped' }}" and steps[save + 1].get("working-directory") == "src-tauri", "the build is put back after the save"
+    assert save + 1 < min(tests), "the cache is saved before the tests"
     assert [names[i] for i in clippy] == ["cargo clippy --locked --test serde_field_naming -- -D warnings", "cargo clippy --locked --all-targets -- -D warnings"] and max(clippy) < build, "both macOS Clippy runs, ahead of the tests"
     assert "if" not in native["steps"][clippy[0]] and native["steps"][clippy[1]].get("if") == after_helper, "macOS Clippy on a pull request too"
     assert native["steps"][build].get("if") == after_helper and native["steps"][build].get("id") == "build", "macOS builds the library's tests whenever it runs, also after a lint"
@@ -319,10 +406,25 @@ def validate(workflow):
     for check in ("swift test --package-path native/computer-use-macos", "node scripts/build-computer-macos.mjs"):
         assert any(s.get("run") == check and "if" not in s for s in native["steps"]), "the Swift tests and the helper build whenever macOS runs"
     # Every serve test binary runs somewhere: here, or in the job named for it.
+    serve_steps = jobs["serve-tests"]["steps"]
     serve = next(run for run in runs(jobs["serve-tests"]) if "tests/*.rs" in run)
-    left_out = re.search(r"^\s*([\w|]+)\) ;;$", serve, re.MULTILINE)
-    assert left_out and set(left_out.group(1).split("|")) == set(SERVE_ELSEWHERE), "serve-tests leaves out only the binaries another job runs"
-    assert '*) tests+=(--test "$name") ;;' in serve and 'cargo test --locked --bins "${tests[@]}"' in serve, "every other serve test binary"
+    left_out = re.findall(r"^\s*([\w|]+)\) ;;$", serve, re.MULTILINE)
+    assert len(left_out) == 2 and set(left_out[0].split("|")) == set(SERVE_ELSEWHERE), "serve-tests leaves out only the binaries another job runs"
+    # nextest lists a binary by running it with `--list`; one without libtest's harness cannot answer, so it runs
+    # under `cargo test` here, every one of them, whatever their number.
+    harnessless = without_harness()
+    assert sorted(left_out[1].split("|")) == harnessless, "nextest leaves out the serve binaries without libtest's harness, and only those"
+    for binary in harnessless:
+        assert any(s.get("run") == f"cargo test --locked --test {binary}" and s.get("working-directory") == "src-tauri/serve" and s.get("if") == "${{ !cancelled() }}" for s in serve_steps), f"{binary} has no libtest harness and serve-tests does not run it"
+    assert serve.startswith("set -o pipefail\n") and '*) tests+=(--test "$name") ;;' in serve and serve.rstrip("\n").endswith("\n" + SERVE_NEXTEST), "every other serve test binary, under nextest's ci profile"
+    # nextest as the library's parts install it, its summary and its JUnit report.
+    serve_install = next((s for s in serve_steps if s.get("name") == "Install cargo-nextest"), None)
+    assert serve_install and "if" not in serve_install and {k: v for k, v in serve_install.items()} == {k: v for k, v in nextest.items() if k != "if"}, "serve-tests installs the same nextest release, checked the same way"
+    assert serve_steps.index(serve_install) < next(i for i, s in enumerate(serve_steps) if s.get("run") == serve), "nextest is installed before the tests"
+    summary = next((s for s in serve_steps if s.get("name") == "Name the flaky and leaky tests in the summary"), None)
+    assert summary and FLAKY_SUMMARY in summary["run"] and '>> "$GITHUB_STEP_SUMMARY"' in summary["run"] and summary.get("if") == "${{ !cancelled() }}", "serve-tests names its flaky and leaky tests"
+    junit = [s for s in serve_steps if s.get("uses", "").startswith("actions/upload-artifact@")]
+    assert len(junit) == 1 and junit[0]["with"] == {"name": "serve-junit", "path": "src-tauri/target/nextest/ci/junit.xml", "if-no-files-found": "warn"} and junit[0].get("if") == "${{ !cancelled() }}", "serve-tests keeps its JUnit report"
     for binary, job in SERVE_ELSEWHERE.items():
         assert (SERVE_TESTS / f"{binary}.rs").exists(), f"{binary} is no longer a serve test binary"
         assert any(re.search(rf"\b{binary}\b", run) for run in runs(jobs[job])), f"{binary} is left out of serve-tests and {job} does not run it"
@@ -348,6 +450,14 @@ def validate(workflow):
     assert WEBKIT_MAC_RUN in runs(mac), "the mac-only WebKit checks"
     assert int(mac["timeout-minutes"]) <= 30, "the mac-only job holds a macOS runner no longer than its checks need"
     validate_webkit_coverage(workflow)
+
+
+def validate_build_once(text):
+    """The script builds once, dates back only the build script's OUT_DIR, and fails unless the next build is fresh."""
+    lines = text.splitlines()
+    assert lines and lines[0] == "#!/usr/bin/env bash", "the script runs under bash"
+    commands = [line for i, line in enumerate(lines) if line.strip() and (i == 0 or not line.lstrip().startswith("#"))]
+    assert commands == BUILD_ONCE_COMMANDS, "cargo-build-once.sh: the build, the dates put back in OUT_DIR alone, and the freshness check, under pipefail"
 
 
 def validate_nextest(config):
@@ -458,10 +568,31 @@ class WorkflowSecurity(unittest.TestCase):
     def test_cache_holding_this_crates_output_is_rejected(self):
         def change(w):
             steps = w["jobs"]["macos-native"]["steps"]
-            steps.remove(next(s for s in steps if s.get("run") == CLEAN))
+            steps.remove(next(s for s in steps if s.get("run") == ASIDE))
         self.rejects(change)
         self.rejects(lambda w: self.step(w, "headless-serve", run="cargo clean").update({"run": "cargo clean --locked -p terminalx-serve"}))
         self.rejects(lambda w: self.step(w, "linux-rust", run="cargo clean").update({"if": "always()"}))
+
+    def test_every_cache_save_needs_its_clean_step(self):
+        validate_saves(self.workflow)
+        saving = [name for name, job in self.workflow["jobs"].items() if any("/save@" in s.get("uses", "") for s in job["steps"])]
+        self.assertEqual(sorted(saving), sorted(["linux-rust", "linux-rust-tests", "macos-native", "headless-serve", "machine-compat", "machines-e2e", "desktop-platforms"]))
+        for job in saving:
+            with self.subTest(job=job):
+                def clean(w, job=job):
+                    return self.step(w, job, name="Leave this crate's own output out of the cache")
+
+                def save(w, job=job):
+                    return self.step(w, job, name="Save the cargo cache")
+                # The clean step's own condition, copied: the save runs also when the clean failed.
+                self.rejects(lambda w: save(w).update({"if": clean(w)["if"]}))
+                self.rejects(lambda w: save(w).update({"if": save(w)["if"].replace("== 'success'", "!= 'skipped'")}))
+                self.rejects(lambda w: save(w).update({"if": "always()"}))
+                self.rejects(lambda w: clean(w).pop("id"))
+                # Another step's success is not the clean's.
+                self.rejects(lambda w: save(w).update({"if": save(w)["if"].replace(f"steps.{clean(w)['id']}.", "steps.cargo-cache.")}))
+        # A save after a failed test, where the clean runs then too, keeps running then.
+        self.rejects(lambda w: self.step(w, "linux-rust-tests", name="Save the cargo cache").update({"if": "${{ steps.clean.outcome == 'success' }}"}))
 
     def test_cache_saved_by_a_job_that_only_restores_is_rejected(self):
         def change(w):
@@ -557,23 +688,65 @@ class WorkflowSecurity(unittest.TestCase):
     def test_missing_phone_checks_are_rejected(self):
         self.rejects(lambda w: w["jobs"]["phone-app"]["steps"].pop())
 
+    def test_macos_cache_saved_after_the_tests_or_left_out_is_rejected(self):
+        def save_last(w):
+            steps = w["jobs"]["macos-native"]["steps"]
+            i = next(i for i, s in enumerate(steps) if s.get("id") == "aside")
+            moved = steps[i : i + 3]
+            del steps[i : i + 3]
+            steps.extend(moved)
+        self.rejects(save_last)
+        # The crate's output cleaned from the build itself, not a clone: the tests would build it again.
+        self.rejects(lambda w: self.step(w, "macos-native", name="Leave this crate").update({"run": CLEAN}))
+        self.rejects(lambda w: w["jobs"]["macos-native"]["steps"].remove(self.step(w, "macos-native", name="Put this crate")))
+        self.rejects(lambda w: self.step(w, "macos-native", name="Put this crate").update({"if": "always()"}))
+
+    def test_second_compile_is_rejected(self):
+        # Without the dates put back, every cargo command after the build compiles the crate again.
+        self.rejects(lambda w: self.step(w, "macos-native", name="build the library").update({"run": "cargo test --locked --lib --no-run\n"}))
+        self.rejects(lambda w: self.step(w, "linux-rust-tests", name="Build the other test binaries").update({"run": "cargo test --locked --bins --test '*' --no-run"}))
+        # The script given another job's arguments builds what the tests do not run.
+        self.rejects(lambda w: self.step(w, "linux-rust-tests", name="Build the other test binaries").update({"run": BUILD_ONCE_CALLS["macos-native"]}))
+        self.rejects(lambda w: self.step(w, "macos-native", name="build the library").update({"run": BUILD_ONCE_CALLS["linux-rust-tests"]}))
+
+        def built_after_the_tests(w):
+            steps = w["jobs"]["linux-rust-tests"]["steps"]
+            steps.append(steps.pop(steps.index(self.step(w, "linux-rust-tests", name="Build the other test binaries"))))
+        self.rejects(built_after_the_tests)
+
+    def test_build_once_script_holds_its_commands(self):
+        validate_build_once(BUILD_ONCE.read_text())
+        text = BUILD_ONCE.read_text()
+        for old, new in [
+            ('find "$out_dir" -type f -exec touch -t 200001010000 {} +\n', ""),
+            (" and all(.fresh)", ""),
+            # A path search dates back what cargo 1.100 keeps beside OUT_DIR, the test binary among them, and makes it stale.
+            ('find "$out_dir"', "find target/debug/build -path '*/raccoon/*/out/*'"),
+            # Without pipefail a cargo failure in the freshness check is jq's success.
+            ("set -euo pipefail", "set -eu"),
+            ("exit 1; }", "true; }"),
+            ('test -d "$out_dir"\n', ""),
+        ]:
+            with self.subTest(dropped=old):
+                self.assertIn(old, text)
+                with self.assertRaises(AssertionError):
+                    validate_build_once(text.replace(old, new))
+
     def test_cancelling_a_running_main_job_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["macos-native"]["concurrency"].update({"cancel-in-progress": "true"}))
 
     def test_narrowed_macos_run_is_rejected(self):
-        self.rejects(lambda w: self.step(w, "macos-native", run='"$BINARY" $(').update({"run": '"$BINARY" dictation::'}))
-        # Back to cargo test, a pull request compiles the crate a second time.
-        self.rejects(lambda w: self.step(w, "macos-native", run='"$BINARY" $(').update({"run": "cargo test --locked --lib -- $(python3 ../infra/ci-runners/macos-rust.py --filters)"}))
+        self.rejects(lambda w: self.step(w, "macos-native", run="cargo test --locked --lib -- $(").update({"run": "cargo test --locked --lib -- dictation::"}))
         self.rejects(lambda w: self.step(w, "macos-native", name="cargo test (main").update({"if": "github.event_name == 'schedule'"}))
         self.rejects(lambda w: self.step(w, "macos-native", name="cargo test (main").update({"run": "cargo test --locked --lib"}))
-        self.rejects(lambda w: self.step(w, "macos-native", run="cargo test --locked --lib --no-run").update({"if": "github.event_name != 'pull_request'"}))
+        self.rejects(lambda w: self.step(w, "macos-native", name="build the library").update({"if": "github.event_name != 'pull_request'"}))
 
     def test_macos_clippy_left_off_pull_requests_or_stopping_the_suite_is_rejected(self):
         for name in ("clippy (the library", "clippy"):
             self.rejects(lambda w, name=name: self.step(w, "macos-native", name=name).update({"if": "github.event_name != 'pull_request'"}))
             self.rejects(lambda w, name=name: self.step(w, "macos-native", name=name).update({"continue-on-error": True}))
         # Without its condition the build is skipped after a failed Clippy, and the suite with it.
-        self.rejects(lambda w: self.step(w, "macos-native", run="cargo test --locked --lib --no-run").pop("if"))
+        self.rejects(lambda w: self.step(w, "macos-native", name="build the library").pop("if"))
         self.rejects(lambda w: self.step(w, "macos-native", name="cargo test (main").update({"if": "github.event_name != 'pull_request'"}))
         self.rejects(lambda w: self.step(w, "macos-native", name="clippy (the library").update({"run": "true"}))
         self.rejects(lambda w: self.step(w, "macos-native", name="clippy").update({"if": "false"}))
@@ -584,8 +757,36 @@ class WorkflowSecurity(unittest.TestCase):
             return next(s for s in w["jobs"]["serve-tests"]["steps"] if "tests/*.rs" in s.get("run", ""))
         self.rejects(lambda w: run(w).update({"run": run(w)["run"].replace("machine_compat|", "machine_compat|local_lifetime|")}))
         self.rejects(lambda w: run(w).update({"run": run(w)["run"].replace('*) tests+=(--test "$name") ;;', "owner_pretool) tests+=(--test owner_pretool) ;;")}))
+        # Left out of nextest as a binary without a harness: only one that is, and never without its own step.
+        self.rejects(lambda w: run(w).update({"run": run(w)["run"].replace("local_supervisor) ;;", "local_supervisor|scheduled_run) ;;")}))
+        self.rejects(lambda w: w["jobs"]["serve-tests"]["steps"].remove(self.step(w, "serve-tests", run="cargo test --locked --test local_supervisor")))
+        self.rejects(lambda w: self.step(w, "serve-tests", run="cargo test --locked --test local_supervisor").update({"if": "github.event_name != 'pull_request'"}))
         # Left out here because headless-serve runs it: not once that step is gone.
         self.rejects(lambda w: w["jobs"]["headless-serve"]["steps"].remove(self.step(w, "headless-serve", name="CLI issue starts")))
+
+    def test_serve_tests_off_nextest_or_without_their_reports_are_rejected(self):
+        def run(w):
+            return next(s for s in w["jobs"]["serve-tests"]["steps"] if "tests/*.rs" in s.get("run", ""))
+        for old, new in [
+            (SERVE_NEXTEST, 'cargo test --locked --bins "${tests[@]}"'),
+            (" --profile ci", ""),
+            (" --bins", ""),
+            ("set -o pipefail\n", ""),
+            (SERVE_NEXTEST, SERVE_NEXTEST + " -E 'not test(/slow/)'"),
+            (SERVE_NEXTEST, SERVE_NEXTEST.replace(' 2>&1 | tee "$RUNNER_TEMP/nextest.log"', "")),
+        ]:
+            with self.subTest(old=old, new=new):
+                self.rejects(lambda w: run(w).update({"run": run(w)["run"].replace(old, new)}))
+        self.rejects(lambda w: w["jobs"]["serve-tests"]["steps"].remove(self.step(w, "serve-tests", uses="actions/upload-artifact@")))
+        self.rejects(lambda w: self.step(w, "serve-tests", uses="actions/upload-artifact@")["with"].update({"name": "rust-junit-serve"}))
+        self.rejects(lambda w: w["jobs"]["serve-tests"]["steps"].remove(self.step(w, "serve-tests", name="Name the flaky")))
+        # A release of its own, or one not checked, is a second tool to trust.
+        def install(w):
+            return self.step(w, "serve-tests", name="Install cargo-nextest")
+        self.rejects(lambda w: install(w)["env"].update(NEXTEST_VERSION="0.9.153"))
+        self.rejects(lambda w: install(w).update({"run": install(w)["run"].replace('echo "$NEXTEST_SHA256  $RUNNER_TEMP/nextest.tar.gz" | sha256sum --check\n', "")}))
+        self.rejects(lambda w: w["jobs"]["serve-tests"]["steps"].remove(install(w)))
+        self.rejects(lambda w: install(w)["env"].update(NEXTEST_RETRIES="2"))
 
     def test_package_install_without_retries_or_a_limit_is_rejected(self):
         self.rejects(lambda w: self.step(w, "vitest", name="Install shells").update({"run": "sudo apt-get update && sudo apt-get install -y zsh && command -v zsh"}))
@@ -630,10 +831,10 @@ class WorkflowSecurity(unittest.TestCase):
         self.rejects(lambda w: self.step(w, "webkit-layout-linux", name="WebKit layout checks").update({"env": {"WEBKIT_MAC_ONLY_TOO": "1"}}))
         self.rejects(lambda w: w["jobs"].pop("webkit-mac-only"))
 
-        def gone_from_check_too(w):
+        def gone_from_main_too(w):
             w["jobs"].pop("webkit-mac-only")
-            w["jobs"]["check"]["needs"].remove("webkit-mac-only")
-        self.rejects(gone_from_check_too)
+            w["jobs"]["check-macos"]["needs"].remove("webkit-mac-only")
+        self.rejects(gone_from_main_too)
         # The checks are still all listed, so only the coverage itself can see them run nowhere.
         with self.assertRaisesRegex(AssertionError, "WebKit checks no job runs"):
             changed = deepcopy(self.workflow)
@@ -666,7 +867,7 @@ class WorkflowSecurity(unittest.TestCase):
 
     def test_webkit_layout_without_its_parts_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["check"]["needs"].remove("webkit-layout-linux"))
-        self.rejects(lambda w: w["jobs"]["check"]["needs"].remove("webkit-mac-only"))
+        self.rejects(lambda w: w["jobs"]["check-macos"]["needs"].remove("webkit-mac-only"))
         self.rejects(lambda w: w["jobs"]["webkit-layout"]["needs"].remove("webkit-layout-linux"))
         self.rejects(lambda w: w["jobs"]["webkit-layout"].update({"if": "success()"}))
         self.rejects(lambda w: w["jobs"]["webkit-layout"].pop("if"))
@@ -713,6 +914,8 @@ class WorkflowSecurity(unittest.TestCase):
         w = self.workflow
         self.assertTrue(gate_passes(w, results(w)))
         for name, answer in SELECTED.items():
+            if name not in w["jobs"]["check"]["needs"]:
+                continue
             with self.subTest(job=name):
                 self.assertTrue(gate_passes(w, results(w, skipped=[name], **{answer: "false"})))
                 # Selected, but it did not run.
@@ -727,12 +930,55 @@ class WorkflowSecurity(unittest.TestCase):
                 for result in ("cancelled", "failure"):
                     self.assertFalse(gate_passes(w, results(w, ended={name: result}, **{answer: "false"})))
         nothing = {answer: "false" for answer in ANSWERS}
-        self.assertTrue(gate_passes(w, results(w, skipped=list(SELECTED), **nothing)))
+        self.assertTrue(gate_passes(w, results(w, skipped=[name for name in SELECTED if name in w["jobs"]["check"]["needs"]], **nothing)))
         # No other job may be skipped, whatever the selector said.
-        for name in set(w["jobs"]) - {"check", *SELECTED}:
+        for name in set(w["jobs"]["check"]["needs"]) - set(SELECTED):
             with self.subTest(job=name):
                 self.assertFalse(gate_passes(w, results(w, skipped=[name], **nothing)))
                 self.assertFalse(gate_passes(w, results(w, ended={name: "failure"})))
+
+    def test_main_is_held_to_the_macos_jobs(self):
+        w = self.workflow
+        ok = {name: {"result": "success"} for name in ["check", *NOT_HELD]}
+        self.assertTrue(gate_passes(w, ok, gate="check-macos"))
+        for job in ok:
+            for result in ("failure", "cancelled", "skipped"):
+                with self.subTest(job=job, result=result):
+                    self.assertFalse(gate_passes(w, {**ok, job: {"result": result}}, gate="check-macos"))
+            # A job left out of the results is not a pass.
+            self.assertFalse(gate_passes(w, {name: r for name, r in ok.items() if name != job}, gate="check-macos"))
+        for job in NOT_HELD:
+            with self.subTest(missing=job):
+                self.rejects(lambda w, job=job: w["jobs"]["check-macos"]["needs"].remove(job))
+        self.rejects(lambda w: w["jobs"]["check-macos"].update({"if": "always()"}))
+        self.rejects(lambda w: w["jobs"]["check-macos"].update({"if": "${{ always() && github.event_name == 'schedule' }}"}))
+        self.rejects(lambda w: w["jobs"].pop("check-macos"))
+
+    def test_a_pull_request_waiting_for_a_macos_job_is_rejected(self):
+        # In check's needs, macos-native would hold the required status for the 45 to 90 minutes it runs, and
+        # webkit-mac-only for its 3 minutes and its wait for a macOS runner.
+        for job in NOT_HELD:
+            with self.subTest(job=job):
+                self.rejects(lambda w, job=job: w["jobs"]["check"]["needs"].append(job))
+
+    def test_machine_compat_holds_main_but_not_a_pull_request(self):
+        # The owner's decision, 25 November 2026: on a pull request machine-compat runs when the selector picks it and
+        # shows its own result, but check neither needs it nor waits for it; pushes to main, nightly and manual runs
+        # are held to it by check-macos.
+        w = self.workflow
+        self.assertNotIn("machine-compat", w["jobs"]["check"]["needs"])
+        self.assertNotIn('"machine-compat"', w["jobs"]["check"]["steps"][0]["run"], "check's gate must not name it either")
+        self.assertIn("machine-compat", w["jobs"]["check-macos"]["needs"])
+        self.assertEqual(w["jobs"]["machine-compat"]["if"], "needs.macos-rust-changes.outputs.machines == 'true'", "it still runs when selected")
+        # check passes whatever machine-compat did, since it is not among its results.
+        self.assertTrue(gate_passes(w, results(w)))
+        ok = {name: {"result": "success"} for name in w["jobs"]["check-macos"]["needs"]}
+        self.assertTrue(gate_passes(w, ok, gate="check-macos"))
+        for result in ("failure", "cancelled", "skipped"):
+            with self.subTest(result=result):
+                self.assertFalse(gate_passes(w, {**ok, "machine-compat": {"result": result}}, gate="check-macos"))
+        self.rejects(lambda w: w["jobs"]["check"]["needs"].append("machine-compat"))
+        self.rejects(lambda w: w["jobs"]["check-macos"]["needs"].remove("machine-compat"))
 
     def test_missing_gate_dependency_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["check"]["needs"].remove("linux-rust"))

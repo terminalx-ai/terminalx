@@ -185,7 +185,7 @@ describe("settings row search", () => {
     expect(searchSettings("bots").map((match) => match.id)).not.toContain("shortcuts.app.bots");
     orchestratorRuns(false);
     // Off until the switches are read, as for a section.
-    expect(SETTINGS_ROWS.filter((row) => !("requires" in row && row.requires) && row.section !== "orchestrator" && row.section !== "localVms" && row.section !== "machines").every((row) => settingOffered(row))).toBe(true);
+    expect(SETTINGS_ROWS.filter((row) => !("requires" in row && row.requires) && !("macOnly" in row && row.macOnly) && row.section !== "orchestrator" && row.section !== "localVms" && row.section !== "machines").every((row) => settingOffered(row))).toBe(true);
   });
 
   it("finds Local VMs rows only while their Experimental switch is on", () => {

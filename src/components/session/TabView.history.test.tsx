@@ -82,7 +82,7 @@ function cloudBackend(onChange: () => void): SessionBackend {
     markRead: async () => undefined,
     patchTab: () => undefined,
     setTabStatus: () => undefined,
-    outbox: { entries: (tabId) => entries.filter((entry) => entry.tabId === tabId), followUps: () => queued, workspaceStatus: null, deciding: () => false, sendAgain: async () => undefined },
+    outbox: { entries: (tabId) => entries.filter((entry) => entry.tabId === tabId), followUps: () => queued, workspaceStatus: null, deciding: () => false, sendAgain: async () => undefined, remove: async () => undefined },
   };
 }
 

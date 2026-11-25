@@ -8,6 +8,7 @@ import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { Check, ChevronsUpDown, CircleAlert, ExternalLink, Loader2, Monitor, Moon, RefreshCw, Sun } from "@/icons";
 import { bindingText, useKeymap } from "@/lib/shortcuts";
+import { isMac } from "@/lib/platform";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { checkForUpdate, installUpdate, useUpdate } from "@/lib/updates";
@@ -229,6 +230,9 @@ export function GeneralTab() {
       <RegisteredSetting setting="general.aiEditor"
         control={<Switch aria-label="AI Editor" checked={prefs.aiEditor} onCheckedChange={(v) => setPrefs({ aiEditor: v })} />}
       />
+      {isMac && <RegisteredSetting setting="general.optionAsMeta"
+        control={<Switch aria-label="Option key is Meta in terminals" checked={prefs.optionAsMeta} onCheckedChange={(v) => setPrefs({ optionAsMeta: v })} />}
+      />}
       <SnippetManager />
       <RegisteredSetting setting="general.useWorktree"
         control={<Switch checked={prefs.useWorktree} onCheckedChange={(v) => setPrefs({ useWorktree: v })} />}

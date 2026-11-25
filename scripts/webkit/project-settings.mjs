@@ -103,6 +103,9 @@ try {
     // Leaving the field saves the edit, and Settings keeps the page until it is saved (#1156).
     await patterns.blur();
     await page.waitForFunction(() => window.__SAVES__.length > 0);
+    // Settings refuses to leave until the save has ended, not only begun: a busy runner clicked Settings files while
+    // it was still saving, the click was refused, and Project · shared never came (3 of 3 with the stress probe).
+    await settings.locator("#repository-copy-patterns:not([data-unsaved])").waitFor();
     checks["leaving Files to copy saves exactly the patterns typed"] = JSON.stringify(await page.evaluate(() => window.__SAVES__)) === JSON.stringify([{ repositorySettings: { filesToCopy: [".env.production", "config/secrets/*.json"] } }]);
 
     // Design 11.10: Settings files, the shared file open, and the Open menu.

@@ -139,6 +139,36 @@ pub fn tidy_label(name: &str) -> String {
         .collect()
 }
 
+/// A readable name for an id this account's list does not carry, the way
+/// the picker names one (`prettyModelId` in `packages/portable`):
+/// `gpt-6.2-astra` reads as `GPT-6.2 Astra`. A provider prefix is dropped.
+pub fn readable_id(id: &str) -> String {
+    let last = id.rsplit('/').next().unwrap_or(id);
+    let last = match last.get(..3) {
+        Some(head) if head.eq_ignore_ascii_case("gpt") => format!("GPT{}", &last[3..]),
+        _ => last.to_string(),
+    };
+    let chars: Vec<char> = last.chars().collect();
+    let mut out = String::with_capacity(last.len());
+    for (i, c) in chars.iter().enumerate() {
+        let prev = i.checked_sub(1).map(|j| chars[j]);
+        if *c == '-' && prev.is_some_and(|p| p.is_ascii_digit()) && chars.get(i + 1).is_some_and(char::is_ascii_alphabetic) {
+            out.push(' ');
+        } else if c.is_ascii_lowercase() && !prev.is_some_and(|p| p.is_ascii_alphanumeric() || p == '_') {
+            out.push(c.to_ascii_uppercase());
+        } else {
+            out.push(*c);
+        }
+    }
+    out
+}
+
+/// The line a tab shows when its model is not on this account and `sub` runs
+/// instead. Both are named for a person, never by their raw ids (#1580).
+pub fn substitution_notice(wanted: &str, sub: &Model) -> String {
+    format!("{} is not available on this account; using {}.", readable_id(wanted), sub.label)
+}
+
 /// What to offer when the CLI cannot be asked. Deliberately the models a
 /// ChatGPT account could run when this was written — never a family alias like
 /// `gpt-5.6`, which the API rejects outright.
@@ -275,5 +305,20 @@ mod tests {
     fn a_failed_ask_still_falls_back() {
         let cache = Cache::default();
         assert!(!cache.get_with(false, || Err(anyhow::anyhow!("no codex"))).is_empty());
+    }
+
+    #[test]
+    fn a_missing_id_reads_like_a_label() {
+        assert_eq!(readable_id("gpt-6.2-astra"), "GPT-6.2 Astra");
+        assert_eq!(readable_id("gpt-5.5"), "GPT-5.5");
+        assert_eq!(readable_id("gpt-5.3-codex-spark"), "GPT-5.3 Codex-Spark");
+        assert_eq!(readable_id("openai/gpt-5.6-sol"), "GPT-5.6 Sol");
+        assert_eq!(readable_id("o3"), "O3");
+    }
+
+    #[test]
+    fn the_substitution_notice_names_both_models_for_a_person() {
+        let sol = Model { label: "GPT-6.1 Sol".into(), ..fallback().remove(0) };
+        assert_eq!(substitution_notice("gpt-6.2-astra", &sol), "GPT-6.2 Astra is not available on this account; using GPT-6.1 Sol.");
     }
 }

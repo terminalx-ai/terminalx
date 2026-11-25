@@ -2024,7 +2024,9 @@ terminalx bots items set <item> --check-back <time>|report|off --json
 - With "Start, but ask before merging", `runs merge` is refused with `merge_held` until you ask
   `ask-merge <item>` and the owner answers Merge.
 - `--check-back` wakes you at a time, on a worker's report (`report`), or both (a time also wakes
-  on a report). Nothing runs and nothing is spent while you wait; TerminalX's note says only that
+  on a report). A report is: the linked run telling its lead something, the run's lead or one of
+  its workers ending a turn with its `terminalx-report` block, or a session you started with
+  `sessions create --report` from the same chat doing so. Nothing runs and nothing is spent while you wait; TerminalX's note says only that
   it is time to look, never what a worker wrote.
 - An item that links a run cannot be `done` until the run has ended. Both Settings → Experimental
   → Bots and Orchestrator runs must be on: with runs off, `plan` and the approval are refused.

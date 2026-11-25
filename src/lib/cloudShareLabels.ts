@@ -65,6 +65,10 @@ export function shareErrorMessage(error: unknown, who?: string): string {
       return "That share was already revoked.";
     case "cloud_workspace_last_admin":
       return "A workspace must have at least one admin.";
+    case "cloud_workspace_group_manager_unsupported":
+      return "Admin access can only be granted to a person.";
+    case "cloud_workspace_runtime_not_ready":
+      return "Admin grants are unavailable for this organization.";
     case "cloud_workspace_runtime_unsupported":
       return MANAGER_APPROVAL_REASON;
     case "cloud_workspace_not_found":
@@ -88,6 +92,7 @@ export function shareRoleLabel(role: CloudShareRole): string {
   }
 }
 
+export const ADMIN_SHARE_LABEL = "Admin — Manages the workspace and who it’s shared with";
 export const MANAGER_APPROVAL_REASON = "Admin without permission approval is not supported by this workspace runtime.";
 
 export const OUTCOME_UNKNOWN = "cloud_workspace_request_outcome_unknown";

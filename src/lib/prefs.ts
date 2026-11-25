@@ -82,6 +82,12 @@ export interface Prefs {
   autocorrect: boolean;
   /** The composer's AI Editor button. A draft leaves only when the reader asks. */
   aiEditor: boolean;
+  /**
+   * On a Mac, Option in a terminal is Meta, for the shell's Option-B and
+   * Option-F. Off, Option types what the keyboard layout puts on it, such as
+   * `@`, `[` or `|` on many European layouts. On unless the reader turned it off.
+   */
+  optionAsMeta: boolean;
   followUps: "now" | "hold";
   lastProject: string | null;
   lastAgent: string;
@@ -210,6 +216,7 @@ const DEFAULTS: Prefs = {
   promptSnippets: [],
   autocorrect: false,
   aiEditor: true,
+  optionAsMeta: true,
   followUps: "now",
   lastProject: null,
   lastAgent: "claude",
@@ -333,6 +340,7 @@ function load(legacyOnly = false): Prefs {
     }
     prefs.autocorrect = prefs.autocorrect === true;
     prefs.aiEditor = prefs.aiEditor !== false;
+    prefs.optionAsMeta = prefs.optionAsMeta !== false;
     prefs.followUps = prefs.followUps === "hold" ? "hold" : "now";
     prefs.prActivityOrder = prefs.prActivityOrder === "oldest" ? "oldest" : "newest";
     prefs.diffMode = prefs.diffMode === "split" ? "split" : "unified";

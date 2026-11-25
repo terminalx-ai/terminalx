@@ -1165,7 +1165,14 @@ pub async fn cloud_agent_codex_login_start(
     if !crate::codex_device_login::runs_trusted(&program, &path) {
         return Err(CloudWorkspaceClientError::local(crate::codex_device_login::DeviceLoginError::CliUntrusted.code(), false));
     }
-    let (login, code) = tauri::async_runtime::spawn_blocking(move || crate::codex_device_login::start(&program, &args, &path, &crate::codex_device_login::homes_parent()))
+    let (login, code) = tauri::async_runtime::spawn_blocking(move || {
+        // No private folder for the sign-in's home: it does not begin anywhere else.
+        let parent = crate::codex_device_login::homes_parent().map_err(|error| {
+            log::warn!("no private folder for a Codex sign-in: {error}");
+            crate::codex_device_login::DeviceLoginError::Unavailable
+        })?;
+        crate::codex_device_login::start(&program, &args, &path, &parent)
+    })
         .await
         .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Mutation))?
         .map_err(|error| CloudWorkspaceClientError::local(error.code(), false))?;
@@ -1746,9 +1753,10 @@ pub async fn cloud_workspace_share_put(
     can_approve: bool,
     state: tauri::State<'_, crate::AppState>,
     org_id: Option<String>,
+    context_revision: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceShareChange, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
-        .share_put(org_id.as_deref(), &workspace_id, &user_id, role, can_approve))
+        .share_put_in_context(org_id.as_deref(), &workspace_id, &user_id, role, can_approve, context_revision.as_deref()))
 }
 
 #[tauri::command]
@@ -2247,6 +2255,126 @@ pub async fn stats_usage_refresh(state: State<'_, AppState>, scope: String, gene
     tauri::async_runtime::spawn_blocking(move || stats.refresh(&scope, generation, move || sessions?.activity_summary()).map_err(err))
         .await
         .map_err(err)?
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudTransferImport {
+    org_id: String,
+    account_revision: String,
+    project_path: String,
+    title: String,
+    harness: String,
+    branch: String,
+    commit: String,
+    bundle: Option<String>,
+    transcript: String,
+}
+
+#[derive(Serialize)]
+pub struct CloudTransferImportError {
+    code: &'static str,
+    message: String,
+}
+
+impl From<String> for CloudTransferImportError {
+    fn from(message: String) -> Self {
+        Self { code: "transfer_import_failed", message }
+    }
+}
+
+impl From<anyhow::Error> for CloudTransferImportError {
+    fn from(error: anyhow::Error) -> Self {
+        if let Some(missing) = error.downcast_ref::<crate::workspace_transfer_bundle::MissingPrerequisite>() {
+            return Self { code: "transfer_fetch_first", message: missing.to_string() };
+        }
+        if error.is::<crate::workspace_transfer_bundle::TooManyPrerequisites>() {
+            return Self { code: "transfer_too_many_prerequisites", message: error.to_string() };
+        }
+        if error.is::<crate::workspace_transfer_bundle::TransferSubmodules>() {
+            return Self { code: "transfer_submodules", message: error.to_string() };
+        }
+        err(error).into()
+    }
+}
+
+#[tauri::command]
+pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, input: CloudTransferImport) -> Result<SessionEntry, CloudTransferImportError> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use crate::workspace_transfer_bundle as transfer;
+    let account = state.account.clone();
+    let authorized = |account: &crate::account::AccountManager, input: &CloudTransferImport| {
+        account.current_revision().is_some_and(|(_, revision)| revision == input.account_revision)
+            && account.phase2_ready("cloud.workspaces.transfer-to-local.v1", Some(&input.org_id), None)
+    };
+    if !authorized(&account, &input) { return Err("The cloud account changed.".to_owned().into()); }
+    if !git::is_repo(Path::new(&input.project_path)) {
+        return Err("Choose a local Git project.".to_owned().into());
+    }
+    if !crate::configuration_commands::review(&app, &input.project_path).await? {
+        return Err("Repository configuration was not trusted.".to_owned().into());
+    }
+    let sessions = state.sessions().map_err(err)?;
+    let ticket = crate::github_process::ticket();
+    github_work(move || crate::github_process::with_ticket(ticket, || -> anyhow::Result<SessionEntry> {
+        anyhow::ensure!(authorized(&account, &input), "The cloud account changed.");
+        anyhow::ensure!(input.transcript.len() <= 6 * 1024 * 1024, "Conversation is too large.");
+        let transcript = serde_json::from_slice::<Vec<transfer::TranscriptMessage>>(&STANDARD.decode(&input.transcript)?)?;
+        let pin = transfer::BranchCommit::new(&input.branch, &input.commit)?;
+        let project = Path::new(&input.project_path);
+        transfer::check_branch_namespace(project, &pin)?;
+        if let Some(encoded) = &input.bundle {
+            anyhow::ensure!(encoded.len() as u64 <= transfer::MAX_BUNDLE_BYTES.div_ceil(3) * 4, "Git bundle is too large.");
+            let bundle_directory = tempfile::tempdir()?;
+            let bundle_path = bundle_directory.path().join("workspace.bundle");
+            std::fs::write(&bundle_path, STANDARD.decode(encoded)?)?;
+            let validated = transfer::validate_bundle(project, &bundle_path, &pin)?;
+            anyhow::ensure!(authorized(&account, &input), "The cloud account changed.");
+            validated.promote(project)?;
+        } else {
+            transfer::require_commit(project, &pin, pin.commit())?;
+            transfer::validate_checkout(project, &pin)?;
+        }
+        anyhow::ensure!(authorized(&account, &input), "The cloud account changed.");
+        let name = format!("transfer-{}", uuid::Uuid::now_v7().simple());
+        let local_pin = transfer::choose_local_branch(project, &pin, &name)?;
+        let created_branch = transfer::ensure_local_branch(project, &local_pin)?;
+        let path = git::worktree_path(project, &name);
+        let mut checkout_created = false;
+        let mut session_created = None;
+        let imported = (|| -> anyhow::Result<SessionEntry> {
+            transfer::checkout(project, &path, &local_pin)?;
+            checkout_created = true;
+            anyhow::ensure!(authorized(&account, &input), "The cloud account changed.");
+            let mut request: NewSession = serde_json::from_value(serde_json::json!({
+                "projectPath": input.project_path, "title": input.title, "useWorktree": false,
+                "cwd": path, "tab": { "harness": input.harness },
+            }))?;
+            crate::session_ops::prefer_native_codex_session(&mut request);
+            let local = sessions.create_on(&request, None)?;
+            session_created = Some(local.clone());
+            transfer::save_transcript(&local, transcript)?;
+            Ok(local)
+        })();
+        match imported {
+            Ok(local) => Ok(local),
+            Err(error) => {
+                let cleanup = (|| -> anyhow::Result<()> {
+                    if let Some(local) = session_created {
+                        let tab = local.tabs.first().ok_or_else(|| anyhow::anyhow!("No transfer conversation"))?;
+                        let log = crate::store::log_path(&local.id, &tab.id)?;
+                        anyhow::ensure!(!log.exists(), "The local conversation acquired a transcript and was kept.");
+                        sessions.delete_session(&local.id)?;
+                    }
+                    transfer::rollback_import_checkout(project, &path, &local_pin, checkout_created, created_branch)
+                })();
+                match cleanup {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(error.context(format!("Transfer rollback was incomplete: {cleanup}"))),
+                }
+            }
+        }
+    })).await.map_err(err)?.map_err(CloudTransferImportError::from)
 }
 
 /// Create a session: an index entry around an existing checkout, or a new

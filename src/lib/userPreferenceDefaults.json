@@ -17,6 +17,7 @@
   "writeCommitMessagesWithAgent": false,
   "promptMap": true,
   "autocorrect": false,
+  "optionAsMeta": true,
   "useWorktree": true,
   "sidebarLayout": "simple",
   "organizationDisplay": "all",

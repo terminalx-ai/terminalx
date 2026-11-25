@@ -326,6 +326,8 @@ function turnOutcome(turn: Turn): Outcome | null {
   const done = turn.completed;
   if (!done) return null;
   const duration = done.durationMs != null ? formatDuration(done.durationMs) : null;
+  // `/clear` (#1498) is a command that ran, not work the agent did.
+  if (done.status === "ok" && turn.prompt?.text.trim() === "/clear") return { tone: "ok", word: "Conversation cleared", label: "Conversation cleared", duration: null };
   if (done.status === "ok") return { tone: "ok", word: "Worked", label: duration ? `Worked for ${duration}` : "Worked", duration: duration && `for ${duration}` };
   const tone = done.status === "aborted" ? "stopped" : "failed";
   const word = tone === "stopped" ? "Stopped" : "Failed";

@@ -27,14 +27,13 @@ fn context() -> TrustedContext {
     }
 }
 
-fn input(id: &str) -> RequestInput {
+pub(super) fn input(id: &str) -> RequestInput {
     RequestInput {
         id: id.into(),
         origin: origin(),
         generation: 1,
         approval_revision: 1,
-        issued_at_ms: 10,
-        expires_at_ms: 100,
+        ttl_ms: 90,
         executable: "/usr/bin/printf".into(),
         arguments: vec!["%s".into(), "literal ; $(text)\n\u{202e}".into()],
         cwd: "/private/tmp".into(),
@@ -154,9 +153,8 @@ fn malformed_and_bounded_requests_fail_closed() {
         |i| i.arguments.push("\0".into()),
         |i| i.arguments = vec!["x".repeat(8193)],
         |i| i.arguments = vec!["x".repeat(8192); 5],
-        |i| i.expires_at_ms = i.issued_at_ms,
-        |i| i.expires_at_ms = i.issued_at_ms - 1,
-        |i| i.expires_at_ms = i.issued_at_ms + MAX_TTL_MS + 1,
+        |i| i.ttl_ms = 0,
+        |i| i.ttl_ms = MAX_TTL_MS + 1,
         |i| i.timeout_ms = 0,
         |i| i.timeout_ms = MAX_TIMEOUT_MS + 1,
         |i| i.output_limit_bytes = 0,
@@ -197,18 +195,15 @@ fn proposal_is_immutable_and_expiry_releases_slot_without_enabling_replay() {
     );
 
     set_time(&policy, 100);
-    assert_eq!(request.state(), Ok(State::Expired));
+    assert_eq!(request.state(), Ok(State::ExpiredBeforeLaunch));
     assert_eq!(policy.submit(input("one")).err(), Some(Rejection::Replay));
-    let mut next = input("two");
-    next.issued_at_ms = 100;
-    next.expires_at_ms = 100 + MAX_TTL_MS;
-    assert!(policy.submit(next).is_ok());
+    assert!(policy.submit(input("two")).is_ok());
 }
 
 #[test]
 fn bounded_registry_refuses_new_ids_and_replay_when_full() {
     let policy = policy();
-    for id in 0..MAX_REQUESTS {
+    for id in 0..MAX_REQUESTS_PER_ORIGIN {
         assert_eq!(
             policy
                 .submit(input(&format!("request-{id}")))
@@ -222,6 +217,115 @@ fn bounded_registry_refuses_new_ids_and_replay_when_full() {
         policy.submit(input("request-0")).err(),
         Some(Rejection::Replay)
     );
+}
+
+#[test]
+fn expired_registry_releases_capacity_without_rebinding_old_handles() {
+    let policy = policy();
+    for index in 1..MAX_REQUESTS_PER_ORIGIN {
+        policy
+            .submit(input(&format!("old-{index}")))
+            .unwrap()
+            .cancel()
+            .unwrap();
+    }
+    let old = policy.submit(input("reused")).unwrap();
+    set_time(&policy, 10 + MAX_TTL_MS);
+    let new = policy.submit(input("reused")).unwrap();
+    assert_eq!(old.state(), Ok(State::ExpiredBeforeLaunch));
+    assert_eq!(policy.start(&old).err(), Some(Rejection::Expired));
+    assert_eq!(new.state(), Ok(State::Pending));
+    assert_eq!(policy.lock().unwrap().entries.len(), 1);
+}
+
+#[test]
+fn prompt_reservation_limits_parallel_and_repeated_attempts() {
+    let policy = policy();
+    let mut proposal = input("one");
+    proposal.ttl_ms = MAX_TTL_MS;
+    let request = policy.submit(proposal).unwrap();
+    let slot = policy.reserve_prompt(&request).unwrap();
+    assert_eq!(
+        policy.reserve_prompt(&request).err(),
+        Some(Rejection::PromptRateLimited)
+    );
+    drop(slot);
+    for _ in 0..2 {
+        drop(policy.reserve_prompt(&request).unwrap());
+    }
+    assert_eq!(
+        policy.reserve_prompt(&request).err(),
+        Some(Rejection::PromptRateLimited)
+    );
+    set_time(&policy, 10 + MAX_TTL_MS);
+    let next = policy.submit(input("two")).unwrap();
+    assert!(policy.reserve_prompt(&next).is_ok());
+}
+
+#[test]
+fn prompt_and_registry_budgets_survive_turn_changes() {
+    let policy = policy();
+    let first = policy.submit(input("first")).unwrap();
+    for _ in 0..MAX_PROMPTS_PER_WINDOW {
+        drop(policy.reserve_prompt(&first).unwrap());
+    }
+    first.cancel().unwrap();
+    for index in 1..MAX_REQUESTS_PER_ORIGIN {
+        policy
+            .submit(input(&format!("id-{index}")))
+            .unwrap()
+            .cancel()
+            .unwrap();
+    }
+    let mut next = input("next");
+    next.origin.turn = "another-turn".into();
+    next.origin.tab = "another-tab".into();
+    let mut trusted = context();
+    trusted.origin = Some(next.origin.clone());
+    policy.update_trusted_context(trusted.clone()).unwrap();
+    assert_eq!(policy.submit(next.clone()).err(), Some(Rejection::Capacity));
+
+    next.origin.workspace = "another-workspace".into();
+    trusted.origin = Some(next.origin.clone());
+    policy.update_trusted_context(trusted).unwrap();
+    let next = policy.submit(next).unwrap();
+    assert_eq!(
+        policy.reserve_prompt(&next).err(),
+        Some(Rejection::PromptRateLimited)
+    );
+}
+
+#[test]
+fn unanswered_alert_releases_prompt_slot_on_expiry_cancel_or_signout() {
+    for action in 0..3 {
+        let policy = policy();
+        let request = policy.submit(input("waiting")).unwrap();
+        let lifetime = consent::PromptLifetime::begin(&policy, &request).unwrap();
+        let (sender, replies) = mpsc::sync_channel::<bool>(1);
+        assert!(lifetime.poll(&replies).is_none());
+        match action {
+            0 => set_time(&policy, 100),
+            1 => {
+                request.cancel().unwrap();
+            }
+            _ => policy
+                .update_trusted_context(TrustedContext::default())
+                .unwrap(),
+        }
+        sender.send(true).unwrap();
+        assert_eq!(
+            lifetime.poll(&replies).unwrap().err(),
+            Some(if action == 0 {
+                Rejection::Expired
+            } else {
+                Rejection::InvalidTransition
+            })
+        );
+        drop(lifetime);
+        policy.update_trusted_context(context()).unwrap();
+        let next = policy.submit(input("next")).unwrap();
+        assert!(consent::PromptLifetime::begin(&policy, &next).is_ok());
+    }
 }
 
 #[test]
@@ -279,8 +383,6 @@ fn poison_fails_closed() {
 mod native {
     use super::*;
     use std::fs;
-    use std::io::Write;
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
     use std::time::Duration;
@@ -291,7 +393,10 @@ mod native {
         assert_eq!(binding.input().cwd, request.input().cwd);
         assert_eq!(binding.input().executable, request.input().executable);
         assert_eq!(
-            policy.record_local_decision(request, binding, LocalDecision::AllowOnce),
+            policy.record_local_decision(
+                request,
+                consent::Decision::fixture(binding, LocalDecision::AllowOnce)
+            ),
             Ok(State::Approved)
         );
     }
@@ -305,7 +410,21 @@ mod native {
     fn assert_stopped(execution: Execution, expected: State) {
         match execution.wait().unwrap() {
             ExecutionOutcome::Stopped(state) => assert_eq!(state, expected),
-            ExecutionOutcome::Exited { .. } => panic!("unexpected command output"),
+            _ => panic!("unexpected sandboxed launch"),
+        }
+    }
+
+    fn assert_withheld(execution: Execution, expected: State) -> (Option<i32>, Option<i32>) {
+        match execution.wait().unwrap() {
+            ExecutionOutcome::LaunchedWithOutputWithheld {
+                code,
+                signal,
+                reason,
+            } => {
+                assert_eq!(reason, expected);
+                (code, signal)
+            }
+            _ => panic!("expected a sandboxed launch with withheld output"),
         }
     }
 
@@ -317,8 +436,27 @@ mod native {
                 stdout,
                 stderr,
             } => (code, signal, stdout, stderr),
-            ExecutionOutcome::Stopped(state) => panic!("command stopped: {state:?}"),
+            ExecutionOutcome::Stopped(state)
+            | ExecutionOutcome::LaunchedWithOutputWithheld { reason: state, .. } => {
+                panic!("command stopped: {state:?}")
+            }
         }
+    }
+
+    #[test]
+    fn unavailable_biometrics_are_distinct_and_cannot_start() {
+        let policy = policy();
+        let request = policy.submit(input("one")).unwrap();
+        let binding = policy.prepare_local_decision(&request).unwrap();
+        let result = policy.record_local_decision(
+            &request,
+            consent::Decision::fixture(binding, LocalDecision::TouchIdUnavailable),
+        );
+        assert_eq!(result, Ok(State::TouchIdUnavailable));
+        assert_eq!(
+            policy.start(&request).err(),
+            Some(Rejection::InvalidTransition)
+        );
     }
 
     #[test]
@@ -332,11 +470,17 @@ mod native {
         let denied = policy.prepare_local_decision(&request).unwrap();
         let duplicate = policy.prepare_local_decision(&request).unwrap();
         assert_eq!(
-            policy.record_local_decision(&request, denied, LocalDecision::default()),
+            policy.record_local_decision(
+                &request,
+                consent::Decision::fixture(denied, LocalDecision::default())
+            ),
             Ok(State::Denied)
         );
         assert_eq!(
-            policy.record_local_decision(&request, duplicate, LocalDecision::AllowOnce),
+            policy.record_local_decision(
+                &request,
+                consent::Decision::fixture(duplicate, LocalDecision::AllowOnce)
+            ),
             Err(Rejection::InvalidTransition)
         );
         assert_eq!(
@@ -349,7 +493,10 @@ mod native {
         request.cancel().unwrap();
         let next = policy.submit(input("three")).unwrap();
         assert_eq!(
-            policy.record_local_decision(&next, binding, LocalDecision::AllowOnce),
+            policy.record_local_decision(
+                &next,
+                consent::Decision::fixture(binding, LocalDecision::AllowOnce)
+            ),
             Err(Rejection::DecisionMismatch)
         );
         assert_eq!(next.state(), Ok(State::Denied));
@@ -363,7 +510,10 @@ mod native {
         let other = foreign.submit(input("four")).unwrap();
         let binding = foreign.prepare_local_decision(&other).unwrap();
         assert_eq!(
-            policy.record_local_decision(&request, binding, LocalDecision::AllowOnce),
+            policy.record_local_decision(
+                &request,
+                consent::Decision::fixture(binding, LocalDecision::AllowOnce)
+            ),
             Err(Rejection::DecisionMismatch)
         );
 
@@ -371,10 +521,13 @@ mod native {
         let late = policy.prepare_local_decision(&request).unwrap();
         set_time(&policy, 100);
         assert_eq!(
-            policy.record_local_decision(&request, late, LocalDecision::AllowOnce),
+            policy.record_local_decision(
+                &request,
+                consent::Decision::fixture(late, LocalDecision::AllowOnce)
+            ),
             Err(Rejection::Expired)
         );
-        assert_eq!(request.state(), Ok(State::Expired));
+        assert_eq!(request.state(), Ok(State::ExpiredBeforeLaunch));
     }
 
     #[test]
@@ -442,13 +595,6 @@ mod native {
         }
     }
 
-    fn shell(id: &str, script: &str) -> RequestInput {
-        let mut proposal = input(id);
-        proposal.executable = "/bin/bash".into();
-        proposal.arguments = vec!["-c".into(), script.into()];
-        proposal
-    }
-
     #[test]
     fn context_cancel_and_expiry_win_at_the_actual_spawn_gate() {
         type BeforeSpawn = fn(&Policy, &Request);
@@ -456,7 +602,7 @@ mod native {
             (State::Cancelled, |_, r| {
                 r.cancel().unwrap();
             }),
-            (State::Expired, |p, _| set_time(p, 100)),
+            (State::ExpiredBeforeLaunch, |p, _| set_time(p, 100)),
             (State::Revoked, |p, _| {
                 p.update_trusted_context(TrustedContext::default()).unwrap()
             }),
@@ -491,7 +637,7 @@ mod native {
                 worker.wait();
             }));
             let directory = Directory::new();
-            let mut proposal = shell("one", "printf spawned > spawn-marker");
+            let mut proposal = input("one");
             directory.apply(&mut proposal);
             let request = approved(&policy, proposal);
             let execution = policy.start(&request).unwrap();
@@ -524,7 +670,7 @@ mod native {
         );
         alias.cancel().unwrap();
 
-        let mut proposal = shell("one", "printf spawned > spawn-marker");
+        let mut proposal = input("one");
         proposal.cwd = original.to_str().unwrap().into();
         let request = approved(&policy, proposal);
         fs::rename(&original, &replaced).unwrap();
@@ -556,87 +702,112 @@ mod native {
     }
 
     #[test]
-    fn empty_environment_closed_stdin_no_inherited_fds_and_anchored_cwd() {
-        let directory = Directory::new();
-        let policy = policy();
-        let mut env = input("env");
-        env.executable = "/usr/bin/env".into();
-        env.arguments.clear();
-        let (_, _, stdout, stderr) = output(policy.start(&approved(&policy, env)).unwrap());
-        assert!(stdout.is_empty());
-        assert!(stderr.is_empty());
-
-        // F_DUPFD creates a deliberately inheritable descriptor. The child must not see it.
-        unsafe extern "C" {
-            fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    fn shell_startup_files_and_argument_options_are_refused() {
+        const FIXTURE: &str = "PRO220_STARTUP_FIXTURE";
+        if let Some(fixture) = std::env::var_os(FIXTURE) {
+            run_startup_fixture(&PathBuf::from(fixture));
+            return;
         }
-        let mut file = fs::File::create(directory.0.join("local-fixture")).unwrap();
-        file.write_all(b"synthetic fixture").unwrap();
-        let fd = unsafe { fcntl(file.as_raw_fd(), 0, 200i32) };
-        assert!(fd >= 200);
-        let inherited = unsafe { OwnedFd::from_raw_fd(fd) };
-        let mut proposal = shell("stdio", "if read -r ignored || [ -e /dev/fd/\"$1\" ]; then exit 9; fi; pwd -P; printf '\\377' >&2");
-        directory.apply(&mut proposal);
-        proposal.arguments.extend(["test".into(), fd.to_string()]);
-        let (code, signal, stdout, stderr) =
-            output(policy.start(&approved(&policy, proposal)).unwrap());
-        drop(inherited);
-        assert_eq!((code, signal), (Some(0), None));
-        assert_eq!(stdout, format!("{}\n", directory.0.display()).as_bytes());
-        assert_eq!(stderr, [0xff]);
+
+        let directory = Directory::new();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("shell_startup_files_and_argument_options_are_refused")
+            .env(FIXTURE, &directory.0)
+            .env("HOME", &directory.0)
+            .env("ZDOTDIR", &directory.0)
+            .env("PATH", &directory.0)
+            .env("DYLD_LIBRARY_PATH", &directory.0)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(
+            result.status.success() && stdout.contains("1 passed"),
+            "{stdout}"
+        );
+    }
+
+    fn run_startup_fixture(directory: &std::path::Path) {
+        let marker = directory.join("startup-marker");
+        fs::write(
+            directory.join(".zshenv"),
+            format!("touch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        let policy = policy();
+        for (id, program, args) in [
+            ("shell", "/bin/zsh", vec!["-c", "true"]),
+            ("environment", "/usr/bin/env", vec![]),
+            ("format", "/usr/bin/printf", vec!["%b", "text"]),
+            ("option", "/usr/bin/printf", vec!["--help"]),
+            ("duration", "/bin/sleep", vec!["1e2"]),
+        ] {
+            let mut proposal = input(id);
+            proposal.cwd = directory.to_str().unwrap().to_owned();
+            proposal.executable = program.into();
+            proposal.arguments = args.into_iter().map(str::to_owned).collect();
+            let request = policy.submit(proposal).unwrap();
+            assert_eq!(
+                policy.prepare_local_decision(&request).err(),
+                Some(Rejection::ExecutableUnavailable)
+            );
+            request.cancel().unwrap();
+        }
+
+        let mut proposal = input("literal");
+        proposal.cwd = directory.to_str().unwrap().to_owned();
+        proposal.arguments[1] = "DYLD_INSERT_LIBRARIES=fixture PATH=/fixture".into();
+        let (_, _, stdout, _) = output(policy.start(&approved(&policy, proposal)).unwrap());
+        assert_eq!(stdout, b"DYLD_INSERT_LIBRARIES=fixture PATH=/fixture");
+        assert!(!marker.exists());
     }
 
     #[test]
-    fn exact_combined_output_limit_and_typed_exit_status() {
+    fn approval_text_escapes_controls_and_rejects_truncation() {
         let policy = policy();
-        let mut proposal = shell("one", "printf abc; printf def >&2; exit 7");
+        let mut proposal = input("one");
+        let text = prompt_text(&proposal).unwrap();
+        assert!(text.contains(r"\n\u{202e}"));
+        assert!(text.contains(r"literal\x20;"));
+        assert!(!text.contains('\u{202e}'));
+        proposal.arguments[1] = "x".repeat(1_024);
+        let request = policy.submit(proposal).unwrap();
+        assert_eq!(
+            policy.prepare_local_decision(&request).err(),
+            Some(Rejection::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn exact_output_limit_and_typed_exit_status() {
+        let policy = policy();
+        let mut proposal = input("one");
+        proposal.arguments[1] = "abcdef".into();
         proposal.output_limit_bytes = 6;
         let (code, signal, stdout, stderr) =
             output(policy.start(&approved(&policy, proposal.clone())).unwrap());
-        assert_eq!((code, signal), (Some(7), None));
-        assert_eq!(stdout, b"abc");
-        assert_eq!(stderr, b"def");
+        assert_eq!((code, signal), (Some(0), None));
+        assert_eq!(stdout, b"abcdef");
+        assert!(stderr.is_empty());
         proposal.id = "two".into();
         proposal.output_limit_bytes = 5;
-        assert_stopped(
+        assert_withheld(
             policy.start(&approved(&policy, proposal)).unwrap(),
             State::OutputLimitExceeded,
         );
 
         let mut proposal = input("three");
-        proposal.executable = "/usr/bin/head".into();
-        proposal.arguments = vec!["-c".into(), "65536".into(), "/dev/zero".into()];
-        proposal.output_limit_bytes = 32;
-        assert_stopped(
-            policy.start(&approved(&policy, proposal)).unwrap(),
-            State::OutputLimitExceeded,
-        );
-    }
-
-    #[test]
-    fn child_creation_is_denied_before_a_process_can_leave_its_group() {
-        let directory = Directory::new();
-        let policy = policy();
-        let mut proposal = shell("fork", "(/bin/pwd > child-marker) & wait");
-        directory.apply(&mut proposal);
-        let (code, _, _, stderr) = output(policy.start(&approved(&policy, proposal)).unwrap());
-        assert_ne!(code, Some(0));
-        assert!(!stderr.is_empty());
-        assert!(!directory.0.join("child-marker").exists());
-
-        let mut proposal = shell("exec", "exec /usr/bin/true");
-        directory.apply(&mut proposal);
-        let (code, _, _, stderr) = output(policy.start(&approved(&policy, proposal)).unwrap());
-        assert_ne!(code, Some(0));
-        assert!(!stderr.is_empty());
+        proposal.executable = "/usr/bin/false".into();
+        proposal.arguments.clear();
+        let (code, signal, _, _) = output(policy.start(&approved(&policy, proposal)).unwrap());
+        assert_eq!((code, signal), (Some(1), None));
     }
 
     #[test]
     fn cancelled_revoked_expired_and_timed_out_processes_are_signalled_before_reaping() {
         for expected in [
             State::Cancelled,
-            State::Revoked,
-            State::Expired,
+            State::RevokedAfterLaunch,
+            State::ExpiredAfterLaunch,
             State::TimedOut,
         ] {
             let mut policy = policy();
@@ -663,24 +834,33 @@ mod native {
                 State::Cancelled => {
                     request.cancel().unwrap();
                 }
-                State::Revoked => {
+                State::RevokedAfterLaunch => {
                     let mut switched = context();
                     switched.local_account = Some("new-account".into());
                     policy.update_trusted_context(switched).unwrap();
                 }
-                State::Expired => set_time(&policy, 100),
+                State::ExpiredAfterLaunch => set_time(&policy, 100),
                 _ => {}
             }
-            assert_stopped(execution, expected);
+            assert_withheld(execution, expected);
             assert_eq!(request.state(), Ok(expected));
-            let events = group_events.lock().unwrap();
-            let Some((executor::GroupEvent::Reaped(pid), signals)) = events.split_last() else {
-                panic!("expected group cleanup to finish with reaping");
-            };
-            assert!(!signals.is_empty());
-            assert!(signals
-                .iter()
-                .all(|event| *event == executor::GroupEvent::Signal(*pid)));
+            assert!(!policy.lock().unwrap().in_flight);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                {
+                    let events = group_events.lock().unwrap();
+                    if let Some((executor::GroupEvent::Reaped(pid), signals)) = events.split_last()
+                    {
+                        assert!(!signals.is_empty());
+                        assert!(signals
+                            .iter()
+                            .all(|event| *event == executor::GroupEvent::Signal(*pid)));
+                        break;
+                    }
+                }
+                assert!(Instant::now() < deadline, "group leader was not reaped");
+                thread::sleep(Duration::from_millis(5));
+            }
         }
     }
 
@@ -699,8 +879,29 @@ mod native {
             .update_trusted_context(TrustedContext::default())
             .unwrap();
         policy.update_trusted_context(context()).unwrap();
-        assert_stopped(execution, State::Revoked);
-        assert_eq!(request.state(), Ok(State::Completed));
+        assert_eq!(
+            assert_withheld(execution, State::RevokedAfterLaunch),
+            (Some(0), None)
+        );
+        assert_eq!(request.state(), Ok(State::RevokedAfterLaunch));
+    }
+
+    #[test]
+    fn completed_launch_expires_before_output_handoff() {
+        let policy = policy();
+        let request = approved(&policy, input("one"));
+        let execution = policy.start(&request).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while request.state() != Ok(State::Completed) {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        set_time(&policy, 100);
+        assert_eq!(
+            assert_withheld(execution, State::ExpiredAfterLaunch),
+            (Some(0), None)
+        );
+        assert_eq!(request.state(), Ok(State::ExpiredAfterLaunch));
     }
 
     #[test]
