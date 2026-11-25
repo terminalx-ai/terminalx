@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudApiError, type CloudCredential, type CloudLifecycle, type CloudPreflight, type CloudProvider, type CloudQuote } from "./api";
-import { LAUNCH_RETRY_MS, LaunchAttempt, QUOTE_EXPIRED, SPEND_NOTICE, agentLogins, cleanupFacts, deleteFacts, deleteFailure, deleteRefusal, firstRunSetup, idleChoices, idleValue, launchProgress, launchProviders, launchRecovery, launchRefusal, mayManage, preflightProblems, pricingNote, problemsTitle, quotedSize, repositoryOf, sizeDetail, sizeValue, stopQuestion, stopState, unanswered } from "./launch";
+import { LAUNCH_RETRY_MS, LaunchAttempt, QUOTE_EXPIRED, SPEND_NOTICE, agentLogins, cleanupFacts, deleteFacts, deleteFailure, deleteRefusal, firstRunSetup, idleChoices, idleValue, launchOrganization, launchProgress, launchProviders, launchRecovery, launchRefusal, mayManage, preflightProblems, pricingNote, problemsTitle, quotedSize, repositoryOf, sizeDetail, sizeValue, stopQuestion, stopState, unanswered } from "./launch";
 import { agent37, agent37Setup, boat, boatQuote, boatSetup, claudeKey, codexLogin, githubToken, lifecycle, refuse, server, terminalxCloud, type Answer, type Call } from "./testing/server";
 
 // PRO-530: launching, stopping and deleting a cloud workspace from the phone (25.05, 25.06).
@@ -46,6 +46,25 @@ describe("the form's choices", () => {
     expect(sizeDetail(boatSetup.machineClasses[0])).toBe("2 vCPU · 4 GiB memory · 40 GiB disk");
     expect(sizeDetail({ vcpu: 1, memoryMiB: 1536, diskGiB: 20 })).toBe("1 vCPU · 1.5 GiB memory · 20 GiB disk");
     expect(quotedSize(boatQuote(0).configuration as CloudQuote["configuration"])).toBe("Small · 2 vCPU · 4 GiB · 40 GiB");
+  });
+
+  it("says a size once when its name already is its machine, and keeps its rate on a line that is not cut off (PRO-565)", () => {
+    // Agent37 names a size by its machine: the review does not follow it with the machine again.
+    const named = { ...boatQuote(0).configuration, machineClassLabel: "2 vCPU · 4 GB RAM · 20 GB disk", vcpu: 2, memoryMiB: 4096, diskGiB: 20 } as CloudQuote["configuration"];
+    expect(quotedSize(named)).toBe("2 vCPU · 4 GB RAM · 20 GB disk");
+    // On the form the name fills the row, so the rate takes the second line.
+    expect(sizeValue({ label: "2 vCPU · 4 GB RAM · 20 GB disk" }, "$0.014")).toBe("2 vCPU · 4 GB RAM · 20 GB disk\n$0.014 / hour");
+    expect(sizeValue({ label: "Small" }, "$0.018")).toBe("Small · $0.018 / hour");
+  });
+
+  it("opens + on the first organization that has a provider to launch on, and on the first when none has (PRO-557)", () => {
+    const personal = { orgId: "org-p" }, demo = { orgId: "org-d" }, other = { orgId: "org-o" };
+    const lists: Record<string, CloudProvider[] | null> = { "org-p": providers({ ...boat, availability: "not-connected" }), "org-d": providers(boat), "org-o": providers(agent37) };
+    expect(launchOrganization([personal, demo, other], (orgId) => lists[orgId])).toBe(demo);
+    // TerminalX Cloud alone is not something the phone launches on; a list that did not answer is not known to launch.
+    expect(launchOrganization([personal, demo], (orgId) => ({ "org-p": providers(terminalxCloud), "org-d": null } as Record<string, CloudProvider[] | null>)[orgId])).toBe(personal);
+    expect(launchOrganization([personal], () => undefined)).toBe(personal);
+    expect(launchOrganization([], () => undefined)).toBeNull();
   });
 
   it("says who bills in the provider's own line, then the console's sentence on the prices", () => {
