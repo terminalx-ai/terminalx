@@ -26,7 +26,7 @@ import type { CloudProject } from "@/types/target";
  * sections show them, default first. None while signed out.
  * Sidebar hiding and One organization mode never restrict this picker.
  */
-export function useCloudProjectChoices(): { orgId: string; orgName: string; projects: CloudProject[]; mayStart: boolean | null }[] {
+export function useCloudProjectChoices(): { orgId: string; orgName: string; projects: CloudProject[]; more?: CloudProject[]; mayStart: boolean | null }[] {
   const catalog = useCloudCatalog();
   const prefs = usePrefs();
   const cloudPins = useCloudPins();
@@ -44,7 +44,7 @@ export function useCloudProjectChoices(): { orgId: string; orgName: string; proj
         blank: prefs.cloudBlankProjects[org.id],
       });
       // Whether this account may start a session there: an owner or admin; null while its role is not known yet.
-      return { orgId: org.id, orgName: sectionName(org), projects: placed.projects, mayStart: mayStartCloudSessions(status, org.id) };
+      return { orgId: org.id, orgName: sectionName(org), projects: placed.projects, more: placed.more, mayStart: mayStartCloudSessions(status, org.id) };
     });
   }, [catalog, cloudPins, prefs.cloudProjects, prefs.cloudBlankProjects, status]);
 }
@@ -98,6 +98,13 @@ export function cloudStartError(error: unknown, orgId: string | null = null): st
   if (code === "cloud_workspace_stopped") return "The cloud workspace is stopped.";
   if (code && /^[a-z_]+$/.test(code)) return createErrorMessage(code);
   return errorMessage(error);
+}
+
+export function cloudPlacementError(error: unknown, orgId: string): string {
+  if (error && typeof error === "object" && "code" in error && error.code === "cloud_environment_version_missing") {
+    return "No environment version is ready for this organization.";
+  }
+  return cloudStartError(error, orgId);
 }
 
 /** A quote in words: the machine it is for, and what it costs running and stopped. */

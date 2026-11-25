@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { FakeAgentRuntime } from "@/test/fakeAgentRuntime";
 import type { HarnessInfo, Project } from "@/types/session";
+import type { CloudProviderSummary } from "@/lib/api";
+import { ProvidersPaused } from "@/lib/hiddenProviders";
 import type { CloudProject } from "@/types/target";
 import { accessibilityPress, mouseClick } from "@/test/press";
 
@@ -12,8 +14,9 @@ import { accessibilityPress, mouseClick } from "@/test/press";
 // workspace, or creates one at once: Create is the confirmation (PRO-409).
 // No local path command runs for a cloud draft.
 
-const { invoke, flow, draft, mayStart, noLocal, modelConnection, catalog, launchAccount } = vi.hoisted(() => ({
+const { invoke, flow, draft, mayStart, noLocal, modelConnection, catalog, launchAccount, here, privacyMode } = vi.hoisted(() => ({
   invoke: vi.fn(),
+  privacyMode: { ready: true, enabled: false, managed: false },
   launchAccount: { value: null as import("@/lib/api").AccountStatus | null },
   /** What the form reads as the cloud catalog: the new workspace's start is followed there. */
   catalog: { value: { orgs: {} } as unknown },
@@ -24,7 +27,11 @@ const { invoke, flow, draft, mayStart, noLocal, modelConnection, catalog, launch
     prepareCloudCreate: vi.fn(),
     confirmCloudCreate: vi.fn(),
     cloudIdleOptions: vi.fn(),
+    cloudPlacementOffers: vi.fn(),
+    checkCloudPlacement: vi.fn(),
+    quoteCloudPlacement: vi.fn(),
   },
+  here: vi.fn(),
   draft: { value: null as { project: CloudProject | null; orgName: string; mayStart: boolean | null } | null },
   /** Whether this account may start cloud sessions in the organization (an owner or admin). */
   mayStart: { value: true as boolean | null },
@@ -77,13 +84,18 @@ vi.mock("@/lib/sessions", () => ({
   selectSession: vi.fn(),
   upsertSession: vi.fn(),
   startCloudSessionIn: vi.fn(),
+  runNewSessionHere: here,
 }));
 vi.mock("./CloudNewSession", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./CloudNewSession")>()),
   useCloudDraft: () => draft.value,
   useCloudProjectChoices: () => [{ orgId: "org-a", orgName: "Acme", mayStart: mayStart.value, projects: [project, { ...project, key: "cloud:org-a:blank/scratch", identity: "blank/scratch", fullName: "scratch", blank: true }] }],
 }));
-vi.mock("@/lib/cloudNewSession", () => flow);
+vi.mock("@/lib/dataPrivacy", async (original) => ({
+  ...(await original<typeof import("@/lib/dataPrivacy")>()),
+  useDataPrivacy: () => ({ ...privacyMode }),
+}));
+vi.mock("@/lib/cloudNewSession", async (original) => ({ ...(await original<typeof import("@/lib/cloudNewSession")>()), ...flow }));
 vi.mock("@/lib/account", async (original) => {
   const account = await original<typeof import("@/lib/account")>();
   return {
@@ -142,6 +154,9 @@ beforeEach(() => {
   mayStart.value = true;
   noLocal.value = false;
   catalog.value = { orgs: {} };
+  launchAccount.value = null;
+  Object.assign(privacyMode, { ready: true, enabled: false });
+  here.mockReset().mockImplementation(() => { draft.value = null; });
   draft.value = { project, orgName: "Acme", mayStart: true };
 });
 
@@ -159,6 +174,8 @@ describe("new session in a cloud project", () => {
     // An agent not installed here still runs there.
     expect(screen.queryByText(/isn't installed/)).toBeNull();
     expect(invoke.mock.calls.map(([command]) => command)).toEqual(["transcription_personalization_load"]);
+    expect(flow.cloudPlacementOffers).not.toHaveBeenCalled();
+    expect(flow.checkCloudPlacement).not.toHaveBeenCalled();
   });
 
   it("starts in an existing workspace (a wake for a stopped one) with the prompt and the worktree preference", async () => {
@@ -550,5 +567,174 @@ describe("the composer's pickers", () => {
       fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
       await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
     }
+  });
+});
+
+describe("ready organization session placement", () => {
+  const defaults = { machineClassId: "small", locationId: "eu", idleSuspendMinutes: 30 };
+  function placementOffer(id: string, label: string) {
+    return { id, label, error: null, setup: { provider: id, defaults, allowedIdleSuspendMinutes: [30, 60], currency: "USD", pricing: "estimate",
+      machineClasses: [{ id: "small", label: "Small", vcpu: 2, memoryMiB: 4096, activeHourlyMicros: 120_000 }],
+      locations: [{ id: "eu", label: "Frankfurt" }],
+    } };
+  }
+  beforeEach(() => {
+    launchAccount.value = { state: "signed-in", identity: null, expiresAt: null, lastError: null, phase2Readiness: { "org-a": ["cloud.workspaces.session-placement.v1"] } };
+    flow.planCloudStart.mockReturnValue({ kind: "create" });
+    flow.cloudPlacementOffers.mockResolvedValue([
+      placementOffer("box", "Box"),
+      placementOffer("boat", "Boat"),
+      { id: "paused", label: "Paused", setup: null, error: new Error("New machines are paused.") },
+    ]);
+    flow.checkCloudPlacement.mockResolvedValue(undefined);
+    flow.quoteCloudPlacement.mockImplementation(async (_orgId, setup) => ({ ...prepared.quote, provider: setup.provider, expiresAt: Date.now() + 30_000 }));
+  });
+
+  it.each([null, 3])("shows the caller's usage and cap %s as an advisory snapshot", async (limit) => {
+    launchAccount.value!.phase2Readiness = { "org-a": ["cloud.workspaces.precreate-usage.v1"] };
+    const fallback = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) => command === "cloud_workspace_precreate_usage"
+      ? Promise.resolve({ callerOwnedRunning: 2, callerOwnedRunningLimit: limit, quota: { used: 5, running: { used: 5, limit: 8 } } })
+      : fallback(command, args));
+    render(<NewSessionView />);
+    const usage = await screen.findByTestId("cloud-placement-usage");
+    expect(usage.textContent).toContain("At last check, you held 2 of 5 organization running slots.");
+    expect(usage.textContent).toContain(limit === null ? "No per-member running limit." : "Per-member running limit: 3.");
+    expect(usage.textContent).toContain("Organization running limit: 8. Create checks capacity again.");
+    expect(invoke.mock.calls.filter(([command]) => command === "cloud_workspace_precreate_usage"))
+      .toEqual([["cloud_workspace_precreate_usage", { orgId: "org-a" }]]);
+  });
+
+  it("offers providers and keeps the chosen machine and visibility through prompt edits until Create", async () => {
+    catalog.value = { viewerUserId: "me", orgs: { "org-a": { source: "live", quota: { running: { used: 2, limit: 3 } },
+      workspaces: [{ workspace: { id: "mine", state: "ready", createdBy: "me" } }],
+    } } };
+    flow.prepareCloudCreate.mockResolvedValue(prepared);
+    flow.confirmCloudCreate.mockResolvedValue({ workspace: { id: "ws-new" } });
+    render(<NewSessionView />);
+    await screen.findByText(/Cloud preflight checked for Claude in Acme/);
+    expect(screen.getByTestId("cloud-placement-machine").textContent).toMatch(/Small.*\$0.12 an hour/);
+
+    await accessibilityPress(screen.getByRole("button", { name: "Where it runs: Acme · Box" }));
+    expect(screen.getByTestId("where-this-mac")).toBeTruthy();
+    const boat = screen.getByTestId("where-cloud-org-a-boat");
+    expect(boat.textContent).toMatch(/Small.*2 vCPU.*4 GB.*Frankfurt.*About \$0.12 an hour/);
+    expect(screen.getByTestId("where-cloud-org-a-paused").getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByText("New machines are paused.")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-placement-usage")).toBeNull();
+    expect(invoke.mock.calls.some(([command]) => command === "cloud_workspace_precreate_usage")).toBe(false);
+    fireEvent.click(boat);
+
+    await screen.findByRole("button", { name: "Where it runs: Acme · Boat" });
+    await accessibilityPress(screen.getByRole("button", { name: "Visible to Only me" }));
+    expect(screen.getByText("Who can open this session")).toBeTruthy();
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Everyone at Acme" }));
+    expect(screen.getByRole("button", { name: "Visible to Acme" })).toBeTruthy();
+
+    type("A draft");
+    type("Start the API");
+    expect(flow.prepareCloudCreate).not.toHaveBeenCalled();
+    expect(flow.confirmCloudCreate).not.toHaveBeenCalled();
+    const create = screen.getByRole("button", { name: "Create in cloud" });
+    await waitFor(() => expect(create.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(create);
+    await waitFor(() => expect(flow.prepareCloudCreate).toHaveBeenCalledWith(project, expect.objectContaining({ prompt: "Start the API" }), {
+      accessMode: "organization", defaultIdleSuspendMinutes: 30, quote: expect.objectContaining({ provider: "boat" }),
+    }));
+    expect(flow.confirmCloudCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets an admin allow new machines before Create and refreshes placement without starting anything", async () => {
+    const paused: CloudProviderSummary = {
+      id: "box", displayName: "Box", availability: "disabled-for-create", canManage: true,
+      connection: null, descriptor: null,
+      capabilities: { suspend: true, resume: true, releaseDisposition: "destroyed", locationSelection: "required", sourceSelection: "none", pricing: "estimate" },
+    };
+    launchAccount.value = { ...launchAccount.value!, context: { account: "account", scope: "org-a", revision: "scope:1" } };
+    flow.cloudPlacementOffers.mockReset().mockResolvedValueOnce([
+      { id: paused.id, label: paused.displayName, setup: null, error: new ProvidersPaused([paused]) },
+    ]).mockResolvedValue([placementOffer("box", "Box")]);
+    const allowed = { ...paused, availability: "available" };
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "cloud_provider_set_creation_enabled") return allowed;
+      if (command === "cloud_providers") return { providers: [allowed] };
+      throw new Error(command);
+    });
+    render(<NewSessionView />);
+    type("Start when machines are allowed");
+    const allow = await screen.findByRole("button", { name: "Allow new machines" });
+    const create = screen.getByRole("button", { name: "Create in cloud" });
+    expect(create.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(allow);
+    await waitFor(() => expect(create.hasAttribute("disabled")).toBe(false));
+    expect(invoke).toHaveBeenCalledWith("cloud_provider_set_creation_enabled", { provider: "box", contextRevision: "scope:1", enabled: true });
+    expect(flow.cloudPlacementOffers).toHaveBeenCalledTimes(2);
+    expect(flow.prepareCloudCreate).not.toHaveBeenCalled();
+    expect(flow.confirmCloudCreate).not.toHaveBeenCalled();
+  });
+
+  it("does not read placement offers or preflight while privacy status is unknown or enabled", async () => {
+    privacyMode.ready = false;
+    const view = render(<NewSessionView />);
+    expect(flow.cloudPlacementOffers).not.toHaveBeenCalled();
+    expect(flow.checkCloudPlacement).not.toHaveBeenCalled();
+    Object.assign(privacyMode, { ready: true, enabled: true });
+    view.rerender(<NewSessionView />);
+    expect(flow.cloudPlacementOffers).not.toHaveBeenCalled();
+    expect(flow.checkCloudPlacement).not.toHaveBeenCalled();
+    privacyMode.enabled = false;
+    view.rerender(<NewSessionView />);
+    await screen.findByText(/Cloud preflight checked/);
+    expect(flow.cloudPlacementOffers).toHaveBeenCalledOnce();
+    expect(flow.checkCloudPlacement).toHaveBeenCalledOnce();
+  });
+
+  it("distinguishes an unavailable machine price from a quote in progress", async () => {
+    let failQuote!: (error: Error) => void;
+    flow.quoteCloudPlacement.mockReturnValueOnce(new Promise((_, reject) => { failQuote = reject; }));
+    render(<NewSessionView />);
+    await screen.findByText("Machine price pending");
+    await act(async () => failQuote(new Error("Could not read the machine price.")));
+    expect(await screen.findByText("Machine price unavailable")).toBeTruthy();
+    expect(screen.queryByText("Machine price pending")).toBeNull();
+  });
+
+  it.each([
+    "Could not verify the agent login for this organization.",
+    "No environment version is ready for this organization.",
+  ])("blocks Create and provider selection when preflight reports %s", async (reason) => {
+    flow.checkCloudPlacement.mockRejectedValue(new Error(reason));
+    render(<NewSessionView />);
+    type("Wait for readiness");
+    await screen.findByText(reason);
+    expect(screen.getByRole("button", { name: "Create in cloud" }).hasAttribute("disabled")).toBe(true);
+    await accessibilityPress(screen.getByTestId("cloud-runs-in"));
+    expect(screen.getByTestId("where-cloud-org-a-box").getAttribute("aria-disabled")).toBe("true");
+    expect(flow.prepareCloudCreate).not.toHaveBeenCalled();
+  });
+
+  it("blocks new cloud placement at the organization's running limit and lets This Mac restore the local form", async () => {
+    catalog.value = { orgs: { "org-a": { quota: { running: { used: 3, limit: 3 } } } } };
+    const view = render(<NewSessionView />);
+    type("Keep this draft");
+    expect(await screen.findByText("Your organization is running 3 of 3 cloud workspaces. Stop one to start another.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Create in cloud" }).hasAttribute("disabled")).toBe(true);
+    await accessibilityPress(screen.getByTestId("cloud-runs-in"));
+    fireEvent.click(screen.getByTestId("where-this-mac"));
+    expect(here).toHaveBeenCalledTimes(1);
+    view.rerender(<NewSessionView />);
+    expect(screen.queryByRole("button", { name: "Create in cloud" })).toBeNull();
+    expect(screen.getByDisplayValue("Keep this draft")).toBeTruthy();
+  });
+
+  it("blocks placement at the total workspace limit even with a running slot available", async () => {
+    catalog.value = { orgs: { "org-a": { quota: { used: 1, limit: 3, running: { used: 1, limit: 3 }, total: { used: 5, limit: 5 } } } } };
+    render(<NewSessionView />);
+    type("Wait for a workspace slot");
+    expect(await screen.findByText("The organization has reached its cloud workspace limit.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Create in cloud" }).hasAttribute("disabled")).toBe(true);
+    await accessibilityPress(screen.getByTestId("cloud-runs-in"));
+    expect(screen.getByTestId("where-cloud-org-a-box").getAttribute("aria-disabled")).toBe("true");
+    expect(flow.prepareCloudCreate).not.toHaveBeenCalled();
   });
 });
