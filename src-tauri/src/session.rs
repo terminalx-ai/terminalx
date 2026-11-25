@@ -6904,7 +6904,7 @@ impl SessionManager {
         let model = match (route_model, substitute) {
             (Some(model), _) => model,
             (None, Some(sub)) => {
-                let text = format!("{} is not available on this account; using {}.", tab.model, sub.label);
+                let text = codex::models::substitution_notice(&tab.model, &sub);
                 self.publish(rt, Payload::Status { text, handoff: None }, None);
                 if let Err(error) = self.update_settings(rt, |s| s.model = sub.id.clone()) {
                     log::warn!("record the substituted Codex model: {error:#}");

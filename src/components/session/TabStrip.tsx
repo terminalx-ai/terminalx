@@ -205,6 +205,18 @@ function LocalTabActions({ session, selected, newTabs }: { session: SessionEntry
 }
 
 /** What a new agent tab of `harness` starts with (PRO-381): the model and effort last picked, or the agent's default. */
+/**
+ * The saved model and effort a new tab on a cloud workspace starts with. On a
+ * list that is only this computer's (`foreign`: the workspace has not said
+ * what it runs) a pinned version may not run there, so only an alias is
+ * carried; otherwise nothing, and the workspace uses its default (#1580).
+ */
+export function cloudTabModel(models: readonly ModelInfo[], foreign: boolean, harness: string, prefs: { lastModel: Record<string, string>; lastEffort: Record<string, string | null> }): { model?: string; effort?: string } {
+  const model = models.find((candidate) => candidate.harness === harness && candidate.id === prefs.lastModel[harness]);
+  if (foreign && !model?.alias) return {};
+  return { model: model?.id, effort: prefs.lastEffort[harness] ?? undefined };
+}
+
 export function newChatStartsWith(models: readonly ModelInfo[] | null | undefined, harness: string, prefs: { lastModel: Record<string, string>; lastEffort: Record<string, string | null> }): string | null {
   const own = (models ?? []).filter((model) => model.harness === harness);
   const model = own.find((candidate) => candidate.id === prefs.lastModel[harness]) ?? own.find((candidate) => candidate.isDefault);
@@ -296,7 +308,7 @@ export function NewTabHint({ children }: { children: ReactNode }) {
 }
 
 function CloudTabActions({ session, selected, cloud, onShowPorts, newTabs }: { session: SessionEntry; selected: SelectedSessionTab | null; cloud: CloudSessionModel; onShowPorts?: () => void; newTabs: boolean }) {
-  const { models, refresh } = usePickerModels(useModels(), true, cloud.asleep ? null : cloud.client);
+  const { models, refresh, foreign } = usePickerModels(useModels(), true, cloud.asleep ? null : cloud.client);
   const picker = useRowMenu({ onOpenChange: (open) => open && void refresh() });
   const [error, setError] = useState<string | null>(null);
   // A cloud workspace session's tabs in the order of its strip (#1325); a machine session's, agents then terminals.
@@ -363,7 +375,7 @@ function CloudTabActions({ session, selected, cloud, onShowPorts, newTabs }: { s
           <DropdownMenuItem
             key={agent.id}
             disabled={!!blocked || !cloud.canAddTabs}
-            onSelect={() => run(() => cloud.addAgentTab({ agent: agent.id, model: models.find((model) => model.harness === agent.id && model.id === prefs.lastModel[agent.id])?.id, effort: prefs.lastEffort[agent.id] ?? undefined, mode: prefs.lastMode }))}
+            onSelect={() => run(() => cloud.addAgentTab({ agent: agent.id, ...cloudTabModel(models, foreign, agent.id, prefs), mode: prefs.lastMode }))}
           >
             <AgentMark id={agent.id} decorative /><span>{agent.name}</span>
             {!blocked && !cloud.canAddTabs ? <span className="ml-auto pl-3 text-[12px] text-faint">update the runtime</span> : null}

@@ -98,7 +98,9 @@ export function usePickerModels(local: ModelInfo[], remote: boolean, client?: Wo
     : offeredOn(local, false).map((model) => ({ ...model, resolved: null }));
   const refresh = () => remote ? (client ? readingFor(client).refresh() : Promise.resolve()) : refreshModels();
   // Until the agents have answered, an empty list is a wait, not an answer.
-  return { models, refresh, loaded: remote ? !!runtime : localLoaded };
+  // `foreign`: the list is this computer's, standing in for a machine that
+  // has not said what it runs, so a pinned version on it may not run there.
+  return { models, refresh, loaded: remote ? !!runtime : localLoaded, foreign: remote && !runtime };
 }
 
 /** Inspect the running workspace chosen for a new session. Never wake stopped compute. */
