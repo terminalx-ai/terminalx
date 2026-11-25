@@ -617,6 +617,7 @@ impl Bootstrapped {
         let mut current = self.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let refreshed = refreshed.and_then(|response| {
             if response.workspace_id != current.workspace_id || response.organization_id != current.organization_id {
+                current.desktop_ready = false;
                 return Err(CallError::Transient(RefreshIdentityMismatch.into()));
             }
             session_from_refresh(response, &relay_host_id).map_err(CallError::Transient)
@@ -1145,6 +1146,20 @@ mod tests {
         *server.credential.borrow_mut() = None;
         assert!(matches!(boot.refresh(&server), Err(CallError::Rejected)));
         assert!(boot.is_rejected());
+        assert!(!boot.session.lock().unwrap().desktop_ready);
+    }
+
+    #[test]
+    fn foreign_periodic_refresh_holds_desktop_immediately() {
+        let token = random_credential();
+        let mut server = FakeServer::with_token(&token);
+        server.refresh_desktop_ready = true;
+        let (_dir, config) = setup(&token);
+        let boot = establish(&config, &server, &quick()).unwrap();
+        assert!(boot.session.lock().unwrap().desktop_ready);
+        server.foreign_refresh = true;
+        assert!(matches!(boot.refresh(&server), Err(CallError::Transient(error))
+            if error.downcast_ref::<RefreshIdentityMismatch>().is_some()));
         assert!(!boot.session.lock().unwrap().desktop_ready);
     }
 

@@ -316,6 +316,10 @@ class FakeRuntime implements WorkspaceTransport {
     const params = (frame.params ?? {}) as Record<string, unknown>;
     const ok = (result: unknown) => ({ id: frame.id, ok: true, result });
     switch (frame.method) {
+      case "desktop.open":
+        return ok({ streamId: `desktop-${this.methods("desktop.open").length}`, window: 262144, maxWriteBytes: 32768 });
+      case "desktop.close":
+        return ok({});
       case "session.tabs":
         return ok({ tabs: this.tabs });
       case "session.list":
@@ -514,6 +518,40 @@ describe("cloud desktop center tab", () => {
     fireEvent.click(desktop);
     expect(screen.getByTestId("fixture-desktop-vnc")).toBe(rfb);
     expect(runtime.sent.filter(({ method }) => method === "desktop.open")).toHaveLength(1);
+  });
+
+  it("starts Desktop on a late offer and replaces hidden control with watch after a downgrade", async () => {
+    mocks.privacyReady = true;
+    mocks.readiness = { [ORG]: ["cloud.desktop.v1"] };
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connectShared({ userId: "u-me", role: "driver", canApprove: true }));
+    await screen.findByText("Fix login redirect");
+    fireEvent.click(screen.getByRole("tab", { name: "Desktop" }));
+    expect(screen.getByText("Cloud desktop is unavailable in this runtime.")).toBeTruthy();
+    await act(async () => runtime.notify("desktop.available", {
+      runtimeGeneration: runtime.generation - 1,
+      runtimeEpoch: runtime.epoch,
+    }));
+    expect(runtime.methods("desktop.open")).toHaveLength(0);
+    await act(async () => runtime.notify("desktop.available", {
+      runtimeGeneration: runtime.generation,
+      runtimeEpoch: runtime.epoch,
+    }));
+    await waitFor(() => expect(runtime.methods("desktop.open").map((frame) => frame.params)).toEqual([{ control: true }]));
+    const initial = screen.getByTestId("fixture-desktop-vnc");
+    fireEvent.click(screen.getByRole("tab", { name: "Session" }));
+
+    const you = { userId: "u-me", role: "viewer", canApprove: false, listed: true };
+    runtime.collab!.you = you;
+    await act(async () => runtime.notify("collab.you", { you }));
+    await waitFor(() => expect(runtime.methods("desktop.open").map((frame) => frame.params)).toEqual([
+      { control: true }, { control: false },
+    ]));
+    expect(runtime.methods("desktop.close").map((frame) => frame.params)).toContainEqual({ streamId: "desktop-1" });
+    const watch = screen.getByTestId("fixture-desktop-vnc");
+    expect(watch).not.toBe(initial);
+    expect(watch.closest("[role=tabpanel]")?.hasAttribute("hidden")).toBe(true);
   });
 
   it("is opt-in and shows an older runtime without starting a display", async () => {

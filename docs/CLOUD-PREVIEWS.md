@@ -334,9 +334,11 @@ have).
 The Linux workspace runtime offers `cloud-desktop/1` only when its
 authenticated bootstrap or refresh response enables `cloud.desktop.v1` with
 a version-1 readiness map and a literal boolean true. The handshake also
-requires an identified peer and a loaded workspace membership list. The
-runtime holds this feature after three consecutive periodic refresh failures,
-and holds it immediately if the credential is rejected.
+requires an identified peer and a loaded workspace membership list. A peer
+that requested the capability receives `desktop.available` on the same link
+when its membership arrives. The runtime holds the feature after three
+consecutive periodic refresh failures. A credential rejection or refresh
+identity mismatch holds it immediately.
 
 - `desktop.open` takes `{ control?: boolean }` and returns
   `{ streamId, window, maxWriteBytes }`. The default is watch-only. A control

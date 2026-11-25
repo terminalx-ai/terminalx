@@ -363,7 +363,21 @@ pub(crate) fn output_with_limit(mut command: Command, args: &[&str], timeout: st
             Ok(output)
         }
     });
-    answer_of(captured)
+    answer_utf8_of(captured)
+}
+
+#[cfg(any(feature = "desktop", test))]
+pub(crate) fn output_utf8_feeding(command: Command, input: Vec<u8>, timeout: std::time::Duration) -> std::result::Result<String, RunError> {
+    answer_utf8_of(capture(command, Some(input), None, timeout))
+}
+
+#[cfg(any(feature = "desktop", test))]
+fn answer_utf8_of(captured: std::io::Result<std::process::Output>) -> std::result::Result<String, RunError> {
+    match captured {
+        Ok(output) if output.status.success() => String::from_utf8(output.stdout)
+            .map_err(|_| RunError::Failed("Git output is not valid UTF-8".into())),
+        other => answer_of(other),
+    }
 }
 
 /// [`output_within`] for a one-shot program given `input` on stdin, so long or

@@ -521,11 +521,17 @@ fn validate_listing(
                 );
                 if mode == "120000" {
                     ensure!(
-                        links.len() < 256
-                            && bytes <= 1024
-                            && matches!(oid.len(), 40 | 64)
+                        links.len() < 256,
+                        "Transfer supports at most 256 symbolic links in one checkout"
+                    );
+                    ensure!(
+                        bytes <= 1024,
+                        "A symbolic link target exceeds the 1024-byte transfer limit"
+                    );
+                    ensure!(
+                        matches!(oid.len(), 40 | 64)
                             && oid.bytes().all(|byte| byte.is_ascii_hexdigit()),
-                        "Too many or oversized symbolic links to transfer"
+                        "Invalid symbolic link object ID"
                     );
                     ensure!(
                         portable_link_path(path),
@@ -549,28 +555,34 @@ pub(crate) struct TransferSubmodules;
 #[cfg(any(feature = "desktop", test))]
 fn portable_link_path(path: &str) -> bool {
     !path.is_empty()
-        && path.is_ascii()
         && !path.starts_with('/')
-        && !path
-            .bytes()
-            .any(|byte| byte.is_ascii_control() || matches!(byte, b'\\' | b':' | b'~'))
+        && !path.chars().any(|character| {
+            character.is_control()
+                || matches!(character,
+                '\\' | ':' | '~' | '\u{061c}' | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
+        })
         && path.split('/').all(|part| {
             if matches!(part, "" | "." | "..") {
                 return true;
             }
-            let device = part
+            let folded = crate::mirror_rules::fold(part);
+            let device = folded
                 .split('.')
                 .next()
                 .unwrap_or_default()
                 .trim_end()
                 .to_ascii_uppercase();
             let numbered = device
-                .as_bytes()
-                .get(3)
-                .is_some_and(|digit| matches!(digit, b'1'..=b'9'))
-                && device.len() == 4
-                && (device.starts_with("COM") || device.starts_with("LPT"));
-            !part.eq_ignore_ascii_case(".git")
+                .strip_prefix("COM")
+                .or_else(|| device.strip_prefix("LPT"))
+                .is_some_and(|number| {
+                    matches!(
+                        number,
+                        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                    )
+                });
+            folded != ".git"
                 && !part.ends_with(['.', ' '])
                 && !matches!(
                     device.as_str(),
@@ -593,7 +605,7 @@ fn validate_links(repo: &Path, links: Vec<(&str, &str, usize)>) -> Result<()> {
         input.extend_from_slice(oid.as_bytes());
         input.push(b'\n');
     }
-    let response = crate::git::output_feeding(command, input, BUNDLE_TIMEOUT)
+    let response = crate::git::output_utf8_feeding(command, input, BUNDLE_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("Could not inspect symbolic links: {error}"))?;
     let mut rest = response.as_str();
     let mut targets = std::collections::HashMap::new();
@@ -611,7 +623,9 @@ fn validate_links(repo: &Path, links: Vec<(&str, &str, usize)>) -> Result<()> {
             "A symbolic link target must stay inside the worktree"
         );
         ensure!(
-            targets.insert(path.to_ascii_lowercase(), target).is_none(),
+            targets
+                .insert(crate::mirror_rules::fold(path), target)
+                .is_none(),
             "Symbolic link paths differ only by case"
         );
         rest = data
@@ -648,7 +662,7 @@ fn resolve_link<'a>(
             }
             name => {
                 stack.push(name);
-                if let Some(target) = targets.get(&stack.join("/").to_ascii_lowercase()) {
+                if let Some(target) = targets.get(&crate::mirror_rules::fold(&stack.join("/"))) {
                     followed += 1;
                     ensure!(followed <= 40, "Symbolic link chain is cyclic or too deep");
                     stack.pop();
@@ -933,6 +947,83 @@ impl TranscriptExport {
     }
 }
 
+/// Read the remainder of one NDJSON record without allocating it or giving
+/// the JSON decoder access to the next record.
+struct RecordTail<'a, R> {
+    reader: &'a mut R,
+    done: bool,
+}
+
+impl<R: std::io::BufRead> std::io::Read for RecordTail<'_, R> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if self.done || out.is_empty() {
+            return Ok(0);
+        }
+        let available = self.reader.fill_buf()?;
+        let available = &available[..available.len().min(out.len())];
+        let size = if let Some(newline) = available.iter().position(|&byte| byte == b'\n') {
+            self.done = true;
+            newline + 1
+        } else {
+            available.len()
+        };
+        out[..size].copy_from_slice(&available[..size]);
+        self.reader.consume(size);
+        Ok(size)
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OversizedTranscriptRecord {
+    subagent: Option<serde::de::IgnoredAny>,
+    payload: OversizedTranscriptPayload,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OversizedTranscriptPayload {
+    #[serde(rename = "type")]
+    kind: TranscriptRecordKind,
+    #[serde(default)]
+    queued: bool,
+    final_text: Option<serde::de::IgnoredAny>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TranscriptRecordKind {
+    UserMessage,
+    AssistantText,
+    TurnStarted,
+    TurnCompleted,
+    #[serde(other)]
+    Other,
+}
+
+impl TranscriptExport {
+    fn oversized_record(&mut self, record: OversizedTranscriptRecord) -> Result<()> {
+        use TranscriptRecordKind::*;
+        let payload = record.payload;
+        let could_display = match payload.kind {
+            UserMessage => !payload.queued,
+            AssistantText => record.subagent.is_none(),
+            TurnCompleted => {
+                !self.assistant_seen && record.subagent.is_none() && payload.final_text.is_some()
+            }
+            TurnStarted => {
+                self.assistant_seen = false;
+                false
+            }
+            Other => false,
+        };
+        if could_display {
+            return Err(TransferTooLarge.into());
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn transcript_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
     use std::io::BufRead;
     let mut export = TranscriptExport::default();
@@ -955,7 +1046,14 @@ pub(crate) fn transcript_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>> 
             break;
         }
         if line.len() > line_limit {
-            return Err(TransferTooLarge.into());
+            let tail = RecordTail {
+                reader: &mut reader,
+                done: line.ends_with(b"\n"),
+            };
+            let record = serde_json::from_reader(line.as_slice().chain(tail))
+                .map_err(|_| TransferTooLarge)?;
+            export.oversized_record(record)?;
+            continue;
         }
         if let Ok(event) = serde_json::from_slice::<crate::events::AgentEvent>(&line) {
             export.event(&event, max_bytes)?;
@@ -1200,6 +1298,45 @@ mod tests {
         assert!(transcript_file(&log, 8)
             .unwrap_err()
             .is::<TransferTooLarge>());
+    }
+
+    #[test]
+    fn skips_an_oversized_tool_record_and_reads_the_next_message() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("transcript.jsonl");
+        let mut file = std::fs::File::create(&log).unwrap();
+        // Put the discriminator after the large field, so finding it requires
+        // scanning across the boundary with the structured JSON decoder.
+        for kind in ["tool_call_completed", "assistant_text"] {
+            file.set_len(0).unwrap();
+            file.rewind().unwrap();
+            file.write_all(br#"{"payload":{"text":""#).unwrap();
+            let chunk = vec![b'x'; 1024 * 1024];
+            for _ in 0..25 {
+                file.write_all(&chunk).unwrap();
+            }
+            writeln!(file, "\",\"type\":\"{kind}\"}}}}").unwrap();
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "id": "next", "sessionId": "session", "tabId": "tab", "harness": "claude",
+                    "seq": 2, "ts": "2026-11-25T00:00:00Z",
+                    "payload": { "type": "assistant_text", "text": "Answer" },
+                })
+            )
+            .unwrap();
+            let exported = transcript_file(&log, 4 * 1024 * 1024);
+            if kind == "tool_call_completed" {
+                assert_eq!(
+                    exported.unwrap(),
+                    br#"[{"role":"assistant","text":"Answer"}]"#
+                );
+            } else {
+                assert!(exported.unwrap_err().is::<TransferTooLarge>());
+            }
+        }
     }
 
     #[test]
@@ -1503,11 +1640,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn explains_the_symbolic_link_count_limit() {
+        let entry = format!("120000 blob {} 1\tlink\0", "a".repeat(40));
+        let listing = entry.repeat(257);
+        let error = validate_listing(&listing, 257, 257).unwrap_err();
+        assert!(error.to_string().contains("at most 256 symbolic links"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn accepts_in_tree_symbolic_links_and_refuses_composed_escapes() {
         assert!(!portable_link_path("nested/COM1.txt"));
         assert!(!portable_link_path("nested/NUL"));
+        assert!(!portable_link_path("nested/COM¹.txt"));
+        assert!(!portable_link_path("nested/a\u{202e}"));
+        assert!(!portable_link_path("nested/a\u{061c}"));
+        assert!(portable_link_path("nested/café"));
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
         repository(&repo);
@@ -1515,11 +1664,14 @@ mod tests {
         std::fs::write(repo.join("inside"), b"text").unwrap();
         std::os::unix::fs::symlink("../inside", repo.join("nested/relative")).unwrap();
         std::os::unix::fs::symlink("nested/relative", repo.join("chain")).unwrap();
+        std::os::unix::fs::symlink("../inside", repo.join("nested/café")).unwrap();
+        std::os::unix::fs::symlink("nested/cafe\u{301}", repo.join("unicode-link")).unwrap();
         std::os::unix::fs::symlink(".", repo.join("root-alias")).unwrap();
         git(&repo, &["add", "--all"]).unwrap();
         let pin = BranchCommit::new("main", &commit(&repo)).unwrap();
         validate_checkout(&repo, &pin).unwrap();
-        std::os::unix::fs::symlink("root-alias/../outside", repo.join("escape")).unwrap();
+        std::os::unix::fs::symlink(".", repo.join("jalón")).unwrap();
+        std::os::unix::fs::symlink("JALO\u{301}N/../outside", repo.join("escape")).unwrap();
         git(&repo, &["add", "--all"]).unwrap();
         let pin = BranchCommit::new("main", &commit(&repo)).unwrap();
         let error = validate_checkout(&repo, &pin).unwrap_err();
