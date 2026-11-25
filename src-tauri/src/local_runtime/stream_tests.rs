@@ -247,11 +247,17 @@ fn a_view_far_behind_is_let_go_alone_and_caught_up_from_scrollback() {
     let losing = lost.clone();
     let bridge = Bridge::connect_views(&client, window_sink.clone(), "behind", Some(Box::new(move |reason| *losing.lock().unwrap() = Some(reason)))).unwrap();
 
-    // The flood's window draws a piece every quarter of a second, and never says what it drew.
+    // The flood's window stops reading at its first piece of the flood, and
+    // never says what it drew: it takes nothing more until the runtime has let
+    // its view go. (One that still drew a piece now and then would drain a
+    // frame each time, and the view would only creep towards its budget.)
     let slow = Arc::new(AtomicBool::new(true));
     let drawing = slow.clone();
-    bridge.attach("flood", "f", Box::new(move |_| {
-        if drawing.load(Ordering::Relaxed) { std::thread::sleep(Duration::from_millis(250)); }
+    let runtime_views = rig.terminals.clone();
+    bridge.attach("flood", "f", Box::new(move |bytes| {
+        if drawing.load(Ordering::Relaxed) && bytes.contains(&b'x') {
+            wait("the runtime lets the flood's view go", || runtime_views.stats().views < 2);
+        }
         true
     })).unwrap();
     let (quiet_tap, quiet) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -290,7 +296,11 @@ fn a_view_far_behind_is_let_go_alone_and_caught_up_from_scrollback() {
     let first = replay.recv_timeout(Duration::from_secs(60)).expect("the replay");
     assert!(first.len() >= 64 * 1024 && first[..64 * 1024].iter().all(|byte| *byte == b'x'), "the replay is the flood's tail");
     let mut tail = first;
-    while !contains(&tail, b"flood-done") {
+    // Each piece is searched once: only what came since the last search, and
+    // the marker's length less one before it, in case the marker spans two.
+    let mut searched = 0;
+    while !contains(&tail[searched..], b"flood-done") {
+        searched = tail.len().saturating_sub(b"flood-done".len() - 1);
         tail.extend(replay.recv_timeout(Duration::from_secs(60)).expect("the rest of the flood"));
     }
     assert_eq!(*lost.lock().unwrap(), None, "the connection was never lost");
