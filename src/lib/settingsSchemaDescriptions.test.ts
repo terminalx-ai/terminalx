@@ -2,8 +2,22 @@
 // schemas/settings-descriptions.json, which must say what the Settings row says.
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
-import { SETTINGS_ROWS } from "@/components/settings/settingsRegistry";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+
+// Settings rows name the computer they run on ("this Mac", "System follows macOS").
+// The published schema is one file for every system, so it is written as the
+// macOS rows read: load the registry as on a Mac, whatever system runs the test.
+let SETTINGS_ROWS: typeof import("@/components/settings/settingsRegistry").SETTINGS_ROWS;
+beforeAll(async () => {
+  vi.resetModules();
+  vi.stubGlobal("navigator", { ...globalThis.navigator, platform: "MacIntel" });
+  try {
+    ({ SETTINGS_ROWS } = await import("@/components/settings/settingsRegistry"));
+  } finally {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  }
+});
 
 const PREFIX = "$TERMINALX_HOME/settings.json#";
 
