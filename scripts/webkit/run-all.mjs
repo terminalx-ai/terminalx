@@ -24,8 +24,17 @@
 // Every check runs even when an earlier one fails. A check's output is printed
 // in one piece when it ends; what failed is printed again at the end, and the
 // exit status is 1.
+//
+// On Linux (the CI parts), a check that failed runs once more by itself after
+// the part's other checks have ended (`reruns`, below). The part passes only if
+// each of them passes then; one that passed only alone is printed as "FAILED
+// under load, passed alone" with its first output ("failed, passed when run
+// again" for a check that ran alone the first time too), listed in the job's
+// summary and given a warning annotation, so it is still fixed:
+// rerun-tally.mjs counts those over the last CI runs. macOS and `--only
+// mac-only` run each check once.
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism, freemem, loadavg } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -64,6 +73,8 @@ export const checks = [
   // `pnpm test:webkit-layout`, the four machine screens from CI's own step.
   "team-presence-following",
   "machines-pairing", "machine-connection", "machine-page", "machine-update",
+  // Split from dictation-edits (2026-11): its Right Option case, which only a Mac can make.
+  "dictation-hold-to-talk",
 ];
 
 /**
@@ -79,8 +90,10 @@ const entryArguments = new Map([
 ]);
 
 /**
- * The checks that are left out on a Linux host, each with why. They run on macOS as before. These are judgements made
- * on a Mac (2026-11), not seen failing on Linux: WEBKIT_MAC_ONLY_TOO=1 runs them on Linux too, to find out.
+ * The checks that are left out on a Linux host, each with why. CI runs them in its macOS job (`--only mac-only`) and
+ * every other check in its Linux parts: infra/ci-runners/test_workflow_security.py fails when a check is in neither or
+ * in both. The first five are judgements made on a Mac (2026-11), not seen failing on Linux; WEBKIT_MAC_ONLY_TOO=1 runs
+ * them on Linux too, to find out. The others were moved here from what a Linux run showed, each reason from that run.
  */
 export const macOnly = new Map([
   ["chat-scrollbar", "measures macOS's overlay scrollbars (they take no width and fade); WebKit on Linux draws GTK's own"],
@@ -88,6 +101,7 @@ export const macOnly = new Map([
   ["run-sidebar", "part of it checks the Mac's glass sidebar (backdrop blur through the window), which WebKit on Linux does not composite the same"],
   ["readable-panels", "measures text contrast through the Mac's glass panels (backdrop blur), which WebKit on Linux does not composite the same"],
   ["pr-conversation", "samples frame times while a list scrolls, against the Mac runner's frame rate"],
+  ["dictation-hold-to-talk", "holds Right Option (the Mac's key, hold:AltRight) and presses Option+Backspace to delete a word; WebKit on Linux has no editing key while Alt is held, so the edit is never made"],
 ]);
 
 /**
@@ -119,11 +133,23 @@ const startsVite = (name) => {
 // check to run for it until only Vite checks remain.
 const viteAtOnce = 2;
 
-// These measure against the clock, so other checks competing for the processor
-// would be what they measured: they run after the rest, one at a time.
-// pr-conversation samples frame times while a list scrolls. cloud-history must
-// see a loading line that its fixture replaces 2.5 s after the page subscribes.
-const alone = new Set(["pr-conversation", "cloud-history"]);
+/**
+ * The checks that run alone, each with why: they measure against the clock, so other checks competing for the
+ * processor would be what they measured. They run after the rest of their part has ended, one at a time. Being here
+ * does not move a check to another part (`dealtApart`, below).
+ */
+export const alone = new Map([
+  ["pr-conversation", "samples frame times while a list scrolls"],
+  ["cloud-history", "must see a loading line that its fixture replaces 2.5 s after the page subscribes"],
+  // Step 2's Linux probe (run 45403430912, attempt 2): 124 ms with the runner at load 11.7 and 3 WebKit at once.
+  ["machine-session", "a sent message must be drawn within 100 ms of the Enter key, timed in the page"],
+]);
+
+/**
+ * The checks `shard` deals as a kind of their own: those `alone` held when the parts were dealt this way (2026-11).
+ * One added to `alone` since keeps the part it had, so that a check moved to run alone changes no part's list.
+ */
+const dealtApart = new Set(["pr-conversation", "cloud-history"]);
 
 const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
 // The slowest check takes about five minutes on a slow runner. Past this one
@@ -183,12 +209,12 @@ function run(name) {
 
 /**
  * Part `index` (from 1) of `count` of `names`, each name in exactly one part. Each kind is dealt out in turn, in the
- * list's order: the Vite checks first, so every part gets its share of them (they start slowest); then the `alone`
- * ones, which still run alone, after the rest of their part; then the others. Which part a check is in does not
+ * list's order: the Vite checks first, so every part gets its share of them (they start slowest); then the
+ * `dealtApart` ones, which run alone, after the rest of their part; then the others. Which part a check is in does not
  * depend on the host: the checks left out on Linux are left out after the parts are dealt.
  */
 export function shard(names, index, count) {
-  const kinds = [names.filter((name) => startsVite(name) && !alone.has(name)), names.filter((name) => alone.has(name)), names.filter((name) => !startsVite(name) && !alone.has(name))];
+  const kinds = [names.filter((name) => startsVite(name) && !dealtApart.has(name)), names.filter((name) => dealtApart.has(name)), names.filter((name) => !startsVite(name) && !dealtApart.has(name))];
   const parts = Array.from({ length: count }, () => []);
   let next = 0;
   for (const kind of kinds) for (const name of kind) parts[next++ % count].push(name);
@@ -231,6 +257,106 @@ export async function pool(names, jobs, start) {
       }
     }
   }));
+}
+
+/**
+ * How many times a check that failed runs again, by itself, on a Linux part: once (the owner's decision, #1514 item
+ * 21). Never more: a check that fails alone too fails its part, and a second try would hide a check that fails half
+ * the time. infra/ci-runners/test_webkit_reruns.py fails when this or `rerunFailed` allows more.
+ */
+export const reruns = 1;
+
+/** The reruns this host makes: Linux runs the CI parts, which rerun; macOS, and `--only mac-only` anywhere, do not. */
+export function rerunsHere({ platform = process.platform, only } = {}) {
+  return platform === "linux" && !only ? reruns : 0;
+}
+
+/**
+ * Run each failed result's check again with `run`, one at a time, in the order they ended, when `times` is 1 (for 0
+ * nothing runs). Called once the part's other checks have ended, so nothing else runs beside each one. Resolves with
+ * every result as it now stands: a check that passed alone is ok, with `first` its failed result and `passedAlone`
+ * set; one that failed alone too is not ok, with `first` as well. Results that passed are returned as they were.
+ */
+export async function rerunFailed(results, run, times = reruns) {
+  if (times !== 0 && times !== reruns) throw new Error(`A failed WebKit check runs again ${reruns} time at most, not ${times}.`);
+  const after = [];
+  for (const first of results) {
+    if (first.ok || !times) {
+      after.push(first);
+      continue;
+    }
+    console.log(`\nagain, alone: ${first.name} failed with others running; it runs once more, by itself`);
+    const again = await run(first.name);
+    if (again.ok) {
+      // Said with what it printed the first time: that output is what has to be fixed.
+      console.log(`\n── ${first.name} ${passedAgain(first)}; its first run:${first.report}`);
+      after.push({ ...again, first, passedAlone: true });
+    } else {
+      after.push({ ...again, first });
+    }
+  }
+  return after;
+}
+
+/**
+ * What a check that passed only when run again did, truthfully: one in `alone` ran by itself the first time too, so
+ * it did not fail under load.
+ */
+export function passedAgain(first) {
+  return first.alone ? "failed, passed when run again" : "FAILED under load, passed alone";
+}
+
+/** The title of the warning annotation for a check that passed only when run again; rerun-tally.mjs reads it back. */
+export function annotationTitle(name, part) {
+  return `WebKit check passed only when run again: ${name}${part ? `, part ${part}` : ""}`;
+}
+
+/** `annotationTitle`'s check and part (null when it gave none), or null for any other title. */
+export function annotationCheck(title) {
+  const match = /^WebKit check passed only when run again: ([a-z0-9-]+(?::\d+)?)(?:, part (\d+\/\d+))?$/.exec(title ?? "");
+  return match ? { name: match[1], part: match[2] ?? null } : null;
+}
+
+/**
+ * GitHub Actions' workflow commands for these results: a warning annotation for each check that passed only when run
+ * again, shown on the run's page and the pull request's checks without opening the job, and counted through the API.
+ */
+export function annotations(results, part) {
+  // The escapes GitHub's workflow commands take: in a property also ":" and ","; in the message "%", CR and LF.
+  const data = (text) => text.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+  const property = (text) => data(text).replace(/:/g, "%3A").replace(/,/g, "%2C");
+  return results.filter((result) => result.passedAlone).map((result) => `::warning title=${property(annotationTitle(result.name, part))}::${data(`${result.name} ${passedAgain(result.first)}${part ? ` in part ${part}` : ""}. The part passed; the check is still to be fixed (its first output is in the log and the job summary).`)}`);
+}
+
+/** A check's output for the job summary: no terminal colours, its last `lines` lines, in a fence it cannot close. */
+function fenced(report, lines = 120) {
+  const text = report.replace(/\x1b\[[0-9;]*m/g, "").trim().split("\n");
+  const kept = text.length > lines ? [`(the last ${lines} of ${text.length} lines)`, ...text.slice(-lines)] : text;
+  const longest = Math.max(2, ...[...kept.join("\n").matchAll(/`+/g)].map((run) => run[0].length));
+  const fence = "`".repeat(longest + 1);
+  return `${fence}\n${kept.join("\n")}\n${fence}`;
+}
+
+/**
+ * The job summary's words for these results (GitHub Actions' GITHUB_STEP_SUMMARY, in Markdown), or "" when every
+ * check passed the first time: the checks that passed only alone under their own heading, each with its first
+ * output, then those that failed alone too.
+ */
+export function stepSummary(results, part) {
+  const title = `WebKit checks${part ? `, part ${part}` : ""}`;
+  const passedAlone = results.filter((result) => result.passedAlone);
+  const failed = results.filter((result) => !result.ok);
+  const said = [];
+  if (passedAlone.length) {
+    said.push(`### ${title}: FAILED under load, passed alone`, "", "Each failed, then passed when run again by itself: with the part's other checks running the first time, or, for a check that always runs alone, by itself both times. The part passed, but each is still to be fixed: its first output is below.", "");
+    for (const result of passedAlone) said.push(`<details><summary><code>${result.name}</code>: ${passedAgain(result.first)} (${seconds(result.first.ms)}, then ${seconds(result.ms)})</summary>`, "", fenced(result.first.report), "", "</details>", "");
+  }
+  if (failed.length) {
+    said.push(`### ${title}: failed`, "");
+    for (const result of failed) said.push(`- <code>${result.name}</code>${result.first ? ", and again alone" : ""}`);
+    said.push("");
+  }
+  return said.join("\n");
 }
 
 /** The command line: run the checks it names, or list them. */
@@ -304,16 +430,27 @@ async function main() {
     }
   }
   await pool(selected.filter((name) => !alone.has(name)), jobs, async (name) => { results.push(await run(name)); });
-  for (const name of selected.filter((name) => alone.has(name))) results.push(await run(name));
+  for (const name of selected.filter((name) => alone.has(name))) {
+    console.log(`alone, after the others: ${name}: ${alone.get(name)}`);
+    results.push({ ...await run(name), alone: true });
+  }
+  const firstRuns = results.splice(0);
+  results.push(...await rerunFailed(firstRuns, run, rerunsHere({ only })));
 
   const failed = results.filter((result) => !result.ok);
-  const slowest = [...results].sort((a, b) => b.ms - a.ms).slice(0, 10);
-  console.log(`\n${results.length - failed.length} of ${results.length} checks passed in ${seconds(Date.now() - started)} (${seconds(results.reduce((sum, result) => sum + result.ms, 0))} of checks).`);
+  const passedAlone = results.filter((result) => result.passedAlone);
+  const slowest = [...firstRuns].sort((a, b) => b.ms - a.ms).slice(0, 10);
+  const checkTime = results.reduce((sum, result) => sum + result.ms + (result.first?.ms ?? 0), 0);
+  console.log(`\n${results.length - failed.length} of ${results.length} checks passed${passedAlone.length ? ` (${passedAlone.length} only when run again alone)` : ""} in ${seconds(Date.now() - started)} (${seconds(checkTime)} of checks).`);
   console.log(`Slowest: ${slowest.map((result) => `${result.name} ${seconds(result.ms)}`).join(", ")}`);
   if (leftOut.length) console.log(`Left out on Linux (run-all.mjs macOnly): ${leftOut.join(", ")}`);
+  if (passedAlone.length) console.log(`Passed only when run again alone (still to be fixed; first output above): ${passedAlone.map((result) => `${result.name} (${passedAgain(result.first)})`).join(", ")}`);
+  if (process.env.GITHUB_ACTIONS === "true") for (const line of annotations(results, parsed.values.shard)) console.log(line);
+  const summary = stepSummary(results, parsed.values.shard);
+  if (summary && process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
   if (failed.length || failedSetup.length) {
     // Again, last: whoever reads only the end of the log finds the cause there.
-    for (const result of failed) console.log(result.report);
+    for (const result of failed) console.log(`${result.first ? `${result.first.report}\n(and alone:)` : ""}${result.report}`);
     console.log(`\nFAILED: ${[...failedSetup, ...failed.map((result) => result.name)].join(", ")}`);
     process.exit(1);
   }

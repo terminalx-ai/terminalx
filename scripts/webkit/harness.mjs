@@ -42,6 +42,9 @@ const muteAudio = `(() => {
 // read ⌘ in labels: on a Linux runner Playwright's WebKit says "Linux x86_64" and every one of them would differ.
 // So the page sees macOS's platform and a Mac user agent; the requests say the same. On a Mac both are what WebKit
 // says already. What the engine itself does (its focus order, its scrollbars, its fonts) stays the host's.
+// So a check presses ⌘ as "Meta", on every host. Not "ControlOrMeta": Playwright picks that key from the host it runs
+// on (`process.platform === "darwin" ? "Meta" : "Control"`, playwright-core server/input.ts), so on Linux the page
+// would get Ctrl, which on a Mac is not ⌘, and the shortcut would not fire (src/lib/shortcuts.ts `chordOf`).
 export const MAC_PLATFORM = "MacIntel";
 const MAC_OS = "Macintosh; Intel Mac OS X 10_15_7";
 const macUserAgent = (agent) => agent.replace(/\([^)]*\)/, `(${MAC_OS})`);

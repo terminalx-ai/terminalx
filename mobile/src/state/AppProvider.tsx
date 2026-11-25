@@ -6,8 +6,9 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import NetInfo from "@react-native-community/netinfo";
 import { AppState, Linking } from "react-native";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from "react";
-import { beginSignIn, finishSignIn, readSession, refreshStoredSession, signOut as revokeCloudSession } from "../auth/native";
-import { isAuthCallbackUrl, type CloudSession } from "../auth/protocol";
+import type { AccessCodeAnswer, AccessCodeRequest } from "../auth/access-code";
+import { beginSignIn, finishSignIn, readSession, redeemHeldAccessCode, refreshStoredSession, signOut as revokeCloudSession, type SignInResult } from "../auth/native";
+import { isAuthCallbackUrl, type AccessHold, type CloudSession } from "../auth/protocol";
 import { HostApi, isSessionSummary, type SessionSummary } from "../data/host-api";
 import { handleNotificationEvent, restoreLocalNotifications } from "../notifications/local";
 import { discoverMachines, pairDiscoveredMachine, signOutPairing, type InstallationState } from "../pairing/account";
@@ -61,6 +62,20 @@ interface AppContextValue {
   connection: HostConnection;
   api: HostApi;
   signIn(): Promise<void>;
+  /** A sign-in is under way, from its sheet closing until the phone knows how it ended (25.08: "Signing in…"). */
+  signingIn: boolean;
+  /**
+   * A sign-in the server holds at the private beta until an access code is
+   * accepted (PRO-551); null otherwise. Nothing of the account is on the phone
+   * meanwhile. The ticket that redeems a code is not here: it never leaves the provider.
+   */
+  accessCode: AccessCodeRequest | null;
+  /** Sends a code for the held sign-in. Accepted, the person is signed in at once; the screen closes with `finishAccessCode`. */
+  redeemAccessCode(code: string): Promise<AccessCodeAnswer>;
+  /** Cancel on the access code screen: the held sign-in and its ticket are dropped, and the person is signed out. */
+  cancelAccessCode(): void;
+  /** The accepted page has been shown: the access code screen closes. */
+  finishAccessCode(): void;
   signOut(): Promise<void>;
   refreshMachines(): Promise<void>;
   pairAvailable(host: AccountHost): Promise<void>;
@@ -121,6 +136,22 @@ export function AppProvider({ children }: PropsWithChildren) {
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<ConnectionLogEntry[]>([]);
   const [pairingProgress, setPairingProgress] = useState<PairingProgress | null>(null);
+  const [signingIn, setSigningIn] = useState(false);
+  // The held sign-in's ticket: in memory only, never in state, a log or storage (PRO-551).
+  const held = useRef<AccessHold | null>(null);
+  const holds = useRef(0);
+  const [accessCode, setAccessCode] = useState<AccessCodeRequest | null>(null);
+  /** Where every sign-in ends, whichever way it came back: signed in, or held for an access code. */
+  const land = useCallback((result: SignInResult) => {
+    if (result.status === "signed-in") {
+      held.current = null;
+      setAccessCode(null);
+      setSession(result.session);
+      return;
+    }
+    held.current = result.hold;
+    setAccessCode({ id: ++holds.current, email: result.hold.email });
+  }, []);
 
   const loadHosts = useCallback(async () => {
     const storedHosts = await readHosts();
@@ -323,7 +354,8 @@ export function AppProvider({ children }: PropsWithChildren) {
       const initialUrl = await Linking.getInitialURL();
       if (startup.signal.aborted) return;
       if (!effectiveSession && initialUrl && isAuthCallbackUrl(initialUrl)) {
-        try { setSession(await finishSignIn(initialUrl)); } catch (cause) { setError(readableError(cause)); }
+        setSigningIn(true);
+        try { land(await finishSignIn(initialUrl)); } catch (cause) { setError(readableError(cause)); } finally { setSigningIn(false); }
       }
       if (startup.signal.aborted) return;
       // Saved pairings already hold the pinned key and credential. Resume the
@@ -340,10 +372,12 @@ export function AppProvider({ children }: PropsWithChildren) {
       setReady(true);
     });
     const linking = Linking.addEventListener("url", ({ url }) => {
-      if (isAuthCallbackUrl(url)) void finishSignIn(url).then(setSession).catch((cause: unknown) => setError(readableError(cause)));
+      if (!isAuthCallbackUrl(url)) return;
+      setSigningIn(true);
+      void finishSignIn(url).then(land).catch((cause: unknown) => setError(readableError(cause))).finally(() => setSigningIn(false));
     });
     return () => { startup.abort(); selectionGeneration.current++; linking.remove(); };
-  }, [api, connectHost, device, loadHosts]);
+  }, [api, connectHost, device, land, loadHosts]);
 
   useEffect(() => {
     const stage = connection.onStage((next, attempt) => {
@@ -446,15 +480,43 @@ export function AppProvider({ children }: PropsWithChildren) {
 
   const signIn = useCallback(async () => {
     setError(null);
+    setSigningIn(true);
     try {
-      const signedIn = await beginSignIn();
-      if (signedIn) setSession(signedIn);
+      const result = await beginSignIn();
+      if (result) land(result);
     } catch (cause) {
       // A Release build logs only errors, so a failed sign-in is still in the device log.
       console.error("[auth] sign-in failed:", readableError(cause));
       setError(readableError(cause));
+    } finally {
+      setSigningIn(false);
     }
+  }, [land]);
+
+  const redeemAccessCode = useCallback(async (code: string): Promise<AccessCodeAnswer> => {
+    const hold = held.current;
+    if (!hold) return { status: "ticket_dead" };
+    let outcome: Awaited<ReturnType<typeof redeemHeldAccessCode>>;
+    try {
+      outcome = await redeemHeldAccessCode(hold, code);
+    } catch (cause) {
+      // The session could not be kept in the keychain: the ticket may be spent, and signing in again finds the account.
+      return { status: "unanswered", reason: readableError(cause) };
+    }
+    if (outcome.status === "accepted") {
+      if (held.current === hold) held.current = null;
+      setError(null);
+      setSession(outcome.session);
+      return { status: "accepted" };
+    }
+    if (outcome.status === "ticket_dead" && held.current === hold) held.current = null;
+    return outcome;
   }, []);
+  const cancelAccessCode = useCallback(() => {
+    held.current = null;
+    setAccessCode(null);
+  }, []);
+  const finishAccessCode = useCallback(() => setAccessCode(null), []);
 
   const signOut = useCallback(async () => {
     if (!session) return;
@@ -467,6 +529,8 @@ export function AppProvider({ children }: PropsWithChildren) {
     api.resetConnection(true);
     await signOutPairing(session);
     await revokeCloudSession(session);
+    held.current = null;
+    setAccessCode(null);
     setSession(null);
     setAccountHosts([]);
     setSessions([]);
@@ -580,7 +644,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     return accountHosts.filter((host) => !paired.has(host.hostPublicKeyB64));
   }, [accountHosts, hosts]);
 
-  const value = useMemo<AppContextValue>(() => ({ ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, updating, beginUpdate, retryConnection, sessions, loadingMachines, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions, clearError: () => setError(null) }), [ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, updating, beginUpdate, retryConnection, sessions, loadingMachines, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions]);
+  const value = useMemo<AppContextValue>(() => ({ ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, updating, beginUpdate, retryConnection, sessions, loadingMachines, error, logs, connection, api, signIn, signingIn, accessCode, redeemAccessCode, cancelAccessCode, finishAccessCode, signOut, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions, clearError: () => setError(null) }), [ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, updating, beginUpdate, retryConnection, sessions, loadingMachines, error, logs, connection, api, signIn, signingIn, accessCode, redeemAccessCode, cancelAccessCode, finishAccessCode, signOut, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

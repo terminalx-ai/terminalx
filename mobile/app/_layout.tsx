@@ -1,10 +1,11 @@
 import "react-native-gesture-handler";
 import { useEffect, useRef } from "react";
-import { Stack, useRootNavigationState, useRouter, type Href } from "expo-router";
+import { Stack, usePathname, useRootNavigationState, useRouter, type Href } from "expo-router";
 import * as Notifications from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
 import { Alert, Platform, Settings, useColorScheme } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { ACCESS_CODE_ROUTE, accessCodeRouting } from "@mobile/auth/access-code";
 import { CloudProvider } from "@mobile/cloud/CloudProvider";
 import { answer, intentOf } from "@mobile/notification-actions";
 import { AppProvider, useApp } from "@mobile/state/AppProvider";
@@ -90,5 +91,20 @@ function Navigation() {
     const route = Platform.OS === "ios" ? Settings.get("openRoute") : undefined;
     if (typeof route === "string" && route.startsWith("/")) router.navigate(route as Href);
   }, [navigationReady, router]);
-  return <><StatusBar style={lightText ? "light" : "dark"} /><Stack screenOptions={{ headerLargeTitle: true, headerTransparent: false, headerStyle: { backgroundColor: palette.page }, headerTintColor: palette.ink, headerShadowVisible: false, contentStyle: { backgroundColor: palette.page } }}><Stack.Screen name="(tabs)" options={{ headerShown: false }} /><Stack.Screen name="session/[sessionId]" options={{ title: "Session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="bot/[botId]" options={{ title: "Bot", headerShown: false }} /><Stack.Screen name="session/new" options={{ title: "New session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="cloud/[workspaceId]" options={{ title: "Workspace", headerLargeTitle: false, headerBackTitle: "Cloud" }} /><Stack.Screen name="cloud/shares" options={{ title: "Sharing", headerLargeTitle: false }} /><Stack.Screen name="account" options={{ title: "Account", headerLargeTitle: false, headerBackTitle: "Settings" }} /><Stack.Screen name="organization/[orgId]" options={{ title: "Organization", headerLargeTitle: false, headerBackTitle: "Account" }} /><Stack.Screen name="notifications" options={{ title: "Notifications", headerLargeTitle: false, headerBackTitle: "Settings" }} /><Stack.Screen name="privacy" options={{ title: "Your data", headerLargeTitle: false, headerBackTitle: "Settings" }} /><Stack.Screen name="connection-log" options={{ title: "Connection log", headerLargeTitle: false, headerBackTitle: "Settings" }} /><Stack.Screen name="support-report" options={{ title: "Support report", headerLargeTitle: false, headerBackTitle: "Settings" }} /></Stack></>;
+  // A sign-in held at the private beta (PRO-551): its page comes up over whichever tab the person signed in
+  // from, once for each hold. When the hold ends it closes: onto the Cloud tab's first run once signed in,
+  // back where it came from otherwise. The page reached with no hold sends the person on too.
+  const pathname = usePathname();
+  const holdId = app.accessCode?.id ?? null;
+  const shownFor = useRef<number | null>(null);
+  useEffect(() => {
+    if (!navigationReady) return;
+    const routing = accessCodeRouting({ holdId, shownFor: shownFor.current, onPage: pathname === ACCESS_CODE_ROUTE, signedIn: app.session !== null, canGoBack: router.canGoBack() });
+    if (holdId === null) shownFor.current = null;
+    if (routing === "open") { shownFor.current = holdId; router.push(ACCESS_CODE_ROUTE); }
+    else if (routing === "to-cloud") router.dismissTo("/cloud");
+    else if (routing === "back") router.back();
+    else if (routing === "to-tabs") router.replace("/");
+  }, [app.session, holdId, navigationReady, pathname, router]);
+  return <><StatusBar style={lightText ? "light" : "dark"} /><Stack screenOptions={{ headerLargeTitle: true, headerTransparent: false, headerStyle: { backgroundColor: palette.page }, headerTintColor: palette.ink, headerShadowVisible: false, contentStyle: { backgroundColor: palette.page } }}><Stack.Screen name="(tabs)" options={{ headerShown: false }} /><Stack.Screen name="session/[sessionId]" options={{ title: "Session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="bot/[botId]" options={{ title: "Bot", headerShown: false }} /><Stack.Screen name="session/new" options={{ title: "New session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="cloud/[workspaceId]" options={{ title: "Workspace", headerLargeTitle: false, headerBackTitle: "Cloud" }} /><Stack.Screen name="cloud/shares" options={{ title: "Sharing", headerLargeTitle: false }} /><Stack.Screen name="account" options={{ title: "Account", headerLargeTitle: false, headerBackTitle: "Settings" }} /><Stack.Screen name="organization/[orgId]" options={{ title: "Organization", headerLargeTitle: false, headerBackTitle: "Account" }} /><Stack.Screen name="notifications" options={{ title: "Notifications", headerLargeTitle: false, headerBackTitle: "Settings" }} /><Stack.Screen name="privacy" options={{ title: "Your data", headerLargeTitle: false, headerBackTitle: "Settings" }} /><Stack.Screen name="connection-log" options={{ title: "Connection log", headerLargeTitle: false, headerBackTitle: "Settings" }} /><Stack.Screen name="support-report" options={{ title: "Support report", headerLargeTitle: false, headerBackTitle: "Settings" }} /><Stack.Screen name="access-code" options={{ title: "Access code", headerLargeTitle: false, presentation: "fullScreenModal", gestureEnabled: false }} /></Stack></>;
 }

@@ -102,6 +102,12 @@ try {
       // Real keyboard DnD reaches empty sections, with no membership mutation.
       const handle = page.getByRole("button", { name: "Move workspace Owned workspace", exact: true });
       await handle.focus(); await page.keyboard.press("Space");
+      // dnd-kit's KeyboardSensor adds its keydown listener in a zero-delay timer, set as Space picks the workspace up: a
+      // key sent before it ran is lost and the drag never moves (as in sidebar-order.mjs's pickedUp). Once the grip is
+      // held, one timer set now runs after the sensor's, so it is listening. (Not the pickup's words: dnd-kit replaces
+      // them at once with the section the workspace is over.)
+      await page.waitForFunction(() => document.querySelector('[aria-label="Move workspace Owned workspace"]')?.getAttribute("aria-pressed") === "true");
+      await page.evaluate(() => new Promise((resolve) => setTimeout(resolve)));
       await page.keyboard.press("ArrowDown");
       await page.getByText("Over Empty", { exact: true }).waitFor();
       await page.keyboard.press("Space");
@@ -111,13 +117,29 @@ try {
       await handle.scrollIntoViewIfNeeded();
       const from = await handle.boundingBox(), to = await target.boundingBox();
       await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
-      await page.mouse.down(); await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 12 }); await page.mouse.up();
+      await page.mouse.down(); await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 12 });
+      // dnd-kit drops on the section it last found under the pointer, found in a render after a move. Released before
+      // that render, the drop went to the section the pointer had left (a busy Linux runner: nothing reached Review).
+      // Released once it says it is over Review, as a person lets go once the section is marked.
+      await page.getByText("Over Review", { exact: true }).waitFor();
+      await page.mouse.up();
       await target.getByTestId("cloud-workspace-group").waitFor();
       check(await page.getByRole("group", { name: "Empty section", exact: true }).getByTestId("cloud-workspace-group").count() === 0, `${width}px pointer moves a workspace into an empty section`);
       const beforeOutside = await target.getByTestId("cloud-workspace-group").count();
       const start = await handle.boundingBox();
       await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2); await page.mouse.down();
-      await page.mouse.move(900, 100, { steps: 12 }); await page.mouse.up();
+      await page.mouse.move(900, 100, { steps: 12 });
+      // Let go once the workspace is held and dnd-kit's last word puts it over no section: it drops on that word's section.
+      // Not "Outside a section" alone: dnd-kit says it when the section under the drag changes to none, and a drag first
+      // drawn with all twelve moves done (a busy runner, 3 of 3 on a Mac with 30 ms after each move) was never over one.
+      await page.waitForFunction(() => {
+        const held = document.querySelector('[aria-label="Move workspace Owned workspace"]')?.getAttribute("aria-pressed") === "true";
+        const said = document.querySelector('[id^="DndLiveRegion-"]')?.textContent ?? "";
+        return held && (said === "Outside a section" || said.startsWith("Picked up Owned workspace"));
+      });
+      await page.mouse.up();
+      // Said only when a drag ends on no section: a drag that never started says nothing, one dropped on a section says "Workspace layout updated".
+      await page.getByText("Move canceled", { exact: true }).waitFor();
       check(await target.getByTestId("cloud-workspace-group").count() === beforeOutside, `${width}px dropping outside all sections preserves placement`);
       check(!(await list.evaluate((el) => el.scrollWidth > el.clientWidth + 1)), `${width}px no horizontal sidebar overflow`);
       const calls = await page.evaluate(() => window.__PW_TEAM__.calls);

@@ -124,6 +124,17 @@ async function checkActions(page, column, context) {
   assert.ok(await visible(menu), `${context}: session actions fit in the window`);
   await page.getByRole("menuitem", { name: "Open", exact: true }).waitFor();
   await page.keyboard.press("Escape");
+  await closed(page, await trigger.elementHandle());
+}
+
+/**
+ * Once a menu is closed: Radix gives focus back to its trigger from a timer after the menu unmounts. Until that timer
+ * has run, focus given to another control is taken back by it; on a busy Linux runner it ran in the middle of the
+ * search box's fill, the text went to the trigger and the search stayed empty ("search: card count 2 !== 1").
+ */
+async function closed(page, trigger) {
+  await page.getByRole("menu").waitFor({ state: "detached" });
+  await page.waitForFunction((element) => document.activeElement === element, trigger);
 }
 
 const server = await serve();
@@ -174,6 +185,7 @@ try {
         const heading = column.locator("header");
         const before = await heading.boundingBox();
         await cards(column).first().hover();
+        await page.evaluate(() => { window.__wheelStill = {}; });
         await page.mouse.wheel(0, 100_000);
         const last = cards(column).last();
         if (count > 1) {
@@ -184,10 +196,16 @@ try {
           }, labels[index]);
           if (!config.stacked) {
             assert.ok(layout.scrollHeight > layout.clientHeight, `${context}: populated column overflows`);
+            // At the end and no longer moving: WebKit on Linux animates a wheel scroll, and at 150% zoom its last step is a
+            // pixel. Read within a pixel of the end, the last card was 1.4 px past the column (hosted-runner run
+            // 45392734637; 3 of 36 copies in a Linux container) and fully in it a step later.
             await page.waitForFunction((label) => {
               const list = document.querySelector(`section[aria-label="${label}"]`).lastElementChild;
-              return list.scrollTop + list.clientHeight >= list.scrollHeight - 1;
-            }, labels[index]);
+              const still = window.__wheelStill;
+              const seen = still[label] ?? { at: null, frames: 0 };
+              still[label] = { at: list.scrollTop, frames: seen.at === list.scrollTop ? seen.frames + 1 : 0 };
+              return still[label].frames >= 3 && list.scrollTop + list.clientHeight >= list.scrollHeight - 1;
+            }, labels[index], { polling: "raf" });
             assert.ok(await visible(last), `${context}: wheel reaches the last card`);
             assert.deepEqual(await heading.boundingBox(), before, `${context}: status heading stays put`);
           }
@@ -214,11 +232,15 @@ try {
       assert.equal(await cards(columns[3]).count(), 0);
       assert.ok(await visible(search), `${context}: search stays visible`);
       await page.getByRole("button", { name: "Clear search", exact: true }).click();
-      await page.getByRole("button", { name: "Filter", exact: true }).click();
+      // The same button is named "Filter, 1 on" once a filter is chosen.
+      const filter = await page.getByRole("button", { name: "Filter", exact: true }).elementHandle();
+      await filter.click();
       await page.getByRole("menu").scrollIntoViewIfNeeded();
       assert.ok(await visible(page.getByRole("menu")), `${context}: filter menu fits in the window`);
       await page.getByRole("menuitemcheckbox", { name: "Working", exact: true }).click();
       await page.keyboard.press("Escape");
+      // The keys below go to a card's menu: the filter menu's focus return must not take them.
+      await closed(page, filter);
       assert.equal(await cards(columns[0]).count(), 0);
       assert.equal(await cards(columns[1]).count(), count * 2);
       assert.equal(await cards(columns[2]).count(), 0);

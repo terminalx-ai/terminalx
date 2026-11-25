@@ -64,7 +64,8 @@ try {
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await openConversation(page, "First conversation");
-    await page.keyboard.press("ControlOrMeta+p");
+    // ⌘, not ControlOrMeta: the page is the Mac app whatever the host (harness.mjs), and on Linux ControlOrMeta is Ctrl.
+    await page.keyboard.press("Meta+p");
     const field = page.getByRole("textbox", { name: "Search files" });
     await field.waitFor();
     const list = page.getByRole("listbox", { name: "Files" });

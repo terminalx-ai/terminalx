@@ -17,7 +17,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
-WEBKIT_LINUX = ROOT / ".github/workflows/webkit-linux.yml"
+RUN_ALL = ROOT / "scripts/webkit/run-all.mjs"
 NEXTEST = ROOT / "src-tauri/.config/nextest.toml"
 SERVE_TESTS = ROOT / "src-tauri/serve/tests"
 HOSTED = {"ubuntu-latest", "macos-latest", "windows-latest"}
@@ -35,12 +35,21 @@ SELECTED = {
     "headless-serve": "rust",
     "serve-tests": "rust",
     "vitest": "frontend",
-    "webkit-layout": "frontend",
+    "webkit-layout-linux": "frontend",
+    "webkit-mac-only": "mac-webkit",
     "phone-app": "phone",
 }
-ANSWERS = ["required", "rust", "frontend", "phone", "machines"]
+ANSWERS = ["required", "rust", "frontend", "phone", "mac-webkit", "machines"]
 # Only these may take a macOS runner.
-MACOS = {"macos-native", "machine-compat", "webkit-layout"}
+MACOS_NATIVE = {"macos-native"}
+MACOS = {"macos-native", "machine-compat", "webkit-mac-only"}
+# A pull request is not held to these (the owner's decisions, 24 November 2026): `check` does not need them, and
+# `check-macos` holds every other run to them.
+NOT_HELD = ["macos-native", "webkit-mac-only"]
+# The WebKit layout checks: the Linux parts, the required status that stands for them, and the mac-only ones.
+WEBKIT_PARTS = ["1", "2", "3", "4"]
+WEBKIT_PART_RUN = "node scripts/webkit/run-all.mjs --shard ${{ matrix.part }}/4"
+WEBKIT_MAC_RUN = "node scripts/webkit/run-all.mjs --only mac-only"
 # The Linux Rust suite: the library's tests in four parts, then the rest of `cargo test`.
 PARTS = ["1", "2", "3", "4", "binaries"]
 LIBRARY_PART = 'set -o pipefail\ncargo nextest run --locked --lib --profile ci --partition count:${{ matrix.part }}/4 2>&1 | tee "$RUNNER_TEMP/nextest.log"\n'
@@ -48,6 +57,18 @@ VITEST_PARTS = ["1", "2", "3", "4"]
 LOCK = "${{ hashFiles('src-tauri/Cargo.lock') }}"
 CACHE_MISS = "!endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock'))"
 CLEAN = "cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental"
+# macos-native saves its cache before the tests, which need this crate's output: it cleans a clone and puts the build back.
+ASIDE = f'mv target "$RUNNER_TEMP/target"\ncp -cpR "$RUNNER_TEMP/target" target\n{CLEAN}\n'
+PUT_BACK = 'test -d "$RUNNER_TEMP/target"\nrm -rf target && mv "$RUNNER_TEMP/target" target\n'
+# The macOS build dates the crate's OUT_DIR files back (tauri::generate_context! writes them during the compile),
+# then proves a second cargo command finds every unit fresh.
+MACOS_BUILD = (
+    'cargo test --locked --lib --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/build.jsonl"\n'
+    "out_dir=$(jq -r 'select(.reason == \"build-script-executed\" and (.package_id | test(\"[#/]raccoon@\"))) | .out_dir' \"$RUNNER_TEMP/build.jsonl\")\n"
+    'test -d "$out_dir"\n'
+    'find "$out_dir" -type f -exec touch -t 200001010000 {} +\n'
+    "cargo test --locked --lib --no-run -v --message-format=json 2> \"$RUNNER_TEMP/fresh.log\" | jq -s -e '[.[] | select(.reason == \"compiler-artifact\")] | (length > 0) and all(.fresh)' || { sed -E 's/\\x1b\\[[0-9;]*m//g' \"$RUNNER_TEMP/fresh.log\" | grep -E '^ *Dirty' | cut -c1-600; exit 1; }\n"
+)
 # The cache each job restores. serve-tests builds what headless-serve builds: it restores that job's and saves none.
 CACHES = {
     "linux-rust": "linux-rust", "linux-rust-tests": "linux-rust-tests", "macos-native": "macos-native",
@@ -71,16 +92,16 @@ def load(path):
     return yaml.load(path.read_text(), Loader=yaml.BaseLoader)
 
 
-def gate_passes(workflow, needs):
+def gate_passes(workflow, needs, gate="check"):
     """Run the aggregate's own script against these job results."""
-    script = workflow["jobs"]["check"]["steps"][0]["run"]
+    script = workflow["jobs"][gate]["steps"][0]["run"]
     done = subprocess.run(["bash", "-c", script], env={**os.environ, "RESULTS": json.dumps(needs)}, capture_output=True)
     return done.returncode == 0
 
 
 def results(workflow, skipped=(), ended=None, **answers):
     """Every job succeeded and every answer was "true", but for the jobs `skipped` or `ended` otherwise and for `answers`."""
-    needs = {name: {"result": "success", "outputs": {}} for name in workflow["jobs"] if name != "check"}
+    needs = {name: {"result": "success", "outputs": {}} for name in workflow["jobs"]["check"]["needs"]}
     needs["macos-rust-changes"]["outputs"] = {answer: answers.get(answer, "true") for answer in ANSWERS}
     for name, result in {**{name: "skipped" for name in skipped}, **(ended or {})}.items():
         needs[name]["result"] = result
@@ -89,6 +110,66 @@ def results(workflow, skipped=(), ended=None, **answers):
 
 def runs(job):
     return [step.get("run", "") for step in job["steps"]]
+
+
+def webkit_gate_passes(workflow, needs):
+    """Run webkit-layout's own verdict against these job results."""
+    script = workflow["jobs"]["webkit-layout"]["steps"][0]["run"]
+    done = subprocess.run(["bash", "-c", script], env={**os.environ, "RESULTS": json.dumps(needs)}, capture_output=True)
+    return done.returncode == 0
+
+
+def run_all_lists(arguments, platform):
+    """The names `run-all.mjs <arguments> --list` prints on `platform` ("linux" or "darwin"), whatever this host is.
+
+    The script is run itself, with Node told it is on that platform: what it leaves out there is its own decision.
+    """
+    preload = f"data:text/javascript,Object.defineProperty(process,'platform',{{value:{json.dumps(platform)}}})"
+    environment = {key: value for key, value in os.environ.items() if key != "WEBKIT_MAC_ONLY_TOO"}
+    done = subprocess.run(["node", "--import", preload, str(RUN_ALL), *arguments, "--list"], cwd=ROOT, env=environment, capture_output=True, text=True)
+    assert done.returncode == 0, f"run-all.mjs {' '.join(arguments)} --list: {done.stderr}"
+    return done.stdout.split()
+
+
+def run_all_arguments(command):
+    """The arguments of a step that runs run-all.mjs, or None when it is not one such command alone."""
+    match = re.fullmatch(r"node scripts/webkit/run-all\.mjs((?: [^\s;&|]+)*)", command.strip())
+    return match.group(1).split() if match else None
+
+
+def webkit_runs(workflow):
+    """Where each WebKit check runs: [(job, the names it runs)], one entry for each part of a job's matrix."""
+    found = []
+    for name, job in workflow["jobs"].items():
+        for step in job["steps"]:
+            run = step.get("run", "")
+            if "run-all.mjs" not in run and "test:webkit-layout" not in run:
+                continue
+            assert "if" not in step, f"{name} runs its WebKit checks only sometimes"
+            platform = "darwin" if job["runs-on"] == "macos-latest" else "linux"
+            parts = job.get("strategy", {}).get("matrix", {}).get("part", [None])
+            for part in parts:
+                command = run.replace("${{ matrix.part }}", str(part))
+                arguments = run_all_arguments(command)
+                assert arguments is not None and "${{" not in command, f"{name} runs the WebKit checks in a way this test cannot read: {run!r}"
+                found.append((f"{name} ({part})" if part else name, run_all_lists(arguments, platform)))
+    return found
+
+
+def validate_webkit_coverage(workflow):
+    """Every WebKit check runs in exactly one place: a Linux part, or the mac-only job."""
+    assert "WEBKIT_MAC_ONLY_TOO" not in str(workflow), "a Linux part that also runs the mac-only checks"
+    every = run_all_lists([], "darwin")
+    assert every, "run-all.mjs lists no checks"
+    where = {}
+    for job, names in webkit_runs(workflow):
+        for name in names:
+            where.setdefault(name, []).append(job)
+    nowhere = [name for name in every if name not in where]
+    twice = {name: jobs for name, jobs in where.items() if len(jobs) > 1}
+    assert not nowhere, f"WebKit checks no job runs: {nowhere}"
+    assert not twice, f"WebKit checks run twice: {twice}"
+    assert set(where) == set(every), "a job runs a name the suite does not list"
 
 
 def validate_common(workflow):
@@ -141,21 +222,28 @@ def validate(workflow):
     assert workflow["env"]["CI_CACHE_SCOPE"] == CACHE_SCOPE, "cache trust scope"
     jobs = workflow["jobs"]
     assert {"check", "frontend", "webkit-layout"} <= jobs.keys(), "required status names"
-    assert set(jobs["check"]["needs"]) == jobs.keys() - {"check"}, "aggregate must require every job"
+    # A pull request is not held to the macOS Rust suite or the mac-only WebKit checks; every other run is, through check-macos.
+    assert set(jobs["check"]["needs"]) == jobs.keys() - {"check", "check-macos", *NOT_HELD}, "aggregate must require every job but the macOS Rust suite and the mac-only WebKit checks"
     assert jobs["check"]["if"] == "always()", "aggregate must report failures and cancellations"
+    held = jobs.get("check-macos")
+    assert held, "main, nightly and manual runs are held to the macOS jobs"
+    assert held["needs"] == ["check", *NOT_HELD] and held["if"] == "${{ always() && github.event_name != 'pull_request' }}", "main, nightly and manual runs are held to check and the macOS suite"
+    assert held["runs-on"] == "ubuntu-latest" and "permissions" not in held and len(held["steps"]) == 1, "a gate and nothing else"
     gate = jobs["check"]["steps"][0]["run"]
     assert '$selector.result == "success"' in gate, "a skip is accepted on a failed selector's word"
     accepted = re.search(r"(\{[^{}]*\}) as \$selected", gate)
-    assert accepted and json.loads(accepted.group(1)) == SELECTED, "aggregate must reject every other skipped dependency"
+    assert accepted and json.loads(accepted.group(1)) == {name: answer for name, answer in SELECTED.items() if name not in NOT_HELD}, "aggregate must reject every other skipped dependency"
     assert '$selector.outputs[$selected[$job]] == "false"' in gate and "$selected[$job] != null" in gate, "a skip is accepted only on the selector's own answer"
     selector = jobs["macos-rust-changes"]
     assert set(selector["outputs"]) == set(ANSWERS), "the selector's answers"
     assert any("macos-rust.py --all" in run and "macos-rust.py --base" in run for run in runs(selector)), "everything runs unless it is a pull request"
     for name, job in jobs.items():
         if name in SELECTED:
-            assert job["if"] == f"needs.macos-rust-changes.outputs.{SELECTED[name]} == 'true'", "job selection"
+            assert job.get("if") == f"needs.macos-rust-changes.outputs.{SELECTED[name]} == 'true'", "job selection"
             assert job["needs"] == "macos-rust-changes", "selection dependency"
-        elif name != "check":
+        elif name in {"check", "webkit-layout"}:
+            assert job.get("if") == "always()", f"{name} must report a failed or cancelled part"
+        elif name != "check-macos":
             assert "if" not in job, "a job the aggregate would see skipped"
         if name in {"macos-native", "machine-compat"}:
             assert job["concurrency"] == {
@@ -183,7 +271,7 @@ def validate(workflow):
                     assert restored and name not in RESTORE_ONLY, "save without a restore, or by a job that only restores"
                     assert inputs["key"] == "${{ steps.cargo-cache.outputs.cache-primary-key }}", "save must use restored scope"
                     assert CACHE_MISS in step["if"], "a cache is saved only when none built from this lock file was restored"
-                    assert previous.get("run") == CLEAN and previous.get("if") == step["if"] and previous.get("working-directory") == "src-tauri", "a cache must not hold this crate's own output"
+                    assert previous.get("run") == (ASIDE if name in MACOS_NATIVE else CLEAN) and previous.get("if") == step["if"] and previous.get("working-directory") == "src-tauri", "a cache must not hold this crate's own output"
                 else:
                     assert "/restore@" in action, "a cache action that saves by itself"
                     assert step["id"] == "cargo-cache", "cache step name"
@@ -240,7 +328,17 @@ def validate(workflow):
     after_helper = "${{ !cancelled() && steps.helper.outcome == 'success' }}"
     names = [s.get("run", "") for s in native["steps"]]
     clippy = [i for i, run in enumerate(names) if run.startswith("cargo clippy")]
-    build = names.index("cargo test --locked --lib --no-run")
+    assert MACOS_BUILD in names, "the macOS build dates its OUT_DIR back and proves the next cargo command compiles nothing"
+    build = names.index(MACOS_BUILD)
+    steps = native["steps"]
+    assert steps[build].get("shell") == "bash", "pipefail: a failed cargo in the freshness check fails the build"
+    # The cache is saved once the dependencies are built, before any test: a suite that fails or runs out of time
+    # still leaves it. The crate's own output is cleaned from a clone, and the build is put back for the tests.
+    save = next(i for i, s in enumerate(steps) if "/save@" in s.get("uses", ""))
+    tests = [i for i, s in enumerate(steps) if s.get("name", "").startswith("cargo test")]
+    assert tests and build < save - 1 and steps[save - 1].get("id") == "aside" and steps[save - 1]["if"].startswith("${{ !cancelled() && steps.build.outcome == 'success' && "), "the cache is saved right after the build"
+    assert steps[save + 1].get("run") == PUT_BACK and steps[save + 1].get("if") == "${{ !cancelled() && steps.aside.outcome != 'skipped' }}" and steps[save + 1].get("working-directory") == "src-tauri", "the build is put back after the save"
+    assert save + 1 < min(tests), "the cache is saved before the tests"
     assert [names[i] for i in clippy] == ["cargo clippy --locked --test serde_field_naming -- -D warnings", "cargo clippy --locked --all-targets -- -D warnings"] and max(clippy) < build, "both macOS Clippy runs, ahead of the tests"
     assert "if" not in native["steps"][clippy[0]] and native["steps"][clippy[1]].get("if") == after_helper, "macOS Clippy on a pull request too"
     assert native["steps"][build].get("if") == after_helper and native["steps"][build].get("id") == "build", "macOS builds the library's tests whenever it runs, also after a lint"
@@ -257,24 +355,28 @@ def validate(workflow):
     for binary, job in SERVE_ELSEWHERE.items():
         assert (SERVE_TESTS / f"{binary}.rs").exists(), f"{binary} is no longer a serve test binary"
         assert any(re.search(rf"\b{binary}\b", run) for run in runs(jobs[job])), f"{binary} is left out of serve-tests and {job} does not run it"
-    webkit = jobs["webkit-layout"]
-    assert "pnpm test:webkit-layout" in runs(webkit), "the WebKit checks"
-    assert any(s.get("with", {}).get("name") == "machine-screens" and s["with"]["if-no-files-found"] == "error" for s in webkit["steps"]), "the machine screens are kept"
-
-
-def validate_webkit_linux(workflow, required):
-    """The Linux WebKit run: the same policy, every check in one part, and no say in what merges."""
-    validate_common(workflow)
-    assert set(workflow["on"]) == {"pull_request", "schedule", "workflow_dispatch"}, "unexpected trigger"
-    # Not on every pull request: only one that changes the checks or the trial itself, whatever its base branch.
-    assert workflow["on"]["pull_request"] == {"paths": ["scripts/webkit/**", ".github/workflows/webkit-linux.yml"]}, "a pull request that changes the checks or the trial, based on any branch"
-    assert not set(workflow["jobs"]) & set(required), "a job that would report under a required status's name"
-    for name, job in workflow["jobs"].items():
-        assert job["runs-on"] == "ubuntu-latest", "hosted Linux only"
-        assert "if" not in job, "every part runs on every pull request"
-        assert not any(step.get("uses", "").startswith("actions/cache") for step in job["steps"]), "unexpected cache"
-        assert job["strategy"] == {"fail-fast": "false", "matrix": {"part": VITEST_PARTS}}, "every part runs and reports"
-        assert "node scripts/webkit/run-all.mjs --shard ${{ matrix.part }}/4" in runs(job), "every WebKit check, in exactly one part"
+    # The WebKit layout checks: four parts on Linux, required through `webkit-layout`, and the mac-only ones on macOS.
+    assert {"webkit-layout-linux", "webkit-mac-only"} <= jobs.keys(), "the Linux WebKit parts and the mac-only WebKit job"
+    parts = jobs["webkit-layout-linux"]
+    assert parts["runs-on"] == "ubuntu-latest", "the WebKit parts on hosted Linux"
+    assert parts["strategy"] == {"fail-fast": "false", "matrix": {"part": WEBKIT_PARTS}}, "every part runs and reports"
+    assert WEBKIT_PART_RUN in runs(parts), "every WebKit check, in exactly one part"
+    assert any("playwright install --with-deps webkit" in run for run in runs(parts)), "WebKit and its libraries on Linux"
+    assert not any(s.get("uses", "").startswith("actions/cache") for s in parts["steps"]), "unexpected cache"
+    gate = jobs["webkit-layout"]
+    assert gate["runs-on"] == "ubuntu-latest", "the required WebKit status on Linux"
+    assert set(gate["needs"]) == {"macos-rust-changes", "webkit-layout-linux"}, "webkit-layout stands for the Linux parts"
+    assert int(gate["timeout-minutes"]) <= 10, "webkit-layout waits for nothing but its parts"
+    assert gate["steps"][0].get("env") == {"RESULTS": "${{ toJSON(needs) }}"} and "if" not in gate["steps"][0], "the verdict reads every part's result"
+    assert not any(run_all_arguments(run) is not None or "webkit" in run for run in runs(gate)[1:]), "webkit-layout runs no check of its own"
+    upload = [s for s in parts["steps"] if s.get("uses", "").startswith("actions/upload-artifact@")]
+    assert len(upload) == 1 and upload[0]["with"]["name"] == "machine-screens-${{ matrix.part }}" and "if" not in upload[0], "each part keeps its machine screens"
+    kept = [s for s in gate["steps"] if s.get("uses", "").startswith("actions/upload-artifact@")]
+    assert len(kept) == 1 and kept[0]["with"]["name"] == "machine-screens" and kept[0]["with"]["if-no-files-found"] == "error", "the machine screens are kept, and missing ones fail"
+    mac = jobs["webkit-mac-only"]
+    assert WEBKIT_MAC_RUN in runs(mac), "the mac-only WebKit checks"
+    assert int(mac["timeout-minutes"]) <= 30, "the mac-only job holds a macOS runner no longer than its checks need"
+    validate_webkit_coverage(workflow)
 
 
 def validate_nextest(config):
@@ -385,7 +487,7 @@ class WorkflowSecurity(unittest.TestCase):
     def test_cache_holding_this_crates_output_is_rejected(self):
         def change(w):
             steps = w["jobs"]["macos-native"]["steps"]
-            steps.remove(next(s for s in steps if s.get("run") == CLEAN))
+            steps.remove(next(s for s in steps if s.get("run") == ASIDE))
         self.rejects(change)
         self.rejects(lambda w: self.step(w, "headless-serve", run="cargo clean").update({"run": "cargo clean --locked -p terminalx-serve"}))
         self.rejects(lambda w: self.step(w, "linux-rust", run="cargo clean").update({"if": "always()"}))
@@ -476,12 +578,34 @@ class WorkflowSecurity(unittest.TestCase):
         self.rejects(lambda w: w["jobs"]["frontend"]["steps"].insert(1, w["jobs"]["frontend"]["steps"].pop(next(i for i, s in enumerate(w["jobs"]["frontend"]["steps"]) if s.get("name") == "Verify portable source icons"))))
 
     def test_a_second_tsc_is_rejected(self):
-        self.rejects(lambda w: self.step(w, "webkit-layout", name="Build the frontend").update({"run": "pnpm build"}))
+        self.rejects(lambda w: self.step(w, "webkit-layout-linux", name="Build the frontend").update({"run": "pnpm build"}))
+        self.rejects(lambda w: self.step(w, "webkit-mac-only", name="Build the frontend").update({"run": "pnpm build"}))
         self.rejects(lambda w: self.step(w, "macos-native", name="Build the frontend").update({"run": "pnpm exec tsc --noEmit && pnpm exec vite build"}))
         self.rejects(lambda w: self.step(w, "frontend", name="tsc").update({"if": "false"}))
 
     def test_missing_phone_checks_are_rejected(self):
         self.rejects(lambda w: w["jobs"]["phone-app"]["steps"].pop())
+
+    def test_macos_cache_saved_after_the_tests_or_left_out_is_rejected(self):
+        def save_last(w):
+            steps = w["jobs"]["macos-native"]["steps"]
+            i = next(i for i, s in enumerate(steps) if s.get("id") == "aside")
+            moved = steps[i : i + 3]
+            del steps[i : i + 3]
+            steps.extend(moved)
+        self.rejects(save_last)
+        # The crate's output cleaned from the build itself, not a clone: the tests would build it again.
+        self.rejects(lambda w: self.step(w, "macos-native", name="Leave this crate").update({"run": CLEAN}))
+        self.rejects(lambda w: w["jobs"]["macos-native"]["steps"].remove(self.step(w, "macos-native", name="Put this crate")))
+        self.rejects(lambda w: self.step(w, "macos-native", name="Put this crate").update({"if": "always()"}))
+
+    def test_macos_second_compile_is_rejected(self):
+        # Without the dates put back, every cargo command after the build compiles the crate again.
+        self.rejects(lambda w: self.step(w, "macos-native", name="build the library").update({"run": "cargo test --locked --lib --no-run\n"}))
+        self.rejects(lambda w: self.step(w, "macos-native", name="build the library").update({"run": MACOS_BUILD.replace(" and all(.fresh)", "")}))
+        # A path search dates back what cargo 1.100 keeps beside OUT_DIR, the test binary among them, and makes it stale.
+        self.rejects(lambda w: self.step(w, "macos-native", name="build the library").update({"run": MACOS_BUILD.replace('find "$out_dir"', "find target/debug/build -path '*/raccoon/*/out/*'")}))
+        self.rejects(lambda w: self.step(w, "macos-native", name="build the library").pop("shell"))
 
     def test_cancelling_a_running_main_job_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["macos-native"]["concurrency"].update({"cancel-in-progress": "true"}))
@@ -519,6 +643,10 @@ class WorkflowSecurity(unittest.TestCase):
         # Without the mirror script a runner in an AWS region takes 25 minutes over the same packages.
         self.rejects(lambda w: self.step(w, "linux-rust", name="Install Linux build dependencies").update({"run": self.step(w, "linux-rust", name="Install Linux build dependencies")["run"].removeprefix("sudo infra/ci-runners/apt-mirrors.sh && ")}))
         self.rejects(lambda w: self.step(w, "linux-rust-tests", name="Install Linux build dependencies").update({"run": self.step(w, "linux-rust-tests", name="Install Linux build dependencies")["run"].replace(" -o Acquire::http::Timeout=30", "", 1)}))
+        # The WebKit parts' libraries come through apt too (`--with-deps`), and so from the mirror the script picks.
+        self.rejects(lambda w: self.step(w, "webkit-layout-linux", name="Install WebKit and the libraries it needs").update({"run": "pnpm exec playwright install --with-deps webkit"}))
+        # Without `--with-deps` a hosted Ubuntu runner lacks the libraries WebKit loads.
+        self.rejects(lambda w: self.step(w, "webkit-layout-linux", name="Install WebKit and the libraries it needs").update({"run": "pnpm exec playwright install webkit"}))
 
     def test_missing_vitest_shell_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["vitest"]["steps"].remove(self.step(w, "vitest", name="Install shells")))
@@ -528,12 +656,113 @@ class WorkflowSecurity(unittest.TestCase):
 
     def test_dropped_machine_screens_are_rejected(self):
         self.rejects(lambda w: w["jobs"]["webkit-layout"]["steps"].pop())
-        self.rejects(lambda w: self.step(w, "webkit-layout", name="WebKit layout checks").update({"run": "node scripts/webkit/run-all.mjs --shard 1/4"}))
+        self.rejects(lambda w: w["jobs"]["webkit-layout-linux"]["steps"].pop())
+        self.rejects(lambda w: self.step(w, "webkit-layout", name="Upload the machine screens")["with"].update({"if-no-files-found": "warn"}))
+
+    def test_the_webkit_checks_are_where_the_suite_says(self):
+        # Every name `run-all.mjs --list` prints is run by exactly one Linux part or by the mac-only job.
+        validate_webkit_coverage(self.workflow)
+        every = run_all_lists([], "darwin")
+        mac = run_all_lists(["--only", "mac-only"], "darwin")
+        linux = [name for part in WEBKIT_PARTS for name in run_all_lists(["--shard", f"{part}/4"], "linux")]
+        self.assertTrue(mac, "no check is left to macOS")
+        self.assertEqual(sorted(linux + mac), sorted(every))
+
+    def test_a_webkit_check_that_runs_nowhere_or_twice_is_rejected(self):
+        # A part removed, or its share dealt into five with four to run it.
+        self.rejects(lambda w: w["jobs"]["webkit-layout-linux"]["strategy"]["matrix"]["part"].pop())
+        self.rejects(lambda w: self.step(w, "webkit-layout-linux", name="WebKit layout checks").update({"run": "node scripts/webkit/run-all.mjs --shard ${{ matrix.part }}/5"}))
+        self.rejects(lambda w: self.step(w, "webkit-layout-linux", name="WebKit layout checks").update({"run": "node scripts/webkit/run-all.mjs settings-navigation"}))
+        self.rejects(lambda w: self.step(w, "webkit-layout-linux", name="WebKit layout checks").update({"if": "matrix.part != '4'"}))
+        # The mac-only checks run on Linux too, or on no runner.
+        self.rejects(lambda w: self.step(w, "webkit-layout-linux", name="WebKit layout checks").update({"env": {"WEBKIT_MAC_ONLY_TOO": "1"}}))
+        self.rejects(lambda w: w["jobs"].pop("webkit-mac-only"))
+
+        def gone_from_main_too(w):
+            w["jobs"].pop("webkit-mac-only")
+            w["jobs"]["check-macos"]["needs"].remove("webkit-mac-only")
+        self.rejects(gone_from_main_too)
+        # The checks are still all listed, so only the coverage itself can see them run nowhere.
+        with self.assertRaisesRegex(AssertionError, "WebKit checks no job runs"):
+            changed = deepcopy(self.workflow)
+            self.step(changed, "webkit-mac-only", name="WebKit layout checks").update({"run": "node scripts/webkit/run-all.mjs chat-scrollbar"})
+            validate_webkit_coverage(changed)
+        with self.assertRaisesRegex(AssertionError, "WebKit checks run twice"):
+            changed = deepcopy(self.workflow)
+            self.step(changed, "webkit-layout-linux", name="WebKit layout checks").update({"env": {}})
+            self.step(changed, "webkit-mac-only", name="WebKit layout checks").update({"run": "node scripts/webkit/run-all.mjs"})
+            validate_webkit_coverage(changed)
+        self.rejects(lambda w: self.step(w, "webkit-mac-only", name="WebKit layout checks").update({"run": "node scripts/webkit/run-all.mjs chat-scrollbar"}))
+        self.rejects(lambda w: self.step(w, "webkit-mac-only", name="WebKit layout checks").update({"run": "pnpm test:webkit-layout"}))
+        # The mac-only job on Linux: there run-all leaves out what it was there to run.
+        self.rejects(lambda w: w["jobs"]["webkit-mac-only"].update({"runs-on": "ubuntu-latest"}))
+
+    def test_the_mac_only_job_off_main_or_on_every_pull_request_is_rejected(self):
+        # Only the selector's `mac-webkit` answer decides; it is "true" on main, nightly and manual runs.
+        for condition in [
+            "github.event_name == 'pull_request' && needs.macos-rust-changes.outputs.mac-webkit == 'true'",
+            "github.event_name != 'push' && needs.macos-rust-changes.outputs.mac-webkit == 'true'",
+            "needs.macos-rust-changes.outputs.frontend == 'true'",
+            "always()",
+        ]:
+            with self.subTest(condition=condition):
+                self.rejects(lambda w: w["jobs"]["webkit-mac-only"].update({"if": condition}))
+        self.rejects(lambda w: w["jobs"]["webkit-mac-only"].pop("if"))
+        self.rejects(lambda w: w["jobs"]["macos-rust-changes"]["outputs"].pop("mac-webkit"))
+        self.rejects(lambda w: w["jobs"]["webkit-layout"].update({"runs-on": "macos-latest"}))
+        self.rejects(lambda w: w["jobs"]["webkit-layout-linux"].update({"runs-on": "macos-latest"}))
+
+    def test_webkit_layout_without_its_parts_is_rejected(self):
+        self.rejects(lambda w: w["jobs"]["check"]["needs"].remove("webkit-layout-linux"))
+        self.rejects(lambda w: w["jobs"]["check-macos"]["needs"].remove("webkit-mac-only"))
+        self.rejects(lambda w: w["jobs"]["webkit-layout"]["needs"].remove("webkit-layout-linux"))
+        self.rejects(lambda w: w["jobs"]["webkit-layout"].update({"if": "success()"}))
+        self.rejects(lambda w: w["jobs"]["webkit-layout"].pop("if"))
+        self.rejects(lambda w: w["jobs"]["webkit-layout"].update({"timeout-minutes": "50"}))
+        self.rejects(lambda w: w["jobs"]["webkit-layout"]["steps"].pop(0))
+        self.rejects(lambda w: w["jobs"].pop("webkit-layout"))
+        self.rejects(lambda w: w["jobs"].pop("webkit-layout-linux"))
+
+    def test_webkit_layout_passes_only_when_every_part_did(self):
+        w = self.workflow
+        self.assertTrue(webkit_gate_passes(w, results(w)))
+        # Skipped on the selector's own "false" for the frontend, and on nothing else.
+        self.assertTrue(webkit_gate_passes(w, results(w, skipped=["webkit-layout-linux"], frontend="false")))
+        self.assertFalse(webkit_gate_passes(w, results(w, skipped=["webkit-layout-linux"])))
+        self.assertFalse(webkit_gate_passes(w, results(w, skipped=["webkit-layout-linux"], frontend="")))
+        self.assertFalse(webkit_gate_passes(w, results(w, skipped=["webkit-layout-linux"], ended={"macos-rust-changes": "failure"}, frontend="false")))
+        self.assertFalse(webkit_gate_passes(w, results(w, skipped=["webkit-layout-linux"], ended={"macos-rust-changes": "cancelled"}, frontend="false")))
+        # A part failed or cancelled (GitHub gives a matrix job the worst of its parts' results).
+        for result in ("failure", "cancelled"):
+            for answer in ("true", "false"):
+                with self.subTest(result=result, frontend=answer):
+                    self.assertFalse(webkit_gate_passes(w, results(w, ended={"webkit-layout-linux": result}, frontend=answer)))
+        self.assertFalse(webkit_gate_passes(w, results(w, ended={"macos-rust-changes": "failure"})))
+        # With the parts missing from what it reads, it cannot pass either.
+        needs = results(w)
+        del needs["webkit-layout-linux"]
+        self.assertFalse(webkit_gate_passes(w, needs))
+
+    def test_webkit_layout_that_accepts_a_failed_part_is_rejected(self):
+        def change(w):
+            verdict = w["jobs"]["webkit-layout"]["steps"][0]
+            verdict["run"] = verdict["run"].replace('$parts == "success"', '$parts != "skipped"')
+        changed = deepcopy(self.workflow)
+        change(changed)
+        self.assertTrue(webkit_gate_passes(changed, results(changed, ended={"webkit-layout-linux": "failure"})), "the mutation must weaken the verdict")
+        self.assertFalse(webkit_gate_passes(self.workflow, results(self.workflow, ended={"webkit-layout-linux": "failure"})))
+
+    def test_the_trial_workflow_is_gone(self):
+        self.assertFalse((ROOT / ".github/workflows/webkit-linux.yml").exists())
+        others = [path for path in (ROOT / ".github/workflows").glob("*.yml") if path != WORKFLOW]
+        self.assertFalse([path.name for path in others if "run-all.mjs" in path.read_text() or "test:webkit-layout" in path.read_text()], "the WebKit checks run in ci.yml alone")
 
     def test_aggregate_accepts_a_skip_only_on_the_selectors_word(self):
         w = self.workflow
         self.assertTrue(gate_passes(w, results(w)))
         for name, answer in SELECTED.items():
+            if name not in w["jobs"]["check"]["needs"]:
+                continue
             with self.subTest(job=name):
                 self.assertTrue(gate_passes(w, results(w, skipped=[name], **{answer: "false"})))
                 # Selected, but it did not run.
@@ -548,12 +777,36 @@ class WorkflowSecurity(unittest.TestCase):
                 for result in ("cancelled", "failure"):
                     self.assertFalse(gate_passes(w, results(w, ended={name: result}, **{answer: "false"})))
         nothing = {answer: "false" for answer in ANSWERS}
-        self.assertTrue(gate_passes(w, results(w, skipped=list(SELECTED), **nothing)))
+        self.assertTrue(gate_passes(w, results(w, skipped=[name for name in SELECTED if name in w["jobs"]["check"]["needs"]], **nothing)))
         # No other job may be skipped, whatever the selector said.
-        for name in set(w["jobs"]) - {"check", *SELECTED}:
+        for name in set(w["jobs"]["check"]["needs"]) - set(SELECTED):
             with self.subTest(job=name):
                 self.assertFalse(gate_passes(w, results(w, skipped=[name], **nothing)))
                 self.assertFalse(gate_passes(w, results(w, ended={name: "failure"})))
+
+    def test_main_is_held_to_the_macos_jobs(self):
+        w = self.workflow
+        ok = {name: {"result": "success"} for name in ["check", *NOT_HELD]}
+        self.assertTrue(gate_passes(w, ok, gate="check-macos"))
+        for job in ok:
+            for result in ("failure", "cancelled", "skipped"):
+                with self.subTest(job=job, result=result):
+                    self.assertFalse(gate_passes(w, {**ok, job: {"result": result}}, gate="check-macos"))
+            # A job left out of the results is not a pass.
+            self.assertFalse(gate_passes(w, {name: r for name, r in ok.items() if name != job}, gate="check-macos"))
+        for job in NOT_HELD:
+            with self.subTest(missing=job):
+                self.rejects(lambda w, job=job: w["jobs"]["check-macos"]["needs"].remove(job))
+        self.rejects(lambda w: w["jobs"]["check-macos"].update({"if": "always()"}))
+        self.rejects(lambda w: w["jobs"]["check-macos"].update({"if": "${{ always() && github.event_name == 'schedule' }}"}))
+        self.rejects(lambda w: w["jobs"].pop("check-macos"))
+
+    def test_a_pull_request_waiting_for_a_macos_job_is_rejected(self):
+        # In check's needs, macos-native would hold the required status for the 45 to 90 minutes it runs, and
+        # webkit-mac-only for its 3 minutes and its wait for a macOS runner.
+        for job in NOT_HELD:
+            with self.subTest(job=job):
+                self.rejects(lambda w, job=job: w["jobs"]["check"]["needs"].append(job))
 
     def test_missing_gate_dependency_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["check"]["needs"].remove("linux-rust"))
@@ -586,58 +839,82 @@ class WorkflowSecurity(unittest.TestCase):
         self.rejects(change)
 
 
-class WebKitOnLinux(unittest.TestCase):
-    def setUp(self):
-        self.workflow = load(WEBKIT_LINUX)
-        self.required = load(WORKFLOW)["jobs"]
+STOP = ROOT / ".github/workflows/stop-closed-pr-runs.yml"
+PULL_REF = "refs/pull/${{ github.event.pull_request.number }}/merge"
 
-    def test_workflow_meets_the_same_policy(self):
-        validate_webkit_linux(self.workflow, self.required)
+
+def pull_request_group(workflow):
+    """The concurrency group a workflow gives a pull request's run, with the ref written as the stop workflow writes it."""
+    group = workflow.get("concurrency", {}).get("group", "")
+    for expression, value in (
+        ("${{ github.event_name }}", "pull_request"),
+        ("${{ github.event_name == 'pull_request' && github.ref || github.run_id }}", PULL_REF),
+        ("${{ github.ref }}", PULL_REF),
+    ):
+        group = group.replace(expression, value)
+    assert group.endswith("-" + PULL_REF) and "${{" not in group[: -len(PULL_REF)], f"a pull request's runs need a group of their own that ends in the pull request's ref: {group!r}"
+    return group
+
+
+def validate_stop(stop, workflows):
+    """`workflows` are all the others, by file name."""
+    assert stop["on"] == {"pull_request": {"types": ["closed"]}}, "it runs when a pull request is closed and at no other time"
+    assert stop.get("permissions") == {}, "it needs no token at all"
+    assert "secrets" not in str(stop) and "env" not in stop, "no secret and nothing shared"
+    assert list(stop["jobs"]) == ["stop"], "one job, which holds the groups"
+    job = stop["jobs"]["stop"]
+    assert "permissions" not in job and "needs" not in job and "if" not in job and "continue-on-error" not in job
+    assert job["runs-on"] == "ubuntu-latest" and int(job["timeout-minutes"]) <= 2, "a hosted runner for a minute or two"
+    assert job["name"] == "stop ${{ matrix.workflow }}" and not {"check", "frontend", "webkit-layout"} & {job["name"], "stop"}, "it must not report under a required name"
+    assert all("uses" not in step for step in job["steps"]), "no checkout and no action: it runs nothing from the pull request"
+    for step in job["steps"]:
+        assert "${{" not in step.get("run", ""), "an expression inside a script"
+    assert job["concurrency"] == {"group": "${{ matrix.workflow }}-" + PULL_REF, "cancel-in-progress": "true"}, "it joins each group by the pull request's number and cancels what holds it"
+    named = {f"{prefix}-{PULL_REF}" for prefix in job["strategy"]["matrix"]["workflow"]}
+    assert job["strategy"].get("fail-fast") == "false", "one group's job must not stop the others"
+    # Every group it names contains refs/pull/: a run on main (a run id, or `main`) cannot hold one.
+    held = {name: pull_request_group(w) for name, w in workflows.items() if "pull_request" in w["on"]}
+    assert named == set(held.values()), f"every workflow a pull request starts is stopped when it closes, and nothing else is named: {held}"
+    for name, w in workflows.items():
+        groups = [w.get("concurrency", {}).get("group", "")] + [j.get("concurrency", {}).get("group", "") for j in w["jobs"].values()]
+        if "pull_request" not in w["on"]:
+            assert not any("refs/pull/" in g or "github.ref" in g and "pull_request" in g for g in groups), f"{name} does not run on a pull request and must not take a pull request's group"
+        assert not any(g in named for g in groups[1:]), f"a job of {name} holds a group the stop workflow cancels"
+
+
+class StopClosedPullRequestRuns(unittest.TestCase):
+    def setUp(self):
+        self.stop = load(STOP)
+        self.workflows = {path.name: load(path) for path in sorted(STOP.parent.glob("*.yml")) if path != STOP}
+
+    def test_it_stops_every_pull_request_workflow_and_nothing_else(self):
+        validate_stop(self.stop, self.workflows)
 
     def rejects(self, mutate):
-        changed = deepcopy(self.workflow)
-        mutate(changed)
+        stop, workflows = deepcopy(self.stop), deepcopy(self.workflows)
+        mutate(stop, workflows)
         with self.assertRaises(AssertionError):
-            validate_webkit_linux(changed, self.required)
+            validate_stop(stop, workflows)
 
-    def job(self, w):
-        return w["jobs"]["webkit-layout-linux"]
+    def test_a_pull_request_workflow_it_does_not_name_is_rejected(self):
+        self.rejects(lambda s, w: s["jobs"]["stop"]["strategy"]["matrix"]["workflow"].remove("repeat-flaky-tests"))
+        self.rejects(lambda s, w: w.update({"new.yml": {"on": {"pull_request": ""}, "concurrency": {"group": "new-${{ github.ref }}"}, "jobs": {}}}))
+        self.rejects(lambda s, w: w.update({"new.yml": {"on": {"pull_request": ""}, "jobs": {}}}))
+        self.rejects(lambda s, w: w["ci.yml"]["concurrency"].update(group="ci-${{ github.head_ref }}"))
 
-    def test_it_is_no_part_of_the_required_run(self):
-        self.assertNotIn("webkit-linux", WORKFLOW.read_text().replace(".github/workflows/webkit-linux.yml", ""))
-        self.rejects(lambda w: w["jobs"].update({"webkit-layout": w["jobs"].pop("webkit-layout-linux")}))
-        self.rejects(lambda w: w["jobs"].update(check=deepcopy(self.job(w))))
+    def test_a_group_a_run_on_main_could_hold_is_rejected(self):
+        self.rejects(lambda s, w: s["jobs"]["stop"]["concurrency"].update(group="${{ matrix.workflow }}-${{ github.ref }}"))
+        self.rejects(lambda s, w: s["jobs"]["stop"]["strategy"]["matrix"]["workflow"].append("ci-macos-native-main"))
+        self.rejects(lambda s, w: s["jobs"]["stop"]["strategy"]["matrix"]["workflow"].append("ci-push"))
 
-    def test_weaker_policy_is_rejected(self):
-        self.rejects(lambda w: w.update(permissions={"contents": "write"}))
-        self.rejects(lambda w: w.pop("permissions"))
-        self.rejects(lambda w: w["on"].update(pull_request_target={}))
-        self.rejects(lambda w: w["on"].update(push={"branches": ["main"]}))
-        self.rejects(lambda w: self.job(w)["steps"][0].update(uses="actions/checkout@v4"))
-        self.rejects(lambda w: self.job(w)["steps"][0]["with"].update({"persist-credentials": "true"}))
-        self.rejects(lambda w: self.job(w).update({"runs-on": "self-hosted"}))
-        self.rejects(lambda w: self.job(w).update({"runs-on": "macos-latest"}))
-        self.rejects(lambda w: self.job(w).update(env={"TOKEN": "${{ secrets.DEPLOY_TOKEN }}"}))
-        self.rejects(lambda w: self.job(w).update({"continue-on-error": "true"}))
-        self.rejects(lambda w: self.job(w)["steps"].append({"uses": "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830", "with": {"path": "dist", "key": "shared"}}))
-
-    def test_branch_filter_is_rejected(self):
-        # It must also run for a pull request based on another pull request's branch.
-        self.rejects(lambda w: w["on"].update(pull_request={"branches": ["main"]}))
-
-    def test_browser_packages_from_the_runners_own_mirror_are_rejected(self):
-        self.rejects(lambda w: next(s for s in self.job(w)["steps"] if "playwright install" in s.get("run", "")).update({"run": "pnpm exec playwright install --with-deps webkit"}))
-
-    def test_running_on_every_pull_request_is_rejected(self):
-        # On every pull request it queues four jobs beside the required ones, for a result nobody is held to.
-        self.rejects(lambda w: w["on"].update(pull_request=""))
-        self.rejects(lambda w: w["on"]["pull_request"]["paths"].append("src/**"))
-
-    def test_missing_or_narrowed_part_is_rejected(self):
-        self.rejects(lambda w: self.job(w)["strategy"]["matrix"]["part"].pop())
-        self.rejects(lambda w: self.job(w).update({"if": "matrix.part != '4'"}))
-        self.rejects(lambda w: self.job(w)["steps"][-1].update({"run": "node scripts/webkit/run-all.mjs --shard ${{ matrix.part }}/5"}))
-        self.rejects(lambda w: self.job(w)["steps"][-1].update({"run": "node scripts/webkit/run-all.mjs settings-navigation"}))
+    def test_more_than_holding_the_groups_is_rejected(self):
+        self.rejects(lambda s, w: s.update(permissions={"actions": "write"}))
+        self.rejects(lambda s, w: s["on"].update(push={"branches": ["main"]}))
+        self.rejects(lambda s, w: s["on"]["pull_request"]["types"].append("synchronize"))
+        self.rejects(lambda s, w: s["jobs"]["stop"]["steps"].append({"uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"}))
+        self.rejects(lambda s, w: s["jobs"]["stop"].update(name="check"))
+        self.rejects(lambda s, w: s["jobs"]["stop"]["concurrency"].update({"cancel-in-progress": "false"}))
+        self.rejects(lambda s, w: s["jobs"]["stop"]["steps"][0].update(run="echo ${{ github.event.pull_request.title }}"))
 
 
 class NextestProfile(unittest.TestCase):
