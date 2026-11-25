@@ -128,7 +128,7 @@ pub fn take_over(run: &Run, piece: &Piece, head: &str, by: TakenBy) -> String {
                 super::LeadFor::NoModelAbove => "Its tries fell short and there is no model above the last one to try it on. Finish it yourself, in your own checkout.",
             };
             format!(
-                "TerminalX handed you piece {} (\"{}\") of run {} by itself: {} {what} {files} Nobody asked the person: this needs no judgment of theirs.\n\n",
+                "TerminalX handed you piece {} (\"{}\") of run {} by itself: {}. {what} {files} Nobody asked the person: this needs no judgment of theirs.\n\n",
                 piece.id, piece.title, run.id, to_lead.stuck.trim_end_matches('.'),
             )
         }

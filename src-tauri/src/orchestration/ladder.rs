@@ -26,7 +26,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::routing::{self, Tier, EFFORTS};
+use super::routing::{self, Installed, Tier, EFFORTS};
 use crate::models::Model;
 
 /// The tries a piece gets, the first included, when Settings say nothing:
@@ -134,11 +134,11 @@ fn lowered(effort: Option<&str>, model: &Model) -> Option<String> {
 
 /// The try after `tries` tries of a piece on `agent`, the last of which ran
 /// `model` at `effort` on `tier`, under the run's `rules`. `models` is what
-/// the agents' CLIs list.
+/// the agents' CLIs list, and where each list came from.
 ///
 /// Tries 2, 4 and 6 take the effort step (a plain retry where the effort
 /// cannot go up); tries 3 and 5 move up a tier. See the module doc.
-pub fn next(agent: &str, tries: usize, rules: &Rules, model: &str, effort: Option<&str>, tier: Option<Tier>, models: &[Model]) -> Verdict {
+pub fn next(agent: &str, tries: usize, rules: &Rules, model: &str, effort: Option<&str>, tier: Option<Tier>, models: &Installed) -> Verdict {
     let allowed = rules.tries.max(1) as usize;
     if tries >= allowed {
         // Step 4.
@@ -165,7 +165,7 @@ pub fn next(agent: &str, tries: usize, rules: &Rules, model: &str, effort: Optio
     };
     match routing::model_for(agent, above, models) {
         Some(up) => Verdict::Again(Next { step: Step::Tier, model: up.id.clone(), effort: lowered(effective(effort, entry).as_deref(), up), tier: Some(above) }),
-        None => Verdict::NoneAbove(format!("No {} model of {} is installed ({}), so there is no model above it to move to.", above.name(), routing::agent_name(agent), above.family(agent).unwrap_or_default())),
+        None => Verdict::NoneAbove(format!("{}, so there is no model above it to move to.", models.missing(agent, above))),
     }
 }
 
@@ -187,14 +187,14 @@ mod tests {
     use crate::orchestration::routing::tests::installed;
 
     fn again(agent: &str, tries: usize, model: &str, effort: Option<&str>, tier: Option<Tier>) -> Next {
-        match next(agent, tries, &Rules::default(), model, effort, tier, &installed()) {
+        match next(agent, tries, &Rules::default(), model, effort, tier, &installed().into()) {
             Verdict::Again(next) => next,
             Verdict::Blocked(why) | Verdict::NoneAbove(why) => panic!("expected another try, got blocked: {why}"),
         }
     }
 
     fn blocked(agent: &str, tries: usize, model: &str, effort: Option<&str>, tier: Option<Tier>) -> String {
-        match next(agent, tries, &Rules::default(), model, effort, tier, &installed()) {
+        match next(agent, tries, &Rules::default(), model, effort, tier, &installed().into()) {
             Verdict::Blocked(why) => why,
             other => panic!("expected blocked, got {other:?}"),
         }
@@ -202,7 +202,7 @@ mod tests {
 
     /// The ladder ends for want of a model above, not of tries.
     fn none_above(agent: &str, tries: usize, model: &str, effort: Option<&str>, tier: Option<Tier>) -> String {
-        match next(agent, tries, &Rules::default(), model, effort, tier, &installed()) {
+        match next(agent, tries, &Rules::default(), model, effort, tier, &installed().into()) {
             Verdict::NoneAbove(why) => why,
             other => panic!("expected no model above, got {other:?}"),
         }
@@ -221,8 +221,8 @@ mod tests {
         assert_eq!((second.step, second.model.as_str(), second.effort.as_deref()), (Step::Effort, "gpt-6.1-terra", Some("high")));
         let third = again("codex", 2, &second.model, second.effort.as_deref(), second.tier);
         assert_eq!((third.step, third.model.as_str(), third.effort.as_deref(), third.tier), (Step::Tier, "gpt-6.1-sol", Some("medium"), Some(Tier::Large)));
-        assert!(matches!(next("codex", 3, &Rules::default(), &third.model, third.effort.as_deref(), third.tier, &installed()), Verdict::Blocked(_)));
-        assert!(matches!(next("codex", 7, &Rules::default(), &third.model, third.effort.as_deref(), third.tier, &installed()), Verdict::Blocked(_)));
+        assert!(matches!(next("codex", 3, &Rules::default(), &third.model, third.effort.as_deref(), third.tier, &installed().into()), Verdict::Blocked(_)));
+        assert!(matches!(next("codex", 7, &Rules::default(), &third.model, third.effort.as_deref(), third.tier, &installed().into()), Verdict::Blocked(_)));
     }
 
     #[test]
@@ -231,7 +231,7 @@ mod tests {
         // From every effort a model offers, on every model: the next try is at most high.
         for model in models.iter().filter(|model| model.harness == "claude" || model.harness == "codex") {
             for effort in model.efforts.iter().map(|effort| Some(effort.as_str())).chain([None]) {
-                let Verdict::Again(next) = next(&model.harness, 1, &Rules::default(), &model.id, effort, routing::tier_of(&model.harness, &model.id), &models) else { panic!("the second try is always made") };
+                let Verdict::Again(next) = next(&model.harness, 1, &Rules::default(), &model.id, effort, routing::tier_of(&model.harness, &model.id), &models.clone().into()) else { panic!("the second try is always made") };
                 let before = effective(effort, Some(model)).and_then(|effort| level(&effort));
                 let after = effective(next.effort.as_deref(), Some(model)).and_then(|effort| level(&effort));
                 match next.step {
@@ -283,19 +283,19 @@ mod tests {
         // The tier above is not installed: what Codex lists today has no Astra.
         let mut models = crate::models::claude_fallback();
         models.extend(crate::harness::codex::models::fallback());
-        assert_eq!(next("codex", 2, &Rules::default(), "gpt-5.6-sol", Some("high"), Some(Tier::Large), &models), Verdict::NoneAbove("No top model of Codex is installed (astra), so there is no model above it to move to.".into()));
+        assert_eq!(next("codex", 2, &Rules::default(), "gpt-5.6-sol", Some("high"), Some(Tier::Large), &models.into()), Verdict::NoneAbove("No top model of Codex is installed (astra), so there is no model above it to move to.".into()));
         // The second try is still made for each of them.
         assert_eq!(again("claude", 1, "fable", Some("medium"), Some(Tier::Top)).step, Step::Effort);
     }
 
     fn under(rules: &Rules, agent: &str, tries: usize, last: &Next) -> Verdict {
-        next(agent, tries, rules, &last.model, last.effort.as_deref(), last.tier, &installed())
+        next(agent, tries, rules, &last.model, last.effort.as_deref(), last.tier, &installed().into())
     }
 
     #[test]
     fn one_try_per_piece_blocks_a_piece_after_its_first() {
         let rules = Rules { tries: 1, ..Rules::default() };
-        assert_eq!(next("claude", 1, &rules, "sonnet", Some("medium"), Some(Tier::Mid), &installed()), Verdict::Blocked("It had its one try: the run gives a piece no more.".into()));
+        assert_eq!(next("claude", 1, &rules, "sonnet", Some("medium"), Some(Tier::Mid), &installed().into()), Verdict::Blocked("It had its one try: the run gives a piece no more.".into()));
     }
 
     #[test]
@@ -356,7 +356,7 @@ mod tests {
             let top = level(ceiling).unwrap();
             for model in models.iter().filter(|model| model.harness == "claude" || model.harness == "codex") {
                 for effort in &model.efforts {
-                    let Verdict::Again(next) = next(&model.harness, 1, &rules, &model.id, Some(effort), routing::tier_of(&model.harness, &model.id), &models) else { panic!("the second try is always made") };
+                    let Verdict::Again(next) = next(&model.harness, 1, &rules, &model.id, Some(effort), routing::tier_of(&model.harness, &model.id), &models.clone().into()) else { panic!("the second try is always made") };
                     let (before, after) = (level(effort), next.effort.as_deref().and_then(level));
                     match next.step {
                         Step::Effort => assert!(after > before && after <= Some(top), "{} under {ceiling}: {effort} to {:?}", model.id, next.effort),
@@ -369,5 +369,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_move_up_with_no_alias_listed_goes_to_the_leads_model_or_says_which_list_had_none() {
+        // #1533: the list had no `fable`; the lead ran on Fable 5.2.
+        let none: Vec<Model> = installed().into_iter().filter(|model| !model.id.contains("fable")).collect();
+        let with_lead = Installed::from(none.clone()).with_lead("claude", "claude-fable-5-2");
+        assert_eq!(next("claude", 2, &Rules::default(), "opus", Some("high"), Some(Tier::Large), &with_lead), Verdict::Again(Next { step: Step::Tier, model: "claude-fable-5-2".into(), effort: Some("medium".into()), tier: Some(Tier::Top) }));
+        // A lead on another model: the message says where the list came from.
+        let mut read = Installed::from(none);
+        read.read.insert("claude".into(), "the list Claude Code (~/.local/bin/claude) gave 2 hours ago".into());
+        assert_eq!(
+            next("claude", 2, &Rules::default(), "opus", Some("high"), Some(Tier::Large), &read),
+            Verdict::NoneAbove("No top model of Claude Code is installed (fable) in the list Claude Code (~/.local/bin/claude) gave 2 hours ago, so there is no model above it to move to.".into())
+        );
+        // No list at all is not a model missing from one.
+        assert_eq!(
+            next("claude", 2, &Rules::default(), "opus", Some("high"), Some(Tier::Large), &Installed::default()),
+            Verdict::NoneAbove("Claude Code's models were not read, and without them no top model (fable) can be found, so there is no model above it to move to.".into())
+        );
     }
 }
