@@ -388,6 +388,10 @@ pub enum HostStatus {
     /// accepts one again.
     Revoked,
     Retrying { attempt: u32 },
+    /// The relay closed the registration with 4401 (#1579): it was accepted,
+    /// then refused. It registers again at `refusal.retry_at`, later with
+    /// each refusal in a row.
+    Refused { refusal: crate::machine_wire::RelayRefusal },
 }
 
 pub struct RelayHost {
@@ -412,6 +416,30 @@ pub struct RelayHost {
 /// registration (PRO-368): phone invites, credential installs and
 /// revocations, as it makes them on its own registration (`pairing::relay`).
 const FORWARDED_REQUESTS: &[&str] = &["invite-create", "device-revoke", "device-credential-install", "device-credential-install-status", "device-resume-confirm"];
+
+/// The keys the relay takes in each of [`FORWARDED_REQUESTS`]: required, then
+/// optional. Its schemas are strict, and it answers an unknown key by closing
+/// the whole control socket with 4401 (`relay_unknown_control_message`), not
+/// by refusing the request. A request retried on every registration then
+/// costs every registration (#1579), so a frame with any other key, or
+/// without a required one, is refused here instead.
+fn forwarded_keys(kind: &str) -> Option<(&'static [&'static str], &'static [&'static str])> {
+    Some(match kind {
+        "invite-create" => (&["type", "reqId", "relayDeviceId"], &["sessionShare"]),
+        "device-revoke" => (&["type", "reqId", "relayDeviceId"], &[]),
+        "device-credential-install" => (&["type", "v", "reqId", "relayDeviceId", "newResumeTokenHash", "authorization"], &["expectedCurrentHash"]),
+        "device-credential-install-status" => (&["type", "v", "reqId", "relayDeviceId"], &[]),
+        "device-resume-confirm" => (&["type", "v", "reqId", "basisConnId"], &[]),
+        _ => return None,
+    })
+}
+
+/// Whether the relay's schema for `frame`'s type takes exactly its keys.
+fn forwardable(frame: &Value) -> bool {
+    let Some(object) = frame.as_object() else { return false };
+    let Some((required, optional)) = object.get("type").and_then(Value::as_str).and_then(forwarded_keys) else { return false };
+    required.iter().all(|key| object.contains_key(*key)) && object.keys().all(|key| required.contains(&key.as_str()) || optional.contains(&key.as_str()))
+}
 
 /// How long a forwarded request waits for the relay's reply. The window's
 /// caller gives up after 15 s (`RELAY_CONTROL_WAIT` in machine_host.rs); a
@@ -731,6 +759,11 @@ impl RelayHost {
             bail!("the relay request {kind:?} cannot be forwarded");
         }
         let req_id = frame["reqId"].as_str().filter(|id| valid_opaque_id(id)).ok_or_else(|| anyhow!("reqId is required"))?.to_string();
+        if !forwardable(&frame) {
+            let keys: Vec<&str> = frame.as_object().map(|object| object.keys().map(String::as_str).collect()).unwrap_or_default();
+            log::warn!("relay host: not forwarding a {kind:?} request with keys {keys:?}; the relay would close the registration for it");
+            bail!("the relay request {kind:?} has keys the relay does not take");
+        }
         let Some((live, _)) = self.registered.lock().unwrap().clone() else { bail!("relay control is offline") };
         let (respond, receive) = std::sync::mpsc::channel();
         live.commands.send(ControlCommand::Forward { frame, req_id, respond }).map_err(|_| anyhow!("relay control is offline"))?;
@@ -780,6 +813,8 @@ impl RelayHost {
     pub async fn run(self: Arc<Self>) {
         let mut attempt = 0u32;
         let mut fenced: Option<u64> = None;
+        // Registrations the relay accepted and then closed with 4401, in a row.
+        let mut refusals = 0u32;
         loop {
             if self.is_stopped() {
                 return;
@@ -816,7 +851,10 @@ impl RelayHost {
             fenced = None;
             self.status.send_replace(HostStatus::Connecting);
             match self.clone().connect_once(session, identity.clone()).await {
-                Ok(()) => attempt = 0,
+                Ok(()) => {
+                    attempt = 0;
+                    refusals = 0;
+                }
                 Err(error) if error.downcast_ref::<Revoked>().is_some() => {
                     self.revoked().await;
                     continue;
@@ -830,8 +868,27 @@ impl RelayHost {
                     continue;
                 }
                 Err(error) => {
-                    log::warn!("relay host: {error:#}");
                     attempt += 1;
+                    if let Some(closed) = refusal_of(&error) {
+                        refusals = refusals.saturating_add(1);
+                        let delay = protocol::refused_backoff(refusals, jitter());
+                        log::warn!(
+                            "relay host: {closed}; the relay refused {refusals} registration(s) in a row, registering again in {}s",
+                            delay.as_secs()
+                        );
+                        self.close_all_connections();
+                        if self.is_stopped() {
+                            return;
+                        }
+                        let retry_at = now_ms().saturating_add(i64::try_from(delay.as_millis()).unwrap_or(i64::MAX));
+                        self.status.send_replace(HostStatus::Refused {
+                            refusal: crate::machine_wire::RelayRefusal { code: closed.code, reason: closed.reason, refusals, retry_at },
+                        });
+                        self.pause(delay).await;
+                        continue;
+                    }
+                    log::warn!("relay host: {error:#}");
+                    refusals = 0;
                 }
             }
             self.close_all_connections();
@@ -1014,13 +1071,7 @@ impl RelayHost {
                     let incoming = incoming.context("relay control went silent")?.ok_or_else(|| anyhow!("relay control closed"))??;
                     let text = match incoming {
                         Message::Text(text) => text,
-                        Message::Close(frame) => {
-                            let code = frame.as_ref().map(|frame| u16::from(frame.code)).unwrap_or(1006);
-                            if code == 4101 {
-                                return Err(Fenced.into());
-                            }
-                            bail!("relay control closed with {code}");
-                        }
+                        Message::Close(frame) => return Err(closed(frame.as_ref())),
                         Message::Ping(bytes) => {
                             socket.send(Message::Pong(bytes)).await?;
                             continue;
@@ -1614,6 +1665,41 @@ impl std::error::Error for Revoked {}
 #[derive(Debug)]
 struct Fenced;
 
+/// The relay closed the control socket with `code`, and `reason` when it is
+/// one of the relay's reason codes ([`protocol::close_reason`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlClosed {
+    pub code: u16,
+    pub reason: Option<String>,
+}
+
+impl std::fmt::Display for ControlClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "relay control closed with {}", self.code)?;
+        if let Some(reason) = &self.reason {
+            write!(f, " ({reason})")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ControlClosed {}
+
+/// The relay's close of the control socket in `error`, when it refused the
+/// registration (4401) rather than dropped it.
+fn refusal_of(error: &anyhow::Error) -> Option<ControlClosed> {
+    error.downcast_ref::<ControlClosed>().filter(|closed| protocol::close_action(closed.code) == protocol::CloseAction::CredentialRejected).cloned()
+}
+
+/// The error for a close frame: [`Fenced`] for 4101, else [`ControlClosed`].
+fn closed(frame: Option<&tokio_tungstenite::tungstenite::protocol::CloseFrame>) -> anyhow::Error {
+    let code = frame.map(|frame| u16::from(frame.code)).unwrap_or(1006);
+    if code == 4101 {
+        return Fenced.into();
+    }
+    ControlClosed { code, reason: frame.and_then(|frame| protocol::close_reason(&frame.reason)) }.into()
+}
+
 impl std::fmt::Display for Fenced {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("the relay retired this runtime generation")
@@ -1655,13 +1741,7 @@ async fn assign(director_url: &str, relay_token: &str, relay_host_id: &str) -> R
 async fn next_json(socket: &mut Socket) -> Result<Value> {
     match tokio::time::timeout(CONNECT_TIMEOUT, socket.next()).await.context("relay control timed out")? {
         Some(Ok(Message::Text(text))) => Ok(serde_json::from_str(&text)?),
-        Some(Ok(Message::Close(frame))) => {
-            let code = frame.as_ref().map(|frame| u16::from(frame.code)).unwrap_or(1006);
-            if code == 4101 {
-                return Err(Fenced.into());
-            }
-            bail!("relay closed the control socket with {code}")
-        }
+        Some(Ok(Message::Close(frame))) => Err(closed(frame.as_ref())),
         Some(Ok(_)) => bail!("relay sent a non-text control message"),
         Some(Err(error)) => Err(error.into()),
         None => bail!("relay closed the control socket"),
@@ -2242,6 +2322,72 @@ mod tests {
         assert_eq!((reply["type"].as_str(), reply["code"].as_str()), (Some("control-error"), Some("not_found")));
         running.abort();
         relay.abort();
+    }
+
+    /// #1579: the relay's schemas are strict, and a key they do not take
+    /// closes the registration with 4401. `device-revoke` was sent with a
+    /// `v`, and retried on every registration until the relay confirmed it.
+    #[test]
+    fn only_frames_the_relay_takes_are_forwarded() {
+        let hash = "A".repeat(43);
+        for frame in [
+            json!({ "type": "invite-create", "reqId": "r", "relayDeviceId": "d" }),
+            json!({ "type": "invite-create", "reqId": "r", "relayDeviceId": "d", "sessionShare": { "expiresAt": 1 } }),
+            json!({ "type": "device-revoke", "reqId": "r", "relayDeviceId": "d" }),
+            json!({ "type": "device-credential-install", "v": 1, "reqId": "r", "relayDeviceId": "d", "newResumeTokenHash": hash, "authorization": { "mode": "relay-basis", "basisConnId": "c" } }),
+            json!({ "type": "device-credential-install", "v": 1, "reqId": "r", "relayDeviceId": "d", "newResumeTokenHash": hash, "expectedCurrentHash": hash, "authorization": { "mode": "relay-basis", "basisConnId": "c" } }),
+            json!({ "type": "device-credential-install-status", "v": 1, "reqId": "r", "relayDeviceId": "d" }),
+            json!({ "type": "device-resume-confirm", "v": 1, "reqId": "r", "basisConnId": "c" }),
+        ] {
+            assert!(forwardable(&frame), "{frame}");
+        }
+        for frame in [
+            json!({ "type": "device-revoke", "v": 1, "reqId": "r", "relayDeviceId": "d" }),
+            json!({ "type": "device-revoke", "reqId": "r" }),
+            json!({ "type": "device-credential-install-status", "reqId": "r", "relayDeviceId": "d" }),
+            json!({ "type": "invite-create", "reqId": "r", "relayDeviceId": "d", "extra": true }),
+            json!({ "type": "conn-accept", "reqId": "r" }),
+            json!(["device-revoke"]),
+        ] {
+            assert!(!forwardable(&frame), "{frame}");
+        }
+    }
+
+    /// #1579: the relay's close reason reaches the log and the status when
+    /// it is one of its reason codes, and a 4401 reads as a refusal.
+    #[tokio::test]
+    async fn a_refused_registration_keeps_the_relays_reason() {
+        use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
+        for (code, reason, kept) in [
+            (4401, "relay_unknown_control_message", Some("relay_unknown_control_message")),
+            (4401, "host abcDEF0123456789", None),
+            (4503, "relay_draining", Some("relay_draining")),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}/v1/host/control", listener.local_addr().unwrap());
+            let relay = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                socket.close(Some(CloseFrame { code: CloseCode::from(code), reason: reason.into() })).await.unwrap();
+                let _ = socket.next().await;
+            });
+            let (mut socket, _) = crate::data_privacy::connect(url.as_str(), None, true).await.unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let rpc = WorkspaceRpc::new(root.path(), 1, Arc::new(crate::sink::BroadcastSink::new(8)), Arc::new(crate::pty::Terminals::new()), None).unwrap();
+            let host = RelayHost::new(Arc::new(NoLink), rpc, None);
+            let (commands, mut command_rx) = mpsc::unbounded_channel();
+            let live = Live { commands, cell_url: "ws://cell".into(), assignment_epoch: 1, relay_generation: 1 };
+            let error = host.control_loop(&mut socket, &mut command_rx, &live).await.unwrap_err();
+            let closed = error.downcast_ref::<ControlClosed>().expect("a typed close");
+            assert_eq!((closed.code, closed.reason.as_deref()), (code, kept));
+            assert_eq!(refusal_of(&error).is_some(), code == 4401);
+            let logged = format!("{error:#}");
+            assert!(!logged.contains("abcDEF"), "{logged}");
+            if let Some(kept) = kept {
+                assert!(logged.contains(kept), "{logged}");
+            }
+            relay.abort();
+        }
     }
 
     #[test]
