@@ -277,10 +277,12 @@ export function openLocalTab(session: SessionEntry, kind: "terminal" | "browser"
  * menu says why when it is not there.
  */
 /** Why the cloud "New tab" menu's items are disabled, or null when they are not. */
-export function newTabBlockedReason(cloud: Pick<CloudSessionModel, "backend" | "connected" | "asleep" | "canWakeForTerminal" | "manage" | "machine">): string | null {
+export function newTabBlockedReason(cloud: Pick<CloudSessionModel, "backend" | "connected" | "asleep" | "canWakeForTerminal" | "manage" | "machine" | "unavailable">): string | null {
   if (cloud.backend.readOnlyReason) return cloud.backend.readOnlyReason;
   if (cloud.machine) return cloud.connected && cloud.manage ? null : `Tabs and terminals open once ${cloud.machine.name} is connected.`;
   if (!cloud.connected) {
+    // #1582: nothing is connecting to a workspace that needs attention or was deleted; say why instead.
+    if (cloud.unavailable) return `The workspace can't be reached, so no tabs or terminals can be opened. ${cloud.unavailable}`;
     if (!cloud.asleep) return "Connecting to the workspace…";
     return cloud.canWakeForTerminal
       ? "Stopped: sending a message or choosing Terminal wakes the workspace. Agent tabs are added once it runs."

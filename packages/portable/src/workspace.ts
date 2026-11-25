@@ -276,6 +276,12 @@ export type WorkspaceConnectionState =
   | { state: "idle" | "opening" | "waitingForRuntime" | "suspended" | "updateRequired" | "stopped" }
   | { state: "connecting"; attempt: number }
   | { state: "reconnecting"; attempt: number; reason: string; retryInMs: number }
+  /**
+   * The workspace cannot be reached as it stands: it needs attention (its
+   * machine is gone, a resume failed) or it was deleted. `reason` is that
+   * workspace state. Nothing is retried until the state changes (#1582).
+   */
+  | { state: "unavailable"; reason: string }
   | {
       state: "connected";
       runtimeGeneration: number;
@@ -2268,7 +2274,7 @@ export class WorkspaceRpcClient {
   private connected(withinMs: number): Promise<void> {
     if (this.state.state === "connected") return new Promise((resolve) => setTimeout(resolve, 50));
     // Nothing reconnects from these on its own; do not hold input for them.
-    if (["suspended", "stopped", "updateRequired"].includes(this.state.state)) {
+    if (["suspended", "unavailable", "stopped", "updateRequired"].includes(this.state.state)) {
       return Promise.reject(new Error(`Workspace runtime is ${this.state.state}`));
     }
     return new Promise((resolve, reject) => {
@@ -2280,7 +2286,7 @@ export class WorkspaceRpcClient {
         // The drop turned out to be a stop (or an end): what was waiting to
         // be resent is refused now. It must never be sent when the workspace
         // is woken later, least of all terminal input typed before the stop.
-        if (["suspended", "stopped", "updateRequired"].includes(state.state)) {
+        if (["suspended", "unavailable", "stopped", "updateRequired"].includes(state.state)) {
           clearTimeout(timer);
           queueMicrotask(stop);
           reject(new Error(`Workspace runtime is ${state.state}`));

@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { WorkspaceRpcError, type Activation, type WorkspaceConnectionState, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { hasWorkspaceConnection, workspaceConnection, type CloudWorkspaceConnection } from "@/lib/api";
+import { WORKSPACE_NOT_REACHABLE } from "@/lib/cloudAgentApi";
 import { detachCloudTerminals } from "@/lib/cloudTerminals";
 import { cloudWorkspaceKey } from "@/types/target";
 
@@ -226,8 +227,9 @@ function watch(entry: Entry, connection: CloudWorkspaceConnection) {
       if (wasConnected && state.state !== "reconnecting") runDisconnected(entry.key);
       // Stopped for an identity change: the api layer closed it; forget it.
       if (state.state === "stopped") drop(entry);
-      else if (state.state === "suspended") {
-        // Parked: its supervisor reads nothing more until a wake. A list asked for from now on may say it runs again.
+      else if (state.state === "suspended" || state.state === "unavailable") {
+        // Parked: its supervisor reads nothing more until a wake (or, unavailable, until its state changes). A list
+        // asked for from now on may say it runs again.
         entry.parkedAt = clock();
         settle(entry);
       }
@@ -240,9 +242,13 @@ function cancelRetry(entry: Entry) {
   entry.retry = null;
 }
 
-/** Whether this entry's transport is going nowhere on its own: stopped as its supervisor last read it, or never attached. */
+/**
+ * Whether this entry's transport is going nowhere on its own: stopped or
+ * unavailable (needs attention, deleted) as its supervisor last read it, or
+ * never attached.
+ */
 function parked(entry: Entry): boolean {
-  return entry.connection ? entry.state.state === "suspended" : !entry.pending;
+  return entry.connection ? entry.state.state === "suspended" || entry.state.state === "unavailable" : !entry.pending;
 }
 
 /**
@@ -627,6 +633,7 @@ export function waitCloudConnected(lease: CloudLease, withinMs = 5 * 60 * 1000, 
       const state = lease.state();
       if (state.state === "connected" && connection) finish(null, connection.client);
       else if (state.state === "updateRequired") finish(new Error("cloud_runtime_update_required"));
+      else if (state.state === "unavailable") finish(new Error(WORKSPACE_NOT_REACHABLE));
       else if (state.state === "stopped") finish(new Error("cloud_connection_closed"));
       else if (state.state === "suspended" && options.stoppedIsError) finish(new Error("cloud_workspace_stopped"));
     };

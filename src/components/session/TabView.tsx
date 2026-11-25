@@ -809,6 +809,11 @@ export function TabView({
     setError(null);
     void outbox.sendAgain(entry).catch((e) => setError(commandError(e)));
   }, [outbox]);
+  const removeCommand = useCallback((entry: OutboxEntry) => {
+    if (!outbox) return;
+    setError(null);
+    void outbox.remove(entry).catch((e) => setError(commandError(e)));
+  }, [outbox]);
   const deciding = transcript.pendingAsks.some(ask => log.permissionResponses?.get(ask.requestId) === "sending" || outbox?.deciding(ask.requestId));
 
   // Signed out of the agent itself (not TerminalX's account): Claude Code signs in
@@ -992,6 +997,7 @@ export function TabView({
           workspace={outbox.workspaceStatus}
           nameOf={nameOf}
           onSendAgain={!readOnly && !gate?.blocked ? resendCommand : undefined}
+          onRemove={!readOnly ? removeCommand : undefined}
           // Escape for the running turn; the runtime then sends what it holds.
           onSendNow={interrupts && live && !readOnly && !gate?.blocked ? interrupt : undefined}
         />

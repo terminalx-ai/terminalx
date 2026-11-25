@@ -459,6 +459,8 @@ export function describe(state: WorkspaceConnectionState): string {
       return "Suspended";
     case "updateRequired":
       return "Update TerminalX to connect to this workspace";
+    case "unavailable":
+      return "Can't be reached";
     case "stopped":
       return "Disconnected";
     default:

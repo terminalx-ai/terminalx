@@ -286,6 +286,36 @@ describe("a workspace that stops and comes back", () => {
     stop();
   });
 
+  // #1582: a workspace whose machine is gone parks its transport as unavailable; nothing is retried until the list says it runs.
+  it("keeps an unavailable connection parked, ends a wait on it, and opens it again with connect once a newer list says it runs", async () => {
+    const lease = await manager.retainCloudConnection(target("w1"));
+    manager.noteCloudWorkspaceListed(target("w1"), { running: false, at: now });
+    now += 100;
+    attached[0]!.emit({ state: "unavailable", reason: "attention-required" });
+    await flush();
+    expect(lease.state()).toEqual({ state: "unavailable", reason: "attention-required" });
+    await expect(manager.waitCloudConnected(lease, 60_000)).rejects.toThrow("cloud_workspace_not_reachable");
+
+    // Lists that still say it needs attention ask nothing of it, however long it stays so.
+    for (let i = 0; i < 5; i++) {
+      now += 30_000;
+      manager.noteCloudWorkspaceListed(target("w1"), { running: false, at: now });
+      await flush(30_000);
+    }
+    expect(attached).toHaveLength(1);
+    expect(attached[0]!.activate).not.toHaveBeenCalled();
+
+    // Repaired: a newer list says it runs, and the same transport opens again.
+    now += 1_000;
+    manager.noteCloudWorkspaceListed(target("w1"), { running: true, at: now });
+    await flush();
+    expect(attached).toHaveLength(1);
+    expect(attached[0]!.activate).toHaveBeenCalledTimes(1);
+    expect(attached[0]!.activate).toHaveBeenCalledWith("connect");
+    expect(wakes()).toBe(0);
+    lease.release();
+  });
+
   it("attaches a held connection fresh with connect when its transport cannot open again, and never wakes", async () => {
     const undo = vi.fn();
     const seen = vi.fn(() => undo);
