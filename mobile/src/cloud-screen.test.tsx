@@ -557,6 +557,31 @@ describe("a cloud workspace screen", () => {
     expect(mocks.alert.mock.calls.at(-1)![0]).toBe("Retry resume?");
   });
 
+  it("says a workspace's machine is gone and offers delete and a new workspace, never Retry resume (#1581)", async () => {
+    world({ state: "attention-required", role: "manager" });
+    mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = { state: "failed", action: "resume", errorCode: "cloud_provider_not_found" };
+    mocks.catalog.workspace().repositories = [{ fullName: "acme/web", primary: true }];
+    await show(<CloudWorkspaceScreen />);
+    const bar = container.querySelector('[data-testid="machine-gone-bar"]')!;
+    expect(bar.textContent).toContain("This workspace's machine no longer exists at the provider. It may have been deleted outside TerminalX.");
+    expect(bar.textContent).toContain("Conversations saved before it stopped can still be read here until the workspace is deleted.");
+    expect(container.querySelector('[data-testid="start-bar"]')).toBeNull();
+    expect(() => button("Retry resume")).toThrow();
+    await click("Delete workspace…");
+    expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/delete", params: { orgId: "org-1", workspaceId: mocks.params.workspaceId } });
+    await click("New workspace");
+    expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/new", params: { orgId: "org-1", repository: "https://github.com/acme/web" } });
+  });
+
+  it("tells a viewer who can delete a workspace whose machine is gone (#1581)", async () => {
+    world({ state: "attention-required", role: "viewer" });
+    mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = { state: "failed", action: "resume", errorCode: "cloud_provider_not_found" };
+    await show(<CloudWorkspaceScreen />);
+    expect(container.querySelector('[data-testid="machine-gone-bar"]')!.textContent).toContain("can delete it.");
+    expect(() => button("Delete workspace…")).toThrow();
+    expect(() => button("New workspace")).toThrow();
+  });
+
   it("says why the service refused to connect this phone to a running workspace, with Reconnect (#1290)", async () => {
     world({ role: "manager", connection: "stopped", problem: { kind: "api", code: "cloud_brand_new_code", unreachable: false } });
     await show(<CloudWorkspaceScreen />);

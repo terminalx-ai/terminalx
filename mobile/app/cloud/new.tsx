@@ -34,7 +34,8 @@ const NAME_MAX = 80;
  */
 export default function NewWorkspaceScreen() {
   // `from`: a canceled launch whose unsent first task the form opens with (Launch again).
-  const params = useLocalSearchParams<{ orgId?: string; from?: string }>();
+  // `repository`: the repository the form opens with, for a workspace whose machine is gone (#1581).
+  const params = useLocalSearchParams<{ orgId?: string; from?: string; repository?: string }>();
   const { palette } = useTheme();
   const router = useRouter();
   const catalog = useCloudCatalog();
@@ -46,7 +47,7 @@ export default function NewWorkspaceScreen() {
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
     <Stack.Screen options={{ title: "New workspace", headerShown: false }} />
     {catalog && organization
-      ? <LaunchFlow key={organization.orgId} catalog={catalog} organization={organization} organizations={organizations} onOrganization={setChosen} again={params.orgId === organization.orgId ? params.from ?? null : null} />
+      ? <LaunchFlow key={organization.orgId} catalog={catalog} organization={organization} organizations={organizations} onOrganization={setChosen} again={params.orgId === organization.orgId ? params.from ?? null : null} repositoryGiven={params.orgId === organization.orgId ? params.repository ?? "" : ""} />
       : <>
         <ScreenHeader title="New workspace" onBack={() => router.back()} />
         {catalog
@@ -93,7 +94,7 @@ type Sheet = "organization" | "provider" | "size" | "region" | "image" | "idle" 
 
 const NO_TASK: FirstTaskDraft = { agent: null, mode: PHONE_DEFAULT_MODE, text: "" };
 
-function LaunchFlow({ catalog, organization, organizations, onOrganization, again }: { catalog: CloudCatalog; organization: CloudOrganization; organizations: CloudOrganization[]; onOrganization(orgId: string): void; again: string | null }) {
+function LaunchFlow({ catalog, organization, organizations, onOrganization, again, repositoryGiven = "" }: { catalog: CloudCatalog; organization: CloudOrganization; organizations: CloudOrganization[]; onOrganization(orgId: string): void; again: string | null; repositoryGiven?: string }) {
   const { palette } = useTheme();
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -103,7 +104,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   const [offer, setOffer] = useState<Offer>({ status: "reading" });
   const [setup, setSetup] = useState<CloudProviderSetup | null>(null);
   // Launch again after a cancel opens with the first task that was not sent, taken from where the launch kept it.
-  const [draft, setDraft] = useState<Draft>(() => ({ name: "", providerId: null, sizeId: "", locationId: "", sourceId: "", idleMinutes: 0, repository: "", ref: "", withoutAgents: [], task: (again ? takeConversationState<FirstTaskDraft>(keptTaskKey(orgId, again)) : undefined) ?? NO_TASK }));
+  const [draft, setDraft] = useState<Draft>(() => ({ name: "", providerId: null, sizeId: "", locationId: "", sourceId: "", idleMinutes: 0, repository: repositoryGiven, ref: "", withoutAgents: [], task: (again ? takeConversationState<FirstTaskDraft>(keptTaskKey(orgId, again)) : undefined) ?? NO_TASK }));
   const [step, setStep] = useState<"form" | "repository" | "review">("form");
   const [sheet, setChosenSheet] = useState<Sheet>(null);
   // The task is the form's last field: while it is typed in, the form keeps its end in view, above the keyboard

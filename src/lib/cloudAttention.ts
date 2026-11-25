@@ -1,7 +1,7 @@
 import type { RuntimeSession, WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import type { CloudWorkspaceListItem } from "@/lib/api";
 import { agentLoginFailure, createErrorMessage, failureMessage, launchFailed, PROVISIONING_TIMEOUT_CODE } from "@/lib/cloudCreate";
-import { archiving, deleteFailure, deletion, operationFailureStands, provisioningFailureKey, workspaceFailureText } from "@/lib/cloudLifecycle";
+import { archiving, deleteFailure, deletion, machineGone, operationFailureStands, provisioningFailureKey, workspaceFailureText } from "@/lib/cloudLifecycle";
 import { cloudProviderIsPlatform, cloudProviderLabel } from "@/lib/cloudProviders";
 import type { TabStatus } from "@/types/session";
 
@@ -21,7 +21,7 @@ export interface CloudAttentionInput {
 export type CloudRecoveryAction =
   | "open-agent-logins" | "check-github-access" | "retry-first-task"
   | "open-session" | "update-runtime" | "retry-operation"
-  | "open-provider-settings" | "contact-provider" | "create-workspace";
+  | "open-provider-settings" | "contact-provider" | "create-workspace" | "delete-workspace";
 
 /** Serializable advice, not authority to perform an action or replay a prompt. */
 export interface CloudRecovery {
@@ -36,7 +36,12 @@ export interface CloudAttention {
   code: string;
   message: string;
   recovery: CloudRecovery;
+  /** Other ways out, offered beside the recovery: a new workspace for the project after its machine is gone. */
+  alternatives?: CloudRecovery[];
 }
+
+/** What is kept and what is lost once the machine is gone; the delete dialog says the same of saved conversations. */
+const MACHINE_GONE_INSTRUCTIONS = "Resuming cannot bring it back. Its files, and anything that was running on it, went with the machine. Conversations saved before it stopped can still be opened here until you delete the workspace. Delete the workspace, or create a new one for the same project.";
 
 /** Local catalog evidence; saved with the row, never sent as authority to a runtime. */
 type ObservedItem = CloudWorkspaceListItem & {
@@ -221,6 +226,12 @@ export function resolveCloudAttention(item: CloudWorkspaceListItem, input: Cloud
   if (operationFailureStands(item, recoveredOperation) && operation && (operation.action || !launchHasReason || operation.errorCode === PROVISIONING_TIMEOUT_CODE)) {
     const code = operation.errorCode ?? "cloud_workspace_operation_failed";
     let next: CloudRecovery;
+    if (machineGone(operation)) return {
+      code: "cloud_workspace_machine_gone",
+      message: workspaceFailureText(item, operation),
+      recovery: recovery("delete-workspace", "Delete workspace", MACHINE_GONE_INSTRUCTIONS),
+      alternatives: [recovery("create-workspace", "Create new workspace", "Create a new workspace for the same project after reviewing the provider and spend confirmation. This one stays until you delete it.")],
+    };
     if (code === PROVISIONING_TIMEOUT_CODE) next = recovery("create-workspace", "Create workspace again", "The timed-out machine was deleted. Create a new workspace after reviewing the provider and spend confirmation.");
     else if (operation.action === "delete" && !deleteFailure(operation, workspace.provider).retry) next = recovery("contact-provider", "Contact provider support", workspaceFailureText(item, operation));
     else if (code === "provider_permanent_delete_unavailable") next = recovery("contact-provider", "Contact provider support", "This provider connection cannot delete the workspace permanently. Check the resource in the provider's console or contact its support to finish removing it; retrying this unsupported action will not help.");

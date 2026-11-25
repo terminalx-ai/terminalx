@@ -2,7 +2,7 @@ import { Alert } from "react-native";
 import { CloudApiError, type CloudProvider, type CloudWorkspaceItem } from "@mobile/cloud/api";
 import type { CloudCatalog } from "@mobile/cloud/catalog";
 import { launchRefusal, mayManage, stopQuestion, stopState } from "@mobile/cloud/launch";
-import { resumeFailure } from "@mobile/cloud/resume";
+import { machineGone, resumeFailure } from "@mobile/cloud/resume";
 import type { RowAction } from "./row-actions";
 
 /**
@@ -52,7 +52,8 @@ export function workspaceActions({ catalog, item, openDelete, start }: {
     { text: "Start", onPress: () => void catalog.start(orgId, id).catch((error: unknown) => Alert.alert("The workspace did not start", resumeFailure(error).text, [{ text: "OK" }])) },
   ]);
 
-  if (stopping === "failed") actions.push({ name: "stop", label: "Retry stop", run: stop });
+  // A stop that failed because the machine is gone is not offered again (#1581): Delete is what is left.
+  if (stopping === "failed") { if (!machineGone(item.latestOperation)) actions.push({ name: "stop", label: "Retry stop", run: stop }); }
   else if (workspace.state === "ready" && !stopping) actions.push({ name: "stop", label: "Stop workspace", run: () => void askStop() });
   else if (workspace.state === "suspended") actions.push({ name: "start", label: "Start workspace", run: askStart });
   if (workspace.state !== "deleting") actions.push({ name: "delete", label: "Delete workspace…", destructive: true, run: openDelete });

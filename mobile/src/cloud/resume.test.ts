@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CloudApiError } from "./api";
-import { listedAsStarting, mayBeUnderWay, resumeFailure, resumeLogDetail, resumeRetryable, ResumeUnconfirmed } from "./resume";
+import { listedAsStarting, machineGone, mayBeUnderWay, resumeFailure, resumeLogDetail, resumeRetryable, ResumeUnconfirmed } from "./resume";
 import { attentionDetail, connectionLine, openRefusalText } from "./words";
 
 /** Nothing the phone says about a failed resume is a bare "That did not work." or a raw code (#1290). */
@@ -93,6 +93,19 @@ describe("a workspace that needs attention after a failed resume (#1290)", () =>
     expect(resumeRetryable({ state: "failed", action: "suspend" })).toBe(false);
     expect(resumeRetryable({ state: "running", action: "resume" })).toBe(false);
     expect(resumeRetryable(null)).toBe(false);
+  });
+
+  // #1581: the provider no longer has the machine, so the same resume cannot work.
+  it("does not offer Retry resume once the workspace's machine is gone", () => {
+    for (const action of ["resume", "suspend", "archive"]) expect(machineGone({ state: "failed", action, errorCode: "cloud_provider_not_found" })).toBe(true);
+    expect(resumeRetryable({ state: "failed", action: "resume", errorCode: "cloud_provider_not_found" })).toBe(false);
+    // Not the machine: a missing environment image, a delete (which finishes without it), a launch, or an operation still running.
+    expect(machineGone({ state: "failed", action: "resume", errorCode: "cloud_provider_not_found", detailCode: "environment_image_missing" })).toBe(false);
+    expect(resumeRetryable({ state: "failed", action: "resume", errorCode: "cloud_provider_not_found", detailCode: "environment_image_missing" })).toBe(true);
+    expect(machineGone({ state: "failed", action: "delete", errorCode: "cloud_provider_not_found" })).toBe(false);
+    expect(machineGone({ state: "failed", action: null, errorCode: "cloud_provider_not_found" })).toBe(false);
+    expect(machineGone({ state: "running", action: "resume", errorCode: "cloud_provider_not_found" })).toBe(false);
+    expect(machineGone({ state: "failed", action: "resume", errorCode: "cloud_provider_unavailable" })).toBe(false);
   });
 
   it("names what failed for the codes a resume fails with, and for a missing or unknown code", () => {

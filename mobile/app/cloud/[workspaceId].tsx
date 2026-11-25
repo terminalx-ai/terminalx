@@ -8,7 +8,7 @@ import { buildTranscript, type PendingAsk } from "@terminalx/portable/transcript
 import { leaseHeldBy, NOTE_MAX_CHARS } from "@terminalx/portable/workspaceCollab";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { workspaceTitle, type CloudCatalog } from "@mobile/cloud/catalog";
-import { resumeFailure, resumeRetryable, type ResumeFailure } from "@mobile/cloud/resume";
+import { MACHINE_GONE_KEPT, MACHINE_GONE_TEXT, MACHINE_GONE_TITLE, machineGone, resumeFailure, resumeRetryable, type ResumeFailure } from "@mobile/cloud/resume";
 import type { CloudRole } from "@mobile/cloud/api";
 import { failureCause, isLaunch, launchRefusal, stopState } from "@mobile/cloud/launch";
 import { accessText, attentionDetail, codeText, connectionLine, leaseLine, outboxLine, presenceLine, roleLabel, rolePhrase, whoCanStart } from "@mobile/cloud/words";
@@ -290,6 +290,10 @@ function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { 
   // Stopping, or a stop the provider did not carry out (25.06): said here, with the retry the console offers.
   const stop = stopState(catalog.workspace(orgId, workspaceId), operation);
   const [stopRefusal, setStopRefusal] = useState<string | null>(null);
+  const router = useRouter();
+  const listedRepositories = catalog.workspace(orgId, workspaceId)?.repositories;
+  const fullName = listedRepositories?.find((entry) => entry.primary)?.fullName ?? listedRepositories?.[0]?.fullName ?? null;
+  const repository = fullName ? `https://github.com/${fullName}` : null;
   const retryStop = () => {
     if (inFlight.current) return;
     inFlight.current = true;
@@ -300,6 +304,17 @@ function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { 
       setAsking(false);
     });
   };
+  // The machine is gone (#1581): nothing to retry. Delete the workspace, or launch a new one in its organization.
+  if (needsAttention && machineGone(operation)) return <View testID="machine-gone-bar" style={[styles.startBar, styles.goneBar, { backgroundColor: palette.card, borderColor: palette.border, marginBottom: insets.bottom + 8 }]}>
+    <Text style={[styles.startTitle, { color: palette.ink }]}>{MACHINE_GONE_TITLE}</Text>
+    <Text style={[styles.startDetail, { color: palette.muted }]}>{MACHINE_GONE_TEXT} {MACHINE_GONE_KEPT}</Text>
+    {mayStart
+      ? <View style={styles.goneActions}>
+        <Button testID="machine-gone-delete" label="Delete workspace…" kind="secondary" size="small" onPress={() => router.push({ pathname: "/cloud/delete", params: { orgId, workspaceId } })} />
+        <Button testID="machine-gone-new" label="New workspace" size="small" onPress={() => router.push({ pathname: "/cloud/new", params: repository ? { orgId, repository } : { orgId } })} />
+      </View>
+      : <Text style={[styles.startDetail, { color: palette.muted }]}>{creatorId ? `${nameOf(creatorId)}, its creator, or an organization owner or admin` : "Its creator or an organization owner or admin"} can delete it.</Text>}
+  </View>;
   if (stop) return <View testID="stop-bar" style={[styles.startBar, { backgroundColor: palette.card, borderColor: palette.border, marginBottom: insets.bottom + 8 }]}>
     <View style={styles.flex}>
       <Text style={[styles.startTitle, { color: palette.ink }]}>{stop === "stopping" ? "Stopping the workspace…" : "It did not stop"}</Text>
@@ -528,6 +543,8 @@ const styles = StyleSheet.create({
   // The title and, under it, the state and the role in plain words.
   // An icon button with a full 44 pt target.
   reconnectText: { fontSize: 12, fontWeight: "600" },
+  goneBar: { flexDirection: "column", alignItems: "stretch", gap: 6 },
+  goneActions: { flexDirection: "row", gap: 8, marginTop: 4 },
   startBar: { flexDirection: "row", alignItems: "center", gap: 10, marginHorizontal: 12, marginTop: 8, borderWidth: StyleSheet.hairlineWidth, borderRadius: 18, borderCurve: "continuous", paddingHorizontal: 14, paddingVertical: 12 },
   startTitle: { fontSize: 15, fontWeight: "600", lineHeight: 20 },
   startDetail: { fontSize: 13, lineHeight: 18, marginTop: 2 },
