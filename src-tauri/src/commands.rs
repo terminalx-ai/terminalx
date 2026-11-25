@@ -775,6 +775,18 @@ pub async fn cloud_agent_logins(
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.agent_logins(org_id.as_deref()))
 }
 
+#[tauri::command]
+pub async fn cloud_agent_login_affected_workspaces(
+    provider: crate::cloud_workspaces::AgentLoginProvider,
+    context_revision: String,
+    org_id: Option<String>,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::AgentLoginAffectedWorkspaces, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| {
+        service.agent_login_affected_workspaces(provider, &context_revision, org_id.as_deref())
+    })
+}
+
 /// Store an agent's login for the organization's cloud workspaces. The
 /// order matters: consent and the owner-or-admin check first, and only then
 /// is a key asked for or this computer's login read.
@@ -1586,6 +1598,11 @@ pub async fn cloud_workspace_details(workspace_id: String, org_id: Option<String
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.details(org_id.as_deref(), &workspace_id))
 }
 
+#[tauri::command]
+pub async fn cloud_workspace_start_progress(workspace_id: String, operation_id: String, org_id: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::CloudStartProgress, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.start_progress(&org_id, &workspace_id, &operation_id))
+}
+
 async fn cloud_workspace_lifecycle(
     state: tauri::State<'_, crate::AppState>,
     org_id: Option<String>,
@@ -1696,6 +1713,19 @@ pub async fn cloud_workspace_shares_apply(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<crate::cloud_workspaces::CloudAccessApplied, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.apply_shares(&org_id, &workspace_id, request, &context_revision))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_general_access_put(
+    workspace_id: String,
+    org_id: Option<String>,
+    access_revision: String,
+    general_access: crate::cloud_workspaces::GeneralAccess,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::GeneralAccessChange, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>|
+        service.general_access_put(org_id.as_deref(), &workspace_id, &access_revision, general_access, &context_revision))
 }
 
 #[tauri::command]

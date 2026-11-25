@@ -10,6 +10,7 @@ import { useConnectionState, type ConnectionState } from "@mobile/state/connecti
 import { ConnectionLine } from "@mobile/ui/ConnectionLine";
 import { usePullRefresh } from "@mobile/ui/pull-refresh";
 import { Button, Card, EmptyState, Screen, SectionTitle } from "@mobile/ui/primitives";
+import { Spinner } from "@mobile/ui/Spinner";
 import { GlassIconButton } from "@mobile/ui/glass";
 import { useTheme, type Palette } from "@mobile/ui/theme";
 import { PairingScanner } from "@mobile/ui/PairingScanner";
@@ -60,7 +61,7 @@ export default function MachinesScreen() {
         <View style={[styles.mark, { backgroundColor: palette.accent }]}><Text style={[styles.markText, { color: palette.accentInk }]}>TX</Text></View>
         <Text style={[styles.heroTitle, { color: palette.ink }]}>Your work, away from your desk</Text>
         <Text style={[styles.heroDetail, { color: palette.muted }]}>Sign in to see the machines on your TerminalX account, or tap + to pair with a QR code.</Text>
-        <Button label="Sign in" onPress={() => void app.signIn()} />
+        <Button label={app.signingIn ? "Signing in…" : "Sign in"} disabled={app.signingIn} accessibilityState={{ disabled: app.signingIn, busy: app.signingIn }} icon={app.signingIn ? (color) => <Spinner size={16} color={color} /> : undefined} onPress={() => void app.signIn()} />
         {errorCard}
       </Screen>
       {menu.element}
@@ -84,7 +85,7 @@ export default function MachinesScreen() {
       }} onMenu={() => menu.open(machine)} />)}</Card></> : null}
       {hidden.length ? <Pressable accessibilityRole="button" onPress={() => setShowHidden((value) => !value)} hitSlop={8} style={styles.link}><Text style={[styles.linkText, { color: palette.accent }]}>{showHidden ? "Hide the hidden machines" : `Show ${hidden.length} hidden ${hidden.length === 1 ? "machine" : "machines"}`}</Text></Pressable> : null}
       {!paired.length && !shownAvailable.length && !(session && app.loadingMachines) ? <EmptyState title="No machines yet" detail="Tap + to pair with the QR code in TerminalX on your Mac or run terminalx-serve pair --phone on your server." /> : null}
-      {!session ? <Card style={styles.stateCard}><Text style={[styles.rowTitle, { color: palette.ink }]}>See every machine on your account</Text><Text style={[styles.detail, { color: palette.muted }]}>Sign in with the account you use in TerminalX on your Mac.</Text><Button label="Sign in" kind="secondary" onPress={() => void app.signIn()} /></Card> : null}
+      {!session ? <Card style={styles.stateCard}><Text style={[styles.rowTitle, { color: palette.ink }]}>See every machine on your account</Text><Text style={[styles.detail, { color: palette.muted }]}>Sign in with the account you use in TerminalX on your Mac.</Text><Button label={app.signingIn ? "Signing in…" : "Sign in"} disabled={app.signingIn} accessibilityState={{ disabled: app.signingIn, busy: app.signingIn }} icon={app.signingIn ? (color) => <Spinner size={16} color={color} /> : undefined} kind="secondary" onPress={() => void app.signIn()} /></Card> : null}
 
       {paired.length ? <Text style={[styles.note, { color: palette.muted }]}>The phone talks to one machine at a time. Tap another one to switch.</Text> : null}
     </Screen>

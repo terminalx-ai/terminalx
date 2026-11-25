@@ -460,6 +460,8 @@ export const api = {
   // Each organization has its own (PRO-107): `orgId` (and a consent's `organizationId`) names any member
   // organization, whatever the active one is; null is the active one.
   cloudAgentLogins: (orgId?: string | null) => invoke<{ credentials: AgentLogin[] }>("cloud_agent_logins", { orgId: orgId ?? null }),
+  cloudAgentLoginAffectedWorkspaces: (provider: AgentLoginProvider, contextRevision: string, orgId?: string | null) =>
+    invoke<AgentLoginAffectedWorkspaces>("cloud_agent_login_affected_workspaces", { provider, contextRevision, orgId: orgId ?? null }),
   cloudAgentLoginConnect: (provider: AgentLoginProvider, source: AgentLoginSource, consent: AgentLoginConsent) =>
     invoke<AgentLogin>("cloud_agent_login_connect", { provider, source, consent }),
   cloudAgentLoginRemove: (provider: AgentLoginProvider, contextRevision: string, orgId?: string | null) =>
@@ -521,6 +523,8 @@ export const api = {
     invoke<DesktopReadMarker>("cloud_workspace_read_marker", { orgId, workspaceId, readAt, sessionId: sessionId ?? null }),
   cloudWorkspaceRestart: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshotDto>("cloud_workspace_restart", { workspaceId, orgId: orgId ?? null }),
+  cloudWorkspaceStartProgress: (orgId: string, workspaceId: string, operationId: string) =>
+    invoke<CloudWorkspaceStartProgress>("cloud_workspace_start_progress", { orgId, workspaceId, operationId }),
   cloudWorkspaceDetails: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceDetailsResponse>("cloud_workspace_details", { workspaceId, orgId: orgId ?? null }),
   cloudWorkspaceSuspend: (workspaceId: string, orgId?: string | null) =>
@@ -580,6 +584,8 @@ export const api = {
     invoke<CloudGroupPage>("cloud_workspace_groups", { orgId, query, cursor, contextRevision }),
   cloudWorkspaceSharesApply: (workspaceId: string, orgId: string, request: CloudAccessApply, contextRevision: string) =>
     invoke<CloudAccessApplied>("cloud_workspace_shares_apply", { workspaceId, orgId, request, contextRevision }),
+  cloudWorkspaceGeneralAccessPut: (workspaceId: string, orgId: string, change: CloudWorkspaceGeneralAccessChange, contextRevision: string) =>
+    invoke<CloudWorkspaceGeneralAccessChange>("cloud_workspace_general_access_put", { workspaceId, orgId, ...change, contextRevision }),
   /** Grant or change a member's share; only managers and the workspace's creator may. */
   cloudWorkspaceSharePut: (workspaceId: string, userId: string, role: CloudShareRole, canApprove: boolean, orgId?: string | null) =>
     invoke<{ share: CloudWorkspaceShare; created?: boolean }>("cloud_workspace_share_put", { workspaceId, userId, role, canApprove, orgId: orgId ?? null }),
@@ -1204,6 +1210,13 @@ export interface AgentLogin {
   configurerLeft?: boolean;
 }
 
+export interface AgentLoginAffectedWorkspaces {
+  workspaces: { id: string; name: string }[];
+  count: number;
+  hasMore: boolean;
+  hasHidden: boolean;
+}
+
 export interface ClaudeLoginStarted {
   attemptId: string;
   authorizeUrl: string;
@@ -1664,10 +1677,23 @@ function requireLegacyCloudSchedule(value: CloudAutomationDto): CloudSchedule {
   return schedule;
 }
 
-export interface CloudWorkspaceShares {
+export type CloudWorkspaceGeneralAccess =
+  | { mode: "invited_only" }
+  | { mode: "organisation"; role: "read" };
+
+export interface CloudWorkspaceGeneralAccessChange {
+  generalAccess: CloudWorkspaceGeneralAccess;
+  accessRevision: string;
+}
+
+export interface CloudWorkspaceShares extends Partial<CloudWorkspaceGeneralAccessChange> {
   shares: CloudWorkspaceShare[];
   you: { role: CloudCollaborationRole; canApprove: boolean; canManageShares: boolean };
-  accessRevision?: string;
+  capabilities?: {
+    canChangeGeneralAccess: boolean;
+    canGrantAdmin: boolean;
+    canUseOrganisationWrite: boolean;
+  };
   groupShares?: CloudGroupShare[];
 }
 
@@ -1741,6 +1767,14 @@ export interface CloudWorkspaceLaunch {
     runningAt: number | null;
     failedAt: number | null;
   };
+}
+
+export interface CloudWorkspaceStartProgress {
+  organizationId: string;
+  workspaceId: string;
+  operation: { id: string };
+  steps: { key: string; startedAt: number | null; finishedAt: number | null; durationMs: number | null }[];
+  events: { id: string; state: string; stage: string; milestone: string | null; occurredAt: number }[];
 }
 
 export interface CloudWorkspaceOperation {

@@ -301,7 +301,7 @@ it("keeps Mine, Shared, Following and current Active predicates over the identic
   const active = (_org: string, id: string) => id === "shared";
   const ids = (view: Parameters<typeof teamPredicate>[1]) => rows.filter((row) => teamPredicate(row, view, catalog, active)).map((row) => row.id);
   expect(ids("everyone")).toEqual(["local", "machine", "mine", "shared", "visible"]);
-  expect(ids("mine")).toEqual(["local", "mine"]);
+  expect(ids("mine")).toEqual(["local", "machine", "mine"]);
   expect(ids("shared")).toEqual(["shared"]);
   expect(ids("following")).toEqual(["shared"]);
   expect(ids("active")).toEqual(["shared"]);

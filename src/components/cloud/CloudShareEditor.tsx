@@ -4,8 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { MemberProfile } from "@/components/people/MemberProfile";
-import { useAccount } from "@/lib/account";
-import { api, type CloudShareRole, type CloudWorkspaceShares } from "@/lib/api";
+import { getAccount, useAccount } from "@/lib/account";
+import { api, type CloudShareRole, type CloudWorkspaceGeneralAccess, type CloudWorkspaceShares } from "@/lib/api";
 import { notifyAccessChanged, VISIBILITY_ADMIN_REASON } from "@/lib/cloudCollab";
 import { buildShareRequest, pendingShareEdits, rebaseShareEdits, replaceShareEdit, shareRowKey, shareRows, type ShareEdit, type ShareRow } from "@/lib/cloudShareDraft";
 import { alwaysHasAccess, codeOf, MANAGER_APPROVAL_REASON, OUTCOME_UNKNOWN, shareErrorMessage, shareRoleLabel, yourAccessText } from "@/lib/cloudShareLabels";
@@ -15,6 +15,8 @@ import { featureFlags, useFeatureFlag } from "@/lib/featureFlags";
 import type { OrganizationMember } from "@/lib/organizationMembers";
 import { readOrganizationRoster, useOrganizationRoster } from "@/lib/organizationRoster";
 import type { Access, AccessMode, ShareDialogProps } from "./CloudShareDialog";
+import { phase2Ready } from "@/lib/phase2Readiness";
+import { CloudGeneralAccessControls } from "./CloudGeneralAccessControls";
 import { CloudShareSearch } from "./CloudShareSearch";
 
 type EditorProps = ShareDialogProps & {
@@ -23,6 +25,7 @@ type EditorProps = ShareDialogProps & {
   orgRole: string | null;
   contextRevision: string;
   ready: boolean;
+  generalReady: boolean;
   privacy: boolean;
   isCurrentScope: () => boolean;
   canRequest: () => boolean;
@@ -33,7 +36,7 @@ type RevisionedShares = CloudWorkspaceShares & { accessRevision: string };
 
 export function CloudShareEditor({
   orgId, organization, orgRole, contextRevision, workspaceId, name, accessMode = "organization", createdBy, canManage, onClose,
-  ready, privacy, isCurrentScope, canRequest, fallback,
+  ready, generalReady, privacy, isCurrentScope, canRequest, fallback,
 }: EditorProps) {
   const enabled = ready && !privacy;
   const { status } = useAccount();
@@ -48,6 +51,7 @@ export function CloudShareEditor({
   const [listed, setListed] = useState<RevisionedShares | null>(null);
   const [access, setAccess] = useState<Access>(accessMode);
   const [edits, setEdits] = useState<ShareEdit[]>([]);
+  const [generalDraft, setGeneralDraft] = useState<{ mode: CloudWorkspaceGeneralAccess["mode"]; revision: string }>();
   const [attempt, setAttempt] = useState<ShareAttempt | null>(null);
   const [failures, setFailures] = useState<{ key: string; name: string; message: string }[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
@@ -127,6 +131,9 @@ export function CloudShareEditor({
   const mayEdit = enabled && manage && access !== "unknown" && (access !== "private" || canChangeVisibility);
   const locked = working || !!confirm || !!attempt || refreshRequired;
   const dirty = pending.length > 0 || !!attempt;
+  const generalAccess = generalReady && access === "organization" ? listed?.generalAccess : undefined;
+  const generalRevision = generalAccess && manage && listed?.capabilities?.canChangeGeneralAccess ? listed.accessRevision : undefined;
+  const generalChoice = generalRevision && generalDraft?.revision === generalRevision ? generalDraft.mode : null;
   const paused = !enabled && (ready || dirty || working || !!notice || access === "unknown");
   const showingLegacy = !enabled && !paused;
   useEffect(() => {
@@ -186,6 +193,36 @@ export function CloudShareEditor({
       }
       setError(`Could not refresh access (${codeOf(e)}).`);
     }
+  };
+
+  const saveGeneralAccess = () => {
+    if (!generalRevision || !generalChoice || generalChoice === generalAccess?.mode || locked || dirty
+      || !phase2Ready(getAccount().status, orgId, "generalAccess")) return;
+    const policy: CloudWorkspaceGeneralAccess = generalChoice === "organisation"
+      ? { mode: "organisation", role: "read" } : { mode: "invited_only" };
+    void run(async () => {
+      try {
+        const receipt = await api.cloudWorkspaceGeneralAccessPut(
+          workspaceId, orgId, { accessRevision: generalRevision, generalAccess: policy }, contextRevision,
+        );
+        if (!current()) return;
+        setListed((previous) => previous && { ...previous, ...receipt });
+        setAccessChanged(true);
+        setRefreshRequired(true);
+        await refresh();
+      } catch (e) {
+        if (!current()) return;
+        const code = codeOf(e);
+        setRefreshRequired(true);
+        await refresh();
+        if (current()) setError(code === "cloud_workspace_access_revision_conflict"
+          ? "Workspace access changed. Review the current General access before saving again."
+          : code === "cloud_workspace_general_access_unavailable" ? "General access is unavailable for this organization."
+            : shareErrorMessage(e, name));
+      } finally {
+        if (current()) setGeneralDraft(undefined);
+      }
+    });
   };
 
   const apply = async (snapshot: RevisionedShares, batch: ShareAttempt, replay = false) => {
@@ -386,6 +423,12 @@ export function CloudShareEditor({
           <p className="text-muted-foreground" data-testid="cloud-share-you">
             Your access: {yourAccessText(listed.you, orgRole ?? self?.role ?? null, creator)}.
           </p>
+          {generalAccess && (
+            <CloudGeneralAccessControls mode={generalAccess.mode} pending={generalChoice}
+              everyone={`Everyone at ${organization}`} editable={!!generalRevision} disabled={locked || dirty}
+              onChoose={(mode) => setGeneralDraft(generalRevision ? { mode, revision: generalRevision } : undefined)}
+              onSave={saveGeneralAccess} />
+          )}
           {rows.length > 0 ? <>
             <h3 className="font-medium">People and groups with access</h3>
             <ul className="divide-y divide-hairline rounded-md border border-hairline" aria-label="People and groups with access">

@@ -1,9 +1,12 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, type AgentLogin } from "@/lib/api";
+import { api, type AccountStatus, type AgentLogin, type AgentLoginAffectedWorkspaces } from "@/lib/api";
 import { refreshCloudCatalog } from "@/lib/cloudCatalog";
 import { openAgentLogins } from "@/lib/settingsLinks";
 import { agentLoginConfigurerLeft, agentLoginMessage, agentLoginReach, agentLoginStatus, agentLoginUsable, codexSignInLine, connectedNotice, lentUntil, OrganizationAgentLogins, signInOutcome } from "./OrganizationAgentLogins";
+
+const account = vi.hoisted(() => ({ status: {} as AccountStatus }));
+vi.mock("@/lib/account", () => ({ useAccount: () => account, getAccount: () => account }));
 
 vi.mock("@/lib/cloudCatalog", () => ({ refreshCloudCatalog: vi.fn(async () => undefined) }));
 
@@ -12,6 +15,7 @@ vi.mock("@/lib/api", () => ({
     cloudAgentLogins: vi.fn(),
     cloudAgentLoginConnect: vi.fn(),
     cloudAgentLoginRemove: vi.fn(),
+    cloudAgentLoginAffectedWorkspaces: vi.fn(),
     cloudAgentClaudeLoginStart: vi.fn(),
     cloudAgentClaudeLoginOpen: vi.fn(),
     cloudAgentClaudeLoginComplete: vi.fn(),
@@ -35,10 +39,79 @@ const consent = (within_: HTMLElement) => within(within_).getAllByRole("checkbox
 
 beforeEach(() => {
   vi.clearAllMocks();
+  account.status = { state: "signed-out" } as AccountStatus;
   stored = [];
   vi.mocked(api.cloudAgentLogins).mockImplementation(async () => ({ credentials: structuredClone(stored) }));
 });
 afterEach(cleanup);
+
+describe("organization API key disconnect preview", () => {
+  const feature = "cloud.agent-logins.affected-workspaces.v1";
+  const setReady = (orgId: string) => {
+    account.status = {
+      state: "signed-in",
+      context: { revision: "org-revision" },
+      phase2Readiness: { [orgId]: [feature] },
+    } as AccountStatus;
+    stored = [login({ authKind: "api-key", fingerprint: "sha256:0123456789abcdef" })];
+  };
+  const open = async () => {
+    await show();
+    fireEvent.click(within(row("claude")).getByRole("button", { name: "Disconnect" }));
+    return screen.getByRole("dialog", { name: "Disconnect API key?" });
+  };
+
+  it("keeps the original confirmation for an organization without readiness", async () => {
+    setReady("other-org");
+    await show();
+    fireEvent.click(within(row("claude")).getByRole("button", { name: "Disconnect" }));
+    expect(within(row("claude")).getByTestId("agent-login-disconnect")).toBeTruthy();
+    expect(api.cloudAgentLoginAffectedWorkspaces).not.toHaveBeenCalled();
+  });
+
+  it("blocks confirmation while loading, lists visible matches, and cancels without removing the key", async () => {
+    setReady("org-1");
+    let finish: (value: AgentLoginAffectedWorkspaces) => void = () => {};
+    vi.mocked(api.cloudAgentLoginAffectedWorkspaces).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const dialog = within(await open());
+    const confirm = dialog.getByRole("button", { name: "Disconnect key" });
+    expect(confirm.hasAttribute("disabled")).toBe(true);
+    expect(api.cloudAgentLoginAffectedWorkspaces).toHaveBeenCalledWith("claude", "org-revision", "org-1");
+    await act(async () => finish({
+      workspaces: [{ id: "ws-a", name: "API verification" }, { id: "ws-b", name: "Deployment tests" }],
+      count: 2, hasMore: false, hasHidden: true,
+    }));
+    expect(dialog.getByText("2 running workspaces use this key.")).toBeTruthy();
+    expect(dialog.getByText("API verification")).toBeTruthy();
+    expect(dialog.getByText("Deployment tests")).toBeTruthy();
+    expect(dialog.getByText(/Other running workspaces/)).toBeTruthy();
+    expect(dialog.getByText("01234567…")).toBeTruthy();
+    expect(confirm.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(dialog.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(api.cloudAgentLoginRemove).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("omits the count for no visible matches (hidden: %s)", async (hasHidden) => {
+    setReady("org-1");
+    vi.mocked(api.cloudAgentLoginAffectedWorkspaces).mockResolvedValueOnce({ workspaces: [], count: 0, hasMore: false, hasHidden });
+    const dialog = within(await open());
+    await waitFor(() => expect(dialog.getByRole("button", { name: "Disconnect key" }).hasAttribute("disabled")).toBe(false));
+    expect(dialog.queryByText(/0 running workspaces/)).toBeNull();
+    expect(!!dialog.queryByText(/Other running workspaces/)).toBe(hasHidden);
+  });
+
+  it("allows disconnect after a preview failure and reloads the row", async () => {
+    setReady("org-1");
+    vi.mocked(api.cloudAgentLoginAffectedWorkspaces).mockRejectedValueOnce({ code: "cloud_provider_unavailable" });
+    vi.mocked(api.cloudAgentLoginRemove).mockImplementationOnce(async () => { stored = []; });
+    const dialog = within(await open());
+    expect(await dialog.findByRole("alert")).toBeTruthy();
+    fireEvent.click(dialog.getByRole("button", { name: "Disconnect key" }));
+    expect(api.cloudAgentLoginRemove).toHaveBeenCalledWith("claude", "org-revision", "org-1");
+    await waitFor(() => expect(within(row("claude")).getByTestId("agent-login-status").textContent).toBe("Not connected"));
+  });
+});
 
 describe("agent logins in Settings (PRO-79)", () => {
   it("lists each agent with its status, and what a member sees instead", async () => {
@@ -560,7 +633,7 @@ describe("agent logins in Settings (PRO-79)", () => {
       fireEvent.click(go);
       return within(await screen.findByTestId("codex-sign-in"));
     };
-    const check = () => vi.advanceTimersByTimeAsync(2000);
+    const check = () => act(async () => { await vi.advanceTimersByTimeAsync(2000); });
     const status = () => screen.getByTestId("codex-sign-in-status").textContent;
 
     it("is the first way for Codex, with the lend of this Mac's sign-in as the second choice", async () => {

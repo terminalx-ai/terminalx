@@ -15,6 +15,7 @@ import { workspaceProject } from "@mobile/cloud/pins";
 import { useApp } from "@mobile/state/AppProvider";
 import { useMacPins } from "@mobile/state/mac-pins";
 import { Button, EmptyState } from "@mobile/ui/primitives";
+import { Spinner } from "@mobile/ui/Spinner";
 import { FoldedSetup, NoComputeCard, SetupCard } from "@mobile/ui/CloudSetup";
 import { CloudWorkspaceRow } from "@mobile/ui/CloudWorkspaceRow";
 import { GlassIconButton, LargeTitle } from "@mobile/ui/glass";
@@ -99,7 +100,7 @@ export default function CloudScreen() {
     router.push({ pathname: "/cloud/[workspaceId]", params: { workspaceId: item.workspace.id, orgId: item.workspace.orgId, title: workspaceTitle(snapshot, item.workspace) } });
   }, [router, sections, snapshot]);
 
-  if (!app.session) return <View style={[styles.page, { backgroundColor: palette.page }]}><EmptyState title="Sign in for cloud workspaces" detail="Cloud workspaces belong to your TerminalX account." /><Button label="Sign in" onPress={() => void app.signIn()} />{app.error ? <Text accessibilityRole="alert" style={[styles.signInError, { color: palette.danger }]}>{app.error}</Text> : null}</View>;
+  if (!app.session) return <View style={[styles.page, { backgroundColor: palette.page }]}><EmptyState title="Sign in for cloud workspaces" detail="Cloud workspaces belong to your TerminalX account." /><Button label={app.signingIn ? "Signing in…" : "Sign in"} disabled={app.signingIn} accessibilityState={{ disabled: app.signingIn, busy: app.signingIn }} icon={app.signingIn ? (color) => <Spinner size={16} color={color} /> : undefined} onPress={() => void app.signIn()} />{app.error ? <Text accessibilityRole="alert" style={[styles.signInError, { color: palette.danger }]}>{app.error}</Text> : null}</View>;
 
   // Nothing read yet and nothing kept: rows stand in for the list, under the title, until it comes.
   const firstLoad = !snapshot.refreshedAt && !snapshot.saved && !snapshot.organizations.length && !snapshot.error;

@@ -1,7 +1,7 @@
 import * as Crypto from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
-import { AUTH_CONFIG, authSessionFailure, buildAuthorizeUrl, exchangeAuthorizationCode, parseStoredSession, refreshSession, revokeSession, type CloudSession } from "./protocol";
+import { AUTH_CONFIG, authSessionFailure, buildAuthorizeUrl, exchangeAuthorizationCode, parseStoredSession, redeemAccessCode, refreshSession, revokeSession, type AccessHold, type CloudSession, type RedeemOutcome } from "./protocol";
 
 const OPTIONS: SecureStore.SecureStoreOptions = { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY };
 const SESSION_KEY = "terminalx.cloud.session.v1";
@@ -16,7 +16,16 @@ export type StoredRefreshOutcome =
   | { status: "rejected" }
   | { status: "unavailable"; session: CloudSession; reason: string };
 
-export async function beginSignIn(): Promise<CloudSession | null> {
+/**
+ * How a finished sign-in ends: signed in, or held at the private beta until an
+ * access code is accepted (PRO-551). A held sign-in stores nothing: its ticket
+ * is handed back to be kept in memory only.
+ */
+export type SignInResult =
+  | { status: "signed-in"; session: CloudSession }
+  | { status: "held"; hold: AccessHold };
+
+export async function beginSignIn(): Promise<SignInResult | null> {
   const verifier = base64Url(await Crypto.getRandomBytesAsync(32));
   const state = base64Url(await Crypto.getRandomBytesAsync(16));
   const nonce = base64Url(await Crypto.getRandomBytesAsync(16));
@@ -34,7 +43,7 @@ export async function beginSignIn(): Promise<CloudSession | null> {
   return null;
 }
 
-export async function finishSignIn(callbackUrl: string): Promise<CloudSession> {
+export async function finishSignIn(callbackUrl: string): Promise<SignInResult> {
   const [verifier, expectedState, nonce] = await Promise.all([
     SecureStore.getItemAsync(VERIFIER_KEY, OPTIONS),
     SecureStore.getItemAsync(STATE_KEY, OPTIONS),
@@ -42,9 +51,19 @@ export async function finishSignIn(callbackUrl: string): Promise<CloudSession> {
   ]);
   await Promise.all([VERIFIER_KEY, STATE_KEY, NONCE_KEY].map((key) => SecureStore.deleteItemAsync(key, OPTIONS).catch(() => undefined)));
   const outcome = await exchangeAuthorizationCode({ config: AUTH_CONFIG, callbackUrl, verifier, expectedState, nonce });
-  if (!outcome.ok) throw new Error(outcome.reason);
+  if (!outcome.ok) {
+    if (outcome.hold) return { status: "held", hold: outcome.hold };
+    throw new Error(outcome.reason);
+  }
   await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(outcome.session), OPTIONS);
-  return outcome.session;
+  return { status: "signed-in", session: outcome.session };
+}
+
+/** Redeems an access code for a held sign-in; an accepted code's session is stored as after any sign-in. */
+export async function redeemHeldAccessCode(hold: AccessHold, code: string): Promise<RedeemOutcome> {
+  const outcome = await redeemAccessCode(AUTH_CONFIG, hold, code);
+  if (outcome.status === "accepted") await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(outcome.session), OPTIONS);
+  return outcome;
 }
 
 export async function readSession(): Promise<CloudSession | null> {

@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { getAccount, useAccount } from "@/lib/account";
-import { api, type AccountStatus, type CloudShareRole, type CloudWorkspaceShare, type CloudWorkspaceShares } from "@/lib/api";
+import { api, type AccountStatus, type CloudShareRole, type CloudWorkspaceGeneralAccess, type CloudWorkspaceShare, type CloudWorkspaceShares } from "@/lib/api";
 import { VISIBILITY_ADMIN_REASON, notifyAccessChanged } from "@/lib/cloudCollab";
 import { loadRoster, loadRosterIn, rememberPeople } from "@/lib/cloudPeople";
 import { readOrganizationRoster, useOrganizationRoster } from "@/lib/organizationRoster";
@@ -14,6 +14,7 @@ import { phase2Ready } from "@/lib/phase2Readiness";
 import type { OrganizationMember } from "@/lib/organizationMembers";
 import { MemberProfile } from "@/components/people/MemberProfile";
 import { alwaysHasAccess, codeOf, MANAGER_APPROVAL_REASON, OUTCOME_UNKNOWN, shareErrorMessage, shareRoleLabel, yourAccessText } from "@/lib/cloudShareLabels";
+import { CloudGeneralAccessControls } from "./CloudGeneralAccessControls";
 import { CloudShareEditor } from "./CloudShareEditor";
 
 export { alwaysHasAccess, shareErrorMessage, yourAccessText } from "@/lib/cloudShareLabels";
@@ -23,6 +24,8 @@ export type AccessMode = "private" | "organization";
 export type Access = AccessMode | "unknown";
 type Confirming = { kind: "share" } | { kind: "private" } | null;
 type Person = { userId: string; role: CloudShareRole; canApprove: boolean };
+const REVISION_CONFLICT = "cloud_workspace_access_revision_conflict";
+const GENERAL_ACCESS_UNAVAILABLE = "cloud_workspace_general_access_unavailable";
 
 export type ShareDialogProps = {
   orgId?: string | null;
@@ -41,11 +44,27 @@ function editorScope(status: AccountStatus, orgId: string | undefined | null): s
   return JSON.stringify([account, scope, revision, status.identity?.organizationId, orgId]);
 }
 
+function shareAccountScope(status: AccountStatus): string {
+  return JSON.stringify([status.state, status.identity?.email, status.identity?.organizationId,
+    status.context?.account, status.context?.scope, status.context?.revision]);
+}
+
 export function CloudShareDialog(props: ShareDialogProps) {
   const { status } = useAccount();
   const privacy = useDataPrivacy();
   const orgId = props.orgId ?? status.identity?.organizationId;
   const contextRevision = status.context?.revision;
+  const generalReady = !!orgId && !!contextRevision && !privacy.enabled && phase2Ready(status, orgId, "generalAccess");
+  const accountScope = shareAccountScope(status);
+  const [openedIn] = useState(accountScope);
+  const [generalUsed, setGeneralUsed] = useState(generalReady);
+  const currentAccount = accountScope === openedIn;
+  const closed = (generalReady || generalUsed) && !currentAccount;
+  const { onClose } = props;
+  useEffect(() => {
+    if (generalReady && currentAccount) setGeneralUsed(true);
+    if (closed) onClose();
+  }, [generalReady, currentAccount, closed, onClose]);
   const scope = editorScope(status, orgId);
   const isCurrentScope = useCallback(() => {
     const now = getAccount().status;
@@ -54,15 +73,17 @@ export function CloudShareDialog(props: ShareDialogProps) {
   const canRequest = useCallback(() =>
     !privacyEnabled() && !!orgId && isCurrentScope() && phase2Ready(getAccount().status, orgId, "workspaceGroups"),
   [orgId, isCurrentScope]);
+  if (closed) return null;
+  const fallback = <LegacyCloudShareDialog {...props} status={status} generalReady={generalReady} />;
   if (scope && orgId && contextRevision) {
     const organization = status.organizations?.find((item) => item.id === orgId);
     const organizationName = organization?.name ?? (orgId === status.identity?.organizationId ? status.identity?.organization : undefined);
     return <CloudShareEditor key={JSON.stringify([scope, props.workspaceId])} {...props}
       orgId={orgId} organization={organizationName || "this organization"} orgRole={organization?.role ?? null} contextRevision={contextRevision}
       ready={phase2Ready(status, orgId, "workspaceGroups")} privacy={privacy.enabled}
-      isCurrentScope={isCurrentScope} canRequest={canRequest} fallback={<LegacyCloudShareDialog {...props} />} />;
+      isCurrentScope={isCurrentScope} canRequest={canRequest} generalReady={generalReady} fallback={fallback} />;
   }
-  return <LegacyCloudShareDialog {...props} />;
+  return fallback;
 }
 
 /**
@@ -87,8 +108,9 @@ function LegacyCloudShareDialog({
   createdBy = null,
   canManage: manageHint,
   onClose,
-}: ShareDialogProps) {
-  const { status } = useAccount();
+  status,
+  generalReady,
+}: ShareDialogProps & { status: AccountStatus; generalReady: boolean }) {
   // The default organization's roster comes with the account; another
   // organization's (every one is live, PRO-71) is read by its own id.
   const defaultOrg = !orgId || !status.identity?.organizationId || status.identity.organizationId === orgId;
@@ -106,23 +128,31 @@ function LegacyCloudShareDialog({
   const [adding, setAdding] = useState<Person>({ userId: "", role: "viewer", canApprove: false });
   const [access, setAccess] = useState<Access>(initialAccess);
   const [confirming, setConfirming] = useState<Confirming>(null);
+  const [generalDraft, setGeneralDraft] = useState<{ mode: CloudWorkspaceGeneralAccess["mode"]; revision: string } | null>(null);
   /** The workspace was made organization-visible, but the share that was the reason for it did not go through. */
   const [unshared, setUnshared] = useState<{ person: Person; why: string } | null>(null);
 
+  const contextRevision = status.context?.revision ?? "";
+  const scope = shareAccountScope(status);
+  const isCurrentAccount = useCallback(() => shareAccountScope(getAccount().status) === scope, [scope]);
+
+  const listRead = useRef(0);
   const reload = useCallback(async () => {
+    if (!isCurrentAccount()) return false;
+    const read = ++listRead.current;
     try {
       const next = await api.cloudWorkspaceShares(workspaceId, orgId);
+      if (!isCurrentAccount() || read !== listRead.current) return false;
       rememberPeople(next.shares);
       setListed(next);
       setLoadError(null);
       return true;
     } catch (e) {
-      setLoadError(codeOf(e));
+      if (isCurrentAccount() && read === listRead.current) setLoadError(codeOf(e));
       return false;
     }
-  }, [workspaceId, orgId]);
+  }, [workspaceId, orgId, isCurrentAccount]);
 
-  const contextRevision = status.context?.revision ?? "";
   const membersRead = useRef(0);
   const loadMembers = useCallback((fresh = true) => {
     if (profiles) {
@@ -149,10 +179,18 @@ function LegacyCloudShareDialog({
   useEffect(() => {
     void reload();
     loadMembers(false);
-    return () => { membersRead.current++; };
+    return () => { listRead.current++; membersRead.current++; };
   }, [reload, loadMembers]);
 
   const manage = listed?.you.canManageShares ?? false;
+  const generalAccess = generalReady && org && access === "organization"
+    ? listed?.generalAccess : undefined;
+  const everyoneLabel = `Everyone at ${status.organizations?.find((candidate) => candidate.id === org)?.name
+    || (status.identity?.organizationId === org ? status.identity?.organization : null)
+    || "this organization"}`;
+  const generalRevision = contextRevision && manage && listed?.capabilities?.canChangeGeneralAccess && !loadError
+    ? listed.accessRevision : undefined;
+  const pendingGeneralMode = generalRevision && generalDraft?.revision === generalRevision ? generalDraft.mode : null;
   // Private or organization-visible is the API's owner-or-admin switch; the list says who this is up front.
   const mayChangeVisibility = listed?.you.role === "manager";
   const isPrivate = access === "private";
@@ -234,6 +272,43 @@ function LegacyCloudShareDialog({
       return Promise.resolve(false);
     }
     return change(`put:${share.userId}`, nameOf(share.userId), () => api.cloudWorkspaceSharePut(workspaceId, share.userId, share.role, share.canApprove, orgId), share.userId);
+  };
+
+  const saveGeneralAccess = async () => {
+    if (!org || !generalAccess || !pendingGeneralMode || generalAccess.mode === pendingGeneralMode
+      || !generalRevision || busy || confirming || !isCurrentAccount()
+      || privacyEnabled() || !phase2Ready(getAccount().status, org, "generalAccess")) return;
+    const policy: CloudWorkspaceGeneralAccess = pendingGeneralMode === "organisation"
+      ? { mode: "organisation", role: "read" }
+      : { mode: "invited_only" };
+    setBusy("general-access");
+    setError(null);
+    try {
+      const receipt = await api.cloudWorkspaceGeneralAccessPut(
+        workspaceId, org, { accessRevision: generalRevision, generalAccess: policy }, contextRevision,
+      );
+      if (!isCurrentAccount()) return;
+      setListed((before) => before && { ...before, ...receipt });
+      notifyAccessChanged(org);
+      await reload();
+    } catch (e) {
+      if (!isCurrentAccount()) return;
+      const code = codeOf(e);
+      setError(code === REVISION_CONFLICT
+        ? "Workspace access changed. Review the current General access before saving again."
+        : code === GENERAL_ACCESS_UNAVAILABLE
+          ? "General access is unavailable for this organization."
+          : code === "account_context_changed"
+            ? "The account session changed during the request. Review the current General access before saving again."
+            : shareErrorMessage(e, name));
+      if (code === REVISION_CONFLICT || code === OUTCOME_UNKNOWN || code === "account_context_changed") notifyAccessChanged(org);
+      await reload();
+    } finally {
+      if (isCurrentAccount()) {
+        setGeneralDraft(null);
+        setBusy(null);
+      }
+    }
   };
 
   /** Grant the share that a visibility change was made for; a refusal leaves the workspace visible but unshared, and says so. */
@@ -331,7 +406,12 @@ function LegacyCloudShareDialog({
           </DialogDescription>
         </DialogHeader>
         {!listed && !loadError && <Loader2 className="size-4 animate-spin" />}
-        {loadError && <p className="text-xs text-destructive">Could not load who this workspace is shared with ({loadError}).</p>}
+        {loadError && (
+          <div className="flex items-center gap-2 text-xs text-destructive">
+            <p className="flex-1">Could not load who this workspace is shared with ({loadError}).</p>
+            <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void reload()}>Try again</Button>
+          </div>
+        )}
         {listed && (
           <div className="flex flex-col gap-3 text-xs">
             <p className="text-muted-foreground" data-testid="cloud-share-you">
@@ -372,7 +452,9 @@ function LegacyCloudShareDialog({
             )}
             {listed.shares.length === 0 ? (
               <p className="text-muted-foreground">
-                {isPrivate ? "Not shared with anyone." : "Not shared with anyone yet. Organization admins and the creator always have access."}
+                {isPrivate ? "Not shared with anyone." : generalAccess?.mode === "organisation"
+                  ? "No individual shares."
+                  : "Not shared with anyone yet. Organization admins and the creator always have access."}
               </p>
             ) : (
               <ul className="flex flex-col divide-y divide-hairline rounded-md border border-hairline" aria-label="People with access">
@@ -500,6 +582,12 @@ function LegacyCloudShareDialog({
                 </div>
               </div>
             )}
+            {generalAccess && (
+              <CloudGeneralAccessControls mode={generalAccess.mode} pending={pendingGeneralMode}
+                everyone={everyoneLabel} editable={!!generalRevision} disabled={busy !== null || confirming !== null}
+                onChoose={(mode) => setGeneralDraft(generalRevision ? { mode, revision: generalRevision } : null)}
+                onSave={() => void saveGeneralAccess()} />
+            )}
             {manage && access === "organization" && confirming?.kind !== "private" && !unshared && (
               <div className="flex items-center gap-2 border-t border-hairline pt-3 text-muted-foreground">
                 <span className="min-w-0 flex-1" data-testid="cloud-share-visibility">
@@ -524,6 +612,7 @@ function LegacyCloudShareDialog({
                   {sharedCount > 0
                     ? `${sharedCount === 1 ? "The 1 person" : `All ${sharedCount} people`} it is shared with ${sharedCount === 1 ? "loses" : "lose"} access now and their open sessions close. `
                     : ""}
+                  {generalAccess?.mode === "organisation" && "Organization members will lose General access. "}
                   It disappears from everyone else's sidebar, organization admins included.{" "}
                   {creator === false
                     ? "You did not create it, so you will stop seeing it too: only its creator will."
