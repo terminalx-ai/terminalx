@@ -27,14 +27,13 @@ fn context() -> TrustedContext {
     }
 }
 
-fn input(id: &str) -> RequestInput {
+pub(super) fn input(id: &str) -> RequestInput {
     RequestInput {
         id: id.into(),
         origin: origin(),
         generation: 1,
         approval_revision: 1,
-        issued_at_ms: 10,
-        expires_at_ms: 100,
+        ttl_ms: 90,
         executable: "/usr/bin/printf".into(),
         arguments: vec!["%s".into(), "literal ; $(text)\n\u{202e}".into()],
         cwd: "/private/tmp".into(),
@@ -154,9 +153,8 @@ fn malformed_and_bounded_requests_fail_closed() {
         |i| i.arguments.push("\0".into()),
         |i| i.arguments = vec!["x".repeat(8193)],
         |i| i.arguments = vec!["x".repeat(8192); 5],
-        |i| i.expires_at_ms = i.issued_at_ms,
-        |i| i.expires_at_ms = i.issued_at_ms - 1,
-        |i| i.expires_at_ms = i.issued_at_ms + MAX_TTL_MS + 1,
+        |i| i.ttl_ms = 0,
+        |i| i.ttl_ms = MAX_TTL_MS + 1,
         |i| i.timeout_ms = 0,
         |i| i.timeout_ms = MAX_TIMEOUT_MS + 1,
         |i| i.output_limit_bytes = 0,
@@ -197,12 +195,9 @@ fn proposal_is_immutable_and_expiry_releases_slot_without_enabling_replay() {
     );
 
     set_time(&policy, 100);
-    assert_eq!(request.state(), Ok(State::Expired));
+    assert_eq!(request.state(), Ok(State::ExpiredBeforeLaunch));
     assert_eq!(policy.submit(input("one")).err(), Some(Rejection::Replay));
-    let mut next = input("two");
-    next.issued_at_ms = 100;
-    next.expires_at_ms = 100 + MAX_TTL_MS;
-    assert!(policy.submit(next).is_ok());
+    assert!(policy.submit(input("two")).is_ok());
 }
 
 #[test]
@@ -222,6 +217,49 @@ fn bounded_registry_refuses_new_ids_and_replay_when_full() {
         policy.submit(input("request-0")).err(),
         Some(Rejection::Replay)
     );
+}
+
+#[test]
+fn expired_registry_releases_capacity_without_rebinding_old_handles() {
+    let policy = policy();
+    for index in 1..MAX_REQUESTS {
+        policy
+            .submit(input(&format!("old-{index}")))
+            .unwrap()
+            .cancel()
+            .unwrap();
+    }
+    let old = policy.submit(input("reused")).unwrap();
+    set_time(&policy, 10 + MAX_TTL_MS);
+    let new = policy.submit(input("reused")).unwrap();
+    assert_eq!(old.state(), Ok(State::ExpiredBeforeLaunch));
+    assert_eq!(policy.start(&old).err(), Some(Rejection::Expired));
+    assert_eq!(new.state(), Ok(State::Pending));
+    assert_eq!(policy.lock().unwrap().entries.len(), 1);
+}
+
+#[test]
+fn prompt_reservation_limits_parallel_and_repeated_attempts() {
+    let policy = policy();
+    let mut proposal = input("one");
+    proposal.ttl_ms = MAX_TTL_MS;
+    let request = policy.submit(proposal).unwrap();
+    let slot = policy.reserve_prompt(&request).unwrap();
+    assert_eq!(
+        policy.reserve_prompt(&request).err(),
+        Some(Rejection::PromptRateLimited)
+    );
+    drop(slot);
+    for _ in 0..2 {
+        drop(policy.reserve_prompt(&request).unwrap());
+    }
+    assert_eq!(
+        policy.reserve_prompt(&request).err(),
+        Some(Rejection::PromptRateLimited)
+    );
+    set_time(&policy, 10 + MAX_TTL_MS);
+    let next = policy.submit(input("two")).unwrap();
+    assert!(policy.reserve_prompt(&next).is_ok());
 }
 
 #[test]
@@ -407,7 +445,7 @@ mod native {
             ),
             Err(Rejection::Expired)
         );
-        assert_eq!(request.state(), Ok(State::Expired));
+        assert_eq!(request.state(), Ok(State::ExpiredBeforeLaunch));
     }
 
     #[test]
@@ -482,7 +520,7 @@ mod native {
             (State::Cancelled, |_, r| {
                 r.cancel().unwrap();
             }),
-            (State::Expired, |p, _| set_time(p, 100)),
+            (State::ExpiredBeforeLaunch, |p, _| set_time(p, 100)),
             (State::Revoked, |p, _| {
                 p.update_trusted_context(TrustedContext::default()).unwrap()
             }),
@@ -686,7 +724,7 @@ mod native {
         for expected in [
             State::Cancelled,
             State::Revoked,
-            State::Expired,
+            State::ExpiredAfterLaunch,
             State::TimedOut,
         ] {
             let mut policy = policy();
@@ -718,28 +756,26 @@ mod native {
                     switched.local_account = Some("new-account".into());
                     policy.update_trusted_context(switched).unwrap();
                 }
-                State::Expired => set_time(&policy, 100),
+                State::ExpiredAfterLaunch => set_time(&policy, 100),
                 _ => {}
             }
             assert_withheld(execution, expected);
             assert_eq!(request.state(), Ok(expected));
-            // Output can be withheld before the OS finishes group cleanup.
-            let cleanup_deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                {
-                    let events = group_events.lock().unwrap();
-                    if let Some((executor::GroupEvent::Reaped(pid), signals)) = events.split_last()
-                    {
-                        assert!(!signals.is_empty());
-                        assert!(signals
-                            .iter()
-                            .all(|event| *event == executor::GroupEvent::Signal(*pid)));
-                        break;
-                    }
-                }
-                assert!(Instant::now() < cleanup_deadline, "group was not reaped");
-                thread::sleep(Duration::from_millis(5));
-            }
+            assert!(!policy.lock().unwrap().in_flight);
+            let events = group_events.lock().unwrap();
+            let Some(executor::GroupEvent::Signal(pid)) = events.first() else {
+                panic!("expected the owned group to be signalled");
+            };
+            // A stuck OS may exceed the cleanup budget. When a reap occurs it
+            // must always be last, and cleanup must never signal a reused ID.
+            let (signals, reaped) = match events.split_last() {
+                Some((executor::GroupEvent::Reaped(reaped), signals)) => (signals, Some(*reaped)),
+                _ => (&events[..], None),
+            };
+            assert!(reaped.is_none_or(|reaped| reaped == *pid));
+            assert!(signals
+                .iter()
+                .all(|event| *event == executor::GroupEvent::Signal(*pid)));
         }
     }
 
@@ -760,6 +796,24 @@ mod native {
         policy.update_trusted_context(context()).unwrap();
         assert_eq!(assert_withheld(execution, State::Revoked), (Some(0), None));
         assert_eq!(request.state(), Ok(State::Completed));
+    }
+
+    #[test]
+    fn completed_launch_expires_before_output_handoff() {
+        let policy = policy();
+        let request = approved(&policy, input("one"));
+        let execution = policy.start(&request).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while request.state() != Ok(State::Completed) {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        set_time(&policy, 100);
+        assert_eq!(
+            assert_withheld(execution, State::ExpiredAfterLaunch),
+            (Some(0), None)
+        );
+        assert_eq!(request.state(), Ok(State::ExpiredAfterLaunch));
     }
 
     #[test]
