@@ -352,6 +352,7 @@ const PHASE2_FEATURES: [&str; 17] = [
     PHASE2_AFFECTED_WORKSPACES,
     PHASE2_GENERAL_ACCESS,
     "cloud.workspaces.session-placement.v1",
+    "cloud.workspaces.transfer-to-local.v1",
     PHASE2_PRECREATE_USAGE,
     "cloud.desktop.v1",
 ];
