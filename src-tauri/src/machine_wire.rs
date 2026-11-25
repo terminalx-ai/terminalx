@@ -176,6 +176,23 @@ pub struct RelayRegistration {
     pub runtime_generation: u64,
 }
 
+/// The relay refused the runtime's registrations with 4401 (#1579), as
+/// [`Status::relay_refused`] says while [`RelayState::Retrying`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayRefusal {
+    /// The close code: 4401.
+    pub code: u16,
+    /// The relay's reason code (`relay_unknown_control_message`), when it
+    /// sent one of that shape. Never free text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Registrations refused in a row.
+    pub refusals: u32,
+    /// When the runtime registers again, in Unix milliseconds.
+    pub retry_at: i64,
+}
+
 /// One paired computer, as Settings → Machines lists it. No credential.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -268,6 +285,10 @@ pub struct Status {
     /// Set while [`RelayState::Registered`].
     #[serde(default)]
     pub relay: Option<RelayRegistration>,
+    /// Set while [`RelayState::Retrying`] after the relay refused the
+    /// registration (#1579). Absent from an older runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_refused: Option<RelayRefusal>,
     /// Phones this runtime serves itself (PRO-359). Absent from a runtime
     /// before PRO-359, which served none.
     #[serde(default)]
@@ -744,6 +765,7 @@ mod tests {
             runs_as: None,
             relay_state: RelayState::Off,
             relay: None,
+            relay_refused: None,
         };
         let value = serde_json::to_value(&status).unwrap();
         assert_eq!(value["code"], serde_json::json!({ "expiresAt": 9 }));

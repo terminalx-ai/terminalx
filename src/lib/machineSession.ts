@@ -451,6 +451,8 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     location: { provider: name, org: "" },
     connection: chipOf(machineState),
     connected,
+    // A machine's reachability is its own state, said by `machine.state` (PRO-347).
+    unavailable: null,
     manage,
     collab: { key: workspaceKey, you: null, live: false, notShared: false },
     locked: null,

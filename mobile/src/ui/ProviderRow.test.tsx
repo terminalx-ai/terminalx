@@ -2,6 +2,7 @@
 import { expect, it, vi } from "vitest";
 import { ProviderMark, ProviderRow } from "./ProviderRow";
 import { appearance, stage } from "./testing/kit";
+import { LargeText } from "./text-size";
 
 // PRO-542: a provider as the server describes it (25.03), and an agent login as the same row (25.04).
 vi.mock("react-native", () => import("@mobile/ui/testing/native"));
@@ -77,6 +78,18 @@ it("heads a provider's own page with the state at the end, level with the name",
   expect(page.styleOf(row).alignItems).toBe("center");
   expect(row.lastElementChild!.textContent).toBe("Connected");
   expect(page.byText("Agent37")!.parentElement!.textContent).toBe("Agent37");
+});
+
+it("puts the state under the name at the accessibility text sizes, also where it is drawn at the end (PRO-563)", async () => {
+  await page.show(<LargeText.Provider value><ProviderRow testID="row" name="Agent37" icon="server" description={AGENT37.billing} badge="connected" badgeAtEnd /></LargeText.Provider>);
+  const row = page.byId("row")!;
+  // Beside the name, in a line that wraps: the state is no longer the row's last child.
+  expect(row.lastElementChild!.textContent).not.toBe("Connected");
+  const heading = page.byText("Agent37")!.parentElement!;
+  expect(heading.textContent).toBe("Agent37Connected");
+  expect(page.styleOf(heading).flexWrap).toBe("wrap");
+  // The name is read in full, on as many lines as it takes.
+  expect(page.byText("Agent37")!.getAttribute("data-lines")).toBeNull();
 });
 
 it("is an agent login's row with an initial and no billing line", async () => {

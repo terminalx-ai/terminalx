@@ -498,9 +498,12 @@ describe("CloudCreateWorkspace launch settings", () => {
     setPrefs({ lastAgent: "codex", lastModel: { codex: "gpt-5.6-sol" }, lastEffort: { codex: "medium" }, lastMode: "manual" });
     await fill();
     const launch = screen.getByTestId("cloud-create-launch");
-    expect(["Agent", "Model", "Effort", "Permissions"].map((title) => within(launch).getByTitle(title).textContent)).toEqual(["Codex", "GPT-5.6 Sol", "Medium", "Ask every time"]);
+    // This computer's saved Codex model may not run there: nothing is chosen until the reader picks (#1580).
+    expect(["Agent", "Model", "Permissions"].map((title) => within(launch).getByTitle(title).textContent)).toEqual(["Codex", "Agent default", "Ask every time"]);
     // No copy of the pickers is left on the form.
     for (const name of ["Agent", "Model", "Effort", "Permission mode"]) expect(screen.queryByRole("combobox", { name })).toBeNull();
+    await choose("Model", "GPT-5.6 Sol");
+    expect(pill("Effort")).toBe("Medium");
     await choose("Effort", "High");
     expect(await createdLaunch()).toMatchObject({ agent: "codex", model: "gpt-5.6-sol", effort: "high", mode: "manual" });
     expect(mocked.cloudWorkspacePreflight).toHaveBeenCalledWith(expect.any(Array), null, "codex");
@@ -537,6 +540,22 @@ describe("CloudCreateWorkspace launch settings", () => {
     expect(agents.map((item) => item.getAttribute("aria-disabled"))).toEqual([null, null]);
   });
 
+  it("sends no Codex model or effort it was not given here, so the workspace runs its own default (#1580)", async () => {
+    setPrefs({ lastAgent: "codex", lastModel: { codex: "gpt-5.6-sol" }, lastEffort: { codex: "high" } });
+    await fill();
+    expect(pill("Model")).toBe("Agent default");
+    // This computer's list is still there to pick from.
+    fireEvent.click(screen.getByTitle("Model"));
+    const offered = await screen.findAllByRole("menuitemradio");
+    expect(offered.map((item) => item.firstChild?.textContent)).toContain("GPT-5.6 Sol");
+    expect(offered.every((item) => item.getAttribute("aria-checked") === "false")).toBe(true);
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    const launch = await createdLaunch();
+    expect(launch).toMatchObject({ agent: "codex" });
+    expect(launch.model ?? "").toBe("");
+    expect(launch.effort ?? "").toBe("");
+  });
+
   it("offers the cloud's aliases, never a version pinned on this computer", async () => {
     await fill();
     expect(pill("Model")).toBe("Sonnet");
@@ -551,7 +570,9 @@ describe("CloudCreateWorkspace launch settings", () => {
     expect([pill("Agent"), pill("Model"), pill("Effort")]).toEqual(["Claude Code", "Sonnet", "High"]);
 
     await choose("Agent", "Codex", "menuitem");
-    expect([pill("Model"), pill("Effort")]).toEqual(["GPT-5.6 Sol", "High"]);
+    // The saved Codex model is this computer's: the workspace's own default until one is picked (#1580).
+    expect(pill("Model")).toBe("Agent default");
+    expect(screen.queryByTitle("Effort")).toBeNull();
     // GPT-6 Astra takes High too, so it stays.
     await choose("Model", "GPT-6 Astra");
     expect(pill("Effort")).toBe("High");

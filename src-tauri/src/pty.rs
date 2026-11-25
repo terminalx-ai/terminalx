@@ -1045,8 +1045,25 @@ pub(crate) fn session_environment(overrides: &std::collections::BTreeMap<String,
         .filter(|(name, _)| name.as_str() != "PATH" && !UNINHERITED_ENV.contains(&name.as_str()))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
+    set.extend(fallback_locale(|name| std::env::var(name).ok(), overrides));
     set.push(("PATH".into(), crate::binpath::login_path()));
     (set, &UNINHERITED_ENV)
+}
+
+/// The locale a pane gets when nothing names one. A Mac app opened from
+/// Finder inherits no `LANG` or `LC_*`, so its shells ran in the C locale,
+/// where non-ASCII text is mangled on screen and in what is typed. A locale
+/// the app inherited or the workspace's environment sets, even `C`, is left
+/// as it is. Windows has no such variables.
+fn fallback_locale(inherited: impl Fn(&str) -> Option<String>, overrides: &std::collections::BTreeMap<String, String>) -> Option<(String, String)> {
+    if cfg!(windows) {
+        return None;
+    }
+    let named = |name: &str| overrides.get(name).cloned().or_else(|| inherited(name)).is_some_and(|value| !value.trim().is_empty());
+    if ["LC_ALL", "LC_CTYPE", "LANG"].into_iter().any(named) {
+        return None;
+    }
+    Some(("LANG".into(), if cfg!(target_os = "macos") { "en_US.UTF-8" } else { "C.UTF-8" }.into()))
 }
 
 /// A value in [`PaneSpec::env`] that removes the variable instead of setting
@@ -3980,5 +3997,28 @@ time.sleep(60)
         let bytes: Vec<_> = scrollback.lock().unwrap().iter().copied().collect();
         assert_eq!(bytes.len(), SCROLLBACK_BYTES);
         assert!(bytes.iter().all(|byte| *byte == 4));
+    }
+
+    #[test]
+    fn gives_a_pane_a_utf8_locale_when_nothing_names_one() {
+        let got = fallback_locale(|_| None, &std::collections::BTreeMap::new());
+        if cfg!(windows) {
+            assert_eq!(got, None, "Windows has no locale variables");
+            return;
+        }
+        let (name, value) = got.expect("a pane with no locale gets one");
+        assert_eq!(name, "LANG");
+        assert!(value.ends_with(".UTF-8"), "{value}");
+        // A blank one names nothing.
+        assert!(fallback_locale(|name| (name == "LANG").then(|| " ".to_string()), &std::collections::BTreeMap::new()).is_some());
+    }
+
+    #[test]
+    fn leaves_an_inherited_or_overridden_locale_alone() {
+        let none = std::collections::BTreeMap::new();
+        assert_eq!(fallback_locale(|name| (name == "LC_CTYPE").then(|| "de_DE.UTF-8".to_string()), &none), None);
+        assert_eq!(fallback_locale(|name| (name == "LANG").then(|| "C".to_string()), &none), None, "even C, when chosen");
+        let overrides = std::collections::BTreeMap::from([("LC_ALL".to_string(), "fr_FR.UTF-8".to_string())]);
+        assert_eq!(fallback_locale(|_| None, &overrides), None);
     }
 }

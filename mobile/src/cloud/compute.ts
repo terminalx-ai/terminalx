@@ -1,22 +1,22 @@
 import { CloudApiError, type CloudProvider } from "./api";
 
 /**
- * What the compute screens (25.03) say: the web console's sentences for what
- * connecting does, what it costs and how a key is kept, and the phone's own
- * for a refusal, which the server sends as a code only.
+ * What the compute screens (25.03) say. The board gives each sentence: some
+ * are the web console's as they stand, some say the same in the phone's words
+ * (PRO-568), and a refusal is the phone's own, since the server sends a code only.
  */
 
-/** The console's `computeSetupDescription`. */
-export const COMPUTE_INTRO = "Connecting validates and stores your provider key. It creates no machine and starts no paid build or workspace.";
+/** 25.03's words for the console's `computeSetupDescription`: what compute is, first, for someone who has never seen the console. */
+export const COMPUTE_INTRO = "Cloud workspaces run on machines in a provider account. Connecting checks and stores a key; it creates no machine and spends nothing.";
 /** The console's `computeSetupOwnerRequired`: who a member asks. */
 export const COMPUTE_OWNER_REQUIRED = "An organization owner or admin must connect compute. You can continue using this organization.";
-/** The console's `cloudConnectBody`. */
-export const keyHandling = (provider: string) => `Paste an API key for ${provider}. It is encrypted at rest and never shown again.`;
+/** 25.03's words for the console's `cloudConnectBody`. The field's own Paste button says where the key goes; this says what becomes of it. */
+export const KEY_HANDLING = "Sent once, encrypted at rest, and never shown again, here or anywhere.";
 /** The console's `cloudConnectDisclosure`: the acknowledgement the server requires with every connect. */
 export const connectDisclosure = (provider: string) => `I understand ${provider} bills this organization directly and every admin here can launch machines with this key.`;
-/** The console's `cloudDisconnectTitle` and `cloudDisconnectBody`. */
+/** The console's `cloudDisconnectTitle`, and its `cloudDisconnectBody` in 25.03's words. */
 export const disconnectTitle = (provider: string) => `Disconnect ${provider}?`;
-export const DISCONNECT_BODY = "Existing machines keep running; new launches will fail until a key is connected again.";
+export const disconnectBody = (provider: string) => `Existing workspaces keep running. New ones cannot be launched on ${provider} until a key is connected again.`;
 
 /** Where the compute pages live, for the screens that lead to them. */
 export const computeHref = (orgId: string) => ({ pathname: "/cloud/compute", params: { orgId } }) as const;

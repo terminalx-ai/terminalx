@@ -1131,6 +1131,7 @@ fn noted(session: &str) -> Vec<(String, Value)> {
 /// says. Each string here is the whole text; a change to any of them fails this test, and is a change to what
 /// agents read, never a change to how the window draws it.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn the_text_an_agent_is_given_is_what_it_was_before_the_cards() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -1223,6 +1224,7 @@ fn the_text_an_agent_is_given_is_what_it_was_before_the_cards() {
 /// words. The window draws from these, never from the text. The lines hand-offs leave in their two chats say which
 /// hand-off they are about, what happened and whose chat they are in.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn each_message_carries_its_card_and_each_line_its_hand_off() {
     let _home = crate::store::temp_home();
     let _switches = Switches;
@@ -1306,6 +1308,7 @@ fn each_message_carries_its_card_and_each_line_its_hand_off() {
 /// of an open hand-off given to its sender. From a home chat it records none, however deep the limit counts it; a
 /// retry's line is the hand-off it tries again; and the window's listing carries all of it.
 #[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
 fn a_hand_off_records_its_parent_only_from_the_chat_of_the_work_it_hands_on() {
     let _home = crate::store::temp_home();
     let _switches = Switches;

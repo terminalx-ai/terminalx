@@ -233,6 +233,10 @@ pub(crate) const WINDOW_PUBLIC_KEY_ENV: &str = "TERMINALX_LOCAL_WINDOW_CONSENT_K
 
 impl Window {
     pub fn current() -> Self {
+        #[cfg(test)]
+        if !WINDOW_FROM_ENVIRONMENT.load(Ordering::SeqCst) {
+            return Self::Headless;
+        }
         if headless() {
             return Self::Headless;
         }
@@ -270,6 +274,25 @@ pub fn terminal_rule(window: &Window, has_terminal: bool, proven: bool) -> Optio
         Window::Keyed(_) => (!proven).then_some(Refusal::NotWindow),
         Window::Unrecognisable => Some(Refusal::UnsupportedDesktop),
     }
+}
+
+/// Whether a test process reads its window from its environment, as a
+/// runtime does (PRO-574). No desktop launched a test's runtime, so it has no
+/// window unless the test pins one (`control`'s `TEST_WINDOW_KEY`) or started
+/// this process as a desktop launch would ([`read_window_from_environment`]).
+/// Otherwise `TERMINALX_LOCAL_DESKTOP` and the window's key are whatever the
+/// shell running `cargo test` has: a TerminalX pane has its own runtime's, so
+/// a bot's process was refused there as the window's write, not as a bot's.
+#[cfg(test)]
+static WINDOW_FROM_ENVIRONMENT: AtomicBool = AtomicBool::new(false);
+
+/// In a process a test launched as a desktop launches a runtime, with
+/// `TERMINALX_LOCAL_DESKTOP` and the window's key set: read the window from
+/// them ([`WINDOW_FROM_ENVIRONMENT`]). Only the Mac desktop's
+/// `machine_host::window_consent_tests` start one.
+#[cfg(all(test, feature = "desktop", target_os = "macos"))]
+pub(crate) fn read_window_from_environment() {
+    WINDOW_FROM_ENVIRONMENT.store(true, Ordering::SeqCst);
 }
 
 /// Whether this runtime has no window: one the desktop started says so in

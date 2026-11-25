@@ -491,7 +491,7 @@ impl Phones {
             }
             if let (Some(relay), Some(registration)) = (&relay, &registration) {
                 let id = uuid::Uuid::new_v4().simple().to_string();
-                let frame = json!({"type":"device-revoke", "v":1, "reqId":id, "relayDeviceId":device});
+                let frame = json!({"type":"device-revoke", "reqId":id, "relayDeviceId":device});
                 if let Ok(reply) = relay.forward_control(frame) {
                     *pending = Some(RevocationRequest { id, registration: registration.clone(), sent: Instant::now(), reply });
                 }

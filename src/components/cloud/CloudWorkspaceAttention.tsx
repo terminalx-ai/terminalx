@@ -1,7 +1,7 @@
 import { useRef, useState, useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/button";
 import type { CloudWorkspaceListItem } from "@/lib/api";
-import { resolveCloudAttention, type CloudAttentionInput } from "@/lib/cloudAttention";
+import { resolveCloudAttention, type CloudAttentionInput, type CloudRecovery } from "@/lib/cloudAttention";
 import { workspaceAuthority, LIFECYCLE_ADMIN_REASON } from "@/lib/cloudCollab";
 import { blankIdentity, getCloudCatalog, refreshCloudCatalog, repositoryOf, resumeCloudWorkspace } from "@/lib/cloudCatalog";
 import { openAgentLogins, openOrganizationSettings, openSettingRow } from "@/lib/settingsLinks";
@@ -51,19 +51,22 @@ export function CloudWorkspaceAttention({ item, input = {}, compact = false, onO
   const suggested = attention.recovery;
   const operationAction = suggested.operationAction === "suspend" ? "stop" : suggested.operationAction;
   // The existing dialog must offer the requested action; otherwise it silently selects a different action.
-  const unavailableOperation = suggested.action === "retry-operation" && operationAction !== "resume"
-    && (!operationAction || !actionsFor(item).includes(operationAction));
+  const unavailableOperation = (suggested.action === "retry-operation" && operationAction !== "resume"
+    && (!operationAction || !actionsFor(item).includes(operationAction)))
+    || (suggested.action === "delete-workspace" && !actionsFor(item).includes("delete"));
   const recovery = unavailableOperation
     ? { action: "open-session" as const, label: "Open session", instructions: "Open the workspace to inspect the failed operation. An owner or admin can review its runtime and provider state before retrying." }
     : suggested;
+  const alternatives = unavailableOperation ? [] : attention.alternatives ?? [];
   const manager = workspaceAuthority(workspace).lifecycle;
-  const restricted = recovery.action === "retry-operation" || recovery.action === "create-workspace";
+  const restrictedAction = (next: CloudRecovery) => next.action === "retry-operation" || next.action === "create-workspace" || next.action === "delete-workspace";
+  const restricted = restrictedAction(recovery);
   const disabled = busy || (restricted && !manager);
   const open = () => onOpenSession ? onOpenSession() : openAttentionSession(cloudWorkspaceKey(workspace.orgId, workspace.id));
-  const act = async () => {
-    if (disabled || pending.current) return;
+  const act = async (next: CloudRecovery) => {
+    if (busy || (restrictedAction(next) && !manager) || pending.current) return;
     setError(null);
-    switch (recovery.action) {
+    switch (next.action) {
       case "open-agent-logins": openAgentLogins(workspace.orgId); return;
       case "check-github-access":
       case "open-provider-settings":
@@ -74,6 +77,8 @@ export function CloudWorkspaceAttention({ item, input = {}, compact = false, onO
         startCloudSessionIn(cloudProjectKey(workspace.orgId, repository?.identity ?? blankIdentity(workspace.name)));
         return;
       }
+      // The workspace menu's own delete: its confirmation, what is removed, and the server's checks.
+      case "delete-workspace": setRequest({ item, action: "delete" }); return;
       case "retry-operation":
         if (operationAction !== "resume") {
           if (!operationAction) return;
@@ -105,9 +110,16 @@ export function CloudWorkspaceAttention({ item, input = {}, compact = false, onO
       <p className="max-w-full whitespace-normal break-words text-destructive" title={attention.message}>{reason}</p>
       {!compact && <p className="text-muted-foreground">{recovery.instructions}</p>}
       <Button type="button" size="xs" variant="outline" className="h-auto max-w-full whitespace-normal py-1 text-left" disabled={disabled}
-        title={restricted && !manager ? LIFECYCLE_ADMIN_REASON : recovery.instructions} onClick={() => void act()}>
+        title={restricted && !manager ? LIFECYCLE_ADMIN_REASON : recovery.instructions} onClick={() => void act(recovery)}>
         {recovery.label}
       </Button>
+      {alternatives.map((alternative) => (
+        <Button key={alternative.action} type="button" size="xs" variant="outline" className="h-auto max-w-full whitespace-normal py-1 text-left"
+          disabled={busy || (restrictedAction(alternative) && !manager)}
+          title={restrictedAction(alternative) && !manager ? LIFECYCLE_ADMIN_REASON : alternative.instructions} onClick={() => void act(alternative)}>
+          {alternative.label}
+        </Button>
+      ))}
       {!compact && onOpenSession && recovery.action !== "open-session" && (
         <Button type="button" size="xs" variant="ghost" onClick={open}>Open session</Button>
       )}

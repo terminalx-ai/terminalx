@@ -4,8 +4,9 @@ import { invoke } from "@tauri-apps/api/core";
 /**
  * A render crash inside one pane must not blank the window. The boundary
  * draws the error where the pane was, with the stack for a bug report.
+ * `fallback` replaces that drawing; as a function it is given the error.
  */
-export class ErrorBoundary extends Component<{ children: ReactNode; label?: string; fallback?: ReactNode }, { error: Error | null }> {
+export class ErrorBoundary extends Component<{ children: ReactNode; label?: string; fallback?: ReactNode | ((error: Error) => ReactNode) }, { error: Error | null }> {
   state = { error: null as Error | null };
 
   static getDerivedStateFromError(error: Error) {
@@ -19,7 +20,9 @@ export class ErrorBoundary extends Component<{ children: ReactNode; label?: stri
 
   render() {
     if (this.state.error) {
-      if (this.props.fallback !== undefined) return this.props.fallback;
+      const { fallback } = this.props;
+      if (typeof fallback === "function") return fallback(this.state.error);
+      if (fallback !== undefined) return fallback;
       return (
         <div className="m-4 select-text rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
           <div className="font-medium">Something went wrong in {this.props.label ?? "this pane"}.</div>
@@ -38,4 +41,25 @@ export class ErrorBoundary extends Component<{ children: ReactNode; label?: stri
     }
     return this.props.children;
   }
+}
+
+/**
+ * What the window shows when the app itself cannot render or start: what
+ * failed, with its stack for a bug report, and a way to load it again. Without
+ * it a crash above every pane leaves a blank window.
+ */
+export function AppErrorScreen({ error, reload = () => window.location.reload() }: { error: unknown; reload?: () => void }) {
+  const detail = error instanceof Error ? String(error.stack ?? error.message) : String(error);
+  return (
+    <div role="alert" className="flex h-screen w-screen flex-col items-center justify-center gap-3 bg-background p-6 text-foreground">
+      <div className="text-base font-medium">TerminalX could not show its window.</div>
+      <p className="max-w-[560px] text-center text-sm text-muted-foreground">Reload to try again. If it keeps happening, include the details below in a bug report.</p>
+      <pre className="max-h-64 w-full max-w-[720px] select-text overflow-auto whitespace-pre-wrap rounded-lg border border-destructive/40 bg-destructive/10 p-3 font-mono text-xs text-destructive">
+        {detail}
+      </pre>
+      <button type="button" className="rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground" onClick={reload}>
+        Reload
+      </button>
+    </div>
+  );
 }

@@ -405,18 +405,25 @@ fn reminder_due(events: &[AgentEvent]) -> Option<String> {
 
 /// A turn of a session that owes a report ended. `events` reads its
 /// transcript and `send` sends it a prompt; neither is touched for a turn
-/// that ended with its report.
-pub fn turn_completed(final_message: Option<&str>, events: impl FnOnce() -> Result<Vec<AgentEvent>>, send: impl FnOnce(&str) -> Result<()>) {
+/// that ended with its report. Returns whether it was asked again, so its
+/// report is still to come.
+pub fn turn_completed(final_message: Option<&str>, events: impl FnOnce() -> Result<Vec<AgentEvent>>, send: impl FnOnce(&str) -> Result<()>) -> bool {
     if final_message.is_some_and(|message| parse(message).is_ok()) {
-        return;
+        return false;
     }
     let events = match events() {
         Ok(events) => events,
-        Err(error) => return log::warn!("read a worker's transcript for its report: {error:#}"),
+        Err(error) => {
+            log::warn!("read a worker's transcript for its report: {error:#}");
+            return false;
+        }
     };
-    if let Some(prompt) = reminder_due(&events) {
-        if let Err(error) = send(&prompt) {
+    let Some(prompt) = reminder_due(&events) else { return false };
+    match send(&prompt) {
+        Ok(()) => true,
+        Err(error) => {
             log::warn!("ask a worker again for its report: {error:#}");
+            false
         }
     }
 }
@@ -692,11 +699,11 @@ mod tests {
         });
 
         // A turn that ends with its report: nothing is sent, and the transcript is not even read.
-        turn_completed(Some(&block(FULL)), || panic!("the transcript is not needed"), |_| panic!("nothing is sent"));
+        assert!(!turn_completed(Some(&block(FULL)), || panic!("the transcript is not needed"), |_| panic!("nothing is sent")), "its report is in");
 
         // No block: one reminder, saying what to send.
         let mut events = turn(1, &format!("Fix the login.\n\n{}", brief()), "All done, tests pass!");
-        ended(Some("All done, tests pass!"), &events);
+        assert!(ended(Some("All done, tests pass!"), &events), "asked again: its report is still to come");
         assert_eq!(sent.borrow().len(), 1);
         assert!(sent.borrow()[0].starts_with(REMINDER_OPENING) && parse(&sent.borrow()[0]).is_ok());
         assert_eq!(of_tab(&events, None, false)["reminded"], json!(false));
@@ -704,7 +711,7 @@ mod tests {
         // The reminder's own turn ends without one too: it is not asked again, and the report says it was asked.
         let reminder = sent.borrow()[0].clone();
         events.extend(turn(5, &reminder, "I already told you it is done."));
-        ended(Some("I already told you it is done."), &events);
+        assert!(!ended(Some("I already told you it is done."), &events), "not asked twice: it stays missing");
         ended(None, &events);
         assert_eq!(sent.borrow().len(), 1);
         let row = of_tab(&events, None, false);
@@ -759,6 +766,6 @@ mod tests {
         assert_eq!(of_tab(&own(1, "Scheduled check: nothing new."), None, false)["reason"], json!("noBlock"));
 
         // A transcript that cannot be read sends nothing rather than a guess.
-        turn_completed(None, || anyhow::bail!("no log"), |_| panic!("nothing is sent"));
+        assert!(!turn_completed(None, || anyhow::bail!("no log"), |_| panic!("nothing is sent")));
     }
 }

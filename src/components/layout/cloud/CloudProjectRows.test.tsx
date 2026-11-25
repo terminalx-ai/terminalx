@@ -83,6 +83,21 @@ it("renders the operation failure beneath Needs attention", () => {
   expect(screen.getByRole("button", { name: "Retry resume" })).toBeTruthy();
 });
 
+it("says in the sidebar that a workspace's machine is gone, with no Retry resume (#1581)", () => {
+  const value = project(false);
+  const row = value.workspaces[0].item;
+  row.workspace.launch = null;
+  row.workspace.state = "attention-required";
+  row.latestOperation = { action: "resume", state: "failed", errorCode: "cloud_provider_not_found" } as never;
+  render(<CloudProjectGroup project={value} onLifecycle={() => undefined} />);
+  const notice = screen.getByTestId("cloud-row-attention");
+  expect(notice.textContent).toContain("This workspace's machine no longer exists at the provider.");
+  expect(notice.textContent).not.toContain("cloud_provider_not_found");
+  expect(screen.queryByRole("button", { name: "Retry resume" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Delete workspace" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Create new workspace" })).toBeTruthy();
+});
+
 // Exercise the actual row builder: mocked prebuilt tabs would hide lost checkpoint dates.
 it.each(["created", "lastMessageAt"] as const)("clears grouped-row attention from a checkpoint's later %s", (field) => {
   const value = project(true);

@@ -761,20 +761,55 @@ fn owned_safely(path: &Path) -> bool {
 }
 
 /// Where throwaway homes go: this user's own temporary directory.
-pub fn homes_parent() -> PathBuf {
-    // A sign-in's home holds its credential until it is moved. On Windows the
-    // homes are kept in an owner-only folder of the temp directory, whose
-    // access they inherit, as each is `0o700` on Unix.
+///
+/// A sign-in's home holds its credential until it is moved. On Windows the
+/// homes are kept in an owner-only folder of the temp directory, whose access
+/// they inherit, as each is `0o700` on Unix. When that folder cannot be made
+/// so, because another account made it first or left a link there, there is
+/// nowhere safe and that is the error: never the temp directory itself,
+/// which may be shared, as `C:\Windows\Temp` is.
+pub fn homes_parent() -> std::io::Result<PathBuf> {
     #[cfg(windows)]
-    if let Ok(dir) = crate::win::fs::private_temp("terminalx-codex-login") {
-        return dir;
-    }
-    std::env::temp_dir()
+    return homes_parent_in(&std::env::temp_dir());
+    #[cfg(not(windows))]
+    Ok(std::env::temp_dir())
+}
+
+/// [`homes_parent`] in the temp directory `temp`.
+#[cfg(windows)]
+fn homes_parent_in(temp: &Path) -> std::io::Result<PathBuf> {
+    let dir = temp.join("terminalx-codex-login");
+    crate::win::fs::create_private_dir_all(&dir)?;
+    Ok(dir)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_where_the_login_homes_go_is_refused_not_replaced_by_the_shared_temp_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        crate::win::fs::junction(&temp.path().join("terminalx-codex-login"), elsewhere.path()).unwrap();
+        assert!(homes_parent_in(temp.path()).is_err(), "a link where the homes go is an error, with no fallback");
+        assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0, "nothing was made through the link");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_login_homes_folder_is_owner_only_and_a_home_made_in_it_inherits_that() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = homes_parent_in(temp.path()).unwrap();
+        assert_eq!(parent, temp.path().join("terminalx-codex-login"));
+        crate::win::security::verify_private(&parent).unwrap();
+        // A home is made as `start_with` makes one: a plain folder, whose access comes from its parent.
+        let home = tempfile::Builder::new().prefix(HOME_PREFIX).tempdir_in(&parent).unwrap();
+        crate::win::security::verify_private(home.path()).unwrap();
+        // The folder already there and private is used again.
+        assert_eq!(homes_parent_in(temp.path()).unwrap(), parent);
+    }
 
     const PROMPT: &str = "\nWelcome to Codex [v\u{1b}[90m0.153.4\u{1b}[0m]\n\u{1b}[90mOpenAI's command-line coding agent\u{1b}[0m\n\nFollow these steps to sign in with ChatGPT using device code authorization:\n\n1. Open this link in your browser and sign in to your account\n   \u{1b}[94mhttps://auth.openai.com/codex/device\u{1b}[0m\n\n2. Enter this one-time code \u{1b}[90m(expires in 15 minutes)\u{1b}[0m\n   \u{1b}[94mWXYZ-12345\u{1b}[0m\n\n\u{1b}[90mContinue only if you started this login in Codex. If a website or another person gave you this code, cancel.\u{1b}[0m\n\n";
 

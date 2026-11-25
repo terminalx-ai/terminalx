@@ -1,5 +1,6 @@
 import { MAX_LAUNCH_PROMPT_BYTES, type CloudCredential, type CloudLaunch, type CloudLifecycle, type CloudWorkspace } from "./api";
-import { phoneMode, phoneModeLabel, type PhoneMode } from "./agent-settings";
+import { modelNote, offeredOn, prettyModelId, type ModelInfo } from "@terminalx/portable/agentSettings";
+import { effortLabel, phoneMode, phoneModeLabel, type PhoneMode } from "./agent-settings";
 import { LAUNCH_STAGES, RUNTIME_EVENTS, credentialName, failureCause, loginDetail } from "./launch";
 
 export { FIRST_TASK_TOO_LONG, LAUNCH_INVALID } from "./launch";
@@ -45,9 +46,15 @@ export function taskAgents(ticked: readonly Pick<CloudCredential, "provider" | "
   return agents;
 }
 
-/** What the person chose for the first task; the agent is the runtime's name for it. */
+/**
+ * What the person chose for the first task; the agent is the runtime's name
+ * for it. A model or effort of null (or none, in a task kept by an older app)
+ * is not chosen: the agent's default of those offered.
+ */
 export interface FirstTaskDraft {
   agent: string | null;
+  model?: string | null;
+  effort?: string | null;
   mode: PhoneMode;
   text: string;
 }
@@ -56,6 +63,47 @@ export interface FirstTaskDraft {
 export function taskAgent(chosen: string | null, agents: readonly TaskAgent[]): TaskAgent | null {
   return agents.find((agent) => agent.id === chosen) ?? agents[0] ?? null;
 }
+
+/** What the server's parser takes as a model and as an effort (`launchBody` in `api.ts`). */
+const MODEL_ID = /^[\x21-\x7e]{1,100}$/;
+const EFFORT_ID = /^[a-z]{1,16}$/;
+
+/**
+ * The models a first task can name for an agent (PRO-562), from where the
+ * desktop's create form has them: the models the person's own computer lists
+ * (`models.list` on the connected Mac), cut down to what another machine can
+ * run, family names where the agent has them (`offeredOn`). No version is
+ * claimed for a family: the workspace's CLI resolves it. `listed` is null
+ * while no Mac is connected, and then, or when the Mac lists none for the
+ * agent, there is nothing to choose: the launch names no model and the agent
+ * uses its own (25.09, "An agent with no model list").
+ */
+export function taskModels(listed: readonly ModelInfo[] | null, agent: string): ModelInfo[] {
+  if (!listed) return [];
+  const own = listed.filter((model) => model.harness === agent && MODEL_ID.test(model.id));
+  return offeredOn(own, false).map((model) => ({ ...model, efforts: model.efforts.filter((effort) => EFFORT_ID.test(effort)), resolved: null }));
+}
+
+/** The task's model: the chosen one while the agent offers it, else the agent's default, else the first offered. Null with nothing offered. */
+export function taskModel(chosen: string | null | undefined, models: readonly ModelInfo[]): ModelInfo | null {
+  return models.find((model) => model.id === chosen) ?? models.find((model) => model.isDefault) ?? models[0] ?? null;
+}
+
+/** The task's effort: the chosen one while the model takes it, else the model's default, else its first. Null for a model with none. */
+export function taskEffort(chosen: string | null | undefined, model: Pick<ModelInfo, "efforts" | "defaultEffort"> | null): string | null {
+  if (!model?.efforts.length) return null;
+  if (chosen && model.efforts.includes(chosen)) return chosen;
+  return model.defaultEffort && model.efforts.includes(model.defaultEffort) ? model.defaultEffort : model.efforts[0]!;
+}
+
+/** The Model sheet's choices: each family with the note the desktop's menu gives it ("latest"). */
+export function taskModelChoices(models: readonly ModelInfo[]): { id: string; label: string; detail?: string }[] {
+  const all = [...models];
+  return all.map((model) => ({ id: model.id, label: model.label, detail: modelNote(model, all, false) ?? undefined }));
+}
+
+/** The Effort sheet's choices: the model's own levels, in the app's names. */
+export const taskEffortChoices = (model: Pick<ModelInfo, "efforts">): { id: string; label: string }[] => model.efforts.map((effort) => ({ id: effort, label: effortLabel(effort) }));
 
 const bytes = (text: string) => new TextEncoder().encode(text).length;
 
@@ -67,19 +115,27 @@ export const taskWritten = (text: string): boolean => text.trim() !== "";
 
 /**
  * The first task a launch sends, or nothing when no agent is ticked. The
- * mode is always named and never bypass; the model and effort are left to
- * the agent while the phone has no list of them; the prompt is sent as
- * typed, and left out when it is blank.
+ * mode is always named and never bypass; the model and its effort are named
+ * where the agent has a list of them (`taskModels`) and left to the agent
+ * where it has none; the prompt is sent as typed, and left out when it is
+ * blank.
  */
-export function launchOf(draft: FirstTaskDraft, agents: readonly TaskAgent[]): CloudLaunch | undefined {
+export function launchOf(draft: FirstTaskDraft, agents: readonly TaskAgent[], listed: readonly ModelInfo[] | null = null): CloudLaunch | undefined {
   const agent = taskAgent(draft.agent, agents);
   if (!agent) return undefined;
-  return { v: 1, agent: agent.id, mode: phoneMode(draft.mode), ...(taskWritten(draft.text) ? { prompt: draft.text } : {}) };
+  const model = taskModel(draft.model, taskModels(listed, agent.id));
+  const effort = taskEffort(draft.effort, model);
+  return { v: 1, agent: agent.id, ...(model ? { model: model.id } : {}), ...(effort ? { effort } : {}), mode: phoneMode(draft.mode), ...(taskWritten(draft.text) ? { prompt: draft.text } : {}) };
 }
 
-/** The review's First task rows. A task is shown in full, however long: it is what will be sent. */
-export function taskFacts(launch: CloudLaunch): { label: string; value: string; block?: boolean }[] {
-  const model = launch.model ? [launch.model, launch.effort].filter(Boolean).join(" · ") : "Agent’s default";
+/**
+ * The review's First task rows. The model is named as the list it was picked
+ * from names it, with its effort ("Opus · High"). A task is shown in full,
+ * however long: it is what will be sent.
+ */
+export function taskFacts(launch: CloudLaunch, listed: readonly ModelInfo[] | null = null): { label: string; value: string; block?: boolean }[] {
+  const name = launch.model ? listed?.find((entry) => entry.harness === launch.agent && entry.id === launch.model)?.label ?? prettyModelId(launch.model) : null;
+  const model = name ? [name, launch.effort ? effortLabel(launch.effort) : null].filter(Boolean).join(" · ") : "Agent’s default";
   return [
     { label: "Agent", value: credentialName(launch.agent) },
     { label: "Model", value: model },

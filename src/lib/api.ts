@@ -1386,6 +1386,12 @@ export interface CloudWorkspace {
   deleteAfter?: number | null;
   deletedAt?: number | null;
   /**
+   * When the server learned the provider no longer has its machine and cannot bring it back
+   * (#1589). Sent only while the workspace is `attention-required` for that reason; absent from
+   * older servers. Read through `machineGone` (@terminalx/portable/cloudMachineGone).
+   */
+  machineMissingAt?: number | null;
+  /**
    * S1 list enrichment (PRO-56), optional because older servers do not send it: the
    * repositories it was built from (primary first), and when anything last
    * happened in it.
@@ -3892,7 +3898,7 @@ export function closeWorkspaceConnectionsIn(orgId: string): void {
   }
 }
 
-export interface TurnCheckpoint { number: number; reviewed: boolean; undone: boolean; files: ChangedFile[]; restored?: boolean; backupRef?: string | null; unavailableReason?: string | null }
+export interface TurnCheckpoint { number: number; reviewed: boolean; undone: boolean; files: ChangedFile[]; restored?: boolean; backupRef?: string | null; unavailableReason?: string | null; /** Turns left in this workspace before an unreviewed turn's Undo expires, when few. */ expiresIn?: number | null }
 export interface TurnUndoResult { overlap: string[]; token: string; undone: boolean; backupRef?: string | null }
 
 /** A saved action's run in a terminal tab of a local session (PRO-363). */

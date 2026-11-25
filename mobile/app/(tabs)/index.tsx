@@ -11,6 +11,7 @@ import { ConnectionLine } from "@mobile/ui/ConnectionLine";
 import { usePullRefresh } from "@mobile/ui/pull-refresh";
 import { Button, Card, EmptyState, Screen, SectionTitle } from "@mobile/ui/primitives";
 import { Spinner } from "@mobile/ui/Spinner";
+import { TerminalXMark } from "@mobile/ui/TerminalXMark";
 import { GlassIconButton } from "@mobile/ui/glass";
 import { useTheme, type Palette } from "@mobile/ui/theme";
 import { PairingScanner } from "@mobile/ui/PairingScanner";
@@ -57,8 +58,7 @@ export default function MachinesScreen() {
   if (!app.ready) return <Screen title="Machines"><EmptyState title="Loading" detail="Reading this phone’s saved machines." /></Screen>;
   if (!session && !paired.length) {
     return <>
-      <Screen title="Machines" titleActions={add} contentContainerStyle={styles.signedOut}>
-        <View style={[styles.mark, { backgroundColor: palette.accent }]}><Text style={[styles.markText, { color: palette.accentInk }]}>TX</Text></View>
+      <Screen title="Machines" titleActions={add} aboveTitle={<View style={styles.logo}><TerminalXMark testID="terminalx-mark" /></View>} contentContainerStyle={styles.signedOut}>
         <Text style={[styles.heroTitle, { color: palette.ink }]}>Your work, away from your desk</Text>
         <Text style={[styles.heroDetail, { color: palette.muted }]}>Sign in to see the machines on your TerminalX account, or tap + to pair with a QR code.</Text>
         <Button label={app.signingIn ? "Signing in…" : "Sign in"} disabled={app.signingIn} accessibilityState={{ disabled: app.signingIn, busy: app.signingIn }} icon={app.signingIn ? (color) => <Spinner size={16} color={color} /> : undefined} onPress={() => void app.signIn()} />
@@ -224,8 +224,8 @@ function PairingApproval({ progress }: { progress: PairingProgress }) {
 
 const styles = StyleSheet.create({
   signedOut: { flexGrow: 1, justifyContent: "center", paddingHorizontal: 30, gap: 16 },
-  mark: { width: 58, height: 58, borderRadius: 18, alignItems: "center", justifyContent: "center" },
-  markText: { fontSize: 19, fontWeight: "800", letterSpacing: -1 },
+  // The logo stands above the title, in the middle of the screen (PRO-578).
+  logo: { alignItems: "center", paddingBottom: 8 },
   heroTitle: { fontSize: 32, lineHeight: 37, fontWeight: "700", letterSpacing: -0.8 },
   heroDetail: { fontSize: 16, lineHeight: 23 },
   detail: { fontSize: 14, lineHeight: 19 },

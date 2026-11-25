@@ -145,6 +145,20 @@ describe("a send native Codex refuses while it works (#815)", () => {
     expect(of("banner")).toEqual([]);
   });
 
+  it("says plainly that /clear is not something native Codex can do, with the tab idle (#1498)", async () => {
+    render(<Tab />);
+    showStatus("completed");
+    refuse = "Native Codex can't clear its conversation, so /clear was not sent. Open a new Codex tab to start fresh.";
+    send("/clear");
+    await waitFor(() => expect(field().value).toBe("/clear"));
+    expect(screen.getByText(refuse)).toBeTruthy();
+    // A refused request: no warning, no Needs you, no agent error.
+    expect(banner()).toBeNull();
+    expect(screen.queryByText("The agent encountered an error. Review the conversation before continuing.")).toBeNull();
+    expect(status()).toBe("completed");
+    expect(of("banner")).toEqual([]);
+  });
+
   it("keeps the message and leaves the running turn as it was", async () => {
     render(<Tab />);
     refuse = BUSY;

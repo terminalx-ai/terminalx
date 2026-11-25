@@ -86,7 +86,23 @@ the Mac's leg unchanged and turns any other into 4408; they are defined in
 `mobile/src/transport/phone-close.ts` and `src-tauri/src/phone/mod.rs`.
 Earlier versions wrote `phone-closed` as the event for every end; those records
 still read. Phone events use at most half the 128 records, so a
-phone retrying in a loop cannot push out the control channel's history. Attempt 1 is
+phone retrying in a loop cannot push out the control channel's history.
+
+A loop folds (#1579): when the last one to four records repeat the run just
+before them, they become repeats of it. Such a record says `repeats` (how many
+more times it happened) and `lastTimestampMs`, and keeps the latest `attempt`.
+A connect/fail loop that runs for hours keeps two records, and the records
+from before it began stay. A single retry is not folded and keeps its order.
+A control socket the relay closed, the window's own or one the runtime reports
+(a registration the relay closed with `4401`), carries `closeCode` and
+`closeReason`: the relay's reason code when it is one, `relay_` and lowercase
+words (`relay_unknown_control_message`) or a typed runtime reason
+(`stale_generation`). Any other reason text is not written. The runtime's
+refusals count as "in a row" only while each registration lasted under
+5 minutes. Its category is `authentication` the first time and
+`refused` from the second refusal in a row. The window's own registration
+retired by the runtime's (`4101`) is `runtime-took-over` and is not recorded
+as a failure. Attempt 1 is
 the initial connection, retry count 0. A control-session failure after a successful
 connection has attempt/retry count 0, before the next connection attempt starts.
 The connected event records the successful attempt before resetting the counter.

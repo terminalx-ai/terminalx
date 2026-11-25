@@ -33,7 +33,7 @@ import {
 } from "@/lib/cloudAgents";
 import { lastKnownWorkspace, refreshCloudCatalog, repositoryOf, useCloudCatalog } from "@/lib/cloudCatalog";
 import { phaseOf, settled } from "@/lib/cloudCreate";
-import { deletion, isOpen, machineRunning, machineStarting, stopping, useCloudWorkspaceDeleted } from "@/lib/cloudLifecycle";
+import { deletion, isOpen, machineReachable, machineRunning, machineStarting, stopping, useCloudWorkspaceDeleted } from "@/lib/cloudLifecycle";
 import {
   accessLoss,
   accessLostReason,
@@ -50,6 +50,7 @@ import {
   useCollab,
   type SessionLock,
 } from "@/lib/cloudCollab";
+import { resolveCloudAttention } from "@/lib/cloudAttention";
 import { cloudAgentLabel, cloudTabTitle } from "@/lib/cloudRowState";
 import { closeCloudTerminal, createCloudTerminal, detachCloudTerminals, followCloudTerminals, quietCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
 import { cloudGitSource, desktopGitIdentity, type GitSource } from "@/lib/gitSource";
@@ -71,6 +72,36 @@ export function cloudProviderName(provider: string | null | undefined): string {
 }
 
 export type ConnectionChip = { label: string; tone: "live" | "pending" | "offline" };
+
+/** The workspace cannot be reached as it stands: it needs attention, or it was deleted (#1582). Settled: nothing spins. */
+export const UNAVAILABLE_LABEL = "Unavailable";
+
+/**
+ * Whether this session's workspace cannot be connected to as it stands: the
+ * list says it needs attention or was deleted. A transport parked because the
+ * API said so decides only where there is no list: a list in any other state
+ * (repaired into stopped, coming up, running) is newer news, and the
+ * connection opens again for it (#1582). A live connection says otherwise,
+ * whatever an older list reads.
+ */
+export function workspaceUnreachable(state: WorkspaceConnectionState, workspaceState: string | null): boolean {
+  if (state.state === "connected") return false;
+  if (workspaceState === "attention-required" || workspaceState === "destroyed") return true;
+  return state.state === "unavailable" && workspaceState === null;
+}
+
+/**
+ * Why the workspace cannot be reached, in a sentence: the list's own word
+ * for what needs attention when it has one (the sidebar's "Needs attention"),
+ * else what the state means.
+ */
+export function unreachableReason(item: CloudWorkspaceListItem | null, state: WorkspaceConnectionState): string {
+  const workspaceState = item?.workspace.state ?? null;
+  if (workspaceState === "destroyed" || (state.state === "unavailable" && state.reason === "destroyed" && !workspaceState)) return "The workspace was deleted.";
+  const attention = item ? resolveCloudAttention(item) : null;
+  if (attention) return attention.message;
+  return "The workspace needs attention and can't be reached until it is repaired. Open it to see why.";
+}
 
 /** The workspace list says the machine is coming up: provisioning, its first launch still running, or a resume in flight. */
 export function workspaceStarting(item: CloudWorkspaceListItem | null | undefined): boolean {
@@ -135,6 +166,10 @@ export function cloudConnectionChip(
   if (workspaceState === "archived" && !options.woke) return { label: "Archived", tone: "offline" };
   if (state.state === "updateRequired") return { label: "Update required", tone: "offline" };
   if (options.stopping) return { label: STOPPING_LABEL, tone: "pending" };
+  // Needs attention or deleted: nothing connects, however it was asked (a wake included), until its state changes.
+  if (workspaceUnreachable(state, workspaceState)) return { label: UNAVAILABLE_LABEL, tone: "offline" };
+  // Parked unavailable, but the list says the workspace can be reached now: it is opening again for that list.
+  if (state.state === "unavailable") state = { state: "opening" };
   if (options.woke && state.state !== "connected" && state.state !== "stopped") {
     // Waking: never back from Connecting to Starting while the runtime retries.
     const step = Math.max(options.wakeFloor ?? 0, state.state === "connecting" || state.state === "reconnecting" ? 1 : 0);
@@ -186,6 +221,8 @@ export function cloudWorkspaceStatus(chip: ConnectionChip): WorkspaceStatus {
       return "live";
     case "Stopped":
       return "stopped";
+    case UNAVAILABLE_LABEL:
+      return "unavailable";
     default:
       return null;
   }
@@ -206,6 +243,13 @@ export interface CloudSessionModel {
   location: { provider: string; org: string };
   connection: { label: string; tone: "live" | "pending" | "offline" };
   connected: boolean;
+  /**
+   * Why the workspace cannot be reached (#1582): it needs attention (its
+   * machine is gone, a resume failed) or it was deleted. Null while it can.
+   * The connection is not retried meanwhile; it follows once the list says
+   * the workspace's state changed.
+   */
+  unavailable: string | null;
   /** This attachment may type into terminals and write files and Git. */
   manage: boolean;
   /**
@@ -514,11 +558,12 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const listRunning = !!item && machineRunning(item);
   const listStopping = !!item && stopping(item);
   const listStarting = !!item && machineStarting(item);
+  const listReachable = !!item && machineReachable(item);
   const listAt = catalog.orgs[orgId]?.requestedAt ?? null;
   useEffect(() => {
     if (!parsed || !item) return;
-    noteCloudWorkspaceListed({ orgId, workspaceId }, { running: listRunning, starting: listStarting, at: listAt ?? 0 });
-  }, [orgId, workspaceId, !!item, listRunning, listStarting, listAt, lease]);
+    noteCloudWorkspaceListed({ orgId, workspaceId }, { running: listRunning, starting: listStarting, reachable: listReachable, at: listAt ?? 0 });
+  }, [orgId, workspaceId, !!item, listRunning, listStarting, listReachable, listAt, lease]);
   // The transport says stopped while the list says running: one of them is
   // stale. Read the list again; a list asked for after the transport stopped
   // decides (the manager then attaches again, with backoff).
@@ -684,6 +729,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     reattaching: managed.reattaching,
   });
   if ((managed.woke || starting) && chip.label === CONNECTING_LABEL) wakeFloor.current = 1;
+  const unavailable = workspaceUnreachable(state, workspaceState) ? unreachableReason(item, state) : null;
   // #1291: the same state, for the line under a queued message.
   const workspaceStatus = cloudWorkspaceStatus(chip);
   // Woken and back: the list still says stopped until it is read again.
@@ -915,6 +961,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     location: { provider: cloudProviderName(item?.workspace.provider ?? lastKnown?.provider), org: orgName },
     connection: chip,
     connected,
+    unavailable,
     manage,
     collab: { key: workspaceKey, you, live: collabLive, notShared: !!locked },
     locked,

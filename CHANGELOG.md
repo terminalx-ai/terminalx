@@ -2,6 +2,18 @@
 
 ## 0.2.39
 
+- Relay: a Mac with a phone revocation or an expired pairing code still
+  waiting for Relay no longer loses its Relay connection a second after every
+  connect. The runtime sent those revocations with a field Relay does not
+  accept, and Relay closed the connection for it; they are now sent as Relay
+  expects, and a request Relay would close the connection for is refused on
+  the Mac instead. If Relay refuses the connection again and again, TerminalX
+  waits longer between tries, up to 30 minutes, and Settings → Devices says
+  so. The window no longer registers for its phones between two of the
+  runtime's tries seconds apart. Relay's reason for closing is now in the log
+  and in `relay-diagnostics.json`, and a failure that repeats no longer pushes
+  older records out of that file (#1579).
+
 - Chat hides the Second opinion footer button by default, including after an
   update. To show it again, turn on **Settings → General → Second opinion
   button**. You can still ask another agent to review a turn from its **…**
