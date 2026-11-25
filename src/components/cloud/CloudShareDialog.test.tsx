@@ -460,6 +460,7 @@ describe("share dialog", () => {
     expect(yourAccessText({ role: "driver", canApprove: true, canManageShares: true }, "member")).toMatch(/^Driver \(/);
     expect(yourAccessText({ role: "driver", canApprove: false, canManageShares: true }, "member", true)).not.toContain("approve permissions and manage");
     expect(shareErrorMessage({ code: "cloud_workspace_last_admin" })).toBe("A workspace must have at least one admin.");
+    expect(shareErrorMessage({ code: "cloud_workspace_group_manager_unsupported" })).toBe("Admin access can only be granted to a person.");
     expect(shareErrorMessage({ code: "cloud_workspace_runtime_unsupported" })).toContain("not supported");
     expect(yourAccessText({ role: "driver", canApprove: false, canManageShares: false }, "member")).toBe("Driver (can send to agents; typing in terminals also needs the right to approve permissions)");
     expect(yourAccessText({ role: "driver", canApprove: true, canManageShares: false }, "member")).toBe("Driver (can send to agents and type in terminals), can approve permissions");

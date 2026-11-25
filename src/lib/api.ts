@@ -2073,6 +2073,7 @@ export type CloudWorkspaceSafeErrorCode =
   | "workspace_reassign_runtime_unsupported"
   | "workspace_reassign_idempotency_conflict"
   | "cloud_workspace_last_admin"
+  | "cloud_workspace_group_manager_unsupported"
   | "workspace_following_unavailable"
   | "presence_rate_limited"
   | "presence_device_limit"

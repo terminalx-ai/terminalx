@@ -65,6 +65,8 @@ export function shareErrorMessage(error: unknown, who?: string): string {
       return "That share was already revoked.";
     case "cloud_workspace_last_admin":
       return "A workspace must have at least one admin.";
+    case "cloud_workspace_group_manager_unsupported":
+      return "Admin access can only be granted to a person.";
     case "cloud_workspace_runtime_not_ready":
       return "Admin grants are unavailable for this organization.";
     case "cloud_workspace_runtime_unsupported":
