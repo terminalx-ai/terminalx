@@ -678,6 +678,9 @@ async fn workspace_transfer_reauthorizes_each_replayed_chunk() {
     let git = |args: &[&str]| crate::workspace_transfer_bundle::git(&f.root, args).unwrap();
     git(&["init", "-q", "-b", "topic"]);
     git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-qm", "Initial"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    git(&["update-ref", "refs/remotes/origin/main", base.trim()]);
+    git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
     git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-qm", "Second"]);
     let session = seed_session(&f.root, "Transfer", None);
     let agent = Agent::new(&session);

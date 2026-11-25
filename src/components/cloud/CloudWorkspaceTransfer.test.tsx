@@ -50,13 +50,17 @@ it("restores the finished local import and separate archive choice after a remou
 
 
 it.each([
+  ["transfer_no_base", "Cannot transfer topic because the cloud checkout has no usable upstream base.", "Cannot transfer topic because the cloud checkout has no usable upstream base. A common upstream commit is required to transfer this branch."],
+  ["transfer_submodules", "This checkout contains Git submodules. Transfer supports the main repository only.", "This checkout contains Git submodules. Transfer supports the main repository only."],
   ["transfer_too_large", "server limit", "This workspace is too large to transfer."],
   ["transfer_fetch_first", "Fetch commit abc in your local clone before transferring topic.", "Fetch commit abc in your local clone before transferring topic. Then retry the transfer."],
 ])("shows the typed %s state without offering archive", async (code, message, expected) => {
-  mocks.invoke.mockRejectedValueOnce({ code, message });
+  mocks.invoke.mockClear();
+  if (code !== "transfer_no_base") mocks.invoke.mockRejectedValueOnce({ code, message });
   const client = {
     connection: { state: "connected" },
     async call(method: string, params: Record<string, unknown>) {
+      if (method === "transfer.open" && code === "transfer_no_base") throw { code, message };
       if (method === "transfer.open") return {
         transferId: "export", branch: "topic", commit: "a".repeat(40),
         bundleBytes: null, transcriptBytes: 2, title: "Task", harness: "claude",
@@ -71,4 +75,5 @@ it.each([
   fireEvent.click(await screen.findByRole("button", { name: "Choose project…" }));
   expect(await screen.findByText(expected)).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Archive cloud workspace" })).toBeNull();
+  if (code === "transfer_no_base") expect(mocks.invoke).not.toHaveBeenCalled();
 });
