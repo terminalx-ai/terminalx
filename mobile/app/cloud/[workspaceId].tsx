@@ -280,13 +280,14 @@ function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { 
   const [failure, setFailure] = useState<ResumeFailure | null>(null);
   // No answer came, but the list shows it starting: said as under way, not as a failure (#1290).
   const [unconfirmed, setUnconfirmed] = useState(false);
-  const listedState = catalog.workspace(orgId, workspaceId)?.state ?? null;
+  const listedWorkspace = catalog.workspace(orgId, workspaceId);
+  const listedState = listedWorkspace?.state ?? null;
   const changing = starting || asking || listedState === "resuming" || listedState === "provisioning";
   const mayStart = role === "manager";
   const needsAttention = listedState === "attention-required";
   const operation = catalog.getSnapshot().organizations.find((entry) => entry.organization.orgId === orgId)?.workspaces.find((item) => item.workspace.id === workspaceId)?.latestOperation;
   // As the desktop offers it: any failed resume can be retried; the detail says what failed and what else may be needed.
-  const retryResume = needsAttention && resumeRetryable(operation);
+  const retryResume = needsAttention && resumeRetryable(operation, listedWorkspace);
   // Stopping, or a stop the provider did not carry out (25.06): said here, with the retry the console offers.
   const stop = stopState(catalog.workspace(orgId, workspaceId), operation);
   const [stopRefusal, setStopRefusal] = useState<string | null>(null);
@@ -304,8 +305,8 @@ function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { 
       setAsking(false);
     });
   };
-  // The machine is gone (#1581): nothing to retry. Delete the workspace, or launch a new one in its organization.
-  if (needsAttention && machineGone(operation)) return <View testID="machine-gone-bar" style={[styles.startBar, styles.goneBar, { backgroundColor: palette.card, borderColor: palette.border, marginBottom: insets.bottom + 8 }]}>
+  // The machine is gone (#1581), as the server says since #1589: nothing to retry. Delete the workspace, or launch a new one in its organization.
+  if (needsAttention && machineGone(operation, listedWorkspace)) return <View testID="machine-gone-bar" style={[styles.startBar, styles.goneBar, { backgroundColor: palette.card, borderColor: palette.border, marginBottom: insets.bottom + 8 }]}>
     <Text style={[styles.startTitle, { color: palette.ink }]}>{MACHINE_GONE_TITLE}</Text>
     <Text style={[styles.startDetail, { color: palette.muted }]}>{MACHINE_GONE_TEXT} {MACHINE_GONE_KEPT}</Text>
     {mayStart

@@ -243,8 +243,9 @@ const MESSAGES: Record<string, string> = {
   provider_cleanup_pending: "The provider is still removing resources.",
   cloud_workspace_request_outcome_unknown: "No answer arrived. The action may have been applied; the list below is the source of truth.",
   cloud_workspace_not_found: "This workspace no longer exists.",
-  // A provider the organization cannot use, or a machine the provider no longer has. A failed resume
-  // that ends with it says the machine is gone (`machineGone`, @terminalx/portable/cloudMachineGone).
+  // A provider the organization cannot use, or a machine the provider no longer has. Since #1589 the
+  // server says which with `detailCode: "machine_missing"`; from an older server a failed resume that
+  // ends with it is read as the machine gone (`machineGone`, @terminalx/portable/cloudMachineGone).
   cloud_provider_not_found: "The provider could not find what this action needs: this organization cannot use it, or it no longer has this workspace's machine.",
   // PRO-73: a workspace is managed by its creator and by owners and admins. Offered because the app
   // thought this person was one of them: the role, or the list, changed since.

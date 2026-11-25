@@ -576,6 +576,16 @@ describe("a cloud workspace screen", () => {
     expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/new", params: { orgId: "org-1", repository: "https://github.com/acme/web" } });
   });
 
+  it("says the machine is gone when the server marked the workspace, with no failed operation (#1589)", async () => {
+    world({ state: "attention-required", role: "manager" });
+    mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = { state: "succeeded", action: "suspend" };
+    mocks.catalog.workspace().machineMissingAt = 1_795_305_607_000;
+    await show(<CloudWorkspaceScreen />);
+    expect(container.querySelector('[data-testid="machine-gone-bar"]')!.textContent).toContain("This workspace's machine no longer exists at the provider.");
+    expect(container.querySelector('[data-testid="start-bar"]')).toBeNull();
+    expect(() => button("Retry resume")).toThrow();
+  });
+
   it("tells a viewer who can delete a workspace whose machine is gone (#1581)", async () => {
     world({ state: "attention-required", role: "viewer" });
     mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = { state: "failed", action: "resume", errorCode: "cloud_provider_not_found" };

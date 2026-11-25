@@ -102,6 +102,11 @@ describe("a workspace that needs attention after a failed resume (#1290)", () =>
     // A stop or archive of a missing machine: a resume may still restore it.
     for (const action of ["suspend", "archive"]) expect(machineGone({ state: "failed", action, errorCode: "cloud_provider_not_found", detailCode: "box_missing" })).toBe(false);
     expect(resumeRetryable({ state: "failed", action: "resume", errorCode: "cloud_provider_not_found" })).toBe(false);
+    // #1589: the server's own word, on the operation or on the workspace.
+    expect(machineGone({ state: "failed", action: "suspend", errorCode: "cloud_provider_not_found", detailCode: "machine_missing" })).toBe(true);
+    expect(resumeRetryable({ state: "failed", action: "resume", errorCode: "cloud_provider_state_conflict", detailCode: "machine_missing" })).toBe(false);
+    expect(resumeRetryable({ state: "failed", action: "resume", errorCode: "cloud_provider_unavailable" }, { state: "attention-required", machineMissingAt: 1_795_305_607_000 })).toBe(false);
+    expect(resumeRetryable({ state: "failed", action: "resume", errorCode: "cloud_provider_unavailable" }, { state: "attention-required" })).toBe(true);
     // Not the machine: a missing environment image, a delete (which finishes without it), a launch, or an operation still running.
     expect(machineGone({ state: "failed", action: "resume", errorCode: "cloud_provider_not_found", detailCode: "environment_image_missing" })).toBe(false);
     expect(resumeRetryable({ state: "failed", action: "resume", errorCode: "cloud_provider_not_found", detailCode: "environment_image_missing" })).toBe(true);
