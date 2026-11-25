@@ -130,6 +130,8 @@ mod fork_allocation;
 mod repo_mirror;
 mod checkpoints;
 mod worktree_files;
+#[cfg(test)]
+mod workspace_transfer_bundle;
 mod sparse_checkout;
 mod git_media;
 mod github;
