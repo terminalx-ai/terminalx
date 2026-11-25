@@ -20,6 +20,8 @@ pub const MAX_OUTPUT_BYTES: u64 = 1_048_576;
 const PROMPT_WINDOW_MS: u64 = 60_000;
 const MAX_PROMPTS_PER_WINDOW: usize = 3;
 const MAX_GLOBAL_PROMPTS_PER_WINDOW: usize = 6;
+const PREPARATION_TIMEOUT_MS: u64 = 2_000;
+const MAX_PREPARATION_WORKERS: usize = 4;
 const MAX_REQUESTS_PER_ORIGIN: usize = 32;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -114,6 +116,7 @@ pub enum Rejection {
     #[cfg(not(target_os = "macos"))]
     UnsupportedPlatform,
     WorkerUnavailable,
+    PreparationTimedOut,
     Poisoned,
 }
 
@@ -205,8 +208,7 @@ struct Registry {
     epoch: Arc<()>,
     entries: HashMap<String, Arc<Mutex<Entry>>>,
     prompt_open: bool,
-    #[cfg(all(target_os = "macos", feature = "desktop"))]
-    preparing_prompt: bool,
+    preparation_workers: Vec<OriginBudget>,
     prompt_times: VecDeque<(OriginBudget, u64)>,
     in_flight: bool,
 }
@@ -233,8 +235,7 @@ impl Default for Policy {
                 epoch: Arc::new(()),
                 entries: HashMap::new(),
                 prompt_open: false,
-                #[cfg(all(target_os = "macos", feature = "desktop"))]
-                preparing_prompt: false,
+                preparation_workers: Vec::new(),
                 prompt_times: VecDeque::new(),
                 in_flight: false,
             })),
@@ -579,19 +580,46 @@ impl PromptSlot {
 impl Drop for PromptSlot {
     fn drop(&mut self) {
         if let Ok(mut registry) = self.policy.lock() {
+            // A failed or abandoned attempt held the same exclusive slot as
+            // a shown alert. Charge it once, to the same workspace.
+            if let Some(budget) = self.budget.take() {
+                registry
+                    .prompt_times
+                    .push_back((budget, self.policy.now_ms()));
+            }
             registry.prompt_open = false;
         }
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "desktop"))]
-struct PreparationSlot(Policy);
+struct PreparationWorker {
+    policy: Policy,
+    budget: OriginBudget,
+}
 
-#[cfg(all(target_os = "macos", feature = "desktop"))]
-impl Drop for PreparationSlot {
+impl PreparationWorker {
+    fn reserve(request: &Request) -> Result<Self, Rejection> {
+        let mut registry = request.policy.lock()?;
+        let budget = OriginBudget::from(&request.input.origin);
+        if registry.preparation_workers.len() >= MAX_PREPARATION_WORKERS
+            || registry.preparation_workers.contains(&budget)
+        {
+            return Err(Rejection::Busy);
+        }
+        registry.preparation_workers.push(budget.clone());
+        Ok(Self {
+            policy: request.policy.clone(),
+            budget,
+        })
+    }
+}
+
+impl Drop for PreparationWorker {
     fn drop(&mut self) {
-        if let Ok(mut registry) = self.0.lock() {
-            registry.preparing_prompt = false;
+        if let Ok(mut registry) = self.policy.lock() {
+            registry
+                .preparation_workers
+                .retain(|key| key != &self.budget);
         }
     }
 }
@@ -758,7 +786,14 @@ mod consent {
         }
     }
 
-    pub(super) trait Presenter {
+    mod presenter_seal {
+        pub trait Sealed {}
+    }
+
+    #[cfg(test)]
+    pub(super) use presenter_seal::Sealed as TestPresenterSeal;
+
+    pub(super) trait Presenter: presenter_seal::Sealed {
         fn alert(&self, input: &RequestInput) -> Result<Presented<bool>, Rejection>;
         fn biometric(&self, input: &RequestInput) -> Result<Presented<LocalDecision>, Rejection>;
     }
@@ -774,6 +809,21 @@ mod consent {
                 dismiss();
             }
         }
+    }
+
+    pub(super) fn attached_alert(
+        replies: mpsc::Receiver<bool>,
+        attached: bool,
+        dismiss: impl FnOnce() + 'static,
+    ) -> Result<Presented<bool>, Rejection> {
+        if !attached {
+            dismiss();
+            return Err(Rejection::WorkerUnavailable);
+        }
+        Ok(Presented {
+            replies,
+            dismiss: Some(Box::new(dismiss)),
+        })
     }
 
     enum Stage {
@@ -794,16 +844,21 @@ mod consent {
         presenter: P,
         sender: mpsc::SyncSender<Result<State, Rejection>>,
         stage: Option<Stage>,
+        prepare_deadline_ms: u64,
     }
 
     impl<P: Presenter> Flow<P> {
-        pub(super) fn new(
+        fn new(
             request: Request,
             slot: PromptSlot,
             presenter: P,
             prepared: mpsc::Receiver<Result<LocalDecisionBinding, Rejection>>,
         ) -> (Self, mpsc::Receiver<Result<State, Rejection>>) {
             let (sender, result) = mpsc::sync_channel(1);
+            let prepare_deadline_ms = request
+                .policy
+                .now_ms()
+                .saturating_add(PREPARATION_TIMEOUT_MS);
             (
                 Self {
                     request,
@@ -811,9 +866,20 @@ mod consent {
                     presenter,
                     sender,
                     stage: Some(Stage::Preparing(prepared)),
+                    prepare_deadline_ms,
                 },
                 result,
             )
+        }
+
+        #[cfg(test)]
+        pub(super) fn for_test(
+            request: Request,
+            slot: PromptSlot,
+            presenter: P,
+            prepared: mpsc::Receiver<Result<LocalDecisionBinding, Rejection>>,
+        ) -> (Self, mpsc::Receiver<Result<State, Rejection>>) {
+            Self::new(request, slot, presenter, prepared)
         }
 
         pub(super) fn tick(flow: &std::cell::Cell<Option<Self>>) -> bool {
@@ -850,6 +916,9 @@ mod consent {
             self.request.require_pending()?;
             let stage = self.stage.take().ok_or(Rejection::InvalidTransition)?;
             match stage {
+                Stage::Preparing(_) if self.request.policy.now_ms() >= self.prepare_deadline_ms => {
+                    Err(Rejection::PreparationTimedOut)
+                }
                 Stage::Preparing(prepared) => match poll(&prepared)? {
                     Some(binding) => {
                         let binding = binding?;
@@ -945,6 +1014,8 @@ mod consent {
             parent: Retained<NSWindow>,
         }
 
+        impl presenter_seal::Sealed for CocoaPresenter {}
+
         impl Presenter for CocoaPresenter {
             fn alert(&self, input: &RequestInput) -> Result<Presented<bool>, Rejection> {
                 let main = MainThreadMarker::new().ok_or(Rejection::ContextUnavailable)?;
@@ -962,18 +1033,18 @@ mod consent {
                 alert.addButtonWithTitle(&NSString::from_str("Cancel"));
                 alert.addButtonWithTitle(&NSString::from_str("Continue to Touch ID"));
                 alert.beginSheetModalForWindow_completionHandler(&self.parent, Some(&completion));
-                if alert.window().sheetParent().is_none() {
-                    return Err(Rejection::WorkerUnavailable);
-                }
+                let sheet = alert.window();
+                let attached = self
+                    .parent
+                    .attachedSheet()
+                    .is_some_and(|shown| std::ptr::eq(&*shown, &*sheet));
                 let parent = self.parent.clone();
-                Ok(Presented {
-                    replies,
-                    dismiss: Some(Box::new(move || {
-                        let sheet = alert.window();
-                        if sheet.sheetParent().is_some() {
-                            parent.endSheet(&sheet);
-                        }
-                    })),
+                attached_alert(replies, attached, move || {
+                    // sheets includes deferred sheets as well as visible ones.
+                    if parent.sheets().containsObject(&sheet) {
+                        parent.endSheet(&sheet);
+                    }
+                    drop(alert);
                 })
             }
 
@@ -1037,14 +1108,9 @@ mod consent {
         ) -> Result<mpsc::Receiver<Result<State, Rejection>>, Rejection> {
             MainThreadMarker::new().ok_or(Rejection::ContextUnavailable)?;
             let slot = policy.reserve_prompt(request)?;
-            let preparation = {
-                let mut registry = policy.lock()?;
-                if registry.preparing_prompt {
-                    return Err(Rejection::Busy);
-                }
-                registry.preparing_prompt = true;
-                PreparationSlot(policy.clone())
-            };
+            // A filesystem syscall may outlive the two-second prompt deadline.
+            // Keep only its bounded worker reservation until it returns.
+            let preparation = PreparationWorker::reserve(request)?;
             let (prepared, replies) = mpsc::sync_channel(1);
             let worker_request = request.clone();
             thread::Builder::new()
