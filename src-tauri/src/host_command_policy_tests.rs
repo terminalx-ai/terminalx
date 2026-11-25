@@ -203,7 +203,7 @@ fn proposal_is_immutable_and_expiry_releases_slot_without_enabling_replay() {
 #[test]
 fn bounded_registry_refuses_new_ids_and_replay_when_full() {
     let policy = policy();
-    for id in 0..MAX_REQUESTS {
+    for id in 0..MAX_REQUESTS_PER_ORIGIN {
         assert_eq!(
             policy
                 .submit(input(&format!("request-{id}")))
@@ -222,7 +222,7 @@ fn bounded_registry_refuses_new_ids_and_replay_when_full() {
 #[test]
 fn expired_registry_releases_capacity_without_rebinding_old_handles() {
     let policy = policy();
-    for index in 1..MAX_REQUESTS {
+    for index in 1..MAX_REQUESTS_PER_ORIGIN {
         policy
             .submit(input(&format!("old-{index}")))
             .unwrap()
@@ -260,6 +260,69 @@ fn prompt_reservation_limits_parallel_and_repeated_attempts() {
     set_time(&policy, 10 + MAX_TTL_MS);
     let next = policy.submit(input("two")).unwrap();
     assert!(policy.reserve_prompt(&next).is_ok());
+}
+
+#[test]
+fn one_origin_cannot_exhaust_another_origins_prompt_or_registry_budget() {
+    let policy = policy();
+    let first = policy.submit(input("first")).unwrap();
+    for _ in 0..MAX_PROMPTS_PER_WINDOW {
+        drop(policy.reserve_prompt(&first).unwrap());
+    }
+    first.cancel().unwrap();
+    for index in 1..MAX_REQUESTS_PER_ORIGIN {
+        policy
+            .submit(input(&format!("id-{index}")))
+            .unwrap()
+            .cancel()
+            .unwrap();
+    }
+    assert_eq!(
+        policy.submit(input("over-cap")).err(),
+        Some(Rejection::Capacity)
+    );
+    let mut second = input("second");
+    second.origin.turn = "another-turn".into();
+    let mut trusted = context();
+    trusted.origin = Some(second.origin.clone());
+    policy.update_trusted_context(trusted).unwrap();
+    let second = policy.submit(second).unwrap();
+    assert!(policy.reserve_prompt(&second).is_ok());
+}
+
+#[test]
+fn unanswered_biometrics_invalidate_on_expiry_and_cancellation() {
+    for expires in [true, false] {
+        let policy = policy();
+        let request = policy.submit(input("waiting")).unwrap();
+        let slot = policy.reserve_prompt(&request).unwrap();
+        let (_sender, replies) = mpsc::channel();
+        let mut invalidated = false;
+        let result = consent::await_biometric(
+            &request,
+            &replies,
+            || {
+                if expires {
+                    set_time(&policy, 100);
+                } else {
+                    request.cancel().unwrap();
+                }
+            },
+            || invalidated = true,
+        );
+        assert_eq!(
+            result.err(),
+            Some(if expires {
+                Rejection::Expired
+            } else {
+                Rejection::InvalidTransition
+            })
+        );
+        assert!(invalidated);
+        drop(slot);
+        let next = policy.submit(input("next")).unwrap();
+        assert!(policy.reserve_prompt(&next).is_ok());
+    }
 }
 
 #[test]
@@ -375,6 +438,22 @@ mod native {
                 panic!("command stopped: {state:?}")
             }
         }
+    }
+
+    #[test]
+    fn unavailable_biometrics_are_distinct_and_cannot_start() {
+        let policy = policy();
+        let request = policy.submit(input("one")).unwrap();
+        let binding = policy.prepare_local_decision(&request).unwrap();
+        let result = policy.record_local_decision(
+            &request,
+            consent::Decision::fixture(binding, LocalDecision::TouchIdUnavailable),
+        );
+        assert_eq!(result, Ok(State::TouchIdUnavailable));
+        assert_eq!(
+            policy.start(&request).err(),
+            Some(Rejection::InvalidTransition)
+        );
     }
 
     #[test]
@@ -762,20 +841,22 @@ mod native {
             assert_withheld(execution, expected);
             assert_eq!(request.state(), Ok(expected));
             assert!(!policy.lock().unwrap().in_flight);
-            let events = group_events.lock().unwrap();
-            let Some(executor::GroupEvent::Signal(pid)) = events.first() else {
-                panic!("expected the owned group to be signalled");
-            };
-            // A stuck OS may exceed the cleanup budget. When a reap occurs it
-            // must always be last, and cleanup must never signal a reused ID.
-            let (signals, reaped) = match events.split_last() {
-                Some((executor::GroupEvent::Reaped(reaped), signals)) => (signals, Some(*reaped)),
-                _ => (&events[..], None),
-            };
-            assert!(reaped.is_none_or(|reaped| reaped == *pid));
-            assert!(signals
-                .iter()
-                .all(|event| *event == executor::GroupEvent::Signal(*pid)));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                {
+                    let events = group_events.lock().unwrap();
+                    if let Some((executor::GroupEvent::Reaped(pid), signals)) = events.split_last()
+                    {
+                        assert!(!signals.is_empty());
+                        assert!(signals
+                            .iter()
+                            .all(|event| *event == executor::GroupEvent::Signal(*pid)));
+                        break;
+                    }
+                }
+                assert!(Instant::now() < deadline, "group leader was not reaped");
+                thread::sleep(Duration::from_millis(5));
+            }
         }
     }
 
@@ -794,8 +875,11 @@ mod native {
             .update_trusted_context(TrustedContext::default())
             .unwrap();
         policy.update_trusted_context(context()).unwrap();
-        assert_eq!(assert_withheld(execution, State::Revoked), (Some(0), None));
-        assert_eq!(request.state(), Ok(State::Completed));
+        assert_eq!(
+            assert_withheld(execution, State::RevokedAfterLaunch),
+            (Some(0), None)
+        );
+        assert_eq!(request.state(), Ok(State::RevokedAfterLaunch));
     }
 
     #[test]

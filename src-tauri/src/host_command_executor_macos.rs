@@ -452,6 +452,27 @@ impl Drop for Process {
     fn drop(&mut self) {
         self.close_pipes();
         self.bounded_cleanup();
+        if let Some(pid) = self.pid.take() {
+            #[cfg(test)]
+            let events = self.group_events.clone();
+            // The bounded path already signalled the owned group. Transfer
+            // sole ownership of the unreaped child and never signal it again.
+            thread::spawn(move || loop {
+                let mut status = 0;
+                // SAFETY: this thread exclusively owns waiting on this child.
+                let result = unsafe { waitpid(pid, &mut status, 0) };
+                if result == pid {
+                    #[cfg(test)]
+                    if let Some(events) = events {
+                        events.lock().unwrap().push(GroupEvent::Reaped(pid));
+                    }
+                    break;
+                }
+                if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                    break;
+                }
+            });
+        }
     }
 }
 
@@ -652,6 +673,39 @@ unsafe extern "C" {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn leader_is_reaped_after_cleanup_hands_off_to_background() {
+        let mut input = super::super::super::tests::input("background-reap");
+        input.executable = "/bin/sleep".into();
+        input.arguments = vec!["2".into()];
+        let paths = ApprovedPaths::open(&input).unwrap();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = Launch::prepare(&input, &paths)
+            .unwrap()
+            .spawn(Some(events.clone()))
+            .unwrap();
+        let pid = process.pid.unwrap();
+        process.cleanup_step();
+        // Force the same transfer as an exhausted cleanup budget.
+        process.cleanup_attempted = true;
+        drop(process);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if events.lock().unwrap().last() == Some(&GroupEvent::Reaped(pid)) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background worker did not reap the leader"
+            );
+            thread::sleep(POLL_INTERVAL);
+        }
+        assert_eq!(
+            *events.lock().unwrap(),
+            [GroupEvent::Signal(pid), GroupEvent::Reaped(pid)]
+        );
+    }
 
     #[test]
     fn sandbox_denies_loopback_network() {
