@@ -21,6 +21,9 @@ mod agent_accounts;
 mod agent_configs;
 mod agent_data;
 mod agent_keys;
+// Compile the dormant host-command policy and its Darwin executor in CI tests.
+#[cfg(all(test, target_os = "macos"))]
+mod host_command_policy;
 #[cfg(feature = "desktop")]
 mod agent_login_commands;
 pub mod data_privacy;
