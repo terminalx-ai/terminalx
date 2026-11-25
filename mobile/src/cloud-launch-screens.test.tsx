@@ -150,8 +150,48 @@ describe("the launch form", () => {
     expect(page.byId("launch-not-connected")!.textContent).toContain("Connect compute first");
     expect(page.byId("launch-not-connected")!.textContent).toContain("Acme has no provider to launch on yet.");
     expect(page.byId("workspace-name")).toBeNull();
+    // The Compute page itself (25.03), which goes back to the form: not the organization's page (PRO-559).
     await page.press(page.byText("Connect compute"));
-    expect(mocks.router.push).toHaveBeenCalledWith({ pathname: "/organization/[orgId]", params: { orgId: "org-1" } });
+    expect(mocks.router.push).toHaveBeenCalledWith({ pathname: "/cloud/compute", params: { orgId: "org-1" } });
+  });
+
+  describe("opened by + with several organizations (PRO-557)", () => {
+    // The account's first organization is the personal one, with no compute; Acme, after it, can launch.
+    const several = (personalProviders: unknown[] = [{ ...boat, availability: "not-connected" }]) => (service: Account) => {
+      service.state.answer = ({ path }) => {
+        if (path.endsWith("/v1/desktop/auth/capabilities")) return { body: { cloud: { userId: "u" }, organizations: [{ orgId: "org-p", name: "Personal (alex@example.com)", role: "owner", isPersonal: true }, { orgId: "org-1", name: "Acme", role: "admin" }], capabilities: { flags: {}, refreshedAt: 1 } } };
+        if (path.endsWith("/orgs/org-p/cloud-providers")) return { body: { providers: personalProviders } };
+        if (path.endsWith("/orgs/org-p/cloud-workspace-credentials")) return { body: { credentials: [] } };
+        if (path.endsWith("/orgs/org-p/cloud-workspaces")) return { body: { workspaces: [], tombstones: [] } };
+        return undefined;
+      };
+    };
+
+    it("opens the organization that can launch, not the first in the list", async () => {
+      await form({}, several());
+      expect(page.byId("launch-not-connected")).toBeNull();
+      expect(page.byId("workspace-name")).not.toBeNull();
+      expect(page.byId("pick-organization")!.getAttribute("aria-label")).toBe("Organization: Acme");
+    });
+
+    it("opens the first when none can launch, and lets another be picked from Connect compute first", async () => {
+      await form({}, (service) => { several()(service); service.state.providers = [{ ...boat, availability: "not-connected" }]; });
+      expect(page.byId("launch-not-connected")!.textContent).toContain("Personal (alex@example.com) has no provider to launch on yet.");
+      // The organization row is on this state too, and opens the same sheet as on the form.
+      await page.press(page.byId("pick-organization"));
+      await page.press(page.byId("choice-org-1"));
+      await pass();
+      expect(page.byId("launch-not-connected")!.textContent).toContain("Acme has no provider to launch on yet.");
+      await page.press(page.byText("Connect compute"));
+      expect(mocks.router.push).toHaveBeenLastCalledWith({ pathname: "/cloud/compute", params: { orgId: "org-1" } });
+    });
+
+    it("launches where it was opened for, whatever the others can do", async () => {
+      mocks.params = { orgId: "org-p" };
+      await form({}, several());
+      expect(page.byId("launch-not-connected")!.textContent).toContain("Personal (alex@example.com) has no provider to launch on yet.");
+      expect(page.byId("pick-organization")!.getAttribute("aria-label")).toBe("Organization: Personal (alex@example.com)");
+    });
   });
 
   it("says new workspaces are paused, with nothing to press", async () => {

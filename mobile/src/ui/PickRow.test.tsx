@@ -75,3 +75,11 @@ it("states the agent's own default model with nothing to choose, and leaves out 
   await page.show(<AgentSettingsRows testID="rows" agent="Codex" model={null} effort={null} mode={null} />);
   expect(page.byText("Permission mode")).toBeNull();
 });
+
+it("draws a value of two lines as two, and reads it as one (PRO-565: a size named by its machine, then its rate)", async () => {
+  await page.show(<><PickRow label="Size" value={"2 vCPU · 4 GB RAM · 20 GB disk\n$0.014 / hour"} onPress={() => undefined} first /><PickRow label="Region" value="United States" /></>);
+  const size = page.byId("pick-size")!;
+  expect(size.getAttribute("aria-label")).toBe("Size: 2 vCPU · 4 GB RAM · 20 GB disk, $0.014 / hour");
+  expect(size.textContent).toContain("$0.014 / hour");
+  expect(page.byLabel("Region: United States")).not.toBeNull();
+});

@@ -5,12 +5,16 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Crypto from "expo-crypto";
 import { Check, CirclePause, CloudOff, ServerOff, WifiOff } from "lucide-react-native";
 import { CloudApiError, type CloudApi, type CloudCredential, type CloudFirstRunSetup, type CloudLaunch, type CloudOrganization, type CloudProvider, type CloudProviderSetup, type CloudQuote } from "@mobile/cloud/api";
-import { BYPASS_NOT_FROM_PHONE, PHONE_DEFAULT_MODE, phoneModeLabel, phoneModes } from "@mobile/cloud/agent-settings";
+import { BYPASS_NOT_FROM_PHONE, PHONE_DEFAULT_MODE, effortLabel, phoneModeLabel, phoneModes } from "@mobile/cloud/agent-settings";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import type { CloudCatalog } from "@mobile/cloud/catalog";
-import { EMPTY_FIRST_TASK, FIRST_TASK_PLACEHOLDER, FIRST_TASK_TOO_LONG, NO_AGENT_TICKED, keptTaskKey, launchOf, taskAgent, taskAgents, taskFacts, taskTooLong, taskWritten, type FirstTaskDraft } from "@mobile/cloud/first-task";
+import { EMPTY_FIRST_TASK, FIRST_TASK_PLACEHOLDER, FIRST_TASK_TOO_LONG, NO_AGENT_TICKED, keptTaskKey, launchOf, taskAgent, taskAgents, taskEffort, taskEffortChoices, taskFacts, taskModel, taskModelChoices, taskModels, taskTooLong, taskWritten, type FirstTaskDraft } from "@mobile/cloud/first-task";
 import { EMPTY_FIRST_TASK_CHECKED_LIVE } from "@mobile/cloud/live-checks";
-import { ACCESS_NOTICE, LaunchAttempt, QUOTE_EXPIRED, SPEND_NOTICE, agentLogins, credentialName, firstRunSetup, idleChoiceLabel, idleChoices, idleValue, launchProviders, launchRefusal, loginDetail, preflightProblems, pricingNote, problemsTitle, providerLabel, quotedSize, repositoriesRow, repositoryLine, sizeDetail, sizeValue, unanswered, type LaunchRefusal, type LaunchRepository, type PreflightProblems } from "@mobile/cloud/launch";
+import { ACCESS_NOTICE, LaunchAttempt, QUOTE_EXPIRED, SPEND_NOTICE, agentLogins, credentialName, firstRunSetup, idleChoiceLabel, idleChoices, idleValue, launchOrganization, launchProviders, launchRefusal, loginDetail, preflightProblems, pricingNote, problemsTitle, providerLabel, quotedSize, repositoriesRow, repositoryLine, sizeDetail, sizeNamesMachine, sizeValue, unanswered, type LaunchRefusal, type LaunchRepository, type PreflightProblems } from "@mobile/cloud/launch";
+import { stepHref } from "@mobile/cloud/setup-routes";
+import { useOrganizationSetups } from "@mobile/cloud/useSetup";
+import { useApp } from "@mobile/state/AppProvider";
+import type { ModelInfo } from "@terminalx/portable/agentSettings";
 import { ChoiceSheet, type Choice } from "@mobile/ui/ChoiceSheet";
 import { FactRows } from "@mobile/ui/FactRows";
 import { Notice } from "@mobile/ui/Notice";
@@ -42,8 +46,22 @@ export default function NewWorkspaceScreen() {
   const snapshot = useCatalogSnapshot(catalog);
   const organizations = useMemo(() => snapshot.organizations.map((entry) => entry.organization), [snapshot.organizations]);
   const [chosen, setChosen] = useState<string | null>(params.orgId ?? null);
-  // Opened for one organization, it launches there; otherwise in the first, until another is picked on the form.
-  const organization = organizations.find((entry) => entry.orgId === chosen) ?? (chosen === null ? organizations[0] : undefined) ?? null;
+  // Opened for one organization, it launches there. Opened by + for none (PRO-557), it launches in the first that
+  // has a provider to launch on, read from each organization's provider list now, until another is picked.
+  const { store } = useOrganizationSetups(catalog);
+  const orgIds = organizations.map((entry) => entry.orgId).join(" ");
+  const finding = chosen === null && organizations.length > 1;
+  useEffect(() => {
+    if (!finding || !store) return;
+    let current = true;
+    void Promise.all(organizations.map((entry) => store.read(entry.orgId))).then(() => {
+      if (current) setChosen((held) => held ?? launchOrganization(organizations, (orgId) => store.getSnapshot().get(orgId)?.providers.value)?.orgId ?? null);
+    });
+    return () => { current = false; };
+    // `orgIds`, not the list: the same organizations read again are not asked about again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [finding, orgIds, store]);
+  const organization = organizations.find((entry) => entry.orgId === chosen) ?? (chosen === null && !finding ? organizations[0] : undefined) ?? null;
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
     <Stack.Screen options={{ title: "New workspace", headerShown: false }} />
     {catalog && organization
@@ -51,7 +69,8 @@ export default function NewWorkspaceScreen() {
       : <>
         <ScreenHeader title="New workspace" onBack={() => router.back()} />
         {catalog
-          ? <EmptyState title={snapshot.refreshedAt || snapshot.error ? "No organization to launch in" : "Reading your organizations…"} detail={snapshot.refreshedAt || snapshot.error ? "Cloud workspaces belong to an organization of your account." : "From your TerminalX account."} busy={!snapshot.refreshedAt && !snapshot.error} />
+          ? finding ? <View testID="launch-finding"><EmptyState busy title="Reading your organizations…" detail="To open the one that can launch." /></View>
+          : <EmptyState title={snapshot.refreshedAt || snapshot.error ? "No organization to launch in" : "Reading your organizations…"} detail={snapshot.refreshedAt || snapshot.error ? "Cloud workspaces belong to an organization of your account." : "From your TerminalX account."} busy={!snapshot.refreshedAt && !snapshot.error} />
           : <EmptyState title="Sign in to launch a workspace" detail="Cloud workspaces belong to your TerminalX account." />}
       </>}
   </View>;
@@ -91,9 +110,28 @@ interface Priced {
   launch: CloudLaunch | undefined;
 }
 
-type Sheet = "organization" | "provider" | "size" | "region" | "image" | "idle" | "agent" | "mode" | null;
+type Sheet = "organization" | "provider" | "size" | "region" | "image" | "idle" | "agent" | "model" | "effort" | "mode" | null;
 
-const NO_TASK: FirstTaskDraft = { agent: null, mode: PHONE_DEFAULT_MODE, text: "" };
+const NO_TASK: FirstTaskDraft = { agent: null, model: null, effort: null, mode: PHONE_DEFAULT_MODE, text: "" };
+
+/**
+ * The models the person's own computer lists, where the desktop's create form
+ * has its choices from (PRO-562): read from the Mac this phone is connected
+ * to, and kept once read. Null with no Mac connected, or one that lists none.
+ */
+function useMacModels(): ModelInfo[] | null {
+  const app = useApp();
+  const connected = app.connectionStage === "connected";
+  const api = app.api;
+  const [listed, setListed] = useState<ModelInfo[] | null>(null);
+  useEffect(() => {
+    if (!connected || !api) return;
+    let current = true;
+    void api.models().then((models) => { if (current && models.length) setListed(models); }, () => undefined);
+    return () => { current = false; };
+  }, [api, connected]);
+  return listed;
+}
 
 function LaunchFlow({ catalog, organization, organizations, onOrganization, again }: { catalog: CloudCatalog; organization: CloudOrganization; organizations: CloudOrganization[]; onOrganization(orgId: string): void; again: string | null }) {
   const { palette } = useTheme();
@@ -101,6 +139,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   const insets = useSafeAreaInsets();
   const api: CloudApi = catalog.api;
   const orgId = organization.orgId;
+  const listedModels = useMacModels();
 
   const [offer, setOffer] = useState<Offer>({ status: "reading" });
   const [setup, setSetup] = useState<CloudProviderSetup | null>(null);
@@ -203,22 +242,28 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   const changeTask = (patch: Partial<FirstTaskDraft>) => setDraft((held) => ({ ...held, task: { ...held.task, ...patch } }));
 
   const toOrganization = () => router.push({ pathname: "/organization/[orgId]", params: { orgId } });
+  // Compute is connected on its own page (25.03), which goes back here (PRO-559).
+  const toCompute = () => router.push(stepHref("compute", orgId));
+  const organizationSheet = { title: "Organization", chosen: orgId, choices: organizations.map((entry) => ({ id: entry.orgId, label: entry.name })), choose: onOrganization };
   const header = (title: string, onBack: () => void) => <ScreenHeader title={title} subtitle={organization.name} onBack={onBack} />;
 
   if (offer.status !== "open" || !setup) {
     const provider = offer.status === "open" ? offer.providers.find((entry) => entry.id === providerId) : null;
     return <>
       {header("New workspace", () => router.back())}
+      {/* Whatever this organization lacks, another may have: it is picked here as on the form (PRO-557). */}
+      {organizations.length > 1 ? <View style={styles.stateOrganization}><Card><PickRow label="Organization" value={organization.name} onPress={() => setSheet("organization")} first /></Card></View> : null}
       {offer.status === "closed" ? <View testID={`launch-${offer.kind}`}>
         <EmptyState
           title={offer.kind === "not-connected" ? "Connect compute first" : offer.kind === "paused" ? "New workspaces are paused" : offer.kind === "unavailable" ? "Not available yet" : "Sizes and prices could not be read"}
           detail={offer.text}
           icon={(color) => offer.kind === "not-connected" ? <ServerOff size={34} color={color} strokeWidth={1.6} /> : offer.kind === "unreachable" ? <CloudOff size={34} color={color} strokeWidth={1.6} /> : <CirclePause size={34} color={color} strokeWidth={1.6} />} />
         <View style={styles.stateAction}>
-          {offer.kind === "not-connected" ? <Button label="Connect compute" onPress={toOrganization} /> : null}
+          {offer.kind === "not-connected" ? <Button label="Connect compute" onPress={toCompute} /> : null}
           {offer.kind === "unreachable" ? <Button label="Try again" kind="secondary" onPress={() => { setOffer({ status: "reading" }); setReads((count) => count + 1); }} /> : null}
         </View>
       </View> : <EmptyState busy title="Reading sizes and prices…" detail={provider ? `From ${providerLabel(provider)}, for ${organization.name}.` : `For ${organization.name}.`} />}
+      {sheet === "organization" ? <ChoiceSheet title={organizationSheet.title} choices={organizationSheet.choices} chosen={organizationSheet.chosen} onChoose={organizationSheet.choose} onClose={() => setSheet(null)} /> : null}
     </>;
   }
 
@@ -234,6 +279,10 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   const agents = taskAgents(ticked);
   const firstTask = offer.loginsRead && logins.length > 0;
   const agent = firstTask ? taskAgent(draft.task.agent, agents) : null;
+  // The agent's models and the chosen one's efforts, where the person's computer lists them; else the agent's own default.
+  const models = agent ? taskModels(listedModels, agent.id) : [];
+  const model = taskModel(draft.task.model, models);
+  const effort = taskEffort(draft.task.effort, model);
   const tooLong = firstTask && taskTooLong(draft.task.text);
   const repositoryRow = repositoriesRow(draft.repositories);
   const hourly = (micros: number | undefined) => (micros == null ? null : priceText(micros, setup.currency));
@@ -261,7 +310,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
       // A new price for what was already under review: said when it is not the same.
       const before = step === "review" && priced && priced.name === name && priced.quote.configuration.machineClassId === quote.configuration.machineClassId && priced.quote.provider === quote.provider ? priced.quote.activeHourlyMicros : null;
       setPriceBefore(before !== null && before !== quote.activeHourlyMicros ? before : null);
-      setPriced({ name, quote, setup: first, repositories: draft.repositories.map(repositoryLine), agents: ticked.map((login) => credentialName(login.provider)), provider, launch: firstTask ? launchOf(draft.task, agents) : undefined });
+      setPriced({ name, quote, setup: first, repositories: draft.repositories.map(repositoryLine), agents: ticked.map((login) => credentialName(login.provider)), provider, launch: firstTask ? launchOf(draft.task, agents, listedModels) : undefined });
       setExpired(false);
       setStep("review");
     } catch (error) {
@@ -346,14 +395,14 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
       ]} />
       {priced.launch ? <>
         <SectionTitle>First task</SectionTitle>
-        <FactRows testID="review-task" facts={taskFacts(priced.launch)} />
+        <FactRows testID="review-task" facts={taskFacts(priced.launch, listedModels)} />
         {!priced.launch.prompt && EMPTY_FIRST_TASK_CHECKED_LIVE ? <Text testID="review-empty-task" style={[styles.help, { color: palette.muted }]}>{EMPTY_FIRST_TASK}</Text> : null}
       </> : null}
       <SectionTitle>Price</SectionTitle>
       <PriceLines testID="review-price" quote={quote} now={api.serverNow} note={pricingNote(priced.provider, quote.pricing)} onExpired={() => setExpired(true)} />
       {noAnswer ? null : expired ? <Notice testID="price-expired" tone="warning" text={QUOTE_EXPIRED} />
         : priceBefore !== null ? <Notice testID="price-changed" tone="warning" text={`The price changed since you last looked: it was ${priceText(priceBefore, quote.currency)} per active hour.`} /> : null}
-      {refusal ? <Notice testID="launch-refusal" tone="danger" text={refusal.text} action={refusal.fix === "compute" ? { label: "Connect compute", onPress: toOrganization } : undefined} /> : null}
+      {refusal ? <Notice testID="launch-refusal" tone="danger" text={refusal.text} action={refusal.fix === "compute" ? { label: "Connect compute", onPress: toCompute } : undefined} /> : null}
       {noAnswer ? <Notice testID="launch-unanswered" tone="warning" icon={(color) => <WifiOff size={16} color={color} />} text="No answer came back. Checking whether the launch started; nothing is launched twice." /> : null}
     </>, noAnswer && !launching
       // The same launch, asked again under the same key: the person already said yes to this price. It stays
@@ -365,13 +414,15 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   }
 
   const sheets: Record<Exclude<Sheet, null>, { title: string; subtitle?: string; help?: string; chosen: string | null; choices: Choice[]; choose(id: string): void }> = {
-    organization: { title: "Organization", chosen: orgId, choices: organizations.map((entry) => ({ id: entry.orgId, label: entry.name })), choose: onOrganization },
+    organization: organizationSheet,
     provider: { title: "Provider", chosen: provider.id, choices: offer.providers.map((entry) => ({ id: entry.id, label: providerLabel(entry), detail: entry.descriptor.billing || undefined })), choose: (id) => change({ providerId: id }) },
-    size: { title: "Size", subtitle: `${providerName} · ${setup.pricing === "provider-rate" ? "Prices come from the provider's live rates." : "Prices shown are estimates."}`, chosen: draft.sizeId, choices: setup.machineClasses.map((entry) => ({ id: entry.id, label: entry.label, detail: sizeDetail(entry), ...(hourly(entry.activeHourlyMicros) ? { value: hourly(entry.activeHourlyMicros)!, valueDetail: "per active hour" } : {}) })), choose: (id) => change({ sizeId: id }) },
+    size: { title: "Size", subtitle: `${providerName} · ${setup.pricing === "provider-rate" ? "Prices come from the provider's live rates." : "Prices shown are estimates."}`, chosen: draft.sizeId, choices: setup.machineClasses.map((entry) => ({ id: entry.id, label: entry.label, ...(sizeNamesMachine(entry.label) ? {} : { detail: sizeDetail(entry) }), ...(hourly(entry.activeHourlyMicros) ? { value: hourly(entry.activeHourlyMicros)!, valueDetail: "per active hour" } : {}) })), choose: (id) => change({ sizeId: id }) },
     region: { title: "Region", subtitle: providerName, chosen: draft.locationId, choices: setup.locations.map((entry) => ({ id: entry.id, label: entry.label })), choose: (id) => change({ locationId: id }) },
     image: { title: "Image", subtitle: providerName, chosen: draft.sourceId, choices: setup.sources.map((entry) => ({ id: entry.id, label: entry.label, detail: entry.description })), choose: (id) => change({ sourceId: id }) },
     idle: { title: "Stop when idle", chosen: String(draft.idleMinutes), help: "A stopped workspace starts again when you send it a message.", choices: idleChoices(setup).map((minutes) => ({ id: String(minutes), label: idleChoiceLabel(minutes) })), choose: (id) => change({ idleMinutes: Number(id) }) },
-    agent: { title: "Agent", subtitle: "The agents ticked for this workspace", chosen: agent?.id ?? null, choices: agents.map((entry) => ({ id: entry.id, label: entry.label, detail: entry.detail })), choose: (id) => { changeTask({ agent: id }); setProblems(null); } },
+    agent: { title: "Agent", subtitle: "The agents ticked for this workspace", chosen: agent?.id ?? null, choices: agents.map((entry) => ({ id: entry.id, label: entry.label, detail: entry.detail })), choose: (id) => { changeTask({ agent: id, model: null, effort: null }); setProblems(null); } },
+    model: { title: "Model", subtitle: agent?.label, chosen: model?.id ?? null, choices: taskModelChoices(models), choose: (id) => changeTask({ model: id }) },
+    effort: { title: "Effort", subtitle: model?.label, chosen: effort, choices: model ? taskEffortChoices(model) : [], choose: (id) => changeTask({ effort: id }) },
     mode: { title: "Permission mode", help: BYPASS_NOT_FROM_PHONE, chosen: draft.task.mode, choices: phoneModes().map((mode) => ({ id: mode.id, label: mode.label, detail: mode.hint })), choose: (id) => changeTask({ mode: phoneModes().find((mode) => mode.id === id)?.id ?? PHONE_DEFAULT_MODE }) },
   };
   const open = sheet ? sheets[sheet] : null;
@@ -380,7 +431,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   return <>
     {page("New workspace", () => router.back(), <>
       {problems ? <Notice testID="preflight-problems" tone="danger" title={problemsTitle(problems.items.length)} items={problems.items} /> : null}
-      {formRefusal ? <Notice testID="form-refusal" tone="danger" text={formRefusal.text} action={formRefusal.fix === "compute" ? { label: "Connect compute", onPress: toOrganization } : undefined} /> : null}
+      {formRefusal ? <Notice testID="form-refusal" tone="danger" text={formRefusal.text} action={formRefusal.fix === "compute" ? { label: "Connect compute", onPress: toCompute } : undefined} /> : null}
       <TextField testID="workspace-name" label="Name" value={draft.name} onChangeText={(name) => change({ name })} placeholder="What it is for" maxLength={NAME_MAX} autoFocus={!draft.name} disabled={busy !== null} returnKeyType="done" />
       <SectionTitle>Machine</SectionTitle>
       <Card>
@@ -412,8 +463,8 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
       {firstTask ? <>
         <SectionTitle>First task</SectionTitle>
         {agent ? <>
-          <AgentSettingsRows testID="first-task-rows" agent={agent.label} model={null} effort={null} mode={phoneModeLabel(draft.task.mode)} badAgent={!!problems?.agents?.includes(agent.id)}
-            onAgent={() => setSheet("agent")} onMode={() => setSheet("mode")} />
+          <AgentSettingsRows testID="first-task-rows" agent={agent.label} model={model?.label ?? null} effort={effort ? effortLabel(effort) : null} mode={phoneModeLabel(draft.task.mode)} badAgent={!!problems?.agents?.includes(agent.id)}
+            onAgent={() => setSheet("agent")} onModel={() => setSheet("model")} onEffort={() => setSheet("effort")} onMode={() => setSheet("mode")} />
           <TextField testID="first-task" accessibilityLabel="First task" multiline onFocus={() => { typing.current = true; }} onBlur={() => { typing.current = false; }} value={draft.task.text} onChangeText={(text) => changeTask({ text })} placeholder={FIRST_TASK_PLACEHOLDER} disabled={busy !== null}
             error={tooLong ? FIRST_TASK_TOO_LONG : null} helper={!taskWritten(draft.task.text) && EMPTY_FIRST_TASK_CHECKED_LIVE ? EMPTY_FIRST_TASK : undefined} />
         </> : <Notice testID="first-task-none" tone="info" text={NO_AGENT_TICKED} />}
@@ -429,6 +480,7 @@ const styles = StyleSheet.create({
   content: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 16, gap: 12 },
   foot: { paddingHorizontal: 16, paddingTop: 10, gap: 8 },
   stateAction: { paddingHorizontal: 24, gap: 8 },
+  stateOrganization: { paddingHorizontal: 16, paddingTop: 8 },
   row: { minHeight: 48, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14, paddingVertical: 9 },
   rowLabel: { fontSize: 16, lineHeight: 21 },
   grow: { flex: 1, minWidth: 0 },

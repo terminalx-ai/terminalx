@@ -6,9 +6,9 @@ import type { CloudOrganization, CloudWorkspaceItem } from "@mobile/cloud/api";
 import { workspaceTitle } from "@mobile/cloud/catalog";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { cloudSections, emptyOrganizationsLabel } from "@mobile/cloud/list";
-import { SETUP_TEXT, setupView, type SetupStepKey } from "@mobile/cloud/setup";
+import { SETUP_TEXT, resumedSetup, setupView, type SetupStepKey } from "@mobile/cloud/setup";
 import { useSetupChoice } from "@mobile/cloud/setup-choice";
-import { SETUP_PATHS, stepHref, useSetupPages, withPages } from "@mobile/cloud/setup-routes";
+import { stepsHref, stepHref, useSetupPages, withPages } from "@mobile/cloud/setup-routes";
 import { useOrganizationSetups } from "@mobile/cloud/useSetup";
 import { codeText } from "@mobile/cloud/words";
 import { workspaceProject } from "@mobile/cloud/pins";
@@ -65,9 +65,15 @@ export default function CloudScreen() {
   const listed = sections.length > 0;
   const chosen = choice.orgId ? snapshot.organizations.find((entry) => entry.organization.orgId === choice.orgId) ?? null : null;
   const personal = snapshot.organizations.find((entry) => entry.organization.isPersonal && !entry.workspaces.length && !entry.error)?.organization ?? null;
-  const settingUp = chosen && !chosen.workspaces.length && !chosen.error ? chosen.organization : null;
+  const held = chosen && !chosen.workspaces.length && !chosen.error ? chosen.organization : null;
+  // With none chosen on this phone (another phone began it, or the chosen one has its workspace now), the setup
+  // carried on is the one the server holds something of (PRO-569): each such organization's lists are read for it.
+  const resumed = useMemo(() => (held || !choice.ready ? { organization: null, pending: false } : resumedSetup(empty, setups)), [choice.ready, empty, held, setups]);
+  const settingUp = held ?? resumed.organization;
+  const unreadIds = held || !choice.ready ? "" : empty.filter((organization) => !setups.get(organization.orgId)?.read).map((organization) => organization.orgId).join(" ");
+  useEffect(() => { for (const id of unreadIds.split(" ").filter(Boolean)) void store?.read(id); }, [store, unreadIds]);
   // An account the service lists no organization for starts at the same step: creating one is on its page.
-  const firstRun = choice.ready && !chosen && !listed;
+  const firstRun = choice.ready && !chosen && !listed && !settingUp && !resumed.pending;
   const firstOrganization = firstRun ? personal ?? snapshot.organizations[0]?.organization ?? null : null;
   // A step opens only when its page is in the app (the steps after the first are other issues' screens).
   const pages = useSetupPages();
@@ -75,7 +81,8 @@ export default function CloudScreen() {
   // Someone who may not set up the chosen organization still sees their own, under it.
   const own = settingUp && view?.noCompute && personal && personal.orgId !== settingUp.orgId ? personal : null;
   const ownView = own ? withPages(setupView(own, true, setups.get(own.orgId)), pages) : null;
-  const readIds = [settingUp?.orgId, own?.orgId].filter((id): id is string => !!id).join(" ");
+  // Read again on a pull and on coming back: the chosen organization's lists, or with none chosen every one a setup could be resumed in.
+  const readIds = [...new Set([...(held ? [held.orgId] : choice.ready ? empty.map((organization) => organization.orgId) : []), own?.orgId].filter((id): id is string => !!id))].join(" ");
   const readSetups = useCallback(() => Promise.all(readIds.split(" ").filter(Boolean).map((id) => store?.read(id))), [readIds, store]);
 
   // The list is read again when the screen opens and now and then while it is shown: only a pull shows the spinner (#983).
@@ -103,7 +110,8 @@ export default function CloudScreen() {
   if (!app.session) return <View style={[styles.page, { backgroundColor: palette.page }]}><EmptyState title="Sign in for cloud workspaces" detail="Cloud workspaces belong to your TerminalX account." /><Button label={app.signingIn ? "Signing in…" : "Sign in"} disabled={app.signingIn} accessibilityState={{ disabled: app.signingIn, busy: app.signingIn }} icon={app.signingIn ? (color) => <Spinner size={16} color={color} /> : undefined} onPress={() => void app.signIn()} />{app.error ? <Text accessibilityRole="alert" style={[styles.signInError, { color: palette.danger }]}>{app.error}</Text> : null}</View>;
 
   // Nothing read yet and nothing kept: rows stand in for the list, under the title, until it comes.
-  const firstLoad = !snapshot.refreshedAt && !snapshot.saved && !snapshot.organizations.length && !snapshot.error;
+  // The same rows while it is not yet known whether a setup is to be carried on: the first step is not offered on a guess.
+  const firstLoad = (!snapshot.refreshedAt && !snapshot.saved && !snapshot.organizations.length && !snapshot.error) || (!listed && resumed.pending && !snapshot.error);
   // Pin project, then Stop or Start and Delete for someone who may manage the workspace (25.06).
   const pinActions = (item: CloudWorkspaceItem) => [
     ...macPins.cloudActions(item.workspace.orgId, workspaceProject(item.workspace), workspaceTitle(snapshot, item.workspace)),
@@ -118,10 +126,11 @@ export default function CloudScreen() {
   const setupPage = !listed && (settingUp || firstRun);
   const offline = snapshot.error === "cloud_workspace_unavailable" || !!view?.stale;
   const shownInSetup = new Set([settingUp?.orgId, firstOrganization?.orgId, own?.orgId]);
-  const folded = empty.filter((organization) => !shownInSetup.has(organization.orgId));
+  // Not while one of them may turn out to be the setup to carry on.
+  const folded = !listed && resumed.pending ? [] : empty.filter((organization) => !shownInSetup.has(organization.orgId));
   const setup = settingUp && view ? <>
     <SetupHeading title={settingUp.name} first={!listed && !snapshot.error} />
-    {listed ? <FoldedSetup view={view} onPress={() => router.push(SETUP_PATHS.steps)} />
+    {listed ? <FoldedSetup view={view} onPress={() => router.push(stepsHref(settingUp.orgId))} />
       : view.noCompute ? <NoComputeCard name={settingUp.name} />
       : <SetupCard testID="setup-card" view={view} offline={offline} onOpen={openStep(settingUp.orgId)} />}
     {!listed && own && ownView ? <><SetupHeading title={own.name} /><SetupCard testID="setup-card-own" view={ownView} offline={offline} button={false} onOpen={openStep(own.orgId)} /></> : null}
@@ -141,7 +150,7 @@ export default function CloudScreen() {
       : firstRun && view ? <><Text style={[styles.intro, { color: palette.muted }]}>{SETUP_TEXT.intro}</Text><SetupCard testID="setup-card" view={view} offline={offline} onOpen={openStep(null)} /></>
       // What this phone kept of the setup is still being read: nothing is said of it on a guess.
       : undefined}
-    ListFooterComponent={listed && setup || folded.length ? <>{listed ? setup : null}{folded.length ? <EmptyOrganizations organizations={folded} open={emptyOpen} onToggle={() => setEmptyOpen((value) => !value)} /> : null}</> : undefined} /><TopBar title="Cloud" shown={top.shown} /></View>;
+    ListFooterComponent={listed && setup || folded.length ? <>{listed ? setup : null}{folded.length ? <EmptyOrganizations organizations={folded} open={emptyOpen} onToggle={() => setEmptyOpen((value) => !value)} onOpen={(organization) => router.push(stepsHref(organization.orgId))} /> : null}</> : undefined} /><TopBar title="Cloud" shown={top.shown} /></View>;
 }
 
 /** The name of the organization being set up, over its steps, as a section of the list is headed. */
@@ -150,8 +159,12 @@ function SetupHeading({ title, first }: { title: string; first?: boolean }) {
   return <View style={[styles.sectionHeader, first && styles.firstHeader]}><Text accessibilityRole="header" numberOfLines={1} style={[styles.sectionTitle, { color: palette.muted }]}>{title}</Text></View>;
 }
 
-/** The organizations with no workspaces, as one row at the end that opens to their names. */
-function EmptyOrganizations({ organizations, open, onToggle }: { organizations: CloudOrganization[]; open: boolean; onToggle(): void }) {
+/**
+ * The organizations with no workspaces, as one row at the end that opens to
+ * their names. Each name opens that organization's setup steps (PRO-561): it
+ * is where its workspaces are set up from.
+ */
+function EmptyOrganizations({ organizations, open, onToggle, onOpen }: { organizations: CloudOrganization[]; open: boolean; onToggle(): void; onOpen(organization: CloudOrganization): void }) {
   const { palette } = useTheme();
   const label = emptyOrganizationsLabel(organizations.length);
   return <View style={[styles.folded, { backgroundColor: palette.card, borderColor: palette.border }]}>
@@ -159,7 +172,10 @@ function EmptyOrganizations({ organizations, open, onToggle }: { organizations: 
       <Text numberOfLines={1} style={[styles.foldedText, { color: palette.muted }]}>{label}</Text>
       {open ? <ChevronDown size={18} color={palette.faint} /> : <ChevronRight size={18} color={palette.faint} />}
     </Pressable>
-    {open ? organizations.map((organization) => <Text key={organization.orgId} numberOfLines={1} style={[styles.emptyName, { color: palette.muted, borderTopColor: palette.border }]}>{organization.name}</Text>) : null}
+    {open ? organizations.map((organization) => <Pressable key={organization.orgId} testID={`empty-organization-${organization.orgId}`} accessibilityRole="button" accessibilityLabel={`${organization.name}, ${SETUP_TEXT.folded.toLowerCase()}`} onPress={() => onOpen(organization)} style={({ pressed }) => [styles.emptyRow, { borderTopColor: palette.border }, pressed && { backgroundColor: palette.raised }]}>
+      <Text numberOfLines={1} style={[styles.emptyName, { color: palette.ink }]}>{organization.name}</Text>
+      <ChevronRight size={18} color={palette.faint} />
+    </Pressable>) : null}
   </View>;
 }
 
@@ -196,7 +212,8 @@ const styles = StyleSheet.create({
   placeholderRow: { alignItems: "center" },
   foldedRow: { minHeight: 48, paddingHorizontal: 14, flexDirection: "row", alignItems: "center", gap: 8, borderRadius: 10 },
   foldedText: { flex: 1, fontSize: 15 },
-  emptyName: { fontSize: 15, lineHeight: 20, paddingHorizontal: 14, paddingVertical: 10, borderTopWidth: StyleSheet.hairlineWidth },
+  emptyRow: { minHeight: 44, paddingHorizontal: 14, paddingVertical: 10, flexDirection: "row", alignItems: "center", gap: 8, borderTopWidth: StyleSheet.hairlineWidth },
+  emptyName: { flex: 1, fontSize: 15, lineHeight: 20 },
   barHeading: { height: 10, width: "22%", borderRadius: 4, marginTop: 24, marginBottom: 12, marginHorizontal: 4 },
   // Placeholder rows as 22.06 draws them: a round mark, the title, and a fainter line under it.
   barMark: { width: 18, height: 18, borderRadius: 9 },
