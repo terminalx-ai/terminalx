@@ -6,7 +6,7 @@ import { CloudOff, Layers, MapPin, PowerOff, Receipt, Trash2, WifiOff, type Luci
 import type { CloudProvider, CloudProviderConnection } from "@mobile/cloud/api";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import type { CloudCatalog } from "@mobile/cloud/catalog";
-import { COMPUTE_OWNER_REQUIRED, CONNECT_OUTCOME_UNKNOWN, connectDisclosure, connectFailure, DISCONNECT_BODY, disconnectFailure, disconnectTitle, keyHandling, listFailure, needsAttention, providerFacts, whenText, type ConnectFailure, type ProviderFactKind } from "@mobile/cloud/compute";
+import { COMPUTE_OWNER_REQUIRED, CONNECT_OUTCOME_UNKNOWN, connectDisclosure, connectFailure, disconnectBody, disconnectFailure, disconnectTitle, KEY_HANDLING, listFailure, needsAttention, providerFacts, whenText, type ConnectFailure, type ProviderFactKind } from "@mobile/cloud/compute";
 import { TitleWithOrganization, useProviders } from "@mobile/ui/compute";
 import { ConsentRow } from "@mobile/ui/ConsentRow";
 import { DescribedFields, type DescribedFieldsHandle } from "@mobile/ui/DescribedFields";
@@ -160,7 +160,7 @@ function ConnectForm({ catalog, orgId, provider, replacing, read, onConnected, o
         ref={fields}
         testID="provider-fields"
         fields={descriptor.credentialFields}
-        helper={keyHandling(label)}
+        helper={KEY_HANDLING}
         errors={failure?.where === "field" ? { [field.name]: failure.text } : undefined}
         disabled={busy}
         onReadyChange={setReady}
@@ -218,7 +218,7 @@ function Stored({ catalog, orgId, provider, connection, read, onReplace, onDisco
       setBusy(false);
     }
   };
-  const ask = () => Alert.alert(disconnectTitle(label), DISCONNECT_BODY, [
+  const ask = () => Alert.alert(disconnectTitle(label), disconnectBody(label), [
     { text: "Cancel", style: "cancel" },
     { text: "Disconnect", style: "destructive", onPress: () => void disconnect() },
   ]);

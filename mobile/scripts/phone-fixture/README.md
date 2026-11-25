@@ -105,6 +105,15 @@ anything reaches the phone, so the flow asks it from the page's switch.
 `permissions` cannot deny them on a simulator) and back on afterwards. The
 notifications are headed "Phone fixture", the copy's own app name.
 
+## Large text (PRO-563)
+
+`flow-large-text.yaml` shoots the screens whose buttons, titles, badges and
+rows were cut at the accessibility text sizes, and checks two things said
+aloud: the back button's name and a cloud message's "Delivered to the
+workspace". Maestro cannot set the text size, so set it on the simulator
+first (`xcrun simctl ui <udid> content_size accessibility-extra-large`) and
+put it back to `large` afterwards.
+
 1. Build the simulator app once, as `pnpm ios:simulator` does, but without installing it:
 
    ```sh
