@@ -19,6 +19,8 @@ pub const MAX_TIMEOUT_MS: u64 = 30_000;
 pub const MAX_OUTPUT_BYTES: u64 = 1_048_576;
 const PROMPT_WINDOW_MS: u64 = 60_000;
 const MAX_PROMPTS_PER_WINDOW: usize = 3;
+const MAX_GLOBAL_PROMPTS_PER_WINDOW: usize = 12;
+const MAX_REQUESTS_PER_ORIGIN: usize = 32;
 
 #[derive(Clone, PartialEq, Eq)]
 struct Origin {
@@ -105,6 +107,8 @@ pub enum State {
     Starting,
     Running,
     Denied,
+    TouchIdUnavailable,
+    RevokedAfterLaunch,
     ExpiredBeforeLaunch,
     /// The OS accepted the sandboxed launch and output was withheld on expiry.
     ExpiredAfterLaunch,
@@ -132,6 +136,7 @@ enum LocalDecision {
     #[default]
     Deny,
     AllowOnce,
+    TouchIdUnavailable,
 }
 
 /// Raw, bounded output goes only to the trusted caller. No Debug or serialization.
@@ -156,6 +161,7 @@ pub enum ExecutionOutcome {
 struct Entry {
     expires_at_ms: u64,
     retire_at_ms: u64,
+    origin: Origin,
     state: State,
     paths: Option<executor::ApprovedPaths>,
 }
@@ -182,7 +188,7 @@ struct Registry {
     epoch: Arc<()>,
     entries: HashMap<String, Arc<Mutex<Entry>>>,
     prompt_open: bool,
-    prompt_times: VecDeque<u64>,
+    prompt_times: VecDeque<(Origin, u64)>,
     in_flight: bool,
 }
 
@@ -298,7 +304,18 @@ impl Policy {
         if registry.entries.contains_key(&input.id) {
             return Err(Rejection::Replay);
         }
-        if registry.entries.len() >= MAX_REQUESTS {
+        if registry.entries.len() >= MAX_REQUESTS
+            || registry
+                .entries
+                .values()
+                .filter(|entry| {
+                    entry
+                        .lock()
+                        .map_or(true, |entry| entry.origin == input.origin)
+                })
+                .count()
+                >= MAX_REQUESTS_PER_ORIGIN
+        {
             return Err(Rejection::Capacity);
         }
         if registry.in_flight
@@ -313,6 +330,7 @@ impl Policy {
         let entry = Arc::new(Mutex::new(Entry {
             expires_at_ms: now.saturating_add(input.ttl_ms),
             retire_at_ms: now.saturating_add(MAX_TTL_MS),
+            origin: input.origin.clone(),
             state: State::Pending,
             paths: None,
         }));
@@ -343,14 +361,23 @@ impl Policy {
         while registry
             .prompt_times
             .front()
-            .is_some_and(|time| now.saturating_sub(*time) >= PROMPT_WINDOW_MS)
+            .is_some_and(|(_, time)| now.saturating_sub(*time) >= PROMPT_WINDOW_MS)
         {
             registry.prompt_times.pop_front();
         }
-        if registry.prompt_open || registry.prompt_times.len() >= MAX_PROMPTS_PER_WINDOW {
+        let origin = &request.input.origin;
+        if registry.prompt_open
+            || registry.prompt_times.len() >= MAX_GLOBAL_PROMPTS_PER_WINDOW
+            || registry
+                .prompt_times
+                .iter()
+                .filter(|(key, _)| key == origin)
+                .count()
+                >= MAX_PROMPTS_PER_WINDOW
+        {
             return Err(Rejection::PromptRateLimited);
         }
-        registry.prompt_times.push_back(now);
+        registry.prompt_times.push_back((origin.clone(), now));
         registry.prompt_open = true;
         Ok(PromptSlot(self.clone()))
     }
@@ -383,6 +410,7 @@ impl Policy {
         }
         match decision {
             LocalDecision::Deny => entry.stop(State::Denied),
+            LocalDecision::TouchIdUnavailable => entry.stop(State::TouchIdUnavailable),
             LocalDecision::AllowOnce => {
                 entry.paths = Some(binding.paths);
                 entry.state = State::Approved;
@@ -545,7 +573,8 @@ impl Execution {
             let reason = if !Arc::ptr_eq(&registry.epoch, &self.request.epoch)
                 || check_context(&registry.context, &self.request.input).is_err()
             {
-                Some(State::Revoked)
+                entry.stop(State::RevokedAfterLaunch);
+                Some(State::RevokedAfterLaunch)
             } else if self.request.policy.now_ms() >= entry.expires_at_ms {
                 entry.stop(State::ExpiredAfterLaunch);
                 Some(State::ExpiredAfterLaunch)
@@ -608,35 +637,48 @@ fn approved_program(input: &RequestInput) -> Result<&'static str, Rejection> {
     }
 }
 
-fn prompt_text(input: &RequestInput) -> Result<String, Rejection> {
-    fn quoted(value: &str) -> String {
-        format!(
-            "\"{}\"",
-            value
-                .chars()
-                .flat_map(char::escape_default)
-                .collect::<String>()
-        )
-    }
+fn quote_prompt_value(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .chars()
+            .flat_map(char::escape_default)
+            .collect::<String>()
+    )
+}
+
+fn command_text(input: &RequestInput) -> Result<String, Rejection> {
+    use std::fmt::Write;
     let mut text = format!(
-        "Account: {}\nOrganization: {}\nWorkspace: {}\nProgram: {}\nWorking directory: {}\nTimeout: {} ms\nOutput limit: {} bytes",
-        quoted(&input.origin.account),
-        quoted(&input.origin.organization),
-        quoted(&input.origin.workspace),
-        quoted(&input.executable),
-        quoted(&input.cwd),
-        input.timeout_ms,
-        input.output_limit_bytes,
+        "Program: {}\nWorking directory: {}",
+        quote_prompt_value(&input.executable),
+        quote_prompt_value(&input.cwd),
     );
     for (index, arg) in input.arguments.iter().enumerate() {
-        use std::fmt::Write;
-        write!(text, "\nArgument {}: {}", index + 1, quoted(arg))
-            .expect("writing to a String cannot fail");
+        write!(
+            text,
+            "\nArgument {}: {}",
+            index + 1,
+            quote_prompt_value(arg)
+        )
+        .expect("writing to a String cannot fail");
     }
-    if text.len() > 1_024 {
+    if text.len() > 512 {
         return Err(Rejection::InvalidRequest);
     }
     Ok(text)
+}
+
+fn prompt_text(input: &RequestInput) -> Result<String, Rejection> {
+    Ok(format!(
+        "Account: {}\nOrganization: {}\nWorkspace: {}\n{}\nTimeout: {} ms\nOutput limit: {} bytes",
+        quote_prompt_value(&input.origin.account),
+        quote_prompt_value(&input.origin.organization),
+        quote_prompt_value(&input.origin.workspace),
+        command_text(input)?,
+        input.timeout_ms,
+        input.output_limit_bytes,
+    ))
 }
 
 mod consent {
@@ -660,9 +702,43 @@ mod consent {
         }
     }
 
+    #[cfg(any(test, all(target_os = "macos", feature = "desktop")))]
+    pub(super) fn await_biometric(
+        request: &Request,
+        replies: &mpsc::Receiver<LocalDecision>,
+        mut pump: impl FnMut(),
+        invalidate: impl FnOnce(),
+    ) -> Result<LocalDecision, Rejection> {
+        let result = loop {
+            if let Err(reason) = request.require_pending() {
+                break Err(reason);
+            }
+            match replies.try_recv() {
+                Ok(choice) => break Ok(choice),
+                Err(mpsc::TryRecvError::Disconnected) => break Err(Rejection::WorkerUnavailable),
+                Err(mpsc::TryRecvError::Empty) => pump(),
+            }
+        };
+        invalidate();
+        result
+    }
+
     #[cfg(all(target_os = "macos", feature = "desktop"))]
     #[link(name = "LocalAuthentication", kind = "framework")]
-    extern "C" {}
+    extern "C" {
+        static LAErrorDomain: &'static objc2_foundation::NSString;
+    }
+
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFRunLoopDefaultMode: *const std::ffi::c_void;
+        fn CFRunLoopRunInMode(
+            mode: *const std::ffi::c_void,
+            seconds: f64,
+            return_after_source: u8,
+        ) -> i32;
+    }
 
     #[cfg(all(target_os = "macos", feature = "desktop"))]
     pub(super) fn prompt(
@@ -681,7 +757,7 @@ mod consent {
         const BIOMETRICS_ONLY: isize = 1;
 
         let main = MainThreadMarker::new().ok_or(Rejection::ContextUnavailable)?;
-        let slot = policy.reserve_prompt(request)?;
+        let _slot = policy.reserve_prompt(request)?;
         let binding = policy.prepare_local_decision(request)?;
         let (sender, receiver) = mpsc::sync_channel(1);
         let text = prompt_text(&binding.input)?;
@@ -709,41 +785,55 @@ mod consent {
         let available: Bool = unsafe {
             msg_send![&*context, canEvaluatePolicy: BIOMETRICS_ONLY, error: std::ptr::null_mut::<*mut NSError>()]
         };
-        if !available.as_bool() {
-            let _ = sender.send(policy.record_local_decision(
-                request,
-                Decision {
-                    binding,
-                    choice: LocalDecision::Deny,
-                },
-            ));
-            return Ok(receiver);
-        }
-        let policy = policy.clone();
-        let request = request.clone();
-        let pending = Mutex::new(Some((binding, slot, context.clone())));
-        let callback = RcBlock::new(move |success: Bool, _error: *mut NSError| {
-            let Ok(mut pending) = pending.lock() else {
-                return;
-            };
-            if let Some((binding, _slot, _context)) = pending.take() {
+        let choice = if available.as_bool() {
+            let (reply, replies) = mpsc::sync_channel(1);
+            let callback = RcBlock::new(move |success: Bool, error: *mut NSError| {
                 let choice = if success.as_bool() {
                     LocalDecision::AllowOnce
+                } else if unsafe { error.as_ref() }.is_some_and(|error| {
+                    // LAErrorBiometryNotAvailable, NotEnrolled, or Lockout.
+                    error.domain().isEqualToString(unsafe { LAErrorDomain })
+                        && matches!(error.code(), -8..=-6)
+                }) {
+                    LocalDecision::TouchIdUnavailable
                 } else {
                     LocalDecision::Deny
                 };
-                let _ = sender
-                    .send(policy.record_local_decision(&request, Decision { binding, choice }));
+                let _ = reply.try_send(choice);
+            });
+            let empty = NSString::from_str("");
+            let reason = NSString::from_str(&command_text(&binding.input)?);
+            // SAFETY: these selectors use LAContext's SDK signatures. The
+            // system copies the block and the main thread owns the context.
+            unsafe {
+                let _: () = msg_send![&*context, setLocalizedFallbackTitle: &*empty];
+                let _: () =
+                    msg_send![&*context, setTouchIDAuthenticationAllowableReuseDuration: 0.0_f64];
+                let _: () = msg_send![&*context, evaluatePolicy: BIOMETRICS_ONLY, localizedReason: &*reason, reply: &*callback];
             }
-        });
-        let empty = NSString::from_str("");
-        let reason = NSString::from_str("Approve this TerminalX command once");
-        // SAFETY: a fresh LAContext defaults to zero Touch ID reuse duration.
-        // The system copies the reply block before evaluatePolicy returns.
-        unsafe {
-            let _: () = msg_send![&*context, setLocalizedFallbackTitle: &*empty];
-            let _: () = msg_send![&*context, evaluatePolicy: BIOMETRICS_ONLY, localizedReason: &*reason, reply: &*callback];
-        }
+            await_biometric(
+                request,
+                &replies,
+                || {
+                    // Pump the main run loop in short slices so cancellation,
+                    // signout and monotonic expiry all dismiss the OS sheet.
+                    const RUN_LOOP_FINISHED: i32 = 1;
+                    if unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, 0) }
+                        == RUN_LOOP_FINISHED
+                    {
+                        thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                },
+                || unsafe {
+                    let _: () = msg_send![&*context, invalidate];
+                },
+            )
+        } else {
+            Ok(LocalDecision::TouchIdUnavailable)
+        };
+        let _ = sender.send(choice.and_then(|choice| {
+            policy.record_local_decision(request, Decision { binding, choice })
+        }));
         Ok(receiver)
     }
 }
