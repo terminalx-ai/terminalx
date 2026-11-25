@@ -435,3 +435,23 @@ describe("cloud send ownership across connection generations", () => {
     expect(second.send).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("a mention's @ on an open cloud session (PRO-141)", () => {
+  it("goes as soon as a mention arrives for the session on screen, not only when the view changes", async () => {
+    const { configureMentionMarks, markMentioned, mentionMarked } = await import("@/lib/mentionMarks");
+    configureMentionMarks("account-a");
+    try {
+      render(<CloudTab />);
+      await waitFor(() => expect(field()).toBeTruthy());
+      const key = `cloud:org-1:ws-1:${logSessionId}`;
+      act(() => markMentioned({ id: "m1", organizationId: "org-1", workspaceId: "ws-1", sessionId: logSessionId, at: Date.now() - 1_000 }));
+      await waitFor(() => expect(mentionMarked(key)).toBe(false));
+      // Another session's @ stays.
+      act(() => markMentioned({ id: "m2", organizationId: "org-1", workspaceId: "ws-1", sessionId: "elsewhere", at: Date.now() - 1_000 }));
+      await act(async () => {});
+      expect(mentionMarked("cloud:org-1:ws-1:elsewhere")).toBe(true);
+    } finally {
+      configureMentionMarks(null);
+    }
+  });
+});

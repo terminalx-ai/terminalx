@@ -71,8 +71,8 @@ import { useProjectForge } from "@/lib/projectForge";
 import { checkAgentReadiness, useSignInReadiness } from "@/lib/agentReadiness";
 import { AccountGoneNotice, AccountSwitchNote, useAccountSwitch } from "@/components/session/AccountSwitch";
 import { MentionPeopleContext, useMentionPeople } from "@/components/chat/useMentionPeople";
-import { parseCloudWorkspaceKey } from "@/types/target";
-import { markMentionsRead } from "@/lib/mentionMarks";
+import { cloudSessionKey, parseCloudWorkspaceKey } from "@/types/target";
+import { markMentionsRead, useMentionMarked } from "@/lib/mentionMarks";
 
 const newLoginIncident = () => ({ loginPane: null as string | null, launched: false, opening: false, consumed: false, cancelled: false, paused: false });
 
@@ -350,11 +350,14 @@ export function TabView({
   );
 
   useTabRead(active, backend.key, tab, backend.markRead);
-  // A mention's @ on the session row goes once the session is on screen here (PRO-141).
+  // A mention's @ on the session row goes while the session is on screen here (PRO-141),
+  // including a mention that arrives while it is.
   const mentionedWorkspace = local ? null : parseCloudWorkspaceKey(backend.key);
+  const mentionKey = mentionedWorkspace ? cloudSessionKey(mentionedWorkspace.orgId, mentionedWorkspace.workspaceId, backend.logSessionId) : "";
+  const mentionedHere = useMentionMarked(mentionKey);
   useEffect(() => {
-    if (active && mentionedWorkspace) markMentionsRead(mentionedWorkspace.orgId, mentionedWorkspace.workspaceId, backend.logSessionId);
-  }, [active, mentionedWorkspace?.orgId, mentionedWorkspace?.workspaceId, backend.logSessionId]);
+    if (active && mentionedHere && mentionedWorkspace) markMentionsRead(mentionedWorkspace.orgId, mentionedWorkspace.workspaceId, backend.logSessionId);
+  }, [active, mentionedHere, mentionedWorkspace?.orgId, mentionedWorkspace?.workspaceId, backend.logSessionId]);
 
   // Nothing is running in a conversation that is only being read. A remote session offers it
   // through its runtime (#1326) when that keeps the turns' checkpoints; `unavailable` says why not.

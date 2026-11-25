@@ -2,24 +2,53 @@
  * The @ on a cloud session's sidebar row (PRO-141, design 13.16): a teammate
  * mentioned you there and you have not read it yet. Kept per account across
  * launches; no imports of the agent stores, which clear it when a tab is read.
+ *
+ * Whether it was read is the session's synced read marker (PRO-125), the same
+ * one every device of the account writes: a mention at or before the marker
+ * is read, here or elsewhere. So a replay after signing in again, or a read on
+ * another Mac, takes the @ away rather than bringing it back.
  */
 import { useSyncExternalStore } from "react";
+import { cloudActivityRead, subscribeCloudReadMarkers, writeCloudReadMarker } from "@/lib/cloudReadMarkers";
 import { cloudSessionKey } from "@/types/target";
 
-/** Session row key → the inbox ids of mentions not read yet. Kept per account across launches. */
-const marks = new Map<string, string[]>();
+interface Mark {
+  organizationId: string;
+  workspaceId: string;
+  sessionId: string;
+  /** The inbox ids of the mentions not read yet. */
+  ids: string[];
+  /** When the newest of them was made (ms). */
+  at: number;
+}
+
+/** Session row key → its unread mentions. */
+const marks = new Map<string, Mark>();
 const markListeners = new Set<() => void>();
 let markOwner: string | null = null;
 const STORAGE_PREFIX = "terminalx.mentions.v1:";
 const MAX_MARKED_SESSIONS = 200;
 
+const iso = (at: number) => new Date(at).toISOString();
+/** The account's marker for the session has reached the mention. */
+const readBy = (mark: Pick<Mark, "organizationId" | "workspaceId" | "sessionId">, at: number) =>
+  cloudActivityRead(mark.organizationId, mark.workspaceId, mark.sessionId, iso(at));
+
 function saveMarks() {
   if (markOwner) {
     try {
-      localStorage.setItem(`${STORAGE_PREFIX}${encodeURIComponent(markOwner)}`, JSON.stringify([...marks]));
+      localStorage.setItem(`${STORAGE_PREFIX}${encodeURIComponent(markOwner)}`, JSON.stringify([...marks.values()]));
     } catch { /* The @ marks are a convenience; the row's read state stays the server's. */ }
   }
   for (const listener of markListeners) listener();
+}
+
+const text = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+function savedMark(value: unknown): Mark | null {
+  if (!value || typeof value !== "object") return null;
+  const mark = value as Partial<Mark>;
+  if (!text(mark.organizationId) || !text(mark.workspaceId) || !text(mark.sessionId) || !Array.isArray(mark.ids) || !Number.isFinite(mark.at)) return null;
+  return { organizationId: mark.organizationId, workspaceId: mark.workspaceId, sessionId: mark.sessionId, ids: mark.ids.filter(text), at: mark.at! };
 }
 
 /** The signed-in account's marks; null (signed out, data privacy) clears them from memory. */
@@ -30,10 +59,9 @@ export function configureMentionMarks(account: string | null) {
   if (account) {
     try {
       const saved = JSON.parse(localStorage.getItem(`${STORAGE_PREFIX}${encodeURIComponent(account)}`) ?? "[]");
-      if (Array.isArray(saved)) {
-        for (const entry of saved) {
-          if (Array.isArray(entry) && typeof entry[0] === "string" && Array.isArray(entry[1])) marks.set(entry[0], entry[1].filter((id: unknown) => typeof id === "string"));
-        }
+      for (const entry of Array.isArray(saved) ? saved : []) {
+        const mark = savedMark(entry);
+        if (mark) marks.set(cloudSessionKey(mark.organizationId, mark.workspaceId, mark.sessionId), mark);
       }
     } catch { /* Unreadable marks start empty. */ }
   }
@@ -45,12 +73,18 @@ export function forgetMentionMarks(account: string) {
   try { localStorage.removeItem(`${STORAGE_PREFIX}${encodeURIComponent(account)}`); } catch { /* storage unavailable */ }
 }
 
-export function markMentioned(notice: { id: string; organizationId: string; workspaceId: string; sessionId: string }) {
-  const key = cloudSessionKey(notice.organizationId, notice.workspaceId, notice.sessionId);
-  const ids = marks.get(key) ?? [];
-  if (ids.includes(notice.id)) return;
+/**
+ * A confirmed mention, made at `at` (ms). Nothing when the session was read
+ * since, on any of the account's devices.
+ */
+export function markMentioned(mention: { id: string; organizationId: string; workspaceId: string; sessionId: string; at: number }) {
+  const { id, organizationId, workspaceId, sessionId, at } = mention;
+  if (!Number.isFinite(at) || readBy(mention, at)) return;
+  const key = cloudSessionKey(organizationId, workspaceId, sessionId);
+  const known = marks.get(key);
+  if (known?.ids.includes(id)) return;
   marks.delete(key);
-  marks.set(key, [...ids, notice.id].slice(-20));
+  marks.set(key, { organizationId, workspaceId, sessionId, ids: [...(known?.ids ?? []), id].slice(-20), at: Math.max(known?.at ?? -Infinity, at) });
   while (marks.size > MAX_MARKED_SESSIONS) marks.delete(marks.keys().next().value!);
   saveMarks();
 }
@@ -63,22 +97,40 @@ export function onMentionsRead(listener: ReadListener): () => void {
   return () => { readListeners.delete(listener); };
 }
 
-/** The session was read here: its @ goes, and so do its notices. */
+/**
+ * The session was read here: its @ goes, and so do its notices. The read
+ * marker is moved up to the mention, so the account's other devices drop
+ * their @ too (a marker is never set later than now).
+ */
 export function markMentionsRead(organizationId: string, workspaceId: string, sessionId: string) {
-  const had = marks.delete(cloudSessionKey(organizationId, workspaceId, sessionId));
+  const key = cloudSessionKey(organizationId, workspaceId, sessionId);
+  const mark = marks.get(key);
+  marks.delete(key);
   for (const listener of readListeners) listener(organizationId, workspaceId, sessionId);
-  if (had) saveMarks();
+  if (!mark) return;
+  saveMarks();
+  void writeCloudReadMarker(organizationId, workspaceId, sessionId, iso(Math.min(mark.at, Date.now())));
 }
+
+// A marker that reached a mention, from this device, another one or a replay, takes its @.
+subscribeCloudReadMarkers(() => {
+  let changed = false;
+  for (const [key, mark] of [...marks]) {
+    if (!readBy(mark, mark.at)) continue;
+    marks.delete(key);
+    for (const listener of readListeners) listener(mark.organizationId, mark.workspaceId, mark.sessionId);
+    changed = true;
+  }
+  if (changed) saveMarks();
+});
 
 /** Access to a workspace is gone: its marks go with it. */
 export function dropWorkspaceMarks(workspaceId: string) {
   let changed = false;
-  for (const key of [...marks.keys()]) {
-    // `cloud:<org>:<workspace>:<session>`
-    if (key.split(":")[2] === workspaceId) {
-      marks.delete(key);
-      changed = true;
-    }
+  for (const [key, mark] of [...marks]) {
+    if (mark.workspaceId !== workspaceId) continue;
+    marks.delete(key);
+    changed = true;
   }
   if (changed) saveMarks();
 }

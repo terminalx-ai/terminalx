@@ -38,16 +38,26 @@ The saas side is described in its `docs/phase2/mentions-contract.md`.
   anything shows. It also refreshes the catalog, since the person now follows
   the workspace.
 - A confirmed mention puts an `@` on the session's sidebar row and makes the
-  title bold until the session is opened here. The marks are kept per account
-  in local storage (session keys and inbox ids only, never text), are dropped
-  when the share is removed, and are cleared on an account change.
-- When the event arrives live (not in catch-up after sign-in) and **Mention
-  notifications** is on:
-  - The in-app notification reads "<name> mentioned you", then the workspace
-    name and the message quoted, with **Open** and **Mark as read**. The quote
-    is looked up by `messageId` in this device's own transcript: the loaded
-    tab log, then the saved cache, then the decrypted checkpoint. It waits at
-    most 1.5 s and otherwise shows no quote.
+  title bold, unless the account's synced read marker for that session
+  (PRO-125) is already at or past the mention. The marker is the read state
+  for every device of the account. A mention replayed after signing in again
+  or leaving data privacy mode does not come back once it was read, and a
+  marker that arrives later, such as a read on another Mac, takes the `@`
+  away. Reading the session here, by having it on screen or with Mark as read,
+  moves the marker up to the mention so the other devices drop their `@` too.
+  An `@` for the session already on screen goes as soon as it arrives. The
+  marks are kept per account in local storage (ids and times only, never
+  text), and are dropped when the share is removed.
+- When the event arrives live (not in catch-up after sign-in), the session is
+  not already read, and **Mention notifications** is on:
+  - The in-app notification shows at once: "<name> mentioned you", the
+    workspace name, **Open** and **Mark as read**. The quote is filled in once
+    this device has the message, looked up by `messageId` in its own
+    transcript: the loaded tab log, the saved cache, or the tab's encrypted
+    checkpoint, decrypted here. The checkpoint list is read again first,
+    because a new follower knows none of the workspace's tabs. A checkpoint
+    saved before the message is tried again for about half a minute; after
+    that the notification stays without a quote.
   - The macOS banner reads "<first name> mentioned you" with the workspace
     name. It never carries the message, because banners can show on the lock
     screen.

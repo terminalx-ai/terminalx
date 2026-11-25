@@ -482,6 +482,43 @@ describe("mentions (PRO-141)", () => {
     expect(localStorage.getItem(inboxKey)).not.toContain("widths");
   });
 
+  const readMarker = (id: string, readAt: string) => ({ id, type: "workspace.read-marker-changed", organizationId: "org", workspaceId: "workspace", payload: { sessionId: "sess-1", readAt }, createdAt: readAt }) as const;
+
+  it("shows the notice without waiting for the quote, and fills the quote in when this device has the message", async () => {
+    let found!: (quote: string | null) => void;
+    f.quote.mockImplementationOnce(() => new Promise((resolve) => { found = resolve; }));
+    f.api.cloudWorkspaces.mockResolvedValue(listWorkspace());
+    deliver([mention], true, mentionReadiness);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(getMentionNotices()).toMatchObject([{ id: "21", quote: null }]);
+    expect(f.notifyMention).toHaveBeenCalledOnce();
+    found("can you check the widths?");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(getMentionNotices()).toMatchObject([{ id: "21", quote: "can you check the widths?" }]);
+  });
+
+  it("does not mark or notify a mention the account already read past, as after signing in again", async () => {
+    f.api.cloudWorkspaces.mockResolvedValue(listWorkspace());
+    deliver([readMarker("20", "2026-11-25T10:05:00Z"), mention], true, mentionReadiness);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mentionMarked(rowKey)).toBe(false);
+    expect(getMentionNotices()).toEqual([]);
+    expect(f.notifyMention).not.toHaveBeenCalled();
+  });
+
+  it("drops the @ and the notice when the session is read on another device", async () => {
+    f.api.cloudWorkspaces.mockResolvedValue(listWorkspace());
+    deliver([mention], true, mentionReadiness);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mentionMarked(rowKey)).toBe(true);
+    // An older marker says nothing about the mention.
+    applyDesktopInboxEvent(readMarker("30", "2026-11-25T09:59:00Z"));
+    expect(mentionMarked(rowKey)).toBe(true);
+    applyDesktopInboxEvent(readMarker("31", "2026-11-25T10:00:00Z"));
+    expect(mentionMarked(rowKey)).toBe(false);
+    expect(getMentionNotices()).toEqual([]);
+  });
+
   it("with Mention notifications off: no notice and no banner, but the catalog still learns of the follow", async () => {
     f.prefs.mentionNotifications = false;
     f.api.cloudWorkspaces.mockResolvedValue(listWorkspace());

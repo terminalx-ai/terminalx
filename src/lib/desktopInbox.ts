@@ -1,4 +1,5 @@
 import { phase2Ready } from "@/lib/phase2Readiness";
+import { cloudSessionKey } from "@/types/target";
 import { useSyncExternalStore } from "react";
 import { cloudPresence } from "@/lib/cloudPresence";
 import { api, invoke, type CloudWorkspace, type DesktopInboxEvent } from "@/lib/api";
@@ -8,7 +9,7 @@ import { CloudInboxSubscriber, validInboxCursor, type InboxStorage, type InboxTr
 import { configureCloudReadMarkers, enableCloudReadMarkerWrites, reconcileCloudReadMarker } from "@/lib/cloudReadMarkers";
 import { cloudOrgArg, getCloudCatalog, invalidateCloudInboxWorkspace, liveCloudOrgIds, resyncCloudInboxCatalog, subscribeCloudCatalog, type OrgCatalog } from "@/lib/cloudCatalog";
 import { notifyMention, notifyOrganizationEvent } from "@/lib/notify";
-import { clearMentionNotices, configureMentionMarks, dropWorkspaceMentions, forgetMentionMarks, lookUpMentionQuote, markMentioned, showMentionNotice } from "@/lib/mentionNotices";
+import { clearMentionNotices, configureMentionMarks, dropWorkspaceMentions, forgetMentionMarks, lookUpMentionQuote, markMentioned, mentionMarked, setMentionQuote, showMentionNotice } from "@/lib/mentionNotices";
 import { getPrefs } from "@/lib/prefs";
 import { readOrganizationRoster } from "@/lib/organizationRoster";
 
@@ -85,19 +86,27 @@ async function actorName(orgId: string, actorId: string): Promise<string> {
 }
 
 /**
- * A confirmed mention (PRO-141): the @ on its session's row, and, when it
- * arrived live and the setting is on, the in-app notification quoting the
- * message from this device's own transcript, and a banner without it.
+ * A confirmed mention (PRO-141): the @ on its session's row unless the
+ * account's read marker is already past it (a replay after signing in again,
+ * or read on another device). Arrived live, not yet read, and the setting on:
+ * the in-app notification at once, its quote filled in once this device has
+ * the message, and a banner without it.
  */
 async function deliverMention(pending: PendingNotice, workspace: CloudWorkspace, authorized: () => boolean) {
   const event = pending.event as NoticeEvent & { type: "workspace.mentioned" };
   const { actorId, sessionId, tabId, messageId } = event.payload;
   const where = { organizationId: event.organizationId, workspaceId: event.workspaceId, sessionId, tabId, messageId };
-  markMentioned({ id: event.id, ...where });
+  const at = Date.parse(event.createdAt);
+  markMentioned({ id: event.id, ...where, at });
   if (!pending.banner || !getPrefs().mentionNotifications) return;
-  const [name, quote] = await Promise.all([actorName(event.organizationId, actorId), lookUpMentionQuote(where)]);
+  if (!mentionMarked(cloudSessionKey(where.organizationId, where.workspaceId, sessionId))) return;
+  const name = await actorName(event.organizationId, actorId);
   if (!authorized()) return;
-  showMentionNotice({ id: event.id, ...where, actorId, actorName: name, workspaceName: workspace.name, quote, at: Date.parse(event.createdAt) || Date.now() });
+  showMentionNotice({ id: event.id, ...where, actorId, actorName: name, workspaceName: workspace.name, quote: null, at: Number.isFinite(at) ? at : Date.now() });
+  // Filled in only while the notice is still shown: revocation, another account and privacy remove it.
+  void lookUpMentionQuote(where).then((quote) => {
+    if (quote) setMentionQuote(event.id, quote);
+  }, () => undefined);
   await notifyMention(name, workspace.name, authorized);
 }
 
