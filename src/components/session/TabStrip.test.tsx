@@ -496,3 +496,19 @@ describe("the tab's agent account", () => {
     expect(screen.queryByTestId("tab-account-mark")).toBeNull();
   });
 });
+
+describe("the saved model a new cloud tab starts with (#1580)", () => {
+  const entry = (id: string, harness: string, alias = false) => ({ id, label: id, harness, efforts: [], defaultEffort: null, acceptsImages: true, isDefault: false, upgrade: null, description: null, alias });
+  const prefs = { lastModel: { codex: "gpt-6.2-astra", claude: "opus" }, lastEffort: { codex: "high", claude: "max" } };
+  it("carries no pinned Codex model while the list is only this computer's", async () => {
+    const { cloudTabModel } = await import("./TabStrip");
+    const models = [entry("gpt-6.2-astra", "codex"), entry("opus", "claude", true)];
+    expect(cloudTabModel(models, true, "codex", prefs)).toEqual({});
+    expect(cloudTabModel(models, true, "claude", prefs)).toEqual({ model: "opus", effort: "max" });
+  });
+  it("carries the saved model once the workspace lists it", async () => {
+    const { cloudTabModel } = await import("./TabStrip");
+    expect(cloudTabModel([entry("gpt-6.2-astra", "codex")], false, "codex", prefs)).toEqual({ model: "gpt-6.2-astra", effort: "high" });
+    expect(cloudTabModel([entry("gpt-6.1-sol", "codex")], false, "codex", prefs)).toEqual({ model: undefined, effort: "high" });
+  });
+});
