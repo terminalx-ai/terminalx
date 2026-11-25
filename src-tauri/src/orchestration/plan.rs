@@ -11,7 +11,6 @@ use serde_json::{json, Value};
 
 use super::routing::{self, LeadModel, Table, KINDS};
 use super::{Brief, Budget, Check, Estimate, Piece, PieceState};
-use crate::models::Model;
 
 /// The modes a worker may be started in: the ones `sessions create --mode` takes.
 pub const MODES: [&str; 5] = ["plan", "manual", "auto", "acceptEdits", "bypassPermissions"];
@@ -157,7 +156,7 @@ pub struct Rules<'a> {
     /// The project's routing table: the model and effort of a piece whose plan names none.
     pub routing: &'a Table,
     /// What the agents' CLIs list: a tier is resolved against it.
-    pub models: &'a [Model],
+    pub models: &'a routing::Installed,
     /// The lead's own model: a tier nobody installed falls back to it.
     pub lead_model: &'a str,
     /// The lead's checkout, to tell a directory a piece owns from a file. Without it only
@@ -700,7 +699,7 @@ mod tests {
         models.extend(crate::harness::codex::models::fallback());
         let agents = ["claude".to_string(), "codex".to_string()];
         let study = PlanPiece { kind: Some("research".into()), ..piece("study") };
-        let pieces = validate(&plan(vec![study, piece("build")]), &Rules { piece_limit: 8, default_agent: "codex", agents: &agents, worker_mode: "bypassPermissions", approval: true, checkout: None, routing: &TABLE, models: &models, lead_model: "gpt-5.6-sol" }).unwrap();
+        let pieces = validate(&plan(vec![study, piece("build")]), &Rules { piece_limit: 8, default_agent: "codex", agents: &agents, worker_mode: "bypassPermissions", approval: true, checkout: None, routing: &TABLE, models: &models.into(), lead_model: "gpt-5.6-sol" }).unwrap();
         assert_eq!((pieces[0].model.as_str(), pieces[0].effort.as_deref()), ("gpt-5.6-sol", Some("medium")));
         assert_eq!(pieces[0].model_note.as_deref(), Some("No top model of Codex is installed (astra): this piece runs on the lead's model, gpt-5.6-sol."));
         assert_eq!((pieces[1].model.as_str(), pieces[1].model_note.as_deref()), ("gpt-5.6-sol", None));
