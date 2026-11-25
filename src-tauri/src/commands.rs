@@ -1748,9 +1748,10 @@ pub async fn cloud_workspace_share_put(
     can_approve: bool,
     state: tauri::State<'_, crate::AppState>,
     org_id: Option<String>,
+    context_revision: Option<String>,
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceShareChange, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
-        .share_put(org_id.as_deref(), &workspace_id, &user_id, role, can_approve))
+        .share_put_in_context(org_id.as_deref(), &workspace_id, &user_id, role, can_approve, context_revision.as_deref()))
 }
 
 #[tauri::command]

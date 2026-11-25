@@ -589,8 +589,8 @@ export const api = {
   cloudWorkspaceGeneralAccessPut: (workspaceId: string, orgId: string, change: CloudWorkspaceGeneralAccessChange, contextRevision: string) =>
     invoke<CloudWorkspaceGeneralAccessChange>("cloud_workspace_general_access_put", { workspaceId, orgId, ...change, contextRevision }),
   /** Grant or change a member's share; only managers and the workspace's creator may. */
-  cloudWorkspaceSharePut: (workspaceId: string, userId: string, role: CloudShareRole, canApprove: boolean, orgId?: string | null) =>
-    invoke<{ share: CloudWorkspaceShare; created?: boolean }>("cloud_workspace_share_put", { workspaceId, userId, role, canApprove, orgId: orgId ?? null }),
+  cloudWorkspaceSharePut: (workspaceId: string, userId: string, role: CloudShareRole, canApprove: boolean, orgId?: string | null, contextRevision?: string) =>
+    invoke<{ share: CloudWorkspaceShare; created?: boolean }>("cloud_workspace_share_put", { workspaceId, userId, role, canApprove, orgId: orgId ?? null, ...(contextRevision === undefined ? {} : { contextRevision }) }),
   /** Revoke a member's share; their connections to the workspace close. */
   cloudWorkspaceShareRevoke: (workspaceId: string, userId: string, orgId?: string | null) =>
     invoke<{ share: CloudWorkspaceShare }>("cloud_workspace_share_revoke", { workspaceId, userId, orgId: orgId ?? null }),

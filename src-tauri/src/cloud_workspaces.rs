@@ -14,7 +14,7 @@ use url::Url;
 use crate::account::{
     AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_PRESENCE, PHASE2_RESTART_DETAILS,
-    PHASE2_AFFECTED_WORKSPACES, PHASE2_GENERAL_ACCESS, PHASE2_PRECREATE_USAGE, PHASE2_WEBHOOK_TRIGGER, PHASE2_WORKSPACE_GROUPS,
+    PHASE2_ADMIN_SHARE, PHASE2_AFFECTED_WORKSPACES, PHASE2_GENERAL_ACCESS, PHASE2_PRECREATE_USAGE, PHASE2_WEBHOOK_TRIGGER, PHASE2_WORKSPACE_GROUPS,
 };
 
 const CONTRACT: &str = "providers-v1";
@@ -4249,6 +4249,16 @@ impl CloudWorkspaceService {
         }
         let risk = RequestRisk::Mutation;
         self.run_group_sharing(Some(org), context_revision, risk, |client, context| {
+            for change in &request.changes {
+                if let AccessChange::Put {
+                    subject: ShareSubject { kind: ShareSubjectType::User, .. },
+                    role: ShareRole::Manager,
+                    can_approve,
+                    ..
+                } = change {
+                    self.require_admin_share(context, *can_approve)?;
+                }
+            }
             let mut result: CloudAccessApplied = client.request(
                 context, &["cloud-workspaces", workspace_id, "shares", "apply"], None, Some(json!(request)), None, risk,
             ).map_err(|mut error| {
@@ -4282,32 +4292,37 @@ impl CloudWorkspaceService {
 
     /// Grant or change one member's share. Idempotent: the same body twice
     /// leaves one share.
-    pub fn share_put(
+    #[cfg(test)]
+    fn share_put(&self, org: Option<&str>, workspace_id: &str, user_id: &str, role: ShareRole, can_approve: bool) -> Result<CloudWorkspaceShareChange, CloudWorkspaceClientError> {
+        self.share_put_in_context(org, workspace_id, user_id, role, can_approve, None)
+    }
+
+    fn require_admin_share(&self, context: &AccountContext, can_approve: bool) -> Result<(), CloudWorkspaceClientError> {
+        if !can_approve {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_runtime_unsupported", false));
+        }
+        self.phase2_gate(PHASE2_ADMIN_SHARE, Some(&context.organization_id), Some(context), "cloud_workspace_runtime_not_ready")
+    }
+
+    pub fn share_put_in_context(
         &self,
         org: Option<&str>,
         workspace_id: &str,
         user_id: &str,
         role: ShareRole,
         can_approve: bool,
+        context_revision: Option<&str>,
     ) -> Result<CloudWorkspaceShareChange, CloudWorkspaceClientError> {
         if !valid_resource_id(workspace_id) || !valid_resource_id(user_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        // Native v1 cannot enforce a manager without approval. Never upgrade the
-        // requested boolean, downgrade the role or retry with a different body.
-        if role == ShareRole::Manager {
-            if !can_approve {
-                return Err(CloudWorkspaceClientError::local("cloud_workspace_runtime_unsupported", false));
-            }
-            #[cfg(test)]
-            let manager_ready = self.force_phase2_for_test;
-            #[cfg(not(test))]
-            let manager_ready = false;
-            if !manager_ready {
-                return Err(CloudWorkspaceClientError::local("cloud_workspace_runtime_not_ready", true));
-            }
+        if role == ShareRole::Manager && !can_approve {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_runtime_unsupported", false));
         }
-        self.run_share_in(org, None, RequestRisk::Mutation, |client, context| {
+        self.run_share_in(org, context_revision, RequestRisk::Mutation, |client, context| {
+            if role == ShareRole::Manager {
+                self.require_admin_share(context, can_approve)?;
+            }
             let result: CloudWorkspaceShareChange = client.request_as(
                 "PUT",
                 context,
@@ -8849,6 +8864,34 @@ mod tests {
             assert_eq!(captured.text.split_once("\r\n\r\n").unwrap().1, "");
             assert!(!captured.extra_request);
         }
+    }
+
+    #[test]
+    fn phase2_admin_grant_requires_target_readiness_and_the_original_context() {
+        let mut manager = share_json("user-2", "manager");
+        manager["canApprove"] = json!(true);
+        let body = json!({ "share": manager, "created": false });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], false);
+        account.apply_phase2_readiness_for_test(json!({
+            "version": 1, "organizations": { "org-2": { (PHASE2_ADMIN_SHARE): true } }
+        }));
+        let revision = AccountManager::context_revision(&context());
+        let held = service.share_put_in_context(
+            Some("org-1"), "workspace-1", "user-2", ShareRole::Manager, true, Some(&revision),
+        ).unwrap_err();
+        assert_eq!(held.code, "cloud_workspace_runtime_not_ready");
+        assert!(service.share_put_in_context(
+            Some("org-2"), "workspace-1", "user-2", ShareRole::Manager, true, Some("replaced"),
+        ).is_err());
+        assert_eq!(service.share_put_in_context(
+            Some("org-2"), "workspace-1", "user-2", ShareRole::Manager, true, Some(&revision),
+        ).unwrap().share.role, ShareRole::Manager);
+
+        let sent = request.join().unwrap().text;
+        assert!(sent.starts_with("PUT /v1/desktop/orgs/org-2/cloud-workspaces/workspace-1/shares/user-2 HTTP/"));
+        assert!(sent.contains(r#""canApprove":true"#));
     }
 
     #[test]

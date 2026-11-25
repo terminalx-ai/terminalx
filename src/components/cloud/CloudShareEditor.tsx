@@ -8,7 +8,7 @@ import { getAccount, useAccount } from "@/lib/account";
 import { api, type CloudShareRole, type CloudWorkspaceGeneralAccess, type CloudWorkspaceShares } from "@/lib/api";
 import { notifyAccessChanged, VISIBILITY_ADMIN_REASON } from "@/lib/cloudCollab";
 import { buildShareRequest, pendingShareEdits, rebaseShareEdits, replaceShareEdit, shareRowKey, shareRows, type ShareEdit, type ShareRow } from "@/lib/cloudShareDraft";
-import { alwaysHasAccess, codeOf, MANAGER_APPROVAL_REASON, OUTCOME_UNKNOWN, shareErrorMessage, shareRoleLabel, yourAccessText } from "@/lib/cloudShareLabels";
+import { ADMIN_SHARE_LABEL, alwaysHasAccess, codeOf, MANAGER_APPROVAL_REASON, OUTCOME_UNKNOWN, shareErrorMessage, shareRoleLabel, yourAccessText } from "@/lib/cloudShareLabels";
 import { loadRoster, loadRosterIn, rememberPeople } from "@/lib/cloudPeople";
 import { privacyEnabled } from "@/lib/dataPrivacy";
 import { featureFlags, useFeatureFlag } from "@/lib/featureFlags";
@@ -125,6 +125,8 @@ export function CloudShareEditor({
     }));
   const manage = listed?.you.canManageShares ?? false;
   const canChangeVisibility = listed?.you.role === "manager" && manage;
+  const offerAdmin = canChangeVisibility && phase2Ready(status, orgId, "adminShare");
+  const canGrantAdmin = () => offerAdmin && phase2Ready(getAccount().status, orgId, "adminShare");
   const email = status.identity?.email;
   const self = members.find((member) => member.email === email);
   const creator = createdBy && self ? createdBy === self.userId : null;
@@ -145,7 +147,7 @@ export function CloudShareEditor({
   }, [showingLegacy]);
 
   const stage = (row: ShareRow, op?: ShareEdit["op"]) => {
-    if (!mayEdit || locked || !canRequest() || (op === "put" && row.role === "manager")) return;
+    if (!mayEdit || locked || !canRequest() || (op === "put" && row.role === "manager" && (row.subject.type !== "user" || !row.canApprove || !canGrantAdmin()))) return;
     setEdits((previous) => pendingShareEdits(base, replaceShareEdit(previous, row, op)));
     setFailures((previous) => previous.filter((failure) => failure.key !== shareRowKey(row)));
     setNotice(null);
@@ -227,6 +229,10 @@ export function CloudShareEditor({
 
   const apply = async (snapshot: RevisionedShares, batch: ShareAttempt, replay = false) => {
     if (!canRequest()) return;
+    if (batch.ordered.some(({ op, row }) => op === "put" && row.role === "manager" && !canGrantAdmin())) {
+      setError(shareErrorMessage({ code: "cloud_workspace_runtime_not_ready" }));
+      return;
+    }
     setNotice(null);
     try {
       const result = await api.cloudWorkspaceSharesApply(workspaceId, orgId, batch.request, contextRevision);
@@ -404,7 +410,8 @@ export function CloudShareEditor({
         </div>
         <DialogDescription>{privacy ? "Sharing is paused while data privacy mode is on."
           : paused ? "Workspace group sharing is paused until it is available again."
-          : "People with access see agent tabs, terminals, files and Git. Drivers can send to agents. Typing in terminals also needs permission approval."}</DialogDescription>
+          : "People with access see agent tabs, terminals, files and Git. Drivers can send to agents. Typing in terminals also needs permission approval."}
+          {!paused && offerAdmin && " Admin grants include permission approval."}</DialogDescription>
       </DialogHeader>
 
       {paused ? <div className="flex flex-col gap-2 text-xs">
@@ -460,11 +467,12 @@ export function CloudShareEditor({
                       <select className={select} aria-label={`Role for ${row.name}`} value={row.role} disabled={locked}
                         onChange={(e) => {
                           const role = e.target.value as CloudShareRole;
-                          stage({ ...row, role, canApprove: row.canApprove }, "put");
+                          stage({ ...row, role, canApprove: role === "manager" || row.canApprove }, "put");
                         }}>
                         <option value="viewer">Viewer</option>
                         <option value="driver">Driver</option>
-                        {row.role === "manager" && <option value="manager" disabled>Admin</option>}
+                        {offerAdmin && row.subject.type === "user" ? <option value="manager">{ADMIN_SHARE_LABEL}</option>
+                          : row.role === "manager" && <option value="manager" disabled>Admin</option>}
                       </select>
                       <label className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
                         <Switch size="sm" aria-label={`Can approve permissions: ${row.name}`} checked={row.canApprove}

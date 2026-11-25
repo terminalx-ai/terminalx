@@ -13,7 +13,7 @@ import { featureFlags, useFeatureFlag } from "@/lib/featureFlags";
 import { phase2Ready } from "@/lib/phase2Readiness";
 import type { OrganizationMember } from "@/lib/organizationMembers";
 import { MemberProfile } from "@/components/people/MemberProfile";
-import { alwaysHasAccess, codeOf, MANAGER_APPROVAL_REASON, OUTCOME_UNKNOWN, shareErrorMessage, shareRoleLabel, yourAccessText } from "@/lib/cloudShareLabels";
+import { ADMIN_SHARE_LABEL, alwaysHasAccess, codeOf, MANAGER_APPROVAL_REASON, OUTCOME_UNKNOWN, shareErrorMessage, shareRoleLabel, yourAccessText } from "@/lib/cloudShareLabels";
 import { CloudGeneralAccessControls } from "./CloudGeneralAccessControls";
 import { CloudShareEditor } from "./CloudShareEditor";
 
@@ -55,16 +55,17 @@ export function CloudShareDialog(props: ShareDialogProps) {
   const orgId = props.orgId ?? status.identity?.organizationId;
   const contextRevision = status.context?.revision;
   const generalReady = !!orgId && !!contextRevision && !privacy.enabled && phase2Ready(status, orgId, "generalAccess");
+  const adminReady = !!orgId && !!contextRevision && !privacy.enabled && phase2Ready(status, orgId, "adminShare");
   const accountScope = shareAccountScope(status);
   const [openedIn] = useState(accountScope);
-  const [generalUsed, setGeneralUsed] = useState(generalReady);
+  const [gatedUsed, setGatedUsed] = useState(generalReady || adminReady);
   const currentAccount = accountScope === openedIn;
-  const closed = (generalReady || generalUsed) && !currentAccount;
+  const closed = (generalReady || adminReady || gatedUsed) && !currentAccount;
   const { onClose } = props;
   useEffect(() => {
-    if (generalReady && currentAccount) setGeneralUsed(true);
+    if ((generalReady || adminReady) && currentAccount) setGatedUsed(true);
     if (closed) onClose();
-  }, [generalReady, currentAccount, closed, onClose]);
+  }, [generalReady, adminReady, currentAccount, closed, onClose]);
   const scope = editorScope(status, orgId);
   const isCurrentScope = useCallback(() => {
     const now = getAccount().status;
@@ -74,7 +75,7 @@ export function CloudShareDialog(props: ShareDialogProps) {
     !privacyEnabled() && !!orgId && isCurrentScope() && phase2Ready(getAccount().status, orgId, "workspaceGroups"),
   [orgId, isCurrentScope]);
   if (closed) return null;
-  const fallback = <LegacyCloudShareDialog {...props} status={status} generalReady={generalReady} />;
+  const fallback = <LegacyCloudShareDialog {...props} status={status} generalReady={generalReady} adminReady={adminReady} />;
   if (scope && orgId && contextRevision) {
     const organization = status.organizations?.find((item) => item.id === orgId);
     const organizationName = organization?.name ?? (orgId === status.identity?.organizationId ? status.identity?.organization : undefined);
@@ -110,7 +111,8 @@ function LegacyCloudShareDialog({
   onClose,
   status,
   generalReady,
-}: ShareDialogProps & { status: AccountStatus; generalReady: boolean }) {
+  adminReady,
+}: ShareDialogProps & { status: AccountStatus; generalReady: boolean; adminReady: boolean }) {
   // The default organization's roster comes with the account; another
   // organization's (every one is live, PRO-71) is read by its own id.
   const defaultOrg = !orgId || !status.identity?.organizationId || status.identity.organizationId === orgId;
@@ -183,6 +185,14 @@ function LegacyCloudShareDialog({
   }, [reload, loadMembers]);
 
   const manage = listed?.you.canManageShares ?? false;
+  const offerAdmin = adminReady && manage && listed?.you.role === "manager";
+  const canGrantAdmin = () => offerAdmin && !!org && isCurrentAccount() && !privacyEnabled()
+    && phase2Ready(getAccount().status, org, "adminShare");
+  const writeShare = (person: Pick<Person, "userId" | "role" | "canApprove">) => person.role === "manager"
+    ? canGrantAdmin()
+      ? api.cloudWorkspaceSharePut(workspaceId, person.userId, person.role, person.canApprove, orgId, contextRevision)
+      : Promise.reject({ code: "cloud_workspace_runtime_not_ready" })
+    : api.cloudWorkspaceSharePut(workspaceId, person.userId, person.role, person.canApprove, orgId);
   const generalAccess = generalReady && org && access === "organization"
     ? listed?.generalAccess : undefined;
   const everyoneLabel = `Everyone at ${status.organizations?.find((candidate) => candidate.id === org)?.name
@@ -271,7 +281,7 @@ function LegacyCloudShareDialog({
       setError(MANAGER_APPROVAL_REASON);
       return Promise.resolve(false);
     }
-    return change(`put:${share.userId}`, nameOf(share.userId), () => api.cloudWorkspaceSharePut(workspaceId, share.userId, share.role, share.canApprove, orgId), share.userId);
+    return change(`put:${share.userId}`, nameOf(share.userId), () => writeShare(share), share.userId);
   };
 
   const saveGeneralAccess = async () => {
@@ -314,7 +324,7 @@ function LegacyCloudShareDialog({
   /** Grant the share that a visibility change was made for; a refusal leaves the workspace visible but unshared, and says so. */
   const shareAfterVisible = async (person: Person) => {
     try {
-      await api.cloudWorkspaceSharePut(workspaceId, person.userId, person.role, person.canApprove, orgId);
+      await writeShare(person);
       setUnshared(null);
       setAdding({ userId: "", role: "viewer", canApprove: false });
     } catch (e) {
@@ -326,7 +336,7 @@ function LegacyCloudShareDialog({
   };
 
   const add = async () => {
-    if (!adding.userId) return;
+    if (!adding.userId || (adding.role === "manager" && !canGrantAdmin())) return;
     if (!isPrivate) {
       if (await put(adding)) setAdding({ userId: "", role: "viewer", canApprove: false });
       return;
@@ -403,6 +413,7 @@ function LegacyCloudShareDialog({
             {manages
               ? "People you share with see this workspace's agent tabs, terminals, files and Git. Drivers can also send to agents, and type in terminals if they can approve permissions."
               : `People with access to ${name} see its agent tabs, terminals, files and Git. Drivers can also send to agents, and type in terminals if they can approve permissions.`}
+            {offerAdmin && " Admin grants include permission approval."}
           </DialogDescription>
         </DialogHeader>
         {!listed && !loadError && <Loader2 className="size-4 animate-spin" />}
@@ -472,11 +483,15 @@ function LegacyCloudShareDialog({
                           className={select}
                           value={share.role}
                           disabled={busy !== null}
-                          onChange={(e) => void put({ ...share, role: e.target.value as CloudShareRole })}
+                          onChange={(e) => {
+                            const role = e.target.value as CloudShareRole;
+                            void put({ ...share, role, canApprove: role === "manager" || share.canApprove });
+                          }}
                         >
                           <option value="viewer">Viewer</option>
                           <option value="driver">Driver</option>
-                          {share.role === "manager" && <option value="manager" disabled>Admin</option>}
+                          {offerAdmin ? <option value="manager">{ADMIN_SHARE_LABEL}</option>
+                            : share.role === "manager" && <option value="manager" disabled>Admin</option>}
                         </select>
                         <label className="flex items-center gap-1.5 text-muted-foreground">
                           <Switch
@@ -541,23 +556,29 @@ function LegacyCloudShareDialog({
                   aria-label="New person's role"
                   className={select}
                   value={adding.role}
-                  onChange={(e) => setAdding((current) => ({ ...current, role: e.target.value as CloudShareRole }))}
+                  onChange={(e) => {
+                    const role = e.target.value as CloudShareRole;
+                    setAdding((current) => ({ ...current, role, canApprove: role === "manager" || current.canApprove }));
+                  }}
                 >
                   <option value="viewer">Viewer</option>
                   <option value="driver">Driver</option>
+                  {offerAdmin && <option value="manager">{ADMIN_SHARE_LABEL}</option>}
                 </select>
                 <label className="flex items-center gap-1.5 text-muted-foreground">
                   <Switch
                     size="sm"
                     aria-label="New person can approve permissions"
                     checked={adding.canApprove}
+                    disabled={adding.role === "manager"}
+                    title={adding.role === "manager" ? MANAGER_APPROVAL_REASON : undefined}
                     onCheckedChange={(checked) => setAdding((current) => ({ ...current, canApprove: checked }))}
                   />
                   Can approve permissions
                 </label>
                 <Button
                   size="sm"
-                  disabled={!adding.userId || busy !== null || confirming !== null || addBlocked}
+                  disabled={!adding.userId || busy !== null || confirming !== null || addBlocked || (adding.role === "manager" && !offerAdmin)}
                   title={addBlocked ? VISIBILITY_ADMIN_REASON : undefined}
                   aria-description={addBlocked ? VISIBILITY_ADMIN_REASON : undefined}
                   onClick={() => void add()}
