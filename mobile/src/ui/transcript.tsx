@@ -29,9 +29,9 @@ export function PermissionCard({ ask, connected, answering, error, onRespond }: 
     {agentNote ? <Text testID="permission-agent-note" selectable style={[styles.body, { color: palette.muted }]}><Text style={styles.agentLabel}>Agent: </Text>{linkedText(agentNote)}</Text>
       : ask.description ? <LinkedText style={[styles.body, { color: palette.muted }]}>{ask.description}</LinkedText> : null}
     {ask.input !== undefined ? <LinkedText style={[styles.monoSmall, { color: palette.muted }]}>{safeJson(ask.input)}</LinkedText> : null}
-    {options.length ? <View style={styles.permissionActions}>{options.map((option) => <Button key={option.id} label={option.label} kind={option.kind === "deny" ? "danger" : option.kind === "allow_once" ? "primary" : "secondary"} disabled={!connected || answering} onPress={() => onRespond(option.id)} style={styles.permissionAction} />)}</View> : <Text style={[styles.body, { color: palette.muted }]}>Answer this request from your Mac.</Text>}
+    {options.length ? <View style={styles.permissionActions}>{options.map((option) => <Button key={option.id} label={option.label} kind={option.kind === "deny" ? "danger" : option.kind === "allow_once" ? "primary" : "secondary"} disabled={!connected || answering} onPress={() => onRespond(option.id)} style={styles.permissionAction} />)}</View> : <Text style={[styles.body, { color: palette.muted }]}>Answer this request from your computer.</Text>}
     {!connected ? <Text style={[styles.permissionHint, { color: palette.warning }]}>Reconnect before answering.</Text> : null}
-    {error ? <LinkedText style={[styles.permissionHint, { color: palette.danger }]}>{`${error} The request may have lapsed; check your Mac.`}</LinkedText> : null}
+    {error ? <LinkedText style={[styles.permissionHint, { color: palette.danger }]}>{`${error} The request may have lapsed; check your computer.`}</LinkedText> : null}
   </Card>;
 }
 
@@ -157,7 +157,7 @@ function ReaderBubble({ text, ts, note, images, delivery }: { text: string; ts?:
 
 /** What took the reader's message: the paired Mac, or a cloud workspace, which has no Mac (PRO-570). */
 export type MessagePlace = "mac" | "workspace";
-const DELIVERED: Record<MessagePlace, string> = { mac: "Delivered to your Mac", workspace: "Delivered to the workspace" };
+const DELIVERED: Record<MessagePlace, string> = { mac: "Delivered to your computer", workspace: "Delivered to the workspace" };
 const DeliveredTo = createContext<MessagePlace>("mac");
 
 /** Where the reader's message is, in a word or a tick, beside its time. */

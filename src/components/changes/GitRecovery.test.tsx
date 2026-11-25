@@ -290,3 +290,17 @@ describe("PR load failures by cause", () => {
     expect(screen.queryByText("GitHub access required")).toBeNull();
   });
 });
+
+describe("a git read that failed for any other reason (3.6)", () => {
+  afterEach(cleanup);
+  it("offers Retry when the panel can read again, and only then", async () => {
+    const { GitError } = await import("./GitRecovery");
+    const retry = vi.fn();
+    const view = render(<GitError details="fatal: not a git repository" onRetry={retry} />);
+    expect(screen.getByText("Could not complete Git operation")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retry).toHaveBeenCalledTimes(1);
+    view.rerender(<GitError details="fatal: not a git repository" />);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+});

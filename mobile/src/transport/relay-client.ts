@@ -74,7 +74,7 @@ export const PAIRING_APPROVAL_WAIT_MS = 150_000;
  */
 export class PairingNotApprovedError extends Error {
   constructor(readonly reason: string) {
-    super("The Mac did not approve this pairing, or the request timed out");
+    super("The computer did not approve this pairing, or the request timed out");
     this.name = "PairingNotApprovedError";
   }
 }
@@ -260,7 +260,7 @@ export class RelayClient {
         // The Mac answers at once when it does not gate (an older Mac, an approved device); otherwise it waits for the person.
         if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
         // No answer at all is not a refusal: the Mac answers a timeout with `pairing_refused` itself.
-        this.handshakeTimer = setTimeout(() => this.fail(new Error("The Mac did not answer the pairing request in time")), approval.timeoutMs ?? PAIRING_APPROVAL_WAIT_MS);
+        this.handshakeTimer = setTimeout(() => this.fail(new Error("The computer did not answer the pairing request in time")), approval.timeoutMs ?? PAIRING_APPROVAL_WAIT_MS);
         approval.onWaiting?.();
       }
       return;

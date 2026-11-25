@@ -115,5 +115,5 @@ name: Large text
     element: "Start conversation"
 - tapOn: "Start conversation"
 - extendedWaitUntil: { visible: "Delivered to the workspace", timeout: 30000 }
-- assertNotVisible: "Delivered to your Mac"
+- assertNotVisible: "Delivered to your computer"
 - takeScreenshot: large-text-11-cloud-conversation

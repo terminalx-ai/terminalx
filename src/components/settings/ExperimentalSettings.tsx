@@ -21,6 +21,21 @@ export function ExperimentalTab() {
   const [openCode, setOpenCode] = useState<boolean | null>(null);
   const [bots, setBots] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [unsupported, setUnsupported] = useState<{ localVmTasks?: string; bots?: string }>({});
+
+  // What cannot be on here, as the runtime says: Bots on Windows, Local VM
+  // tasks off a Mac with Apple silicon. An older runtime cannot say: Windows
+  // is known to have neither.
+  useEffect(() => {
+    let live = true;
+    Promise.resolve()
+      .then(() => experimental.unsupported())
+      .then((reasons) => { if (live) setUnsupported(reasons ?? {}); })
+      .catch(() => {
+        if (live && familyNow() === "windows") setUnsupported({ localVmTasks: "Local VM tasks need a Mac with Apple silicon, or Linux.", bots: "Bots are not available on Windows yet." });
+      });
+    return () => { live = false; };
+  }, []);
 
   useEffect(() => {
     let live = true;
@@ -155,8 +170,8 @@ export function ExperimentalTab() {
     }
   };
 
-  // The runtime refuses both on Windows, so a switch here could only fail.
-  const windows = familyNow() === "windows";
+  const vmOff = unsupported.localVmTasks;
+  const botsOff = unsupported.bots;
 
   return (
     <div className="flex flex-col" data-testid="experimental-settings">
@@ -170,15 +185,15 @@ export function ExperimentalTab() {
         control={<Switch aria-label="Orchestration runs" checked={orchestratorRuns ?? false} disabled={orchestratorRuns === null} onCheckedChange={(on) => void changeRuns(on)} />}
       />
       <RegisteredSetting setting="experimental.localVmTasks"
-        control={<Switch aria-label="Local VM tasks" checked={!windows && (localVmTasks ?? false)} disabled={windows || localVmTasks === null} onCheckedChange={(on) => void changeLocalVmTasks(on)} />}
+        control={<Switch aria-label="Local VM tasks" checked={!vmOff && (localVmTasks ?? false)} disabled={!!vmOff || localVmTasks === null} onCheckedChange={(on) => void changeLocalVmTasks(on)} />}
       />
       <RegisteredSetting setting="experimental.opencode"
         control={<Switch aria-label="OpenCode" checked={openCode ?? false} disabled={openCode === null} onCheckedChange={(on) => void changeOpenCode(on)} />}
       />
       <RegisteredSetting setting="experimental.bots"
-        control={<Switch aria-label="Bots" checked={!windows && (bots ?? false)} disabled={windows || bots === null} onCheckedChange={(on) => void changeBots(on)} />}
+        control={<Switch aria-label="Bots" checked={!botsOff && (bots ?? false)} disabled={!!botsOff || bots === null} onCheckedChange={(on) => void changeBots(on)} />}
       />
-      {windows && <p data-testid="experimental-windows-note" className="pb-2 text-xs text-muted-foreground">Local VM tasks and Bots are not available on Windows yet.</p>}
+      {(vmOff || botsOff) && <p data-testid="experimental-unsupported-note" className="pb-2 text-xs text-muted-foreground">{[vmOff, botsOff].filter(Boolean).join(" ")}</p>}
       {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}
     </div>
   );

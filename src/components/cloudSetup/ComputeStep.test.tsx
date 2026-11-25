@@ -1,5 +1,9 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// These cover the forms as a Mac runs them, where the secure system dialog exists.
+const platform = vi.hoisted(() => ({ secureDialog: true }));
+vi.mock("@/lib/platform", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/platform")>()), get hasSecureDialog() { return platform.secureDialog; } }));
 import { api, type CloudProviderConnection, type CloudProviderSummary, type CloudWorkspaceSetup, type OrganizationSummary } from "@/lib/api";
 import { newSetup } from "@/lib/organizationSetup";
 import { describedAs } from "@/test/cloudProviderDescriptors";
@@ -217,5 +221,22 @@ describe("a provider the organization connects", () => {
     vi.mocked(api.cloudProviderConnect).mockResolvedValue(connection("hetzner"));
     fireEvent.click(button);
     await waitFor(() => expect(api.cloudProviderConnect).toHaveBeenCalledWith("hetzner", expect.objectContaining({ contextRevision: "rev-1" })));
+  });
+});
+
+describe("a provider key on a computer with no secure system dialog", () => {
+  it("keeps Connect off and says where to enter the key", async () => {
+    platform.secureDialog = false;
+    try {
+      listed = [summary("hetzner", { availability: "not-connected", descriptor: describedAs("hetzner") })];
+      vi.mocked(api.cloudProvider).mockImplementation(async (provider) => connection(provider, { state: "not-connected", credentialFingerprint: null, connectedAt: null, lastValidatedAt: null }));
+      mount();
+      const connect = await screen.findByTestId("cloud-setup-provider-connect");
+      expect(within(connect).getByRole("note").textContent).toContain("macOS only");
+      fireEvent.click(within(connect).getByRole("checkbox"));
+      expect((within(connect).getByRole("button", { name: "Connect Hetzner Cloud" }) as HTMLButtonElement).disabled).toBe(true);
+    } finally {
+      platform.secureDialog = true;
+    }
   });
 });

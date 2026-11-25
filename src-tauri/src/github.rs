@@ -14,8 +14,18 @@ use serde_json::Value;
 
 pub mod checks;
 
+/// What a reader is told when `gh` is missing, with the GitHub CLI's own install
+/// command for this system where its docs give one (Linux has a package per
+/// distribution: its site).
+#[cfg(target_os = "macos")]
+pub const GH_MISSING: &str = "GitHub CLI (gh) is not installed or not on PATH. Install it with brew install gh.";
+#[cfg(windows)]
+pub const GH_MISSING: &str = "GitHub CLI (gh) is not installed or not on PATH. Install it with winget install --id GitHub.cli --source winget.";
+#[cfg(not(any(target_os = "macos", windows)))]
+pub const GH_MISSING: &str = "GitHub CLI (gh) is not installed or not on PATH. Install it from cli.github.com.";
+
 fn gh() -> Result<Command> {
-    let p = crate::binpath::resolve("gh").ok_or_else(|| anyhow!("GitHub CLI (gh) is not installed or not on PATH."))?;
+    let p = crate::binpath::resolve("gh").ok_or_else(|| anyhow!(GH_MISSING))?;
     let mut c = Command::new(p);
     c.env("PATH", crate::binpath::login_path());
     c.env("GH_PROMPT_DISABLED", "1");

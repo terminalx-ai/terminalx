@@ -195,7 +195,7 @@ export async function followSessionLink(sessionId: string): Promise<boolean> {
   await whenSessionsLoaded();
   const session = getSessionStore().sessions.find((candidate) => candidate.id === sessionId);
   if (!session) {
-    showError("It may have been deleted, or the link is from another Mac", undefined, { title: "No session matches that link", key: "session-link", tone: "warning", icon: "link-off", copy: false });
+    showError("It may have been deleted, or the link is from another computer", undefined, { title: "No session matches that link", key: "session-link", tone: "warning", icon: "link-off", copy: false });
     return false;
   }
   if (getSessionStore().selectedSessionId !== session.id) selectSession(session.id);

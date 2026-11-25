@@ -192,7 +192,7 @@ export function MachineAwayCard({ machine, state }: { machine: PairedMachine; st
   const Icon = removed ? ShieldX : WifiOff;
   const title = removed ? `${machine.name} no longer allows ${thisComputer}` : `${machine.name} isn’t reachable`;
   const detail = removed
-    ? "It was revoked on that Mac. Sessions there keep running; pair again to see them here."
+    ? `It was revoked on ${machine.name}. Sessions there keep running; pair again to see them here.`
     : [seen ? lastSeenSentence(seen) : null, "Sessions there keep running, and this list catches up when it reconnects."].filter(Boolean).join(" ");
   const settings = (
     <Button size="sm" variant="outline" onClick={() => selectCloudWorkspace(machineSectionKey(machine.machineId))}>

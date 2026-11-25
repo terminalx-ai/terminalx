@@ -620,3 +620,16 @@ describe("CloudCreateWorkspace launch settings", () => {
     expect((await createdLaunch()).mode).toBe("bypassPermissions");
   });
 });
+
+describe("CloudCreateWorkspace providers that fail to load (3.7)", () => {
+  it("says cloud workspaces are unavailable, and reads the providers again on Try again", async () => {
+    mocked.cloudProviders.mockRejectedValueOnce({ code: "cloud_unreachable" });
+    render(<CloudCreateWorkspace organizationId="org-1" onOpen={vi.fn()} />);
+    const alert = (await screen.findByText(/Cloud workspaces are unavailable/)).closest("[role=alert]") as HTMLElement;
+    expect(alert.textContent).toContain("cloud_unreachable");
+    const before = mocked.cloudProviders.mock.calls.length;
+    fireEvent.click(within(alert).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(mocked.cloudProviders.mock.calls.length).toBeGreaterThan(before));
+    await waitFor(() => expect(screen.queryByText(/Cloud workspaces are unavailable/)).toBeNull());
+  });
+});

@@ -67,7 +67,7 @@ describe("statusLineState, from the transcript's events", () => {
     expect(read(stateOf(events))).toEqual({ label: "Done", detail: messageTime(ago(1), "en-US", "UTC")!.short });
   });
 
-  it("says Stopped, with the reason the Mac gave or else when", () => {
+  it("says Stopped, with the reason the computer gave or else when", () => {
     const stopped = [prompt("Run the suite", ago(6)), started(ago(6)), ended("aborted", ago(2))];
     expect(stateOf(stopped)).toEqual({ kind: "stopped", reason: null, at: ago(2) });
     expect(read(stateOf(stopped))).toEqual({ label: "Stopped", detail: messageTime(ago(2), "en-US", "UTC")!.short });
@@ -87,11 +87,11 @@ describe("statusLineState, from the transcript's events", () => {
   });
 
   it("says Failed when the agent's launch was refused, with no turn end", () => {
-    const events = [prompt("Start", ago(2)), ev({ type: "error", message: "Codex is not installed on this Mac.", fatal: true }, ago(1))];
-    expect(read(stateOf(events))).toEqual({ label: "Failed", detail: "Codex is not installed on this Mac." });
+    const events = [prompt("Start", ago(2)), ev({ type: "error", message: "Codex is not installed on this computer.", fatal: true }, ago(1))];
+    expect(read(stateOf(events))).toEqual({ label: "Failed", detail: "Codex is not installed on this computer." });
   });
 
-  it("falls back to the Mac's tab status where the transcript says nothing", () => {
+  it("falls back to the computer's tab status where the transcript says nothing", () => {
     expect(stateOf([], "in_progress")).toEqual({ kind: "working" });
     expect(read(stateOf([], "waiting"))).toEqual({ label: "Needs you", detail: null });
     expect(stateOf([], "idle")).toBeNull();
@@ -155,7 +155,7 @@ describe("StatusLine", () => {
     expect(container.textContent).toContain("Needs your answer · 1 min");
   });
 
-  it("offers Stop only while a turn is open, only when the Mac takes it, and not twice", async () => {
+  it("offers Stop only while a turn is open, only when the computer takes it, and not twice", async () => {
     await render(<StatusLine state={{ kind: "working", since: NOW }} />);
     expect(stop()).toBeUndefined();
     await render(<StatusLine state={{ kind: "working", since: NOW }} onStop={() => undefined} stopping />);

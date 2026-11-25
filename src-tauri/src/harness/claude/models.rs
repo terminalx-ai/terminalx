@@ -41,7 +41,12 @@ const FRESH_FOR: Duration = Duration::from_secs(900);
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 
 struct Reading {
+    /// When this was last asked for, answered or not: what the next ask waits on.
     at: Instant,
+    /// When the CLI gave `models`; `None` for the stand-in.
+    answered: Option<Instant>,
+    /// The CLI that gave `models`, home shortened to `~`.
+    program: Option<String>,
     /// False when the CLI could not be asked and `models` is a stand-in.
     ok: bool,
     /// Whether `models` is the CLI's own answer (possibly an older one).
@@ -50,6 +55,8 @@ struct Reading {
 }
 
 type Probe = Box<dyn Fn() -> Result<Value> + Send + Sync>;
+/// The CLI a probe runs, as a sentence names it.
+type Locate = Box<dyn Fn() -> Option<String> + Send + Sync>;
 
 /// The process-lifetime cache, with the question it asks injected so the
 /// caching can be tested without a CLI.
@@ -58,13 +65,14 @@ pub struct Cache {
     /// Held across a read, so two askers share one child.
     reading_now: Mutex<()>,
     probe: Probe,
+    locate: Locate,
     fresh_for: Duration,
     retry_after: Duration,
 }
 
 impl Cache {
     fn new(probe: Probe) -> Self {
-        Self { reading: Mutex::new(None), reading_now: Mutex::new(()), probe, fresh_for: FRESH_FOR, retry_after: RETRY_AFTER }
+        Self { reading: Mutex::new(None), reading_now: Mutex::new(()), probe, locate: Box::new(|| None), fresh_for: FRESH_FOR, retry_after: RETRY_AFTER }
     }
 
     /// The cached models, unless it is time to ask again.
@@ -88,9 +96,10 @@ impl Cache {
         }
         // The cache lock is not held across the read: it spawns a child and waits.
         let read = (self.probe)().map(|reply| parse(&reply));
+        let program = read.is_ok().then(|| (self.locate)()).flatten();
         let mut reading = self.reading.lock().unwrap();
         let next = match read {
-            Ok(models) if !models.is_empty() => Reading { at: Instant::now(), ok: true, listed: true, models },
+            Ok(models) if !models.is_empty() => Reading { at: Instant::now(), answered: Some(Instant::now()), program, ok: true, listed: true, models },
             failed => {
                 match &failed {
                     Err(e) => log::warn!("could not read the Claude model list ({e:#})"),
@@ -99,13 +108,31 @@ impl Cache {
                 // An older real answer beats the stand-in; either way, ask again soon.
                 match reading.take().filter(|r| r.listed) {
                     Some(last) => Reading { at: Instant::now(), ok: false, ..last },
-                    None => Reading { at: Instant::now(), ok: false, listed: false, models: claude_fallback() },
+                    None => Reading { at: Instant::now(), answered: None, program: None, ok: false, listed: false, models: claude_fallback() },
                 }
             }
         };
         let models = next.models.clone();
         *reading = Some(next);
         models
+    }
+
+    /// Which list [`Cache::get`] answers with now, as a sentence ends with it:
+    /// a list the CLI gave and how long ago, or the built-in one (#1533).
+    pub fn read_from(&self) -> String {
+        let reading = self.reading.lock().unwrap();
+        match reading.as_ref() {
+            Some(Reading { answered: Some(answered), program, ok, .. }) => {
+                let ago = ago(answered.elapsed());
+                let cli = program.as_deref().map(|program| format!(" ({program})")).unwrap_or_default();
+                match ok {
+                    true => format!("the list Claude Code{cli} gave {ago}"),
+                    false => format!("the list Claude Code{cli} gave {ago}, since asking it again failed"),
+                }
+            }
+            Some(_) => "the built-in list, since Claude Code could not be asked for its own".into(),
+            None => "no list: Claude Code was not asked yet".into(),
+        }
     }
 
     /// Enforce only the CLI's own answer, never the built-in stand-in. An
@@ -130,12 +157,31 @@ impl Cache {
 /// answers with the built-in list.
 fn shared() -> &'static Cache {
     static C: OnceLock<Cache> = OnceLock::new();
-    C.get_or_init(|| Cache::new(if cfg!(test) { Box::new(|| Err(anyhow::anyhow!("tests do not run the CLI"))) } else { Box::new(ask) }))
+    C.get_or_init(|| match cfg!(test) {
+        true => Cache::new(Box::new(|| Err(anyhow::anyhow!("tests do not run the CLI")))),
+        false => Cache { locate: Box::new(program), ..Cache::new(Box::new(ask)) },
+    })
 }
 
 /// See `Cache::get`.
 pub fn get(refresh: bool) -> Vec<Model> {
     shared().get(refresh)
+}
+
+/// See `Cache::read_from`.
+pub fn read_from() -> String {
+    shared().read_from()
+}
+
+/// How long ago, in a sentence: `just now`, `4 minutes ago`, `2 hours ago`.
+fn ago(elapsed: Duration) -> String {
+    let minutes = elapsed.as_secs() / 60;
+    let (count, unit) = match minutes {
+        0 => return "just now".into(),
+        1..=119 => (minutes, "minute"),
+        _ => (minutes / 60, "hour"),
+    };
+    format!("{count} {unit}{} ago", if count == 1 { "" } else { "s" })
 }
 
 /// The models as last read, without asking the CLI again: for callers that
@@ -174,6 +220,17 @@ pub(crate) fn with_test_models<T>(reply: Value, run: impl FnOnce() -> T) -> T {
     TEST_MODELS.with(|cache| *cache.borrow_mut() = Some(Cache::new(Box::new(move || Ok(reply.clone())))));
     let _reset = Reset;
     run()
+}
+
+/// The CLI [`ask`] runs, home shortened to `~`: a list read off another
+/// install than the sessions run can be told from its name (#1533).
+fn program() -> Option<String> {
+    let path = crate::binpath::resolve("claude")?;
+    let shown = match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok().map(|rest| rest.display().to_string())) {
+        Some(rest) => format!("~/{rest}"),
+        None => path.display().to_string(),
+    };
+    Some(shown)
 }
 
 /// Asked from the home directory: the list depends on the account, not on a
@@ -456,6 +513,23 @@ mod tests {
         assert_eq!(opus_runs(&cache.get(false)), Some("claude-opus-5-5"));
         assert_eq!(opus_runs(&cache.get(false)), Some("claude-opus-6"));
         assert_eq!(reads.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn a_reading_says_which_list_it_is_and_how_old() {
+        let (mut cache, _) = scripted(vec![Err("no claude on PATH"), Ok(reply("claude-opus-5-5")), Err("hung")]);
+        cache.locate = Box::new(|| Some("~/.local/bin/claude".into()));
+        cache.retry_after = Duration::ZERO;
+        cache.fresh_for = Duration::ZERO;
+        assert_eq!(cache.read_from(), "no list: Claude Code was not asked yet");
+        cache.get(false);
+        assert_eq!(cache.read_from(), "the built-in list, since Claude Code could not be asked for its own");
+        cache.get(false);
+        assert_eq!(cache.read_from(), "the list Claude Code (~/.local/bin/claude) gave just now");
+        // A failed refresh keeps the answer, and says it could not be read again.
+        cache.get(true);
+        assert_eq!(cache.read_from(), "the list Claude Code (~/.local/bin/claude) gave just now, since asking it again failed");
+        assert_eq!([ago(Duration::from_secs(59)), ago(Duration::from_secs(60)), ago(Duration::from_secs(45 * 60)), ago(Duration::from_secs(3 * 3600 + 5))], ["just now", "1 minute ago", "45 minutes ago", "3 hours ago"]);
     }
 
     #[test]

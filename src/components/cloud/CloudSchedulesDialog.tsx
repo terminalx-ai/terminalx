@@ -215,8 +215,9 @@ function ScopedSchedulesDialog({ orgId, workspaceId, name, onClose }: SchedulesT
           {webhookAvailable && createdSecret && <WebhookSecretDialog secret={createdSecret} onClose={() => setCreatedSecret(null)} />}
           {!schedules && !loadError && <Loader2 className="size-4 animate-spin" />}
           {loadError && (
-            <p className="text-destructive" data-testid="cloud-schedules-load-error">
-              Could not load the scheduled tasks. {loadError}
+            <p role="alert" className="text-destructive" data-testid="cloud-schedules-load-error">
+              Could not load the scheduled tasks. {loadError}{" "}
+              <Button size="xs" variant="outline" onClick={() => void reload()}>Try again</Button>
             </p>
           )}
           {schedules && schedules.length === 0 && !creating && <p className="text-muted-foreground">This workspace has no scheduled tasks.</p>}

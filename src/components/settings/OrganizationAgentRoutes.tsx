@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { thisComputer } from "@/lib/platform";
+import { hasSecureDialog, SECURE_DIALOG_OFF, thisComputer } from "@/lib/platform";
 import { Loader2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, type AgentRoute, type AgentRouteAgent, type AgentRouteCheckResult, type AgentRoutes, type AgentRouteSettings, type AgentRouteTemplate } from "@/lib/api";
@@ -397,8 +397,9 @@ function RouteEditor({
           labeled user managed until a workspace runs it and the endpoint accepts its credential.
         </p>
       )}
+      {entering && !hasSecureDialog && <p role="note" className="text-warning">{SECURE_DIALOG_OFF}</p>}
       <div className="flex gap-1.5">
-        <Button size="xs" disabled={busy || invalid} onClick={() => onSave(template)} data-testid="agent-route-save">
+        <Button size="xs" disabled={busy || invalid || (entering && !hasSecureDialog)} onClick={() => onSave(template)} data-testid="agent-route-save">
           {busy && <Loader2 className="animate-spin" />}
           {entering ? "Enter credential and save" : "Save"}
         </Button>

@@ -188,7 +188,7 @@ it.each([
 });
 
 // PRO-314 (docs/PAIRING-APPROVAL.md): the Mac holds a QR pairing until the person approves it.
-describe("approval on the Mac", () => {
+describe("approval on the computer", () => {
   const device = { label: "iPhone", platform: "ios" as const };
   const progressOf = async (offer: PairingOffer) => {
     const progress: unknown[] = [];
@@ -205,7 +205,7 @@ describe("approval on the Mac", () => {
     expect(await readHosts()).toEqual([result]);
   });
 
-  it("reports the Mac's refusal as not approved and drops the unrecoverable journal", async () => {
+  it("reports the computer's refusal as not approved and drops the unrecoverable journal", async () => {
     state.relay = true; state.direct = true; state.approval = "decline";
     const { result } = await progressOf(parsePairingCode(btoa(JSON.stringify(freshOffer())))!);
     expect(result).toMatchObject({ stage: "approval", category: "not-approved" });
@@ -223,7 +223,7 @@ describe("approval on the Mac", () => {
     expect(await readPairingJournal()).not.toBeNull();
   });
 
-  it("keeps the journal when a recovery attempt is closed while waiting, since the Mac may have committed it", async () => {
+  it("keeps the journal when a recovery attempt is closed while waiting, since the computer may have committed it", async () => {
     state.relay = false; state.direct = false;
     await expect(pair(parsePairingCode(btoa(JSON.stringify(freshOffer())))!)).rejects.toMatchObject({ category: "connection-failed" });
     const journal = await readPairingJournal();
@@ -242,13 +242,13 @@ describe("approval on the Mac", () => {
     expect(await readPairingJournal()).toBeNull();
   });
 
-  it("prefers the Mac's refusal to another path's network failure", async () => {
+  it("prefers the computer's refusal to another path's network failure", async () => {
     state.relay = true; state.direct = false; state.approval = "decline"; state.slowFailure = true;
     const { result } = await progressOf(parsePairingCode(btoa(JSON.stringify(freshOffer())))!);
     expect(result).toMatchObject({ category: "not-approved" });
   });
 
-  it.each(["refuse", "fail", "accept"] as const)("tells the Mac the phone's name, and pairs whether it can %s it", async (answer) => {
+  it.each(["refuse", "fail", "accept"] as const)("tells the computer the phone's name, and pairs whether it can %s it", async (answer) => {
     state.relay = true; state.describe = answer;
     const { result } = await progressOf(parsePairingCode(btoa(JSON.stringify(freshOffer())))!);
     expect(await readHosts()).toEqual([result]);

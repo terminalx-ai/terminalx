@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { homeShort, useHome } from "@/lib/homePath";
+import { ghInstallCommand } from "@/lib/ghInstall";
 import type { LucideIcon } from "lucide-react";
 import { Atom, Bot, Check, File, Folder, FolderGit2, GitBranch, Loader2, Lock, Zap } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -268,7 +269,7 @@ function GithubProjectDialog() {
               </div>
               <p className="mt-1 text-muted-foreground">
                 {repositories.status === "missing" ? (
-                  <>Install <code className="font-mono">gh</code> to pick from a list of your repositories. </>
+                  <>{ghInstallCommand() ? <>Install it with <code className="font-mono">{ghInstallCommand()}</code></> : <>Install <code className="font-mono">gh</code> from cli.github.com</>} to pick from a list of your repositories. </>
                 ) : repositories.status === "signed-out" ? (
                   <>Run <code className="font-mono">gh auth login</code> in a terminal to pick from a list of your repositories. </>
                 ) : (

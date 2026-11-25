@@ -1,5 +1,5 @@
 import { useSettingsFile } from "@/lib/settingsFile";
-import { thisComputer } from "@/lib/platform";
+import { isMac, thisComputer } from "@/lib/platform";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
@@ -11,7 +11,7 @@ import { TranscriptionInputPicker } from "@/components/chat/TranscriptionInputPi
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import { errorMessage, transcription, type DownloadProgress, type TranscriptionModel, type TranscriptionPreferences } from "@/lib/api";
-import { refreshDictationEngine } from "@/lib/dictation";
+import { dictationAvailable, refreshDictationEngine } from "@/lib/dictation";
 
 import { TranscriptionPersonalization } from "./TranscriptionPersonalization";
 
@@ -45,7 +45,14 @@ export function TranscriptionTab() {
   const [settings, setSettings] = useState<TranscriptionPreferences | null>(null);
   const [progress, setProgress] = useState<Record<string, DownloadProgress>>({});
   const [error, setError] = useState<string | null>(null);
+  const [available, setAvailable] = useState<boolean | null>(null);
   const request = useRef(0);
+
+  useEffect(() => {
+    let live = true;
+    void dictationAvailable().then((ok) => { if (live) setAvailable(ok); });
+    return () => { live = false; };
+  }, []);
 
   const reload = useCallback(async () => {
     const current = ++request.current;
@@ -125,6 +132,9 @@ export function TranscriptionTab() {
 
   return (
     <div className="flex flex-col gap-5">
+      {available === false && <p role="note" data-testid="dictation-unavailable" className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">{isMac ? `Dictation is not available on ${thisComputer}.` : "Dictation is available on macOS only. These settings take effect there."}</p>}
+      {/* Off where dictation cannot run: the settings stay readable, and nothing here downloads or records. */}
+      <fieldset disabled={available === false} className="contents">
       <div>
         <div className="text-sm font-medium">Model</div>
         <p className="mt-0.5 text-xs text-muted-foreground">Transcription runs on {thisComputer}. Audio never leaves it.</p>
@@ -226,6 +236,7 @@ export function TranscriptionTab() {
         />
       </div>
       <TranscriptionPersonalization />
+      </fieldset>
     </div>
   );
 }

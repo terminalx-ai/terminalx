@@ -14,7 +14,7 @@ export function PrivacyEmptyState() {
 const TURNED_OFF: readonly { label: string; detail: string }[] = [
   { label: "Cloud workspaces", detail: "organisation sections in the sidebar, sharing, previews and the cloud desktop" },
   { label: "Organisations", detail: "their pages, members and the work status teammates see" },
-  { label: "Remote control and pairing", detail: "phones and other Macs that control this one" },
+  { label: "Remote control and pairing", detail: "phones and other computers that control this one" },
   { label: "MCP servers from organisation config", detail: "servers an organisation adds to your agents" },
   { label: "External logging", detail: `error reports sent from ${thisComputer}` },
 ];

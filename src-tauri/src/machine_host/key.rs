@@ -153,7 +153,7 @@ impl KeyStore {
 
     fn read(&self) -> Result<Option<[u8; 32]>> {
         let bytes = match &self.location {
-            Location::Keychain { service } => self.secrets.get(service, ACCOUNT).context("read the machine host key from the Keychain")?,
+            Location::Keychain { service } => self.secrets.get(service, ACCOUNT).with_context(|| crate::platform_profile::localize("read the machine host key from the Keychain"))?,
             Location::File { path } => match std::fs::read(path) {
                 Ok(bytes) => {
                     let file: KeyFile = serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
@@ -173,7 +173,7 @@ impl KeyStore {
 
     fn write(&self, secret: &[u8; 32]) -> Result<()> {
         match &self.location {
-            Location::Keychain { service } => self.secrets.set(service, ACCOUNT, secret).context("keep the machine host key in the Keychain"),
+            Location::Keychain { service } => self.secrets.set(service, ACCOUNT, secret).with_context(|| crate::platform_profile::localize("keep the machine host key in the Keychain")),
             Location::File { path } => {
                 super::private_dir(path.parent().ok_or_else(|| anyhow!("host key path has no parent"))?)?;
                 let file = KeyFile { v: 1, secret_b64: STANDARD.encode(secret) };

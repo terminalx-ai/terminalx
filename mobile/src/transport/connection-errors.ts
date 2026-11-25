@@ -104,13 +104,13 @@ export function screenMessage(cause: unknown, fallback: string): string {
 }
 
 const text: Record<ConnectionProblem, string> = {
-  "pairing-invalid": "this phone is no longer paired with your Mac; pair it again from Machines",
-  "mac-offline": "your Mac is offline",
-  dropped: "the connection to your Mac dropped",
-  reconnecting: "the phone is reconnecting to your Mac",
-  network: "a network problem interrupted the connection to your Mac",
-  "too-large": "a message too large for Relay dropped the connection to your Mac",
-  "no-answer": "your Mac didn't answer in time",
+  "pairing-invalid": "this phone is no longer paired with your computer; pair it again from Machines",
+  "mac-offline": "your computer is offline",
+  dropped: "the connection to your computer dropped",
+  reconnecting: "the phone is reconnecting to your computer",
+  network: "a network problem interrupted the connection to your computer",
+  "too-large": "a message too large for Relay dropped the connection to your computer",
+  "no-answer": "your computer didn't answer in time",
 };
 
 /** A clause in plain words, to follow "Not sent:" or to start a sentence. */

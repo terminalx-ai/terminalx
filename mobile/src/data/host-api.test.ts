@@ -201,7 +201,7 @@ describe("a draft's id (#675)", () => {
     }
   });
 
-  it("asks what the Mac understands once per connection", async () => {
+  it("asks what the computer understands once per connection", async () => {
     const request = mac({ ok: true, value: { sendIds: 1 } });
     const api = hostApi(request);
     await api.sendSession("tab-1", "one", [], "draft-1");
@@ -214,7 +214,7 @@ describe("a draft's id (#675)", () => {
   });
 
   // #730: an update replaces the Mac's runtime while the phone stays connected.
-  it("asks again, and tells whoever shows a feature, when the Mac says its runtime changed or after a reconnect", async () => {
+  it("asks again, and tells whoever shows a feature, when the computer says its runtime changed or after a reconnect", async () => {
     let event: (value: { method: string; params?: unknown }) => void = () => {};
     const request = vi.fn()
       .mockResolvedValueOnce({ ok: true, value: { transcript: 1 } })
@@ -239,7 +239,7 @@ describe("a draft's id (#675)", () => {
     expect(request.mock.calls.filter(([method]) => method === "sync.capabilities")).toHaveLength(3);
   });
 
-  it("sends a draft's id only once the Mac's runtime takes it", async () => {
+  it("sends a draft's id only once the computer's runtime takes it", async () => {
     let event: (value: { method: string }) => void = () => {};
     const request = vi.fn(async (method: string, _params?: unknown) => method === "sync.capabilities"
       ? { ok: true, value: request.mock.calls.filter(([called]) => called === "sync.capabilities").length > 1 ? { sendIds: 1 } : {} }
@@ -332,7 +332,7 @@ describe("conditional lists", () => {
 });
 
 describe("the terminal view's requests", () => {
-  it("opens a tab's terminal on the Mac, and says why when it cannot", async () => {
+  it("opens a tab's terminal on the computer, and says why when it cannot", async () => {
     const request = vi.fn().mockResolvedValueOnce({ ok: true, value: { opened: true } })
       .mockResolvedValueOnce({ ok: false, refusal: { code: "unavailable", message: "Wait for Codex to finish this turn, or interrupt it, before opening its terminal." } });
     const api = hostApi(request);
@@ -341,7 +341,7 @@ describe("the terminal view's requests", () => {
     await expect(api.openTerminal("worktree", "tab")).resolves.toEqual({ opened: false, message: "Wait for Codex to finish this turn, or interrupt it, before opening its terminal." });
   });
 
-  it("passes the Mac's reason when typing is refused", async () => {
+  it("passes the computer's reason when typing is refused", async () => {
     const request = vi.fn().mockResolvedValueOnce({ ok: true, value: { accepted: true } })
       .mockResolvedValueOnce({ ok: false, refusal: { code: "unavailable", message: "Another mobile client or terminal instance owns this driver lease." } });
     const api = hostApi(request);
@@ -350,7 +350,7 @@ describe("the terminal view's requests", () => {
     await expect(api.queueInput("worktree", "tab", "x")).resolves.toEqual({ accepted: false, message: "Another mobile client or terminal instance owns this driver lease." });
   });
 
-  it("hands on the pane's size and the Mac ending the view, and drops a size that is not one", () => {
+  it("hands on the pane's size and the computer ending the view, and drops a size that is not one", () => {
     let deliver: (value: unknown) => void = () => {};
     const subscribe = vi.fn((_method: string, _params: unknown, listener: (value: unknown) => void) => { deliver = listener; return () => {}; });
     const api = new HostApi({ request: vi.fn(), subscribe, onEvent: () => () => {} } as unknown as HostConnection);
@@ -381,7 +381,7 @@ it("clears a reminder on the host and preserves a refusal", async () => {
 });
 
 describe("answering an agent's question (#979)", () => {
-  it("sends the answers as the desktop's card words them, and passes on the Mac's refusal", async () => {
+  it("sends the answers as the desktop's card words them, and passes on the computer's refusal", async () => {
     const request = vi.fn().mockResolvedValue({ ok: true, value: { status: "answered" } });
     const api = hostApi(request);
     const answers = { "Which checks should run?": "Tests, Lint, format", "Which branch?": "release/1.0" };
@@ -412,7 +412,7 @@ describe("bots", () => {
   it("reads nothing from a Mac that does not name bots", async () => {
     const { api, request } = mac({}, () => ({ ok: true, value: overview }));
     await expect(api.botsOverview()).resolves.toBeNull();
-    await expect(api.answerBot("b1", 4, { answer: 0 }, "q1")).rejects.toThrow("Bots are off on this Mac");
+    await expect(api.answerBot("b1", 4, { answer: 0 }, "q1")).rejects.toThrow("Bots are off on this computer");
     expect(request.mock.calls.map(([method]) => method)).toEqual(["sync.capabilities"]);
   });
 
@@ -422,7 +422,7 @@ describe("bots", () => {
     await expect(api.botHome("b1")).rejects.toThrow("cannot read");
   });
 
-  it("answers by index or in words, to the question shown, and passes the Mac's refusal on", async () => {
+  it("answers by index or in words, to the question shown, and passes the computer's refusal on", async () => {
     const { api, request } = mac({ bots: 1 }, (method, params) => {
       if ((params as { number?: number }).number === 9) return { ok: false, refusal: { code: "refused", message: "Atlas no longer asks this on item #9." } };
       return method === "bots.answer" ? { ok: true, value: { item: null, delivery: { sent: true } } } : { ok: true, value: null };
@@ -443,7 +443,7 @@ describe("bots", () => {
     ]);
   });
 
-  it("tells what is on screen to read again when the Mac says the bots changed", () => {
+  it("tells what is on screen to read again when the computer says the bots changed", () => {
     const { api, emit } = mac({ bots: 1 }, () => ({ ok: true, value: null }));
     const heard = vi.fn();
     const stop = api.onBotsChanged(heard);
@@ -455,25 +455,25 @@ describe("bots", () => {
   });
 });
 
-describe("pins on the Mac (#1403)", () => {
+describe("pins on the computer (#1403)", () => {
   const mac = (features: Record<string, number>, answer: (method: string, params: unknown) => unknown) => vi.fn(async (method: string, params?: unknown) => method === "sync.capabilities"
     ? { ok: true, value: features }
     : answer(method, params));
 
   it("pins and unpins through a Mac that names pin, and says its refusal in its own words", async () => {
     const request = mac({ pin: 1 }, (_method, params) => (params as { sessionId?: string }).sessionId === "gone"
-      ? { ok: false, refusal: { code: "internal", message: "This session is no longer on this Mac." } }
+      ? { ok: false, refusal: { code: "internal", message: "This session is no longer on this computer." } }
       : { ok: true, value: { sessionId: "s1", pinned: true } });
     const api = hostApi(request);
     await expect(api.pins()).resolves.toBe(true);
     await expect(api.setPinned("s1", true)).resolves.toEqual({ done: true });
     expect(request).toHaveBeenCalledWith("sessions.pin", { sessionId: "s1", pinned: true });
-    await expect(api.setPinned("gone", false)).resolves.toEqual({ done: false, message: "This session is no longer on this Mac.", code: "internal" });
+    await expect(api.setPinned("gone", false)).resolves.toEqual({ done: false, message: "This session is no longer on this computer.", code: "internal" });
     await expect(api.setCloudPinned("org-1", "github.com/acme/web", true)).resolves.toEqual({ done: true });
     expect(request).toHaveBeenCalledWith("cloud.pin", { orgId: "org-1", identity: "github.com/acme/web", pinned: true });
   });
 
-  it("reads the Mac's cloud pins, keeping only lists of names, and asks an older Mac for none", async () => {
+  it("reads the computer's cloud pins, keeping only lists of names, and asks an older Mac for none", async () => {
     const request = mac({ pin: 1 }, () => ({ ok: true, value: { orgs: { "org-1": ["github.com/acme/web", 7, ""], "org-2": "not a list", "org-3": [] } } }));
     await expect(hostApi(request).cloudPins()).resolves.toEqual({ "org-1": ["github.com/acme/web"] });
     const refused = mac({ pin: 1 }, () => ({ ok: false, refusal: { code: "internal", message: "Not now." } }));

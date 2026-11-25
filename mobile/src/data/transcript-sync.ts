@@ -31,8 +31,8 @@ const lossKey = (host: string, session: string, tab: string) => JSON.stringify([
 export class TranscriptHaltedError extends Error {
   constructor(readonly path: TransportPath | null, readonly code: number, readonly fitted = false) {
     super(code === MESSAGE_TOO_LARGE || (path === "relay" && !fitted)
-      ? "This conversation is too large to load over Relay; open it on the same Wi-Fi as your Mac."
-      : "Loading this conversation dropped the connection to your Mac twice, so the phone stopped asking. Retry to ask once more.");
+      ? "This conversation is too large to load over Relay; open it on the same Wi-Fi as your computer."
+      : "Loading this conversation dropped the connection to your computer twice, so the phone stopped asking. Retry to ask once more.");
     this.name = "TranscriptHaltedError";
   }
 }

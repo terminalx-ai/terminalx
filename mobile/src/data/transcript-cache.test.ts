@@ -145,7 +145,7 @@ describe("keeping what a prefetch sent (#1283)", () => {
     expect((await readCache("host", "session", "tab")).events).toHaveLength(300);
   });
 
-  it("names the checkpoint of a conversation the Mac will send among more than it can name (#1339)", async () => {
+  it("names the checkpoint of a conversation the computer will send among more than it can name (#1339)", async () => {
     // 200 kept conversations, more than the 128 checkpoints a prefetch names;
     // the one the Mac will send was saved first, so the newest 128 leave it out.
     vi.useFakeTimers();
@@ -347,7 +347,7 @@ describe("reclaiming chunks a save cut short left behind (#1340)", () => {
     expect(left()).toEqual([]);
   });
 
-  it("forgets where it stopped with the Mac", async () => {
+  it("forgets where it stopped with the computer", async () => {
     await writeCache("host", "session", "tab", { events: range(1, 10), cursor: cursor(10), hasEarlier: false });
     await reclaimOrphanChunks("host");
     expect([...storage.keys()].some((key) => key.startsWith("terminalx:saved:v1:"))).toBe(true);

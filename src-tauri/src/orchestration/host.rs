@@ -13,7 +13,7 @@ use super::budget::Login;
 use super::engine::{self, Activity, Cost, EngineError, Host, Lead, Started, VerifierNow, WorkerNow};
 use super::merge::{Checkouts, Worktree};
 use super::verify::{self, Checked, Checkout, Gate};
-use super::{guard, Piece, Run, SessionRef, RUN_EVENT};
+use super::{guard, routing, Piece, Run, SessionRef, RUN_EVENT};
 use crate::session::SessionManager;
 use crate::session_ops::{NewSession, NewTab};
 use crate::sink::EventSink;
@@ -305,9 +305,17 @@ impl Host for ManagerHost {
         crate::harness::offered().into_iter().filter(|agent| agent.available && crate::session::pty_first(&agent.id).is_some()).map(|agent| agent.id).collect()
     }
 
-    fn models(&self) -> Vec<crate::models::Model> {
-        // As the pickers list them: each agent's CLI was asked once, and the answer is kept.
-        crate::models::list(&self.manager.codex_models(), false)
+    fn models(&self) -> routing::Installed {
+        // As the pickers list them: each agent's CLI was asked once, and the answer is kept. A
+        // Claude list with a tier missing is asked for again once it has aged: the account or the
+        // CLI may have changed since this process first asked (#1533).
+        let mut claude = crate::harness::claude::models::get(false);
+        if routing::Tier::ALL.iter().any(|tier| routing::model_for("claude", *tier, &claude).is_none()) {
+            claude = crate::harness::claude::models::get(true);
+        }
+        let models = crate::models::offered(claude, self.manager.codex_models().get(false));
+        let read = std::collections::BTreeMap::from([("claude".to_string(), crate::harness::claude::models::read_from())]);
+        routing::Installed { models, read }
     }
 
     fn worker_cost(&self, worker: &SessionRef) -> Cost {

@@ -62,7 +62,7 @@ class WebKitShardTest(unittest.TestCase):
 
     def test_the_file_has_its_source_and_every_linux_check(self):
         data = json.loads(TIMES.read_text())
-        self.assertIn("45442275413", data["source"], "the file says which runs its numbers came from")
+        self.assertIn("45588208775", data["source"], "the file says which runs its numbers came from")
         self.assertIn("--times", data["source"], "the file says how it is rebuilt")
         linux = set(self.dealt["checks"]) - set(self.dealt["macOnly"])
         self.assertEqual(set(data["seconds"]), linux)
@@ -110,6 +110,36 @@ class WebKitShardTest(unittest.TestCase):
                 self.assertEqual(len({i for i, part in enumerate(parts) for name in part if name in apart}), 2)
                 held = [sum(1 for name in part if starts_vite(name) and name not in apart) for part in parts]
                 self.assertLessEqual(max(held) - min(held), 1, f"Vite checks per part: {held}")
+
+    def test_a_split_scripts_entries_are_in_different_parts(self):
+        # pool runs one script's entries one at a time, so two in one part add up under it however even the sums are.
+        # The times of 25 November put agent-dashboard:1 and :2 (180 s and 132 s) in one part before this rule.
+        split = {}
+        for name in self.dealt["checks"]:
+            if ":" in name:
+                split.setdefault(name.split(":")[0], []).append(name)
+        self.assertTrue(split, "no split script left to test")
+        times = measured()
+        for seed in range(5):
+            shuffled = dict(times) if seed == 0 else {name: round(random.Random(seed).uniform(5, 250), 1) for name in times}
+            dealt = deal(shuffled)
+            self.assert_each_once(dealt)
+            for count, parts in dealt["deals"].items():
+                for script, entries in split.items():
+                    if int(count) < len(entries):
+                        continue
+                    with self.subTest(seed=seed, count=count, script=script):
+                        held = [i for i, part in enumerate(parts) for name in part if name in entries]
+                        self.assertEqual(len(set(held)), len(entries), f"{script}'s entries share a part: {held}")
+
+    def test_each_part_starts_its_longest_checks_first(self):
+        # pool starts a part's checks in the order shard gives them; in checks' order a long one late in the list began
+        # when the rest were nearly done.
+        weights = self.dealt["weights"]
+        for count, parts in self.dealt["deals"].items():
+            for i, part in enumerate(parts):
+                with self.subTest(count=count, part=i + 1):
+                    self.assertEqual(part, sorted(part, key=lambda name: (-weights[name], name)))
 
     def test_times_rebuilds_the_file_from_logs(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -103,6 +103,8 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   const connection = current ?? (held && shown.current?.lease === held.lease && !held.lease.ended() ? shown.current.connection : null);
   const state = useSyncExternalStore<WorkspaceConnectionState>(subscribeCloudConnections, () => held?.lease.state() ?? NOT_CONNECTED, () => NOT_CONNECTED);
   const [error, setError] = useState<string | null>(null);
+  // Asking for the connection again after it could not be opened.
+  const [attempt, setAttempt] = useState(0);
   const [resuming, setResuming] = useState(false);
   // The list's state of now, so the view's chips follow a stop or a resume instead of what was true when it was opened.
   const listState = item?.workspace.state ?? null;
@@ -126,7 +128,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
         lease = next;
         setHeld({ lease: next, name: item.workspace.name, provider: item.workspace.provider, workspaceState: item.workspace.state });
       })
-      .catch((e: unknown) => live && setError(errorCode(e)));
+      .catch((e: unknown) => live && setError(lifecycleErrorMessage(errorCode(e))));
     return () => {
       live = false;
       setHeld(null);
@@ -136,7 +138,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
     // The workspace's identity decides the connection; row refreshes do not. A
     // stopped workspace that runs again is followed by the connection manager
     // on the same lease, so a resume never remounts the view (#1288).
-  }, [workspaceKey, canOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [workspaceKey, canOpen, attempt]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const refusedNow = state.state === "reconnecting" && accessLostReason(state.reason);
   useEffect(() => {
@@ -284,7 +286,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
         </div>
       )}
       {member && item && parsed && <CloudResourceNotice workspaceKey={cloudWorkspaceKey(parsed.orgId, parsed.workspaceId)} manage={state.state === "connected" && state.authority === "manage"} />}
-      {error && <p className="shrink-0 px-4 py-1 text-xs text-destructive">Could not open: {error}</p>}
+      {error && <p role="alert" className="shrink-0 px-4 py-1 text-xs text-destructive">Could not open this workspace. {error} <Button size="xs" variant="outline" onClick={() => setAttempt((n) => n + 1)}>Try again</Button></p>}
       {!member ? (
         <Centered>
           <span className="flex flex-col items-center gap-2">
