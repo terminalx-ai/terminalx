@@ -355,7 +355,7 @@ impl HttpApi {
 impl Api for HttpApi {
     fn redeem(&self, token: &str, key: &HostKey) -> Result<Redeemed, CallError> {
         let body = serde_json::json!({ "relayHostId": key.relay_host_id(), "hostPublicKeyB64": key.public_key_b64() });
-        self.post("/v1/cloud-workspace-bootstrap/redeem", token, body, Some((CAPABILITIES_HEADER, "phase2-readiness-v1")))
+        self.post("/v1/cloud-workspace-bootstrap/redeem", token, body, Some((CAPABILITIES_HEADER, CAPABILITIES)))
     }
 
     fn refresh(&self, credential: &str) -> Result<Refreshed, CallError> {
