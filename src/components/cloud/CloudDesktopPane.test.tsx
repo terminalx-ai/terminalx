@@ -54,6 +54,15 @@ it("uses the runtime's typed image-unavailable result", () => {
   expect(screen.queryByTestId("fixture-vnc")).toBeNull();
 });
 
+it("explains a Chrome startup failure and offers to reconnect", () => {
+  render(<CloudDesktopPane client={client} asleep={false} control onReconnect={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: "Connected" }));
+  act(() => fixture.fail?.({ code: "cloud_desktop_chrome_start_failed" }));
+  expect(screen.getByRole("status").textContent).toBe("Chrome could not start in this workspace image.");
+  fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+  expect(screen.getByRole("status").textContent).toBe("Connecting…");
+});
+
 it("shows a stopped workspace without opening VNC or offering to wake it", () => {
   const reconnect = vi.fn();
   render(<CloudDesktopPane client={client} asleep control onReconnect={reconnect} />);

@@ -346,3 +346,16 @@ a version-1 readiness map and a literal boolean true.
   a separate VNC process per attachment. A watcher uses VNC's view-only mode.
   A watch-mode stream still carries the RFB handshake and framebuffer
   requests. Clipboard access and VNC remote commands are disabled.
+
+Reconnect replaces the desktop if Xvfb, the window manager, or Chrome exited.
+When Chrome fails to launch or exits during startup, the runtime returns
+`cloud_desktop_chrome_start_failed`. Chrome still requires a working sandbox.
+
+Run the opt-in real-binary check as an unprivileged user in the target Linux
+workspace image before enabling the flag. The test skips if any required
+desktop tools are missing.
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib \
+  real_binaries_exchange_rfb_without_a_tcp_listener -- --ignored --nocapture
+```

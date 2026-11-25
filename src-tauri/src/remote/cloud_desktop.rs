@@ -16,6 +16,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
 const START_TIMEOUT: Duration = Duration::from_secs(8);
+const STARTUP_GRACE: Duration = Duration::from_secs(1);
+const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum DesktopError {
@@ -23,8 +25,16 @@ pub(crate) enum DesktopError {
     MissingTools,
     #[error("Could not start the cloud desktop")]
     StartupFailed,
+    #[error("Chrome could not start in this workspace image")]
+    ChromeStartupFailed,
     #[error("Cloud desktop access changed before open")]
     AccessChanged,
+}
+
+impl From<io::Error> for DesktopError {
+    fn from(_: io::Error) -> Self {
+        Self::StartupFailed
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,6 +76,30 @@ impl Tools {
 
 /// Dropping a process stops its group while the child's id is still owned.
 struct Process(Child);
+
+impl Process {
+    #[cfg(target_os = "linux")]
+    fn is_running(&mut self) -> bool {
+        let Some(pid) = self.0.id() else { return false };
+        // Observe the exit without reaping. Drop still owns the process group
+        // and can stop its remaining members before Tokio reaps its leader.
+        let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut status,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        result == 0 && unsafe { status.si_pid() } == 0
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn is_running(&mut self) -> bool {
+        matches!(self.0.try_wait(), Ok(None))
+    }
+}
 
 impl Drop for Process {
     fn drop(&mut self) {
@@ -131,9 +165,9 @@ fn parse_display(bytes: &[u8]) -> io::Result<u16> {
 
 pub(crate) struct Desktop {
     // Drop graphics clients before the server, and all processes before their private files.
-    _chrome: Process,
-    _manager: Process,
-    _xvfb: Process,
+    chrome: Process,
+    manager: Process,
+    xvfb: Process,
     files: tempfile::TempDir,
     display: String,
     vnc: PathBuf,
@@ -147,13 +181,24 @@ pub(crate) struct DesktopConnection {
 impl Desktop {
     pub(crate) async fn start(dirs: &[&str]) -> Result<Self, DesktopError> {
         let tools = Tools::discover(dirs)?;
-        tokio::time::timeout(START_TIMEOUT, Self::launch(tools))
+        let mut desktop = tokio::time::timeout(START_TIMEOUT, Self::launch(tools))
             .await
-            .map_err(|_| DesktopError::StartupFailed)?
-            .map_err(|_| DesktopError::StartupFailed)
+            .map_err(|_| DesktopError::StartupFailed)??;
+        tokio::time::sleep(STARTUP_GRACE).await;
+        if !desktop.xvfb.is_running() || !desktop.manager.is_running() {
+            return Err(DesktopError::StartupFailed);
+        }
+        if !desktop.chrome.is_running() {
+            return Err(DesktopError::ChromeStartupFailed);
+        }
+        Ok(desktop)
     }
 
-    async fn launch(tools: Tools) -> io::Result<Self> {
+    fn is_running(&mut self) -> bool {
+        self.xvfb.is_running() && self.manager.is_running() && self.chrome.is_running()
+    }
+
+    async fn launch(tools: Tools) -> Result<Self, DesktopError> {
         let files = tempfile::Builder::new()
             .prefix("terminalx-desktop-")
             .tempdir()?;
@@ -207,12 +252,13 @@ impl Desktop {
                     "--no-default-browser-check",
                     "about:blank",
                 ])
-                .spawn()?,
+                .spawn()
+                .map_err(|_| DesktopError::ChromeStartupFailed)?,
         );
         Ok(Self {
-            _chrome: chrome,
-            _manager: manager,
-            _xvfb: xvfb,
+            chrome,
+            manager,
+            xvfb,
             files,
             display,
             vnc: tools.vnc,
@@ -248,6 +294,10 @@ impl Desktop {
             .args(["-inetd", "-display", &self.display, "-auth"])
             .arg(self.files.path().join("Xauthority"))
             .args([
+                "-rfbport",
+                "0",
+                "-no6",
+                "-localhost",
                 "-norc",
                 "-nopw",
                 "-nosel",
@@ -311,9 +361,18 @@ impl DesktopPool {
         if !allowed() {
             return Err(DesktopError::AccessChanged);
         }
+        if state
+            .desktop
+            .as_mut()
+            .is_some_and(|desktop| !desktop.is_running())
+        {
+            state.desktop = None;
+        }
         if state.desktop.is_none() {
             let dirs: Vec<_> = self.bin_dirs.iter().map(String::as_str).collect();
-            state.desktop = Some(Desktop::start(&dirs).await?);
+            let desktop = Desktop::start(&dirs).await?;
+            self.watch_health(desktop.files.path().to_owned());
+            state.desktop = Some(desktop);
         }
         if !allowed() {
             if state.connected == 0 {
@@ -342,6 +401,28 @@ impl DesktopPool {
             connection,
             pool: Arc::downgrade(self),
         })
+    }
+
+    fn watch_health(self: &Arc<Self>, files: PathBuf) {
+        let pool = Arc::downgrade(self);
+        self.runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(HEALTH_INTERVAL).await;
+                let Some(pool) = pool.upgrade() else { return };
+                let mut state = pool.state.lock().await;
+                let Some(desktop) = state
+                    .desktop
+                    .as_mut()
+                    .filter(|desktop| desktop.files.path() == files)
+                else {
+                    return;
+                };
+                if !desktop.is_running() {
+                    state.desktop = None;
+                    return;
+                }
+            }
+        });
     }
 
     fn disconnected(pool: Weak<Self>) {
@@ -494,6 +575,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refuses_early_chrome_exit_and_restarts_a_dead_display_once() {
+        let tools = tempfile::tempdir().unwrap();
+        let dirs = [tools.path().to_str().unwrap()];
+        fixture(tools.path(), "xauth", "umask 077; cat > \"$3\"");
+        fixture(
+            tools.path(),
+            "Xvfb",
+            "printf x >> \"$0.starts\"; printf '42\\n'; exec /bin/sleep 15",
+        );
+        fixture(tools.path(), "openbox", "exec /bin/sleep 15");
+        fixture(tools.path(), "x11vnc", "exec /bin/cat");
+        let chrome = tools.path().join("chromium");
+        let false_binary = ["/usr/bin/false", "/bin/false"]
+            .into_iter()
+            .find(|path| Path::new(path).is_file())
+            .unwrap();
+        std::os::unix::fs::symlink(false_binary, &chrome).unwrap();
+        assert_eq!(
+            Desktop::start(&dirs).await.err(),
+            Some(DesktopError::ChromeStartupFailed)
+        );
+
+        std::fs::remove_file(chrome).unwrap();
+        fixture(tools.path(), "chromium", "exec /bin/sleep 15");
+        let pool = DesktopPool::new(vec![dirs[0].into()], Duration::from_secs(20));
+        let old_lease = pool.connect(DesktopAccess::Watch, || true).await.unwrap();
+        let old_files = {
+            let mut state = pool.state.lock().await;
+            let desktop = state.desktop.as_mut().unwrap();
+            desktop.xvfb.0.kill().await.unwrap();
+            desktop.files.path().to_owned()
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while old_files.exists() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let (watch, control) = tokio::join!(
+            pool.connect(DesktopAccess::Watch, || true),
+            pool.connect(DesktopAccess::Control, || true),
+        );
+        let _leases = (old_lease, watch.unwrap(), control.unwrap());
+        let mut state = pool.state.lock().await;
+        assert_eq!(state.connected, 3);
+        assert!(state.desktop.as_mut().unwrap().is_running());
+        assert!(!old_files.exists());
+        assert_eq!(
+            std::fs::read(tools.path().join("Xvfb.starts")).unwrap(),
+            b"xxx"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires real Xvfb, xauth, a window manager, x11vnc and sandboxed Chrome on Linux"]
+    async fn real_binaries_exchange_rfb_without_a_tcp_listener() -> io::Result<()> {
+        use std::collections::HashSet;
+
+        fn assert_no_listeners(process: &Process) -> io::Result<()> {
+            let pid = process.0.id().expect("live process");
+            let proc = PathBuf::from(format!("/proc/{pid}"));
+            let mut sockets = HashSet::new();
+            for entry in std::fs::read_dir(proc.join("fd"))? {
+                let Ok(target) = std::fs::read_link(entry?.path()) else {
+                    continue;
+                };
+                let target = target.to_string_lossy();
+                if let Some(inode) = target
+                    .strip_prefix("socket:[")
+                    .and_then(|v| v.strip_suffix(']'))
+                {
+                    sockets.insert(inode.to_owned());
+                }
+            }
+            for protocol in ["tcp", "tcp6"] {
+                let table = match std::fs::read_to_string(proc.join("net").join(protocol)) {
+                    Ok(table) => table,
+                    Err(error) if protocol == "tcp6" && error.kind() == io::ErrorKind::NotFound => {
+                        continue
+                    }
+                    Err(error) => return Err(error),
+                };
+                for row in table.lines().skip(1) {
+                    let fields: Vec<_> = row.split_whitespace().collect();
+                    assert!(
+                        fields.get(3) != Some(&"0A")
+                            || !fields.get(9).is_some_and(|inode| sockets.contains(*inode)),
+                        "desktop process {pid} owns a listening {protocol} socket"
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        let dirs = ["/usr/bin", "/bin"];
+        if matches!(Tools::discover(&dirs), Err(DesktopError::MissingTools)) {
+            eprintln!(
+                "Skipping real cloud desktop test because the workspace image lacks desktop tools"
+            );
+            return Ok(());
+        }
+        let desktop = Desktop::start(&dirs)
+            .await
+            .expect("real desktop starts with Chrome sandbox enabled");
+        for access in [DesktopAccess::Watch, DesktopAccess::Control] {
+            let mut connection = desktop.connect(access).await.expect("real x11vnc starts");
+            let mut version = [0; 12];
+            let socket = connection.rfb.as_mut().unwrap();
+            tokio::time::timeout(Duration::from_secs(5), socket.read_exact(&mut version)).await??;
+            assert!(version.starts_with(b"RFB ") && version.ends_with(b"\n"));
+            assert_no_listeners(&desktop.xvfb)?;
+            assert_no_listeners(&connection._server)?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn each_connection_gets_its_own_process_and_watch_mode() {
         let files = tempfile::tempdir().unwrap();
         let vnc = files.path().join("rfb-fixture");
@@ -501,9 +702,9 @@ mod tests {
         std::fs::set_permissions(&vnc, std::fs::Permissions::from_mode(0o700)).unwrap();
         let idle = || Process(command(Path::new("/bin/sleep")).arg("15").spawn().unwrap());
         let desktop = Desktop {
-            _chrome: idle(),
-            _manager: idle(),
-            _xvfb: idle(),
+            chrome: idle(),
+            manager: idle(),
+            xvfb: idle(),
             files,
             display: ":42".into(),
             vnc,
@@ -520,6 +721,9 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(flags.lines().any(|arg| arg == "-inetd"));
+            assert!(flags.lines().any(|arg| arg == "-no6"));
+            assert!(flags.lines().any(|arg| arg == "-localhost"));
+            assert!(flags.contains("-rfbport\n0\n"));
             assert_eq!(flags.lines().any(|arg| arg == "-viewonly"), view_only);
         }
     }

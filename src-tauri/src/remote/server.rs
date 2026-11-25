@@ -1751,6 +1751,7 @@ impl WorkspaceRpc {
                 if error == DesktopError::AccessChanged { return RpcError::forbidden(error.to_string()); }
                 RpcError::new(match error {
                     DesktopError::MissingTools => "cloud_desktop_image_unavailable",
+                    DesktopError::ChromeStartupFailed => "cloud_desktop_chrome_start_failed",
                     _ => "cloud_desktop_start_failed",
                 }, error.to_string())
             })?;

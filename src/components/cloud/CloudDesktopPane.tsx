@@ -12,10 +12,11 @@ export function CloudDesktopPane({ client, asleep, control, onReconnect }: {
 }) {
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<VncState>("connecting");
-  const [failure, setFailure] = useState<"image" | "access" | null>(null);
+  const [failure, setFailure] = useState<"image" | "access" | "chrome" | null>(null);
   const open = useCallback(() => new CloudDesktopChannel(client!, control, (error) => {
     const code = error && typeof error === "object" && "code" in error ? error.code : null;
     if (code === "cloud_desktop_image_unavailable") setFailure("image");
+    if (code === "cloud_desktop_chrome_start_failed") setFailure("chrome");
     if (code === "forbidden") setFailure("access");
     setState("disconnected");
   }), [client, control]);
@@ -39,6 +40,7 @@ export function CloudDesktopPane({ client, asleep, control, onReconnect }: {
     {(asleep || !available || state !== "connected" || failure) &&
       <div className="absolute inset-0 top-9 flex flex-col items-center justify-center gap-2 p-4 text-center text-sm text-muted-foreground">
         <p role="status">{asleep ? "The workspace is stopped." : failure === "image" ? "Not available in this workspace image."
+          : failure === "chrome" ? "Chrome could not start in this workspace image."
           : failure === "access" ? "Cloud desktop access is unavailable." : online && !available ? "Cloud desktop is unavailable in this runtime."
           : !online || state === "disconnected" ? "Disconnected" : "Connecting…"}</p>
         {!asleep && (!online || (available && state === "disconnected" && failure !== "image")) &&
