@@ -4792,6 +4792,8 @@ mod tests {
 
     /// A bot with its home chat, an ordinary session of the owner's, and a
     /// process `script` started in the chat's terminal, found by `marker`.
+    /// Each test's marker is its own: tests run at once, and one that found
+    /// another's process would place it in no session of its own runtime.
     #[cfg(unix)]
     pub(super) fn bot_with_a_process(script: &str, marker: &str) -> (crate::store::TempHome, ControlService, Arc<crate::sink::BroadcastSink>, String, SessionEntry, SessionEntry, i32) {
         let home = crate::store::temp_home();
@@ -5325,6 +5327,28 @@ mod tests {
         service.manager.terminals().kill(&chat.tabs[0].pane_id());
     }
 
+    /// PRO-574: a test's runtime has no window, whatever shell runs the
+    /// tests. In a TerminalX pane, which has its runtime's
+    /// `TERMINALX_LOCAL_DESKTOP` and window key, a bot's process is still
+    /// refused as a bot's (`forbidden`), not as the window's (`person_required`).
+    #[cfg(unix)]
+    #[test]
+    fn a_bots_process_is_refused_as_a_bots_in_a_terminalx_pane_too() {
+        let key = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [9u8; 32]);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "--test-threads=1",
+                "control::tests::a_bots_process_changes_nothing_through_the_runtimes_dispatch",
+                "control::tests::a_bots_session_reads_its_own_week_of_duties_only",
+                "control::tests::a_bots_tab_adopted_after_a_handover_is_refused"])
+            .env("TERMINALX_LOCAL_DESKTOP", "1")
+            .env(crate::serve_cli::consent::WINDOW_PUBLIC_KEY_ENV, key)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+        assert!(stdout.contains("3 passed"), "{stdout}");
+    }
+
     /// H1 (review 6): on macOS a client that closes its socket after
     /// sending cannot be read, and was taken for an in-process call. Over the
     /// real socket: the same request is done while its sender waits for the
@@ -5526,7 +5550,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn on_a_keyed_runtime_only_the_proven_window_writes_through_the_runtime() {
-        let marker = format!("72.{}", std::process::id());
+        let marker = format!("80.{}", std::process::id());
         let (_home, service, _sink, _id, chat, _owners, _pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
         let lifetime = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
         let service = service.with_local_lifetime(lifetime.clone());
@@ -5850,7 +5874,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn on_a_keyed_runtime_a_bots_session_reads_its_own_duties_and_week_only() {
-        let marker = format!("75.{}", std::process::id());
+        let marker = format!("83.{}", std::process::id());
         let (_home, service, _sink, id, chat, _owners, pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
         let other = service.execute("bots.create", json!({"role": "watcher", "name": "Argus"}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
         let service = service.with_local_lifetime(crate::local_runtime::Lifetime::new(std::time::Duration::ZERO));
@@ -5885,7 +5909,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_window_frame_answered_right_after_a_handover_is_delivered() {
-        let marker = format!("71.{}", std::process::id());
+        let marker = format!("78.{}", std::process::id());
         let (_home, service, _sink, _id, chat, _owners, _pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
         let lifetime = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
         let service = service.with_local_lifetime(lifetime.clone());
@@ -5911,7 +5935,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_process_in_a_pane_is_not_taken_for_the_window() {
-        let marker = format!("72.{}", std::process::id());
+        let marker = format!("81.{}", std::process::id());
         let (_home, service, _sink, _id, chat, _owners, pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
         assert!(!service.may_be_the_window(pid), "in the bot's pane");
         let mut child = std::process::Command::new("sleep").arg("30").stdin(std::process::Stdio::null()).spawn().unwrap();
@@ -5926,7 +5950,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_caller_that_cannot_be_placed_starts_nothing() {
-        let marker = format!("73.{}", std::process::id());
+        let marker = format!("82.{}", std::process::id());
         let (_home, service, _sink, _id, chat, _owners, pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
         let index = crate::store::sessions_dir().unwrap().join("index.json");
         let kept = std::fs::read(&index).unwrap();
@@ -6072,7 +6096,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_bots_session_only_reads_through_the_runtimes_own_calls() {
-        let marker = format!("63.{}", std::process::id());
+        let marker = format!("77.{}", std::process::id());
         let script = format!("/bin/sh -c 'sleep {marker}; true'");
         let (_home, service, _sink, _id, chat, _owners, pid) = bot_with_a_process(&script, &marker);
         crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));

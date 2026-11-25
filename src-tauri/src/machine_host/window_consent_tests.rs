@@ -125,6 +125,10 @@ fn detached_child(root: &Path, role: &str) -> Command {
 
 #[test]
 fn process_fixture() {
+    if std::env::var_os(ROLE).is_some() {
+        // A child `child` or `detached_child` launched as the desktop launches a runtime and its window.
+        crate::serve_cli::consent::read_window_from_environment();
+    }
     match std::env::var(ROLE).as_deref() {
         Ok(role @ ("runtime" | "runtime-restarted" | "runtime-relaunched")) => runtime(role),
         Ok(role @ ("window" | "window-restarted" | "window-reopened")) => window(role),
