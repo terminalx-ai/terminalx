@@ -10,6 +10,7 @@ export const phase2Features = {
   workspaceAccessRequest: "cloud.workspaces.access-request-copy.v1",
   agentLoginAffectedWorkspaces: "cloud.agent-logins.affected-workspaces.v1",
   webhookTrigger: "cloud.automations.webhook-trigger.v1",
+  generalAccess: "cloud.workspaces.general-access.v1",
 } as const;
 
 export function phase2Ready(status: AccountStatus, orgId: string, feature: keyof typeof phase2Features): boolean {

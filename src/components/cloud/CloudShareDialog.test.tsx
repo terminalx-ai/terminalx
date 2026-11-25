@@ -5,6 +5,7 @@ import type { CloudWorkspaceShare, CloudWorkspaceShares } from "@/lib/api";
 
 const mocks = vi.hoisted(() => ({
   shares: vi.fn(),
+  generalAccessPut: vi.fn(),
   put: vi.fn(),
   revoke: vi.fn(),
   members: vi.fn(),
@@ -15,6 +16,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/api", () => ({
   api: {
     cloudWorkspaceShares: mocks.shares,
+    cloudWorkspaceGeneralAccessPut: mocks.generalAccessPut,
     cloudWorkspaceSharePut: mocks.put,
     cloudWorkspaceShareRevoke: mocks.revoke,
     cloudWorkspaceSetAccess: mocks.access,
@@ -49,6 +51,11 @@ beforeEach(() => {
   refreshRosterFlags();
   listed = { shares: [share()], you: { role: "manager", canApprove: true, canManageShares: true } };
   mocks.shares.mockReset().mockImplementation(async () => listed);
+  mocks.generalAccessPut.mockReset().mockImplementation(async (_workspace, _org, { generalAccess }) => {
+    const receipt = { generalAccess, accessRevision: "9007199254740994" };
+    listed = { ...listed, ...receipt };
+    return receipt;
+  });
   mocks.put.mockReset().mockImplementation(async (_ws: string, userId: string, role: string, canApprove: boolean) => {
     const next = share({ userId, role: role as CloudWorkspaceShare["role"], canApprove, name: userId === "u-bob" ? "Bob" : "Alice", email: `${userId}@example.com` });
     listed = { ...listed, shares: [...listed.shares.filter((s) => s.userId !== userId), next] };
@@ -97,6 +104,152 @@ afterEach(() => {
 });
 
 const dialog = () => render(<CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments" onClose={() => undefined} />);
+
+describe("General access", () => {
+  const feature = "cloud.workspaces.general-access.v1";
+  const invited = { mode: "invited_only" } as const;
+  const everyone = { mode: "organisation", role: "read" } as const;
+  const enable = (organization = "org-1") => {
+    account.status = { ...account.status, phase2Readiness: { [organization]: [feature] } };
+    listed = {
+      ...listed,
+      generalAccess: invited,
+      accessRevision: "9007199254740993",
+      capabilities: { canChangeGeneralAccess: true, canGrantAdmin: true, canUseOrganisationWrite: false },
+    };
+  };
+  const selectEveryone = async () => {
+    const picker = await screen.findByRole("combobox", { name: "General access" });
+    fireEvent.change(picker, { target: { value: "organisation" } });
+    return screen.getByRole("button", { name: "Save General access" });
+  };
+
+  it("saves Everyone Read and switches back to invited-only using the server revision", async () => {
+    enable();
+    dialog();
+    const save = await selectEveryone();
+    expect(mocks.generalAccessPut).not.toHaveBeenCalled();
+    expect(screen.getByText("Read")).toBeTruthy();
+    expect(screen.queryByText("Write")).toBeNull();
+    fireEvent.click(save);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Save General access" })).toBeNull());
+    expect(mocks.generalAccessPut).toHaveBeenNthCalledWith(1, "ws-1", "org-1", {
+      accessRevision: "9007199254740993", generalAccess: everyone,
+    }, "account-1");
+    const picker = screen.getByRole("combobox", { name: "General access" }) as HTMLSelectElement;
+    expect(picker.value).toBe("organisation");
+    await waitFor(() => expect(picker.disabled).toBe(false));
+    fireEvent.change(picker, { target: { value: "invited_only" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save General access" }));
+    await waitFor(() => expect(screen.queryByText("Read")).toBeNull());
+    expect(mocks.generalAccessPut).toHaveBeenNthCalledWith(2, "ws-1", "org-1", {
+      accessRevision: "9007199254740994", generalAccess: invited,
+    }, "account-1");
+  });
+
+  it.each(["different organization", "legacy response", "private workspace"])("hides controls for a %s", async (scenario) => {
+    enable(scenario === "different organization" ? "org-2" : "org-1");
+    if (scenario === "legacy response") listed.generalAccess = undefined;
+    render(<CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments"
+      accessMode={scenario === "private workspace" ? "private" : "organization"} onClose={() => undefined} />);
+    await screen.findByTestId("cloud-share-row");
+    expect(screen.queryByRole("heading", { name: "General access" })).toBeNull();
+  });
+
+  it.each(["workspace capability", "share management"])("shows Everyone Read without edits when missing %s", async (authority) => {
+    enable();
+    listed.generalAccess = everyone;
+    if (authority === "workspace capability") listed.capabilities!.canChangeGeneralAccess = false;
+    else listed.you = { role: "viewer", canManageShares: false, canApprove: false };
+    dialog();
+    expect(await screen.findByText("Everyone at org-1")).toBeTruthy();
+    expect(screen.getByText("Read")).toBeTruthy();
+    expect(screen.queryByRole("combobox", { name: "General access" })).toBeNull();
+  });
+
+  it("refetches on conflict and waits for a new choice before saving", async () => {
+    enable();
+    mocks.generalAccessPut.mockImplementationOnce(async () => {
+      listed = { ...listed, accessRevision: "77" };
+      throw { code: "cloud_workspace_access_revision_conflict", status: 409 };
+    });
+    dialog();
+    fireEvent.click(await selectEveryone());
+    expect(await screen.findByText(/Workspace access changed/)).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Save General access" })).toBeNull());
+    expect(mocks.shares).toHaveBeenCalledTimes(2);
+    expect(mocks.generalAccessPut).toHaveBeenCalledTimes(1);
+    fireEvent.click(await selectEveryone());
+    await waitFor(() => expect(mocks.generalAccessPut).toHaveBeenNthCalledWith(2, "ws-1", "org-1", {
+      accessRevision: "77", generalAccess: everyone,
+    }, "account-1"));
+  });
+
+  it("discards a draft when an individual share refreshes the revision", async () => {
+    enable();
+    dialog();
+    await selectEveryone();
+    listed = { ...listed, accessRevision: "77" };
+    fireEvent.change(screen.getByLabelText("Role for Alice"), { target: { value: "driver" } });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Save General access" })).toBeNull());
+    expect(mocks.generalAccessPut).not.toHaveBeenCalled();
+    expect((screen.getByRole("combobox", { name: "General access" }) as HTMLSelectElement).value).toBe("invited_only");
+  });
+
+  it("keeps the original dialog and share list for the held account without a context", async () => {
+    account.status = { ...account.status, state: "signed-out", context: null, identity: null, phase2Readiness: {} };
+    dialog();
+    expect(await screen.findByTestId("cloud-share-row")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "General access" })).toBeNull();
+    expect(mocks.shares).toHaveBeenCalledWith("ws-1", "org-1");
+    expect(mocks.generalAccessPut).not.toHaveBeenCalled();
+  });
+
+  it("discards an initial held share response after the account changes", async () => {
+    let finish!: (value: CloudWorkspaceShares) => void;
+    mocks.shares.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    dialog();
+    expect(mocks.shares).toHaveBeenCalledOnce();
+    account.status = { ...account.status, context: { scope: "replacement", revision: "replacement:1" } };
+    await act(async () => finish({ ...listed, generalAccess: everyone }));
+    expect(screen.queryByTestId("cloud-share-row")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "General access" })).toBeNull();
+  });
+
+  it("fences a late save across sign-out even if another account is already signed in", async () => {
+    enable();
+    const nextStatus = { ...account.status, context: { scope: "other", revision: "account-2" } };
+    let finish!: () => void;
+    mocks.generalAccessPut.mockImplementationOnce(() => new Promise((resolve) => {
+      finish = () => resolve({ generalAccess: everyone, accessRevision: "77" });
+    }));
+    const close = vi.fn();
+    const editor = () => <CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments" onClose={close} />;
+    const { rerender, unmount } = render(editor());
+    const notify = vi.fn();
+    const stop = onAccessChanged(notify);
+    try {
+      fireEvent.click(await selectEveryone());
+      account.status = { ...account.status, state: "signed-out", context: null, identity: null };
+      rerender(editor());
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(close).toHaveBeenCalledOnce();
+      account.status = nextStatus;
+      rerender(editor());
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(mocks.shares).toHaveBeenCalledTimes(1);
+      unmount();
+      render(editor());
+      await screen.findByRole("combobox", { name: "General access" });
+      await act(async () => finish());
+      expect(screen.queryByText("Read")).toBeNull();
+      expect(mocks.shares).toHaveBeenCalledTimes(2);
+      expect(notify).not.toHaveBeenCalled();
+    } finally {
+      stop();
+    }
+  });
+});
 
 describe("share dialog", () => {
   it("adds someone from the roster who is not shared yet", async () => {
