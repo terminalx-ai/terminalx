@@ -58,7 +58,7 @@ export default function MachinesScreen() {
   if (!session && !paired.length) {
     return <>
       <Screen title="Machines" titleActions={add} contentContainerStyle={styles.signedOut}>
-        <View style={[styles.mark, { backgroundColor: palette.accent }]}><Text style={[styles.markText, { color: palette.accentInk }]}>TX</Text></View>
+        <View style={[styles.mark, { backgroundColor: palette.accent }]}>{/* A mark in a tile of fixed size, not words to read: it keeps its size (PRO-563). */}<Text allowFontScaling={false} style={[styles.markText, { color: palette.accentInk }]}>TX</Text></View>
         <Text style={[styles.heroTitle, { color: palette.ink }]}>Your work, away from your desk</Text>
         <Text style={[styles.heroDetail, { color: palette.muted }]}>Sign in to see the machines on your TerminalX account, or tap + to pair with a QR code.</Text>
         <Button label={app.signingIn ? "Signing in…" : "Sign in"} disabled={app.signingIn} accessibilityState={{ disabled: app.signingIn, busy: app.signingIn }} icon={app.signingIn ? (color) => <Spinner size={16} color={color} /> : undefined} onPress={() => void app.signIn()} />

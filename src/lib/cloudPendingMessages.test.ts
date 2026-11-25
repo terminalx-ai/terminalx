@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentEvent } from "@/types/events";
 import type { OutboxEntry } from "@/lib/cloudAgentApi";
-import { DELIVERY_GRACE_MS, isMessageCommand, nextGraceEnd, pendingCloudMessages, trackPending, waitingLine, type PendingTrack } from "./cloudPendingMessages";
+import { DELIVERY_GRACE_MS, NOT_DELIVERABLE_LINE, isMessageCommand, nextGraceEnd, pendingCloudMessages, trackPending, undeliverable, waitingLine, type PendingTrack } from "./cloudPendingMessages";
 
 const entry = (id: string, fields: Partial<OutboxEntry> = {}): OutboxEntry => ({
   clientCommandId: id,
@@ -166,5 +166,22 @@ describe("the line under a waiting message (#1291)", () => {
     expect(waitingLine(message({ wake: "in-progress" }), null)).toBe("Starting the workspace…");
     expect(waitingLine(message({ wake: "unavailable" }), "stopped")).toBe("Waiting for the workspace: it could not be started now");
     expect(waitingLine(message({ wake: "not-requested" }), null)).toBe("Queued for the workspace");
+  });
+
+  // #1582: a workspace whose machine is gone never takes it; the card says so, and nothing spins.
+  it("says a message will not be delivered while its workspace can't be reached, and offers to remove it", () => {
+    for (const state of ["queued", "unsent", "leased"] as const) {
+      const waiting = message({ state });
+      expect(waitingLine(waiting, "unavailable")).toBe(NOT_DELIVERABLE_LINE);
+      expect(waitingLine(waiting, "unavailable").endsWith("…")).toBe(false);
+      expect(undeliverable(waiting, "unavailable")).toBe(true);
+    }
+    expect(NOT_DELIVERABLE_LINE).toMatch(/^Won't be delivered/);
+    // The runtime already typed it, or holds it as a follow-up: those lines stand.
+    expect(undeliverable(message({ state: "applied" }), "unavailable")).toBe(false);
+    expect(undeliverable(message({}, "held"), "unavailable")).toBe(false);
+    // Any other workspace state keeps its own line.
+    expect(undeliverable(message(), "connecting")).toBe(false);
+    expect(undeliverable(message(), "stopped")).toBe(false);
   });
 });

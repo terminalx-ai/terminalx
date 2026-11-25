@@ -551,7 +551,11 @@ fn live_work_is_never_stopped_or_removed() {
         live.panes.push((format!("{}:1", owner.id), f.base.clone()));
     }
     // A process that changed into the worktree, started by nothing the app knows.
+    #[cfg(unix)]
     let mut child = std::process::Command::new("sleep").arg("30").current_dir(&shell_only).spawn().unwrap();
+    // Windows has no `sleep`: `ping` waits as long, with no console to need.
+    #[cfg(windows)]
+    let mut child = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).current_dir(&shell_only).spawn().unwrap();
     f.live.lock().unwrap().process_dirs = process_dirs();
 
     let expect = [(&waiting, "waiting for an answer"), (&running, "an agent is running"), (&background, "an agent is running"), (&terminal, "terminal is open"), (&owned, "a terminal is open"), (&shell_only, "process is running")];

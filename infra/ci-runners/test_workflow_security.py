@@ -43,9 +43,9 @@ ANSWERS = ["required", "rust", "frontend", "phone", "mac-webkit", "machines"]
 # Only these may take a macOS runner.
 MACOS_NATIVE = {"macos-native"}
 MACOS = {"macos-native", "machine-compat", "webkit-mac-only"}
-# A pull request is not held to these (the owner's decisions, 24 November 2026): `check` does not need them, and
-# `check-macos` holds every other run to them.
-NOT_HELD = ["macos-native", "webkit-mac-only"]
+# A pull request is not held to these (the owner's decisions, 24 November 2026, and for machine-compat 25 November
+# 2026): `check` does not need them, and `check-macos` holds every other run to them.
+NOT_HELD = ["macos-native", "machine-compat", "webkit-mac-only"]
 # The WebKit layout checks: the Linux parts, the required status that stands for them, and the mac-only ones.
 WEBKIT_PARTS = ["1", "2", "3", "4"]
 WEBKIT_PART_RUN = "node scripts/webkit/run-all.mjs --shard ${{ matrix.part }}/4"
@@ -272,12 +272,13 @@ def validate(workflow):
     assert workflow["env"]["CI_CACHE_SCOPE"] == CACHE_SCOPE, "cache trust scope"
     jobs = workflow["jobs"]
     assert {"check", "frontend", "webkit-layout"} <= jobs.keys(), "required status names"
-    # A pull request is not held to the macOS Rust suite or the mac-only WebKit checks; every other run is, through check-macos.
-    assert set(jobs["check"]["needs"]) == jobs.keys() - {"check", "check-macos", *NOT_HELD}, "aggregate must require every job but the macOS Rust suite and the mac-only WebKit checks"
+    # A pull request is not held to the macOS Rust suite, the build against the released runtimes or the mac-only
+    # WebKit checks; every other run is, through check-macos.
+    assert set(jobs["check"]["needs"]) == jobs.keys() - {"check", "check-macos", *NOT_HELD}, "aggregate must require every job but the macOS jobs"
     assert jobs["check"]["if"] == "always()", "aggregate must report failures and cancellations"
     held = jobs.get("check-macos")
     assert held, "main, nightly and manual runs are held to the macOS jobs"
-    assert held["needs"] == ["check", *NOT_HELD] and held["if"] == "${{ always() && github.event_name != 'pull_request' }}", "main, nightly and manual runs are held to check and the macOS suite"
+    assert held["needs"] == ["check", *NOT_HELD] and held["if"] == "${{ always() && github.event_name != 'pull_request' }}", "main, nightly and manual runs are held to check and the macOS jobs"
     assert held["runs-on"] == "ubuntu-latest" and "permissions" not in held and len(held["steps"]) == 1, "a gate and nothing else"
     gate = jobs["check"]["steps"][0]["run"]
     assert '$selector.result == "success"' in gate, "a skip is accepted on a failed selector's word"
@@ -959,6 +960,25 @@ class WorkflowSecurity(unittest.TestCase):
         for job in NOT_HELD:
             with self.subTest(job=job):
                 self.rejects(lambda w, job=job: w["jobs"]["check"]["needs"].append(job))
+
+    def test_machine_compat_holds_main_but_not_a_pull_request(self):
+        # The owner's decision, 25 November 2026: on a pull request machine-compat runs when the selector picks it and
+        # shows its own result, but check neither needs it nor waits for it; pushes to main, nightly and manual runs
+        # are held to it by check-macos.
+        w = self.workflow
+        self.assertNotIn("machine-compat", w["jobs"]["check"]["needs"])
+        self.assertNotIn('"machine-compat"', w["jobs"]["check"]["steps"][0]["run"], "check's gate must not name it either")
+        self.assertIn("machine-compat", w["jobs"]["check-macos"]["needs"])
+        self.assertEqual(w["jobs"]["machine-compat"]["if"], "needs.macos-rust-changes.outputs.machines == 'true'", "it still runs when selected")
+        # check passes whatever machine-compat did, since it is not among its results.
+        self.assertTrue(gate_passes(w, results(w)))
+        ok = {name: {"result": "success"} for name in w["jobs"]["check-macos"]["needs"]}
+        self.assertTrue(gate_passes(w, ok, gate="check-macos"))
+        for result in ("failure", "cancelled", "skipped"):
+            with self.subTest(result=result):
+                self.assertFalse(gate_passes(w, {**ok, "machine-compat": {"result": result}}, gate="check-macos"))
+        self.rejects(lambda w: w["jobs"]["check"]["needs"].append("machine-compat"))
+        self.rejects(lambda w: w["jobs"]["check-macos"]["needs"].remove("machine-compat"))
 
     def test_missing_gate_dependency_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["check"]["needs"].remove("linux-rust"))

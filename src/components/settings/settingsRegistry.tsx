@@ -86,6 +86,8 @@ interface SettingDefinition {
    * switch is `settingsSectionOffered`'s.
    */
   requires?: "orchestratorRuns" | "localVmTasks" | "opencode" | "bots";
+  /** Only a Mac has it, so elsewhere neither its page nor Settings search offers it. */
+  macOnly?: boolean;
 }
 export interface SettingRegistration extends SettingDefinition {
   render: (props: RowProps) => ReactNode;
@@ -642,6 +644,12 @@ export const SETTINGS_ROWS = [
     description: "Your keyboard's spelling correction, smart quotes and dashes, and text replacements apply in prompts, answers to an agent's questions, and notes. Off leaves what you type exactly as typed.",
     searchTerms: ["general", "autocorrect"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.autocorrect" },
+  }),
+  defineSetting({
+    id: "general.optionAsMeta", section: "general", title: "Option key is Meta in terminals", macOnly: true,
+    description: "On a Mac, Option in a terminal works as Meta, for the shell's Option-B and Option-F. Off, Option types the characters your keyboard layout puts on it, such as @, [ or | on many European layouts.",
+    searchTerms: ["general", "terminal", "option", "alt", "meta", "keyboard", "layout"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.optionAsMeta" },
   }),
   defineSetting({
     id: "general.aiEditor", section: "general", title: "AI Editor",

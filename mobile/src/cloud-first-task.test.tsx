@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   params: {} as Record<string, string>,
   router: { back: vi.fn(), push: vi.fn(), replace: vi.fn(), dismissAll: vi.fn(), canDismiss: () => true },
   catalog: null as unknown,
+  app: {} as unknown,
 }));
 vi.mock("react-native", async () => {
   const native = await import("@mobile/ui/testing/native");
@@ -25,7 +26,7 @@ vi.mock("react-native", async () => {
 });
 vi.mock("@mobile/ui/theme", async (actual) => (await import("@mobile/ui/testing/kit")).boardTheme(await actual()));
 vi.mock("expo-router", () => ({ Stack: { Screen: () => null }, useLocalSearchParams: () => mocks.params, useRouter: () => mocks.router, useFocusEffect: () => undefined }));
-vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => ({}) }));
+vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("expo-crypto", () => ({ randomUUID: () => globalThis.crypto.randomUUID() }));
 vi.mock("expo-clipboard", () => ({ getStringAsync: async () => "", hasStringAsync: async () => false }));
 vi.mock("@mobile/cloud/CloudProvider", async () => {
@@ -63,6 +64,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
   vi.setSystemTime(Date.UTC(2026, 10, 24, 10, 0, 0));
   mocks.params = {};
+  mocks.app = {};
   for (const spy of [mocks.router.back, mocks.router.push, mocks.router.replace, alert]) spy.mockReset();
 });
 afterEach(() => { held?.catalog.close(); held = null; forgetConversationState("cloud:"); vi.useRealTimers(); });
@@ -88,7 +90,7 @@ describe("the launch form's first task", () => {
   it("is the form's last section: the first ticked agent, its own default model, Ask every time, and a task field", async () => {
     await form();
     expect(rows("first-task-rows")).toEqual(["Agent: Codex", "Model: Agent’s default", "Permission mode: Ask every time"]);
-    // Until the setup answer lists them, there is no model to pick and no effort.
+    // With no Mac connected to list them, there is no model to pick and no effort.
     expect(page.byId("pick-model")).toBeNull();
     expect(page.byId("pick-effort")).toBeNull();
     expect(task().getAttribute("data-multiline")).toBe("true");
@@ -169,6 +171,52 @@ describe("the launch form's first task", () => {
     expect(rows("review-task")).toEqual(["Agent: Codex", "Model: Agent’s default", "Permission mode: Ask every time", `Task: ${typed}`]);
     await launch();
     expect((service.sent("POST", "/cloud-workspaces")[0].body as { launch: unknown }).launch).toEqual({ v: 1, agent: "codex", mode: "manual", prompt: typed });
+  });
+
+  it("offers the model and effort the person's own Mac lists for the agent, and sends what is shown (PRO-562)", async () => {
+    // The desktop's source for its create form: the models its own computer lists, family names for another machine.
+    const listed = (harness: string, id: string, label: string, fields: Record<string, unknown> = {}) => ({ id, label, harness, efforts: ["low", "medium", "high"], defaultEffort: "medium", acceptsImages: true, isDefault: false, upgrade: null, description: null, ...fields });
+    const models = vi.fn(async () => [
+      listed("codex", "gpt-6.1-sol", "GPT-6.1 Sol", { isDefault: true, defaultEffort: "low" }), listed("codex", "gpt-6.1-mini", "GPT-6.1 Mini", { efforts: [] , defaultEffort: null }),
+      listed("claude", "claude-opus-5-5", "Opus 5.5", { isDefault: true }), listed("claude", "opus", "Opus", { alias: true, defaultEffort: "high" }), listed("claude", "sonnet", "Sonnet", { alias: true }),
+    ]);
+    mocks.app = { connectionStage: "connected", api: { models } };
+    const service = await form();
+    expect(models).toHaveBeenCalledOnce();
+    expect(rows("first-task-rows")).toEqual(["Agent: Codex", "Model: GPT-6.1 Sol", "Effort: Low", "Permission mode: Ask every time"]);
+    await page.press(page.byId("pick-model"));
+    expect(rows("choice-sheet").filter((row) => !row!.startsWith("Close"))).toEqual(["GPT-6.1 Sol", "GPT-6.1 Mini"]);
+    // A model with no efforts has no Effort row.
+    await page.press(page.byId("choice-gpt-6.1-mini"));
+    expect(rows("first-task-rows")).toEqual(["Agent: Codex", "Model: GPT-6.1 Mini", "Permission mode: Ask every time"]);
+    // Another agent starts on its own default: Claude Code's families only, each following its latest release.
+    await page.press(page.byId("pick-agent"));
+    await page.press(page.byId("choice-claude"));
+    expect(rows("first-task-rows")).toEqual(["Agent: Claude Code", "Model: Opus", "Effort: High", "Permission mode: Ask every time"]);
+    await page.press(page.byId("pick-model"));
+    expect(rows("choice-sheet").filter((row) => !row!.startsWith("Close"))).toEqual(["Opus, latest", "Sonnet, latest"]);
+    await page.press(page.byId("choice-sonnet"));
+    await page.press(page.byId("pick-effort"));
+    await page.press(page.byId("choice-high"));
+    expect(rows("first-task-rows")).toEqual(["Agent: Claude Code", "Model: Sonnet", "Effort: High", "Permission mode: Ask every time"]);
+    await toReview();
+    expect(rows("review-task").slice(0, 3)).toEqual(["Agent: Claude Code", "Model: Sonnet · High", "Permission mode: Ask every time"]);
+    await launch();
+    expect((service.sent("POST", "/cloud-workspaces")[0].body as { launch: unknown }).launch).toEqual({ v: 1, agent: "claude", model: "sonnet", effort: "high", mode: "manual" });
+  });
+
+  it("leaves the model to the agent when the Mac is not connected or lists nothing", async () => {
+    const models = vi.fn(async () => []);
+    mocks.app = { connectionStage: "connecting", api: { models } };
+    await form();
+    expect(models).not.toHaveBeenCalled();
+    expect(rows("first-task-rows")).toEqual(["Agent: Codex", "Model: Agent’s default", "Permission mode: Ask every time"]);
+    mocks.app = { connectionStage: "connected", api: { models } };
+    await page.show(<NewWorkspaceScreen key="connected" />);
+    await pass();
+    expect(models).toHaveBeenCalledOnce();
+    expect(rows("first-task-rows")).toEqual(["Agent: Codex", "Model: Agent’s default", "Permission mode: Ask every time"]);
+    expect(page.byId("pick-model")).toBeNull();
   });
 
   it("says None for an empty task, and sends no prompt", async () => {

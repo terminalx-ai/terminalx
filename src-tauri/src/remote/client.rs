@@ -104,6 +104,11 @@ pub enum OpenOutcome {
     WaitingForRuntime,
     /// Suspended compute; only an interactive action ([`Activation::Wake`]) resumes it.
     Suspended,
+    /// The workspace cannot be reached at all: it needs attention (its
+    /// machine is gone, a resume failed) or it was deleted. Nothing is tried
+    /// again until the workspace's state changes (#1582). `reason` is the
+    /// workspace state that refused it.
+    Unavailable { reason: String },
 }
 
 /// Where attachments come from: `POST .../cloud-workspaces/:id/open?attachTicket=1`.
@@ -128,6 +133,12 @@ pub enum ClientState {
         close_code: Option<u16>,
     },
     Suspended,
+    /// The workspace cannot be connected to as it stands (needs attention, or
+    /// deleted): parked, like `Suspended`, until its state changes and the
+    /// web view asks again (#1582). `reason` is the workspace state.
+    Unavailable {
+        reason: String,
+    },
     Connecting { attempt: u32 },
     Connected {
         runtime_generation: u64,
@@ -528,6 +539,21 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
                     attached = None;
                     was_live = false;
                     emit(ClientState::Suspended);
+                    tokio::select! {
+                        _ = activation.changed() => continue,
+                        _ = stopped.changed() => break,
+                    }
+                }
+                Ok(OpenOutcome::Unavailable { reason }) => {
+                    // Parked as a stopped workspace is: retrying cannot reach
+                    // a workspace that needs attention or was deleted. The web
+                    // view asks again (a new activation) once the workspace
+                    // list says its state changed (#1582).
+                    attached = None;
+                    resume = None;
+                    was_live = false;
+                    attempt = 0;
+                    emit(ClientState::Unavailable { reason });
                     tokio::select! {
                         _ = activation.changed() => continue,
                         _ = stopped.changed() => break,
@@ -951,6 +977,50 @@ mod tests {
         supervisor.set_activation(Activation::Wake);
         state_where(&mut states, |state| matches!(state, ClientState::WaitingForRuntime { .. })).await;
         assert_eq!(workspace.resumes.load(Ordering::SeqCst), 1);
+        supervisor.stop();
+    }
+
+    /// A workspace whose machine is gone (needs attention) until a test repairs it.
+    struct UnreachableWorkspace {
+        repaired: std::sync::atomic::AtomicBool,
+        opens: std::sync::atomic::AtomicUsize,
+    }
+
+    impl AttachSource for UnreachableWorkspace {
+        fn open(&self, _refresh_pairing: bool, _activation: Activation) -> Result<OpenOutcome> {
+            use std::sync::atomic::Ordering;
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            if self.repaired.load(Ordering::SeqCst) {
+                return Ok(OpenOutcome::Ready(Box::new(live_grant())));
+            }
+            Ok(OpenOutcome::Unavailable { reason: "attention-required".into() })
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_workspace_parks_until_asked_again() {
+        use std::sync::atomic::Ordering;
+        let workspace = Arc::new(UnreachableWorkspace { repaired: false.into(), opens: 0.into() });
+        let (_close, closes) = mpsc::unbounded_channel();
+        let (events, mut states) = mpsc::unbounded_channel();
+        let supervisor = Supervisor::start_with(workspace.clone(), Activation::Connect, events, Arc::new(FakeRelay { closes: tokio::sync::Mutex::new(closes) }));
+        let state = state_where(&mut states, |state| !matches!(state, ClientState::Opening)).await;
+        assert_eq!(state, ClientState::Unavailable { reason: "attention-required".into() });
+
+        // Parked: well past the backoff's first steps, nothing opens again and nothing says it reconnects.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(workspace.opens.load(Ordering::SeqCst), 1, "an unavailable workspace is not retried on its own");
+        while let Ok(event) = states.try_recv() {
+            if let ClientEvent::State(state) = event {
+                panic!("parked, yet it reported {state:?}");
+            }
+        }
+
+        // Its state changed (the web view saw it in the list) and asks again: it opens, and connects.
+        workspace.repaired.store(true, Ordering::SeqCst);
+        supervisor.set_activation(Activation::Connect);
+        state_where(&mut states, |state| matches!(state, ClientState::Connected { .. })).await;
+        assert_eq!(workspace.opens.load(Ordering::SeqCst), 2);
         supervisor.stop();
     }
 

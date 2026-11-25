@@ -4,6 +4,7 @@ import { errorMessage, type CloudWorkspaceQuote } from "@/lib/api";
 import { isRoleRefusal, roleRefusedMessage } from "@/lib/accountRoles";
 import { getAccount, useAccount } from "@/lib/account";
 import { cloudOrganizations, defaultOrgId, liveCloudOrgIds, placeCloudProjects, useCloudCatalog } from "@/lib/cloudCatalog";
+import { WORKSPACE_NOT_REACHABLE } from "@/lib/cloudAgentApi";
 import { CreateRefused, createErrorMessage, isClientError } from "@/lib/cloudCreate";
 import { cloudIdleOptions, type CloudIdleOptions } from "@/lib/cloudNewSession";
 import { cloudKeyOrgId, managesOrganization, mayStartCloudSessions } from "@/lib/multiOrg";
@@ -96,6 +97,7 @@ export function cloudStartError(error: unknown, orgId: string | null = null): st
   if (code === "cloud_workspace_unreachable") return "The cloud workspace did not come up in time. Try again.";
   if (code === "cloud_runtime_update_required") return "The cloud workspace's runtime needs an update before it can start sessions.";
   if (code === "cloud_workspace_stopped") return "The cloud workspace is stopped.";
+  if (code === WORKSPACE_NOT_REACHABLE) return "The cloud workspace can't be reached: it needs attention. Open it to see why.";
   if (code && /^[a-z_]+$/.test(code)) return createErrorMessage(code);
   return errorMessage(error);
 }

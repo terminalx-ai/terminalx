@@ -191,7 +191,16 @@ const seedNotifications = () => updateNotificationSettings((current) => ({
 
 // ---- The Mac, as the phone's requests reach it ----
 
-const MODELS = [{ id: "claude-opus-5-5", label: "Opus 5.5", harness: "claude", efforts: ["low", "medium", "high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null }];
+// What a Mac lists (`models.list`): Claude Code's families, which follow their latest release, the version pinned here, and Codex's models.
+const listed = (harness: string, id: string, label: string, more: Record<string, unknown> = {}) => ({ id, label, harness, efforts: ["low", "medium", "high"], defaultEffort: "high", acceptsImages: true, isDefault: false, upgrade: null, description: null, ...more });
+const MODELS = [
+  listed("claude", "claude-opus-5-5", "Opus 5.5", { isDefault: true }),
+  listed("claude", "opus", "Opus", { alias: true, resolved: "claude-opus-5-5", efforts: ["low", "medium", "high", "xhigh", "max"] }),
+  listed("claude", "sonnet", "Sonnet", { alias: true, resolved: "claude-sonnet-5-5" }),
+  listed("claude", "haiku", "Haiku", { alias: true, resolved: "claude-haiku-5-5", efforts: [], defaultEffort: null }),
+  listed("codex", "gpt-6.1-sol", "GPT-6.1 Sol", { isDefault: true, efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "low" }),
+  listed("codex", "gpt-6.1-mini", "GPT-6.1 Mini", { defaultEffort: "medium" }),
+];
 const answer = <T,>(value: T) => ({ ok: true as const, value });
 /** A tab's model and mode, as the Mac reports them (`session.tab`). */
 const TAB = { harness: "claude", model: "claude-opus-5-5", effort: "high", permissionMode: "default", status: "in_progress" };

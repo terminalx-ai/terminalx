@@ -282,14 +282,20 @@ struct KeyLock {
 
 impl KeyLock {
     fn acquire(path: &Path) -> Result<Self> {
-        let mut options = fs::OpenOptions::new();
-        options.create(true).truncate(false).write(true);
         #[cfg(unix)]
-        {
+        let file = {
             use std::os::unix::fs::OpenOptionsExt;
+            let mut options = fs::OpenOptions::new();
+            options.create(true).truncate(false).write(true);
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        let file = options.open(path).with_context(|| format!("open {}", path.display()))?;
+            options.open(path).with_context(|| format!("open {}", path.display()))?
+        };
+        // Owner-only, and a link or a file with a second name is refused rather than followed.
+        #[cfg(windows)]
+        let file = crate::win::fs::create_private(path, false).with_context(|| format!("open {}", path.display()))?;
+        // Windows has no flock: the same exclusive lock, held until drop.
+        #[cfg(windows)]
+        file.lock().with_context(|| format!("lock {}", path.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;

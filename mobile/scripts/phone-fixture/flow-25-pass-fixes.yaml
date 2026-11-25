@@ -1,0 +1,143 @@
+# The phone flow defects of the PRO-554 test pass, each in the state that showed it:
+# PRO-569, PRO-561, PRO-557, PRO-559, PRO-562 and PRO-565.
+appId: com.terminalx.phone.fixture
+name: Test pass fixes (PRO-554)
+---
+# PRO-569: a phone that chose nothing carries on the setup the server holds. Northwind has compute connected.
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureSetup: several }
+- tapOn: "Cloud"
+- extendedWaitUntil:
+    visible: "Step 2 of 4, done: Connect compute.*"
+    timeout: 20000
+- assertVisible: "Continue: sign your agents in"
+- takeScreenshot: pro-569-setup-begun-elsewhere
+
+# PRO-561: with workspaces listed, the setup the server holds folds to its row, and each organization
+# with no workspaces opens its steps.
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureSetup: begun-elsewhere }
+- tapOn: "Cloud"
+- extendedWaitUntil:
+    visible: "Set up cloud workspaces, 3 of 4 steps done"
+    timeout: 20000
+- tapOn: ".* with no workspaces"
+- assertVisible: "Personal \\(alex@example.com\\), set up cloud workspaces"
+- takeScreenshot: pro-561-1-folded-row-and-names
+- tapOn: "Personal \\(alex@example.com\\), set up cloud workspaces"
+- extendedWaitUntil:
+    visible: "Step 2 of 4, next: Connect compute.*"
+    timeout: 15000
+- waitForAnimationToEnd
+- takeScreenshot: pro-561-2-that-organizations-steps
+
+# PRO-557: + opens the organization that can launch. The personal one, first in the list, has no compute.
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: hold, fixtureLaunchAccount: several }
+- tapOn: "Cloud"
+- tapOn:
+    id: launch-workspace
+- extendedWaitUntil:
+    visible: "Organization: Northwind"
+    timeout: 20000
+- hideKeyboard
+- takeScreenshot: pro-557-1-plus-opens-the-one-that-can-launch
+# Opened for the one with no compute, the page still has the Organization row.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: hold, fixtureLaunchAccount: several, openRoute: "/cloud/new?orgId=org-personal" }
+- extendedWaitUntil:
+    visible: "Connect compute first"
+    timeout: 20000
+- assertVisible: "Organization: Personal \\(alex@example.com\\)"
+- takeScreenshot: pro-557-2-no-compute-with-the-organization-row
+- tapOn:
+    id: pick-organization
+- waitForAnimationToEnd
+- takeScreenshot: pro-557-3-picking-another
+- tapOn:
+    id: choice-org-personal
+- waitForAnimationToEnd
+# PRO-559: Connect compute opens the Compute page, which goes back to the launch page.
+- tapOn: "Connect compute"
+- extendedWaitUntil:
+    visible: "Boat.*"
+    timeout: 15000
+- waitForAnimationToEnd
+- takeScreenshot: pro-559-connect-compute-opens-compute
+
+# PRO-562: the first task's model and effort, from what the connected Mac lists.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: hold, openRoute: "/cloud/new?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "New workspace"
+    timeout: 20000
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- scrollUntilVisible:
+    element:
+      id: pick-permission-mode
+- assertVisible: "Model: GPT-6.1 Sol"
+- assertVisible: "Effort: Low"
+- takeScreenshot: pro-562-1-model-and-effort-rows
+- tapOn:
+    id: pick-agent
+- tapOn:
+    id: choice-claude
+- waitForAnimationToEnd
+- tapOn:
+    id: pick-model
+- waitForAnimationToEnd
+- takeScreenshot: pro-562-2-model-sheet
+- tapOn:
+    id: choice-opus
+- waitForAnimationToEnd
+- tapOn:
+    id: pick-effort
+- waitForAnimationToEnd
+- takeScreenshot: pro-562-3-effort-sheet
+- tapOn:
+    id: choice-high
+- waitForAnimationToEnd
+- tapOn:
+    id: review-price
+- extendedWaitUntil:
+    visible:
+      id: launch
+    timeout: 15000
+- scrollUntilVisible:
+    element:
+      id: review-task
+- assertVisible: "Model: Opus · High"
+- takeScreenshot: pro-562-4-review
+
+# PRO-565: a size named by its machine, on Agent37: its rate on the form, and said once on the review.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: hold, fixtureLaunchProvider: agent37, openRoute: "/cloud/new?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "New workspace"
+    timeout: 20000
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- assertVisible: "Size: 2 vCPU · 4 GB RAM · 20 GB disk, \\$0.014 / hour"
+- takeScreenshot: pro-565-1-size-row
+- tapOn:
+    id: pick-size
+- waitForAnimationToEnd
+- takeScreenshot: pro-565-2-size-sheet
+- tapOn:
+    id: choice-2x4
+- waitForAnimationToEnd
+- tapOn:
+    id: review-price
+- extendedWaitUntil:
+    visible:
+      id: launch
+    timeout: 15000
+- assertVisible: "Size: 2 vCPU · 4 GB RAM · 20 GB disk"
+- takeScreenshot: pro-565-3-review

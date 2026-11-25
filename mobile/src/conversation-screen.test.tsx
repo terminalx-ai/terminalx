@@ -51,11 +51,13 @@ vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
   multiSet: vi.fn(async (pairs: [string, string][]) => { for (const [key, value] of pairs) mocks.storage.set(key, value); }),
   multiRemove: vi.fn(async (keys: string[]) => { for (const key of keys) mocks.storage.delete(key); }),
 } }));
+// The + chooser: the test picks a file unless it chose the photo library (the chooser itself: ui/choices.test.ts).
+vi.mock("@mobile/ui/choices", () => ({
+  showChoices: (_title: string, choices: readonly string[], choose: (choice: string) => void) => { if (choices.includes(mocks.sheetChoice)) choose(mocks.sheetChoice); },
+}));
 vi.mock("react-native", () => {
   const Box = ({ children, accessibilityRole }: { children?: ReactNode; accessibilityRole?: string }) => <div role={accessibilityRole === "link" ? "link" : undefined}>{children}</div>;
   return {
-    // The + sheet: the test picks a file unless it chose the photo library.
-    ActionSheetIOS: { showActionSheetWithOptions: ({ options }: { options: string[] }, choose: (index: number) => void) => choose(options.indexOf(mocks.sheetChoice)) },
     AppState: { currentState: "active" },
     AccessibilityInfo: { isReduceMotionEnabled: async () => false, addEventListener: () => ({ remove: () => undefined }) },
     Animated: { View: Box, Value: class { setValue() {} interpolate() { return "0deg"; } }, loop: () => ({ start: () => undefined, stop: () => undefined }), timing: () => ({}) },
