@@ -205,13 +205,61 @@ fn recreated_runtime_reconciles_pending_prompts_and_acknowledged_turns() {
     }
 }
 
-#[test]
-fn owned_stdio_lifecycle_is_process_bounded() {
-    for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread", "settings", "to-terminal",
-        "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-slow-start", "share-ended", "host-while-shared",
-        "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart", "resend-no-helper-tools",
-        "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch", "streamed-reply", "streamed-stopped",
-        "mailbox-after-refusal", "mailbox-cli-waiting", "busy-while-working", "queued-while-working", "queued-stop", "queued-interrupt", "queued-share-ended", "queued-overflow", "handover-stop", "handover-exit", "handover-descendant"] {
+/// Each case is a child run of this binary with its own home, so each is a
+/// test of its own and nextest runs them side by side.
+macro_rules! owned_stdio_lifecycle_cases {
+    ($($name:ident => $case:literal,)*) => { $(
+        #[test]
+        fn $name() { owned_stdio_lifecycle_is_process_bounded($case); }
+    )* };
+}
+owned_stdio_lifecycle_cases! {
+    owned_stdio_lifecycle_is_process_bounded_admission_drain => "admission-drain",
+    owned_stdio_lifecycle_is_process_bounded_retain_drained_child => "retain-drained-child",
+    owned_stdio_lifecycle_is_process_bounded_full_input_pipe => "full-input-pipe",
+    owned_stdio_lifecycle_is_process_bounded_expired_input_pipe => "expired-input-pipe",
+    owned_stdio_lifecycle_is_process_bounded_stale_control => "stale-control",
+    owned_stdio_lifecycle_is_process_bounded_private_diagnostics => "private-diagnostics",
+    owned_stdio_lifecycle_is_process_bounded_refused_handshake => "refused-handshake",
+    owned_stdio_lifecycle_is_process_bounded_refused_exit => "refused-exit",
+    owned_stdio_lifecycle_is_process_bounded_resume_thread => "resume-thread",
+    owned_stdio_lifecycle_is_process_bounded_resume_other_thread => "resume-other-thread",
+    owned_stdio_lifecycle_is_process_bounded_settings => "settings",
+    owned_stdio_lifecycle_is_process_bounded_to_terminal => "to-terminal",
+    owned_stdio_lifecycle_is_process_bounded_phone_input => "phone-input",
+    owned_stdio_lifecycle_is_process_bounded_phone_compact => "phone-compact",
+    owned_stdio_lifecycle_is_process_bounded_phone_revoked => "phone-revoked",
+    owned_stdio_lifecycle_is_process_bounded_phone_reconcile_race => "phone-reconcile-race",
+    owned_stdio_lifecycle_is_process_bounded_share_input => "share-input",
+    owned_stdio_lifecycle_is_process_bounded_share_slow_start => "share-slow-start",
+    owned_stdio_lifecycle_is_process_bounded_share_ended => "share-ended",
+    owned_stdio_lifecycle_is_process_bounded_host_while_shared => "host-while-shared",
+    owned_stdio_lifecycle_is_process_bounded_continuation_delivered => "continuation-delivered",
+    owned_stdio_lifecycle_is_process_bounded_continuation_undelivered => "continuation-undelivered",
+    owned_stdio_lifecycle_is_process_bounded_continuation_stopped => "continuation-stopped",
+    owned_stdio_lifecycle_is_process_bounded_resend_after_restart => "resend-after-restart",
+    owned_stdio_lifecycle_is_process_bounded_resend_no_helper_tools => "resend-no-helper-tools",
+    owned_stdio_lifecycle_is_process_bounded_native_fallback_send => "native-fallback-send",
+    owned_stdio_lifecycle_is_process_bounded_native_fallback_start => "native-fallback-start",
+    owned_stdio_lifecycle_is_process_bounded_native_supported_start => "native-supported-start",
+    owned_stdio_lifecycle_is_process_bounded_cloud_launch => "cloud-launch",
+    owned_stdio_lifecycle_is_process_bounded_streamed_reply => "streamed-reply",
+    owned_stdio_lifecycle_is_process_bounded_streamed_stopped => "streamed-stopped",
+    owned_stdio_lifecycle_is_process_bounded_mailbox_after_refusal => "mailbox-after-refusal",
+    owned_stdio_lifecycle_is_process_bounded_mailbox_cli_waiting => "mailbox-cli-waiting",
+    owned_stdio_lifecycle_is_process_bounded_busy_while_working => "busy-while-working",
+    owned_stdio_lifecycle_is_process_bounded_queued_while_working => "queued-while-working",
+    owned_stdio_lifecycle_is_process_bounded_queued_stop => "queued-stop",
+    owned_stdio_lifecycle_is_process_bounded_queued_interrupt => "queued-interrupt",
+    owned_stdio_lifecycle_is_process_bounded_queued_share_ended => "queued-share-ended",
+    owned_stdio_lifecycle_is_process_bounded_queued_overflow => "queued-overflow",
+    owned_stdio_lifecycle_is_process_bounded_handover_stop => "handover-stop",
+    owned_stdio_lifecycle_is_process_bounded_handover_exit => "handover-exit",
+    owned_stdio_lifecycle_is_process_bounded_handover_descendant => "handover-descendant",
+}
+
+fn owned_stdio_lifecycle_is_process_bounded(case: &str) {
+    {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
