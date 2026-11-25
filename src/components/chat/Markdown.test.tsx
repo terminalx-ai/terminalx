@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { revealInFileManager } from "@/lib/platform";
 import { fs, type LocalPathInfo } from "@/lib/api";
 import { openBrowserTab } from "@/lib/browser";
 import { openFile } from "@/lib/editors";
@@ -238,7 +239,7 @@ describe("Codex file citations (#776)", () => {
 
     fireEvent.contextMenu(link);
     expect(await screen.findByRole("menuitem", { name: "Open with default application" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("menuitem", { name: "Reveal in file manager" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: revealInFileManager }));
     await waitFor(() => expect(revealItemInDir).toHaveBeenCalledWith("/abs/path/report.xlsx"));
   });
 

@@ -45,7 +45,8 @@ import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
 import { openAgentHandoff, openCloseTabs, openRenameTab } from "@/lib/dialogs";
 import { otherAgent } from "@/lib/agentHandoff";
 import { showFloatingWindow } from "@/lib/floating";
-import { isMac, useShortcutKeycaps } from "@/lib/hotkeys";
+import { useShortcutKeycaps } from "@/lib/hotkeys";
+import { fileManager } from "@/lib/platform";
 import type { ShortcutId } from "@/lib/shortcuts";
 import { getTabLog, loadTab } from "@/lib/agentEvents";
 import { tabLinkFor } from "@/lib/tabDeepLink";
@@ -513,7 +514,7 @@ export function TabMenuItems({
           </ContextMenuSub>
           {tab.kind !== "browser" ? (
             <ContextMenuItem onSelect={() => void revealItemInDir(session.cwd).catch(failed("revealing the working directory"))}>
-              <FolderOpen /> {isMac ? "Reveal working directory in Finder" : "Reveal working directory in the file manager"}
+              <FolderOpen /> Reveal working directory in {fileManager}
             </ContextMenuItem>
           ) : null}
           {drawnAs ? (

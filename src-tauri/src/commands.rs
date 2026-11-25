@@ -891,7 +891,7 @@ fn lent_identity(provider: crate::cloud_workspaces::AgentLoginProvider, account:
         chrono::LocalResult::Single(at) => at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         _ => "an unknown time".into(),
     };
-    let fallback = format!("{} on a Mac", agent_label(provider));
+    let fallback = format!("{} on a {}", agent_label(provider), crate::platform_profile::current().computer_word);
     format!("{} · lent until {until}", account.unwrap_or(&fallback))
 }
 
@@ -5467,7 +5467,7 @@ mod command_tests {
         // Everything else is word for word the Claude Code dialog.
         let same = |text: &str| text.replace("Claude Code", "AGENT").replace("Codex", "AGENT").replace("Claude subscription", "SUB subscription").replace("ChatGPT subscription", "SUB subscription").replace(", with its ID token (which names the account and plan),", "");
         assert_eq!(same(&claude), same(&codex));
-        assert_eq!(super::lent_identity(AgentLoginProvider::Codex, None, 1_790_000_000_000), "Codex on a Mac · lent until 2026-09-21T14:13:20Z");
+        assert_eq!(super::lent_identity(AgentLoginProvider::Codex, None, 1_790_000_000_000), format!("Codex on a {} · lent until 2026-09-21T14:13:20Z", crate::platform_profile::current().computer_word));
     }
 
     // PRO-111: the provider key dialog names the provider and the organization, not their ids.

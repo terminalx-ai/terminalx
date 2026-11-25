@@ -130,7 +130,7 @@ function PairPhoneBody() {
           {mode === "automatic" && <RelayLine signedIn={signedIn} accountReady={account.ready} accountBusy={account.busy} status={status} />}
           <div className={cn(sectionLabel, "mt-1")}>On the phone</div>
           <ol className={cn(soft, "grid list-decimal gap-1 pl-4")}>
-            <li>Open TerminalX and tap Pair a Mac</li>
+            <li>Open TerminalX and tap Add a machine (+)</li>
             <li>Scan this code, then compare the fingerprint</li>
             <li>Approve here when the phone asks</li>
           </ol>

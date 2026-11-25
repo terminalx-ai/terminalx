@@ -89,7 +89,7 @@ describe("Pair a phone dialog", () => {
       "Phone can be on cellular or any Wi-Fi. Nearby, it tries this computer directly first, then falls back to Relay. Every path is end-to-end encrypted.",
       "Relay is ready",
       "On the phone",
-      "Open TerminalX and tap Pair a Mac",
+      "Open TerminalX and tap Add a machine (+)",
       "Scan this code, then compare the fingerprint",
       "Approve here when the phone asks",
       "Keep this computer awake while a phone is connected",

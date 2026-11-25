@@ -135,11 +135,11 @@ fn key_account(organization_id: &str, workspace_id: &str, key_id: &str) -> Strin
 #[cfg(target_os = "macos")]
 impl KeyStore for KeychainKeys {
     fn put(&self, organization_id: &str, workspace_id: &str, key_id: &str, key: &[u8; crypto::KEY_LEN]) -> Result<()> {
-        crate::keychain::set(self.service()?, &key_account(organization_id, workspace_id, key_id), key).context("save a workspace key to Keychain")
+        crate::keychain::set(self.service()?, &key_account(organization_id, workspace_id, key_id), key).with_context(|| crate::platform_profile::localize("save a workspace key to the Keychain"))
     }
 
     fn get(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<Option<[u8; crypto::KEY_LEN]>> {
-        let Some(bytes) = crate::keychain::get(self.service()?, &key_account(organization_id, workspace_id, key_id)).context("read a workspace key from Keychain")? else {
+        let Some(bytes) = crate::keychain::get(self.service()?, &key_account(organization_id, workspace_id, key_id)).with_context(|| crate::platform_profile::localize("read a workspace key from the Keychain"))? else {
             return Ok(None);
         };
         let bytes = Zeroizing::new(bytes);
@@ -147,7 +147,7 @@ impl KeyStore for KeychainKeys {
     }
 
     fn delete(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()> {
-        crate::keychain::delete(self.service()?, &key_account(organization_id, workspace_id, key_id)).context("delete a workspace key from Keychain")
+        crate::keychain::delete(self.service()?, &key_account(organization_id, workspace_id, key_id)).with_context(|| crate::platform_profile::localize("delete a workspace key from the Keychain"))
     }
 }
 
