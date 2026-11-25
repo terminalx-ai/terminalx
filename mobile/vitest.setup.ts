@@ -11,7 +11,7 @@ vi.mock("expo-glass-effect", () => ({
 // Drawings are native views: tests draw nothing for them.
 vi.mock("react-native-svg", () => {
   const Nothing = () => null;
-  return { default: Nothing, Svg: Nothing, Defs: Nothing, Path: Nothing, RadialGradient: Nothing, Rect: Nothing, Stop: Nothing, Circle: Nothing, G: Nothing, Line: Nothing };
+  return { default: Nothing, Svg: Nothing, Defs: Nothing, LinearGradient: Nothing, Path: Nothing, RadialGradient: Nothing, Rect: Nothing, Stop: Nothing, Circle: Nothing, G: Nothing, Line: Nothing };
 });
 
 // Icons draw nothing in tests; any icon the app names exists.
@@ -27,6 +27,12 @@ vi.mock("./modules/paste-image", () => ({ addPasteImageListener: () => () => und
 vi.mock("expo-blur", () => ({ BlurView: () => null }));
 vi.mock("expo-linear-gradient", () => ({ LinearGradient: () => null }));
 vi.mock("@react-native-masked-view/masked-view", () => ({ default: () => null }));
+// The system's browser is native: nothing opens in tests unless a test says so.
+vi.mock("expo-web-browser", () => ({
+  openBrowserAsync: async () => ({ type: "cancel" }),
+  openAuthSessionAsync: async () => ({ type: "cancel" }),
+  dismissAuthSession: () => undefined,
+}));
 // Dictation is native: tests never hear anything.
 vi.mock("expo-speech-recognition", () => ({
   ExpoSpeechRecognitionModule: { start: () => undefined, stop: () => undefined, abort: () => undefined, requestPermissionsAsync: async () => ({ granted: false }) },

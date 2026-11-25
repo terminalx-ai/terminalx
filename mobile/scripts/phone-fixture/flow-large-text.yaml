@@ -1,0 +1,119 @@
+# Large text (PRO-563): the screens whose buttons, titles, badges and rows were cut at the accessibility sizes.
+# Maestro cannot set the text size. Set it on the simulator first, then run this flow:
+#   xcrun simctl ui <udid> content_size accessibility-extra-large
+# and back to `large` afterwards. At `large` the same screens show the default layout.
+appId: com.terminalx.phone.fixture
+name: Large text
+---
+# Signed out: the Machines title and mark, and the Sign in button.
+- launchApp:
+    clearState: true
+    arguments: { fixtureAccessCode: accepted }
+- assertVisible: "Machines"
+- takeScreenshot: large-text-1-machines-signed-out
+- tapOn: "Cloud"
+- assertVisible: "Sign in"
+- takeScreenshot: large-text-2-cloud-signed-out
+# The organizations, then Northwind's compute and its connect form.
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureSetup: several }
+- tapOn: "Cloud"
+# At the accessibility sizes the button is below the first screenful.
+- scrollUntilVisible:
+    element: "Start setup"
+- tapOn: "Start setup"
+- assertVisible: "Choose the organization to set up."
+- waitForAnimationToEnd
+- takeScreenshot: large-text-3-organization
+- scrollUntilVisible:
+    element: "Northwind"
+- tapOn: "Northwind"
+- tapOn: "Continue with Northwind"
+- waitForAnimationToEnd
+# The tab comes back scrolled to where Start setup was: the step is above.
+- scrollUntilVisible:
+    element:
+      id: setup-step-compute
+    direction: UP
+- tapOn:
+    id: setup-step-compute
+- extendedWaitUntil:
+    visible:
+      id: compute-list
+    timeout: 15000
+- waitForAnimationToEnd
+# The back button is round and wordless (25.03), and is never called by the route group's name (PRO-558).
+- assertNotVisible: "\\(tabs\\)"
+- takeScreenshot: large-text-4-compute
+- scrollUntilVisible:
+    element:
+      id: provider-agent37
+- takeScreenshot: large-text-5-compute-not-connected
+- tapOn:
+    id: provider-agent37
+- extendedWaitUntil:
+    visible:
+      id: provider-form
+    timeout: 15000
+- waitForAnimationToEnd
+- takeScreenshot: large-text-6-connect-agent37
+# Agent logins and a key form. The organization chosen above is kept on the phone.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureSetup: several }
+- tapOn: "Cloud"
+- scrollUntilVisible:
+    element:
+      id: setup-step-agents
+- tapOn:
+    id: setup-step-agents
+- extendedWaitUntil:
+    visible:
+      id: agent-logins
+    timeout: 15000
+- waitForAnimationToEnd
+- takeScreenshot: large-text-7-agent-logins
+- scrollUntilVisible:
+    element:
+      id: agent-login-claude
+- tapOn:
+    id: agent-login-claude
+- extendedWaitUntil:
+    visible: "Save"
+    timeout: 15000
+- waitForAnimationToEnd
+- takeScreenshot: large-text-8-claude-code-key
+# The launch form's rows.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLaunch: hold, openRoute: "/cloud/new?orgId=org-northwind" }
+- extendedWaitUntil:
+    visible: "New workspace"
+    timeout: 15000
+- inputText: "Checkout redesign"
+- pressKey: Enter
+- waitForAnimationToEnd
+- takeScreenshot: large-text-9-launch-form
+# The Cloud list: each workspace names its provider.
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureSetup: with-workspaces }
+- tapOn: "Cloud"
+- assertVisible: "Checkout redesign.*"
+- takeScreenshot: large-text-10-cloud-list
+# A running workspace's conversation: a delivered message says the workspace has it (PRO-570).
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, openRoute: /cloud, openWorkspace: ws-search }
+- extendedWaitUntil: { visible: "Start one with an agent.", timeout: 20000 }
+- tapOn: { id: "empty-start-button" }
+- extendedWaitUntil: { visible: "Permission mode: Ask every time", timeout: 10000 }
+- tapOn: "First message.*"
+- inputText: "Update the changelog."
+- scrollUntilVisible:
+    element: "Start conversation"
+- tapOn: "Start conversation"
+- extendedWaitUntil: { visible: "Delivered to the workspace", timeout: 30000 }
+- assertNotVisible: "Delivered to your Mac"
+- takeScreenshot: large-text-11-cloud-conversation

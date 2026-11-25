@@ -726,6 +726,41 @@ pub fn backoff(attempt: u32, jitter: f64) -> Duration {
     Duration::from_millis(half + (half as f64 * jitter.clamp(0.0, 1.0)) as u64).max(BACKOFF_FLOOR)
 }
 
+/// The relay's typed runtime close reasons (`RUNTIME_CLOSE` in the relay's
+/// `close-codes.ts`). Its other reasons all start with `relay_`.
+const RUNTIME_CLOSE_REASONS: &[&str] = &["runtime_unavailable", "stale_generation", "auth_expired", "update_required", "backpressure"];
+
+/// The reason text of a relay close frame, kept only when it is one of the
+/// relay's own reason codes: `relay_` and lowercase words and underscores
+/// (`relay_unknown_control_message`), at most 64 bytes, or one of its typed
+/// runtime reasons. Anything else, which could carry an identifier or a
+/// credential, is dropped (#1579).
+pub fn close_reason(reason: &str) -> Option<String> {
+    let relay_code = reason.len() <= 64
+        && reason.strip_prefix("relay_").is_some_and(|rest| {
+            rest.bytes().next().is_some_and(|byte| byte.is_ascii_lowercase())
+                && rest.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        });
+    (relay_code || RUNTIME_CLOSE_REASONS.contains(&reason)).then(|| reason.to_string())
+}
+
+/// The wait before registering again after the relay refused `refusals`
+/// registrations in a row with 4401 (#1579). The first may be a race with a
+/// credential rotating, so it waits as for a drop; from the second the wait
+/// doubles from 30 s to 30 min, so a refusal that does not clear by itself
+/// costs a few registrations an hour, not hundreds.
+pub const REFUSED_BACKOFF_FLOOR: Duration = Duration::from_secs(30);
+pub const REFUSED_BACKOFF_CEILING: Duration = Duration::from_secs(30 * 60);
+
+pub fn refused_backoff(refusals: u32, jitter: f64) -> Duration {
+    if refusals <= 1 {
+        return backoff(refusals, jitter);
+    }
+    let step = REFUSED_BACKOFF_FLOOR.saturating_mul(2u32.saturating_pow((refusals - 2).min(16))).min(REFUSED_BACKOFF_CEILING);
+    // Up to a tenth later, so hosts refused together do not return together.
+    step + step.mul_f64(jitter.clamp(0.0, 1.0) / 10.0)
+}
+
 /// How much a caller may cost: reading a cache never connects, and only an
 /// interactive action may resume a suspended workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -984,6 +1019,28 @@ mod tests {
         assert_eq!(close_action(4104), CloseAction::Reconnect);
         assert_eq!(close_action(1006), CloseAction::Reconnect);
         assert_eq!(close_action(4401), CloseAction::CredentialRejected);
+    }
+
+    #[test]
+    fn close_reasons_keep_relay_codes_and_drop_anything_else() {
+        assert_eq!(close_reason("relay_unknown_control_message").as_deref(), Some("relay_unknown_control_message"));
+        assert_eq!(close_reason("relay_control_not_active").as_deref(), Some("relay_control_not_active"));
+        assert_eq!(close_reason("stale_generation").as_deref(), Some("stale_generation"));
+        let long = format!("relay_{}", "a".repeat(59));
+        for unsafe_reason in ["", "Relay closed", "relay host abcDEF0123456789", "token=secret", "relay-x", "_relay", "relay_", "relay__x", "relay_ü", &long, "abcdef0123456789", "user_1234", "draining"] {
+            assert_eq!(close_reason(unsafe_reason), None, "{unsafe_reason:?}");
+        }
+    }
+
+    #[test]
+    fn repeated_refusals_back_off_from_30s_to_30min() {
+        assert!(refused_backoff(1, 1.0) <= BACKOFF_CEILING, "one refusal retries as a drop does");
+        assert_eq!(refused_backoff(2, 0.0), Duration::from_secs(30));
+        assert_eq!(refused_backoff(3, 0.0), Duration::from_secs(60));
+        assert_eq!(refused_backoff(7, 0.0), Duration::from_secs(16 * 60));
+        assert_eq!(refused_backoff(8, 0.0), REFUSED_BACKOFF_CEILING);
+        assert_eq!(refused_backoff(u32::MAX, 0.0), REFUSED_BACKOFF_CEILING);
+        assert_eq!(refused_backoff(8, 1.0), REFUSED_BACKOFF_CEILING + REFUSED_BACKOFF_CEILING / 10);
     }
 
     #[test]

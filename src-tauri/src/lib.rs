@@ -253,6 +253,8 @@ mod status;
 mod stats;
 #[cfg(feature = "desktop")]
 mod star_nag;
+#[cfg(feature = "desktop")]
+mod startup_error;
 mod summaries;
 mod terminal_perf;
 #[cfg(feature = "desktop")]
@@ -409,7 +411,8 @@ pub fn run() {
     let organization_members = Arc::new(organization_members::OrganizationMembersService::new(account.clone()));
     let agent_keys = Arc::new(cloud_agent_client::KeychainKeys::default());
     let cloud_agents = Arc::new(
-        cloud_agent_client::CloudAgentClient::new(account.clone(), Arc::new(cloud_agent_client::CachedKeys::new(agent_keys.clone()))).expect("open the cloud agent store under TERMINALX_HOME"),
+        cloud_agent_client::CloudAgentClient::new(account.clone(), Arc::new(cloud_agent_client::CachedKeys::new(agent_keys.clone())))
+            .unwrap_or_else(|error| startup_error::exit("open its cloud agent store", error)),
     );
     let organization_compute = Arc::new(organization_compute::OrganizationComputeService::new(account.clone()));
     let organization_github_app = Arc::new(organization_github_app::OrganizationGithubAppService::new(account.clone()));
@@ -423,7 +426,7 @@ pub fn run() {
     // The resource directory is only known once Tauri is up; the service
     // resolves the helper lazily, so it can be built before `setup`.
     let computer = Arc::new(computer::ComputerService::new(None));
-    let browser = Arc::new(browser::BrowserRuntime::open().expect("open the browser stores under TERMINALX_HOME"));
+    let browser = Arc::new(browser::BrowserRuntime::open().unwrap_or_else(|error| startup_error::exit("open its browser stores", error)));
     let state = AppState {
         account: account.clone(),
         cloud_workspaces,
@@ -493,7 +496,8 @@ pub fn run() {
             }
             // A Codex sign-in home left by an app that crashed or was force-quit (PRO-79).
             #[cfg(feature = "desktop")]
-            std::thread::spawn(|| codex_device_login::sweep_stale(&codex_device_login::homes_parent()));
+            // With no private folder for them there are no homes of ours to sweep: a shared one is left alone.
+            std::thread::spawn(|| if let Ok(parent) = codex_device_login::homes_parent() { codex_device_login::sweep_stale(&parent) });
             // Agent account directories a crash left before they were listed (#980).
             std::thread::spawn(agent_accounts::sweep);
             // Attachments are shown from the data folder, wherever
@@ -1415,7 +1419,7 @@ pub fn run() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("error while building tauri application")
+        .unwrap_or_else(|error| startup_error::exit("start its window", error))
         .run(|app, event| {
             // A restart never returns to be told no, so it is not held back.
             if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {

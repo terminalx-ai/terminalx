@@ -20,6 +20,7 @@ import { terminalColorHex } from "@/lib/terminalColor";
 import { hideWebgl, recoverWebgl, showWebgl } from "@/lib/terminalWebgl";
 import { onAppResume } from "@/lib/appResume";
 import { useTheme } from "@/lib/theme";
+import { getPrefs, subscribePrefs } from "@/lib/prefs";
 import { REMOTE_DROP_REFUSAL, TerminalDropHint, useTerminalDrop, type TerminalDropRefusal } from "./TerminalDrop";
 
 const subscribeVisibility = (changed: () => void) => {
@@ -88,6 +89,31 @@ export function themeFor(mode: "dark" | "light") {
       };
 }
 
+type OptionKeyed = { options: { macOptionIsMeta?: boolean }; dispose(): void };
+
+/** Every open terminal made here, so turning the Option key setting reaches those already open. */
+const optionKeyed = new Set<OptionKeyed>();
+let followingOptionKey = false;
+
+/**
+ * Keep `term`'s Option key as the setting says, now and whenever it changes,
+ * until it is disposed. One subscription serves every terminal.
+ */
+export function followOptionKey(term: OptionKeyed) {
+  optionKeyed.add(term);
+  const dispose = term.dispose.bind(term);
+  term.dispose = () => {
+    optionKeyed.delete(term);
+    dispose();
+  };
+  if (followingOptionKey) return;
+  followingOptionKey = true;
+  subscribePrefs(() => {
+    const meta = getPrefs().optionAsMeta;
+    for (const open of optionKeyed) if (open.options.macOptionIsMeta !== meta) open.options.macOptionIsMeta = meta;
+  });
+}
+
 /**
  * An xterm in its own element, styled like every TerminalX terminal, not yet
  * wired to a process. It draws with WebGL once a view shows it (`terminalWebgl.ts`).
@@ -103,8 +129,9 @@ export function createTerminal(mode: "dark" | "light"): TerminalInstance {
     lineHeight: 1.25,
     scrollback: 10_000,
     theme: themeFor(mode),
-    macOptionIsMeta: true,
+    macOptionIsMeta: getPrefs().optionAsMeta,
   });
+  followOptionKey(term);
   const fit = new FitAddon();
   term.loadAddon(new TerminalBufferCleanup());
   term.loadAddon(fit);

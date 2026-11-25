@@ -118,7 +118,7 @@ fn a_bot_changes_only_its_own_work_list() {
 #[test]
 fn a_bot_asks_the_owner_answers_and_the_bot_carries_on() {
     let _switches = Switches;
-    let marker = format!("71.{}", std::process::id());
+    let marker = format!("79.{}", std::process::id());
     let (_home, service, _sink, atlas, chat, _owners, pid) = super::tests::bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
     let service = service.with_local_lifetime(crate::local_runtime::Lifetime::new(std::time::Duration::ZERO));
     let ask = |command: &str, params: Value| service.execute(command, params, "r");

@@ -51,8 +51,13 @@ const hold = async (page, from, to) => {
   await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2, { steps: 20 });
   await page.evaluate(() => new Promise(requestAnimationFrame));
 };
-const drag = async (page, from, to) => {
+// dnd-kit drops on what it last found under the pointer, found in a render after a move; the frame hold() waits for
+// is not that render, and a busy runner drops where the pointer was (sidebar-order.mjs, run 45414573818). So drag()
+// lets go once dnd-kit says `over`, its words for the target.
+const over = (page, words) => page.locator('[id^="DndLiveRegion-"]').getByText(words, { exact: true }).waitFor();
+const drag = async (page, from, to, words) => {
   await hold(page, from, to);
+  await over(page, words);
   await page.mouse.up();
   await page.waitForTimeout(100);
 };
@@ -128,7 +133,7 @@ try {
     // Now: Release (empty), Refactor (empty), Retries [two]; one and three in the main list.
     const ids = () => page.locator('[data-local-section]').evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-local-section')));
     const inSection = (id) => page.locator(`[data-local-section] [data-row-sessions~="${id}"]`).count();
-    await drag(page, section("Retries").getByText("Fix retry handling", { exact: true }), section("Release").getByText("Drag sessions here", { exact: true }));
+    await drag(page, section("Retries").getByText("Fix retry handling", { exact: true }), section("Release").getByText("Drag sessions here", { exact: true }), "Over Release. Drop to move Fix retry handling there.");
     await section("Release").getByText("Fix retry handling", { exact: true }).waitFor();
     assert.equal(await section("Retries").getByText("Drag sessions here", { exact: true }).count(), 1, "the emptied section shows its drop target");
     {
@@ -151,7 +156,7 @@ try {
       if (process.env.SCREENSHOTS) await page.screenshot({ path: `${process.env.SCREENSHOTS}/${layout}-${colorScheme}-drag-out.png` });
       const end = await back.boundingBox();
       await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2, { steps: 20 });
-      await page.evaluate(() => new Promise(requestAnimationFrame));
+      await over(page, "Over the main list. Drop to move Simplify the parser there.");
       await page.mouse.up();
       await page.waitForFunction(() => !document.querySelector('[data-local-section] [data-row-sessions~="three"]') && document.querySelector('[data-row-sessions~="three"]'));
       assert.equal(await back.count(), 0);
@@ -159,12 +164,12 @@ try {
     // A section header drags the section: Retries goes above Release.
     assert.equal((await ids())[0], 'release');
     const last = (await ids()).at(-1);
-    await drag(page, section("Retries").getByRole("button", { name: /^Retries \d+$/ }), section("Release").getByRole("button", { name: /^Release \d+$/ }));
+    await drag(page, section("Retries").getByRole("button", { name: /^Retries \d+$/ }), section("Release").getByRole("button", { name: /^Release \d+$/ }), "Moved section Retries. Position 1 of 3.");
     await page.waitForFunction((id) => document.querySelector('[data-local-section]')?.getAttribute('data-local-section') === id, last);
     assert.equal(await page.getByRole("button", { name: "Reorder section Release", exact: true }).count(), 1, "headers carry a keyboard grip");
     // A failed move raises the error toast and leaves the session where it was.
     await page.evaluate(() => { window.__PW_FAIL_MOVE__ = true; });
-    await drag(page, section("Release").getByText("Fix retry handling", { exact: true }), section("Retries").getByRole("button", { name: /^Retries \d+$/ }));
+    await drag(page, section("Release").getByText("Fix retry handling", { exact: true }), section("Retries").getByRole("button", { name: /^Retries \d+$/ }), "Over Retries. Drop to move Fix retry handling there.");
     // 02.20 (PRO-386): titled with what was not done, where it is now, and Try again.
     await page.getByText("Couldn't move Fix retry handling to Retries", { exact: true }).waitFor();
     await page.getByText(/It's back in Release\.$/).waitFor();

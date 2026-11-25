@@ -10,6 +10,7 @@
     "./agentMarks": "./src/agentMarks.ts",
     "./agentSettings": "./src/agentSettings.ts",
     "./botFace": "./src/botFace.ts",
+    "./cloudMachineGone": "./src/cloudMachineGone.ts",
     "./codexCitations": "./src/codexCitations.ts",
     "./harnessText": "./src/harnessText.ts",
     "./continuation": "./src/continuation.ts",

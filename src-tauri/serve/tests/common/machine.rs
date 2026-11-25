@@ -13,18 +13,70 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::agent::Serve;
 
-/// A port nothing listens on, and one no other test in this process got:
-/// a port just released is often the next one handed out.
+/// A port nothing listens on, and one no other test got, in this process or
+/// in another: a port just released is often the next one handed out, and
+/// under cargo-nextest every test is a process of its own and tests of
+/// different binaries run at the same time.
+///
+/// A port is taken by creating `<temp dir>/terminalx-test-ports/<port>`
+/// exclusively, with this process's id in it. A file whose process is gone is
+/// taken over; one whose process still runs, or that holds no id yet, is not.
 pub fn free_port() -> u16 {
-    static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
-    let mut given = GIVEN.lock().unwrap();
+    let ports = std::env::temp_dir().join("terminalx-test-ports");
+    std::fs::create_dir_all(&ports).unwrap();
     loop {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        if !given.contains(&port) {
-            given.push(port);
+        if reserve(&ports, port) {
             return port;
         }
     }
+}
+
+/// Whether this process now holds `port`.
+fn reserve(ports: &Path, port: u16) -> bool {
+    let file = ports.join(port.to_string());
+    if create_holding(&file) {
+        return true;
+    }
+    let Some(holder) = holder(&file) else { return false };
+    if alive(holder) {
+        return false;
+    }
+    // Its process is gone. Of the processes that read the same id, the one
+    // that creates `<port>.from-<id>` takes the port over. That file stays:
+    // a process that read the id later cannot remove the file the one that
+    // took it over wrote.
+    if !create_holding(&ports.join(format!("{port}.from-{holder}"))) || self::holder(&file) != Some(holder) {
+        return false;
+    }
+    // Another process may create the file once it is gone: then it is that
+    // one's, and this one takes the next port.
+    std::fs::remove_file(&file).is_ok() && create_holding(&file)
+}
+
+/// Create `path` if nothing is there, holding this process's id.
+fn create_holding(path: &Path) -> bool {
+    use std::io::Write as _;
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => {
+            file.write_all(std::process::id().to_string().as_bytes()).unwrap();
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(error) => panic!("reserving the test port {}: {error}", path.display()),
+    }
+}
+
+/// The process id in a port's file: none while its creator has not written it.
+fn holder(file: &Path) -> Option<libc::pid_t> {
+    std::fs::read_to_string(file).ok()?.trim().parse().ok().filter(|pid| *pid > 0)
+}
+
+/// Whether a process with this id runs (signal 0 sends nothing; EPERM is
+/// another user's process, which runs).
+fn alive(pid: libc::pid_t) -> bool {
+    let sent = unsafe { libc::kill(pid, 0) } == 0;
+    sent || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 pub fn allow(data: &Path, on: bool) {

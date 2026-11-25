@@ -8,7 +8,11 @@ const server = await serve();
 const browser = await launch();
 const fixture = { cloud: false, localProjects: 2, localSessions: 6 };
 const extra = `localStorage.setItem("raccoon.prefs", JSON.stringify({ sidebarLayout: "simple", animations: false }));`;
-const drag = async (page, from, to) => {
+// dnd-kit drops on the row it last found under the pointer, found in a render after a move, and says so in its live
+// region. Released one frame after the last move, a busy runner had not drawn that render yet and the drop went to the
+// row the pointer had left: Chat 5 never led (Linux run 45414573818, sidebar-order.mjs:95). So it lets go once dnd-kit
+// says `over`, the words it uses for the target, as a person lets go once the row is marked.
+const drag = async (page, from, to, over) => {
   const start = await from.boundingBox();
   const end = await to.boundingBox();
   assert.ok(start && end);
@@ -17,7 +21,7 @@ const drag = async (page, from, to) => {
   await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2 + 8, { steps: 2 });
   await page.waitForFunction((element) => element.getAttribute("aria-pressed") === "true", await from.elementHandle());
   await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2, { steps: 20 });
-  await page.evaluate(() => new Promise(requestAnimationFrame));
+  await page.locator('[id^="DndLiveRegion-"]').getByText(over, { exact: true }).waitFor();
   await page.mouse.up();
   // dnd-kit retains its document click guard for 50 ms after pointer release.
   // Let it detach before the next interaction so a fast CI click is not swallowed.
@@ -44,11 +48,11 @@ try {
   await sidebar(page);
   await toggle(page);
   const first = page.getByRole("group", { name: "local-0", exact: true });
-  await drag(page, first.getByRole("button", { name: "Reorder topic/4", exact: true }), first.getByRole("button", { name: "Reorder topic/0", exact: true }));
+  await drag(page, first.getByRole("button", { name: "Reorder topic/4", exact: true }), first.getByRole("button", { name: "Reorder topic/0", exact: true }), "Moved topic/4. Position 1 of 3.");
   await page.waitForFunction(() => window.__PW_STUB__.answers.sidebar_order.sessions[0] === "many-s4");
   const sessionOrder = await rows(page, "local-0");
   assert.deepEqual(sessionOrder, ["many-s4", "many-s0", "many-s2"]);
-  await drag(page, page.getByRole("button", { name: "Reorder local-1", exact: true }), page.getByRole("button", { name: "Reorder local-0", exact: true }));
+  await drag(page, page.getByRole("button", { name: "Reorder local-1", exact: true }), page.getByRole("button", { name: "Reorder local-0", exact: true }), "Moved local-1. Position 1 of 2.");
   await page.waitForFunction(() => window.__PW_STUB__.answers.sidebar_order.projects[0] === "/repos/p1");
   assert.deepEqual(await projectNames(page), ["local-1", "local-0"]);
   await toggle(page);
@@ -91,7 +95,7 @@ try {
   const flat = await open(browser, server.url, fixture, { width: 1100, height: 900 }, { extra: `localStorage.setItem("raccoon.prefs", JSON.stringify({ sidebarLayout: "list", animations: false }));
     window.__PW_STUB__.answers.sidebar_order = { custom: true, sessions: ["many-s4", "many-s0", "many-s2", "many-s1", "many-s3", "many-s5"], projects: [], revision: 1 };` });
   await sidebar(flat);
-  await drag(flat, flat.getByRole("button", { name: "Reorder Chat 5", exact: true }), flat.getByRole("button", { name: "Reorder Chat 4", exact: true }));
+  await drag(flat, flat.getByRole("button", { name: "Reorder Chat 5", exact: true }), flat.getByRole("button", { name: "Reorder Chat 4", exact: true }), "Moved Chat 5. Position 1 of 6.");
   await flat.waitForFunction(() => window.__PW_STUB__.answers.sidebar_order.sessions[0] === "many-s5");
   await flat.evaluate(() => {
     const source = window.__PW_STUB__.answers.list_sessions[0];
@@ -108,7 +112,7 @@ try {
   await flat.getByTestId("sidebar-filter").click();
   await flat.getByRole("menuitemcheckbox", { name: "Show archived" }).click();
   const archive = flat.getByTestId("archived-sessions");
-  await drag(flat, archive.getByRole("button", { name: "Reorder Chat 3", exact: true }), archive.getByRole("button", { name: "Reorder Chat 5", exact: true }));
+  await drag(flat, archive.getByRole("button", { name: "Reorder Chat 3", exact: true }), archive.getByRole("button", { name: "Reorder Chat 5", exact: true }), "Moved Chat 3. Position 1 of 2.");
   await flat.waitForFunction(() => document.querySelector('[data-testid="archived-sessions"] [data-row-sessions]')?.getAttribute("data-row-sessions") === "many-s3");
   await flat.close();
   // A visible status group is its own drag scope: crossing its boundary cancels,
@@ -128,11 +132,11 @@ try {
   const statusRows = (group) => group.locator("[data-row-sessions]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-row-sessions")));
   await backlog.getByRole("button", { name: "Backlog 3", exact: true }).waitFor();
   assert.deepEqual(await statusRows(backlog), ["many-s0", "many-s2", "many-s4"]);
-  await drag(status, backlog.getByRole("button", { name: "Reorder Chat 0", exact: true }), done.getByRole("button", { name: "Reorder Chat 5", exact: true }));
+  await drag(status, backlog.getByRole("button", { name: "Reorder Chat 0", exact: true }), done.getByRole("button", { name: "Reorder Chat 5", exact: true }), "Outside the list. Drop to cancel.");
   assert.deepEqual(await status.evaluate(() => window.__PW_ORDER_WRITES__), []);
   assert.deepEqual(await statusRows(backlog), ["many-s0", "many-s2", "many-s4"]);
   await status.getByRole("status").filter({ hasText: "Cancelled. Chat 0. Position 1 of 3." }).waitFor();
-  await drag(status, backlog.getByRole("button", { name: "Reorder Chat 4", exact: true }), backlog.getByRole("button", { name: "Reorder Chat 0", exact: true }));
+  await drag(status, backlog.getByRole("button", { name: "Reorder Chat 4", exact: true }), backlog.getByRole("button", { name: "Reorder Chat 0", exact: true }), "Moved Chat 4. Position 1 of 3.");
   await status.waitForFunction(() => window.__PW_ORDER_WRITES__.length === 1);
   assert.deepEqual(await status.evaluate(() => window.__PW_ORDER_WRITES__[0]), { sessions: ["many-s4", "many-s0", "many-s2"] });
   assert.deepEqual(await statusRows(done), ["many-s1", "many-s3", "many-s5"]);

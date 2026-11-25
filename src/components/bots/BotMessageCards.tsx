@@ -193,9 +193,11 @@ function IncomingCard({ card, text, seq, ts, queued, className }: { card: BotMes
   const { list } = useSharedBotHandoffs(isHandoff ? card.to : null);
   const live = isHandoff ? list?.handoffs.find((handoff) => handoff.number === card.handoff) ?? null : null;
   const [open, setOpen] = useDisclosure(`received:${seq ?? card.handoff ?? ""}`);
-  const relation = relationLine(card, fromName, toName);
+  // What one bot is to the other holds while both are here: a deleted sender reports to no one. The lower-access
+  // sentence names a deleted sender mid-sentence, as the chips do.
+  const relation = from && to ? relationLine(card, from.name, to.name) : null;
   const lower = !!card.fromAccess && !!card.toAccess && rank(card.fromAccess) < rank(card.toAccess);
-  const lowerLine = lower ? lowerAccessLine(card, fromName, toName) : null;
+  const lowerLine = lower && to ? lowerAccessLine(card, from?.name ?? GONE.toLowerCase(), to.name) : null;
   const hasFooterLinks = isHandoff || card.handoff !== undefined;
   return (
     <article className={cn("@container/botcard", className)} aria-label={`${fromName}: ${kindWords(card, toName)}`} data-testid="bot-message-card" data-kind={card.kind} data-from={card.from}>
@@ -230,13 +232,13 @@ function IncomingCard({ card, text, seq, ts, queued, className }: { card: BotMes
               {card.due && <p className="mt-1 break-words text-[12px] text-faint" data-testid="bot-card-due">Answer due: {card.due}</p>}
               {card.body && <p className={cn("select-text whitespace-pre-wrap break-words text-[13.5px] leading-[21px] text-foreground", (card.title || card.due) && "mt-1.5")} data-testid="bot-card-body">{card.body}</p>}
               {relation && (
-                <p className="mt-2 flex items-start gap-1.5 text-[12px] text-muted-foreground" data-testid="bot-card-relation"><UserCheck className="mt-0.5 size-3 shrink-0" />{relation}</p>
+                <p className="mt-2 flex items-start gap-1.5 text-[12px] leading-[18px] text-muted-foreground" data-testid="bot-card-relation"><UserCheck className="mt-[3px] size-3 shrink-0" /><span className="min-w-0 flex-1 break-words">{relation}</span></p>
               )}
               {lower && (
                 <div className="mt-2 flex flex-wrap items-center gap-1.5" data-testid="bot-card-access">
                   <Chip className="text-muted-foreground"><Eye className="size-3 shrink-0" />{fromName}: {accessLabel(card.fromAccess as BotAccess)}</Chip>
                   <Chip className="text-warning"><ShieldOff className="size-3 shrink-0" />{toName}: {accessLabel(card.toAccess as BotAccess)}</Chip>
-                  {lowerLine && <span className="min-w-0 break-words text-[12px] text-muted-foreground">{lowerLine}</span>}
+                  {lowerLine && <span className="min-w-0 basis-[16rem] grow break-words text-[12px] leading-[18px] text-muted-foreground" data-testid="bot-card-lower-access">{lowerLine}</span>}
                 </div>
               )}
             </div>

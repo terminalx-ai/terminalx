@@ -4,6 +4,7 @@ import { Check } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Card } from "@mobile/ui/primitives";
 import { useKeyboardShown } from "@mobile/ui/keyboard";
+import { BAR_TITLE_MAX_SCALE } from "@mobile/ui/text-size";
 import { useTheme } from "@mobile/ui/theme";
 
 /**
@@ -24,8 +25,8 @@ export function LoginPage({ children, footer, testID }: { children: ReactNode; f
 export function LoginHeaderTitle({ title, organization }: { title: string; organization?: string | null }) {
   const { palette } = useTheme();
   return <View accessible accessibilityRole="header" accessibilityLabel={organization ? `${title}, ${organization}` : title} style={styles.header}>
-    <Text numberOfLines={1} style={[styles.headerTitle, { color: palette.ink }]}>{title}</Text>
-    {organization ? <Text numberOfLines={1} style={[styles.headerSub, { color: palette.muted }]}>{organization}</Text> : null}
+    <Text numberOfLines={1} maxFontSizeMultiplier={BAR_TITLE_MAX_SCALE} style={[styles.headerTitle, { color: palette.ink }]}>{title}</Text>
+    {organization ? <Text numberOfLines={1} maxFontSizeMultiplier={BAR_TITLE_MAX_SCALE} style={[styles.headerSub, { color: palette.muted }]}>{organization}</Text> : null}
   </View>;
 }
 

@@ -134,7 +134,7 @@ describe("the providers the server offers", () => {
       "Agent37, Not connected, Full virtual machines with Docker in the US, France and India. Sleeps when idle., Per minute from your Agent37 wallet; only disk bills while asleep",
       "Hetzner, Not connected, Dedicated machines in Germany and Finland., Per hour, billed by Hetzner",
     ]);
-    expect(text()).toContain("Connecting validates and stores your provider key. It creates no machine and starts no paid build or workspace.");
+    expect(text()).toContain("Cloud workspaces run on machines in a provider account. Connecting checks and stores a key; it creates no machine and spends nothing.");
     expect(page.byId("header")!.textContent).toBe("ComputeNorthwind");
     // Nothing is connected yet: no word on how many are needed.
     expect(text()).not.toContain("One provider is enough");
@@ -192,7 +192,7 @@ describe("the providers the server offers", () => {
     await page.press(page.byId("provider-box"));
     expect(mocks.push).not.toHaveBeenCalled();
     // What a manager is told about connecting is not said to someone who cannot.
-    expect(text()).not.toContain("Connecting validates");
+    expect(text()).not.toContain("Connecting checks and stores a key");
     expect(text()).not.toContain("One provider is enough");
   });
 
@@ -223,7 +223,7 @@ describe("connecting a provider", () => {
     expect(page.icon("Server")).not.toBeNull();
     const input = keyField("Agent37 API key")!;
     expect(input.type).toBe("password");
-    expect(text()).toContain("Paste an API key for Agent37. It is encrypted at rest and never shown again.");
+    expect(text()).toContain("Sent once, encrypted at rest, and never shown again, here or anywhere.");
     expect(consent().getAttribute("aria-label")).toBe("I understand Agent37 bills this organization directly and every admin here can launch machines with this key.");
     expect(off(connectButton())).toBe(true);
     await page.type(input, KEY);
@@ -482,7 +482,7 @@ describe("a provider with a key stored", () => {
     const alert = await alertMock();
     await page.press(page.byId("provider-disconnect"));
     expect(requests("POST", "/cloud-providers/box/disconnect")).toHaveLength(0);
-    expect(alert).toHaveBeenCalledExactlyOnceWith("Disconnect Boat?", "Existing machines keep running; new launches will fail until a key is connected again.", [
+    expect(alert).toHaveBeenCalledExactlyOnceWith("Disconnect Boat?", "Existing workspaces keep running. New ones cannot be launched on Boat until a key is connected again.", [
       { text: "Cancel", style: "cancel" },
       expect.objectContaining({ text: "Disconnect", style: "destructive" }),
     ]);

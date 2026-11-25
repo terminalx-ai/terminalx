@@ -53,6 +53,35 @@ for (const compact of [true, false]) describe(compact ? "sidebar recovery" : "pa
     finish();
     await waitFor(() => expect(mocks.refresh).toHaveBeenCalledExactlyOnceWith("workspace-org"));
   });
+  it("says the machine is gone and offers delete and a new workspace, never Retry resume (#1581)", () => {
+    const row = item();
+    row.workspace.state = "attention-required";
+    row.workspace.launch = null;
+    row.latestOperation = { id: "op", action: "resume", state: "failed", errorCode: "cloud_provider_not_found" } as never;
+    render(<CloudWorkspaceAttention item={row} compact={compact} />);
+    const status = screen.getByRole("status");
+    expect(status.textContent).toContain("This workspace's machine no longer exists at the provider.");
+    expect(status.textContent).not.toContain("cloud_provider_not_found");
+    if (!compact) expect(status.textContent).toContain("Its files, and anything that was running on it, went with the machine.");
+    expect(screen.queryByRole("button", { name: "Retry resume" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Delete workspace" }));
+    expect(screen.getByRole("dialog").textContent).toBe("Confirm delete");
+    fireEvent.click(screen.getByRole("button", { name: "Create new workspace" }));
+    expect(mocks.start).toHaveBeenCalledExactlyOnceWith("cloud:workspace-org:blank/Work");
+    expect(mocks.resume).not.toHaveBeenCalled();
+  });
+  it("keeps delete and a new workspace from a viewer when the machine is gone", () => {
+    const row = item(); row.workspace.launch = null; row.workspace.state = "attention-required";
+    row.workspace.you = { role: "viewer", canApprove: false }; row.workspace.authority = "participate";
+    row.latestOperation = { action: "resume", state: "failed", errorCode: "cloud_provider_not_found" } as never;
+    render(<CloudWorkspaceAttention item={row} compact={compact} />);
+    for (const name of ["Delete workspace", "Create new workspace"]) {
+      const button = screen.getByRole("button", { name }) as HTMLButtonElement;
+      expect(button.disabled).toBe(true); fireEvent.click(button);
+    }
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(mocks.start).not.toHaveBeenCalled();
+  });
   it("keeps lifecycle recovery unavailable to a viewer", () => {
     const row = item(); row.workspace.launch = null; row.workspace.state = "attention-required";
     row.workspace.you = { role: "viewer", canApprove: false }; row.workspace.authority = "participate";

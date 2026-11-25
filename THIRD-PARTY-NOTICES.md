@@ -33,7 +33,8 @@ Settings → Transcription and linked to its Hugging Face model card.
 
 ## TerminalX Legacy app artwork (MIT)
 
-The desktop source `resources/icon-source/legacy.icns` and mobile sources
+The desktop source `resources/icon-source/legacy.icns`, the mark's drawing
+`resources/icon-source/logo.svg` and mobile sources
 `mobile/assets/icon.png` and `mobile/assets/adaptive-icon.png` are copied from
 [dudhatparesh/terminalx-app-v3](https://github.com/dudhatparesh/terminalx-app-v3/tree/6e07f4ba0ab39dd61ae7cfc69cb53380ad38a47a),
 commit `6e07f4ba0ab39dd61ae7cfc69cb53380ad38a47a`. Generated derivatives live in

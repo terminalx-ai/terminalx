@@ -360,6 +360,15 @@ describe("a settled turn's header and footer", () => {
     expect(screen.getByTestId("turn-footer").textContent).toContain("Failed after 14s");
   });
 
+  it("says a /clear that ran cleared the conversation, not how long it worked (#1498)", () => {
+    const value = { ...turn([]), completed: { status: "ok", ts: "2026-11-23T11:57:00Z", durationMs: 307 } } as unknown as Turn;
+    value.prompt!.text = "/clear";
+    render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} />);
+    const footer = screen.getByTestId("turn-footer").textContent ?? "";
+    expect(footer).toMatch(/^Conversation cleared · \d{1,2}:\d{2}/);
+    expect(footer).not.toMatch(/Stopped|Worked|0s/);
+  });
+
   it("puts how long it took in the footer when there is no work to fold", () => {
     setPrefs({ foldToolCalls: true });
     render(<TurnBlock turn={worked("ok", false)} sessionId="s" stream={[]} working={false} />);

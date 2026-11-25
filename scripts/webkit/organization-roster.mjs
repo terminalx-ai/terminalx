@@ -76,7 +76,7 @@ function App() {
   const [sharing, setSharing] = useState(false);
   window.__ROSTER__.show = setSurface;
   return <TooltipProvider><main className="h-full overflow-auto bg-background p-8 text-foreground">
-    <div className="mx-auto max-w-2xl">
+    <div className="mx-auto max-w-2xl" data-surface={surface}>
       <h1 className="mb-1 text-base font-semibold">Analytical Engines</h1>
       {surface === 'members' && <OrganizationMembers organizationId={orgId} accountEmail={me.email} contextRevision={status.context.revision}/>}
       {surface === 'participants' && <div className="mt-4 flex border-y border-hairline py-2"><ParticipantsBar collabKey="cloud:org-a:workspace" you={you} tabLabel={() => 'Editor'}/></div>}
@@ -164,6 +164,9 @@ try {
 
     for (const surface of ["members", "participants", "header"]) {
       await page.evaluate(surface => window.__ROSTER__.show(surface), surface);
+      // The surface is drawn in a later task. Until then the last one's avatar is still there: focused and given Enter, it
+      // is taken away with that surface, and the profile never opens (a busy Linux runner, run 45416284874).
+      await page.locator(`[data-surface="${surface}"]`).waitFor();
       const opened = await openProfile();
       await shot(`${surface}-profile`);
       await closeProfile(opened);

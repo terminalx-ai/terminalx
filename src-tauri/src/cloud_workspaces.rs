@@ -851,6 +851,11 @@ pub struct CloudWorkspace {
     pub delete_after: Option<i64>,
     #[serde(default)]
     pub deleted_at: Option<i64>,
+    /// When the server learned the provider no longer has this workspace's
+    /// machine and cannot bring it back (#1589): only while it is
+    /// `attention-required` for that reason. Absent from older servers.
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub machine_missing_at: Option<i64>,
     /// List enrichment (saas #137, PRO-56, contract §20.1). Every field is
     /// optional: older servers omit them, and create, open and lifecycle
     /// responses never carry them. A malformed value reads as absent rather
@@ -7839,6 +7844,7 @@ mod tests {
                     archived_at: None,
                     delete_after: None,
                     deleted_at: None,
+                    machine_missing_at: None,
                     repositories: None,
                     created_by: None,
                     creator: None,
@@ -8568,13 +8574,31 @@ mod tests {
         assert!(workspace.repositories.is_none() && workspace.runtime_activity.is_none() && workspace.authority.is_none());
         assert!(listed.quota.is_none());
         let sent = serde_json::to_value(&listed).unwrap();
-        for field in ["repositories", "createdBy", "lastActivityAt", "runtimeActivity", "revision", "authority"] {
+        for field in ["repositories", "createdBy", "lastActivityAt", "runtimeActivity", "revision", "authority", "machineMissingAt"] {
             assert!(sent["workspaces"][0]["workspace"].get(field).is_none(), "{field}");
         }
         assert!(sent.get("quota").is_none());
         // A pre-PRO-76 quota has no running or total.
         let quota: CloudWorkspaceQuota = serde_json::from_value(json!({ "used": 1, "limit": 2 })).unwrap();
         assert_eq!(serde_json::to_value(quota).unwrap(), json!({ "used": 1, "limit": 2 }));
+    }
+
+    #[test]
+    fn a_machine_the_server_says_is_gone_reaches_the_webview() {
+        // #1589: the server states it on the workspace, and the page reads it there.
+        let mut list: Value = serde_json::from_str(&org_2_list_body().replace("org-2", "org-1")).unwrap();
+        list["workspaces"][0]["workspace"]["state"] = json!("attention-required");
+        list["workspaces"][0]["workspace"]["machineMissingAt"] = json!(1_795_305_607_000_i64);
+        let parsed: CloudWorkspaceList = serde_json::from_value(list).unwrap();
+        assert_eq!(parsed.workspaces[0].workspace.machine_missing_at, Some(1_795_305_607_000));
+        assert_eq!(serde_json::to_value(&parsed).unwrap()["workspaces"][0]["workspace"]["machineMissingAt"], json!(1_795_305_607_000_i64));
+
+        // A malformed value reads as absent rather than failing the list.
+        let mut list: Value = serde_json::from_str(&org_2_list_body().replace("org-2", "org-1")).unwrap();
+        list["workspaces"][0]["workspace"]["machineMissingAt"] = json!("yesterday");
+        let parsed: CloudWorkspaceList = serde_json::from_value(list).unwrap();
+        assert_eq!(parsed.workspaces[0].workspace.machine_missing_at, None);
+        assert!(serde_json::to_value(&parsed).unwrap()["workspaces"][0]["workspace"].get("machineMissingAt").is_none());
     }
 
     #[test]

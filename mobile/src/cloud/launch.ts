@@ -1,4 +1,4 @@
-import { CloudApiError, type CloudApi, type CloudCredential, type CloudFirstRunSetup, type CloudLaunch, type CloudLifecycle, type CloudOperation, type CloudPreflight, type CloudProvider, type CloudProviderSetup, type CloudQuote, type CloudWorkspace } from "./api";
+import { CloudApiError, type CloudApi, type CloudCredential, type CloudFirstRunSetup, type CloudLaunch, type CloudLifecycle, type CloudOperation, type CloudOrganization, type CloudPreflight, type CloudProvider, type CloudProviderSetup, type CloudQuote, type CloudWorkspace } from "./api";
 
 /**
  * Launching a cloud workspace from the phone, and stopping and deleting one
@@ -29,6 +29,17 @@ export function launchProviders(providers: readonly CloudProvider[]): { choices:
   return { choices, blocked: paused ? "paused" : "not-connected" };
 }
 
+/**
+ * The organization + on the Cloud tab launches in (PRO-557): the first one,
+ * in the account's order, that has a provider to launch on. `providers` is
+ * each organization's provider list as just read; one whose list did not
+ * answer is not known to launch. With none that can, the first: its page
+ * says what is missing, and another can be picked there.
+ */
+export function launchOrganization<T extends Pick<CloudOrganization, "orgId">>(organizations: readonly T[], providers: (orgId: string) => readonly CloudProvider[] | null | undefined): T | null {
+  return organizations.find((organization) => launchProviders(providers(organization.orgId) ?? []).choices.length > 0) ?? organizations[0] ?? null;
+}
+
 /** A provider's name as the server gives it. */
 export const providerLabel = (provider: Pick<CloudProvider, "displayName" | "descriptor">): string => provider.descriptor.label || provider.displayName;
 
@@ -50,14 +61,26 @@ export const idleValue = (minutes: number): string => (minutes === 0 ? "Never" :
 const gib = (mib: number): string => String(Math.round((mib / 1024) * 10) / 10);
 
 type MachineClass = CloudProviderSetup["machineClasses"][number];
-/** A size on the form's row: its name, and its hourly rate (already written as a price) where the provider gives one. */
+/**
+ * Whether a size's name already is its machine: Agent37 names a size
+ * "2 vCPU · 4 GB RAM · 20 GB disk", where Boat names one "Small". Such a
+ * name is not followed by the machine again (PRO-565).
+ */
+export const sizeNamesMachine = (label: string): boolean => /\bvCPU\b/i.test(label);
+/**
+ * A size on the form's row: its name, and its hourly rate (already written as
+ * a price) where the provider gives one. After a name that is a machine the
+ * rate takes the row's second line, where the row's end does not cut it off.
+ */
 export function sizeValue(size: Pick<MachineClass, "label">, hourly: string | null): string {
-  return hourly === null ? size.label : `${size.label} · ${hourly} / hour`;
+  if (hourly === null) return size.label;
+  return `${size.label}${sizeNamesMachine(size.label) ? "\n" : " · "}${hourly} / hour`;
 }
 /** A size's machine in the sheet, as the console writes it. */
 export const sizeDetail = (size: Pick<MachineClass, "vcpu" | "memoryMiB" | "diskGiB">): string => `${size.vcpu} vCPU · ${gib(size.memoryMiB)} GiB memory · ${size.diskGiB} GiB disk`;
-/** The quoted machine on the review. */
+/** The quoted machine on the review: the size's name and its machine, said once. */
 export function quotedSize(configuration: CloudQuote["configuration"]): string {
+  if (sizeNamesMachine(configuration.machineClassLabel)) return configuration.machineClassLabel;
   return `${configuration.machineClassLabel} · ${configuration.vcpu} vCPU · ${gib(configuration.memoryMiB)} GiB · ${configuration.diskGiB} GiB`;
 }
 
@@ -109,25 +132,57 @@ export function loginDetail(credential: Pick<CloudCredential, "displayIdentity" 
   return credential.authKind === "api-key" ? "API key" : credential.authKind === "personal-access-token" ? "Access token" : "Signed in";
 }
 
-export interface LaunchDraft {
-  repository: { cloneUrl: string; fullName: string } | null;
+/** The most repositories a launch takes (`setup.repositories`). */
+export const MAX_LAUNCH_REPOSITORIES = 5;
+
+/** One repository a new workspace clones: picked from the organization's list, or typed as a URL. */
+export interface LaunchRepository {
+  cloneUrl: string;
+  fullName: string;
+  /** The branch or tag to check out; empty for the repository's default branch. */
   ref: string;
+  /** Typed as a URL, not picked from the organization's list. */
+  typed: boolean;
+  /** Known of a picked one, from the organization's list. */
+  private?: boolean;
+  defaultBranch?: string | null;
+}
+
+/** The form's Repository row (25.11): nothing, the one repository, or the first one's name and how many more. */
+export function repositoriesRow(repositories: readonly Pick<LaunchRepository, "fullName">[]): { label: string; value: string } {
+  const first = repositories[0];
+  if (!first) return { label: "Repository", value: "None" };
+  if (repositories.length === 1) return { label: "Repository", value: first.fullName };
+  return { label: "Repositories", value: `${first.fullName.split("/").pop()} and ${repositories.length - 1} more` };
+}
+
+/** A repository on the review: its full name, with the branch it is cloned at where that is known. */
+export function repositoryLine(repository: Pick<LaunchRepository, "fullName" | "ref" | "defaultBranch">): string {
+  const branch = repository.ref.trim() || repository.defaultBranch || "";
+  return branch ? `${repository.fullName} · ${branch}` : repository.fullName;
+}
+
+export interface LaunchDraft {
+  /** At most `MAX_LAUNCH_REPOSITORIES`. */
+  repositories: readonly Pick<LaunchRepository, "cloneUrl" | "fullName" | "ref">[];
   /** The ids of the agent logins that are ticked. */
   agentIds: readonly string[];
 }
 
 /**
  * What the new workspace starts with, as the console builds it: the
- * repository, the saved GitHub token when there is a repository to clone, and
- * the chosen agent logins. Nothing chosen is no setup at all: a bare workspace.
+ * repositories, the saved GitHub token when there is one to clone, and the
+ * chosen agent logins. Nothing chosen is no setup at all: a bare workspace.
+ * A repository in the organization's GitHub App set is cloned through the
+ * App whatever token is sent; the token is what a typed one outside it needs.
  */
 export function firstRunSetup(draft: LaunchDraft, credentials: readonly CloudCredential[]): CloudFirstRunSetup | undefined {
-  const github = draft.repository ? credentials.find((credential) => credential.provider === "github" && credential.state === "connected") : undefined;
+  const github = draft.repositories.length ? credentials.find((credential) => credential.provider === "github" && credential.state === "connected") : undefined;
   const agents = agentLogins(credentials).filter((credential) => draft.agentIds.includes(credential.id));
   const credentialIds = [...(github ? [github.id] : []), ...agents.map((credential) => credential.id)];
-  if (!draft.repository && !credentialIds.length) return undefined;
-  const ref = draft.ref.trim();
-  return { credentialIds, ...(draft.repository ? { repositories: [{ cloneUrl: draft.repository.cloneUrl, ...(ref ? { ref } : {}) }] } : {}) };
+  if (!draft.repositories.length && !credentialIds.length) return undefined;
+  const repositories = draft.repositories.map((repository) => { const ref = repository.ref.trim(); return { cloneUrl: repository.cloneUrl, ...(ref ? { ref } : {}) }; });
+  return { credentialIds, ...(repositories.length ? { repositories } : {}) };
 }
 
 // ── Preflight ──
@@ -153,6 +208,8 @@ export interface PreflightProblems {
   ref: string | null;
   /** The repository is private and no GitHub token is saved: the way on is Agent logins. */
   needsGithubToken: boolean;
+  /** What failed for each repository, by its `owner/name` in lower case: several can be chosen (25.11). */
+  byRepository?: Record<string, { repository: string | null; ref: string | null }>;
   /** The agents (by login provider) whose login failed its check: a first task on one of them is marked. */
   agents?: string[];
 }
@@ -169,7 +226,7 @@ export function problemsTitle(count: number): string {
  * The failed checks of a preflight, in the console's sentences. There are no
  * warnings: anything that failed blocks, so each one is listed.
  */
-export function preflightProblems(preflight: CloudPreflight, draft: Pick<LaunchDraft, "repository">, credentials: readonly CloudCredential[]): PreflightProblems | null {
+export function preflightProblems(preflight: CloudPreflight, draft: Pick<LaunchDraft, "repositories">, credentials: readonly CloudCredential[]): PreflightProblems | null {
   const failed = preflight.checks.filter((check) => check.status === "failed");
   // Not ready with nothing named: said as the check itself not having worked.
   if (!failed.length) return preflight.ready ? null : { items: [PREFLIGHT_UNAVAILABLE], repository: null, ref: null, needsGithubToken: false };
@@ -181,10 +238,16 @@ export function preflightProblems(preflight: CloudPreflight, draft: Pick<LaunchD
       ? `The ${label} credential failed verification. It may have expired.`
       : (check.errorCode ? PREFLIGHT[check.errorCode] : undefined) ?? PREFLIGHT_UNAVAILABLE;
     if (check.kind === "repository") {
-      const subject = (check.cloneUrl ? repositoryOf(check.cloneUrl)?.fullName : null) ?? draft.repository?.fullName ?? "Repository";
-      problems.items.push(`${subject}: ${lowerFirst(sentence)}`);
+      // A check that names no repository is about the only one there is, when there is only one.
+      const named = (check.cloneUrl ? repositoryOf(check.cloneUrl)?.fullName : null) ?? (draft.repositories.length === 1 ? draft.repositories[0]!.fullName : null);
+      problems.items.push(`${named ?? "Repository"}: ${lowerFirst(sentence)}`);
       if (check.errorCode === REF_NOT_FOUND) problems.ref = sentence;
       else problems.repository = sentence;
+      if (named) {
+        const said = ((problems.byRepository ??= {})[named.toLowerCase()] ??= { repository: null, ref: null });
+        if (check.errorCode === REF_NOT_FOUND) said.ref = sentence;
+        else said.repository = sentence;
+      }
       if (check.errorCode === "cloud_workspace_repository_credential_required") problems.needsGithubToken = true;
     } else {
       problems.items.push(label && !sentence.includes(label) ? `${label}: ${lowerFirst(sentence)}` : sentence);
@@ -217,6 +280,8 @@ export const FIRST_TASK_TOO_LONG = "The first task is longer than 32 KB.";
 const REFUSED: Record<string, string> = {
   cloud_workspace_quote_expired: QUOTE_EXPIRED,
   cloud_environment_changed: QUOTE_EXPIRED,
+  // The desktop's sentence, as written (`src/lib/cloudCreate.ts`): a published environment image must hold every repository.
+  cloud_environment_repository_not_in_image: "That repository is not in the organization's environment image. Add it and rebuild the environment first.",
   cloud_provider_connection_required: "Connect a compute provider first.",
   machine0_connection_required: "Connect a compute provider first.",
   cloud_workspace_credential_required: "Connect at least one AI agent.",

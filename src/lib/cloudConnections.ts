@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { WorkspaceRpcError, type Activation, type WorkspaceConnectionState, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { hasWorkspaceConnection, workspaceConnection, type CloudWorkspaceConnection } from "@/lib/api";
+import { WORKSPACE_NOT_REACHABLE } from "@/lib/cloudAgentApi";
 import { detachCloudTerminals } from "@/lib/cloudTerminals";
 import { cloudWorkspaceKey } from "@/types/target";
 
@@ -92,6 +93,12 @@ export interface CloudWorkspaceListed {
    * may still read so for a moment.
    */
   starting?: boolean;
+  /**
+   * In a state that can be opened at all: not needing attention, not
+   * deleted. A connection parked as unavailable opens again on such a list,
+   * stopped or coming up as well as running (#1582).
+   */
+  reachable?: boolean;
   /** When that list was asked for (ms): only a list asked for after a connection stopped can say it runs again. */
   at: number;
 }
@@ -226,8 +233,9 @@ function watch(entry: Entry, connection: CloudWorkspaceConnection) {
       if (wasConnected && state.state !== "reconnecting") runDisconnected(entry.key);
       // Stopped for an identity change: the api layer closed it; forget it.
       if (state.state === "stopped") drop(entry);
-      else if (state.state === "suspended") {
-        // Parked: its supervisor reads nothing more until a wake. A list asked for from now on may say it runs again.
+      else if (state.state === "suspended" || state.state === "unavailable") {
+        // Parked: its supervisor reads nothing more until a wake (or, unavailable, until its state changes). A list
+        // asked for from now on may say it runs again.
         entry.parkedAt = clock();
         settle(entry);
       }
@@ -240,19 +248,27 @@ function cancelRetry(entry: Entry) {
   entry.retry = null;
 }
 
-/** Whether this entry's transport is going nowhere on its own: stopped as its supervisor last read it, or never attached. */
+/**
+ * Whether this entry's transport is going nowhere on its own: stopped or
+ * unavailable (needs attention, deleted) as its supervisor last read it, or
+ * never attached.
+ */
 function parked(entry: Entry): boolean {
-  return entry.connection ? entry.state.state === "suspended" : !entry.pending;
+  return entry.connection ? entry.state.state === "suspended" || entry.state.state === "unavailable" : !entry.pending;
 }
 
 /**
  * Whether the workspace came back under a parked entry, so that its
  * connection must be replaced: a list asked for after it parked says the
- * machine runs.
+ * machine runs, or, for one parked as unavailable, that the workspace is in
+ * any state that can be opened again (repaired into stopped, say).
  */
 function cameBack(entry: Entry): boolean {
   const listed = entry.listed;
-  if (!listed?.running || !parked(entry)) return false;
+  if (!listed || !parked(entry)) return false;
+  // Unavailable (needs attention, deleted) is left for any state that can be opened; stopped only for running.
+  const unavailable = !!entry.connection && entry.state.state === "unavailable";
+  if (!listed.running && !(unavailable && listed.reachable)) return false;
   return entry.parkedAt === null || listed.at > entry.parkedAt;
 }
 
@@ -627,6 +643,7 @@ export function waitCloudConnected(lease: CloudLease, withinMs = 5 * 60 * 1000, 
       const state = lease.state();
       if (state.state === "connected" && connection) finish(null, connection.client);
       else if (state.state === "updateRequired") finish(new Error("cloud_runtime_update_required"));
+      else if (state.state === "unavailable") finish(new Error(WORKSPACE_NOT_REACHABLE));
       else if (state.state === "stopped") finish(new Error("cloud_connection_closed"));
       else if (state.state === "suspended" && options.stoppedIsError) finish(new Error("cloud_workspace_stopped"));
     };

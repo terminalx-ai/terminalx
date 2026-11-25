@@ -1,4 +1,5 @@
 import { CloudCatalog } from "../catalog";
+import { githubService } from "./github";
 import { agent37, agent37Setup, boat, boatQuote, boatSetup, claudeKey, codexLogin, operation, refuse, server, workspace, type Answer, type Call } from "./server";
 
 /**
@@ -111,6 +112,8 @@ export function account(start: { role?: "owner" | "admin" | "member"; workspaces
   };
   /** A workspace as every answer carries it: with its launch view (`withLaunch`). */
   const viewed = (held: Record<string, unknown>) => { const launch = launchView(held.id as string); return launch ? { ...held, launch } : held; };
+  // The GitHub App's routes (PRO-537): nothing connected until a test connects an installation.
+  const github = githubService();
   let made = 0;
   const life = (operationId: string) => { const op = state.operations.get(operationId)!; return { workspace: viewed(state.workspaces.get(op.workspaceId as string)!), operation: op }; };
   const begin = (workspaceId: string, fields: Record<string, unknown>) => {
@@ -125,6 +128,8 @@ export function account(start: { role?: "owner" | "admin" | "member"; workspaces
   function handle(call: Call): Answer {
     const { path, method } = call;
     if (path.endsWith("/v1/desktop/auth/capabilities")) return { body: { cloud: { userId: "u" }, organizations: [{ orgId: "org-1", name: "Acme", role: state.role }], capabilities: { flags: {}, refreshedAt: 1 } } };
+    const git = github.handle(call, state.role);
+    if (git) return git;
     if (path === "/cloud-providers") return { body: { providers: state.providers } };
     if (path === "/cloud-workspace-credentials") return state.role === "member" ? refuse("organization_admin_required", 403) : { body: { credentials: state.credentials } };
     if (path.startsWith("/cloud-workspaces/setup")) return { body: path.endsWith("agent37") ? agent37Setup : boatSetup };
@@ -196,5 +201,5 @@ export function account(start: { role?: "owner" | "admin" | "member"; workspaces
     appVersion: "0.1.0",
   });
   const sent = (method: string, path: string) => calls.filter((call) => call.method === method && call.path === path);
-  return { state, api, calls, catalog, advance, advanceLaunch, handle, sent };
+  return { state, github, api, calls, catalog, advance, advanceLaunch, handle, sent };
 }

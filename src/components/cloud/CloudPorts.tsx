@@ -61,6 +61,8 @@ export function connectionText(state: WorkspaceConnectionState): { text: string;
       return { text: "The workspace's runtime is starting or restarting. Previews can be opened once it is up.", restarting: true };
     case "updateRequired":
       return { text: "Update TerminalX to preview this workspace's ports.", restarting: false };
+    case "unavailable":
+      return { text: "The workspace can't be reached: it needs attention, or it was deleted. Previews work again once it is repaired.", restarting: false };
     default:
       return { text: STOPPED, restarting: false };
   }

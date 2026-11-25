@@ -52,12 +52,16 @@ fn a_binding_another_account_holds_is_asked_about_again_later() {
 }
 
 #[test]
-fn the_window_registers_itself_while_the_runtime_is_retrying() {
+fn a_registration_trying_again_says_it_is_retrying() {
     // The first registration: the window waits for it (a while).
     assert_eq!(unregistered_relay_state(None, &HostStatus::Connecting), RelayState::Connecting);
-    // Lost, refused or fenced and trying again: the window does not wait.
+    // Lost, refused or fenced and trying again. The window waits for one
+    // retrying soon (#1579); `Status::relay_refused` says when a refused one is.
     assert_eq!(unregistered_relay_state(None, &HostStatus::Retrying { attempt: 3 }), RelayState::Retrying);
     assert_eq!(unregistered_relay_state(None, &HostStatus::Fenced { runtime_generation: 2 }), RelayState::Retrying);
+    let refusal = crate::machine_wire::RelayRefusal { code: 4401, reason: None, refusals: 2, retry_at: 1 };
+    assert_eq!(unregistered_relay_state(None, &HostStatus::Refused { refusal: refusal.clone() }), RelayState::Retrying);
+    assert_eq!(unregistered_relay_state(Some(Ended::SignedOut), &HostStatus::Refused { refusal }), RelayState::SignedOut);
     // Ended by the account or another binding.
     assert_eq!(unregistered_relay_state(None, &HostStatus::Revoked), RelayState::SignedOut);
     assert_eq!(unregistered_relay_state(Some(Ended::SignedOut), &HostStatus::Retrying { attempt: 1 }), RelayState::SignedOut);

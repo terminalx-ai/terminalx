@@ -497,6 +497,7 @@ function CloudLocation({
           )}
           data-testid="session-connection"
           role="status"
+          title={cloud.unavailable ?? undefined}
         >
           <span className={cn("size-1.5 rounded-full", connection.tone === "live" ? "bg-success" : connection.tone === "pending" ? "bg-warning" : "bg-faint")} aria-hidden />
           {connection.label}

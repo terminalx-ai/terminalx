@@ -116,7 +116,7 @@ function world(options: { state?: string | null; role?: string | null; canApprov
     retain: vi.fn(() => release),
     opened: () => session,
     people: { subscribe: () => () => undefined, getVersion: () => 1, name: (userId: string | null | undefined) => NAMES[userId ?? ""] ?? "Someone", roster: vi.fn(async () => [{ userId: "u-me", email: "me@example.com", role: "admin" }, { userId: "u-alice", email: "alice@example.com", displayName: "Alice", role: "member" }, { userId: "u-bob", email: "bob@example.com", displayName: "Bob", role: "member" }]), remember: vi.fn() },
-    api: { shares: vi.fn(), putShare: vi.fn(async () => ({})), revokeShare: vi.fn(async () => undefined) },
+    api: { shares: vi.fn(), putShare: vi.fn(async () => ({})), revokeShare: vi.fn(async () => undefined), providers: vi.fn(async () => []), credentials: vi.fn(async () => []) },
   };
   return { session, release, snapshot };
 }
@@ -205,6 +205,9 @@ describe("the Cloud tab", () => {
     await click("5 organizations with no workspaces");
     expect(button("5 organizations with no workspaces").getAttribute("aria-expanded")).toBe("true");
     expect(text()).toContain("PersonalE2E BoxE2E VideoE2E IsolatedSandbox");
+    // PRO-561: each name opens that organization's setup steps.
+    await click("E2E Video, set up cloud workspaces");
+    expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/setup", params: { orgId: "e2" } });
   });
 
   it("never shows a blank page: placeholder rows under the title on a first load, the kept list on a later one (#988)", async () => {
@@ -555,6 +558,41 @@ describe("a cloud workspace screen", () => {
     expect(said).not.toContain("This workspace needs attention.This workspace needs attention.");
     await click("Retry resume");
     expect(mocks.alert.mock.calls.at(-1)![0]).toBe("Retry resume?");
+  });
+
+  it("says a workspace's machine is gone and offers delete and a new workspace, never Retry resume (#1581)", async () => {
+    world({ state: "attention-required", role: "manager" });
+    mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = { state: "failed", action: "resume", errorCode: "cloud_provider_not_found" };
+    mocks.catalog.workspace().repositories = [{ fullName: "acme/web", primary: true }];
+    await show(<CloudWorkspaceScreen />);
+    const bar = container.querySelector('[data-testid="machine-gone-bar"]')!;
+    expect(bar.textContent).toContain("This workspace's machine no longer exists at the provider. It may have been deleted outside TerminalX.");
+    expect(bar.textContent).toContain("Conversations saved before it stopped can still be read here until the workspace is deleted.");
+    expect(container.querySelector('[data-testid="start-bar"]')).toBeNull();
+    expect(() => button("Retry resume")).toThrow();
+    await click("Delete workspace…");
+    expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/delete", params: { orgId: "org-1", workspaceId: mocks.params.workspaceId } });
+    await click("New workspace");
+    expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/new", params: { orgId: "org-1", repository: "https://github.com/acme/web" } });
+  });
+
+  it("says the machine is gone when the server marked the workspace, with no failed operation (#1589)", async () => {
+    world({ state: "attention-required", role: "manager" });
+    mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = { state: "succeeded", action: "suspend" };
+    mocks.catalog.workspace().machineMissingAt = 1_795_305_607_000;
+    await show(<CloudWorkspaceScreen />);
+    expect(container.querySelector('[data-testid="machine-gone-bar"]')!.textContent).toContain("This workspace's machine no longer exists at the provider.");
+    expect(container.querySelector('[data-testid="start-bar"]')).toBeNull();
+    expect(() => button("Retry resume")).toThrow();
+  });
+
+  it("tells a viewer who can delete a workspace whose machine is gone (#1581)", async () => {
+    world({ state: "attention-required", role: "viewer" });
+    mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = { state: "failed", action: "resume", errorCode: "cloud_provider_not_found" };
+    await show(<CloudWorkspaceScreen />);
+    expect(container.querySelector('[data-testid="machine-gone-bar"]')!.textContent).toContain("can delete it.");
+    expect(() => button("Delete workspace…")).toThrow();
+    expect(() => button("New workspace")).toThrow();
   });
 
   it("says why the service refused to connect this phone to a running workspace, with Reconnect (#1290)", async () => {

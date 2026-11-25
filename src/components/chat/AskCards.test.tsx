@@ -336,3 +336,36 @@ it("denies on Escape where the card's view has the keys, and only there (PRO-382
   fireEvent.keyDown(document.activeElement ?? window, { key: "Escape" });
   expect(answer).not.toHaveBeenCalled();
 });
+
+/** A composer the person is typing in when a card arrives, outside the card. */
+function typingInComposer() {
+  const composer = document.createElement("textarea");
+  composer.setAttribute("aria-label", "Message");
+  document.body.appendChild(composer);
+  composer.focus();
+  return composer;
+}
+
+it("leaves focus in the composer when a permission request arrives while typing", () => {
+  const composer = typingInComposer();
+  render(<PermissionCard ask={threeWay} onAnswer={vi.fn()} takesKeys />);
+  expect(document.activeElement).toBe(composer);
+  composer.remove();
+});
+
+it("leaves focus in a terminal when a question arrives", () => {
+  const terminal = document.createElement("div");
+  terminal.className = "xterm";
+  const input = document.createElement("textarea");
+  terminal.appendChild(input);
+  document.body.appendChild(terminal);
+  input.focus();
+  render(<QuestionCard ask={{ kind: "questions", requestId: "q", toolUseId: "call", seq: 1, questions: [{ question: "Which flag?", multiSelect: false, freeText: false, options: [{ label: "--force" }] }] }} onAnswer={vi.fn()} />);
+  expect(document.activeElement).toBe(input);
+  terminal.remove();
+});
+
+it("still takes the focus for Return when nothing else is being typed in (PRO-382)", () => {
+  render(<PermissionCard ask={threeWay} onAnswer={vi.fn()} takesKeys />);
+  expect((document.activeElement as HTMLElement | null)?.textContent).toBe("Allow⏎");
+});
