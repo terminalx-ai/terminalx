@@ -32,6 +32,9 @@ import type { TabStatus } from "@/types/session";
  * while connected. A stopped workspace never shows a tab as working.
  */
 
+/** How long a failed first read of a workspace's agent tabs waits before it is tried again. */
+const TABS_RETRY_MS = 3_000;
+
 export interface CloudSessionTab {
   tabId: string;
   harness: string;
@@ -165,10 +168,13 @@ function onConnected(target: CloudTarget, client: WorkspaceRpcClient): () => voi
     .listSessions()
     .then((sessions) => open && takeLive(target, sessions, capabilities, manage))
     .catch(() => undefined);
-  void client
+  // Sessions are read again on the poll below; the tabs are not, so a first read that fails is tried again a few
+  // times while the connection is open, rather than leaving the workspace without its agents.
+  const readTabs = (left: number) => void client
     .listAgentTabs()
     .then((tabs) => open && applyLiveTabs(scope, tabs))
-    .catch(() => undefined);
+    .catch(() => { if (open && left > 0) setTimeout(() => open && readTabs(left - 1), TABS_RETRY_MS); });
+  readTabs(3);
   let readingStatus = false;
   const statusTimer = setInterval(() => {
     if (readingStatus || document.hidden) return;
