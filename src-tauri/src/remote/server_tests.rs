@@ -4186,6 +4186,7 @@ async fn cloud_desktop_requires_readiness_and_watchers_cannot_open_control_or_ge
     let f = fixture();
     listed(&f.rpc);
     let (viewer, mut events) = Peer::for_user("desktop-viewer".into(), Authority::Participate, Some("viewer".into()));
+    let (editor, mut editor_events) = Peer::for_user("desktop-editor".into(), Authority::Manage, Some("admin".into()));
     let (stranger, _) = Peer::for_user("desktop-stranger".into(), Authority::Participate, Some("stranger".into()));
     let hello = json!({ "protocol": PROTOCOL, "want": ["ports/1", protocol::CLOUD_DESKTOP] });
     assert_eq!(call(&f.rpc, &viewer, "rpc.hello", hello.clone()).await.unwrap()["capabilities"], json!(["ports/1"]));
@@ -4196,6 +4197,7 @@ async fn cloud_desktop_requires_readiness_and_watchers_cannot_open_control_or_ge
     let pool = super::super::cloud_desktop::DesktopPool::new(vec![tools.path().to_string_lossy().into_owned()], Duration::from_millis(10));
     assert!(f.rpc.desktop.set(pool).is_ok());
     call(&f.rpc, &viewer, "rpc.hello", hello.clone()).await.unwrap();
+    call(&f.rpc, &editor, "rpc.hello", hello.clone()).await.unwrap();
     call(&f.rpc, &stranger, "rpc.hello", hello).await.unwrap();
     assert_eq!(code(call(&f.rpc, &stranger, "desktop.open", json!({})).await), "forbidden");
     assert_eq!(code(call(&f.rpc, &viewer, "desktop.open", json!({"control":true})).await), "forbidden");
@@ -4221,8 +4223,40 @@ async fn cloud_desktop_requires_readiness_and_watchers_cannot_open_control_or_ge
     assert_eq!(data["event"], "desktop.data");
     assert_eq!(data["params"]["data"], general_purpose::STANDARD.encode("watch"));
 
+    f.rpc.answer_port_open(&editor, &json!({ "id": "editor-open", "method": "desktop.open", "params": { "control": true } })).await;
+    let opened = tokio::time::timeout(Duration::from_secs(5), editor_events.recv()).await.unwrap().unwrap();
+    assert_eq!(opened["id"], "editor-open");
+    let editor_stream = opened["result"]["streamId"].as_str().unwrap();
+    call(&f.rpc, &editor, "desktop.write", json!({ "streamId": editor_stream, "data": "eA==" })).await.unwrap();
+    let echo = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = editor_events.recv().await.unwrap();
+            if event["event"] == "desktop.data" { break event; }
+        }
+    }).await.unwrap();
+    assert_eq!(echo["params"]["data"], "eA==");
+
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "viewer" },
+        { "userId": "viewer", "role": "viewer" },
+    ])));
+    let ended = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = editor_events.recv().await.unwrap();
+            if event["event"] == "desktop.closed" { break event; }
+        }
+    }).await.unwrap();
+    assert_eq!(ended["params"]["streamId"], editor_stream);
+    assert_eq!(ended["params"]["reason"], "revoked");
+    assert!(call(&f.rpc, &editor, "desktop.write", json!({ "streamId": editor_stream, "data": "eA==" })).await.is_err());
+
     f.rpc.set_desktop_readiness(7, false);
-    let closed = tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap().unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event["event"] == "desktop.closed" { break event; }
+        }
+    }).await.unwrap();
     assert_eq!(closed["event"], "desktop.closed");
     assert_eq!(closed["params"]["streamId"], stream);
     assert_eq!(closed["params"]["reason"], "revoked");
