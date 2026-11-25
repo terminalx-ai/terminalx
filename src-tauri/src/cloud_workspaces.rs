@@ -14,7 +14,7 @@ use url::Url;
 use crate::account::{
     AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_PRESENCE, PHASE2_RESTART_DETAILS,
-    PHASE2_AFFECTED_WORKSPACES, PHASE2_GENERAL_ACCESS, PHASE2_WEBHOOK_TRIGGER, PHASE2_WORKSPACE_GROUPS,
+    PHASE2_AFFECTED_WORKSPACES, PHASE2_GENERAL_ACCESS, PHASE2_PRECREATE_USAGE, PHASE2_WEBHOOK_TRIGGER, PHASE2_WORKSPACE_GROUPS,
 };
 
 const CONTRACT: &str = "providers-v1";
@@ -983,6 +983,15 @@ pub struct CloudWorkspaceQuota {
     pub running: Option<QuotaUsage>,
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub total: Option<QuotaUsage>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudPrecreateUsage {
+    caller_owned_running: u32,
+    #[serde(deserialize_with = "Deserialize::deserialize")]
+    caller_owned_running_limit: Option<u32>,
+    quota: CloudWorkspaceQuota,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -3023,6 +3032,24 @@ impl CloudWorkspaceService {
             let snapshot = client.request(context, &["cloud-workspaces", workspace_id, "restart"], None, Some(json!({})), None, RequestRisk::Mutation)?;
             ensure_snapshot(snapshot, &context.organization_id, Some(workspace_id), RequestRisk::Mutation)
         })
+    }
+
+    pub fn precreate_usage(&self, org: &str) -> Result<CloudPrecreateUsage, CloudWorkspaceClientError> {
+        let risk = RequestRisk::Read;
+        let unavailable = "cloud_workspace_usage_unavailable";
+        if !valid_resource_id(org) { return Err(inbox_invalid()); }
+        self.phase2_gate(PHASE2_PRECREATE_USAGE, Some(org), None, unavailable)?;
+        let context = self.account.inbox_member_context(org)
+            .map_err(|code| CloudWorkspaceClientError::local(code, false))?;
+        self.phase2_gate(PHASE2_PRECREATE_USAGE, Some(org), Some(&context), unavailable)?;
+        let result = self.client.request(&context, &["cloud-workspaces", "precreate-usage"], None, None, None, risk);
+        if !self.account.inbox_member_is_current(&context, org) { return Err(context_changed_error(risk)); }
+        self.phase2_gate(PHASE2_PRECREATE_USAGE, Some(org), Some(&context), unavailable)?;
+        let usage: CloudPrecreateUsage = result?;
+        if !usage.quota.running.is_some_and(|running| usage.caller_owned_running <= running.used) {
+            return Err(invalid_response());
+        }
+        Ok(usage)
     }
 
     pub fn details(&self, org: Option<&str>, workspace_id: &str) -> Result<CloudWorkspaceDetailsResponse, CloudWorkspaceClientError> {
@@ -7275,6 +7302,29 @@ mod tests {
         ] {
             assert!(!claude_login_page(page), "{page}");
         }
+    }
+
+    #[test]
+    fn precreate_usage_reads_the_enabled_target_organization_and_preserves_unlimited() {
+        let body = r#"{"callerOwnedRunning":2,"callerOwnedRunningLimit":null,"quota":{"used":5,"limit":8,"running":{"used":5,"limit":8},"total":{"used":7,"limit":10}}}"#;
+        let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        for org in ["org-1", "org-2"] {
+            account.apply_phase2_readiness_for_test(json!({
+                "version": 1, "organizations": { (org): { (PHASE2_PRECREATE_USAGE): true } }
+            }));
+            let result = service.precreate_usage("org-2");
+            if org == "org-1" {
+                assert_eq!(result.unwrap_err().code, "cloud_workspace_usage_unavailable");
+            } else {
+                let usage = serde_json::to_value(result.unwrap()).unwrap();
+                assert_eq!(usage, serde_json::from_str::<Value>(body).unwrap());
+            }
+        }
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-2/cloud-workspaces/precreate-usage HTTP/1.1"));
+        assert!(!captured.extra_request);
     }
 
     #[test]

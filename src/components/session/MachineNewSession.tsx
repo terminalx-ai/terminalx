@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { ThisComputer, thisComputer } from "@/lib/platform";
-import { Check, ChevronDown, Cloud, Folder, GitBranch, Laptop, Plus } from "@/icons";
+import { Check, ChevronDown, Folder, GitBranch, Laptop, Plus, RefreshCw } from "@/icons";
 import { WorkspaceRpcError, type MachineProject, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { RemoteGit, type RemoteBranch } from "@terminalx/portable/workspaceGit";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
+import { cloudProviderIcon, useCloudProviderDescriptors } from "@/lib/cloudProviders";
 import { MachineIcon, machineViewStatus } from "@/components/machines/connectionStatus";
 import { MachineMessage } from "@/components/machines/MachineMessage";
 import { useRuntimeModels } from "@/lib/cloudModels";
@@ -192,6 +193,9 @@ export interface CloudWhere {
   projectCount: number;
   /** Why it cannot be chosen, if it cannot. */
   locked: string | null;
+  provider?: string;
+  providerLabel?: string;
+  detail?: string | null;
 }
 
 /**
@@ -206,22 +210,32 @@ export function WhereMenu({
   localProject,
   localWorktree,
   cloud,
+  showCloudPlacementNote,
+  onCloud,
+  onHere,
+  onRecheckCloud,
   disabled,
   onAddMachine,
 }: {
   lead: boolean;
   /** What runs it now: This Mac, a machine (by id), or an organization's cloud. */
-  current: { kind: "local" } | { kind: "machine"; machineId: string; name: string; machine: PairedMachine | null } | { kind: "cloud"; orgId: string; orgName: string };
+  current: { kind: "local" } | { kind: "machine"; machineId: string; name: string; machine: PairedMachine | null } | { kind: "cloud"; orgId: string; orgName: string; provider?: string; providerLabel?: string };
   localProject: { name: string; path: string } | null;
   localWorktree: boolean;
   cloud: CloudWhere[];
+  showCloudPlacementNote?: boolean;
+  onCloud?: (row: CloudWhere) => void;
+  onHere?: () => void;
+  onRecheckCloud?: () => void;
   disabled?: boolean;
   onAddMachine: () => void;
 }) {
   const menu = useRowMenu();
+  useCloudProviderDescriptors();
   const { machines } = useMachineConnections();
-  const label = current.kind === "local" ? ThisComputer : current.kind === "machine" ? current.name : `${current.orgName} cloud`;
-  const icon = current.kind === "local" ? <Laptop className="size-[13px]" /> : current.kind === "machine" ? <MachineIcon machine={current.machine} className="size-[13px]" /> : <Cloud className="size-[13px] text-info" />;
+  const label = current.kind === "local" ? ThisComputer : current.kind === "machine" ? current.name : current.providerLabel ? `${current.orgName} · ${current.providerLabel}` : `${current.orgName} cloud`;
+  const ProviderIcon = cloudProviderIcon(current.kind === "cloud" ? current.provider : null);
+  const icon = current.kind === "local" ? <Laptop className="size-[13px]" /> : current.kind === "machine" ? <MachineIcon machine={current.machine} className="size-[13px]" /> : <ProviderIcon className="size-[13px] shrink-0 text-info" />;
   return (
     <DropdownMenu {...menu.root}>
       <DropdownMenuTrigger asChild {...menu.trigger}>
@@ -231,7 +245,7 @@ export function WhereMenu({
           aria-label={`Where it runs: ${label}`}
           data-testid={current.kind === "cloud" ? "cloud-runs-in" : "where-it-runs"}
           title="Where it runs"
-          className={cn(chip, lead ? "bg-sel text-foreground" : "ml-auto text-[12px] text-muted-foreground")}
+          className={cn(chip, showCloudPlacementNote && "max-w-full shrink", lead ? "bg-sel text-foreground" : "ml-auto text-[12px] text-muted-foreground")}
         >
           {icon}
           <span className="truncate">{label}</span>
@@ -255,7 +269,7 @@ export function WhereMenu({
             )
           }
           chosen={current.kind === "local"}
-          onSelect={runNewSessionHere}
+          onSelect={onHere ?? runNewSessionHere}
         />
         {machines.map((machine) => (
           <MachineWhereItem
@@ -266,25 +280,34 @@ export function WhereMenu({
             onSelect={() => startMachineSessionIn(machine.machineId, null)}
           />
         ))}
-        {cloud.map((org) => (
-          <WhereItem
-            key={org.orgId}
-            testId={`where-cloud-${org.orgId}`}
-            icon={<Cloud className="!text-info" />}
-            name={`${org.orgName} cloud`}
-            detail={org.locked ?? `A cloud workspace of ${org.orgName} · ${org.projectCount} project${org.projectCount === 1 ? "" : "s"}`}
-            chosen={current.kind === "cloud" && current.orgId === org.orgId}
-            disabled={!org.startKey}
-            onSelect={() => org.startKey && startCloudSessionIn(org.startKey)}
-          />
-        ))}
+        {cloud.map((org) => {
+          const Icon = cloudProviderIcon(org.provider);
+          return (
+            <WhereItem
+              key={JSON.stringify([org.orgId, org.provider])}
+              testId={`where-cloud-${org.orgId}${org.provider ? `-${org.provider}` : ""}`}
+              icon={<Icon className="!text-info" />}
+              name={org.providerLabel ? `${org.orgName} · ${org.providerLabel}` : `${org.orgName} cloud`}
+              detail={org.locked ?? org.detail ?? `A cloud workspace of ${org.orgName} · ${org.projectCount} project${org.projectCount === 1 ? "" : "s"}`}
+              chosen={current.kind === "cloud" && current.orgId === org.orgId && current.provider === org.provider}
+              disabled={!org.startKey || (!!org.provider && !!org.locked)}
+              onSelect={() => onCloud ? onCloud(org) : org.startKey && startCloudSessionIn(org.startKey)}
+            />
+          );
+        })}
         <DropdownMenuSeparator />
+        {onRecheckCloud && <DropdownMenuItem className="h-8 gap-2.5 px-2.5 text-[12.5px]" onSelect={onRecheckCloud}>
+          <RefreshCw className="!size-3.5" />
+          Recheck cloud placement
+        </DropdownMenuItem>}
         <DropdownMenuItem className="h-8 gap-2.5 px-2.5 text-[12.5px]" onSelect={onAddMachine} data-testid="where-add-machine">
           <Plus className="!size-3.5" />
           Add a machine…
         </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <p className="px-2.5 py-1.5 text-[12px] leading-[17px] text-faint">A session runs where it is created and uses that machine’s files, agent sign-ins and git.</p>
+        <div className="px-2.5 py-1.5 text-[12px] leading-[17px] text-faint">
+          {showCloudPlacementNote ? <p>Cloud placement works with GitHub repositories.</p> : <p>A session runs where it is created and uses that machine’s files, agent sign-ins and git.</p>}
+        </div>
       </DropdownMenuContent>
     </DropdownMenu>
   );

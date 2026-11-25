@@ -523,6 +523,8 @@ export const api = {
     invoke<DesktopReadMarker>("cloud_workspace_read_marker", { orgId, workspaceId, readAt, sessionId: sessionId ?? null }),
   cloudWorkspaceRestart: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshotDto>("cloud_workspace_restart", { workspaceId, orgId: orgId ?? null }),
+  cloudWorkspacePrecreateUsage: (orgId: string) =>
+    invoke<CloudWorkspacePrecreateUsage>("cloud_workspace_precreate_usage", { orgId }),
   cloudWorkspaceStartProgress: (orgId: string, workspaceId: string, operationId: string) =>
     invoke<CloudWorkspaceStartProgress>("cloud_workspace_start_progress", { orgId, workspaceId, operationId }),
   cloudWorkspaceDetails: (workspaceId: string, orgId?: string | null) =>
@@ -1916,6 +1918,12 @@ export interface CloudLimitUsage {
 }
 
 /** The organization's workspace slots (§20.1); `used`/`limit` mirror `running` since PRO-76. */
+export interface CloudWorkspacePrecreateUsage {
+  callerOwnedRunning: number;
+  callerOwnedRunningLimit: number | null;
+  quota: CloudWorkspaceQuota;
+}
+
 export interface CloudWorkspaceQuota extends CloudLimitUsage {
   running?: CloudLimitUsage;
   total?: CloudLimitUsage;

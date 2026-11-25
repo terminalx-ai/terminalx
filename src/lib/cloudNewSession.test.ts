@@ -677,3 +677,80 @@ it("sends an explicit conflict opt-out for an issue whose project default is on"
     pipelineOptions: { autoMerge: false, resolveConflicts: false },
   });
 });
+
+describe("session placement with explicit organization readiness", () => {
+  const target = {
+    key: `cloud:${ORG}:github.com/acme/api` as const,
+    orgId: ORG, identity: "github.com/acme/api", fullName: "acme/api",
+    selected: true, pinned: false, blank: false, workspaces: [],
+  };
+  const credential = { kind: "agent-credential", agent: "claude", status: "verified" };
+
+  it("requires the organization-specific placement key", () => {
+    expect(flow.sessionPlacementReady(mocks.status, ORG)).toBe(false);
+    mocks.status = { ...mocks.status, phase2Readiness: { other: ["cloud.workspaces.session-placement.v1"] } };
+    expect(flow.sessionPlacementReady(mocks.status, ORG)).toBe(false);
+    expect(flow.sessionPlacementReady(mocks.status, "other")).toBe(true);
+    expect(flow.sessionPlacementReady({ ...mocks.status, state: "signed-out" }, "other")).toBe(false);
+  });
+
+  it("omits hidden providers and only reads setups for offered providers that can create", async () => {
+    mocks.api.cloudProviders.mockResolvedValue({ providers: [
+      { id: "visible", displayName: "Visible", availability: "available" },
+      { id: "hidden", availability: "available", descriptor: { listed: false } },
+      { id: "paused", displayName: "Paused", availability: "disabled-for-create" },
+    ] });
+    expect(await flow.cloudPlacementOffers(ORG)).toMatchObject([
+      { id: "visible", error: null },
+      { id: "paused", setup: null, error: { code: "cloud_provider_creation_paused" } },
+    ]);
+    expect(mocks.api.cloudWorkspaceSetup.mock.calls).toEqual([["visible", null]]);
+    expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [[{ ...credential, agent: null }], "Could not verify the agent login"],
+    [[{ ...credential, agent: "codex" }], "Could not verify the agent login"],
+    [[credential, { kind: "repository", status: "failed", errorCode: "cloud_environment_version_missing" }], "cloud_environment_version_missing"],
+  ])("needs explicit preflight evidence (%j)", async (checks, reason) => {
+    mocks.api.cloudWorkspacePreflight.mockResolvedValue({ ready: true, checks });
+    await expect(flow.checkCloudPlacement(target, request.agent)).rejects.toThrow(reason);
+    expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ used: 1, limit: 3, running: { used: 1, limit: 3 }, total: { used: 5, limit: 5 } }, "cloud_workspace_quota_exceeded"],
+    [{ used: 3, limit: 3, running: { used: 3, limit: 3 }, total: { used: 3, limit: 5 } }, "cloud_workspace_concurrency_exceeded"],
+  ])("refuses a ready placement at quota %j before asking for preflight", async (quota, code) => {
+    mocks.status = { ...mocks.status, phase2Readiness: { [ORG]: ["cloud.workspaces.session-placement.v1"] } };
+    await place([], quota);
+    const quote = await mocks.api.cloudWorkspaceQuote();
+    await expect(flow.prepareCloudCreate(target, request, { quote, defaultIdleSuspendMinutes: 30, accessMode: "private" })).rejects.toMatchObject({ code });
+    expect(mocks.api.cloudWorkspacePreflight).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("submits the displayed quote with an explicit idle choice (%s)", async (hasIdleChoice) => {
+    mocks.status = { ...mocks.status, phase2Readiness: { [ORG]: ["cloud.workspaces.session-placement.v1"] } };
+    mocks.api.cloudWorkspacePreflight.mockResolvedValue({ ready: true, checks: [credential] });
+    const setup = { provider: "explicit", ...await mocks.api.cloudWorkspaceSetup(), allowedIdleSuspendMinutes: hasIdleChoice ? [30] : [] };
+    const legacyQuote = await mocks.api.cloudWorkspaceQuote();
+    mocks.api.cloudWorkspaceSetup.mockClear();
+    mocks.api.cloudWorkspaceQuote.mockResolvedValue({ ...legacyQuote, id: "displayed", provider: "explicit", expiresAt: Date.now() + 60_000 });
+    const quote = await flow.quoteCloudPlacement(ORG, setup, hasIdleChoice ? 30 : null);
+    expect(mocks.api.cloudWorkspaceQuote).toHaveBeenLastCalledWith(expect.objectContaining({ idleSuspendMinutes: 30 }), null);
+    const placement = { quote, defaultIdleSuspendMinutes: setup.defaults.idleSuspendMinutes, accessMode: "organization" } as const;
+    await expect(flow.prepareCloudCreate(target, { ...request, idleSuspendMinutes: 60 }, placement))
+      .rejects.toMatchObject({ code: "cloud_workspace_quote_expired" });
+    const prepared = await flow.prepareCloudCreate(target, hasIdleChoice ? { ...request, idleSuspendMinutes: 30 } : request, placement);
+    expect(mocks.api.cloudWorkspacePreflight).toHaveBeenCalledWith([{ cloneUrl: "https://github.com/acme/api.git", ref: null }], null, "claude");
+    expect(prepared.form.provider).toBe("explicit");
+    expect(prepared.pending.request).toMatchObject({ quoteId: "displayed", accessMode: "organization", confirmProviderSpend: true });
+    expect(mocks.api.cloudProviders).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceSetup).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
+    mocks.api.cloudWorkspaceCreate.mockResolvedValue({ workspace: item("fresh", { state: "provisioning" }).workspace });
+    await flow.confirmCloudCreate(prepared, { follow: false });
+    expect(mocks.api.cloudWorkspaceCreate).toHaveBeenCalledExactlyOnceWith(prepared.pending.request, null);
+  });
+});
