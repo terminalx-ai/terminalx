@@ -27,6 +27,9 @@ fn screen(rig: &Rig) -> String {
 }
 
 /// A program in the tab's pane that reads one byte, says which, and stays.
+/// After that byte it reads and draws what it is typed, as a CLI does: the
+/// app waits for a CLI to read a pasted prompt and draw it before Enter, and
+/// one that never read again would make every prompt wait that out.
 #[cfg(unix)]
 fn with_a_cli_that_names_its_first_byte(kind: CliKind) -> Rig {
     let rig = Rig::of(kind, "");
@@ -37,7 +40,7 @@ fn with_a_cli_that_names_its_first_byte(kind: CliKind) -> Rig {
 printf 'CLI-IS-UP'
 byte=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
 printf 'TYPED-%s.' "$byte"
-sleep 600
+exec cat
 "#,
     )
     .unwrap();
