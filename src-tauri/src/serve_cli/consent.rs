@@ -288,8 +288,9 @@ static WINDOW_FROM_ENVIRONMENT: AtomicBool = AtomicBool::new(false);
 
 /// In a process a test launched as a desktop launches a runtime, with
 /// `TERMINALX_LOCAL_DESKTOP` and the window's key set: read the window from
-/// them ([`WINDOW_FROM_ENVIRONMENT`]).
-#[cfg(test)]
+/// them ([`WINDOW_FROM_ENVIRONMENT`]). Only the Mac desktop's
+/// `machine_host::window_consent_tests` start one.
+#[cfg(all(test, feature = "desktop", target_os = "macos"))]
 pub(crate) fn read_window_from_environment() {
     WINDOW_FROM_ENVIRONMENT.store(true, Ordering::SeqCst);
 }
