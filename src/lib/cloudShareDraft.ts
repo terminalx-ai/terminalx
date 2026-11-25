@@ -13,7 +13,7 @@ export type ShareRow = {
   canApprove: boolean;
 };
 
-export type ShareEdit = { op: "put" | "remove"; row: ShareRow };
+export type ShareEdit = { op: "put" | "remove"; row: ShareRow; needsChoice?: boolean };
 
 export function shareRowKey({ subject }: ShareRow): string {
   return `${subject.type}:${subject.id}`;
@@ -58,25 +58,23 @@ export function replaceShareEdit(edits: ShareEdit[], row: ShareRow, op?: ShareEd
   return op ? [...others, { op, row }] : others;
 }
 
-/** Keep fields changed by another manager when this draft did not edit them. */
+/** Preserve the chosen role and approval as one grant across a refresh. */
 export function rebaseShareEdits(before: ShareRow[], after: ShareRow[], edits: ShareEdit[]): ShareEdit[] {
   const previous = new Map(before.map((row) => [shareRowKey(row), row]));
   const current = new Map(after.map((row) => [shareRowKey(row), row]));
-  return pendingShareEdits(after, edits.map((edit) => {
+  return pendingShareEdits(after, edits.flatMap((edit) => {
+    if (edit.op === "remove") return [edit];
     const key = shareRowKey(edit.row);
     const from = previous.get(key);
     const to = current.get(key);
-    if (edit.op !== "put" || !from || !to) return edit;
-    const role = from.role === edit.row.role ? to.role : edit.row.role;
-    const canApprove = role === "manager" || (from.canApprove === edit.row.canApprove ? to.canApprove : edit.row.canApprove);
-    return { ...edit, row: { ...to, role, canApprove } };
+    if (!to) return from ? [] : [edit];
+    const changed = !from || from.role !== to.role || from.canApprove !== to.canApprove;
+    return [{ ...edit, needsChoice: edit.needsChoice || changed }];
   }));
 }
 
 export function buildShareRequest(accessRevision: string, edits: ShareEdit[]) {
-  // Put replacement admins first so the server's last-admin check can pass.
-  const order = (edit: ShareEdit) => edit.op === "remove" ? 1 : edit.row.role === "manager" ? 0 : 2;
-  const ordered = [...edits].sort((a, b) => order(a) - order(b));
+  const ordered = [...edits].sort((a, b) => Number(b.op === "remove") - Number(a.op === "remove"));
   const request: CloudAccessApply = {
     accessRevision,
     requestId: crypto.randomUUID(),

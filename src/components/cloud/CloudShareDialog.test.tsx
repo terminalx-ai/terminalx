@@ -820,7 +820,7 @@ describe("organization workspace-group readiness", () => {
     fireEvent.click(screen.getByRole("button", { name: "Revoke Alice" }));
     fireEvent.click(save());
     const retry = await screen.findByRole("button", { name: "Retry save" });
-    expect((screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Undo removal of Alice" }) as HTMLButtonElement).disabled).toBe(true);
     expect((search() as HTMLInputElement).disabled).toBe(true);
     expect(mocks.shares).toHaveBeenCalledTimes(1);
     fireEvent.click(retry);
@@ -953,7 +953,7 @@ describe("organization workspace-group readiness", () => {
     expect(mocks.groups).not.toHaveBeenCalled();
   });
 
-  it("requires review after a stale revision and builds a fresh envelope", async () => {
+  it("requires an explicit choice between complete grants after a stale revision", async () => {
     enabled();
     mocks.apply.mockRejectedValueOnce({ code: "cloud_workspace_access_revision_conflict" })
       .mockImplementationOnce(async (_workspace: string, _org: string, request: CloudAccessApply) =>
@@ -967,33 +967,52 @@ describe("organization workspace-group readiness", () => {
     listed = { ...listed, accessRevision: "opaque:2", shares: [share({ canApprove: true }), share({ userId: "u-bob", name: "Bob" })] };
     fireEvent.click(refresh);
     await screen.findByRole("combobox", { name: "Role for Bob" });
-    expect((role("Alice") as HTMLSelectElement).value).toBe("driver");
+    expect((save() as HTMLButtonElement).disabled).toBe(true);
+    expect(await screen.findByRole("button", { name: "Keep current: Viewer, can approve" })).toBeTruthy();
+    fireEvent.click(save());
     expect(mocks.apply).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Use my change: Driver, approval off" }));
     fireEvent.click(save());
     await screen.findByText("Access changes saved.");
-    expect(mocks.apply.mock.calls[1][2]).toMatchObject({ accessRevision: "opaque:2", changes: [{ subject: { type: "user", id: "u-alice" }, canApprove: true }] });
+    expect(mocks.apply.mock.calls[1][2]).toMatchObject({ accessRevision: "opaque:2", changes: [{ subject: { type: "user", id: "u-alice" }, role: "driver", canApprove: false }] });
     expect(mocks.apply.mock.calls[1][2].requestId).not.toBe(mocks.apply.mock.calls[0][2].requestId);
   });
 
-  it("submits a replacement administrator with approval before removing the old grant", async () => {
+  it("drops an edit to a revoked share while preserving unrelated drafts", async () => {
     enabled();
-    listed = { ...listed, shares: [share({ role: "manager", canApprove: true }), share({ userId: "u-bob", name: "Bob" })] };
-    mocks.apply.mockImplementationOnce(async (_workspace: string, _org: string, request: CloudAccessApply) =>
-      receipt({ shares: [share({ userId: "u-bob", name: "Bob", role: "manager", canApprove: true })], accessRevision: "opaque:2" },
-        request.changes.map(({ id }) => ({ id, status: "applied" }))));
+    const bob = share({ userId: "u-bob", name: "Bob" });
+    listed = { ...listed, shares: [share(), bob] };
+    mocks.apply.mockRejectedValueOnce({ code: "cloud_workspace_access_revision_conflict" })
+      .mockImplementationOnce(async (_workspace: string, _org: string, request: CloudAccessApply) =>
+        receipt({ shares: [{ ...bob, role: "driver" }], accessRevision: "opaque:3" },
+          request.changes.map(({ id }) => ({ id, status: "applied" }))));
     renderEditor();
     await screen.findByTestId("cloud-share-you");
-    fireEvent.click(screen.getByRole("button", { name: "Revoke Alice" }));
-    fireEvent.change(role("Bob"), { target: { value: "manager" } });
-    const approval = screen.getByRole("switch", { name: "Can approve permissions: Bob" });
-    expect(approval.getAttribute("aria-checked")).toBe("true");
-    expect((approval as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(role("Alice"), { target: { value: "driver" } });
+    fireEvent.change(role("Bob"), { target: { value: "driver" } });
+    fireEvent.click(save());
+    const refresh = await screen.findByRole("button", { name: "Refresh access" });
+    listed = { ...listed, accessRevision: "opaque:2", shares: [bob] };
+    fireEvent.click(refresh);
+    await waitFor(() => expect(screen.queryByRole("combobox", { name: "Role for Alice" })).toBeNull());
     fireEvent.click(save());
     await screen.findByText("Access changes saved.");
-    expect(mocks.apply.mock.calls[0][2].changes).toMatchObject([
-      { op: "put", subject: { type: "user", id: "u-bob" }, role: "manager", canApprove: true },
-      { op: "remove", subject: { type: "user", id: "u-alice" } },
+    expect(mocks.apply.mock.calls[1][2].changes).toEqual([
+      expect.objectContaining({ op: "put", subject: { type: "user", id: "u-bob" }, role: "driver" }),
     ]);
+  });
+
+  it("withholds Admin grants for both people and groups while displaying existing Admin access", async () => {
+    enabled("org-1", [{ groupId: group.id, group, role: "viewer", canApprove: false }]);
+    listed = { ...listed, shares: [share({ role: "manager", canApprove: true }), share({ userId: "u-bob", name: "Bob" })] };
+    renderEditor();
+    await screen.findByTestId("cloud-share-you");
+    expect((role("Alice") as HTMLSelectElement).value).toBe("manager");
+    expect((within(role("Alice")).getByRole("option", { name: "Admin" }) as HTMLOptionElement).disabled).toBe(true);
+    expect(within(role("Bob")).queryByRole("option", { name: "Admin" })).toBeNull();
+    expect(within(role(group.name)).queryByRole("option", { name: "Admin" })).toBeNull();
+    expect((save() as HTMLButtonElement).disabled).toBe(true);
+    expect(mocks.apply).not.toHaveBeenCalled();
   });
 
   it.each(["account", "revision", "active organization", "target organization", "workspace"])("retires an ambiguous payload when the %s changes", async (change) => {

@@ -107,8 +107,9 @@ export function CloudShareEditor({
   const base = useMemo(() => listed ? shareRows(listed) : [], [listed]);
   const pending = pendingShareEdits(base, edits);
   const byKey = new Map(pending.map((edit) => [shareRowKey(edit.row), edit]));
-  const baseKeys = new Set(base.map(shareRowKey));
-  const rows = [...base.map((row) => byKey.get(shareRowKey(row))?.row ?? row), ...pending.filter((edit) => !baseKeys.has(shareRowKey(edit.row))).map((edit) => edit.row)];
+  const savedByKey = new Map(base.map((row) => [shareRowKey(row), row]));
+  const needsChoice = pending.some((edit) => edit.needsChoice);
+  const rows = [...base.map((row) => byKey.get(shareRowKey(row))?.row ?? row), ...pending.filter((edit) => !savedByKey.has(shareRowKey(edit.row))).map((edit) => edit.row)];
   const shared = new Set(rows.filter((row) => byKey.get(shareRowKey(row))?.op !== "remove").map(shareRowKey));
   const people = members.filter((member) => !alwaysHasAccess(member, createdBy ?? null) && !shared.has(`user:${member.userId}`))
     .map((member): ShareRow => ({
@@ -137,7 +138,7 @@ export function CloudShareEditor({
   }, [showingLegacy]);
 
   const stage = (row: ShareRow, op?: ShareEdit["op"]) => {
-    if (!mayEdit || locked || !canRequest()) return;
+    if (!mayEdit || locked || !canRequest() || (op === "put" && row.role === "manager")) return;
     setEdits((previous) => pendingShareEdits(base, replaceShareEdit(previous, row, op)));
     setFailures((previous) => previous.filter((failure) => failure.key !== shareRowKey(row)));
     setNotice(null);
@@ -174,8 +175,9 @@ export function CloudShareEditor({
     try {
       const next = await readShares();
       if (!current() || !canRequest()) return;
-      accept(next, rebaseShareEdits(base, shareRows(next), pending));
-      if (refreshRequired && pending.length) setNotice("Access refreshed. Review the unsaved changes before saving.");
+      const remaining = rebaseShareEdits(base, shareRows(next), pending);
+      accept(next, remaining);
+      if (refreshRequired) setNotice(remaining.length ? "Access refreshed. Review the unsaved changes before saving." : "Access refreshed.");
     } catch (e) {
       if (!current() || !canRequest()) return;
       if (codeOf(e) === "cloud_workspace_not_found") {
@@ -201,13 +203,14 @@ export function CloudShareEditor({
         return [{ key: shareRowKey(row), name: row.name, message }];
       });
       const failed = new Set(failures.map((failure) => failure.key));
-      const remaining = batch.ordered.filter(({ row }) => failed.has(shareRowKey(row)));
+      const rejected = batch.ordered.filter(({ row }) => failed.has(shareRowKey(row)));
       setAttempt(null);
       setFailures(failures);
       // The apply snapshot is authoritative for the batch, including receipts
       // replayed after a lost reply. Recheck standing and concurrent writes
       // before allowing a new batch from this editor.
       const updated = { you: snapshot.you, shares: result.shares, groupShares: result.groupShares, accessRevision: result.accessRevision };
+      const remaining = rebaseShareEdits(shareRows(snapshot), shareRows(updated), rejected);
       accept(updated, remaining);
       const applied = result.results.length - failures.length;
       if (applied > 0) setAccessChanged(true);
@@ -298,7 +301,7 @@ export function CloudShareEditor({
       void run(() => apply(listed, attempt, true));
       return;
     }
-    if (!mayEdit || refreshRequired) return;
+    if (!mayEdit || refreshRequired || needsChoice) return;
     if (pending.length === 0 || pending.length > 128) return;
     if (access === "private") setConfirm("visible");
     else void run(() => apply(listed, buildShareRequest(listed.accessRevision, pending)));
@@ -316,7 +319,7 @@ export function CloudShareEditor({
         if (!current() || !canRequest()) return;
         const remaining = rebaseShareEdits(base, shareRows(next), pending);
         accept(next, remaining);
-        if (remaining.length && next.you.canManageShares) await apply(next, buildShareRequest(next.accessRevision, remaining));
+        if (remaining.length && !remaining.some((edit) => edit.needsChoice) && next.you.canManageShares) await apply(next, buildShareRequest(next.accessRevision, remaining));
       } catch (e) {
         if (!current() || !canRequest()) return;
         setError(`The workspace is visible. Refresh access before saving (${codeOf(e)}).`);
@@ -343,7 +346,7 @@ export function CloudShareEditor({
   const pendingLabel = `${pending.length} unsaved ${pending.length === 1 ? "change" : "changes"}`;
   const activeConfirmation = paused && confirm !== "discard" ? null : confirm;
   const confirmationTitle = activeConfirmation === "discard" ? "Discard access changes?" : activeConfirmation === "visible" ? "Make workspace visible and save?" : "Make workspace private?";
-  const cannotSave = working || !!confirm || (!attempt && (refreshRequired || !mayEdit || pending.length === 0 || pending.length > 128));
+  const cannotSave = working || !!confirm || (!attempt && (refreshRequired || !mayEdit || needsChoice || pending.length === 0 || pending.length > 128));
   const feedback = !privacy && <>
     {failures.length > 0 && <div role="alert" className="rounded-md border border-destructive/30 px-3 py-2 text-destructive">
       <p>Could not save these changes</p>
@@ -388,7 +391,9 @@ export function CloudShareEditor({
             <ul className="divide-y divide-hairline rounded-md border border-hairline" aria-label="People and groups with access">
               {rows.map((row) => {
                 const key = shareRowKey(row);
-                const removed = byKey.get(key)?.op === "remove";
+                const edit = byKey.get(key);
+                const saved = savedByKey.get(key);
+                const removed = edit?.op === "remove";
                 return <li key={key} className="flex min-w-0 flex-wrap items-center gap-2 px-3 py-2" data-testid="cloud-share-row">
                   {profiles && row.subject.type === "user" && <MemberProfile className="size-7" member={members.find((member) => member.userId === row.subject.id)
                     ?? { userId: row.subject.id, email: row.detail ?? row.name, displayName: row.detail ? row.name : undefined, role: "" }} />}
@@ -397,18 +402,26 @@ export function CloudShareEditor({
                     {row.detail && <span className="block truncate text-muted-foreground">{row.detail}</span>}
                   </div>
                   <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-                    {mayEdit && removed ? <>
+                    {mayEdit && edit?.needsChoice && saved ? <>
+                      <p className="w-full text-warning">Access changed while you were editing.</p>
+                      <Button size="sm" variant="outline" disabled={locked} onClick={() => stage(row)}>
+                        Keep current: {shareRoleLabel(saved.role)}{saved.canApprove ? ", can approve" : ", approval off"}
+                      </Button>
+                      <Button size="sm" variant="outline" disabled={locked} onClick={() => stage(row, "put")}>
+                        Use my change: {shareRoleLabel(row.role)}{row.canApprove ? ", can approve" : ", approval off"}
+                      </Button>
+                    </> : mayEdit && removed ? <>
                       <span className="text-muted-foreground">Removing access</span>
-                      <Button size="sm" variant="ghost" disabled={locked} onClick={() => stage(row)}>Undo</Button>
+                      <Button size="sm" variant="ghost" disabled={locked} aria-label={`Undo removal of ${row.name}`} onClick={() => stage(row)}>Undo</Button>
                     </> : mayEdit ? <>
                       <select className={select} aria-label={`Role for ${row.name}`} value={row.role} disabled={locked}
                         onChange={(e) => {
                           const role = e.target.value as CloudShareRole;
-                          stage({ ...row, role, canApprove: role === "manager" || row.canApprove }, "put");
+                          stage({ ...row, role, canApprove: row.canApprove }, "put");
                         }}>
                         <option value="viewer">Viewer</option>
                         <option value="driver">Driver</option>
-                        <option value="manager">Admin</option>
+                        {row.role === "manager" && <option value="manager" disabled>Admin</option>}
                       </select>
                       <label className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
                         <Switch size="sm" aria-label={`Can approve permissions: ${row.name}`} checked={row.canApprove}
@@ -455,7 +468,7 @@ export function CloudShareEditor({
           {activeConfirmation === "discard" && !privacy && <ul className="max-h-36 list-disc space-y-1 overflow-y-auto break-words pl-5 text-sm">
             {pending.map(({ row, op }) => <li key={shareRowKey(row)}>
               {row.name}{row.subject.type === "group" ? " (Group)" : ""} · {op === "remove" ? "Remove access"
-                : `${baseKeys.has(shareRowKey(row)) ? "Change to" : "Add as"} ${shareRoleLabel(row.role)}${row.canApprove ? ", can approve permissions" : ", approval off"}`}
+                : `${savedByKey.has(shareRowKey(row)) ? "Change to" : "Add as"} ${shareRoleLabel(row.role)}${row.canApprove ? ", can approve permissions" : ", approval off"}`}
             </li>)}
           </ul>}
           <div className="flex flex-wrap justify-end gap-2">

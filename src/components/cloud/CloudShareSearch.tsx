@@ -75,7 +75,7 @@ function SearchResults({ query, orgId, organization, contextRevision, people, sh
   }));
   const matches = [...people, ...groups];
   return (
-    <div className="max-h-48 overflow-y-auto rounded-md border border-hairline" aria-label="People and groups matching the search">
+    <div className="max-h-48 overflow-y-auto rounded-md border border-hairline" role="region" aria-label="People and groups matching the search">
       {matches.length > 0 && <ul className="divide-y divide-hairline">
         {matches.map((row) => {
           const added = shared.has(shareRowKey(row));
