@@ -611,14 +611,14 @@ describe("the pipeline an issue session starts", () => {
     expect(onCreated).toHaveBeenCalledWith("session-1", "tab-1", issuePrompt(issues[0]));
   });
 
-  it("still starts the session when the pipeline cannot start", async () => {
+  it("still starts the session when the pipeline cannot start, and says it did not", async () => {
     startPipeline.mockRejectedValue("The issue pipeline needs a Git project.");
-    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     const onCreated = await open();
     await start();
     expect(onCreated).toHaveBeenCalledWith("session-1", "tab-1", issuePrompt(issues[0]));
-    expect(logged).toHaveBeenCalledWith("issue pipeline did not start", "The issue pipeline needs a Git project.");
-    logged.mockRestore();
+    const { getErrorToasts, dismissErrorKey } = await import("@/lib/errorToasts");
+    expect(getErrorToasts().some((toast) => toast.key === "issue-pipeline" && String(toast.cause).includes("needs a Git project"))).toBe(true);
+    dismissErrorKey("issue-pipeline");
   });
 
   it("shows an issue's pipeline on its page and in the list, with the switch where the pipeline is", async () => {
@@ -1456,5 +1456,36 @@ describe("agent accounts on an issue start", () => {
     const req = await start();
     expect(req).toMatchObject({ title: "#11 Fix login timeout", account: WORK });
     expect(req.tab).not.toHaveProperty("account");
+  });
+});
+
+describe("a read that fails (3.5)", () => {
+  it("says the list could not be read, offers Retry, and does not claim there are no issues", async () => {
+    setPrefs({ issueProvider: "github" });
+    let fail = true;
+    const backend = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => (command === "issues_list" && fail ? Promise.reject(new Error("network down")) : backend(command, args)));
+    render(<IssuesView onCreated={vi.fn()} />);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("network down");
+    expect(screen.queryByText("No open issues match.")).toBeNull();
+    fail = false;
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Fix login timeout")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("says an issue could not be read in its own pane, and reads it again on Retry", async () => {
+    setPrefs({ issueProvider: "github" });
+    let fail = true;
+    const backend = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => (command === "issue_details" && fail ? Promise.reject(new Error("timed out")) : backend(command, args)));
+    render(<IssuesView onCreated={vi.fn()} />);
+    fireEvent.click(await screen.findByText("Fix login timeout"));
+    const alert = (await screen.findByText(/Couldn’t load this issue. timed out/)).closest("[role=alert]") as HTMLElement;
+    fail = false;
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("First issue body.")).toBeTruthy();
+    expect(screen.queryByText(/Couldn’t load this issue/)).toBeNull();
   });
 });

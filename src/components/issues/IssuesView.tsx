@@ -6,6 +6,7 @@ import { Check, ChevronDown, Cloud, Copy, ExternalLink, Github, LogoLinear, Fold
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { GH_INSTALL_URL, ghInstallCommand } from "@/lib/ghInstall";
 import { Button } from "@/components/ui/button";
+import { showError } from "@/lib/errorToasts";
 import { bindingText, matchesShortcut, useKeymap } from "@/lib/shortcuts";
 import { Segmented, Switch } from "@/components/ui/controls";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -181,6 +182,9 @@ export function IssuesView({
   const [selected, setSelected] = useState<Issue | null>(null);
   const [detail, setDetail] = useState<Issue | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  // The open issue's own read, apart from the list's: each says it failed where it is shown, and is read again on its own.
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailRetry, setDetailRetry] = useState(0);
   const [linear, setLinear] = useState<LinearStatus | null>(null);
   const [ghOk, setGhOk] = useState<boolean | null>(null);
   const [repo, setRepo] = useState<string | null>(null);
@@ -318,7 +322,7 @@ export function IssuesView({
   // Who is connected, and to what.
   useEffect(() => {
     let live = true;
-    issuesApi.linearStatus().then((s) => live && setLinear(s)).catch(() => {});
+    issuesApi.linearStatus().then((s) => live && setLinear(s)).catch((e) => live && setError({ message: `Couldn’t check the Linear connection. ${errorMessage(e)}`, organizationId: null }));
     gh.available().then((ok) => live && setGhOk(ok)).catch(() => live && setGhOk(false));
     return () => {
       live = false;
@@ -345,7 +349,7 @@ export function IssuesView({
   useEffect(() => {
     if (provider !== "linear" || !linear?.connected) return;
     let live = true;
-    issuesApi.linearTeams().then((t) => live && setTeams(t)).catch(() => {});
+    issuesApi.linearTeams().then((t) => live && setTeams(t)).catch((e) => live && setError({ message: `Couldn’t read the Linear teams. ${errorMessage(e)}`, organizationId: null }));
     return () => {
       live = false;
     };
@@ -431,17 +435,18 @@ export function IssuesView({
     if (rowFirst) setDetail(selected);
     let live = true;
     const started = writes.readStarted();
+    setDetailError(null);
     if (!again && !rowFirst) setDetailLoading(true);
     issuesApi
       .details(projectPath, selected.provider, selected.id)
       // Not over a status change that began or ended since the read started.
       .then((d) => live && setDetail((now) => (now && writeKey(now) === writeKey(d) && writes.outdated(writeKey(d), started) ? now : newer(now, d))))
-      .catch((e) => live && setError({ message: errorMessage(e), organizationId: null }))
+      .catch((e) => live && setDetailError(errorMessage(e)))
       .finally(() => live && setDetailLoading(false));
     return () => {
       live = false;
     };
-  }, [selected, projectPath, tick]);
+  }, [selected, projectPath, tick, detailRetry]);
 
   // The open issue's thread as the pane last read it, for the agent's prompt; named by the issue it belongs to.
   const thread = useRef<{ key: string; thread: IssueThread } | null>(null);
@@ -546,7 +551,8 @@ export function IssuesView({
           if ((started.pipeline.resolveConflicts ?? false) !== launch.resolveConflicts) await setPipelineResolveConflicts(started.pipeline.id, launch.resolveConflicts);
           prompt = `${prompt}\n\n${started.authorBrief}`;
         } catch (e) {
-          console.error("issue pipeline did not start", e);
+          // The session starts without it, as before; the person is told so.
+          showError("The issue’s pipeline did not start. The session starts without it.", e, { key: "issue-pipeline", tone: "warning" });
         }
       }
       if (orchestrate) {
@@ -838,9 +844,10 @@ export function IssuesView({
         {workNote && !emptyReason && <div className="px-4 pb-1.5 text-[11px] text-faint" data-testid="issues-work-note">{workNote}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
           {error && (
-            <div className="mx-4 mb-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            <div role="alert" className="mx-4 mb-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
               {error.message}
               {error.organizationId && <AgentLoginsLink message={error.message} organizationId={error.organizationId} className="ml-2" />}
+              <Button size="xs" variant="outline" className="ml-2" disabled={loading} onClick={() => { startedRows.current.keys.clear(); setError(null); setTick((n) => n + 1); }}>Retry</Button>
             </div>
           )}
           {emptyReason && provider === "linear" && linear && !linear.connected ? (
@@ -865,7 +872,7 @@ export function IssuesView({
                 </div>
               )}
             </div>
-          ) : shownList.length === 0 && !loading ? (
+          ) : shownList.length === 0 && !loading && error ? null : shownList.length === 0 && !loading ? (
             <div className="px-4 py-6 text-sm text-muted-foreground">
               {list.length > 0 && workFilter === "free"
                 ? "Someone is working on every issue listed."
@@ -1109,6 +1116,12 @@ export function IssuesView({
               {pipeline && <IssuePipelinePanel key={pipeline.id} pipeline={pipeline} />}
               <div className="px-5 py-4">
                 {detailLoading && <div className="text-xs text-faint">Loading…</div>}
+                {detailError && !detailLoading && (
+                  <div role="alert" className="mb-2 text-xs text-destructive">
+                    Couldn’t load this issue. {detailError}{" "}
+                    <Button size="xs" variant="outline" onClick={() => setDetailRetry((n) => n + 1)}>Retry</Button>
+                  </div>
+                )}
                 {detailText != null && (
                   <IssueDescription key={issueKey} edits={edits}>
                     {detailText.trim() ? <Markdown text={detailText} /> : <div className="text-sm text-faint">No description.</div>}
