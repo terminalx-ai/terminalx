@@ -184,7 +184,12 @@ pub(crate) fn ensure_local_branch(repo: &Path, expected: &BranchCommit) -> Resul
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
-#[serde(tag = "role", rename_all = "lowercase")]
+// Transcript tags are lowercase. Message fields use the webview wire convention.
+#[serde(
+    tag = "role",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
 pub(crate) enum TranscriptMessage {
     User { text: String },
     Assistant { text: String },

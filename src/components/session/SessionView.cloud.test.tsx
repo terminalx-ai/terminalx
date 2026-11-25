@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   /** This account's role in the session's organization. */
   role: "member",
   readiness: {} as Record<string, string[]>,
+  accountContext: undefined as { scope: string; revision: string } | undefined,
   privacyReady: false,
   memberWorkspaces: false,
   /** Lists of the organization asked for by the session (never an attach or a resume). */
@@ -33,7 +34,7 @@ vi.mock("@/lib/cloudCatalog", async (importOriginal) => ({
   refreshCloudCatalog: mocks.refreshCatalog,
 }));
 vi.mock("@/lib/account", () => {
-  const account = { status: { state: "signed-in", identity: { name: null, email: "a@b.c", organization: "Acme", organizationId: "org-1" }, expiresAt: null, lastError: null, context: { scope: "scope", revision: "revision" }, get phase2Readiness() { return mocks.readiness; }, get memberWorkspaces() { return mocks.memberWorkspaces; }, organizations: [{ id: "org-1", name: "Acme", cloud: { enabled: true, flags: {} }, get role() { return mocks.role; } }] } };
+  const account = { status: { state: "signed-in", identity: { name: null, email: "a@b.c", organization: "Acme", organizationId: "org-1" }, expiresAt: null, lastError: null, get context() { return mocks.accountContext; }, get phase2Readiness() { return mocks.readiness; }, get memberWorkspaces() { return mocks.memberWorkspaces; }, organizations: [{ id: "org-1", name: "Acme", cloud: { enabled: true, flags: {} }, get role() { return mocks.role; } }] } };
   return { useAccount: () => account, getAccount: () => account, subscribeAccount: () => () => undefined, refreshAccount: vi.fn() };
 });
 vi.mock("@/lib/dataPrivacy", async (original) => ({
@@ -444,6 +445,7 @@ beforeEach(() => {
   mocks.refreshCatalog.mockClear();
   mocks.role = "member";
   mocks.readiness = {};
+  mocks.accountContext = undefined;
   mocks.privacyReady = false;
   mocks.memberWorkspaces = false;
   setCatalog(workspaceItem("ready"));
@@ -499,6 +501,10 @@ describe("cloud desktop center tab", () => {
 });
 
 describe("transfer to local", () => {
+  beforeEach(() => {
+    mocks.accountContext = { scope: "scope", revision: mocks.catalog.revision };
+  });
+
   it("keeps the action held when a different organisation is ready", async () => {
     mocks.privacyReady = true;
     mocks.readiness = { "other-org": ["cloud.workspaces.transfer-to-local.v1"] };
