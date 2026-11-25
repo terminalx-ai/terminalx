@@ -4,6 +4,7 @@ use crate::workspace_transfer_bundle::{self as bundle, BranchCommit, TransferBun
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 const EXPORT_TTL: Duration = Duration::from_secs(180);
+const EXPORT_MAX_AGE: Duration = Duration::from_secs(15 * 60);
 const MAX_EXPORTS: usize = 4;
 const MAX_TRANSCRIPT_BYTES: usize = 4 * 1024 * 1024;
 
@@ -16,7 +17,8 @@ pub(super) struct Export {
     generation: u64,
     stamp: Option<collab::v2::Stamp>,
     expires: Instant,
-    bundle: TransferBundle,
+    hard_expires: Instant,
+    bundle: Option<TransferBundle>,
     transcript: Vec<u8>,
 }
 
@@ -90,6 +92,8 @@ impl WorkspaceRpc {
                 let bytes = match required_str(params, "part")? {
                     "bundle" => entry
                         .bundle
+                        .as_ref()
+                        .ok_or_else(|| RpcError::invalid("This transfer needs no bundle"))?
                         .read_chunk(offset)
                         .map_err(RpcError::internal)?,
                     "transcript" => {
@@ -103,7 +107,9 @@ impl WorkspaceRpc {
                     }
                     _ => return Err(RpcError::invalid("Unknown transfer part")),
                 };
-                entry.expires = Instant::now() + EXPORT_TTL;
+                if !bytes.is_empty() {
+                    entry.expires = renew_expiry(Instant::now(), entry.hard_expires);
+                }
                 Ok(json!({ "offset": offset, "data": STANDARD.encode(bytes) }))
             }
             _ => Err(RpcError::new("method_not_found", "Unknown transfer method")),
@@ -194,7 +200,10 @@ impl WorkspaceRpc {
         })?;
         still_allowed()?;
         let bundle = bundle::export(&checkout, &pin).map_err(RpcError::internal)?;
-        if bundle.size() > bundle::MAX_BUNDLE_BYTES {
+        if bundle
+            .as_ref()
+            .is_some_and(|bundle| bundle.size() > bundle::MAX_BUNDLE_BYTES)
+        {
             return Err(RpcError::new(
                 "transfer_too_large",
                 "This Git bundle is too large to transfer",
@@ -205,9 +214,10 @@ impl WorkspaceRpc {
         let id = uuid::Uuid::new_v4().to_string();
         let result = json!({
             "transferId": id, "branch": pin.branch(), "commit": pin.commit(),
-            "bundleBytes": bundle.size(),
+            "bundleBytes": bundle.as_ref().map(TransferBundle::size),
             "transcriptBytes": transcript.len(), "harness": tab.harness, "title": session.title,
         });
+        let created = Instant::now();
         self.transfers.lock().unwrap().insert(
             peer.id(),
             Export {
@@ -218,11 +228,29 @@ impl WorkspaceRpc {
                 tab: tab_id.into(),
                 generation,
                 stamp: permit,
-                expires: Instant::now() + EXPORT_TTL,
+                expires: created + EXPORT_TTL,
+                hard_expires: created + EXPORT_MAX_AGE,
                 bundle,
                 transcript,
             },
         );
         Ok(result)
+    }
+}
+
+fn renew_expiry(now: Instant, hard_expires: Instant) -> Instant {
+    (now + EXPORT_TTL).min(hard_expires)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_read_renews_the_idle_deadline_only_to_the_hard_limit() {
+        let now = Instant::now();
+        let end = now + EXPORT_MAX_AGE;
+        assert_eq!(renew_expiry(now, end), now + EXPORT_TTL);
+        assert_eq!(renew_expiry(end - Duration::from_secs(1), end), end);
     }
 }

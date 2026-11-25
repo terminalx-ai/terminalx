@@ -634,7 +634,7 @@ export function SessionView({
   const transferRevision = desktopAccount.context?.revision;
   const canTransfer = cloud && !machine && !compact && !start && !cloud.locked && cloud.connected && cloud.manage
     && privacy.ready && !privacy.enabled && phase2Ready(desktopAccount, cloud.orgId, "workspaceTransferToLocal")
-    && cloud.client?.hasCapability("workspace-transfer/2");
+    && cloud.client?.hasCapability("workspace-transfer/3");
   // PRO-404: a machine session's branch, diff size and next Git step, read and run on the machine (21.08). Nothing is read for any other session.
   const machineBranch = useMachineBranch({
     session,
