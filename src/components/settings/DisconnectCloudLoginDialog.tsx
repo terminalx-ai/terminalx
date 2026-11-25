@@ -52,7 +52,7 @@ export function DisconnectCloudLoginDialog({ login, agent, organization, organiz
             </div>
           )}
           {impact?.hasHidden && <p>Other running workspaces you can’t view also use this key.</p>}
-          <p className="text-muted-foreground">Running tabs can keep using access already issued until it expires. This removes the cloud login. Keys already saved in this Mac’s Keychain stay there.</p>
+          <p className="text-muted-foreground">Running tabs can keep using access already issued until it expires. This removes the cloud login. Any keys saved on this device stay in place.</p>
         </div>
         <DialogFooter>
           <Button type="button" variant="outline" disabled={busy} onClick={onClose}>Cancel</Button>

@@ -84,6 +84,19 @@ describe("the locked workspace access request", () => {
     expect(within(dialog).queryByRole("button", { name: /edit|revoke|save/i })).toBeNull();
   });
 
+  it("uses a member label when the access list has no display name", async () => {
+    mock.readShares.mockResolvedValueOnce({ shares: [
+      { userId: "member-a", name: "  Morgan  ", email: "morgan@example.test", role: "viewer" },
+      { userId: "member-b", name: "  ", email: "private@example.test", role: "driver" },
+    ] });
+    render(<NotSharedNotice requestTarget={target} />);
+    fireEvent.click(screen.getByRole("button", { name: "Who has access" }));
+    const dialog = await screen.findByRole("dialog", { name: "Who has access" });
+    expect(await within(dialog).findByText("Morgan · Read")).toBeTruthy();
+    expect(within(dialog).getByText("Organization member · Write")).toBeTruthy();
+    expect(within(dialog).queryByText(/@example.test/)).toBeNull();
+  });
+
   it.each(["held", "private", "stale"] as const)("preserves the legacy pane without disclosing creator or access when %s", (condition) => {
     if (condition === "held") mock.account.phase2Readiness = { other: [feature] };
     if (condition === "private") mock.catalog.orgs[orgId].workspaces = [item("private")];
