@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { CloudApiError, type CloudCredential, type CloudOrganization, type CloudProvider } from "./api";
-import { CloudSetupStore, connectedCompute, FIX_KEY, setupStoreFor, setupView, signedInAgents, stepsDoneLabel, type OrganizationSetup, type SetupRead } from "./setup";
+import { CloudSetupStore, connectedCompute, FIX_KEY, resumedSetup, setupStarted, setupStoreFor, setupView, signedInAgents, stepsDoneLabel, type OrganizationSetup, type SetupRead } from "./setup";
 
 // PRO-527: an organization's four setup steps, from what the server lists for it (25.01).
 
@@ -124,6 +124,40 @@ describe("the setup steps", () => {
   it("names the agents in the steps' order, and only those with a working login", () => {
     expect(signedInAgents([login("cursor"), login("github"), login("claude", "sign-in-required"), login("codex")])).toEqual(["Codex", "Cursor"]);
     expect(signedInAgents([login("github")])).toEqual([]);
+  });
+});
+
+describe("the setup carried on when this phone chose none (PRO-569)", () => {
+  const northwind: CloudOrganization = { orgId: "org-n", name: "Northwind", role: "owner" };
+  const nothing = setup(ok([offered("Boat")]), ok([]));
+
+  it("counts as begun what the server holds: compute connected or rejected, or an agent signed in", () => {
+    expect(setupStarted(undefined)).toBe(false);
+    expect(setupStarted(nothing)).toBe(false);
+    expect(setupStarted(setup(ok([provider("Boat")]), ok([])))).toBe(true);
+    expect(setupStarted(setup(ok([provider("Boat", { availability: "attention-required", state: "attention-required" })]), ok([])))).toBe(true);
+    expect(setupStarted(setup(ok([offered("Boat")]), ok([login("codex")])))).toBe(true);
+    // A GitHub token is no agent, a login that stopped working is none, and compute TerminalX holds the key for is not this setup's.
+    expect(setupStarted(setup(ok([provider("TerminalX Cloud", { source: "platform" })]), ok([login("github"), login("codex", "attention-required")])))).toBe(false);
+    // Lists that did not answer say nothing.
+    expect(setupStarted(setup(failed(), failed()))).toBe(false);
+  });
+
+  it("is the first organization, in the account's order, that the server holds something of", () => {
+    const begun = setup(ok([provider("Boat")]), ok([]));
+    expect(resumedSetup([owner, northwind], new Map([["org-p", nothing], ["org-n", begun]]))).toEqual({ organization: northwind, pending: false });
+    expect(resumedSetup([owner, northwind], new Map([["org-p", begun], ["org-n", begun]]))).toEqual({ organization: owner, pending: false });
+    // Nothing begun anywhere: the first run, as before.
+    expect(resumedSetup([owner, northwind], new Map([["org-p", nothing], ["org-n", nothing]]))).toEqual({ organization: null, pending: false });
+    expect(resumedSetup([], new Map())).toEqual({ organization: null, pending: false });
+  });
+
+  it("says nothing while an organization before it is still unread", () => {
+    const begun = setup(ok([provider("Boat")]), ok([]));
+    expect(resumedSetup([owner, northwind], new Map([["org-n", begun]]))).toEqual({ organization: null, pending: true });
+    expect(resumedSetup([owner, northwind], new Map([["org-p", { ...nothing, read: false }]]))).toEqual({ organization: null, pending: true });
+    // One read and begun is the answer, whatever comes after it.
+    expect(resumedSetup([owner, northwind], new Map([["org-p", begun]]))).toEqual({ organization: owner, pending: false });
   });
 });
 

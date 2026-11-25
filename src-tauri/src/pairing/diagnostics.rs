@@ -11,6 +11,10 @@ use thiserror::Error;
 use super::cloud::CloudHttpError;
 
 const MAX_RECORDS: usize = 128;
+/// The longest run of records that folds into the same run before it
+/// (#1579): a loop of connect, fail, connect, fail keeps two records, not
+/// the buffer, and the records from before it began stay.
+const FOLD_WINDOW: usize = 4;
 /// A phone retrying in a loop must not push the control channel's history out.
 const MAX_PHONE_RECORDS: usize = MAX_RECORDS / 2;
 const MAX_BYTES: u64 = 64 * 1024;
@@ -69,6 +73,12 @@ pub(super) enum Category {
     AccountChanged,
     /// The phone sent more requests than the Mac holds unanswered.
     TooManyRequests,
+    /// The relay accepted this Mac's registration, then closed it with 4401,
+    /// more than once in a row (#1579).
+    Refused,
+    /// This window's own registration was retired by the runtime's (4101).
+    /// Expected, not a failure: the window uses the runtime's from then on.
+    RuntimeTookOver,
     Unknown,
 }
 
@@ -196,13 +206,17 @@ impl Failure {
                 "This Mac's account changed while a phone was connected.",
             Category::TooManyRequests =>
                 "A phone sent more requests than this Mac answers at once and was reconnected.",
+            Category::Refused =>
+                "Relay keeps closing this Mac's connection right after it connects. TerminalX now retries every few minutes. If this continues, check for a TerminalX update. You can use LAN meanwhile.",
+            Category::RuntimeTookOver =>
+                "TerminalX's local runtime took over this Mac's Relay connection.",
             Category::Unknown =>
                 "Relay connection ended unexpectedly. Retrying automatically. You can use LAN meanwhile.",
         })
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(super) enum Event {
     Started,
@@ -250,6 +264,49 @@ struct Record {
     /// The code of the close frame that ended it, the phone's or the relay's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     close_code: Option<u16>,
+    /// The relay's reason code with that close, as
+    /// `crate::remote::protocol::close_reason` keeps it: never free text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    close_reason: Option<String>,
+    /// How many more times the same record happened after this one, the
+    /// last at `last_timestamp_ms` with the attempt in `attempt`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    repeats: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_timestamp_ms: Option<i64>,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+impl Record {
+    /// Whether `other` is the same thing happening again, whatever its attempt.
+    fn repeated_by(&self, other: &Record) -> bool {
+        self.event == other.event
+            && self.failure == other.failure
+            && self.ended == other.ended
+            && self.close_code == other.close_code
+            && self.close_reason == other.close_reason
+    }
+}
+
+/// The close of a relay control socket, for [`DiagnosticLog::record_close`].
+/// The window's own control closes carry it as an error's context.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Close {
+    pub code: u16,
+    pub reason: Option<String>,
+}
+
+impl std::fmt::Display for Close {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "relay control closed with {}", self.code)?;
+        if let Some(reason) = &self.reason {
+            write!(f, " ({reason})")?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -292,7 +349,7 @@ impl DiagnosticLog {
         failure: Option<Failure>,
         ended: Option<crate::phone::Ended>,
     ) -> std::io::Result<()> {
-        self.records.push_back(Record {
+        self.push(Record {
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             event,
             attempt,
@@ -300,7 +357,40 @@ impl DiagnosticLog {
             failure,
             ended: ended.map(|ended| ended.reason),
             close_code: ended.and_then(|ended| ended.close_code),
-        });
+            close_reason: None,
+            repeats: 0,
+            last_timestamp_ms: None,
+        })
+    }
+
+    /// `record`, with the close that ended a relay control socket (#1579).
+    pub fn record_close(
+        &mut self,
+        event: Event,
+        attempt: u32,
+        failure: Option<Failure>,
+        close: Close,
+    ) -> std::io::Result<()> {
+        self.push(Record {
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            event,
+            attempt,
+            retry_count: attempt.saturating_sub(1),
+            failure,
+            ended: None,
+            close_code: Some(close.code),
+            close_reason: close.reason.as_deref().and_then(crate::remote::protocol::close_reason),
+            repeats: 0,
+            last_timestamp_ms: None,
+        })
+    }
+
+    fn push(&mut self, record: Record) -> std::io::Result<()> {
+        let event = record.event;
+        self.records.push_back(record);
+        if self.fold() {
+            return self.persist();
+        }
         if event.is_phone()
             && self.records.iter().filter(|record| record.event.is_phone()).count()
                 > MAX_PHONE_RECORDS
@@ -312,6 +402,31 @@ impl DiagnosticLog {
         while self.records.len() > MAX_RECORDS {
             self.records.pop_front();
         }
+        self.persist()
+    }
+
+    /// When the last `n` records (`n` up to [`FOLD_WINDOW`]) repeat the `n`
+    /// before them, they become repeats of those: a loop keeps one record of
+    /// each step, however long it runs. A single retry is not a loop and
+    /// keeps its order.
+    fn fold(&mut self) -> bool {
+        let len = self.records.len();
+        let Some(cycle) = (1..=FOLD_WINDOW).filter(|cycle| 2 * cycle <= len).find(|&cycle| {
+            (0..cycle).all(|step| self.records[len - 2 * cycle + step].repeated_by(&self.records[len - cycle + step]))
+        }) else {
+            return false;
+        };
+        let repeated: Vec<Record> = self.records.drain(len - cycle..).collect();
+        for (earlier, again) in self.records.iter_mut().skip(len - 2 * cycle).zip(repeated) {
+            earlier.repeats = earlier.repeats.saturating_add(1 + again.repeats);
+            earlier.last_timestamp_ms = Some(again.last_timestamp_ms.unwrap_or(again.timestamp_ms));
+            earlier.attempt = again.attempt;
+            earlier.retry_count = again.retry_count;
+        }
+        true
+    }
+
+    fn persist(&self) -> std::io::Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
         };
@@ -399,6 +514,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut log = DiagnosticLog::default();
         log.configure(directory.path().to_owned()).unwrap();
+        // Five statuses in turn: none repeats within the fold window.
         for attempt in 1..=200 {
             log.record(
                 Event::Failed,
@@ -406,7 +522,7 @@ mod tests {
                 Some(Failure {
                     stage: Stage::Assignment,
                     category: Category::ServiceUnavailable,
-                    http_status: Some(502),
+                    http_status: Some(500 + (attempt % 5) as u16),
                 }),
             )
             .unwrap();
@@ -436,21 +552,21 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut log = DiagnosticLog::default();
         log.configure(directory.path().to_owned()).unwrap();
-        let control = Failure {
-            stage: Stage::ControlSession,
-            category: Category::Timeout,
-            http_status: None,
-        };
+        // Distinct records throughout, so none folds into an earlier one.
         for attempt in 1..=10 {
+            let control = Failure {
+                stage: Stage::ControlSession,
+                category: Category::ServiceUnavailable,
+                http_status: Some(500 + attempt as u16),
+            };
             log.record(Event::Failed, attempt, Some(control)).unwrap();
         }
-        let phone = Failure {
-            stage: Stage::PhoneHandshake,
-            category: Category::Authentication,
-            http_status: None,
-        };
-        for _ in 0..500 {
-            log.record(Event::PhoneRequested, 0, None).unwrap();
+        for round in 0..500u16 {
+            let phone = Failure {
+                stage: Stage::PhoneHandshake,
+                category: Category::Authentication,
+                http_status: Some(400 + round % 5),
+            };
             log.record(Event::PhoneFailed, 0, Some(phone)).unwrap();
         }
         let bytes = std::fs::read(directory.path().join(FILE_NAME)).unwrap();
@@ -462,6 +578,57 @@ mod tests {
         assert_eq!(control.last().unwrap().attempt, 10);
         assert!(matches!(records.last().unwrap().event, Event::PhoneFailed));
         assert!(String::from_utf8(bytes).unwrap().contains("\"stage\":\"phone-handshake\""));
+    }
+
+    /// #1579: a registration refused every few seconds for hours kept only
+    /// its own loop. Repeats fold into the records they repeat, so what came
+    /// before the loop stays, and the loop says how often and until when.
+    #[test]
+    fn a_repeating_failure_folds_and_keeps_what_came_before() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut log = DiagnosticLog::default();
+        log.configure(directory.path().to_owned()).unwrap();
+        let before = Failure { stage: Stage::Assignment, category: Category::Timeout, http_status: None };
+        log.record(Event::Failed, 1, Some(before)).unwrap();
+        log.record(Event::Connected, 1, None).unwrap();
+        let refused = Failure { stage: Stage::ControlSession, category: Category::Authentication, http_status: None };
+        for attempt in 1..=3000 {
+            log.record(Event::Connected, attempt, None).unwrap();
+            let close = Close { code: 4401, reason: Some("relay_unknown_control_message".into()) };
+            log.record_close(Event::Failed, attempt, Some(refused), close).unwrap();
+        }
+        let bytes = std::fs::read_to_string(directory.path().join(FILE_NAME)).unwrap();
+        let records: Vec<Record> = serde_json::from_str(&bytes).unwrap();
+        assert_eq!(records.len(), 4, "{bytes}");
+        assert!(matches!(records[0].event, Event::Started));
+        assert_eq!(records[1].failure, Some(before), "how it began is still there");
+        assert!(matches!(records[2].event, Event::Connected));
+        assert_eq!(records[2].repeats, 3000);
+        assert_eq!(records[3].repeats, 2999);
+        assert_eq!(records[3].attempt, 3000);
+        assert_eq!(records[3].close_code, Some(4401));
+        assert!(records[3].last_timestamp_ms.is_some_and(|last| last >= records[3].timestamp_ms));
+        assert!(bytes.contains(r#""closeReason":"relay_unknown_control_message""#), "{bytes}");
+        // A reason that is not a relay code is not written.
+        log.record_close(Event::Failed, 1, None, Close { code: 4401, reason: Some("host abcDEF0123456789 token=x".into()) }).unwrap();
+        let bytes = std::fs::read_to_string(directory.path().join(FILE_NAME)).unwrap();
+        assert!(!bytes.contains("abcDEF") && !bytes.contains("token"), "{bytes}");
+        // A relaunch reads the folded records back.
+        let mut relaunched = DiagnosticLog::default();
+        relaunched.configure(directory.path().to_owned()).unwrap();
+        assert_eq!(relaunched.records[3].repeats, 2999);
+        // One retry is not a loop: it keeps its order.
+        let directory = tempfile::tempdir().unwrap();
+        let mut log = DiagnosticLog::default();
+        log.configure(directory.path().to_owned()).unwrap();
+        log.record(Event::Connected, 1, None).unwrap();
+        log.record(Event::Failed, 1, Some(refused)).unwrap();
+        log.record(Event::Connected, 2, None).unwrap();
+        let events: Vec<_> = log.records.iter().map(|record| (record.event, record.repeats)).collect();
+        assert_eq!(events, [(Event::Started, 0), (Event::Connected, 0), (Event::Failed, 0), (Event::Connected, 0)]);
+        log.record(Event::Failed, 2, Some(refused)).unwrap();
+        let events: Vec<_> = log.records.iter().map(|record| (record.event, record.repeats)).collect();
+        assert_eq!(events, [(Event::Started, 0), (Event::Connected, 1), (Event::Failed, 1)], "the second round is a loop");
     }
 
     /// #1282: a phone session's end says why, not `unknown`.

@@ -24,6 +24,11 @@ export function stepHref(step: SetupStepKey, orgId: string | null): Href {
   return { pathname: SETUP_PATHS[step], params: { orgId } } as unknown as Href;
 }
 
+/** The steps page of one organization: its folded row, or its name among the organizations with no workspaces. */
+export function stepsHref(orgId: string): Href {
+  return { pathname: SETUP_PATHS.steps, params: { orgId } } as unknown as Href;
+}
+
 /** Whether the app has a step's page: asked before anything offers to open it. */
 export type HasSetupPage = (step: SetupStepKey) => boolean;
 

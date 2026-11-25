@@ -52,8 +52,8 @@ machine, a pull request's edited workflow included.
 | `machines-e2e` | Ubuntu | always; decides in a step | Two machines end to end (PRO-358). |
 | `desktop-platforms` | Ubuntu | always | Off-macOS helper build, Linux renderer and launcher tests. No Rust on Linux: that is `linux-rust` and `linux-rust-tests`. Disabled Windows steps retained. |
 | `legacy-runtime-probe` | Ubuntu | always | Legacy AppImage diagnostics. Its tests set the operating system themselves, so one runner covers Linux and macOS. |
-| `check` | Ubuntu | always | The aggregate. Every other job but `macos-native`, `webkit-mac-only` and `check-macos` must succeed. A job in the "Runs" column's frontend, phone, Rust or machines rows may be skipped instead, and only when the selector succeeded and answered "false" for it. |
-| `check-macos` | Ubuntu | main, nightly, manual | Needs `check`, `macos-native` and `webkit-mac-only`; fails unless all three succeeded. Not a required status: a pull request is not held to the macOS Rust suite or the mac-only WebKit checks ("macOS Rust coverage"). |
+| `check` | Ubuntu | always | The aggregate. Every other job but `macos-native`, `machine-compat`, `webkit-mac-only` and `check-macos` must succeed. A job in the "Runs" column's frontend, phone, Rust or machines rows may be skipped instead, and only when the selector succeeded and answered "false" for it. |
+| `check-macos` | Ubuntu | main, nightly, manual | Needs `check`, `macos-native`, `machine-compat` and `webkit-mac-only`; fails unless all four succeeded. Not a required status: a pull request is not held to the macOS Rust suite, the build against the released runtimes or the mac-only WebKit checks ("macOS Rust coverage"). |
 
 All runners are GitHub-hosted. The WebKit checks run in `ci.yml` alone: the
 trial workflow `webkit-linux.yml` that first ran them on Linux is gone.
@@ -264,13 +264,11 @@ Three jobs take one only when they are selected:
 - `webkit-mac-only`: the same events, and pull requests the `mac-webkit` answer
   selects (below).
 
-`macos-rust-changes` decides all three. `check` accepts a skipped
-`machine-compat` on its word alone, and does not wait for `macos-native` or
-`webkit-mac-only` at all. On `main`, `macos-native` and `machine-compat` each
-keep the run in progress and the newest waiting commit: an older commit still
-waiting when a newer one arrives is cancelled, and its `check` (for
-`machine-compat`) or its `check-macos` (for `macos-native`) fails. The newest
-commit of a burst of merges is always tested.
+`macos-rust-changes` decides all three, and `check` waits for none of them.
+On `main`, `macos-native` and `machine-compat` each keep the run in progress
+and the newest waiting commit: an older commit still waiting when a newer one
+arrives is cancelled, and its `check-macos` fails. The newest commit of a burst
+of merges is always tested.
 
 ### The WebKit layout checks
 
@@ -451,6 +449,23 @@ Keyed by commit, every run saved a new cache, the repository's 10 GB limit
 evicted them within hours, and the macOS jobs, which failed and so never
 saved, built every dependency on every run.
 
+## The Rust toolchain
+
+**Rust is pinned to one release** (the owner's decision, 25 November 2026):
+`rust-toolchain.toml` names `channel = "1.100.0"`, not `stable`, with the
+components `clippy` and `rustfmt` and the target `aarch64-apple-darwin`. Every
+job, and every developer's machine, builds with the release `rustup` installs
+from that file. So a new stable release, with its new Clippy lints, no longer
+fails every pull request at once with no change of ours. No workflow installs
+or picks a toolchain of its own: each runs `rustup show && cargo --version`,
+which installs the pinned release and prints it in the log. To bump it, open
+a one-line pull request that changes `channel`, with any Clippy fixes the new
+release needs. The cache keys carry `rustc --version`, so a bump starts new
+caches by itself. `test_rust_toolchain.py` fails unless the channel is an
+exact `x.y.z` and no workflow picks another toolchain (a toolchain action,
+`rustup default`, `install`, `override` or `run`, `cargo +<toolchain>`,
+`RUSTUP_TOOLCHAIN` or `RUSTC`).
+
 ## macOS Rust coverage
 
 **A pull request is not held to the macOS Rust suite** (the owner's decision,
@@ -468,6 +483,22 @@ and the policy tests pin that `check` never needs `macos-native` or
 `webkit-mac-only` again (either would hold the required status for its run and
 its wait for a macOS runner), that `check-macos` needs both, and that it runs
 on every event but a pull request.
+
+**A pull request is not held to `machine-compat` either** (the owner's
+decision, 25 November 2026). The job builds this tree against the previous two
+released runtimes on a macOS runner. In run 45418009203 it waited 37.4 minutes
+for that runner and then ran 2.6, while the rest of the run had finished by
+minute 10, and `check` waited for it. Now `check` does not need it: a pull
+request the selector picks for it (the paths in
+`scripts/machine-e2e/relevant.py`) still runs it and shows its result for the
+reviewer, red or green, and can merge either way. `check-macos` holds every push
+to `main`, nightly and manual run to it, beside `macos-native` and
+`webkit-mac-only`. **What is left to `main`:** a change that breaks the build
+against a released runtime is found on `main` after the merge, by
+`machine-compat` on the push and `check-macos`, and is fixed there. The policy
+tests pin that `check` neither needs `machine-compat` nor names it in its gate,
+that `check-macos` needs it and fails unless it succeeded, and that it still
+runs when selected.
 
 The full macOS suite runs on pushes to `main`, nightly at 02:23 UTC and on
 manual workflow dispatch. A selected pull request runs the filtered part of it

@@ -191,7 +191,20 @@ export function nextGraceEnd(messages: readonly PendingCloudMessage[], tracks: R
 }
 
 /** Where the workspace stands, as the header chip says it (`cloudWorkspaceStatus`); null where the view has no chip. */
-export type WorkspaceStatus = "starting" | "resuming" | "connecting" | "live" | "stopped" | null;
+export type WorkspaceStatus = "starting" | "resuming" | "connecting" | "live" | "stopped" | "unavailable" | null;
+
+/** Under a message the workspace cannot take: it needs attention or was deleted (#1582). Settled, and it can be removed. */
+export const NOT_DELIVERABLE_LINE = "Won't be delivered: the workspace can't be reached. Remove it, or send it again once the workspace is repaired.";
+
+/**
+ * A message that cannot reach its workspace as it stands (#1582): not sent
+ * yet, in the mailbox, or leased to a runtime that is gone, while the
+ * workspace needs attention or was deleted. Its card says so and offers to remove it, which cancels the
+ * command so it is never delivered later by surprise.
+ */
+export function undeliverable(message: PendingCloudMessage, workspace: WorkspaceStatus): boolean {
+  return workspace === "unavailable" && message.phase === "waiting" && !!message.entry && message.entry.state !== "applied";
+}
 
 /**
  * The line under a message, from the workspace's state where the view knows
@@ -201,6 +214,7 @@ export type WorkspaceStatus = "starting" | "resuming" | "connecting" | "live" | 
 export function waitingLine(message: PendingCloudMessage, workspace: WorkspaceStatus): string {
   const entry = message.entry;
   if (message.phase === "held") return "Sends when the agent finishes its turn";
+  if (undeliverable(message, workspace)) return NOT_DELIVERABLE_LINE;
   if (!entry || entry.state === "leased" || entry.state === "applied") return "Delivering to the agent…";
   if (entry.state === "unsent") return "Not sent yet — will retry";
   switch (workspace) {

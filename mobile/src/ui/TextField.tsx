@@ -183,7 +183,8 @@ export function TextField({ ref, ...props }: TextFieldProps) {
 }
 
 const styles = StyleSheet.create({
-  labelRow: { flexDirection: "row", justifyContent: "space-between", gap: 8, marginHorizontal: 4, marginBottom: 6 },
+  // The hint or the link goes under a label it does not fit beside: at the accessibility text sizes "optional" ran off the edge (PRO-563).
+  labelRow: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", columnGap: 8, rowGap: 2, marginHorizontal: 4, marginBottom: 6 },
   label: { fontSize: 13, lineHeight: 18 },
   link: { flexDirection: "row", alignItems: "center", gap: 3 },
   field: { minHeight: 44, borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, paddingHorizontal: 12, flexDirection: "row", alignItems: "center", gap: 8 },

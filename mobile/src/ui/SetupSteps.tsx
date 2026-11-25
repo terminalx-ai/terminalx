@@ -52,7 +52,8 @@ function Mark({ state, number }: { state: SetupStepState; number: number }) {
   if (state === "failed") return <View testID="setup-step-mark" style={[styles.mark, { backgroundColor: `${palette.danger}29`, borderColor: "transparent" }]}><TriangleAlert size={13} color={palette.danger} /></View>;
   const next = state === "next";
   return <View testID="setup-step-mark" style={[styles.mark, next ? { backgroundColor: palette.accent, borderColor: "transparent" } : { backgroundColor: palette.raised, borderColor: palette.border }]}>
-    <Text style={[styles.number, { color: next ? palette.accentInk : palette.muted }]}>{number}</Text>
+    {/* A number in a circle of fixed size, as the tick and the warning beside it are: it keeps its size (PRO-563). */}
+    <Text allowFontScaling={false} style={[styles.number, { color: next ? palette.accentInk : palette.muted }]}>{number}</Text>
   </View>;
 }
 

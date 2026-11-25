@@ -82,6 +82,31 @@ describe("shared attention and recovery", () => {
     expect(resolveCloudAttention(item({ state: "attention-required", launch: { phase: "failed", state: "failed" } }, { state: "failed", action: null, errorCode: "cloud_workspace_provisioning_timeout" }))?.recovery.action).toBe("create-workspace");
   });
 
+  // #1581: a resume the provider answered with "not found" could not bring the machine back.
+  it("says a machine deleted at the provider is gone, and offers delete and a new workspace instead of a retry", () => {
+    for (const detailCode of [undefined, "box_lost_without_checkpoint"]) {
+      const row = item({ state: "attention-required" }, { state: "failed", action: "resume", errorCode: "cloud_provider_not_found", providerErrorCode: "not_found", detailCode });
+      const attention = resolveCloudAttention(row)!;
+      expect(attention).toMatchObject({ code: "cloud_workspace_machine_gone", recovery: { action: "delete-workspace", label: "Delete workspace" }, alternatives: [{ action: "create-workspace", label: "Create new workspace" }] });
+      expect(attention.message).toBe("This workspace's machine no longer exists at the provider. It may have been deleted outside TerminalX. (Provider code: not_found)");
+      expect(attention.recovery.instructions).toContain("Resuming cannot bring it back.");
+      expect(attention.recovery.instructions).toContain("Conversations saved before it stopped can still be opened here until you delete the workspace.");
+      expect(attention.recovery.operationAction).toBeUndefined();
+      expect(deriveCloudActivity(row).tone).toBe("attention");
+    }
+    // A missing environment image is not a missing machine: the usual retry stays.
+    const image = item({ state: "attention-required" }, { state: "failed", action: "resume", errorCode: "cloud_provider_not_found", detailCode: "environment_image_missing" });
+    expect(resolveCloudAttention(image)).toMatchObject({ code: "cloud_provider_not_found", recovery: { action: "retry-operation", label: "Retry resume" } });
+    // A stop or an archive of a missing machine keeps its retry: a resume may still restore it (TerminalX Cloud rebuilds from a checkpoint).
+    for (const action of ["suspend", "archive"]) {
+      const stopped = item({ state: "attention-required" }, { state: "failed", action, errorCode: "cloud_provider_not_found", detailCode: "box_missing" });
+      expect(resolveCloudAttention(stopped)).toMatchObject({ code: "cloud_provider_not_found", recovery: { action: "retry-operation", operationAction: action } });
+    }
+    // A delete finishes without the machine; a failed one is retried as before.
+    const deleted = item({ state: "attention-required" }, { state: "failed", action: "delete", errorCode: "cloud_provider_not_found" });
+    expect(resolveCloudAttention(deleted)?.recovery).toMatchObject({ action: "retry-operation", label: "Retry delete" });
+  });
+
   // PRO-452: a provider TerminalX itself provides has no key of the organization's to repair in Settings.
   it("sends a credential failure on a platform provider to TerminalX, not to a provider connection", () => {
     learnDescriptors();

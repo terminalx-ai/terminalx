@@ -15,7 +15,8 @@ name: Organization (25.02)
     element: "${THEME} theme"
 - tapOn: "${THEME} theme"
 - tapOn: "Cloud"
-- tapOn: "Start setup"
+# Northwind has compute connected, so with no choice on this phone its setup is the one carried on (PRO-569).
+- tapOn: "Step 1 of 4, done: Organization.*"
 - assertVisible: "Choose the organization to set up."
 - tapOn: "Northwind"
 - assertVisible: "Continue with Northwind"

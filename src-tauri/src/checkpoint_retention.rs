@@ -117,6 +117,23 @@ pub fn pin(cwd: &Path, updates: &[(String, &str)]) -> Result<()> {
     crate::store::write_json(&path, &ledger)
 }
 
+/// How many more turns in this checkout `group` lasts before the count limit
+/// removes it: each new turn adds a group, and past [`MAX_GROUPS`] the least
+/// recently touched one goes. So with `newer` groups touched after it, it
+/// goes on the `MAX_GROUPS - newer`th. None when the ledger does not hold it,
+/// or when it outlived the limit already, which only a protected group does.
+/// The size limit cannot be foreseen without asking Git, so it is not counted.
+pub fn remaining(cwd: &Path, group: &str) -> Result<Option<usize>> {
+    let ledger = load(&ledger_path(cwd)?)?;
+    Ok(remaining_in(&ledger, group, MAX_GROUPS))
+}
+
+fn remaining_in(ledger: &Ledger, group: &str, max_groups: usize) -> Option<usize> {
+    let touched = ledger.groups.get(group)?.touched;
+    let newer = ledger.groups.values().filter(|other| other.touched > touched).count();
+    max_groups.checked_sub(newer).filter(|left| *left > 0)
+}
+
 fn evict_oldest(cwd: &Path, ledger: &mut Ledger, protected: &BTreeSet<String>) -> Result<bool> {
     let Some(oldest) = ledger
         .groups
@@ -169,6 +186,20 @@ pub fn enforce_for_test(cwd: &Path, max_groups: usize, max_bytes: u64) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_checkpoint_says_how_many_turns_remain_before_it_expires() {
+        let mut ledger = Ledger::default();
+        for (n, name) in ["old", "middle", "new"].into_iter().enumerate() {
+            ledger.groups.insert(name.into(), Group { touched: n as u64 + 1, refs: BTreeMap::new() });
+        }
+        // With room for 3, the oldest goes on the next turn, the newest in 3.
+        assert_eq!(remaining_in(&ledger, "old", 3), Some(1));
+        assert_eq!(remaining_in(&ledger, "middle", 3), Some(2));
+        assert_eq!(remaining_in(&ledger, "new", 3), Some(3));
+        assert_eq!(remaining_in(&ledger, "gone", 3), None, "a group the ledger does not hold");
+        assert_eq!(remaining_in(&ledger, "old", 2), None, "one already past the limit is protected, not about to go");
+    }
 
     #[test]
     fn counts_shared_objects_once_and_adopts_legacy_refs_without_other_worktrees() {

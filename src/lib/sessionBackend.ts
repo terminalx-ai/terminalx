@@ -15,6 +15,7 @@ import {
   isDevScope,
   markCloudAgentRead,
   refreshFromCheckpoint,
+  cancelCloudAgentCommand,
   sendAgain,
   sendToCloudAgent,
   setViewing,
@@ -412,6 +413,8 @@ export interface SessionBackend {
     workspaceStatus: WorkspaceStatus;
     deciding(requestId: string): boolean;
     sendAgain(entry: OutboxEntry): Promise<void>;
+    /** Cancel a command still on its way (#1582: one its workspace cannot take); never wakes anything. */
+    remove(entry: OutboxEntry): Promise<void>;
   };
 }
 
@@ -970,6 +973,7 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
       workspaceStatus: ctx.workspaceStatus ?? null,
       deciding: (requestId) => isDeciding(scope, requestId),
       sendAgain: (entry) => interactive(() => sendAgain(scope, entry, client)),
+      remove: (entry) => cancelCloudAgentCommand(scope, entry.clientCommandId),
     },
   };
 }

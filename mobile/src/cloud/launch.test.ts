@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudApiError, type CloudCredential, type CloudLifecycle, type CloudPreflight, type CloudProvider, type CloudQuote } from "./api";
-import { LAUNCH_RETRY_MS, LaunchAttempt, QUOTE_EXPIRED, SPEND_NOTICE, agentLogins, cleanupFacts, deleteFacts, deleteFailure, deleteRefusal, firstRunSetup, idleChoices, idleValue, launchProgress, launchProviders, launchRecovery, launchRefusal, mayManage, preflightProblems, pricingNote, problemsTitle, quotedSize, repositoryOf, sizeDetail, sizeValue, stopQuestion, stopState, unanswered } from "./launch";
+import { LAUNCH_RETRY_MS, LaunchAttempt, QUOTE_EXPIRED, SPEND_NOTICE, agentLogins, cleanupFacts, deleteFacts, deleteFailure, deleteRefusal, firstRunSetup, idleChoices, idleValue, launchOrganization, launchProgress, launchProviders, launchRecovery, launchRefusal, mayManage, preflightProblems, pricingNote, problemsTitle, quotedSize, repositoriesRow, repositoryLine, repositoryOf, sizeDetail, sizeValue, stopQuestion, stopState, unanswered } from "./launch";
 import { agent37, agent37Setup, boat, boatQuote, boatSetup, claudeKey, codexLogin, githubToken, lifecycle, refuse, server, terminalxCloud, type Answer, type Call } from "./testing/server";
 
 // PRO-530: launching, stopping and deleting a cloud workspace from the phone (25.05, 25.06).
@@ -48,6 +48,25 @@ describe("the form's choices", () => {
     expect(quotedSize(boatQuote(0).configuration as CloudQuote["configuration"])).toBe("Small · 2 vCPU · 4 GiB · 40 GiB");
   });
 
+  it("says a size once when its name already is its machine, and keeps its rate on a line that is not cut off (PRO-565)", () => {
+    // Agent37 names a size by its machine: the review does not follow it with the machine again.
+    const named = { ...boatQuote(0).configuration, machineClassLabel: "2 vCPU · 4 GB RAM · 20 GB disk", vcpu: 2, memoryMiB: 4096, diskGiB: 20 } as CloudQuote["configuration"];
+    expect(quotedSize(named)).toBe("2 vCPU · 4 GB RAM · 20 GB disk");
+    // On the form the name fills the row, so the rate takes the second line.
+    expect(sizeValue({ label: "2 vCPU · 4 GB RAM · 20 GB disk" }, "$0.014")).toBe("2 vCPU · 4 GB RAM · 20 GB disk\n$0.014 / hour");
+    expect(sizeValue({ label: "Small" }, "$0.018")).toBe("Small · $0.018 / hour");
+  });
+
+  it("opens + on the first organization that has a provider to launch on, and on the first when none has (PRO-557)", () => {
+    const personal = { orgId: "org-p" }, demo = { orgId: "org-d" }, other = { orgId: "org-o" };
+    const lists: Record<string, CloudProvider[] | null> = { "org-p": providers({ ...boat, availability: "not-connected" }), "org-d": providers(boat), "org-o": providers(agent37) };
+    expect(launchOrganization([personal, demo, other], (orgId) => lists[orgId])).toBe(demo);
+    // TerminalX Cloud alone is not something the phone launches on; a list that did not answer is not known to launch.
+    expect(launchOrganization([personal, demo], (orgId) => ({ "org-p": providers(terminalxCloud), "org-d": null } as Record<string, CloudProvider[] | null>)[orgId])).toBe(personal);
+    expect(launchOrganization([personal], () => undefined)).toBe(personal);
+    expect(launchOrganization([], () => undefined)).toBeNull();
+  });
+
   it("says who bills in the provider's own line, then the console's sentence on the prices", () => {
     expect(pricingNote(boat as CloudProvider, "estimate")).toBe("Per second, billed by Boat. Prices shown are estimates.");
     expect(pricingNote(boat as CloudProvider, "provider-rate")).toBe("Per second, billed by Boat. Prices come from the provider's live rates.");
@@ -69,42 +88,65 @@ describe("the repository", () => {
   });
 
   it("builds the setup as the console does: the repository, the saved GitHub token with it, and the ticked agents", () => {
-    const repository = repositoryOf("github.com/acme/app");
-    expect(firstRunSetup({ repository, ref: " main ", agentIds: ["cred_codex"] }, credentials)).toEqual({ credentialIds: ["cred_github", "cred_codex"], repositories: [{ cloneUrl: "https://github.com/acme/app", ref: "main" }] });
-    expect(firstRunSetup({ repository, ref: "", agentIds: [] }, credentials)).toEqual({ credentialIds: ["cred_github"], repositories: [{ cloneUrl: "https://github.com/acme/app" }] });
+    const repository = repositoryOf("github.com/acme/app")!;
+    expect(firstRunSetup({ repositories: [{ ...repository, ref: " main " }], agentIds: ["cred_codex"] }, credentials)).toEqual({ credentialIds: ["cred_github", "cred_codex"], repositories: [{ cloneUrl: "https://github.com/acme/app", ref: "main" }] });
+    expect(firstRunSetup({ repositories: [{ ...repository, ref: "" }], agentIds: [] }, credentials)).toEqual({ credentialIds: ["cred_github"], repositories: [{ cloneUrl: "https://github.com/acme/app" }] });
     // Without a repository the GitHub token is not installed.
-    expect(firstRunSetup({ repository: null, ref: "main", agentIds: ["cred_codex", "cred_claude"] }, credentials)).toEqual({ credentialIds: ["cred_codex", "cred_claude"] });
+    expect(firstRunSetup({ repositories: [], agentIds: ["cred_codex", "cred_claude"] }, credentials)).toEqual({ credentialIds: ["cred_codex", "cred_claude"] });
     // Nothing chosen: a bare workspace, with no setup sent at all.
-    expect(firstRunSetup({ repository: null, ref: "", agentIds: [] }, credentials)).toBeUndefined();
+    expect(firstRunSetup({ repositories: [], agentIds: [] }, credentials)).toBeUndefined();
+  });
+
+  it("sends several repositories in the order they were chosen, each with its own branch (25.11)", () => {
+    const repositories = [{ ...repositoryOf("github.com/acme/app")!, ref: "" }, { ...repositoryOf("github.com/acme/api")!, ref: "release/2.4" }];
+    expect(firstRunSetup({ repositories, agentIds: [] }, [])).toEqual({ credentialIds: [], repositories: [{ cloneUrl: "https://github.com/acme/app" }, { cloneUrl: "https://github.com/acme/api", ref: "release/2.4" }] });
+  });
+
+  it("says on the form's row what is chosen: nothing, the one repository, or the first one's name and how many more", () => {
+    expect(repositoriesRow([])).toEqual({ label: "Repository", value: "None" });
+    expect(repositoriesRow([{ fullName: "acme/checkout" }])).toEqual({ label: "Repository", value: "acme/checkout" });
+    expect(repositoriesRow([{ fullName: "acme/checkout" }, { fullName: "acme/api" }, { fullName: "other/sandbox" }])).toEqual({ label: "Repositories", value: "checkout and 2 more" });
+  });
+
+  it("writes a repository on the review with the branch it is cloned at: the typed one, else its default, else none", () => {
+    expect(repositoryLine({ fullName: "acme/api", ref: " release/2.4 ", defaultBranch: "main" })).toBe("acme/api · release/2.4");
+    expect(repositoryLine({ fullName: "acme/checkout", ref: "", defaultBranch: "main" })).toBe("acme/checkout · main");
+    expect(repositoryLine({ fullName: "acme/sandbox", ref: "" })).toBe("acme/sandbox");
   });
 
   it("offers only agent logins that work, never the GitHub token and never an id that is not a stored login", () => {
     const revoked = { ...claudeKey, state: "revoked" } as CloudCredential;
     expect(agentLogins([codexLogin as CloudCredential, revoked, githubToken as CloudCredential]).map((login) => login.id)).toEqual(["cred_codex"]);
-    expect(firstRunSetup({ repository: null, ref: "", agentIds: ["cred_claude", "made-up"] }, [codexLogin as CloudCredential, revoked])).toBeUndefined();
+    expect(firstRunSetup({ repositories: [], agentIds: ["cred_claude", "made-up"] }, [codexLogin as CloudCredential, revoked])).toBeUndefined();
+  });
+});
+
+describe("a refused launch", () => {
+  it("says, in the desktop's sentence, that a repository is not in the organization's environment image", () => {
+    expect(launchRefusal(new CloudApiError("cloud_environment_repository_not_in_image", 409))).toEqual({ text: "That repository is not in the organization's environment image. Add it and rebuild the environment first.", fix: null, closed: false });
   });
 });
 
 describe("preflight problems", () => {
   const check = (checks: unknown[], ready = false) => ({ version: 1, ready, checks }) as CloudPreflight;
-  const repository = repositoryOf("github.com/acme/app");
+  const repositories = [{ ...repositoryOf("github.com/acme/app")!, ref: "" }];
 
   it("says nothing when every check passed", () => {
-    expect(preflightProblems(check([{ kind: "repository", cloneUrl: "https://github.com/acme/app", status: "verified" }], true), { repository }, credentials)).toBeNull();
+    expect(preflightProblems(check([{ kind: "repository", cloneUrl: "https://github.com/acme/app", status: "verified" }], true), { repositories }, credentials)).toBeNull();
   });
 
   it("lists every failed check in the console's sentences, named by what it is about", () => {
     const problems = preflightProblems(check([
       { kind: "repository", cloneUrl: "https://github.com/acme/app", status: "failed", errorCode: "cloud_workspace_repository_credential_required" },
       { kind: "agent-credential", agent: "codex", status: "failed", errorCode: "cloud_agent_credential_reauth_required" },
-    ]), { repository }, credentials)!;
+    ]), { repositories }, credentials)!;
     expect(problems.items).toEqual(["acme/app: this repository needs a GitHub personal access token.", "Codex: sign-in required."]);
     expect(problemsTitle(problems.items.length)).toBe("Two things to fix before this can be priced");
     expect(problems).toMatchObject({ repository: "This repository needs a GitHub personal access token.", ref: null, needsGithubToken: true });
   });
 
   it("puts a branch that is not there on the branch field", () => {
-    const problems = preflightProblems(check([{ kind: "repository", cloneUrl: "https://github.com/acme/app", status: "failed", errorCode: "cloud_workspace_repository_ref_not_found" }]), { repository }, credentials)!;
+    const problems = preflightProblems(check([{ kind: "repository", cloneUrl: "https://github.com/acme/app", status: "failed", errorCode: "cloud_workspace_repository_ref_not_found" }]), { repositories }, credentials)!;
     expect(problems).toMatchObject({ repository: null, ref: "That branch or tag was not found in the repository.", needsGithubToken: false });
     expect(problemsTitle(1)).toBe("One thing to fix before this can be priced");
   });
@@ -114,7 +156,7 @@ describe("preflight problems", () => {
       { kind: "credential", provider: "claude", credentialId: "cred_claude", status: "failed", errorCode: "cloud_workspace_credential_invalid" },
       { kind: "agent-credential", status: "failed", errorCode: "cloud_workspace_agent_credential_required" },
       { kind: "repository", status: "failed", errorCode: "a_code_from_later", retryable: true },
-    ]), { repository }, credentials)!;
+    ]), { repositories }, credentials)!;
     expect(problems.items).toEqual([
       "The Claude Code credential failed verification. It may have expired.",
       "Connect at least one AI agent.",
@@ -122,8 +164,23 @@ describe("preflight problems", () => {
     ]);
   });
 
+  it("says of each repository what failed for it, when several are chosen", () => {
+    const several = [...repositories, { ...repositoryOf("github.com/acme/api")!, ref: "gone" }];
+    const problems = preflightProblems(check([
+      { kind: "repository", cloneUrl: "https://github.com/Acme/App.git", status: "failed", errorCode: "cloud_workspace_repository_not_accessible" },
+      { kind: "repository", cloneUrl: "https://github.com/acme/api", status: "failed", errorCode: "cloud_workspace_repository_ref_not_found" },
+      { kind: "repository", status: "failed", errorCode: "cloud_workspace_repository_verification_unavailable" },
+    ]), { repositories: several }, credentials)!;
+    expect(problems.byRepository).toEqual({
+      "acme/app": { repository: "The repository is not accessible with the provided credentials.", ref: null },
+      "acme/api": { repository: null, ref: "That branch or tag was not found in the repository." },
+    });
+    // A check that names no repository cannot be pinned on one of several.
+    expect(problems.items.at(-1)).toBe("Repository: verification is temporarily unavailable. Try again in a moment.");
+  });
+
   it("does not call a setup ready that the server did not, even with no check named", () => {
-    expect(preflightProblems(check([]), { repository }, credentials)?.items).toEqual(["Verification is temporarily unavailable. Try again in a moment."]);
+    expect(preflightProblems(check([]), { repositories }, credentials)?.items).toEqual(["Verification is temporarily unavailable. Try again in a moment."]);
   });
 });
 

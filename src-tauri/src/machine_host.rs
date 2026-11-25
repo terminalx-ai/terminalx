@@ -341,7 +341,7 @@ fn unregistered_relay_state(ended: Option<crate::remote::account_link::Ended>, h
         // Stopping at the next pass; the window need not wait for it.
         (Some(Ended::OwnerConflict), _) => wire::RelayState::Off,
         (None, HostStatus::Connecting) => wire::RelayState::Connecting,
-        (None, HostStatus::Retrying { .. } | HostStatus::Fenced { .. } | HostStatus::Registered { .. }) => wire::RelayState::Retrying,
+        (None, HostStatus::Retrying { .. } | HostStatus::Refused { .. } | HostStatus::Fenced { .. } | HostStatus::Registered { .. }) => wire::RelayState::Retrying,
     }
 }
 
@@ -747,7 +747,7 @@ impl MachineHost {
         let takes_port = state.hosting() && host_key != HostKeyState::Error && (state.bind_error.is_none() || state.port_busy);
         let (pending, code, paused_until) = state.pairing.view(now_ms());
         let phone_route = state.phone_route.as_ref().is_some_and(|route| route.attachment.valid());
-        let (relay_state, relay) = self.relay_view(state);
+        let (relay_state, relay, relay_refused) = self.relay_view(state);
         Status {
             enabled: state.enabled,
             host_key,
@@ -763,6 +763,7 @@ impl MachineHost {
             phones: wire::PhoneStatus { hosting: state.desktop_phones, window_open: phone_route || self.window_available(), ..self.phone_status() },
             relay_state,
             relay,
+            relay_refused,
             listen: Some(self.listen_status(state)),
             // `sudo` is asked once, and only by a runtime that hosts.
             runs_as: Some(crate::listen::runs_as_now(state.hosting())),
@@ -771,7 +772,7 @@ impl MachineHost {
 
     /// The relay registration as the status says it. Takes the
     /// `account_relay` lock under the state lock: never the other way round.
-    fn relay_view(&self, state: &State) -> (wire::RelayState, Option<wire::RelayRegistration>) {
+    fn relay_view(&self, state: &State) -> (wire::RelayState, Option<wire::RelayRegistration>, Option<wire::RelayRefusal>) {
         let registration = |host: &crate::remote::host::RelayHost| {
             host.registration().map(|registration| wire::RelayRegistration {
                 relay_host_id: registration.relay_host_id,
@@ -784,19 +785,25 @@ impl MachineHost {
         };
         if let Some(relay) = self.account_relay.lock().unwrap().as_ref() {
             if let Some(registration) = registration(&relay.host) {
-                return (wire::RelayState::Registered, Some(registration));
+                return (wire::RelayState::Registered, Some(registration), None);
             }
-            return (unregistered_relay_state(relay.link.ended(), &relay.host.status().borrow()), None);
+            let host = relay.host.status().borrow().clone();
+            let relay_state = unregistered_relay_state(relay.link.ended(), &host);
+            let refused = match host {
+                crate::remote::host::HostStatus::Refused { refusal } if relay_state == wire::RelayState::Retrying => Some(refusal),
+                _ => None,
+            };
+            return (relay_state, None, refused);
         }
         if !state.hosting() || !self.account_relay_allowed {
-            return (wire::RelayState::Off, None);
+            return (wire::RelayState::Off, None, None);
         }
         if state.relay_superseded.is_some() {
-            (wire::RelayState::Superseded, None)
+            (wire::RelayState::Superseded, None, None)
         } else if state.relay_signed_out {
-            (wire::RelayState::SignedOut, None)
+            (wire::RelayState::SignedOut, None, None)
         } else {
-            (wire::RelayState::Off, None)
+            (wire::RelayState::Off, None, None)
         }
     }
 
@@ -1300,7 +1307,7 @@ impl MachineHost {
             Self::off_task(move || {
                 let req_id = uuid::Uuid::new_v4().simple().to_string();
                 let confirmed = relay
-                    .forward_control(json!({ "type": "device-revoke", "v": 1, "reqId": req_id, "relayDeviceId": device }))
+                    .forward_control(json!({ "type": "device-revoke", "reqId": req_id, "relayDeviceId": device }))
                     .ok()
                     .and_then(|reply| reply.recv_timeout(RELAY_CONTROL_WAIT).ok())
                     .and_then(Result::ok)

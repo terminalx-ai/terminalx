@@ -3892,7 +3892,7 @@ export function closeWorkspaceConnectionsIn(orgId: string): void {
   }
 }
 
-export interface TurnCheckpoint { number: number; reviewed: boolean; undone: boolean; files: ChangedFile[]; restored?: boolean; backupRef?: string | null; unavailableReason?: string | null }
+export interface TurnCheckpoint { number: number; reviewed: boolean; undone: boolean; files: ChangedFile[]; restored?: boolean; backupRef?: string | null; unavailableReason?: string | null; /** Turns left in this workspace before an unreviewed turn's Undo expires, when few. */ expiresIn?: number | null }
 export interface TurnUndoResult { overlap: string[]; token: string; undone: boolean; backupRef?: string | null }
 
 /** A saved action's run in a terminal tab of a local session (PRO-363). */

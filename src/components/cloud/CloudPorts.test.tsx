@@ -262,6 +262,9 @@ describe("the Ports tab (PRO-28, 14.11)", () => {
     expect(connectionText({ state: "connecting", attempt: 1 }).restarting).toBe(true);
     expect(connectionText({ state: "updateRequired" }).text).toBe("Update TerminalX to preview this workspace's ports.");
     expect(connectionText({ state: "suspended" }).text).toContain("Looking here never starts it");
+    // #1582: a workspace that needs attention is not connecting; nothing reads as on its way.
+    expect(connectionText({ state: "unavailable", reason: "attention-required" })).toEqual({ text: expect.stringContaining("can't be reached") as unknown as string, restarting: false });
+    expect(connectionText({ state: "unavailable", reason: "attention-required" }).text).not.toMatch(/Connecting/);
     const restarting: WorkspaceConnectionState = { state: "waitingForRuntime" };
     const { runtime, client } = setup(restarting);
     draw(<CloudPortsView workspaceKey="ws-1" client={client} state={restarting} connectionId="cloud-1" mayOpen active />);

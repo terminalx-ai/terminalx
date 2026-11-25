@@ -52,6 +52,19 @@ does, through the app. The boards are drawn in Ember when dark and in Den when
 light: for the light run set the simulator's appearance to light and
 `MAESTRO_THEME=Den`.
 
+## Connect GitHub and repositories (25.11)
+
+`fixtureGithub: <state>` (with `fixtureLaunch`, which gives Northwind its
+compute) answers the GitHub App routes in memory, by the account service the
+screen tests use (`src/cloud/testing/github.ts`, which follows the server's
+`docs/mobile-github-app.md`); the states are listed in `setup/github.ts`.
+Connect GitHub opens the system's real sign-in sheet on github.com, where
+nobody is signed in, so `fixtureGithubEnds: connected` (or `canceled`, or an
+error code) ends the attempt six seconds later, as the browser's pages would.
+`flow-25.11.yaml` shoots connecting, the organization's set, the launch
+picker, a branch, a typed URL, the review, the browser closed early, a member
+and five chosen.
+
 ## Beta access code (25.08)
 
 `fixtureAccessCode: <answer>` starts the phone signed out with no machines.
@@ -91,6 +104,15 @@ anything reaches the phone, so the flow asks it from the page's switch.
 `flow-22.07-off.yaml` turns notifications off in iOS Settings (Maestro's launch
 `permissions` cannot deny them on a simulator) and back on afterwards. The
 notifications are headed "Phone fixture", the copy's own app name.
+
+## Large text (PRO-563)
+
+`flow-large-text.yaml` shoots the screens whose buttons, titles, badges and
+rows were cut at the accessibility text sizes, and checks two things said
+aloud: the back button's name and a cloud message's "Delivered to the
+workspace". Maestro cannot set the text size, so set it on the simulator
+first (`xcrun simctl ui <udid> content_size accessibility-extra-large`) and
+put it back to `large` afterwards.
 
 1. Build the simulator app once, as `pnpm ios:simulator` does, but without installing it:
 
