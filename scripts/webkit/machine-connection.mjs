@@ -125,7 +125,7 @@ const STATES = [
   { id: "needs-update", state: { state: "needsUpdate", version: "0.2.27", side: "machine" }, label: "Needs update", hint: "Runs an older TerminalX", status: "Mac mini runs an older TerminalX. Update TerminalX there to connect." },
   { id: "updating", state: () => ({ state: "updating", version: "0.2.33", since: Date.now() - 5_000 }), label: "Updating", hint: "Back in under a minute",
     status: "Mac mini is updating. Back in under a minute. Sessions there keep running.", spins: true },
-  { id: "access-removed", state: { state: "accessRemoved" }, label: "Access removed", hint: "Revoked on that Mac", status: "Mac mini no longer allows this Mac. Pair again to reconnect." },
+  { id: "access-removed", state: { state: "accessRemoved" }, label: "Access removed", hint: "Revoked on Mac mini", status: "Mac mini no longer allows this Mac. Pair again to reconnect." },
 ];
 
 const matches = (expected, actual) => (expected instanceof RegExp ? expected.test(actual ?? "") : expected === actual);

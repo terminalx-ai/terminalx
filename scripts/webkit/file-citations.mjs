@@ -98,7 +98,7 @@ try {
     await chip.click();
     await page.waitForFunction(() => window.__PW_FILE_ACTIONS__.length === 1);
     await chip.click({ button: "right" });
-    await page.getByRole("menuitem", { name: "Reveal in file manager", exact: true }).click();
+    await page.getByRole("menuitem", { name: /^Reveal in (Finder|File Explorer|File Manager)$/ }).click();
     await page.waitForFunction(() => window.__PW_FILE_ACTIONS__.length === 2);
     const path = `/repos/p0/out/${longName}`;
     assert.deepEqual(await page.evaluate(() => window.__PW_FILE_ACTIONS__), [["open", path], ["reveal", path]]);
