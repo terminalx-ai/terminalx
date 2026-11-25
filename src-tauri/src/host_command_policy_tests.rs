@@ -340,6 +340,41 @@ fn prompt_and_registry_budgets_survive_turn_changes() {
 }
 
 #[test]
+fn parked_preparations_release_active_capacity_but_obey_the_hard_cap() {
+    let policy = policy();
+    let mut workers = Vec::new();
+    for index in 0..=MAX_OUTSTANDING_PREPARATIONS {
+        let mut proposal = input(&format!("request-{index}"));
+        proposal.origin.workspace = format!("workspace-{index}");
+        let mut trusted = context();
+        trusted.origin = Some(proposal.origin.clone());
+        policy.update_trusted_context(trusted).unwrap();
+        let request = policy.submit(proposal).unwrap();
+        if index == MAX_OUTSTANDING_PREPARATIONS {
+            assert_eq!(
+                PreparationWorker::reserve(&request).err(),
+                Some(Rejection::Busy)
+            );
+            workers.pop();
+            assert!(PreparationWorker::reserve(&request).is_ok());
+        } else {
+            let (worker, ticket) = PreparationWorker::reserve(&request).unwrap();
+            assert_eq!(
+                PreparationWorker::reserve(&request).err(),
+                Some(Rejection::Busy)
+            );
+            drop(ticket);
+            assert_eq!(
+                PreparationWorker::reserve(&request).err(),
+                Some(Rejection::WorkspaceFolderNotResponding)
+            );
+            workers.push(worker);
+        }
+        request.cancel().unwrap();
+    }
+}
+
+#[test]
 fn concurrent_submissions_share_one_registry() {
     for same_id in [false, true] {
         let policy = policy();
@@ -540,16 +575,20 @@ mod native {
                 ..Sheets::default()
             });
             let (prepared, replies) = mpsc::sync_channel(1);
+            let (stalled_worker, ticket) = if scenario == "preparation timeout" {
+                let (worker, ticket) = PreparationWorker::reserve(&request).unwrap();
+                (Some(worker), Some(ticket))
+            } else {
+                (None, None)
+            };
             let (flow, result) =
-                consent::Flow::for_test(request.clone(), slot, sheets.clone(), replies);
+                consent::Flow::for_test(request.clone(), slot, sheets.clone(), replies, ticket);
             let flow = Cell::new(Some(flow));
             let tick = || !consent::Flow::tick(&flow);
             assert!(tick());
             assert!(policy.lock().unwrap().prompt_times.is_empty());
-            let stalled_worker = if scenario == "preparation timeout" {
-                let worker = PreparationWorker::reserve(&request).unwrap();
+            if scenario == "preparation timeout" {
                 set_time(&policy, 10 + PREPARATION_TIMEOUT_MS);
-                Some(worker)
             } else {
                 let binding = policy.prepare_local_decision(&request);
                 prepared
@@ -562,15 +601,14 @@ mod native {
                 if scenario == "preparation expiry" {
                     set_time(&policy, 100);
                 }
-                None
-            };
+            }
             let mut shown = false;
             let mut biometric = false;
             let expected = if !tick() {
                 Err(match scenario {
                     "preparation error" => Rejection::InvalidDirectory,
                     "preparation expiry" => Rejection::Expired,
-                    "preparation timeout" => Rejection::PreparationTimedOut,
+                    "preparation timeout" => Rejection::WorkspaceFolderNotResponding,
                     _ => Rejection::WorkerUnavailable,
                 })
             } else {
@@ -658,8 +696,9 @@ mod native {
                 assert!(prepared.send(Err(Rejection::InvalidDirectory)).is_err());
                 assert_eq!(
                     PreparationWorker::reserve(&request).err(),
-                    Some(Rejection::Busy)
+                    Some(Rejection::WorkspaceFolderNotResponding)
                 );
+                assert_eq!(request.state(), Ok(State::WorkspaceFolderNotResponding));
                 let mut other = input("other-workspace");
                 other.origin.workspace = "workspace-b".into();
                 let mut trusted = context();
@@ -887,7 +926,7 @@ mod native {
     }
 
     #[test]
-    fn cwd_mapping_rejects_symlinks_and_replaced_directories() {
+    fn cwd_mapping_rejects_symlinks_at_approval_and_uses_pinned_directory_at_launch() {
         let directory = Directory::new();
         let original = directory.0.join("original");
         let replaced = directory.0.join("replaced");
@@ -909,10 +948,12 @@ mod native {
         proposal.cwd = original.to_str().unwrap().into();
         let request = approved(&policy, proposal);
         fs::rename(&original, &replaced).unwrap();
-        fs::create_dir(&original).unwrap();
-        assert_stopped(policy.start(&request).unwrap(), State::SpawnFailed);
-        assert!(!original.join("spawn-marker").exists());
-        assert!(!replaced.join("spawn-marker").exists());
+        // Reopening this spelling would now be refused. The approved
+        // descriptor still refers to the original directory after the rename.
+        symlink(&replaced, &original).unwrap();
+        let (code, _, _, _) = output(policy.start(&request).unwrap());
+        assert_eq!(code, Some(0));
+        assert_eq!(request.state(), Ok(State::Completed));
     }
 
     #[test]

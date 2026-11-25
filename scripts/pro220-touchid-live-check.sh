@@ -3,11 +3,12 @@
 # approve: compare program/argv/cwd in both prompts, then authenticate.
 # expire: leave the first alert unanswered, or continue and leave Touch ID unanswered.
 # Either sheet should dismiss on its own 15 seconds after the request starts.
+# deferred: enqueue behind a fixture sheet, then verify the queued alert is removed.
 # The probe prints the final approval state and never starts the command.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 mode="${1:-approve}"
-case "$mode" in approve|expire|build-only) ;; *) exit 2 ;; esac
+case "$mode" in approve|expire|deferred|build-only) ;; *) exit 2 ;; esac
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 mkdir "$scratch/src"
@@ -58,13 +59,19 @@ fn main() {
         generation: Some(1), approval_revision: Some(1),
         can_approve: Some(true), turn_active: Some(true), cwd_root: Some("/private/tmp".into()),
     }).unwrap();
-    let expires = std::env::args().nth(1).as_deref() == Some("expire");
-    let request = policy.submit(RequestInput {
+    let mode = std::env::args().nth(1);
+    let proposal = RequestInput {
         id: "touch-id-check".into(), origin, generation: 1, approval_revision: 1,
-        ttl_ms: if expires { 15_000 } else { 60_000 }, executable: "/usr/bin/printf".into(),
+        ttl_ms: if mode.as_deref() == Some("expire") { 15_000 } else { 60_000 }, executable: "/usr/bin/printf".into(),
         arguments: vec!["%s".into(), "Touch ID fixture".into()], cwd: "/private/tmp".into(),
         timeout_ms: 1000, output_limit_bytes: 64,
-    }).unwrap();
+    };
+    if mode.as_deref() == Some("deferred") {
+        let passed = consent::check_deferred_alert(&window, &proposal);
+        println!("Deferred alert was queued and dismissed: {passed}");
+        std::process::exit(if passed { 0 } else { 1 });
+    }
+    let request = policy.submit(proposal).unwrap();
     let reply = policy.prompt_once(&request, &window).expect("could not present the fixture");
     std::thread::spawn(move || {
         let result = match reply.recv() {

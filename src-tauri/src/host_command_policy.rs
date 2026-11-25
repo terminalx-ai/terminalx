@@ -22,6 +22,8 @@ const MAX_PROMPTS_PER_WINDOW: usize = 3;
 const MAX_GLOBAL_PROMPTS_PER_WINDOW: usize = 6;
 const PREPARATION_TIMEOUT_MS: u64 = 2_000;
 const MAX_PREPARATION_WORKERS: usize = 4;
+// Reserve headroom for an active worker to become parked at any time.
+const MAX_OUTSTANDING_PREPARATIONS: usize = 8;
 const MAX_REQUESTS_PER_ORIGIN: usize = 32;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -116,7 +118,7 @@ pub enum Rejection {
     #[cfg(not(target_os = "macos"))]
     UnsupportedPlatform,
     WorkerUnavailable,
-    PreparationTimedOut,
+    WorkspaceFolderNotResponding,
     Poisoned,
 }
 
@@ -128,6 +130,7 @@ pub enum State {
     Running,
     Denied,
     TouchIdUnavailable,
+    WorkspaceFolderNotResponding,
     RevokedAfterLaunch,
     ExpiredBeforeLaunch,
     /// The OS accepted the sandboxed launch and output was withheld on expiry.
@@ -208,7 +211,7 @@ struct Registry {
     epoch: Arc<()>,
     entries: HashMap<String, Arc<Mutex<Entry>>>,
     prompt_open: bool,
-    preparation_workers: Vec<OriginBudget>,
+    preparation_workers: Vec<PreparationRecord>,
     prompt_times: VecDeque<(OriginBudget, u64)>,
     in_flight: bool,
 }
@@ -592,25 +595,64 @@ impl Drop for PromptSlot {
     }
 }
 
+struct PreparationRecord {
+    budget: OriginBudget,
+    parked: Arc<std::sync::atomic::AtomicBool>,
+}
+
 struct PreparationWorker {
     policy: Policy,
-    budget: OriginBudget,
+    parked: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Dropping the prompt's ticket releases the active preparation slot. The
+/// worker remains counted against the hard cap until its syscall returns.
+struct PreparationTicket(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for PreparationTicket {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 
 impl PreparationWorker {
-    fn reserve(request: &Request) -> Result<Self, Rejection> {
+    fn reserve(request: &Request) -> Result<(Self, PreparationTicket), Rejection> {
+        use std::sync::atomic::{AtomicBool, Ordering};
         let mut registry = request.policy.lock()?;
         let budget = OriginBudget::from(&request.input.origin);
-        if registry.preparation_workers.len() >= MAX_PREPARATION_WORKERS
-            || registry.preparation_workers.contains(&budget)
+        if let Some(record) = registry
+            .preparation_workers
+            .iter()
+            .find(|record| record.budget == budget)
+        {
+            return Err(if record.parked.load(Ordering::Acquire) {
+                Rejection::WorkspaceFolderNotResponding
+            } else {
+                Rejection::Busy
+            });
+        }
+        let outstanding = &mut registry.preparation_workers;
+        if outstanding.len() >= MAX_OUTSTANDING_PREPARATIONS
+            || outstanding
+                .iter()
+                .filter(|record| !record.parked.load(Ordering::Acquire))
+                .count()
+                >= MAX_PREPARATION_WORKERS
         {
             return Err(Rejection::Busy);
         }
-        registry.preparation_workers.push(budget.clone());
-        Ok(Self {
-            policy: request.policy.clone(),
+        let parked = Arc::new(AtomicBool::new(false));
+        outstanding.push(PreparationRecord {
             budget,
-        })
+            parked: parked.clone(),
+        });
+        Ok((
+            Self {
+                policy: request.policy.clone(),
+                parked: parked.clone(),
+            },
+            PreparationTicket(parked),
+        ))
     }
 }
 
@@ -619,7 +661,7 @@ impl Drop for PreparationWorker {
         if let Ok(mut registry) = self.policy.lock() {
             registry
                 .preparation_workers
-                .retain(|key| key != &self.budget);
+                .retain(|record| !Arc::ptr_eq(&record.parked, &self.parked));
         }
     }
 }
@@ -827,7 +869,10 @@ mod consent {
     }
 
     enum Stage {
-        Preparing(mpsc::Receiver<Result<LocalDecisionBinding, Rejection>>),
+        Preparing(
+            mpsc::Receiver<Result<LocalDecisionBinding, Rejection>>,
+            Option<PreparationTicket>,
+        ),
         Alert(Box<LocalDecisionBinding>, Presented<bool>),
         Confirmed(Box<LocalDecisionBinding>),
         Biometric(Box<LocalDecisionBinding>, Presented<LocalDecision>),
@@ -853,6 +898,7 @@ mod consent {
             slot: PromptSlot,
             presenter: P,
             prepared: mpsc::Receiver<Result<LocalDecisionBinding, Rejection>>,
+            preparation: Option<PreparationTicket>,
         ) -> (Self, mpsc::Receiver<Result<State, Rejection>>) {
             let (sender, result) = mpsc::sync_channel(1);
             let prepare_deadline_ms = request
@@ -865,7 +911,7 @@ mod consent {
                     slot,
                     presenter,
                     sender,
-                    stage: Some(Stage::Preparing(prepared)),
+                    stage: Some(Stage::Preparing(prepared, preparation)),
                     prepare_deadline_ms,
                 },
                 result,
@@ -878,8 +924,9 @@ mod consent {
             slot: PromptSlot,
             presenter: P,
             prepared: mpsc::Receiver<Result<LocalDecisionBinding, Rejection>>,
+            preparation: Option<PreparationTicket>,
         ) -> (Self, mpsc::Receiver<Result<State, Rejection>>) {
-            Self::new(request, slot, presenter, prepared)
+            Self::new(request, slot, presenter, prepared, preparation)
         }
 
         pub(super) fn tick(flow: &std::cell::Cell<Option<Self>>) -> bool {
@@ -916,10 +963,13 @@ mod consent {
             self.request.require_pending()?;
             let stage = self.stage.take().ok_or(Rejection::InvalidTransition)?;
             match stage {
-                Stage::Preparing(_) if self.request.policy.now_ms() >= self.prepare_deadline_ms => {
-                    Err(Rejection::PreparationTimedOut)
+                Stage::Preparing(..)
+                    if self.request.policy.now_ms() >= self.prepare_deadline_ms =>
+                {
+                    self.request.finish(State::WorkspaceFolderNotResponding);
+                    Err(Rejection::WorkspaceFolderNotResponding)
                 }
-                Stage::Preparing(prepared) => match poll(&prepared)? {
+                Stage::Preparing(prepared, ticket) => match poll(&prepared)? {
                     Some(binding) => {
                         let binding = binding?;
                         self.request.require_pending()?;
@@ -927,7 +977,7 @@ mod consent {
                         self.slot.charge_for_shown_alert()?;
                         Ok(Step::Pending(Stage::Alert(Box::new(binding), sheet)))
                     }
-                    None => Ok(Step::Pending(Stage::Preparing(prepared))),
+                    None => Ok(Step::Pending(Stage::Preparing(prepared, ticket))),
                 },
                 Stage::Alert(binding, sheet) => match poll(&sheet.replies)? {
                     None => Ok(Step::Pending(Stage::Alert(binding, sheet))),
@@ -1022,6 +1072,24 @@ mod consent {
                 if self.parent.attachedSheet().is_some() {
                     return Err(Rejection::Busy);
                 }
+                self.begin_alert(input, main, |_| {})
+            }
+
+            fn biometric(
+                &self,
+                input: &RequestInput,
+            ) -> Result<Presented<LocalDecision>, Rejection> {
+                start_biometric(input)
+            }
+        }
+
+        impl CocoaPresenter {
+            fn begin_alert(
+                &self,
+                input: &RequestInput,
+                main: MainThreadMarker,
+                observe_deferred: impl FnOnce(bool),
+            ) -> Result<Presented<bool>, Rejection> {
                 let (reply, replies) = mpsc::sync_channel(1);
                 let completion = RcBlock::new(move |response: NSModalResponse| {
                     let _ = reply.try_send(response == NSAlertSecondButtonReturn);
@@ -1039,6 +1107,7 @@ mod consent {
                     .attachedSheet()
                     .is_some_and(|shown| std::ptr::eq(&*shown, &*sheet));
                 let parent = self.parent.clone();
+                observe_deferred(!attached && parent.sheets().containsObject(&sheet));
                 attached_alert(replies, attached, move || {
                     // sheets includes deferred sheets as well as visible ones.
                     if parent.sheets().containsObject(&sheet) {
@@ -1047,13 +1116,35 @@ mod consent {
                     drop(alert);
                 })
             }
+        }
 
-            fn biometric(
-                &self,
-                input: &RequestInput,
-            ) -> Result<Presented<LocalDecision>, Rejection> {
-                start_biometric(input)
+        // The app includes this module only under cfg(test). This fixture is
+        // compiled only by the standalone manual probe.
+        #[cfg(not(test))]
+        pub(in super::super) fn check_deferred_alert(
+            parent: &NSWindow,
+            input: &RequestInput,
+        ) -> bool {
+            let Some(main) = MainThreadMarker::new() else {
+                return false;
+            };
+            let blocker = NSAlert::new(main);
+            blocker.setMessageText(&NSString::from_str("Deferred sheet fixture"));
+            blocker.beginSheetModalForWindow_completionHandler(parent, None);
+            let blocker_window = blocker.window();
+            let presenter = CocoaPresenter {
+                parent: parent.retain(),
+            };
+            let mut was_queued = false;
+            let result = presenter.begin_alert(input, main, |queued| was_queued = queued);
+            let only_blocker_remains =
+                parent.sheets().count() == 1 && parent.sheets().containsObject(&blocker_window);
+            if parent.sheets().containsObject(&blocker_window) {
+                parent.endSheet(&blocker_window);
             }
+            matches!(result, Err(Rejection::WorkerUnavailable))
+                && was_queued
+                && only_blocker_remains
         }
 
         fn start_biometric(input: &RequestInput) -> Result<Presented<LocalDecision>, Rejection> {
@@ -1110,7 +1201,12 @@ mod consent {
             let slot = policy.reserve_prompt(request)?;
             // A filesystem syscall may outlive the two-second prompt deadline.
             // Keep only its bounded worker reservation until it returns.
-            let preparation = PreparationWorker::reserve(request)?;
+            let (preparation, ticket) =
+                PreparationWorker::reserve(request).inspect_err(|reason| {
+                    if *reason == Rejection::WorkspaceFolderNotResponding {
+                        request.finish(State::WorkspaceFolderNotResponding);
+                    }
+                })?;
             let (prepared, replies) = mpsc::sync_channel(1);
             let worker_request = request.clone();
             thread::Builder::new()
@@ -1130,6 +1226,7 @@ mod consent {
                     parent: parent.retain(),
                 },
                 replies,
+                Some(ticket),
             );
             let flow = Cell::new(Some(flow));
             let tick = RcBlock::new(move |timer: *mut c_void| {
@@ -1161,6 +1258,9 @@ mod consent {
 
     #[cfg(all(target_os = "macos", feature = "desktop"))]
     pub(super) use cocoa::prompt;
+
+    #[cfg(all(not(test), target_os = "macos", feature = "desktop"))]
+    pub(super) use cocoa::check_deferred_alert;
 }
 
 fn validate_input(input: &RequestInput) -> Result<(), Rejection> {
