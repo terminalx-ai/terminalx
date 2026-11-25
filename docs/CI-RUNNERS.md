@@ -46,7 +46,7 @@ machine, a pull request's edited workflow included.
 | `linux-rust` | Ubuntu on **every PR** | Rust | `cargo clippy --locked --all-targets -- -D warnings`; GTK/WebKit/audio dependencies installed. Main push/nightly/manual runs alone may use the owner-approved `CI_LINUX_RUNNER` label; unset/empty falls back to Ubuntu. |
 | `linux-rust-tests` | Ubuntu, five at once | Rust | The library's tests under cargo-nextest in four parts, and a fifth with the other test binaries, the doc tests and the local owner path without desktop features (below). |
 | `headless-serve` | Ubuntu | Rust | Headless build, dependency exclusions, Clippy, the named integration tests and the self-tests. |
-| `serve-tests` | Ubuntu | Rust | Every other test binary under `src-tauri/serve/tests`. |
+| `serve-tests` | Ubuntu | Rust | Every other test binary under `src-tauri/serve/tests`, under cargo-nextest (below). |
 | `macos-native` | **macOS** | macOS | Icon checks, Swift tests, helper build, one build of the library's tests. On a pull request the Apple-only and system-dependent tests; on main, nightly and manual runs macOS Clippy and the full suite. |
 | `machine-compat` | **macOS** | machines | This build against the previous two released runtimes (PRO-354). |
 | `machines-e2e` | Ubuntu | always; decides in a step | Two machines end to end (PRO-358). |
@@ -425,11 +425,30 @@ race that fails half the time pass seven runs in eight.
 nextest is installed as one release by version, its archive checked against a
 SHA-256 in the workflow before it is opened.
 
+**The serve tests** (`serve-tests`) run under the same `ci` profile: `cargo
+nextest run --locked --profile ci --bins` with a `--test` for every file under
+`src-tauri/serve/tests` but the four other jobs run (`machine_compat`,
+`machines_e2e`, `machine_routes`, `local_issue_start`). Under `cargo test` the
+binaries ran one after another, 433 s in run 45442275413, 186 s of it
+`scheduled_run`; nextest runs them side by side, so the slowest test is the
+floor. The job installs the same nextest release, checked the same way, keeps
+its JUnit report as `serve-junit` and names flaky and leaky tests in its
+summary. `local_supervisor` is built without libtest's harness (`harness =
+false`) and cannot answer nextest's `--list`, so it runs under `cargo test` in
+a step of its own; a policy test takes the binaries without a harness from
+`src-tauri/serve/Cargo.toml` and requires that step for each.
+
+With every test in a process of its own, a reservation one process keeps is no
+longer one: `free_port()` (`tests/common/machine.rs`), which hands a test a
+port no other test got, takes it by creating
+`<temp dir>/terminalx-test-ports/<port>` exclusively with its process id, and
+takes over a file whose process is gone.
+
 The Rust jobs on Linux do not install or build the frontend. `tauri-build`
 needs the folder the frontend builds into, so a step writes a one-line
 `dist/index.html`; no Rust test reads what is in it.
 
-`infra/ci-runners/test_workflow_security.py` holds both suites to these shapes.
+`infra/ci-runners/test_workflow_security.py` holds the suites to these shapes.
 
 ## Cargo caches
 

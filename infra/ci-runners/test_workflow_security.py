@@ -94,7 +94,17 @@ SERVE_ELSEWHERE = {
     "machine_compat": "machine-compat", "machines_e2e": "machines-e2e", "machine_routes": "machines-e2e",
     "local_issue_start": "headless-serve",
 }
-STAND_IN = "mkdir -p dist && printf '<!doctype html><title>TerminalX</title>\\n' > dist/index.html"
+# The serve tests run under nextest's `ci` profile, all binaries at once; a binary without libtest's harness cannot be
+# listed by nextest and runs under `cargo test` in the same job.
+SERVE_NEXTEST = 'cargo nextest run --locked --profile ci --bins "${tests[@]}" 2>&1 | tee "$RUNNER_TEMP/nextest.log"'
+SERVE_CARGO = ROOT / "src-tauri/serve/Cargo.toml"
+FLAKY_SUMMARY = "grep -aE '^[[:space:]]*(FLAKY|LEAK)[[:space:]]' \"$RUNNER_TEMP/nextest.log\" | sort -u || echo \"none\""
+STAND_IN ="mkdir -p dist && printf '<!doctype html><title>TerminalX</title>\\n' > dist/index.html"
+
+
+def without_harness():
+    """The serve test binaries built with `harness = false`."""
+    return sorted(test["name"] for test in tomllib.loads(SERVE_CARGO.read_text()).get("test", []) if test.get("harness") is False)
 
 
 def cache_key(name, scope, lock=LOCK):
@@ -368,10 +378,25 @@ def validate(workflow):
     for check in ("swift test --package-path native/computer-use-macos", "node scripts/build-computer-macos.mjs"):
         assert any(s.get("run") == check and "if" not in s for s in native["steps"]), "the Swift tests and the helper build whenever macOS runs"
     # Every serve test binary runs somewhere: here, or in the job named for it.
+    serve_steps = jobs["serve-tests"]["steps"]
     serve = next(run for run in runs(jobs["serve-tests"]) if "tests/*.rs" in run)
-    left_out = re.search(r"^\s*([\w|]+)\) ;;$", serve, re.MULTILINE)
-    assert left_out and set(left_out.group(1).split("|")) == set(SERVE_ELSEWHERE), "serve-tests leaves out only the binaries another job runs"
-    assert '*) tests+=(--test "$name") ;;' in serve and 'cargo test --locked --bins "${tests[@]}"' in serve, "every other serve test binary"
+    left_out = re.findall(r"^\s*([\w|]+)\) ;;$", serve, re.MULTILINE)
+    assert len(left_out) == 2 and set(left_out[0].split("|")) == set(SERVE_ELSEWHERE), "serve-tests leaves out only the binaries another job runs"
+    # nextest lists a binary by running it with `--list`; one without libtest's harness cannot answer, so it runs
+    # under `cargo test` here, every one of them, whatever their number.
+    harnessless = without_harness()
+    assert sorted(left_out[1].split("|")) == harnessless, "nextest leaves out the serve binaries without libtest's harness, and only those"
+    for binary in harnessless:
+        assert any(s.get("run") == f"cargo test --locked --test {binary}" and s.get("working-directory") == "src-tauri/serve" and s.get("if") == "${{ !cancelled() }}" for s in serve_steps), f"{binary} has no libtest harness and serve-tests does not run it"
+    assert serve.startswith("set -o pipefail\n") and '*) tests+=(--test "$name") ;;' in serve and serve.rstrip("\n").endswith("\n" + SERVE_NEXTEST), "every other serve test binary, under nextest's ci profile"
+    # nextest as the library's parts install it, its summary and its JUnit report.
+    serve_install = next((s for s in serve_steps if s.get("name") == "Install cargo-nextest"), None)
+    assert serve_install and "if" not in serve_install and {k: v for k, v in serve_install.items()} == {k: v for k, v in nextest.items() if k != "if"}, "serve-tests installs the same nextest release, checked the same way"
+    assert serve_steps.index(serve_install) < next(i for i, s in enumerate(serve_steps) if s.get("run") == serve), "nextest is installed before the tests"
+    summary = next((s for s in serve_steps if s.get("name") == "Name the flaky and leaky tests in the summary"), None)
+    assert summary and FLAKY_SUMMARY in summary["run"] and '>> "$GITHUB_STEP_SUMMARY"' in summary["run"] and summary.get("if") == "${{ !cancelled() }}", "serve-tests names its flaky and leaky tests"
+    junit = [s for s in serve_steps if s.get("uses", "").startswith("actions/upload-artifact@")]
+    assert len(junit) == 1 and junit[0]["with"] == {"name": "serve-junit", "path": "src-tauri/target/nextest/ci/junit.xml", "if-no-files-found": "warn"} and junit[0].get("if") == "${{ !cancelled() }}", "serve-tests keeps its JUnit report"
     for binary, job in SERVE_ELSEWHERE.items():
         assert (SERVE_TESTS / f"{binary}.rs").exists(), f"{binary} is no longer a serve test binary"
         assert any(re.search(rf"\b{binary}\b", run) for run in runs(jobs[job])), f"{binary} is left out of serve-tests and {job} does not run it"
@@ -683,8 +708,36 @@ class WorkflowSecurity(unittest.TestCase):
             return next(s for s in w["jobs"]["serve-tests"]["steps"] if "tests/*.rs" in s.get("run", ""))
         self.rejects(lambda w: run(w).update({"run": run(w)["run"].replace("machine_compat|", "machine_compat|local_lifetime|")}))
         self.rejects(lambda w: run(w).update({"run": run(w)["run"].replace('*) tests+=(--test "$name") ;;', "owner_pretool) tests+=(--test owner_pretool) ;;")}))
+        # Left out of nextest as a binary without a harness: only one that is, and never without its own step.
+        self.rejects(lambda w: run(w).update({"run": run(w)["run"].replace("local_supervisor) ;;", "local_supervisor|scheduled_run) ;;")}))
+        self.rejects(lambda w: w["jobs"]["serve-tests"]["steps"].remove(self.step(w, "serve-tests", run="cargo test --locked --test local_supervisor")))
+        self.rejects(lambda w: self.step(w, "serve-tests", run="cargo test --locked --test local_supervisor").update({"if": "github.event_name != 'pull_request'"}))
         # Left out here because headless-serve runs it: not once that step is gone.
         self.rejects(lambda w: w["jobs"]["headless-serve"]["steps"].remove(self.step(w, "headless-serve", name="CLI issue starts")))
+
+    def test_serve_tests_off_nextest_or_without_their_reports_are_rejected(self):
+        def run(w):
+            return next(s for s in w["jobs"]["serve-tests"]["steps"] if "tests/*.rs" in s.get("run", ""))
+        for old, new in [
+            (SERVE_NEXTEST, 'cargo test --locked --bins "${tests[@]}"'),
+            (" --profile ci", ""),
+            (" --bins", ""),
+            ("set -o pipefail\n", ""),
+            (SERVE_NEXTEST, SERVE_NEXTEST + " -E 'not test(/slow/)'"),
+            (SERVE_NEXTEST, SERVE_NEXTEST.replace(' 2>&1 | tee "$RUNNER_TEMP/nextest.log"', "")),
+        ]:
+            with self.subTest(old=old, new=new):
+                self.rejects(lambda w: run(w).update({"run": run(w)["run"].replace(old, new)}))
+        self.rejects(lambda w: w["jobs"]["serve-tests"]["steps"].remove(self.step(w, "serve-tests", uses="actions/upload-artifact@")))
+        self.rejects(lambda w: self.step(w, "serve-tests", uses="actions/upload-artifact@")["with"].update({"name": "rust-junit-serve"}))
+        self.rejects(lambda w: w["jobs"]["serve-tests"]["steps"].remove(self.step(w, "serve-tests", name="Name the flaky")))
+        # A release of its own, or one not checked, is a second tool to trust.
+        def install(w):
+            return self.step(w, "serve-tests", name="Install cargo-nextest")
+        self.rejects(lambda w: install(w)["env"].update(NEXTEST_VERSION="0.9.153"))
+        self.rejects(lambda w: install(w).update({"run": install(w)["run"].replace('echo "$NEXTEST_SHA256  $RUNNER_TEMP/nextest.tar.gz" | sha256sum --check\n', "")}))
+        self.rejects(lambda w: w["jobs"]["serve-tests"]["steps"].remove(install(w)))
+        self.rejects(lambda w: install(w)["env"].update(NEXTEST_RETRIES="2"))
 
     def test_package_install_without_retries_or_a_limit_is_rejected(self):
         self.rejects(lambda w: self.step(w, "vitest", name="Install shells").update({"run": "sudo apt-get update && sudo apt-get install -y zsh && command -v zsh"}))
