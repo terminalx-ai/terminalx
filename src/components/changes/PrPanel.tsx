@@ -490,7 +490,7 @@ export function PrPanel({
       {error && inline && errorFrom === "load" && !prErrorKind(error) ? (
         // Not reaching GitHub is no fault of the reader's: said once, quietly, the detail on hover.
         <p className="px-4 text-xs text-faint" title={error} data-testid="pr-unreachable">Can't reach GitHub right now. Pull requests will show when it answers.</p>
-      ) : error && (source.cloud ? <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} onRetry={() => setTick((value) => value + 1)} onConnect={() => setConnection({ state: "signed_out", details: null, hostname: connection?.hostname })} />)}
+      ) : error && (source.cloud ? <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error} <Button size="xs" variant="outline" onClick={() => setTick((value) => value + 1)}>Retry</Button></div> : <GitError details={error} onRetry={() => setTick((value) => value + 1)} onConnect={() => setConnection({ state: "signed_out", details: null, hostname: connection?.hostname })} />)}
       {notice && <div role="status" className="mx-3 mt-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
       {loadedSelection === selection && pendingCreation && (
         <div className="space-y-1 px-4 text-xs text-muted-foreground" data-testid="pr-pending-creation">

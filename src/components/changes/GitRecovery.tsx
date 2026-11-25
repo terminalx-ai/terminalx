@@ -172,6 +172,7 @@ export function GitError({ details, operation, onRetry, onConnect }: { details: 
   return <div role="alert" className="mx-3 my-2 rounded-md bg-destructive/10 p-2 text-xs">
     <p className="font-medium">{denied ? "Repository access denied" : operation === "push" ? "Could not push" : "Could not complete Git operation"}</p>
     <p className="mt-1 text-muted-foreground">{denied ? "Check that your Git credentials have write access to this repository, then try again." : "Check the repository and your connection, then try again."}</p>
+    {onRetry && <Button size="xs" variant="outline" className="mt-2" onClick={onRetry}>Retry</Button>}
     <CommandDetails key={details} details={details} />
   </div>;
 }

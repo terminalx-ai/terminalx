@@ -53,6 +53,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   // Asked about the file as a whole, staged and unstaged: that is what a discard takes back.
   const askDiscard = (file: DiscardTarget) => setDiscarding(workingDiscardTarget(file.path, staged, unstaged) ?? file);
   const [status, setStatus] = useState<SourceStatus | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [selectedStaged, setSelectedStaged] = useState(false);
@@ -98,7 +99,8 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   useEffect(() => {
     if (!active || sub !== "history") return;
     let cancelled = false;
-    source.logCommits(null, 60).then((next) => !cancelled && setCommits(next)).catch(() => !cancelled && setCommits([]));
+    setHistoryError(null);
+    source.logCommits(null, 60).then((next) => !cancelled && setCommits(next)).catch((e) => { if (!cancelled) { setCommits((now) => now ?? []); setHistoryError(source.errorMessage(e)); } });
     return () => {
       cancelled = true;
     };
@@ -171,7 +173,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
       {needsRemote && source.addRemote && <AddRemote key={source.key} source={source} onDone={() => { setNeedsRemote(false); setError(null); setNotice("Remote added. Push when you’re ready."); refresh(); }} />}
       {error && (source.cloud ? <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} operation={operation} />)}
       {!error && readError != null && (
-        source.cloud ? <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{source.errorMessage(readError)}</div> : <GitError details={source.errorMessage(readError)} />
+        source.cloud ? <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{source.errorMessage(readError)} <Button size="xs" variant="outline" onClick={refresh}>Retry</Button></div> : <GitError details={source.errorMessage(readError)} onRetry={refresh} />
       )}
       {notice && <div role="status" className="mx-3 mb-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
       {(status?.operation || !!status?.conflicted?.length) && (
@@ -287,9 +289,12 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
 
       {sub === "history" && (
         <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin px-1.5 py-1">
+          {historyError && (
+            <div role="alert" className="mx-1.5 my-2 text-xs text-destructive">Couldn’t read the history. {historyError} <Button size="xs" variant="outline" onClick={refresh}>Retry</Button></div>
+          )}
           {commits === null ? (
             <div role="status" className="flex items-center gap-1.5 px-2 py-4 text-xs text-faint"><Loader2 className="size-3 animate-spin" /> Loading history…</div>
-          ) : commits.length === 0 ? (
+          ) : commits.length === 0 && !historyError ? (
             <div className="px-2 py-4 text-xs text-muted-foreground">No commits yet.</div>
           ) : null}
           {(commits ?? []).map((c) => (

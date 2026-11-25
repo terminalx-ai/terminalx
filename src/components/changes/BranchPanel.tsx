@@ -2,6 +2,7 @@ import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ChevronRight, GitBranch, Loader2, Sparkles } from "@/icons";
 import { WithTooltip } from "@/components/ui/tooltip";
+import { Button } from "@/components/ui/button";
 import { agent, api, errorMessage, git, type BranchOverview, type PullRequest } from "@/lib/api";
 import { localGitSource } from "@/lib/gitSource";
 import { useProjectForge } from "@/lib/projectForge";
@@ -153,7 +154,7 @@ export function BranchPanel({
   const held = !overview || !!found || overview.onBase || !github;
   useEffect(() => onStep?.(held), [held, onStep]);
 
-  if (error && !overview) return <p className="p-4 text-xs text-destructive">{error}</p>;
+  if (error && !overview) return <div role="alert" className="p-4 text-xs text-destructive">Couldn’t read the branch. {error} <Button size="xs" variant="outline" onClick={() => setReread((n) => n + 1)}>Retry</Button></div>;
   if (!overview) {
     return (
       <p role="status" className="animate-panel-content flex items-center gap-1.5 p-4 text-xs text-faint">
