@@ -263,7 +263,7 @@ fn prompt_reservation_limits_parallel_and_repeated_attempts() {
 }
 
 #[test]
-fn one_origin_cannot_exhaust_another_origins_prompt_or_registry_budget() {
+fn prompt_and_registry_budgets_survive_turn_changes() {
     let policy = policy();
     let first = policy.submit(input("first")).unwrap();
     for _ in 0..MAX_PROMPTS_PER_WINDOW {
@@ -277,51 +277,54 @@ fn one_origin_cannot_exhaust_another_origins_prompt_or_registry_budget() {
             .cancel()
             .unwrap();
     }
-    assert_eq!(
-        policy.submit(input("over-cap")).err(),
-        Some(Rejection::Capacity)
-    );
-    let mut second = input("second");
-    second.origin.turn = "another-turn".into();
+    let mut next = input("next");
+    next.origin.turn = "another-turn".into();
+    next.origin.tab = "another-tab".into();
     let mut trusted = context();
-    trusted.origin = Some(second.origin.clone());
+    trusted.origin = Some(next.origin.clone());
+    policy.update_trusted_context(trusted.clone()).unwrap();
+    assert_eq!(policy.submit(next.clone()).err(), Some(Rejection::Capacity));
+
+    next.origin.workspace = "another-workspace".into();
+    trusted.origin = Some(next.origin.clone());
     policy.update_trusted_context(trusted).unwrap();
-    let second = policy.submit(second).unwrap();
-    assert!(policy.reserve_prompt(&second).is_ok());
+    let next = policy.submit(next).unwrap();
+    assert_eq!(
+        policy.reserve_prompt(&next).err(),
+        Some(Rejection::PromptRateLimited)
+    );
 }
 
 #[test]
-fn unanswered_biometrics_invalidate_on_expiry_and_cancellation() {
-    for expires in [true, false] {
+fn unanswered_alert_releases_prompt_slot_on_expiry_cancel_or_signout() {
+    for action in 0..3 {
         let policy = policy();
         let request = policy.submit(input("waiting")).unwrap();
-        let slot = policy.reserve_prompt(&request).unwrap();
-        let (_sender, replies) = mpsc::channel();
-        let mut invalidated = false;
-        let result = consent::await_biometric(
-            &request,
-            &replies,
-            || {
-                if expires {
-                    set_time(&policy, 100);
-                } else {
-                    request.cancel().unwrap();
-                }
-            },
-            || invalidated = true,
-        );
+        let lifetime = consent::PromptLifetime::begin(&policy, &request).unwrap();
+        let (sender, replies) = mpsc::sync_channel::<bool>(1);
+        assert!(lifetime.poll(&replies).is_none());
+        match action {
+            0 => set_time(&policy, 100),
+            1 => {
+                request.cancel().unwrap();
+            }
+            _ => policy
+                .update_trusted_context(TrustedContext::default())
+                .unwrap(),
+        }
+        sender.send(true).unwrap();
         assert_eq!(
-            result.err(),
-            Some(if expires {
+            lifetime.poll(&replies).unwrap().err(),
+            Some(if action == 0 {
                 Rejection::Expired
             } else {
                 Rejection::InvalidTransition
             })
         );
-        assert!(invalidated);
-        drop(slot);
+        drop(lifetime);
+        policy.update_trusted_context(context()).unwrap();
         let next = policy.submit(input("next")).unwrap();
-        assert!(policy.reserve_prompt(&next).is_ok());
+        assert!(consent::PromptLifetime::begin(&policy, &next).is_ok());
     }
 }
 
@@ -764,6 +767,7 @@ mod native {
         let mut proposal = input("one");
         let text = prompt_text(&proposal).unwrap();
         assert!(text.contains(r"\n\u{202e}"));
+        assert!(text.contains(r"literal\x20;"));
         assert!(!text.contains('\u{202e}'));
         proposal.arguments[1] = "x".repeat(1_024);
         let request = policy.submit(proposal).unwrap();
@@ -802,7 +806,7 @@ mod native {
     fn cancelled_revoked_expired_and_timed_out_processes_are_signalled_before_reaping() {
         for expected in [
             State::Cancelled,
-            State::Revoked,
+            State::RevokedAfterLaunch,
             State::ExpiredAfterLaunch,
             State::TimedOut,
         ] {
@@ -830,7 +834,7 @@ mod native {
                 State::Cancelled => {
                     request.cancel().unwrap();
                 }
-                State::Revoked => {
+                State::RevokedAfterLaunch => {
                     let mut switched = context();
                     switched.local_account = Some("new-account".into());
                     policy.update_trusted_context(switched).unwrap();

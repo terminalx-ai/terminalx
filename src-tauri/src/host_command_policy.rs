@@ -19,7 +19,7 @@ pub const MAX_TIMEOUT_MS: u64 = 30_000;
 pub const MAX_OUTPUT_BYTES: u64 = 1_048_576;
 const PROMPT_WINDOW_MS: u64 = 60_000;
 const MAX_PROMPTS_PER_WINDOW: usize = 3;
-const MAX_GLOBAL_PROMPTS_PER_WINDOW: usize = 12;
+const MAX_GLOBAL_PROMPTS_PER_WINDOW: usize = 3;
 const MAX_REQUESTS_PER_ORIGIN: usize = 32;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -30,6 +30,23 @@ struct Origin {
     workspace: String,
     tab: String,
     turn: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct OriginBudget {
+    mac: String,
+    account: String,
+    workspace: String,
+}
+
+impl From<&Origin> for OriginBudget {
+    fn from(origin: &Origin) -> Self {
+        Self {
+            mac: origin.mac.clone(),
+            account: origin.account.clone(),
+            workspace: origin.workspace.clone(),
+        }
+    }
 }
 
 impl Origin {
@@ -161,7 +178,7 @@ pub enum ExecutionOutcome {
 struct Entry {
     expires_at_ms: u64,
     retire_at_ms: u64,
-    origin: Origin,
+    budget: OriginBudget,
     state: State,
     paths: Option<executor::ApprovedPaths>,
 }
@@ -188,7 +205,7 @@ struct Registry {
     epoch: Arc<()>,
     entries: HashMap<String, Arc<Mutex<Entry>>>,
     prompt_open: bool,
-    prompt_times: VecDeque<(Origin, u64)>,
+    prompt_times: VecDeque<(OriginBudget, u64)>,
     in_flight: bool,
 }
 
@@ -278,7 +295,12 @@ impl Policy {
                 let mut entry = entry.lock().map_err(|_| Rejection::Poisoned)?;
                 entry.expire(self.now_ms());
                 if entry.state.live() {
-                    entry.stop(State::Revoked);
+                    let reason = if entry.state == State::Running {
+                        State::RevokedAfterLaunch
+                    } else {
+                        State::Revoked
+                    };
+                    entry.stop(reason);
                 }
             }
             registry.context = context;
@@ -304,15 +326,12 @@ impl Policy {
         if registry.entries.contains_key(&input.id) {
             return Err(Rejection::Replay);
         }
+        let budget = OriginBudget::from(&input.origin);
         if registry.entries.len() >= MAX_REQUESTS
             || registry
                 .entries
                 .values()
-                .filter(|entry| {
-                    entry
-                        .lock()
-                        .map_or(true, |entry| entry.origin == input.origin)
-                })
+                .filter(|entry| entry.lock().map_or(true, |entry| entry.budget == budget))
                 .count()
                 >= MAX_REQUESTS_PER_ORIGIN
         {
@@ -330,7 +349,7 @@ impl Policy {
         let entry = Arc::new(Mutex::new(Entry {
             expires_at_ms: now.saturating_add(input.ttl_ms),
             retire_at_ms: now.saturating_add(MAX_TTL_MS),
-            origin: input.origin.clone(),
+            budget,
             state: State::Pending,
             paths: None,
         }));
@@ -349,8 +368,9 @@ impl Policy {
     fn prompt_once(
         &self,
         request: &Request,
+        parent: &objc2_app_kit::NSWindow,
     ) -> Result<mpsc::Receiver<Result<State, Rejection>>, Rejection> {
-        consent::prompt(self, request)
+        consent::prompt(self, request, parent)
     }
 
     fn reserve_prompt(&self, request: &Request) -> Result<PromptSlot, Rejection> {
@@ -365,19 +385,19 @@ impl Policy {
         {
             registry.prompt_times.pop_front();
         }
-        let origin = &request.input.origin;
+        let budget = OriginBudget::from(&request.input.origin);
         if registry.prompt_open
             || registry.prompt_times.len() >= MAX_GLOBAL_PROMPTS_PER_WINDOW
             || registry
                 .prompt_times
                 .iter()
-                .filter(|(key, _)| key == origin)
+                .filter(|(key, _)| key == &budget)
                 .count()
                 >= MAX_PROMPTS_PER_WINDOW
         {
             return Err(Rejection::PromptRateLimited);
         }
-        registry.prompt_times.push_back((origin.clone(), now));
+        registry.prompt_times.push_back((budget, now));
         registry.prompt_open = true;
         Ok(PromptSlot(self.clone()))
     }
@@ -638,13 +658,16 @@ fn approved_program(input: &RequestInput) -> Result<&'static str, Rejection> {
 }
 
 fn quote_prompt_value(value: &str) -> String {
-    format!(
-        "\"{}\"",
-        value
-            .chars()
-            .flat_map(char::escape_default)
-            .collect::<String>()
-    )
+    let mut escaped = String::from("\"");
+    for character in value.chars() {
+        if character == ' ' {
+            escaped.push_str(r"\x20");
+        } else {
+            escaped.extend(character.escape_default());
+        }
+    }
+    escaped.push('"');
+    escaped
 }
 
 fn command_text(input: &RequestInput) -> Result<String, Rejection> {
@@ -703,95 +726,166 @@ mod consent {
     }
 
     #[cfg(any(test, all(target_os = "macos", feature = "desktop")))]
-    pub(super) fn await_biometric(
-        request: &Request,
-        replies: &mpsc::Receiver<LocalDecision>,
-        mut pump: impl FnMut(),
-        invalidate: impl FnOnce(),
-    ) -> Result<LocalDecision, Rejection> {
-        let result = loop {
-            if let Err(reason) = request.require_pending() {
-                break Err(reason);
+    pub(super) struct PromptLifetime {
+        request: Request,
+        _slot: PromptSlot,
+    }
+
+    #[cfg(any(test, all(target_os = "macos", feature = "desktop")))]
+    impl PromptLifetime {
+        pub(super) fn begin(policy: &Policy, request: &Request) -> Result<Self, Rejection> {
+            Ok(Self {
+                request: request.clone(),
+                _slot: policy.reserve_prompt(request)?,
+            })
+        }
+
+        pub(super) fn poll<T>(&self, replies: &mpsc::Receiver<T>) -> Option<Result<T, Rejection>> {
+            if let Err(reason) = self.request.require_pending() {
+                return Some(Err(reason));
             }
             match replies.try_recv() {
-                Ok(choice) => break Ok(choice),
-                Err(mpsc::TryRecvError::Disconnected) => break Err(Rejection::WorkerUnavailable),
-                Err(mpsc::TryRecvError::Empty) => pump(),
+                Ok(reply) => Some(Ok(reply)),
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(Rejection::WorkerUnavailable)),
+                Err(mpsc::TryRecvError::Empty) => None,
             }
-        };
-        invalidate();
-        result
+        }
     }
 
     #[cfg(all(target_os = "macos", feature = "desktop"))]
-    #[link(name = "LocalAuthentication", kind = "framework")]
-    extern "C" {
-        static LAErrorDomain: &'static objc2_foundation::NSString;
-    }
-
-    #[cfg(all(target_os = "macos", feature = "desktop"))]
-    #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
-        static kCFRunLoopDefaultMode: *const std::ffi::c_void;
-        fn CFRunLoopRunInMode(
-            mode: *const std::ffi::c_void,
-            seconds: f64,
-            return_after_source: u8,
-        ) -> i32;
-    }
-
-    #[cfg(all(target_os = "macos", feature = "desktop"))]
-    pub(super) fn prompt(
-        policy: &Policy,
-        request: &Request,
-    ) -> Result<mpsc::Receiver<Result<State, Rejection>>, Rejection> {
-        use block2::RcBlock;
+    mod cocoa {
+        use super::*;
+        use block2::{DynBlock, RcBlock};
         use objc2::rc::Retained;
         use objc2::runtime::{AnyObject, Bool};
-        use objc2::{class, msg_send, MainThreadMarker};
-        use objc2_app_kit::{NSAlert, NSAlertSecondButtonReturn, NSAlertStyle};
+        use objc2::{class, msg_send, MainThreadMarker, Message};
+        use objc2_app_kit::{
+            NSAlert, NSAlertSecondButtonReturn, NSAlertStyle, NSModalResponse, NSWindow,
+        };
         use objc2_foundation::{NSError, NSString};
+        use std::cell::Cell;
+        use std::ffi::c_void;
 
-        // LAPolicyDeviceOwnerAuthenticationWithBiometrics. No password or
-        // accessibility action can supply the biometric match for this policy.
         const BIOMETRICS_ONLY: isize = 1;
 
-        let main = MainThreadMarker::new().ok_or(Rejection::ContextUnavailable)?;
-        let _slot = policy.reserve_prompt(request)?;
-        let binding = policy.prepare_local_decision(request)?;
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let text = prompt_text(&binding.input)?;
-        let alert = NSAlert::new(main);
-        alert.setAlertStyle(NSAlertStyle::Warning);
-        alert.setMessageText(&NSString::from_str("Run this command on your Mac?"));
-        alert.setInformativeText(&NSString::from_str(&text));
-        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
-        alert.addButtonWithTitle(&NSString::from_str("Continue to Touch ID"));
-        if alert.runModal() != NSAlertSecondButtonReturn {
-            let _ = sender.send(policy.record_local_decision(
-                request,
-                Decision {
-                    binding,
-                    choice: LocalDecision::Deny,
-                },
-            ));
-            return Ok(receiver);
+        #[link(name = "LocalAuthentication", kind = "framework")]
+        extern "C" {
+            static LAErrorDomain: &'static NSString;
         }
-        request.require_pending()?;
 
-        // SAFETY: these are the LAContext Objective-C signatures. Each
-        // request gets a fresh context and the OS owns biometric evaluation.
-        let context: Retained<AnyObject> = unsafe { msg_send![class!(LAContext), new] };
-        let available: Bool = unsafe {
-            msg_send![&*context, canEvaluatePolicy: BIOMETRICS_ONLY, error: std::ptr::null_mut::<*mut NSError>()]
-        };
-        let choice = if available.as_bool() {
+        #[link(name = "CoreFoundation", kind = "framework")]
+        extern "C" {
+            static kCFRunLoopCommonModes: *const c_void;
+            fn CFAbsoluteTimeGetCurrent() -> f64;
+            fn CFRunLoopGetMain() -> *mut c_void;
+            fn CFRunLoopTimerCreateWithHandler(
+                allocator: *const c_void,
+                fire_date: f64,
+                interval: f64,
+                flags: usize,
+                order: isize,
+                handler: &DynBlock<dyn Fn(*mut c_void)>,
+            ) -> *mut c_void;
+            fn CFRunLoopAddTimer(run_loop: *mut c_void, timer: *mut c_void, mode: *const c_void);
+            fn CFRunLoopTimerInvalidate(timer: *mut c_void);
+            fn CFRelease(object: *const c_void);
+        }
+
+        enum Stage {
+            Alert {
+                parent: Retained<NSWindow>,
+                alert: Retained<NSAlert>,
+                replies: mpsc::Receiver<NSModalResponse>,
+            },
+            Biometric {
+                context: Retained<AnyObject>,
+                replies: mpsc::Receiver<LocalDecision>,
+            },
+        }
+
+        impl Stage {
+            fn dismiss(self) {
+                match self {
+                    Self::Alert { parent, alert, .. } => {
+                        let sheet = alert.window();
+                        if sheet.sheetParent().is_some() {
+                            parent.endSheet(&sheet);
+                        }
+                    }
+                    Self::Biometric { context, .. } => {
+                        // SAFETY: the object is the LAContext owned by this flow.
+                        unsafe {
+                            let _: () = msg_send![&*context, invalidate];
+                        }
+                    }
+                }
+            }
+        }
+
+        struct Flow {
+            lifetime: PromptLifetime,
+            policy: Policy,
+            binding: LocalDecisionBinding,
+            sender: mpsc::SyncSender<Result<State, Rejection>>,
+            stage: Stage,
+        }
+
+        impl Flow {
+            fn advance(mut self) -> Option<Self> {
+                let choice = match &self.stage {
+                    Stage::Alert { replies, .. } => match self.lifetime.poll(replies) {
+                        None => return Some(self),
+                        Some(reply) => match reply {
+                            Ok(response) if response == NSAlertSecondButtonReturn => {
+                                match start_biometric(&self.binding.input) {
+                                    Ok(stage) => {
+                                        self.stage = stage;
+                                        return Some(self);
+                                    }
+                                    Err(choice) => Ok(choice),
+                                }
+                            }
+                            Ok(_) => Ok(LocalDecision::Deny),
+                            Err(reason) => Err(reason),
+                        },
+                    },
+                    Stage::Biometric { replies, .. } => match self.lifetime.poll(replies) {
+                        Some(result) => result,
+                        None => return Some(self),
+                    },
+                };
+                self.stage.dismiss();
+                let result = choice.and_then(|choice| {
+                    self.policy.record_local_decision(
+                        &self.lifetime.request,
+                        Decision {
+                            binding: self.binding,
+                            choice,
+                        },
+                    )
+                });
+                drop(self.lifetime);
+                let _ = self.sender.try_send(result);
+                None
+            }
+        }
+
+        fn start_biometric(input: &RequestInput) -> Result<Stage, LocalDecision> {
+            let reason = command_text(input).map_err(|_| LocalDecision::Deny)?;
+            // SAFETY: LAContext selectors use their SDK signatures. Each
+            // request gets its own context, held and invalidated on the main thread.
+            let context: Retained<AnyObject> = unsafe { msg_send![class!(LAContext), new] };
+            let available: Bool = unsafe {
+                msg_send![&*context, canEvaluatePolicy: BIOMETRICS_ONLY, error: std::ptr::null_mut::<*mut NSError>()]
+            };
+            if !available.as_bool() {
+                return Err(LocalDecision::TouchIdUnavailable);
+            }
             let (reply, replies) = mpsc::sync_channel(1);
             let callback = RcBlock::new(move |success: Bool, error: *mut NSError| {
                 let choice = if success.as_bool() {
                     LocalDecision::AllowOnce
                 } else if unsafe { error.as_ref() }.is_some_and(|error| {
-                    // LAErrorBiometryNotAvailable, NotEnrolled, or Lockout.
                     error.domain().isEqualToString(unsafe { LAErrorDomain })
                         && matches!(error.code(), -8..=-6)
                 }) {
@@ -802,40 +896,84 @@ mod consent {
                 let _ = reply.try_send(choice);
             });
             let empty = NSString::from_str("");
-            let reason = NSString::from_str(&command_text(&binding.input)?);
-            // SAFETY: these selectors use LAContext's SDK signatures. The
-            // system copies the block and the main thread owns the context.
+            let reason = NSString::from_str(&reason);
             unsafe {
                 let _: () = msg_send![&*context, setLocalizedFallbackTitle: &*empty];
                 let _: () =
                     msg_send![&*context, setTouchIDAuthenticationAllowableReuseDuration: 0.0_f64];
                 let _: () = msg_send![&*context, evaluatePolicy: BIOMETRICS_ONLY, localizedReason: &*reason, reply: &*callback];
             }
-            await_biometric(
-                request,
-                &replies,
-                || {
-                    // Pump the main run loop in short slices so cancellation,
-                    // signout and monotonic expiry all dismiss the OS sheet.
-                    const RUN_LOOP_FINISHED: i32 = 1;
-                    if unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, 0) }
-                        == RUN_LOOP_FINISHED
-                    {
-                        thread::sleep(std::time::Duration::from_millis(10));
+            Ok(Stage::Biometric { context, replies })
+        }
+
+        pub(in super::super) fn prompt(
+            policy: &Policy,
+            request: &Request,
+            parent: &NSWindow,
+        ) -> Result<mpsc::Receiver<Result<State, Rejection>>, Rejection> {
+            let main = MainThreadMarker::new().ok_or(Rejection::ContextUnavailable)?;
+            if parent.attachedSheet().is_some() {
+                return Err(Rejection::Busy);
+            }
+            let lifetime = PromptLifetime::begin(policy, request)?;
+            let binding = policy.prepare_local_decision(request)?;
+            let (sender, result) = mpsc::sync_channel(1);
+            let (reply, replies) = mpsc::sync_channel(1);
+            let completion = RcBlock::new(move |response: NSModalResponse| {
+                let _ = reply.try_send(response);
+            });
+            let alert = NSAlert::new(main);
+            alert.setAlertStyle(NSAlertStyle::Warning);
+            alert.setMessageText(&NSString::from_str("Run this command on your Mac?"));
+            alert.setInformativeText(&NSString::from_str(&prompt_text(&binding.input)?));
+            alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+            alert.addButtonWithTitle(&NSString::from_str("Continue to Touch ID"));
+            let flow = Cell::new(Some(Flow {
+                lifetime,
+                policy: policy.clone(),
+                binding,
+                sender,
+                stage: Stage::Alert {
+                    parent: parent.retain(),
+                    alert: alert.clone(),
+                    replies,
+                },
+            }));
+            let tick = RcBlock::new(move |timer: *mut c_void| {
+                // Take ownership before any AppKit call. If AppKit re-enters
+                // this timer while dismissing a sheet, there is no flow to advance.
+                if let Some(active) = flow.take() {
+                    match active.advance() {
+                        Some(active) => flow.set(Some(active)),
+                        // SAFETY: this is the live timer passed by Core Foundation.
+                        None => unsafe { CFRunLoopTimerInvalidate(timer) },
                     }
-                },
-                || unsafe {
-                    let _: () = msg_send![&*context, invalidate];
-                },
-            )
-        } else {
-            Ok(LocalDecision::TouchIdUnavailable)
-        };
-        let _ = sender.send(choice.and_then(|choice| {
-            policy.record_local_decision(request, Decision { binding, choice })
-        }));
-        Ok(receiver)
+                }
+            });
+            // SAFETY: Core Foundation copies the block. The timer is added
+            // only to the main run loop and that loop retains it until invalidation.
+            unsafe {
+                let timer = CFRunLoopTimerCreateWithHandler(
+                    std::ptr::null(),
+                    CFAbsoluteTimeGetCurrent() + 0.05,
+                    0.05,
+                    0,
+                    0,
+                    &tick,
+                );
+                if timer.is_null() {
+                    return Err(Rejection::WorkerUnavailable);
+                }
+                alert.beginSheetModalForWindow_completionHandler(parent, Some(&completion));
+                CFRunLoopAddTimer(CFRunLoopGetMain(), timer, kCFRunLoopCommonModes);
+                CFRelease(timer);
+            }
+            Ok(result)
+        }
     }
+
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
+    pub(super) use cocoa::prompt;
 }
 
 fn validate_input(input: &RequestInput) -> Result<(), Rejection> {
