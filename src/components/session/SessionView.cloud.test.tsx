@@ -1257,6 +1257,34 @@ describe("the session header's location and connection chips", () => {
     expect(activate).not.toHaveBeenCalledWith("wake");
   });
 
+  // #1582 review: repaired into stopped. The list decides now, the connection opens again, and a send would wake it.
+  it("follows a workspace repaired from needing attention into stopped: Stopped, the prompt waits for a wake, and the connection opens again", async () => {
+    setCatalog(workspaceItem("attention-required"));
+    cache["t-1"] = { tab: tabInfo(), events: [ev({ type: "user_message", text: "earlier question", queued: false })], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    outbox = [{ clientCommandId: "cmd-later", tabId: "t-1", kind: "send", text: "fix the login page", requestId: null, state: "queued", wake: "queued", createdAt: 1, updatedAt: 1 }];
+    const view = render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.emit({ state: "unavailable", reason: "attention-required" }));
+    const chip = () => screen.getByTestId("session-connection");
+    expect(chip().textContent).toBe("Unavailable");
+    expect(within(await screen.findByTestId("queued-message")).getByTestId("queued-status").textContent).toMatch(/^Won't be delivered/);
+
+    // An owner repaired it, and it is stopped now: a list asked for after the park says so.
+    const before = activate.mock.calls.length;
+    const requestedAt = Date.now() + 1_000;
+    mocks.catalog.orgs = { [ORG]: { orgId: ORG, workspaces: [workspaceItem("suspended")], repositories: null, repositoriesAt: null, quota: null, fetchedAt: requestedAt, requestedAt, source: "live", error: null } };
+    view.rerender(wrap(<CloudHarness />));
+    await waitFor(() => expect(activate.mock.calls.slice(before)).toEqual([["connect"]]));
+    expect(activate).not.toHaveBeenCalledWith("wake");
+    // Even before the transport has opened again, the list's state is what the session shows.
+    expect(chip().textContent).toBe("Stopped");
+    const status = within(screen.getByTestId("queued-message")).getByTestId("queued-status");
+    expect(status.textContent).not.toMatch(/Won't be delivered/);
+    expect(screen.queryByTestId("queued-remove")).toBeNull();
+    await act(async () => runtime.emit({ state: "suspended" }));
+    expect(chip().textContent).toBe("Stopped");
+  });
+
   it("never reads a workspace that needs attention, was deleted or cannot be reached as on its way", () => {
     const states = ["idle", "opening", "connecting", "reconnecting", "waitingForRuntime", "suspended", "unavailable", "updateRequired", "stopped"];
     for (const state of states) {

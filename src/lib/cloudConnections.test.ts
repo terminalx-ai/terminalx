@@ -299,7 +299,7 @@ describe("a workspace that stops and comes back", () => {
     // Lists that still say it needs attention ask nothing of it, however long it stays so.
     for (let i = 0; i < 5; i++) {
       now += 30_000;
-      manager.noteCloudWorkspaceListed(target("w1"), { running: false, at: now });
+      manager.noteCloudWorkspaceListed(target("w1"), { running: false, reachable: false, at: now });
       await flush(30_000);
     }
     expect(attached).toHaveLength(1);
@@ -312,6 +312,38 @@ describe("a workspace that stops and comes back", () => {
     expect(attached).toHaveLength(1);
     expect(attached[0]!.activate).toHaveBeenCalledTimes(1);
     expect(attached[0]!.activate).toHaveBeenCalledWith("connect");
+    expect(wakes()).toBe(0);
+    lease.release();
+  });
+
+  // #1582 review: repaired into stopped, not running. The parked connection opens again, finds it stopped, and parks there.
+  it("opens an unavailable connection again with connect once a newer list says it is stopped or coming up, not only running", async () => {
+    const lease = await manager.retainCloudConnection(target("w1"));
+    now += 100;
+    attached[0]!.emit({ state: "unavailable", reason: "attention-required" });
+    await flush();
+    // A list from before the park says nothing.
+    manager.noteCloudWorkspaceListed(target("w1"), { running: false, reachable: true, at: now - 50 });
+    await flush(60_000);
+    expect(attached[0]!.activate).not.toHaveBeenCalled();
+
+    now += 30_000;
+    manager.noteCloudWorkspaceListed(target("w1"), { running: false, reachable: true, at: now });
+    await flush();
+    expect(attached).toHaveLength(1);
+    expect(attached[0]!.activate).toHaveBeenCalledTimes(1);
+    expect(attached[0]!.activate).toHaveBeenCalledWith("connect");
+
+    // Its supervisor finds the workspace stopped and parks there: more lists of a stopped workspace ask nothing more of it.
+    attached[0]!.emit({ state: "opening" });
+    attached[0]!.emit({ state: "suspended" });
+    for (let i = 0; i < 3; i++) {
+      now += 30_000;
+      manager.noteCloudWorkspaceListed(target("w1"), { running: false, reachable: true, at: now });
+      await flush(30_000);
+    }
+    expect(attached[0]!.activate).toHaveBeenCalledTimes(1);
+    expect(lease.state()).toEqual({ state: "suspended" });
     expect(wakes()).toBe(0);
     lease.release();
   });

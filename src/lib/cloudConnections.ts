@@ -93,6 +93,12 @@ export interface CloudWorkspaceListed {
    * may still read so for a moment.
    */
   starting?: boolean;
+  /**
+   * In a state that can be opened at all: not needing attention, not
+   * deleted. A connection parked as unavailable opens again on such a list,
+   * stopped or coming up as well as running (#1582).
+   */
+  reachable?: boolean;
   /** When that list was asked for (ms): only a list asked for after a connection stopped can say it runs again. */
   at: number;
 }
@@ -254,11 +260,15 @@ function parked(entry: Entry): boolean {
 /**
  * Whether the workspace came back under a parked entry, so that its
  * connection must be replaced: a list asked for after it parked says the
- * machine runs.
+ * machine runs, or, for one parked as unavailable, that the workspace is in
+ * any state that can be opened again (repaired into stopped, say).
  */
 function cameBack(entry: Entry): boolean {
   const listed = entry.listed;
-  if (!listed?.running || !parked(entry)) return false;
+  if (!listed || !parked(entry)) return false;
+  // Unavailable (needs attention, deleted) is left for any state that can be opened; stopped only for running.
+  const unavailable = !!entry.connection && entry.state.state === "unavailable";
+  if (!listed.running && !(unavailable && listed.reachable)) return false;
   return entry.parkedAt === null || listed.at > entry.parkedAt;
 }
 
