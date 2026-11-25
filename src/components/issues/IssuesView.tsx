@@ -4,6 +4,7 @@ import { EmptyView } from "@/components/start/EmptyView";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Check, ChevronDown, Cloud, Copy, ExternalLink, Github, LogoLinear, FolderGit2, GitBranch, Loader2, Plus, RefreshCw, Search, Settings2, Users } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { GH_INSTALL_URL, ghInstallCommand } from "@/lib/ghInstall";
 import { Button } from "@/components/ui/button";
 import { bindingText, matchesShortcut, useKeymap } from "@/lib/shortcuts";
 import { Segmented, Switch } from "@/components/ui/controls";
@@ -569,7 +570,7 @@ export function IssuesView({
   const emptyReason = useMemo(() => {
     if (!projectPath) return "Add a project to see its issues.";
     if (provider === "github") {
-      if (ghOk === false) return "Issues need the GitHub CLI. Install gh and run gh auth login.";
+      if (ghOk === false) return ghInstallCommand() ? `Issues need the GitHub CLI. Install it with ${ghInstallCommand()}, then run gh auth login.` : "Issues need the GitHub CLI. Install gh, then run gh auth login.";
       if (repo === null) return "Add a GitHub remote named origin to see this project's issues.";
     } else if (linear && !linear.connected) {
       return "Linear is not connected. Add an API key in Settings → Integrations.";
@@ -855,7 +856,7 @@ export function IssuesView({
               <span className="max-w-[44ch] text-sm text-muted-foreground">{emptyReason}</span>
               {provider === "github" && ghOk === false && (
                 <div className="mt-1 flex flex-wrap justify-center gap-2">
-                  <Button size="sm" onClick={() => void openUrl("https://cli.github.com").catch(() => {})}>
+                  <Button size="sm" onClick={() => void openUrl(GH_INSTALL_URL).catch(() => {})}>
                     Install GitHub CLI <ExternalLink />
                   </Button>
                   <Button size="sm" variant="ghost" onClick={() => setTick((n) => n + 1)}>

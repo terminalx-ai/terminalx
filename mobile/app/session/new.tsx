@@ -90,7 +90,7 @@ export function NewSessionForm({ title, onStarted }: { title?: string; onStarted
     </Card> : null}
 
     <SectionTitle>Agent</SectionTitle>
-    <Card style={styles.group}>{options.agents.map((candidate) => choice(candidate.id, candidate.name, candidate.id === choices.agent, () => change(agentDefaults(candidate)), candidate.available ? undefined : `Not installed · ${candidate.installHint}`, !candidate.available))}</Card>
+    <Card style={styles.group}>{options.agents.map((candidate) => choice(candidate.id, candidate.name, candidate.id === choices.agent, () => change(agentDefaults(candidate)), candidate.available ? undefined : `Not installed · ${candidate.installHint || "install it with its setup guide"}`, !candidate.available))}</Card>
     {agent && agent.models.length ? <><SectionTitle>Model</SectionTitle><Card style={styles.group}>{agent.models.map((candidate) => choice(candidate.id, candidate.label, candidate.id === choices.model, () => setChoices(chooseModel(choices, agent, candidate.id))))}</Card></> : null}
     <AccountChoices agent={agent} choices={choices} onChange={change} />
     {agent?.effort && model && model.efforts.length ? <><SectionTitle>Effort</SectionTitle><Card style={styles.row}>{model.efforts.map((effort) => <Pressable key={effort} accessibilityRole="button" accessibilityState={{ selected: effort === choices.effort }} onPress={() => change({ effort })} style={[styles.pill, { backgroundColor: effort === choices.effort ? palette.selected : palette.raised }]}><Text style={[styles.choiceLabel, { color: palette.ink }]}>{effort}</Text></Pressable>)}</Card></> : null}

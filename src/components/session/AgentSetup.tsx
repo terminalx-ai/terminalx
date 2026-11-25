@@ -147,12 +147,12 @@ export function AgentSetupCard({ harness, value, checking }: { harness: HarnessI
           </Button> : null}
       </div>
       {active ? <SetupRun harness={harness} flow={flow} card /> : state !== "ready" && !harness.installable && <div className="mt-2 text-xs text-muted-foreground">
-        <p>{install ? "Open a terminal and run this command to install it, then sign in." : `Open a terminal and run this command to sign in to ${harness.name}.`}</p>
+        <p>{!command ? "Install it with its setup guide, then sign in." : install ? "Open a terminal and run this command to install it, then sign in." : `Open a terminal and run this command to sign in to ${harness.name}.`}</p>
         <div className="mt-1.5 flex flex-wrap items-center gap-2">
-          <code className="min-w-0 break-all rounded bg-background px-2 py-1">{command}</code>
-          <Button type="button" size="sm" variant="outline" onClick={() => {
+          {command && <code className="min-w-0 break-all rounded bg-background px-2 py-1">{command}</code>}
+          {command && <Button type="button" size="sm" variant="outline" onClick={() => {
             void copyText(command).then(() => setCopyStatus("Copied"), () => setCopyStatus("Could not copy. Select the command to copy it."));
-          }}>Copy command</Button>
+          }}>Copy command</Button>}
           <Button type="button" size="sm" variant="ghost" onClick={() => void openUrl(harness.installUrl)}>Setup guide</Button>
           {copyStatus && <span role="status">{copyStatus}</span>}
         </div>

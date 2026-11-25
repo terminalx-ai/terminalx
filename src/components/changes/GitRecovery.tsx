@@ -2,6 +2,7 @@ import { prErrorKind, type PrErrorKind } from "@/lib/prErrors";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { GH_INSTALL_URL, ghInstallCommand } from "@/lib/ghInstall";
 import { errorMessage, gh, pty, type GitHubConnectionStatus } from "@/lib/api";
 import type { GitSource } from "@/lib/gitSource";
 import { disposeInstance } from "@/lib/terminal";
@@ -77,10 +78,11 @@ export function GitHubSetup({ status, onRefresh, onConnectingChange }: { status:
   return <section aria-label="GitHub connection" className="m-3 rounded-lg border border-hairline p-5 text-center text-xs">
     <div className="mx-auto mb-3 grid size-9 place-items-center rounded-md bg-well"><GitPullRequest className="size-4" /></div>
     <h3 className="text-sm font-medium">{missing ? "Install GitHub CLI" : unavailable ? "Could not check GitHub" : "Connect GitHub to see pull requests"}</h3>
-    <p className="mt-1 text-muted-foreground">{missing ? "Install the GitHub CLI to connect your account and work with pull requests." : unavailable ? `Check your connection to ${hostname} and try again.` : `Connect your account on ${hostname} through your browser using the GitHub CLI on this computer.`}</p>
+    <p className="mt-1 text-muted-foreground">{missing ? `Install the GitHub CLI to connect your account and work with pull requests.${ghInstallCommand() ? "" : " Its site has the package for your system."}` : unavailable ? `Check your connection to ${hostname} and try again.` : `Connect your account on ${hostname} through your browser using the GitHub CLI on this computer.`}</p>
+    {missing && ghInstallCommand() && <p className="mt-2 text-muted-foreground">In a terminal: <code className="font-mono">{ghInstallCommand()}</code></p>}
     <div className="mt-3 flex flex-wrap justify-center gap-2">
       <Button size="sm" variant="accent" onClick={() => {
-        if (missing) void openUrl("https://cli.github.com/");
+        if (missing) void openUrl(GH_INSTALL_URL);
         else if (unavailable) onRefresh();
         else { setConnecting(true); onConnectingChange?.(true); }
       }}>{missing ? "Install GitHub CLI" : unavailable ? "Try again" : "Connect GitHub"}</Button>

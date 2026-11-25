@@ -175,7 +175,7 @@ impl IssueFilter {
 // ------------------------------------------------------------------ GitHub
 
 pub(crate) fn gh() -> Result<Command> {
-    let p = crate::binpath::resolve("gh").ok_or_else(|| anyhow!("GitHub CLI (gh) is not installed or not on PATH."))?;
+    let p = crate::binpath::resolve("gh").ok_or_else(|| anyhow!(crate::github::GH_MISSING))?;
     let mut c = Command::new(p);
     c.env("PATH", crate::binpath::login_path());
     c.env("GH_PROMPT_DISABLED", "1");
