@@ -41,6 +41,8 @@ APPLE_ONLY = (
     "src-tauri/src/computer/macos_native.rs",
     "src-tauri/src/dictation.rs",
     "src-tauri/src/harness/codex/browser_use_macos",
+    # The dormant approved-command executor and its policy (PRO-220): macOS enforcement, no caller yet.
+    "src-tauri/src/host_command_",
     "src-tauri/src/local_runtime/platform",
     "src-tauri/src/machine_host/window_consent_tests.rs",
     "src-tauri/src/power.rs",
