@@ -3,14 +3,14 @@ import { Alert, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView,
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Crypto from "expo-crypto";
-import { Check, ChevronRight, CirclePause, CloudOff, ServerOff, WifiOff } from "lucide-react-native";
+import { Check, CirclePause, CloudOff, ServerOff, WifiOff } from "lucide-react-native";
 import { CloudApiError, type CloudApi, type CloudCredential, type CloudFirstRunSetup, type CloudLaunch, type CloudOrganization, type CloudProvider, type CloudProviderSetup, type CloudQuote } from "@mobile/cloud/api";
 import { BYPASS_NOT_FROM_PHONE, PHONE_DEFAULT_MODE, effortLabel, phoneModeLabel, phoneModes } from "@mobile/cloud/agent-settings";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import type { CloudCatalog } from "@mobile/cloud/catalog";
 import { EMPTY_FIRST_TASK, FIRST_TASK_PLACEHOLDER, FIRST_TASK_TOO_LONG, NO_AGENT_TICKED, keptTaskKey, launchOf, taskAgent, taskAgents, taskEffort, taskEffortChoices, taskFacts, taskModel, taskModelChoices, taskModels, taskTooLong, taskWritten, type FirstTaskDraft } from "@mobile/cloud/first-task";
 import { EMPTY_FIRST_TASK_CHECKED_LIVE } from "@mobile/cloud/live-checks";
-import { ACCESS_NOTICE, LaunchAttempt, QUOTE_EXPIRED, REPOSITORY_INVALID, SPEND_NOTICE, agentLogins, credentialName, firstRunSetup, idleChoiceLabel, idleChoices, idleValue, launchOrganization, launchProviders, launchRefusal, loginDetail, preflightProblems, pricingNote, problemsTitle, providerLabel, quotedSize, repositoryOf, sizeDetail, sizeNamesMachine, sizeValue, unanswered, type LaunchRefusal, type PreflightProblems } from "@mobile/cloud/launch";
+import { ACCESS_NOTICE, LaunchAttempt, QUOTE_EXPIRED, SPEND_NOTICE, agentLogins, credentialName, firstRunSetup, idleChoiceLabel, idleChoices, idleValue, launchOrganization, launchProviders, launchRefusal, loginDetail, preflightProblems, pricingNote, problemsTitle, providerLabel, quotedSize, repositoriesRow, repositoryLine, sizeDetail, sizeNamesMachine, sizeValue, unanswered, type LaunchRefusal, type LaunchRepository, type PreflightProblems } from "@mobile/cloud/launch";
 import { stepHref } from "@mobile/cloud/setup-routes";
 import { useOrganizationSetups } from "@mobile/cloud/useSetup";
 import { useApp } from "@mobile/state/AppProvider";
@@ -21,6 +21,7 @@ import { Notice } from "@mobile/ui/Notice";
 import { AgentSettingsRows, PickRow } from "@mobile/ui/PickRow";
 import { PriceLines, priceText } from "@mobile/ui/PriceLines";
 import { Button, Card, EmptyState, SectionTitle } from "@mobile/ui/primitives";
+import { RepositoriesStep } from "@mobile/ui/repositories/RepositoriesStep";
 import { ScreenHeader } from "@mobile/ui/SessionChrome";
 import { TextField } from "@mobile/ui/TextField";
 import { useTheme } from "@mobile/ui/theme";
@@ -88,8 +89,8 @@ interface Draft {
   locationId: string;
   sourceId: string;
   idleMinutes: number;
-  repository: string;
-  ref: string;
+  /** The repositories it clones (25.11): picked from the organization's list or typed, at most five, each with its branch. */
+  repositories: LaunchRepository[];
   /** Agent logins the person unticked; every other working one is given to the workspace. */
   withoutAgents: string[];
   /** The first task (25.09): which ticked agent starts, in which mode, and what it is told. */
@@ -101,7 +102,8 @@ interface Priced {
   name: string;
   quote: CloudQuote;
   setup: CloudFirstRunSetup | undefined;
-  repository: string | null;
+  /** One line each, with its branch. */
+  repositories: string[];
   agents: string[];
   provider: CloudProvider;
   /** The first task, as it is sent; none when no agent is ticked or the person cannot choose logins. */
@@ -142,7 +144,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   const [offer, setOffer] = useState<Offer>({ status: "reading" });
   const [setup, setSetup] = useState<CloudProviderSetup | null>(null);
   // Launch again after a cancel opens with the first task that was not sent, taken from where the launch kept it.
-  const [draft, setDraft] = useState<Draft>(() => ({ name: "", providerId: null, sizeId: "", locationId: "", sourceId: "", idleMinutes: 0, repository: "", ref: "", withoutAgents: [], task: (again ? takeConversationState<FirstTaskDraft>(keptTaskKey(orgId, again)) : undefined) ?? NO_TASK }));
+  const [draft, setDraft] = useState<Draft>(() => ({ name: "", providerId: null, sizeId: "", locationId: "", sourceId: "", idleMinutes: 0, repositories: [], withoutAgents: [], task: (again ? takeConversationState<FirstTaskDraft>(keptTaskKey(orgId, again)) : undefined) ?? NO_TASK }));
   const [step, setStep] = useState<"form" | "repository" | "review">("form");
   const [sheet, setChosenSheet] = useState<Sheet>(null);
   // The task is the form's last field: while it is typed in, the form keeps its end in view, above the keyboard
@@ -282,8 +284,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   const model = taskModel(draft.task.model, models);
   const effort = taskEffort(draft.task.effort, model);
   const tooLong = firstTask && taskTooLong(draft.task.text);
-  const typedRepository = draft.repository.trim();
-  const repository = typedRepository ? repositoryOf(typedRepository) : null;
+  const repositoryRow = repositoriesRow(draft.repositories);
   const hourly = (micros: number | undefined) => (micros == null ? null : priceText(micros, setup.currency));
 
   /** Check the setup, then ask for the price: the review opens on the quote. */
@@ -292,8 +293,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
     if (inFlight.current || noAnswer) return;
     const name = draft.name.trim();
     if (!name || !size || !place || !source || tooLong) return;
-    if (typedRepository && !repository) return setProblems({ items: [REPOSITORY_INVALID], repository: REPOSITORY_INVALID, ref: null, needsGithubToken: false });
-    const first = firstRunSetup({ repository, ref: draft.ref, agentIds: ticked.map((login) => login.id) }, offer.credentials);
+    const first = firstRunSetup({ repositories: draft.repositories, agentIds: ticked.map((login) => login.id) }, offer.credentials);
     inFlight.current = true;
     setBusy("pricing");
     setProblems(null);
@@ -302,7 +302,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
     setNoAnswer(false);
     try {
       if (first) {
-        const found = preflightProblems(await api.preflight(orgId, first), { repository }, offer.credentials);
+        const found = preflightProblems(await api.preflight(orgId, first), { repositories: draft.repositories }, offer.credentials);
         if (found) { if (alive.current) { setProblems(found); setStep("form"); } return; }
       }
       const quote = await api.quote(orgId, { provider: provider.id, sourceId: source.id, locationId: place.id, machineClassId: size.id, idleSuspendMinutes: draft.idleMinutes, retentionDays: setup.defaults.retentionDays, networkPolicy: setup.defaults.networkPolicy });
@@ -310,7 +310,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
       // A new price for what was already under review: said when it is not the same.
       const before = step === "review" && priced && priced.name === name && priced.quote.configuration.machineClassId === quote.configuration.machineClassId && priced.quote.provider === quote.provider ? priced.quote.activeHourlyMicros : null;
       setPriceBefore(before !== null && before !== quote.activeHourlyMicros ? before : null);
-      setPriced({ name, quote, setup: first, repository: repository ? [repository.fullName, draft.ref.trim()].filter(Boolean).join(" · ") : null, agents: ticked.map((login) => credentialName(login.provider)), provider, launch: firstTask ? launchOf(draft.task, agents, listedModels) : undefined });
+      setPriced({ name, quote, setup: first, repositories: draft.repositories.map(repositoryLine), agents: ticked.map((login) => credentialName(login.provider)), provider, launch: firstTask ? launchOf(draft.task, agents, listedModels) : undefined });
       setExpired(false);
       setStep("review");
     } catch (error) {
@@ -364,17 +364,17 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
     { text: "Launch", onPress: () => void launch() },
   ]);
 
-  const page = (title: string, onBack: () => void, body: ReactNode, foot: ReactNode) => <KeyboardAvoidingView style={styles.page} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-    {header(title, onBack)}
+  // `subtitle`: a page about every workspace of the organization says so in place of its name (25.11's Choose repositories).
+  const page = (title: string, onBack: () => void, body: ReactNode, foot: ReactNode, subtitle?: string) => <KeyboardAvoidingView style={styles.page} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+    {subtitle ? <ScreenHeader title={title} subtitle={subtitle} onBack={onBack} /> : header(title, onBack)}
     <ScrollView ref={scroller} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}
       onContentSizeChange={() => { if (typing.current) scroller.current?.scrollToEnd({ animated: false }); }}>{body}</ScrollView>
-    <View style={[styles.foot, { paddingBottom: insets.bottom + 12 }]}>{foot}</View>
+    {foot ? <View style={[styles.foot, { paddingBottom: insets.bottom + 12 }]}>{foot}</View> : null}
   </KeyboardAvoidingView>;
 
   if (step === "repository") {
-    return <RepositoryStep organization={organization.name} repository={draft.repository} gitRef={draft.ref} problems={problems} page={page}
-      onUse={(next, ref) => { change({ repository: next, ref }); setStep("form"); }}
-      onNone={() => { change({ repository: "", ref: "" }); setStep("form"); }}
+    return <RepositoriesStep api={api} orgId={orgId} organization={organization.name} repositories={draft.repositories} problems={problems} page={page}
+      onUse={(repositories) => { change({ repositories }); setStep("form"); }}
       onBack={() => setStep("form")} onToken={toOrganization} />;
   }
 
@@ -389,7 +389,8 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
         { label: "Size", value: quotedSize(quote.configuration) },
         { label: "Region", value: quote.configuration.locationLabel },
         { label: "Stops when idle", value: idleValue(quote.configuration.idleSuspendMinutes) },
-        { label: "Repository", value: priced.repository ?? "None" },
+        // Several are listed one to a line, each with its branch, under the label.
+        priced.repositories.length > 1 ? { label: "Repositories", value: priced.repositories.join("\n"), block: true } : { label: "Repository", value: priced.repositories[0] ?? "None" },
         { label: "Agents", value: priced.agents.length ? priced.agents.join(", ") : "None" },
       ]} />
       {priced.launch ? <>
@@ -447,7 +448,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
       </Card>
       <SectionTitle>Repository and agents</SectionTitle>
       <Card>
-        <PickRow label="Repository" value={repository?.fullName ?? (typedRepository || "None")} bad={!!problems?.repository || !!problems?.ref} onPress={() => setStep("repository")} first />
+        <PickRow testID="pick-repository" label={repositoryRow.label} value={repositoryRow.value} bad={!!problems?.repository || !!problems?.ref} onPress={() => { Keyboard.dismiss(); setStep("repository"); }} first />
         {logins.map((login) => {
           const on = !draft.withoutAgents.includes(login.id);
           return <Pressable key={login.id} testID={`agent-${login.provider}`} accessibilityRole="checkbox" accessibilityLabel={`${credentialName(login.provider)}, ${loginDetail(login)}`} accessibilityState={{ checked: on }}
@@ -474,49 +475,6 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   </>;
 }
 
-/** The repository's own page: one typed or pasted GitHub URL and an optional branch, with what the last check said of each. */
-function RepositoryStep({ organization, repository, gitRef, problems, page, onUse, onNone, onBack, onToken }: {
-  organization: string;
-  repository: string;
-  gitRef: string;
-  problems: PreflightProblems | null;
-  page(title: string, onBack: () => void, body: ReactNode, foot: ReactNode): ReactNode;
-  onUse(repository: string, ref: string): void;
-  onNone(): void;
-  onBack(): void;
-  onToken(): void;
-}) {
-  const { palette } = useTheme();
-  const [url, setUrl] = useState(repository);
-  const [ref, setRef] = useState(gitRef);
-  const [invalid, setInvalid] = useState(false);
-  // What the last check said is about what was checked: gone once it is edited.
-  const unchanged = url === repository && ref === gitRef;
-  const empty = !url.trim();
-  const use = () => {
-    if (!repositoryOf(url)) return setInvalid(true);
-    onUse(url.trim(), ref.trim());
-  };
-  return page("Repository", onBack, <>
-    <Text style={[styles.lede, { color: palette.muted }]}>Optional. The repository is cloned before the workspace becomes available.</Text>
-    <TextField testID="repository-url" label="GitHub repository URL" value={url} onChangeText={(value) => { setUrl(value); setInvalid(false); }} placeholder="github.com/owner/repository" paste autoFocus={empty} autoCapitalize="none" autoCorrect={false} keyboardType="url"
-      error={invalid ? REPOSITORY_INVALID : unchanged ? problems?.repository : null} />
-    <TextField testID="repository-ref" label="Branch or tag" hint="optional" value={ref} onChangeText={setRef} placeholder="main" autoCapitalize="none" autoCorrect={false} error={unchanged ? problems?.ref : null} />
-    {unchanged && problems?.needsGithubToken
-      ? <Card><Pressable testID="add-github-token" accessibilityRole="button" accessibilityLabel={`Add a GitHub token, saved for ${organization}, in Agent logins`} onPress={onToken} style={({ pressed }) => [styles.row, styles.tokenRow, pressed ? { backgroundColor: palette.raised } : null]}>
-        <View style={styles.grow}>
-          <Text style={[styles.rowLabel, { color: palette.ink }]}>Add a GitHub token</Text>
-          <Text style={[styles.tokenDetail, { color: palette.muted }]}>{`Saved for ${organization}, in Agent logins`}</Text>
-        </View>
-        <ChevronRight size={18} color={palette.faint} />
-      </Pressable></Card>
-      : <Text style={[styles.help, { color: palette.muted }]}>A private repository is cloned with the GitHub token saved in Agent logins.</Text>}
-  </>, <>
-    <Button testID="use-repository" label="Use this repository" disabled={empty} onPress={use} />
-    {repository.trim() || !empty ? <Button testID="no-repository" label="Launch without a repository" kind="secondary" onPress={onNone} /> : null}
-  </>);
-}
-
 const styles = StyleSheet.create({
   page: { flex: 1 },
   content: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 16, gap: 12 },
@@ -529,7 +487,4 @@ const styles = StyleSheet.create({
   tick: { width: 22, height: 22, borderRadius: 11, alignItems: "center", justifyContent: "center" },
   agentDetail: { flexShrink: 1, fontSize: 13, lineHeight: 18 },
   help: { fontSize: 13, lineHeight: 18, marginHorizontal: 4 },
-  lede: { fontSize: 15, lineHeight: 21, marginHorizontal: 4 },
-  tokenRow: { minHeight: 52 },
-  tokenDetail: { fontSize: 13, lineHeight: 18 },
 });
