@@ -28,6 +28,8 @@ pub mod agent_commands;
 pub mod bootstrap_link;
 pub mod bots;
 pub mod client;
+#[cfg(all(test, unix))]
+mod cloud_desktop;
 pub mod collab;
 pub mod environment;
 pub mod files;
