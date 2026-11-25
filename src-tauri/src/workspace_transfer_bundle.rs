@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const BUNDLE_TIMEOUT: Duration = Duration::from_secs(60);
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", test))]
 const MAX_CHECKOUT_BYTES: u64 = 512 * 1024 * 1024;
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", test))]
 const MAX_CHECKOUT_ENTRIES: usize = 100_000;
 pub(crate) const CHUNK_BYTES: u64 = 128 * 1024;
 pub(crate) const MAX_BUNDLE_BYTES: u64 = 64 * 1024 * 1024;
@@ -33,7 +33,7 @@ impl BranchCommit {
 
     pub(crate) fn new(branch: &str, commit: &str) -> Result<Self> {
         ensure!(
-            crate::remote::git::valid_ref_name(branch),
+            crate::remote::git::valid_ref_name(branch) && !branch.eq_ignore_ascii_case("HEAD"),
             "invalid transfer branch"
         );
         ensure!(
@@ -77,12 +77,35 @@ impl TransferBundle {
     }
 }
 
-pub(crate) fn git(repo: &Path, args: &[&str]) -> Result<String> {
+fn git_command(repo: &Path, args: &[&str]) -> std::process::Command {
     let mut command = crate::git::git_in(repo, args);
+    let bound = command
+        .get_envs()
+        .any(|(key, value)| key == "GIT_DIR" && value.is_some());
+    if !bound {
+        for key in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_INDEX_FILE",
+        ] {
+            command.env_remove(key);
+        }
+    }
     command
-        .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_NO_LAZY_FETCH", "1");
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_QUARANTINE_PATH")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_ALLOW_PROTOCOL", "file");
+    command
+}
+
+pub(crate) fn git(repo: &Path, args: &[&str]) -> Result<String> {
+    let mut command = git_command(repo, args);
+    command.args(args);
     crate::git::output_within(command, BUNDLE_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("transfer bundle: {error}"))
 }
@@ -95,39 +118,52 @@ fn path_argument(path: &Path) -> Result<&str> {
     path.to_str().context("unsupported transfer bundle path")
 }
 
-pub(crate) fn export(repo: &Path, expected: &BranchCommit) -> Result<TransferBundle> {
+pub(crate) fn export(repo: &Path, expected: &BranchCommit) -> Result<Option<TransferBundle>> {
     let head = git(repo, &["rev-parse", "--verify", &expected.branch_ref])?;
     ensure!(
         head.trim() == expected.commit,
         "cloud branch changed before export"
     );
+    let boundary = ["@{upstream}", "refs/remotes/origin/HEAD"]
+        .into_iter()
+        .find_map(|reference| git(repo, &["merge-base", expected.commit(), reference]).ok());
+    let parents;
+    let bases = if let Some(boundary) = &boundary {
+        if boundary.trim() == expected.commit() {
+            return Ok(None);
+        }
+        vec![boundary.trim()]
+    } else {
+        parents = git(
+            repo,
+            &["rev-list", "--parents", "-n", "1", expected.commit()],
+        )?;
+        let parents: Vec<_> = parents.split_whitespace().skip(1).collect();
+        if parents.is_empty() {
+            return Ok(None);
+        }
+        parents
+    };
+    let exclusions: Vec<_> = bases.into_iter().map(|base| format!("^{base}")).collect();
     let directory = tempfile::Builder::new()
         .prefix("terminalx-transfer-")
         .tempdir()?;
     let path = directory.path().join("workspace.bundle");
-    let base = ["@{upstream}", "refs/remotes/origin/HEAD"]
-        .into_iter()
-        .filter_map(|reference| git(repo, &["merge-base", expected.commit(), reference]).ok())
-        .map(|base| base.trim().to_owned())
-        .find(|base| base != expected.commit());
-    let exclude = base.map(|base| format!("^{base}"));
     let mut args = vec![
         "bundle",
         "create",
         path_argument(&path)?,
         &expected.branch_ref,
     ];
-    if let Some(exclude) = &exclude {
-        args.push(exclude);
-    }
+    args.extend(exclusions.iter().map(String::as_str));
     git(repo, &args)?;
     check_head(repo, &path, expected)?;
     let size = std::fs::metadata(&path)?.len();
-    Ok(TransferBundle {
+    Ok(Some(TransferBundle {
         _directory: directory,
         path,
         size,
-    })
+    }))
 }
 
 fn check_head(repo: &Path, bundle: &Path, expected: &BranchCommit) -> Result<()> {
@@ -143,12 +179,71 @@ fn check_head(repo: &Path, bundle: &Path, expected: &BranchCommit) -> Result<()>
     Ok(())
 }
 
-/// Load Git objects only. The caller can create the named branch and
-/// worktree after the transcript and destination have both been validated.
-pub(crate) fn import_objects(repo: &Path, bundle: &Path, expected: &BranchCommit) -> Result<()> {
-    check_head(repo, bundle, expected)?;
+#[cfg(any(feature = "desktop", test))]
+#[derive(Debug, thiserror::Error)]
+#[error("Fetch commit {commit} in your local clone before transferring {branch}.")]
+pub(crate) struct MissingPrerequisite {
+    pub(crate) commit: String,
+    pub(crate) branch: String,
+}
+
+#[cfg(any(feature = "desktop", test))]
+pub(crate) fn require_commit(repo: &Path, expected: &BranchCommit, commit: &str) -> Result<()> {
+    ensure!(
+        commit.len() == expected.commit().len()
+            && commit.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "Invalid Git bundle prerequisite"
+    );
+    if git(repo, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_err() {
+        return Err(MissingPrerequisite {
+            commit: commit.to_owned(),
+            branch: expected.branch().to_owned(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "desktop", test))]
+fn check_prerequisites(repo: &Path, bundle: &Path, expected: &BranchCommit) -> Result<()> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(bundle)?;
+    let mut header = std::io::BufReader::new(file).take(64 * 1024);
+    let mut line = Vec::new();
+    header.read_until(b'\n', &mut line)?;
+    ensure!(
+        matches!(line.as_slice(), b"# v2 git bundle\n" | b"# v3 git bundle\n"),
+        "Invalid Git bundle header"
+    );
+    let mut prerequisites = 0;
+    loop {
+        line.clear();
+        header.read_until(b'\n', &mut line)?;
+        ensure!(
+            line.ends_with(b"\n"),
+            "The Git bundle header is incomplete or too large"
+        );
+        if line == b"\n" {
+            return Ok(());
+        }
+        if let Some(prerequisite) = line.strip_prefix(b"-") {
+            prerequisites += 1;
+            ensure!(
+                prerequisites <= 32,
+                "The Git bundle has too many prerequisites"
+            );
+            let end = prerequisite
+                .iter()
+                .position(|byte| *byte == b' ')
+                .context("Malformed bundle prerequisite")?;
+            require_commit(repo, expected, std::str::from_utf8(&prerequisite[..end])?)?;
+        }
+    }
+}
+
+#[cfg(any(feature = "desktop", test))]
+fn strict_fetch(repo: &Path, bundle: &Path, expected: &BranchCommit) -> Result<()> {
     let bundle = path_argument(bundle)?;
-    git(repo, &["bundle", "verify", bundle])?;
     git(
         repo,
         &[
@@ -167,24 +262,89 @@ pub(crate) fn import_objects(repo: &Path, bundle: &Path, expected: &BranchCommit
             &expected.branch_ref,
         ],
     )?;
+    require_commit(repo, expected, expected.commit())
+}
+
+#[cfg(any(feature = "desktop", test))]
+pub(crate) struct ValidatedBundle<'a> {
+    path: &'a Path,
+    expected: &'a BranchCommit,
+}
+
+#[cfg(any(feature = "desktop", test))]
+impl ValidatedBundle<'_> {
+    pub(crate) fn promote(&self, destination: &Path) -> Result<()> {
+        strict_fetch(destination, self.path, self.expected)
+    }
+}
+
+/// Validate the caller's private bundle snapshot before adding any objects
+/// to the target repository. The alternates link is used only for reads.
+#[cfg(any(feature = "desktop", test))]
+pub(crate) fn validate_bundle<'a>(
+    repo: &Path,
+    bundle: &'a Path,
+    expected: &'a BranchCommit,
+) -> Result<ValidatedBundle<'a>> {
+    check_prerequisites(repo, bundle, expected)?;
+    check_head(repo, bundle, expected)?;
+    let format = if expected.commit().len() == 64 {
+        "sha256"
+    } else {
+        "sha1"
+    };
+    let quarantine = tempfile::tempdir()?;
     git(
-        repo,
-        &["cat-file", "-e", &format!("{}^{{commit}}", expected.commit)],
+        quarantine.path(),
+        &["init", "--bare", &format!("--object-format={format}")],
     )?;
-    Ok(())
+    let raw = git(
+        repo,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "objects",
+        ],
+    )?;
+    let objects = crate::paths::canonicalize(raw.trim_end_matches(['\r', '\n']))?;
+    let alternate = path_argument(&objects)?;
+    ensure!(
+        !alternate.contains(['\r', '\n']),
+        "Unsupported Git object directory path"
+    );
+    std::fs::write(
+        quarantine.path().join("objects/info/alternates"),
+        format!("{alternate}\n"),
+    )?;
+    git(
+        quarantine.path(),
+        &["bundle", "verify", path_argument(bundle)?],
+    )?;
+    strict_fetch(quarantine.path(), bundle, expected)?;
+    validate_checkout(quarantine.path(), expected)?;
+    Ok(ValidatedBundle {
+        path: bundle,
+        expected,
+    })
+}
+
+#[cfg(test)]
+fn import_objects(repo: &Path, bundle: &Path, expected: &BranchCommit) -> Result<()> {
+    validate_bundle(repo, bundle, expected)?.promote(repo)
 }
 
 /// Bound the contents Git will materialize before creating a worktree.
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", test))]
 pub(crate) fn validate_checkout(repo: &Path, expected: &BranchCommit) -> Result<()> {
     let args = ["ls-tree", "-r", "-l", "-z", expected.commit()];
-    let command = crate::git::git_in(repo, &args);
+    let command = git_command(repo, &args);
     let listing = crate::git::output_with_limit(command, &args, BUNDLE_TIMEOUT, 16 * 1024 * 1024)
         .map_err(|error| anyhow::anyhow!("transfer tree: {error}"))?;
     validate_listing(&listing, MAX_CHECKOUT_BYTES, MAX_CHECKOUT_ENTRIES)
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", test))]
 fn validate_listing(listing: &str, max_bytes: u64, max_entries: usize) -> Result<()> {
     let mut size = 0u64;
     for (index, record) in listing.split_terminator('\0').enumerate() {
@@ -192,14 +352,21 @@ fn validate_listing(listing: &str, max_bytes: u64, max_entries: usize) -> Result
             index < max_entries,
             "The Git checkout has too many entries to transfer"
         );
-        let (metadata, _) = record.split_once('\t').context("Invalid Git tree entry")?;
+        let (metadata, path) = record.split_once('\t').context("Invalid Git tree entry")?;
+        ensure!(
+            path.len() <= 1024
+                && path
+                    .split('/')
+                    .all(|part| !part.is_empty() && part.len() <= 255),
+            "A Git checkout path is too long to transfer"
+        );
         let mut fields = metadata.split_whitespace();
         let mode = fields.next().context("Missing Git tree mode")?;
         let object = fields.next().context("Missing Git tree object type")?;
         fields.next().context("Missing Git tree object ID")?;
         let bytes = fields.next().context("Missing Git tree object size")?;
         match (mode, object) {
-            ("100644" | "100755" | "120000", "blob") => {
+            ("100644" | "100755", "blob") => {
                 size = size
                     .checked_add(bytes.parse()?)
                     .context("The Git checkout is too large to transfer")?;
@@ -208,7 +375,8 @@ fn validate_listing(listing: &str, max_bytes: u64, max_entries: usize) -> Result
                     "The Git checkout is too large to transfer"
                 );
             }
-            ("160000", "commit") => {}
+            ("120000", "blob") => bail!("Git checkout contains symbolic links"),
+            ("160000", "commit") => bail!("Git checkout contains submodules"),
             _ => bail!("Unsupported Git tree entry"),
         }
     }
@@ -254,6 +422,27 @@ pub(crate) fn ensure_local_branch(repo: &Path, expected: &BranchCommit) -> Resul
 }
 
 #[cfg(feature = "desktop")]
+pub(crate) fn choose_local_branch(
+    repo: &Path,
+    expected: &BranchCommit,
+    worktree_name: &str,
+) -> Result<BranchCommit> {
+    let attached = git(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(worktreepath)",
+            &expected.branch_ref,
+        ],
+    )?;
+    if attached.trim().is_empty() {
+        Ok(expected.clone())
+    } else {
+        BranchCommit::new(worktree_name, expected.commit())
+    }
+}
+
+#[cfg(feature = "desktop")]
 pub(crate) fn checkout(repo: &Path, path: &Path, expected: &BranchCommit) -> Result<()> {
     ensure!(!path.exists(), "Transfer checkout path already exists");
     std::fs::create_dir_all(path.parent().context("No worktree directory")?)?;
@@ -275,22 +464,41 @@ pub(crate) fn checkout(repo: &Path, path: &Path, expected: &BranchCommit) -> Res
             actual.trim() == expected.commit(),
             "The local branch moved during checkout"
         );
-        git(
-            path,
-            &[
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "filter.lfs.process=",
-                "-c",
-                "filter.lfs.smudge=",
-                "-c",
-                "filter.lfs.required=false",
-                "reset",
-                "--hard",
-                expected.commit(),
-            ],
-        )?;
+        let keys = git(path, &["config", "--name-only", "--null", "--list"])?;
+        let mut filters: Vec<_> = keys
+            .split_terminator('\0')
+            .filter_map(|key| {
+                let key = key.strip_prefix("filter.")?;
+                let (driver, attribute) = key.rsplit_once('.')?;
+                if !matches!(attribute, "smudge" | "process" | "required") {
+                    return None;
+                }
+                Some(driver)
+            })
+            .collect();
+        filters.sort_unstable();
+        filters.dedup();
+        let overrides: Vec<_> = filters
+            .into_iter()
+            .flat_map(|driver| {
+                [
+                    format!("filter.{driver}.smudge="),
+                    format!("filter.{driver}.process="),
+                    format!("filter.{driver}.required=false"),
+                ]
+            })
+            .collect();
+        let mut reset = vec!["-c", "core.hooksPath=/dev/null"];
+        for option in &overrides {
+            reset.extend(["-c", option.as_str()]);
+        }
+        reset.extend([
+            "reset",
+            "--hard",
+            "--no-recurse-submodules",
+            expected.commit(),
+        ]);
+        git(path, &reset)?;
         Ok(())
     })();
     if let Err(error) = populate {
@@ -433,8 +641,34 @@ pub(crate) fn transcript_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>> 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(export.finish()),
         Err(error) => return Err(error.into()),
     };
-    for line in std::io::BufReader::new(file).lines() {
-        if let Ok(event) = serde_json::from_str::<crate::events::AgentEvent>(&line?) {
+    let mut reader = std::io::BufReader::new(file);
+    let line_limit = max_bytes.max(1024 * 1024).saturating_mul(6);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader
+            .by_ref()
+            .take(line_limit as u64 + 1)
+            .read_until(b'\n', &mut line)?
+            == 0
+        {
+            break;
+        }
+        if line.len() > line_limit && !line.ends_with(b"\n") {
+            let visible = [
+                b"\"type\":\"user_message\"".as_slice(),
+                b"\"type\":\"assistant_text\"",
+                b"\"type\":\"turn_completed\"",
+            ]
+            .into_iter()
+            .any(|tag| line.windows(tag.len()).any(|window| window == tag));
+            if visible {
+                return Err(TransferTooLarge.into());
+            }
+            reader.skip_until(b'\n')?;
+            continue;
+        }
+        if let Ok(event) = serde_json::from_slice::<crate::events::AgentEvent>(&line) {
             export.event(&event, max_bytes)?;
         }
     }
@@ -525,11 +759,24 @@ mod tests {
         let cloud = temp.path().join("cloud");
         let local = temp.path().join("local");
         repository(&cloud);
-        repository(&local);
+        commit(&cloud);
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "-q",
+                cloud.to_str().unwrap(),
+                local.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
         git(&cloud, &["switch", "-c", "topic/one"]).unwrap();
         let source = BranchCommit::new("topic/one", &commit(&cloud)).unwrap();
-        let local_head = commit(&local);
-        let bundle = export(&cloud, &source).unwrap();
+        let local_head = git(&local, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_owned();
+        let bundle = export(&cloud, &source).unwrap().unwrap();
         let mut received = Vec::new();
         while (received.len() as u64) < bundle.size() {
             let bytes = bundle.read_chunk(received.len() as u64).unwrap();
@@ -599,7 +846,9 @@ mod tests {
         };
         let hidden = event(serde_json::json!({ "type": "reasoning", "text": "x".repeat(5000) }));
         let visible = event(serde_json::json!({ "type": "assistant_text", "text": "Answer" }));
-        std::fs::write(&log, format!("{hidden}\n{visible}\n")).unwrap();
+        let mut bytes = vec![0xff, b'\n'];
+        bytes.extend(format!("{hidden}\n{visible}\n").into_bytes());
+        std::fs::write(&log, bytes).unwrap();
         let text = transcript_file(&log, 64).unwrap();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&text).unwrap(),
@@ -610,6 +859,96 @@ mod tests {
         assert!(transcript_file(&log, 8)
             .unwrap_err()
             .is::<TransferTooLarge>());
+    }
+
+    #[test]
+    fn a_rejected_gitlink_or_multi_head_bundle_leaves_the_destination_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let cloud = temp.path().join("cloud");
+        let local = temp.path().join("local");
+        repository(&cloud);
+        let base = commit(&cloud);
+        let root = BranchCommit::new("main", &base).unwrap();
+        assert!(export(&cloud, &root).unwrap().is_none());
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "-q",
+                cloud.to_str().unwrap(),
+                local.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        git(
+            &cloud,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{base},outside"),
+            ],
+        )
+        .unwrap();
+        let head = commit(&cloud);
+        let pin = BranchCommit::new("main", &head).unwrap();
+        let bundle = export(&cloud, &pin).unwrap().unwrap();
+        let objects_before = git(&local, &["count-objects", "-v"]).unwrap();
+        let error = validate_bundle(&local, &bundle.path, &pin).err().unwrap();
+        assert!(error.to_string().contains("submodules"), "{error:#}");
+        assert_eq!(
+            git(&local, &["count-objects", "-v"]).unwrap(),
+            objects_before
+        );
+        assert!(git(&local, &["cat-file", "-e", &head]).is_err());
+
+        git(&cloud, &["branch", "second"]).unwrap();
+        let multi = temp.path().join("multi.bundle");
+        git(
+            &cloud,
+            &[
+                "bundle",
+                "create",
+                multi.to_str().unwrap(),
+                "main",
+                "second",
+                &format!("^{base}"),
+            ],
+        )
+        .unwrap();
+        assert!(validate_bundle(&local, &multi, &pin).is_err());
+        assert_eq!(
+            git(&local, &["count-objects", "-v"]).unwrap(),
+            objects_before
+        );
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn retry_uses_a_new_branch_and_keeps_the_original_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        repository(&project);
+        let head = commit(&project);
+        let original = BranchCommit::new("main", &head).unwrap();
+        let retry = choose_local_branch(&project, &original, "transfer-retry").unwrap();
+        assert_eq!(retry.branch(), "transfer-retry");
+        assert!(ensure_local_branch(&project, &retry).unwrap());
+        let checkout_path = dir.path().join("retry");
+        checkout(&project, &checkout_path, &retry).unwrap();
+        rollback_checkout(&project, &checkout_path, &retry).unwrap();
+        rollback_branch(&project, &retry).unwrap();
+        assert_eq!(
+            git(&project, &["rev-parse", "refs/heads/main"])
+                .unwrap()
+                .trim(),
+            head
+        );
+        assert!(git(
+            &project,
+            &["rev-parse", "--verify", "refs/heads/transfer-retry"]
+        )
+        .is_err());
     }
 
     #[test]
@@ -630,15 +969,22 @@ mod tests {
             git(checkout, &["config", "user.name", "Fixture"]).unwrap();
             git(checkout, &["config", "user.email", "fixture@example.test"]).unwrap();
         }
+        let up_to_date = BranchCommit::new("main", &base).unwrap();
+        assert!(export(&cloud, &up_to_date).unwrap().is_none());
         let head = commit(&cloud);
         let selected = BranchCommit::new("main", &head).unwrap();
-        let bundle = export(&cloud, &selected).unwrap();
+        let bundle = export(&cloud, &selected).unwrap().unwrap();
         assert_eq!(git(&origin, &["rev-parse", "main"]).unwrap().trim(), base);
         import_objects(&local, &bundle.path, &selected).unwrap();
         assert_eq!(git(&local, &["rev-parse", "main"]).unwrap().trim(), base);
         let missing_base = temp.path().join("missing-base");
         repository(&missing_base);
-        assert!(import_objects(&missing_base, &bundle.path, &selected).is_err());
+        let error = validate_bundle(&missing_base, &bundle.path, &selected)
+            .err()
+            .unwrap();
+        let missing = error.downcast_ref::<MissingPrerequisite>().unwrap();
+        assert_eq!(missing.commit, base);
+        assert_eq!(missing.branch, "main");
     }
 
     #[test]
@@ -685,8 +1031,9 @@ mod tests {
         let local = temp.path().join("local");
         repository(&cloud);
         repository(&local);
+        commit(&cloud);
         let initial = BranchCommit::new("main", &commit(&cloud)).unwrap();
-        let bundle = export(&cloud, &initial).unwrap();
+        let bundle = export(&cloud, &initial).unwrap().unwrap();
         let moved = BranchCommit::new("main", &commit(&cloud)).unwrap();
         assert!(export(&cloud, &initial).is_err());
         assert!(import_objects(&local, &bundle.path, &moved).is_err());

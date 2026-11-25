@@ -349,7 +349,7 @@ pub(crate) fn output_within(command: Command, timeout: std::time::Duration) -> s
 
 /// Capture a complete result with a time and byte limit. If a pipe reaches
 /// the limit, close it and refuse the result rather than parsing a prefix.
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", test))]
 pub(crate) fn output_with_limit(mut command: Command, args: &[&str], timeout: std::time::Duration, limit: usize) -> std::result::Result<String, RunError> {
     command.args(args);
     let captured = capture_limited(command, None, None, timeout, Some(limit));

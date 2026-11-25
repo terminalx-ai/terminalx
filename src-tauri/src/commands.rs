@@ -2254,12 +2254,33 @@ pub struct CloudTransferImport {
     harness: String,
     branch: String,
     commit: String,
-    bundle: String,
+    bundle: Option<String>,
     transcript: String,
 }
 
+#[derive(Serialize)]
+pub struct CloudTransferImportError {
+    code: &'static str,
+    message: String,
+}
+
+impl From<String> for CloudTransferImportError {
+    fn from(message: String) -> Self {
+        Self { code: "transfer_import_failed", message }
+    }
+}
+
+impl From<anyhow::Error> for CloudTransferImportError {
+    fn from(error: anyhow::Error) -> Self {
+        if let Some(missing) = error.downcast_ref::<crate::workspace_transfer_bundle::MissingPrerequisite>() {
+            return Self { code: "transfer_fetch_first", message: missing.to_string() };
+        }
+        err(error).into()
+    }
+}
+
 #[tauri::command]
-pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, input: CloudTransferImport) -> CmdResult<SessionEntry> {
+pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, input: CloudTransferImport) -> Result<SessionEntry, CloudTransferImportError> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use crate::workspace_transfer_bundle as transfer;
     let account = state.account.clone();
@@ -2267,12 +2288,12 @@ pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, i
         account.current_revision().is_some_and(|(_, revision)| revision == input.account_revision)
             && account.phase2_ready("cloud.workspaces.transfer-to-local.v1", Some(&input.org_id), None)
     };
-    if !authorized(&account, &input) { return Err("The cloud account changed.".into()); }
+    if !authorized(&account, &input) { return Err("The cloud account changed.".to_owned().into()); }
     if !git::is_repo(Path::new(&input.project_path)) {
-        return Err("Choose a local Git project.".into());
+        return Err("Choose a local Git project.".to_owned().into());
     }
     if !crate::configuration_commands::review(&app, &input.project_path).await? {
-        return Err("Repository configuration was not trusted.".into());
+        return Err("Repository configuration was not trusted.".to_owned().into());
     }
     let sessions = state.sessions().map_err(err)?;
     let ticket = crate::github_process::ticket();
@@ -2282,20 +2303,27 @@ pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, i
         let transcript = serde_json::from_slice::<Vec<transfer::TranscriptMessage>>(&STANDARD.decode(&input.transcript)?)?;
         let pin = transfer::BranchCommit::new(&input.branch, &input.commit)?;
         let project = Path::new(&input.project_path);
-        anyhow::ensure!(input.bundle.len() as u64 <= transfer::MAX_BUNDLE_BYTES.div_ceil(3) * 4, "Git bundle is too large.");
-        let bundle_directory = tempfile::tempdir()?;
-        let bundle_path = bundle_directory.path().join("workspace.bundle");
-        std::fs::write(&bundle_path, STANDARD.decode(&input.bundle)?)?;
-        transfer::import_objects(project, &bundle_path, &pin)?;
-        transfer::validate_checkout(project, &pin)?;
+        if let Some(encoded) = &input.bundle {
+            anyhow::ensure!(encoded.len() as u64 <= transfer::MAX_BUNDLE_BYTES.div_ceil(3) * 4, "Git bundle is too large.");
+            let bundle_directory = tempfile::tempdir()?;
+            let bundle_path = bundle_directory.path().join("workspace.bundle");
+            std::fs::write(&bundle_path, STANDARD.decode(encoded)?)?;
+            let validated = transfer::validate_bundle(project, &bundle_path, &pin)?;
+            anyhow::ensure!(authorized(&account, &input), "The cloud account changed.");
+            validated.promote(project)?;
+        } else {
+            transfer::require_commit(project, &pin, pin.commit())?;
+            transfer::validate_checkout(project, &pin)?;
+        }
         anyhow::ensure!(authorized(&account, &input), "The cloud account changed.");
-        let created_branch = transfer::ensure_local_branch(project, &pin)?;
         let name = format!("transfer-{}", uuid::Uuid::now_v7().simple());
+        let local_pin = transfer::choose_local_branch(project, &pin, &name)?;
+        let created_branch = transfer::ensure_local_branch(project, &local_pin)?;
         let path = git::worktree_path(project, &name);
         let mut checkout_created = false;
         let mut session_created = None;
         let imported = (|| -> anyhow::Result<SessionEntry> {
-            transfer::checkout(project, &path, &pin)?;
+            transfer::checkout(project, &path, &local_pin)?;
             checkout_created = true;
             anyhow::ensure!(authorized(&account, &input), "The cloud account changed.");
             let mut request: NewSession = serde_json::from_value(serde_json::json!({
@@ -2319,11 +2347,11 @@ pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, i
                         sessions.delete_session(&local.id)?;
                     }
                     if checkout_created {
-                        transfer::rollback_checkout(project, &path, &pin)?;
+                        transfer::rollback_checkout(project, &path, &local_pin)?;
                     }
                     if created_branch {
                         anyhow::ensure!(!path.exists(), "The unfinished checkout was kept with its branch.");
-                        transfer::rollback_branch(project, &pin)?;
+                        transfer::rollback_branch(project, &local_pin)?;
                     }
                     Ok(())
                 })();
@@ -2333,7 +2361,7 @@ pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, i
                 }
             }
         }
-    })).await.map_err(err)?.map_err(err)
+    })).await.map_err(err)?.map_err(CloudTransferImportError::from)
 }
 
 /// Create a session: an index entry around an existing checkout, or a new

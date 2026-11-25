@@ -9,7 +9,7 @@ import type { SessionEntry } from "@/types/session";
 import type { CloudSessionModel } from "@/lib/cloudSession";
 import { importCloudWorkspace, readCloudTransfer } from "@/lib/cloudWorkspaceTransfer";
 import { phase2Ready } from "@/lib/phase2Readiness";
-import { selectSession } from "@/lib/sessions";
+import { selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 
 type Imported = Awaited<ReturnType<typeof importCloudWorkspace>>;
 
@@ -50,6 +50,8 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
   const { client, workspaceId, orgId } = cloud;
   const key = JSON.stringify([accountRevision, orgId, workspaceId, sessionId, tabId]);
   const { opened, busy, notice, imported, archiveChosen } = useSyncExternalStore(subscribe, () => transfers.get(key) ?? EMPTY);
+  const sessions = useSessionStore();
+  const localAvailable = !imported || !sessions.loaded || sessions.sessions.some((entry) => entry.id === imported.local.sessionId);
   const update = (patch: Partial<TransferState>) => updateTransfer(key, patch);
 
   const current = () => {
@@ -68,13 +70,16 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
         const local = await invoke<SessionEntry>("cloud_transfer_import", {
           input: { ...snapshot, orgId, accountRevision, projectPath },
         });
+        if (current()) upsertSession(local);
         return { sessionId: local.id, worktreePath: local.cwd };
       }, current);
       update({ imported: transfer });
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? error.code : null;
+      const detail = error && typeof error === "object" && "message" in error && typeof error.message === "string"
+        ? error.message : String(error);
       update({ notice: code === "transfer_too_large" ? "This workspace is too large to transfer."
-        : error instanceof Error ? error.message : String(error) });
+        : code === "transfer_fetch_first" ? `${detail} Then retry the transfer.` : detail });
     } finally {
       update({ busy: false });
     }
@@ -119,15 +124,18 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
         <DialogHeader>
           <DialogTitle>Transfer to local</DialogTitle>
           <DialogDescription>{imported
-            ? "The local worktree and conversation are ready. You can keep or archive the cloud workspace."
+            ? localAvailable
+              ? "The local worktree and conversation are ready. You can keep or archive the cloud workspace."
+              : "The previously imported local session is no longer available."
             : "Choose a local Git project. TerminalX transfers the committed branch and this conversation’s messages. Uncommitted files and attachments stay in the cloud."}</DialogDescription>
         </DialogHeader>
         {notice && <p role="status" className="text-sm">{notice}</p>}
         <DialogFooter>
           <Button variant="ghost" disabled={busy} onClick={() => update({ opened: false })}>{imported ? "Close" : "Cancel"}</Button>
           {!imported && <Button disabled={busy} onClick={() => void start()}>{busy ? "Transferring…" : "Choose project…"}</Button>}
-          {imported && !archiveChosen && <Button variant="outline" disabled={busy} onClick={() => void archive()}>Archive cloud workspace</Button>}
-          {imported && <Button disabled={busy} onClick={() => { update({ opened: false }); selectSession(imported.local.sessionId); }}>Open local worktree</Button>}
+          {imported && <Button variant="ghost" disabled={busy} onClick={() => update({ imported: null, archiveChosen: false, notice: null })}>Transfer again…</Button>}
+          {imported && localAvailable && !archiveChosen && <Button variant="outline" disabled={busy} onClick={() => void archive()}>Archive cloud workspace</Button>}
+          {imported && localAvailable && <Button disabled={busy} onClick={() => { update({ opened: false }); selectSession(imported.local.sessionId); }}>Open local worktree</Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>
