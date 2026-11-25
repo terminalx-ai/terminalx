@@ -205,10 +205,10 @@ fn local_base(cwd: &Path, base: &str) -> Option<String> {
 }
 
 fn main_checkout(cwd: &Path) -> Option<String> {
-    git::run(cwd, &["worktree", "list", "--porcelain", "-z"]).ok()
+    git::shared::run(cwd, &["worktree", "list", "--porcelain", "-z"]).ok()
         .and_then(|list| main_checkout_in(&list, true))
         // -z was added in Git 2.36. Older versions still support porcelain.
-        .or_else(|| git::run(cwd, &["-c", "core.quotePath=false", "worktree", "list", "--porcelain"]).ok()
+        .or_else(|| git::shared::run(cwd, &["-c", "core.quotePath=false", "worktree", "list", "--porcelain"]).ok()
             .and_then(|list| main_checkout_in(&list, false)))
 }
 
@@ -272,7 +272,7 @@ pub fn merge_into(cwd: &Path, into: &str) -> anyhow::Result<String> {
 
 /// The worktree with `refname` checked out, if any.
 fn checked_out_at(cwd: &Path, refname: &str) -> Option<std::path::PathBuf> {
-    let list = git::run(cwd, &["worktree", "list", "--porcelain"]).ok()?;
+    let list = git::shared::run(cwd, &["worktree", "list", "--porcelain"]).ok()?;
     let mut path = None;
     for line in list.lines() {
         if let Some(p) = line.strip_prefix("worktree ") {
