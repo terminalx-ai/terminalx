@@ -242,6 +242,16 @@ not a path searched for: cargo 1.100 keeps every unit's output, the test binary
 among them, under `build/raccoon/<hash>/out`, and dating those back makes them
 stale.
 
+The commands are one script, `infra/ci-runners/cargo-build-once.sh`, which
+takes cargo test's target arguments and sets pipefail itself: `macos-native`
+calls it with `--lib`, and the `binaries` part of `linux-rust-tests` with
+`--bins --test '*'`. On Linux the same cause compiled the crate a second time
+in `binaries`, 190 s of a 10.4 minute job (run 45442275413), between the build
+step and the step that runs the tests. The other jobs that build the crate
+build it without the desktop features, so `generate_context!` does not run in
+them and they do not call the script. The policy tests pin the script's
+commands and the call in both jobs.
+
 A cold run of `macos-native` on a manual run (45448416407, 24 November 2026,
 every dependency built) took 1 h 52 min: Clippy 15 min 41 s and 15 min 6 s,
 the test build 34 min 52 s (the freshness check in it 2 s), the cache save

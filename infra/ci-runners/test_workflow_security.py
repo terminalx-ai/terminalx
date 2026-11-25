@@ -60,15 +60,28 @@ CLEAN = "cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/deb
 # macos-native saves its cache before the tests, which need this crate's output: it cleans a clone and puts the build back.
 ASIDE = f'mv target "$RUNNER_TEMP/target"\ncp -cpR "$RUNNER_TEMP/target" target\n{CLEAN}\n'
 PUT_BACK = 'test -d "$RUNNER_TEMP/target"\nrm -rf target && mv "$RUNNER_TEMP/target" target\n'
-# The macOS build dates the crate's OUT_DIR files back (tauri::generate_context! writes them during the compile),
-# then proves a second cargo command finds every unit fresh.
-MACOS_BUILD = (
-    'cargo test --locked --lib --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/build.jsonl"\n'
-    "out_dir=$(jq -r 'select(.reason == \"build-script-executed\" and (.package_id | test(\"[#/]raccoon@\"))) | .out_dir' \"$RUNNER_TEMP/build.jsonl\")\n"
-    'test -d "$out_dir"\n'
-    'find "$out_dir" -type f -exec touch -t 200001010000 {} +\n'
-    "cargo test --locked --lib --no-run -v --message-format=json 2> \"$RUNNER_TEMP/fresh.log\" | jq -s -e '[.[] | select(.reason == \"compiler-artifact\")] | (length > 0) and all(.fresh)' || { sed -E 's/\\x1b\\[[0-9;]*m//g' \"$RUNNER_TEMP/fresh.log\" | grep -E '^ *Dirty' | cut -c1-600; exit 1; }\n"
-)
+# A build of this crate's tests dates the crate's OUT_DIR files back (tauri::generate_context! writes them during the
+# compile), then proves a second cargo command finds every unit fresh. One script does it for both jobs that build
+# the desktop crate's tests: its commands, every line that is not a comment, and the call in each job.
+BUILD_ONCE = ROOT / "infra/ci-runners/cargo-build-once.sh"
+BUILD_ONCE_COMMANDS = [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    'if [ "$#" -eq 0 ]; then',
+    '  echo "usage: cargo-build-once.sh <cargo test target arguments>, for example --lib" >&2',
+    "  exit 2",
+    "fi",
+    'dir="${RUNNER_TEMP:-$(mktemp -d)}"',
+    'cargo test --locked "$@" --no-run --message-format=json-render-diagnostics > "$dir/build.jsonl"',
+    "out_dir=$(jq -r 'select(.reason == \"build-script-executed\" and (.package_id | test(\"[#/]raccoon@\"))) | .out_dir' \"$dir/build.jsonl\")",
+    'test -d "$out_dir"',
+    'find "$out_dir" -type f -exec touch -t 200001010000 {} +',
+    "cargo test --locked \"$@\" --no-run -v --message-format=json 2> \"$dir/fresh.log\" | jq -s -e '[.[] | select(.reason == \"compiler-artifact\")] | (length > 0) and all(.fresh)' || { sed -E 's/\\x1b\\[[0-9;]*m//g' \"$dir/fresh.log\" | grep -E '^ *Dirty' | cut -c1-600; exit 1; }",
+]
+BUILD_ONCE_CALLS = {
+    "macos-native": "../infra/ci-runners/cargo-build-once.sh --lib",
+    "linux-rust-tests": "../infra/ci-runners/cargo-build-once.sh --bins --test '*'",
+}
 # The cache each job restores. serve-tests builds what headless-serve builds: it restores that job's and saves none.
 CACHES = {
     "linux-rust": "linux-rust", "linux-rust-tests": "linux-rust-tests", "macos-native": "macos-native",
@@ -300,6 +313,13 @@ def validate(workflow):
     assert any(s.get("run") == LIBRARY_PART and s.get("if") == "matrix.part != 'binaries'" for s in tests["steps"]), "the library's tests, every part"
     others = next((s for s in tests["steps"] if s.get("run", "").startswith("cargo test --locked --bins --test '*'\n")), None)
     assert others and others["if"] == "matrix.part == 'binaries'" and others["run"].split("\n")[:2] == ["cargo test --locked --bins --test '*'", "cargo test --locked --doc"], "the other test binaries and the doc tests"
+    # Built once: the step that runs them finds every unit fresh, because the build put the OUT_DIR dates back.
+    built = [i for i, s in enumerate(tests["steps"]) if s.get("run") == BUILD_ONCE_CALLS["linux-rust-tests"]]
+    assert len(built) == 1 and tests["steps"][built[0]].get("id") == "build" and tests["steps"][built[0]].get("if") == "matrix.part == 'binaries'" and tests["steps"][built[0]].get("working-directory") == "src-tauri", "binaries builds the other test binaries once, through cargo-build-once.sh"
+    assert built[0] < tests["steps"].index(others), "binaries builds before it runs the tests"
+    assert not any("--no-run" in s.get("run", "") for s in tests["steps"]), "binaries builds its tests through cargo-build-once.sh alone"
+    validate_build_once(BUILD_ONCE.read_text())
+    assert os.access(BUILD_ONCE, os.X_OK), "cargo-build-once.sh is run by its path"
     assert any(s.get("run") == "cargo test --locked --no-default-features --features local-ui --lib control::issue_tests" and s.get("if") == "matrix.part == 'binaries'" for s in tests["steps"]), "the local owner path without desktop features"
     nextest = next(s for s in tests["steps"] if s.get("name") == "Install cargo-nextest")
     assert re.fullmatch(r"\d+\.\d+\.\d+", nextest["env"]["NEXTEST_VERSION"]) and re.fullmatch(r"[0-9a-f]{64}", nextest["env"]["NEXTEST_SHA256"]), "cargo-nextest by version and checksum"
@@ -328,10 +348,10 @@ def validate(workflow):
     after_helper = "${{ !cancelled() && steps.helper.outcome == 'success' }}"
     names = [s.get("run", "") for s in native["steps"]]
     clippy = [i for i, run in enumerate(names) if run.startswith("cargo clippy")]
-    assert MACOS_BUILD in names, "the macOS build dates its OUT_DIR back and proves the next cargo command compiles nothing"
-    build = names.index(MACOS_BUILD)
+    assert BUILD_ONCE_CALLS["macos-native"] in names, "the macOS build dates its OUT_DIR back and proves the next cargo command compiles nothing"
+    build = names.index(BUILD_ONCE_CALLS["macos-native"])
     steps = native["steps"]
-    assert steps[build].get("shell") == "bash", "pipefail: a failed cargo in the freshness check fails the build"
+    assert steps[build].get("working-directory") == "src-tauri" and steps[build].get("name") == "build the library's tests by themselves", "the macOS build of the library's tests"
     # The cache is saved once the dependencies are built, before any test: a suite that fails or runs out of time
     # still leaves it. The crate's own output is cleaned from a clone, and the build is put back for the tests.
     save = next(i for i, s in enumerate(steps) if "/save@" in s.get("uses", ""))
@@ -377,6 +397,14 @@ def validate(workflow):
     assert WEBKIT_MAC_RUN in runs(mac), "the mac-only WebKit checks"
     assert int(mac["timeout-minutes"]) <= 30, "the mac-only job holds a macOS runner no longer than its checks need"
     validate_webkit_coverage(workflow)
+
+
+def validate_build_once(text):
+    """The script builds once, dates back only the build script's OUT_DIR, and fails unless the next build is fresh."""
+    lines = text.splitlines()
+    assert lines and lines[0] == "#!/usr/bin/env bash", "the script runs under bash"
+    commands = [line for i, line in enumerate(lines) if line.strip() and (i == 0 or not line.lstrip().startswith("#"))]
+    assert commands == BUILD_ONCE_COMMANDS, "cargo-build-once.sh: the build, the dates put back in OUT_DIR alone, and the freshness check, under pipefail"
 
 
 def validate_nextest(config):
@@ -599,13 +627,36 @@ class WorkflowSecurity(unittest.TestCase):
         self.rejects(lambda w: w["jobs"]["macos-native"]["steps"].remove(self.step(w, "macos-native", name="Put this crate")))
         self.rejects(lambda w: self.step(w, "macos-native", name="Put this crate").update({"if": "always()"}))
 
-    def test_macos_second_compile_is_rejected(self):
+    def test_second_compile_is_rejected(self):
         # Without the dates put back, every cargo command after the build compiles the crate again.
         self.rejects(lambda w: self.step(w, "macos-native", name="build the library").update({"run": "cargo test --locked --lib --no-run\n"}))
-        self.rejects(lambda w: self.step(w, "macos-native", name="build the library").update({"run": MACOS_BUILD.replace(" and all(.fresh)", "")}))
-        # A path search dates back what cargo 1.100 keeps beside OUT_DIR, the test binary among them, and makes it stale.
-        self.rejects(lambda w: self.step(w, "macos-native", name="build the library").update({"run": MACOS_BUILD.replace('find "$out_dir"', "find target/debug/build -path '*/raccoon/*/out/*'")}))
-        self.rejects(lambda w: self.step(w, "macos-native", name="build the library").pop("shell"))
+        self.rejects(lambda w: self.step(w, "linux-rust-tests", name="Build the other test binaries").update({"run": "cargo test --locked --bins --test '*' --no-run"}))
+        # The script given another job's arguments builds what the tests do not run.
+        self.rejects(lambda w: self.step(w, "linux-rust-tests", name="Build the other test binaries").update({"run": BUILD_ONCE_CALLS["macos-native"]}))
+        self.rejects(lambda w: self.step(w, "macos-native", name="build the library").update({"run": BUILD_ONCE_CALLS["linux-rust-tests"]}))
+
+        def built_after_the_tests(w):
+            steps = w["jobs"]["linux-rust-tests"]["steps"]
+            steps.append(steps.pop(steps.index(self.step(w, "linux-rust-tests", name="Build the other test binaries"))))
+        self.rejects(built_after_the_tests)
+
+    def test_build_once_script_holds_its_commands(self):
+        validate_build_once(BUILD_ONCE.read_text())
+        text = BUILD_ONCE.read_text()
+        for old, new in [
+            ('find "$out_dir" -type f -exec touch -t 200001010000 {} +\n', ""),
+            (" and all(.fresh)", ""),
+            # A path search dates back what cargo 1.100 keeps beside OUT_DIR, the test binary among them, and makes it stale.
+            ('find "$out_dir"', "find target/debug/build -path '*/raccoon/*/out/*'"),
+            # Without pipefail a cargo failure in the freshness check is jq's success.
+            ("set -euo pipefail", "set -eu"),
+            ("exit 1; }", "true; }"),
+            ('test -d "$out_dir"\n', ""),
+        ]:
+            with self.subTest(dropped=old):
+                self.assertIn(old, text)
+                with self.assertRaises(AssertionError):
+                    validate_build_once(text.replace(old, new))
 
     def test_cancelling_a_running_main_job_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["macos-native"]["concurrency"].update({"cancel-in-progress": "true"}))
@@ -614,14 +665,14 @@ class WorkflowSecurity(unittest.TestCase):
         self.rejects(lambda w: self.step(w, "macos-native", run="cargo test --locked --lib -- $(").update({"run": "cargo test --locked --lib -- dictation::"}))
         self.rejects(lambda w: self.step(w, "macos-native", name="cargo test (main").update({"if": "github.event_name == 'schedule'"}))
         self.rejects(lambda w: self.step(w, "macos-native", name="cargo test (main").update({"run": "cargo test --locked --lib"}))
-        self.rejects(lambda w: self.step(w, "macos-native", run="cargo test --locked --lib --no-run").update({"if": "github.event_name != 'pull_request'"}))
+        self.rejects(lambda w: self.step(w, "macos-native", name="build the library").update({"if": "github.event_name != 'pull_request'"}))
 
     def test_macos_clippy_left_off_pull_requests_or_stopping_the_suite_is_rejected(self):
         for name in ("clippy (the library", "clippy"):
             self.rejects(lambda w, name=name: self.step(w, "macos-native", name=name).update({"if": "github.event_name != 'pull_request'"}))
             self.rejects(lambda w, name=name: self.step(w, "macos-native", name=name).update({"continue-on-error": True}))
         # Without its condition the build is skipped after a failed Clippy, and the suite with it.
-        self.rejects(lambda w: self.step(w, "macos-native", run="cargo test --locked --lib --no-run").pop("if"))
+        self.rejects(lambda w: self.step(w, "macos-native", name="build the library").pop("if"))
         self.rejects(lambda w: self.step(w, "macos-native", name="cargo test (main").update({"if": "github.event_name != 'pull_request'"}))
         self.rejects(lambda w: self.step(w, "macos-native", name="clippy (the library").update({"run": "true"}))
         self.rejects(lambda w: self.step(w, "macos-native", name="clippy").update({"if": "false"}))

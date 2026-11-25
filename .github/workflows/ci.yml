@@ -428,11 +428,15 @@ jobs:
           name: rust-junit-${{ matrix.part }}
           path: src-tauri/target/nextest/ci/junit.xml
           if-no-files-found: warn
+      # Built once, as macos-native builds the library's tests: without the
+      # OUT_DIR dates put back, the test step below compiled the crate again
+      # (190 s in run 45442275413). The script fails unless a second
+      # `--no-run` finds every unit fresh.
       - name: Build the other test binaries
         id: build
         if: matrix.part == 'binaries'
         working-directory: src-tauri
-        run: cargo test --locked --bins --test '*' --no-run
+        run: ../infra/ci-runners/cargo-build-once.sh --bins --test '*'
       - name: cargo test (the other test binaries and the doc tests)
         if: matrix.part == 'binaries'
         working-directory: src-tauri
@@ -636,19 +640,13 @@ jobs:
       # under build/raccoon/<hash>/out, and dating those back makes them stale.
       # The second `--no-run` must find every unit fresh: if the crate is
       # compiled a second time again, the job fails here and prints cargo's
-      # reason.
+      # reason. The commands are infra/ci-runners/cargo-build-once.sh, which
+      # sets pipefail itself; linux-rust-tests (binaries) builds through it too.
       - name: build the library's tests by themselves
         id: build
         if: ${{ !cancelled() && steps.helper.outcome == 'success' }}
         working-directory: src-tauri
-        # `shell: bash` sets pipefail: a cargo failure in the check must fail it.
-        shell: bash
-        run: |
-          cargo test --locked --lib --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/build.jsonl"
-          out_dir=$(jq -r 'select(.reason == "build-script-executed" and (.package_id | test("[#/]raccoon@"))) | .out_dir' "$RUNNER_TEMP/build.jsonl")
-          test -d "$out_dir"
-          find "$out_dir" -type f -exec touch -t 200001010000 {} +
-          cargo test --locked --lib --no-run -v --message-format=json 2> "$RUNNER_TEMP/fresh.log" | jq -s -e '[.[] | select(.reason == "compiler-artifact")] | (length > 0) and all(.fresh)' || { sed -E 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/fresh.log" | grep -E '^ *Dirty' | cut -c1-600; exit 1; }
+        run: ../infra/ci-runners/cargo-build-once.sh --lib
 
       # Saved as soon as the dependencies are built, before any test runs: a
       # suite that fails or runs out of time must not leave every later run to
