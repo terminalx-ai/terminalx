@@ -96,6 +96,8 @@ export function membersErrorMessage(error: unknown): string {
       return "This organization has sent too many invites recently. Try again later.";
     case "personal_org_no_invites":
       return "Personal organizations cannot invite members.";
+    case "organization_member_limit_reached":
+      return "This organization has reached its member limit.";
     case "organization_requires_pro":
       return "Inviting and changing roles requires TerminalX Pro.";
     case "forbidden":
