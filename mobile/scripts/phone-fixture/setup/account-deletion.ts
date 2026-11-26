@@ -99,6 +99,10 @@ export const handle: SetupHandler = async (request) => {
     return request.json(200, read(state));
   }
   if (request.method !== "POST") return undefined;
+  // As the server checks it: exactly `{ confirmationEmail }`, the account's address in any case.
+  const body = request.body as { confirmationEmail?: unknown } | null;
+  if (!body || Object.keys(body).length !== 1 || typeof body.confirmationEmail !== "string" || body.confirmationEmail.trim().toLowerCase() !== "alex@example.com")
+    return request.json(422, { error: "account_deletion_confirmation_mismatch" });
   confirms += 1;
   if (state === "unknown") {
     await pause(4_000);

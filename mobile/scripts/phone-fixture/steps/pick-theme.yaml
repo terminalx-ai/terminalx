@@ -4,6 +4,7 @@ appId: com.terminalx.phone.fixture
 - tapOn: "Settings"
 - scrollUntilVisible:
     element: "${THEME} theme"
+    centerElement: true
 - tapOn: "${THEME} theme"
 - scrollUntilVisible:
     element:

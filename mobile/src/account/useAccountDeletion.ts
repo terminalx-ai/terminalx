@@ -4,6 +4,7 @@ import { CloudApiError, type CloudApi } from "../cloud/api";
 import {
   ACCOUNT_DELETION_ERRORS as E,
   accountDeletionText as T,
+  emailConfirmed,
   refusalSentence,
   stoppedAtConfirm,
   type AccountDeletionAttempt,
@@ -45,7 +46,7 @@ export interface DeletionState {
 
 export interface AccountDeletionDeps {
   api: Pick<CloudApi, "accountDeletion" | "requestAccountDeletion"> | null;
-  /** The account's own address: sent to confirm, never what was typed. */
+  /** The account's own address: the page sends nothing until what was typed matches it. */
   email: string | null;
   online: boolean;
   reauthenticate(): Promise<"signed-in" | "closed" | "other-account">;
@@ -121,17 +122,23 @@ export class AccountDeletionFlow {
   }
 
   /** Read what stands in the way and what goes. `quiet`: the notice on the page stays. */
+  /** Reads started; only the latest one's answer is kept. */
+  private reads = 0;
+
   async load(quiet = false): Promise<void> {
     const api = this.deps.api;
     if (!api || this.finished) return;
+    // Coming back from the sign-in sheet starts a read with the old sign-in while Sign in again reads with the new
+    // one: an answer that comes later from an earlier read must not say again that the sign-in is not recent.
+    const read = ++this.reads;
     let value: AccountDeletionRead;
     try {
       value = await api.accountDeletion();
     } catch {
-      if (this.state.phase.kind === "loading") this.set({ phase: { kind: "unreadable" } });
+      if (read === this.reads && this.state.phase.kind === "loading") this.set({ phase: { kind: "unreadable" } });
       return;
     }
-    if (this.finished) return;
+    if (this.finished || read !== this.reads) return;
     const notice = quiet ? this.state.notice : this.state.notice?.kind === "unknown" || this.state.notice?.kind === "refused" ? this.state.notice : null;
     this.set({ read: value, notice, phase: this.state.phase.kind === "loading" || this.state.phase.kind === "unreadable" ? { kind: "ready" } : this.state.phase });
     const attempt = value.deletion;
@@ -154,10 +161,19 @@ export class AccountDeletionFlow {
     if (!this.busy && !this.finished) void this.load(true);
   }
 
-  confirm = (): void => {
+  /**
+   * Confirm with what the person typed, trimmed: the server checks it against the account's address, so the check is
+   * the server's and not only the page's. Nothing is sent unless it already matches here.
+   */
+  confirm = (typed: string): void => {
     const { api, email, online } = this.deps;
     const read = this.state.read;
     if (this.busy || this.finished || !api || !email || !read) return;
+    if (!emailConfirmed(typed, email)) {
+      this.set({ mismatch: true });
+      return;
+    }
+    const confirmation = typed.trim();
     if (!online) {
       this.set({ notice: { kind: "offline" } });
       return;
@@ -168,7 +184,7 @@ export class AccountDeletionFlow {
     void (async () => {
       let attempt: AccountDeletionAttempt;
       try {
-        attempt = await api.requestAccountDeletion(email);
+        attempt = await api.requestAccountDeletion(confirmation);
       } catch (error) {
         await this.refused(error);
         return;

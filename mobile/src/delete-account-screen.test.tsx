@@ -107,8 +107,8 @@ it("a plain account: says the grace, what goes and what is kept, and deletes onc
   expect(confirmButton().disabled).toBe(false);
   await act(async () => confirmButton().click());
   await flush();
-  // The account's own address goes, never what was typed.
-  expect(mocks.catalog.api.requestAccountDeletion).toHaveBeenCalledWith("alex@example.com");
+  // What was typed goes, trimmed, so the server's email check is real.
+  expect(mocks.catalog.api.requestAccountDeletion).toHaveBeenCalledWith("ALEX@example.com");
   expect(mocks.app.forgetDeletedAccount).toHaveBeenCalledTimes(1);
   expect(container.textContent).toContain(T.doneHead("9 December 2026"));
   expect(container.textContent).toContain(T.doneKeep("9 December 2026"));

@@ -147,7 +147,7 @@ export default function DeleteAccountScreen() {
         <Button testID="delete-account-confirm" kind="danger" label={working ? (sending === "stopping" ? T.stopping : T.busy) : T.confirmButton}
           disabled={!on} accessibilityState={{ disabled: !on, busy: working }}
           icon={working ? (color) => <Spinner size={16} color={color} /> : undefined}
-          onPress={() => { setLeft(true); if (on) deletion.confirm(); }} />
+          onPress={() => { setLeft(true); if (on) deletion.confirm(typed); }} />
         {blocked ? <Text style={[styles.small, styles.footNote, { color: palette.muted }]}>{T.blockedConfirm}</Text>
           : keyboard || noteInPage ? null : <Text style={[styles.small, styles.footNote, { color: palette.muted }]}>{T.signOutNote(on14)}</Text>}
       </View>

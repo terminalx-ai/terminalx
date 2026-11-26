@@ -21,10 +21,10 @@ const settled = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 beforeEach(() => { stored.value = null; });
 
-it("schedules a plain account at once, sends the account's own address, and forgets the account on the phone", async () => {
+it("schedules a plain account at once, sends what was typed, and forgets the account on the phone", async () => {
   const { flow, api, deps } = setup();
   await flow.load();
-  flow.confirm();
+  flow.confirm("alex@example.com");
   expect(flow.getSnapshot().sending).toBe("deleting");
   await settled();
   expect(api.requestAccountDeletion).toHaveBeenCalledWith("alex@example.com");
@@ -41,7 +41,7 @@ it("says it is stopping running cloud workspaces, follows until they stop, then 
   api.requestAccountDeletion.mockResolvedValueOnce(attempt("stopping"));
   // Signed out everywhere once scheduled: the next read is refused.
   api.accountDeletion.mockResolvedValueOnce({ ...read, deletion: attempt("stopping") }).mockRejectedValueOnce(new CloudApiError("unauthorized", 401));
-  flow.confirm();
+  flow.confirm("alex@example.com");
   expect(flow.getSnapshot().sending).toBe("stopping");
   await vi.waitFor(() => expect(flow.getSnapshot().phase.kind).toBe("scheduled"));
   // Every device was signed out before the server said the day: the page says the grace it gave, and Settings remembers nothing.
@@ -56,7 +56,7 @@ it("says the day a stopping answer gave when every device is signed out before t
   await flow.load();
   api.requestAccountDeletion.mockResolvedValueOnce(attempt("stopping", { deleteAfter: "2026-12-09T12:00:07.000Z" }));
   api.accountDeletion.mockRejectedValueOnce(new CloudApiError("unauthorized", 401));
-  flow.confirm();
+  flow.confirm("alex@example.com");
   await vi.waitFor(() => expect(flow.getSnapshot().phase.kind).toBe("scheduled"));
   expect(flow.getSnapshot().phase).toMatchObject({ deleteAfter: Date.parse("2026-12-09T12:00:07.000Z"), stopped: 1 });
   expect(stored.value).toBe(Date.parse("2026-12-09T12:00:07.000Z"));
@@ -69,7 +69,7 @@ it("takes the day from a scheduled answer read while following", async () => {
   await flow.load();
   api.requestAccountDeletion.mockResolvedValueOnce(attempt("stopping"));
   api.accountDeletion.mockResolvedValueOnce({ ...read, deletion: attempt("scheduled", { deleteAfter: "2026-12-09T12:00:05.000Z" }) });
-  flow.confirm();
+  flow.confirm("alex@example.com");
   await vi.waitFor(() => expect(flow.getSnapshot().phase.kind).toBe("scheduled"));
   expect(flow.getSnapshot().phase).toMatchObject({ deleteAfter: Date.parse("2026-12-09T12:00:05.000Z") });
   expect(stored.value).toBe(Date.parse("2026-12-09T12:00:05.000Z"));
@@ -81,12 +81,12 @@ it("names the workspace that did not stop and the one that did, schedules nothin
   const { flow, api, deps } = setup(read);
   await flow.load();
   api.requestAccountDeletion.mockResolvedValueOnce(attempt("refused", { failure: { code: "workspace_stop_failed", provider: "box", workspaceId: "ws_2", workspaceName: null, reason: "provider_timed_out", stopped: [{ workspaceId: "ws_1", workspaceName: "checkout-redesign" }] } }));
-  flow.confirm();
+  flow.confirm("alex@example.com");
   await settled();
   expect(flow.getSnapshot().notice).toEqual({ kind: "refused", tone: "danger", text: `${T.failStop("Boat", "scratch", "the provider is not answering")} ${T.failStopKept(["checkout-redesign"])}` });
   expect(flow.getSnapshot().sending).toBeNull();
   expect(deps.forgetDeletedAccount).not.toHaveBeenCalled();
-  flow.confirm();
+  flow.confirm("alex@example.com");
   await settled();
   expect(api.requestAccountDeletion).toHaveBeenCalledTimes(2);
   expect(flow.getSnapshot().phase.kind).toBe("scheduled");
@@ -96,7 +96,7 @@ it("asks to sign in again when the server finds the sign-in no longer recent", a
   const { flow, api } = setup();
   await flow.load();
   api.requestAccountDeletion.mockRejectedValueOnce(new CloudApiError("account_deletion_recent_sign_in_required", 403));
-  flow.confirm();
+  flow.confirm("alex@example.com");
   await settled();
   expect(flow.getSnapshot().notice).toEqual({ kind: "stale" });
   expect(flow.getSnapshot().read?.recentSignIn).toBe(false);
@@ -105,6 +105,28 @@ it("asks to sign in again when the server finds the sign-in no longer recent", a
   await settled();
   expect(flow.getSnapshot().notice).toBeNull();
   expect(flow.getSnapshot().read?.recentSignIn).toBe(true);
+});
+
+it("a sign-in made before the server kept sign-in times: asks to sign in again, and an earlier read answering late does not undo it", async () => {
+  const stale = { ...plainRead(), recentSignIn: false };
+  const { flow, api, deps } = setup(stale);
+  await flow.load();
+  expect(flow.getSnapshot().read?.recentSignIn).toBe(false);
+  // Back from the sheet: the app's own read (with the old sign-in) answers after the one Sign in again makes.
+  let late!: (value: AccountDeletionRead) => void;
+  api.accountDeletion.mockImplementationOnce(() => new Promise((resolve) => { late = resolve; }));
+  void flow.load();
+  api.accountDeletion.mockResolvedValueOnce(plainRead());
+  flow.signInAgain();
+  await settled();
+  expect(deps.reauthenticate).toHaveBeenCalledTimes(1);
+  expect(flow.getSnapshot().read?.recentSignIn).toBe(true);
+  late(stale);
+  await settled();
+  expect(flow.getSnapshot().read?.recentSignIn).toBe(true);
+  flow.confirm("alex@example.com");
+  await settled();
+  expect(api.requestAccountDeletion).toHaveBeenCalledWith("alex@example.com");
 });
 
 it("says so when the sign-in again came back as someone else", async () => {
@@ -122,17 +144,28 @@ it("reads the list again when something now stands in the way", async () => {
   const blocked = { ...plainRead(), blockers: [{ code: "sole_owner_with_members", organizationId: "org_1", organizationName: "Northwind", otherMembers: 4 }] };
   api.requestAccountDeletion.mockRejectedValueOnce(new CloudApiError("account_deletion_blocked", 409));
   api.accountDeletion.mockResolvedValueOnce(blocked);
-  flow.confirm();
+  flow.confirm("alex@example.com");
   await settled();
   expect(flow.getSnapshot().notice).toEqual({ kind: "blocked" });
   expect(flow.getSnapshot().read?.blockers).toHaveLength(1);
+});
+
+it("sends what the person typed, trimmed, so the server checks it; nothing when it does not match", async () => {
+  const { flow, api } = setup();
+  await flow.load();
+  flow.confirm("alex@example.co");
+  expect(api.requestAccountDeletion).not.toHaveBeenCalled();
+  expect(flow.getSnapshot().mismatch).toBe(true);
+  flow.confirm("  Alex@Example.com \n");
+  await settled();
+  expect(api.requestAccountDeletion).toHaveBeenCalledWith("Alex@Example.com");
 });
 
 it("sends nothing while offline", async () => {
   const { flow, api, deps } = setup();
   await flow.load();
   flow.update({ ...deps, online: false });
-  flow.confirm();
+  flow.confirm("alex@example.com");
   expect(api.requestAccountDeletion).not.toHaveBeenCalled();
   expect(flow.getSnapshot().notice).toEqual({ kind: "offline" });
 });
@@ -141,7 +174,7 @@ it("checks before trying again when the answer was lost, and finds it scheduled"
   const { flow, api } = setup();
   await flow.load();
   api.requestAccountDeletion.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null, "timeout"));
-  flow.confirm();
+  flow.confirm("alex@example.com");
   await settled();
   expect(flow.getSnapshot().notice).toEqual({ kind: "unknown" });
   api.accountDeletion.mockRejectedValueOnce(new CloudApiError("unauthorized", 401));
@@ -154,7 +187,7 @@ it("finds nothing scheduled after a lost answer and lets the person confirm agai
   const { flow, api } = setup();
   await flow.load();
   api.requestAccountDeletion.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", 502));
-  flow.confirm();
+  flow.confirm("alex@example.com");
   await settled();
   flow.check();
   await settled();
@@ -166,7 +199,7 @@ it("shows a refusal the server answered as not deleted", async () => {
   const { flow, api } = setup();
   await flow.load();
   api.requestAccountDeletion.mockRejectedValueOnce(new CloudApiError("account_deletion_busy", 409));
-  flow.confirm();
+  flow.confirm("alex@example.com");
   await settled();
   expect(flow.getSnapshot().notice).toEqual({ kind: "refused", tone: "danger", text: T.failRefused });
 });

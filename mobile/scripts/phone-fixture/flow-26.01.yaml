@@ -191,14 +191,22 @@ name: Delete account (26.01)
 - tapOn: "Settings"
 - scrollUntilVisible:
     element: "${THEME} theme"
+    centerElement: true
 - tapOn: "${THEME} theme"
-- scrollUntilVisible:
-    element:
-      id: settings-deletion-cancelled
-    direction: UP
+# Back to the top, clear of the tab bar (at AX1 the notice is taller than a scroll can bring fully into view).
 - swipe:
-    start: 50%, 30%
-    end: 50%, 80%
-    duration: 600
+    start: 25%, 30%
+    end: 25%, 70%
+    duration: 500
+- swipe:
+    start: 25%, 30%
+    end: 25%, 70%
+    duration: 500
+- swipe:
+    start: 25%, 30%
+    end: 25%, 70%
+    duration: 500
+- assertVisible:
+    id: settings-deletion-cancelled
 - waitForAnimationToEnd
 - takeScreenshot: 26.01-22-cancelled
