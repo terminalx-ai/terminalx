@@ -38,7 +38,7 @@ interface State {
   /** Explicit navigation also reveals a destination that was collapsed. */
   navigationVersion: number;
   /** What the workspace shows when no session is selected. */
-  view: "home" | "welcome" | "new" | "issues" | "agents" | "automations" | "skills" | "project" | "bots" | "bot";
+  view: "home" | "welcome" | "new" | "issues" | "agents" | "automations" | "plans" | "skills" | "project" | "bots" | "bot";
   /** The issues browser opens its new-issue form when it next shows; it sets this back. */
   newIssueRequested: boolean;
   /** A cross-workspace navigation request can open one automation directly. */
@@ -422,6 +422,11 @@ export function openBots() {
 /** Saved agent runs share the full workspace with issues and the dashboard. */
 export function openAutomations() {
   set({ selectedSessionId: null, view: "automations", selectedAutomationId: null });
+}
+
+/** Open the account's in-app plan comparison. */
+export function openPlans() {
+  set({ selectedSessionId: null, selectedCloudWorkspace: null, view: "plans", selectedAutomationId: null, navigationVersion: state.navigationVersion + 1 });
 }
 
 /** A bot's view (PRO-468): its header, tabs and chats. */

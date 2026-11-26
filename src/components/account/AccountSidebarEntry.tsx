@@ -3,6 +3,7 @@ import { Loader2, LogOut, Settings, UserRound } from "@/icons";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { Button } from "@/components/ui/button";
 import { openPasteLink, signIn, signOut, useAccount } from "@/lib/account";
+import { openPlans } from "@/lib/sessions";
 import { AccountAvatar } from "./AccountAvatar";
 import { RelayStatus } from "./RelayStatus";
 import { usePairing } from "@/lib/pairing";
@@ -15,6 +16,9 @@ export function AccountSidebarEntry({ onOpenAccount }: { onOpenAccount: () => vo
   const { relay } = usePairing().status;
   const relayDropped = relay.phase === "offline" || (relay.phase === "connecting" && relay.attempt > 0);
   const identity = account.status.identity;
+  const plan = privacy.ready && !privacy.enabled
+    ? account.status.organizations?.find((org) => org.id === identity?.organizationId)?.plan
+    : undefined;
   if (account.status.state === "signed-in" && identity) {
     return (
       // One line, the picture and the name, opening a menu: the email it is signed in as, Settings, and Log out. Relay's state
@@ -38,6 +42,12 @@ export function AccountSidebarEntry({ onOpenAccount }: { onOpenAccount: () => vo
           <DropdownMenuContent side="top" align="start" className="w-60">
             <div className="truncate px-2 py-1.5 text-xs text-muted-foreground" title={identity.email}>{identity.email}</div>
             <DropdownMenuSeparator />
+            {plan && (
+              <DropdownMenuItem onSelect={openPlans}>
+                <span>{plan.plan === "free" ? "Upgrade to Pro" : "View plans"}</span>
+                <span className="ml-auto rounded bg-veil-raised px-1.5 text-[10px] uppercase">{plan.plan}</span>
+              </DropdownMenuItem>
+            )}
             <DropdownMenuItem onSelect={onOpenAccount}><Settings /> Settings</DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => void signOut()} disabled={account.busy}><LogOut /> Log out</DropdownMenuItem>

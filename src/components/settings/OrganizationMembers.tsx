@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Copy, Loader2, MoreHorizontal, RefreshCw } from "@/icons";
+import type { OrganizationPlan } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
   isInvitableEmail,
@@ -27,6 +28,7 @@ const selectClass = "h-7 rounded-md border border-hairline bg-background px-1.5 
 interface OrganizationMembersProps {
   accountEmail: string;
   organizationId?: string;
+  plan?: OrganizationPlan;
   /** The account's context revision; a change reloads the roster. */
   contextRevision: string;
 }
@@ -35,7 +37,7 @@ export function OrganizationMembers(props: OrganizationMembersProps) {
   // A rollout kill unmounts open profiles, action menus and pending UI callbacks.
   return <OrganizationMembersContent key={profiles ? "profiles" : "legacy"} {...props} profiles={profiles} />;
 }
-function OrganizationMembersContent({ accountEmail, contextRevision, organizationId, profiles }: OrganizationMembersProps & { profiles: boolean }) {
+function OrganizationMembersContent({ accountEmail, contextRevision, organizationId, profiles, plan }: OrganizationMembersProps & { profiles: boolean }) {
   const cached = useOrganizationRoster(organizationId, profiles);
   const [localRoster, setLocalRoster] = useState<OrganizationRoster | null>(null);
   const { error: rosterError, loading: rosterLoading } = cached;
@@ -171,6 +173,13 @@ function OrganizationMembersContent({ accountEmail, contextRevision, organizatio
           <RefreshCw className={loading ? "animate-spin" : undefined} />
         </Button>
       </div>
+      {plan?.plan === "teams" && (
+        <p className="mt-1 text-xs text-muted-foreground">
+          {plan.memberLimit === null
+            ? `${plan.seatsUsed} seats used on Teams`
+            : `${plan.seatsUsed} of ${plan.memberLimit} seats used on Teams`}
+        </p>
+      )}
       {!manage && (
         <p className="mt-1 text-[11px] text-muted-foreground">Only owners and admins can invite or manage members.</p>
       )}
