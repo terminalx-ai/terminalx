@@ -141,6 +141,68 @@ pub(super) fn refresh(
     Ok(())
 }
 
+/// Why a signed-in standalone runtime does not publish itself in its
+/// account's machine list this round (PRO-598). Each is logged when it
+/// starts and when it ends, never skipped silently.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Unpublished {
+    /// Data privacy mode turns the account's features off.
+    DataPrivacy,
+    /// Relay has not registered this machine: the account service lists a
+    /// machine only once Relay vouches for it.
+    NotOnRelay,
+    /// Relay registered this machine for another account than the one
+    /// signed in (a sign-in the relay host has not caught up with yet).
+    RelayForAnotherAccount,
+}
+
+impl std::fmt::Display for Unpublished {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::DataPrivacy => "data privacy mode is on",
+            Self::NotOnRelay => "Relay has not registered this machine yet",
+            Self::RelayForAnotherAccount => "Relay has this machine registered for another account than the one signed in",
+        })
+    }
+}
+
+/// Whether the signed-in `session_user` can be published now.
+pub(crate) fn unpublished(data_privacy: bool, on_relay: bool, relay_user: Option<&str>, session_user: &str) -> Option<Unpublished> {
+    if data_privacy {
+        Some(Unpublished::DataPrivacy)
+    } else if !on_relay {
+        Some(Unpublished::NotOnRelay)
+    } else if relay_user != Some(session_user) {
+        Some(Unpublished::RelayForAnotherAccount)
+    } else {
+        None
+    }
+}
+
+/// One round's outcome for the log: signed out, published, or why not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Round {
+    SignedOut,
+    Published,
+    Skipped { who: String, reason: Unpublished },
+}
+
+/// The line a change of outcome is logged with, if it is worth one.
+fn round_changed(last: Option<&Round>, now: &Round) -> Option<(log::Level, String)> {
+    if last == Some(now) {
+        return None;
+    }
+    match now {
+        Round::Skipped { who, reason } => {
+            Some((log::Level::Warn, format!("machine directory: this machine is not on {who}'s machine list: {reason}")))
+        }
+        Round::Published if matches!(last, Some(Round::Skipped { .. })) => {
+            Some((log::Level::Info, "machine directory: this machine is on its account's machine list again".into()))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) async fn publish(
     data: PathBuf,
     secret: [u8; 32],
@@ -151,6 +213,7 @@ pub(crate) async fn publish(
     let key = HostKeypair::from_secret(secret);
     let mut status = relay.status();
     let mut binding = None;
+    let mut last: Option<Round> = None;
     loop {
         drop(status.borrow_and_update());
         if relay.registration().is_some() {
@@ -163,22 +226,36 @@ pub(crate) async fn publish(
             );
             let round = tokio::task::spawn_blocking(move || {
                 let result = locked(&data, || {
-                    if let Some(session) = load(&data)?.filter(|session| {
-                        !crate::data_privacy::enabled()
-                            && relay.registration().is_some()
-                            && link.user_id().as_deref() == Some(session.cloud.user_id.as_str())
-                    }) {
-                        refresh(&api, &session, &data, &key, &mut binding)?;
+                    let Some(session) = load(&data)? else { return Ok(Round::SignedOut) };
+                    let skipped = unpublished(
+                        crate::data_privacy::enabled(),
+                        relay.registration().is_some(),
+                        link.user_id().as_deref(),
+                        &session.cloud.user_id,
+                    );
+                    if let Some(reason) = skipped {
+                        return Ok(Round::Skipped { who: session.who(), reason });
                     }
-                    Ok(())
+                    refresh(&api, &session, &data, &key, &mut binding)?;
+                    Ok(Round::Published)
                 });
-                if let Err(error) = result {
-                    log::warn!("machine directory: {error:#}");
-                }
-                binding
+                let round = match result {
+                    Ok(round) => Some(round),
+                    Err(error) => {
+                        log::warn!("machine directory: {error:#}");
+                        None
+                    }
+                };
+                (binding, round)
             });
-            let Ok(current) = round.await else { return };
+            let Ok((current, round)) = round.await else { return };
             binding = current;
+            if let Some(round) = round {
+                if let Some((level, line)) = round_changed(last.as_ref(), &round) {
+                    log::log!(level, "{line}");
+                }
+                last = Some(round);
+            }
             tokio::select! {
                 _ = tokio::time::sleep(HEARTBEAT) => {}
                 changed = status.changed() => if changed.is_err() { return; },
@@ -310,4 +387,35 @@ fn unbind(api: &Api, session: &Session, data: &Path, mut binding: Binding) -> Re
     // with the same generation.
     crate::store::write_json(&path, &binding)?;
     Ok(Ok(()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_reason_a_signed_in_machine_is_not_published_is_named() {
+        assert_eq!(unpublished(true, true, Some("u1"), "u1"), Some(Unpublished::DataPrivacy));
+        assert_eq!(unpublished(false, false, Some("u1"), "u1"), Some(Unpublished::NotOnRelay));
+        assert_eq!(unpublished(false, true, Some("u0"), "u1"), Some(Unpublished::RelayForAnotherAccount));
+        assert_eq!(unpublished(false, true, None, "u1"), Some(Unpublished::RelayForAnotherAccount), "a link with no user yet is not this one");
+        assert_eq!(unpublished(false, true, Some("u1"), "u1"), None);
+        // Data privacy first: with it on, nothing else matters.
+        assert_eq!(unpublished(true, false, None, "u1"), Some(Unpublished::DataPrivacy));
+    }
+
+    #[test]
+    fn a_skip_is_logged_when_it_starts_changes_and_ends_not_every_round() {
+        let skipped = |reason| Round::Skipped { who: "Ada (ada@example.invalid)".into(), reason };
+        let privacy = skipped(Unpublished::DataPrivacy);
+        let (level, line) = round_changed(None, &privacy).unwrap();
+        assert_eq!(level, log::Level::Warn);
+        assert_eq!(line, "machine directory: this machine is not on Ada (ada@example.invalid)'s machine list: data privacy mode is on");
+        assert_eq!(round_changed(Some(&privacy), &privacy), None, "the same reason again is not logged again");
+        let relay = skipped(Unpublished::NotOnRelay);
+        assert!(round_changed(Some(&privacy), &relay).unwrap().1.ends_with("Relay has not registered this machine yet"));
+        assert_eq!(round_changed(Some(&relay), &Round::Published).map(|(level, _)| level), Some(log::Level::Info));
+        assert_eq!(round_changed(None, &Round::Published), None, "publishing as expected needs no line");
+        assert_eq!(round_changed(Some(&Round::Published), &Round::SignedOut), None);
+    }
 }

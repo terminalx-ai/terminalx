@@ -622,7 +622,11 @@ fn status_and_devices_serialise_to_the_typescript_shapes() {
     let value = serde_json::to_value(&status).unwrap();
     let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
     keys.sort();
-    assert_eq!(keys, ["activePairing", "devices", "host", "keepAwake", "lastError", "pendingApproval", "relay"]);
+    assert_eq!(keys, ["accountListing", "activePairing", "devices", "host", "keepAwake", "lastError", "pendingApproval", "relay"]);
+    // Tagged by `state`, as src/types/pairing.ts reads it (PRO-598).
+    assert_eq!(value["accountListing"], json!({ "state": "off" }));
+    let refused = serde_json::to_value(super::AccountListing::Refused { reason: "Why".into() }).unwrap();
+    assert_eq!(refused, json!({ "state": "refused", "reason": "Why" }));
     assert_eq!(
         value["pendingApproval"],
         json!({ "requestId": "request", "deviceId": "phone", "fingerprint": "1177\u{00B7}11ED", "transport": "direct", "requestedAt": 1, "expiresAt": 120_001 })

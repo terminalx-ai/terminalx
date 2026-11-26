@@ -1183,6 +1183,25 @@ because the "On your account" tab of Add a machine (screen 21.03) needs it.
   `machines_account_request { hostId }`, `machines_account_cancel`,
   `machines_account_finish { grantRequestId, paired }`; shapes in
   `src/types/machines.ts`.
+- **Being on the list (PRO-598).** A computer is on its account's machine list
+  once the account service takes its host registration. In the desktop app the
+  window registers it (`PairingManager::bind_host`); a desktop-launched runtime
+  never does (`TERMINALX_LOCAL_DESKTOP=1`), so it writes no
+  `account/host-binding.json`. Sign-out moves the binding fence to N + 1 and
+  revokes the binding there, and the service then refuses N + 1 again
+  (`host_binding_inactive`). Signing in again as the same person therefore
+  registers at the next generation. A sign-out whose revoke never arrived
+  leaves the binding active at an earlier generation
+  (`host_binding_generation_conflict`); the window ends it at its own
+  generation, then registers at the next. Waiting for Relay's proof, a rate
+  limit or a network failure is retried with backoff. What only a person can
+  fix (another account owns the host key, a key mismatch, a newer binding) is
+  logged and said in Settings → Account ("Not on your account's machine list",
+  with the reason), as `PairingStatus.accountListing`. A standalone runtime
+  publishes itself (`machine_account::directory::publish`) and logs each
+  reason it does not, once, when it starts and ends. The "On your account" tab
+  names the account's address when no other computer is on it, so a computer
+  signed in to another address is plain at a glance.
 - **A headless server** pairs computers from its terminal (PRO-353). Its
   account listing advertises terminal QR pairing for phones (PRO-359).
 - **Remove** (`machines_remove { machineId }`) stops the machine's connection

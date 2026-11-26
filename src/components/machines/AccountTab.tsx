@@ -210,7 +210,9 @@ export function AccountTab({ pairing, onClose, onDone, onUseCode }: { pairing: M
     const firstOnline = others.find((machine) => machine.availability === "online" && !machine.paired)?.hostId;
     body =
       others.length === 0 ? (
-        <p className={cn(soft, "mt-3")}>No other computer is signed in to your account. Sign in to TerminalX on it, or pair it with a code.</p>
+        <p className={cn(soft, "mt-3")} data-testid="account-empty">
+          No other computer is signed in as {directory.email}. Sign in to TerminalX on it with that address, or pair it with a code.
+        </p>
       ) : (
         <ul className="mt-3 rounded-lg border border-hairline" aria-label="Computers on your account">
           {others.map((machine) => {

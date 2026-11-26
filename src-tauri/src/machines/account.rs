@@ -66,7 +66,9 @@ const INSTALLATION_VERSION: u8 = 1;
 #[serde(untagged, rename_all_fields = "camelCase")]
 pub enum MachineAccountDirectory {
     SignedOut { signed_in: bool },
-    SignedIn { signed_in: bool, installation: InstallationState, machines: Vec<AccountMachine> },
+    /// `email` is the account whose list this is, so an empty one can say
+    /// which address the other computer must sign in with (PRO-598).
+    SignedIn { signed_in: bool, email: String, installation: InstallationState, machines: Vec<AccountMachine> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -360,7 +362,7 @@ impl AccountPairing {
         let Some(context) = (self.context)() else { return Ok(MachineAccountDirectory::SignedOut { signed_in: false }) };
         let (_, state) = self.register(&context)?;
         if state != InstallationState::Ready {
-            return Ok(MachineAccountDirectory::SignedIn { signed_in: true, installation: state, machines: Vec::new() });
+            return Ok(MachineAccountDirectory::SignedIn { signed_in: true, email: context.email.clone(), installation: state, machines: Vec::new() });
         }
         let hosts = self.hosts(&context)?;
         let this_mac: HashSet<String> = (self.this_mac)().into_iter().collect();
@@ -383,7 +385,7 @@ impl AccountPairing {
                 }
             })
             .collect();
-        Ok(MachineAccountDirectory::SignedIn { signed_in: true, installation: state, machines })
+        Ok(MachineAccountDirectory::SignedIn { signed_in: true, email: context.email.clone(), installation: state, machines })
     }
 
     /// `machines_account_request`: a one-time `runtime` grant for `host_id`,
