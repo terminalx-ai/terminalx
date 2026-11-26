@@ -13,7 +13,7 @@ const attempt = (state: string, extra: Partial<AccountDeletionAttempt> = {}): Ac
 
 function setup(read: AccountDeletionRead = plainRead()) {
   const api = { accountDeletion: vi.fn(async () => read), requestAccountDeletion: vi.fn(async (_email: string) => attempt("scheduled", { deleteAfter: "2026-12-09T12:00:00.000Z" })) };
-  const deps = { api, email: "alex@example.com", online: true, reauthenticate: vi.fn(async () => "signed-in" as const), forgetDeletedAccount: vi.fn(async () => undefined), now: () => NOW, wait: async () => undefined, providerName: (id: string) => (id === "box" ? "Boat" : id) };
+  const deps = { api, email: "alex@example.com", online: true, reauthenticate: vi.fn(async () => "signed-in" as const), forgetDeletedAccount: vi.fn(async () => undefined), wait: async () => undefined, providerName: (id: string) => (id === "box" ? "Boat" : id) };
   const flow = new AccountDeletionFlow(deps);
   return { flow, api, deps };
 }
@@ -28,12 +28,12 @@ it("schedules a plain account at once, sends the account's own address, and forg
   expect(flow.getSnapshot().sending).toBe("deleting");
   await settled();
   expect(api.requestAccountDeletion).toHaveBeenCalledWith("alex@example.com");
-  expect(flow.getSnapshot().phase).toEqual({ kind: "scheduled", deleteAfter: Date.parse("2026-12-09T12:00:00.000Z"), stopped: 0 });
+  expect(flow.getSnapshot().phase).toEqual({ kind: "scheduled", deleteAfter: Date.parse("2026-12-09T12:00:00.000Z"), graceDays: 14, stopped: 0 });
   expect(stored.value).toBe(Date.parse("2026-12-09T12:00:00.000Z"));
   expect(deps.forgetDeletedAccount).toHaveBeenCalledTimes(1);
 });
 
-it("says it is stopping running cloud workspaces, follows until they stop, then counts them", async () => {
+it("says it is stopping running cloud workspaces, follows until they stop, then counts them; no day is made up once signed out", async () => {
   const read = plainRead();
   read.deleted.runningWorkspaces = [{ id: "ws_1", name: "notes", provider: "box", organizationId: "org_p" }, { id: "ws_2", name: "site", provider: "box", organizationId: "org_p" }];
   const { flow, api } = setup(read);
@@ -44,7 +44,22 @@ it("says it is stopping running cloud workspaces, follows until they stop, then 
   flow.confirm();
   expect(flow.getSnapshot().sending).toBe("stopping");
   await vi.waitFor(() => expect(flow.getSnapshot().phase.kind).toBe("scheduled"));
-  expect(flow.getSnapshot().phase).toEqual({ kind: "scheduled", deleteAfter: NOW + 14 * 86_400_000, stopped: 2 });
+  // Every device was signed out before the server said the day: the page says the grace it gave, and Settings remembers nothing.
+  expect(flow.getSnapshot().phase).toEqual({ kind: "scheduled", deleteAfter: null, graceDays: 14, stopped: 2 });
+  expect(stored.value).toBeNull();
+});
+
+it("takes the day from a scheduled answer read while following", async () => {
+  const read = plainRead();
+  read.deleted.runningWorkspaces = [{ id: "ws_1", name: "notes", provider: "box", organizationId: "org_p" }];
+  const { flow, api } = setup(read);
+  await flow.load();
+  api.requestAccountDeletion.mockResolvedValueOnce(attempt("stopping"));
+  api.accountDeletion.mockResolvedValueOnce({ ...read, deletion: attempt("scheduled", { deleteAfter: "2026-12-09T12:00:05.000Z" }) });
+  flow.confirm();
+  await vi.waitFor(() => expect(flow.getSnapshot().phase.kind).toBe("scheduled"));
+  expect(flow.getSnapshot().phase).toMatchObject({ deleteAfter: Date.parse("2026-12-09T12:00:05.000Z") });
+  expect(stored.value).toBe(Date.parse("2026-12-09T12:00:05.000Z"));
 });
 
 it("names the workspace that did not stop and the one that did, schedules nothing, and lets the person try again", async () => {

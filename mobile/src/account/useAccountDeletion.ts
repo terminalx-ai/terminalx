@@ -4,7 +4,6 @@ import { CloudApiError, type CloudApi } from "../cloud/api";
 import {
   ACCOUNT_DELETION_ERRORS as E,
   accountDeletionText as T,
-  deleteAfterFrom,
   refusalSentence,
   stoppedAtConfirm,
   type AccountDeletionAttempt,
@@ -28,7 +27,8 @@ export type DeletionPhase =
   | { kind: "unreadable" }
   | { kind: "ready" }
   /** Scheduled, and this phone signed out: the day it is deleted, and how many were stopped. */
-  | { kind: "scheduled"; deleteAfter: number; stopped: number }
+  /** `deleteAfter` is the server's; null when every device was signed out before it was read (then `graceDays` is said). */
+  | { kind: "scheduled"; deleteAfter: number | null; graceDays: number; stopped: number }
   /** The final deletion has started: signing in no longer cancels it. */
   | { kind: "finishing" };
 
@@ -52,7 +52,6 @@ export interface AccountDeletionDeps {
   forgetDeletedAccount(): Promise<void>;
   /** A provider's name as people know it, from the organization of that workspace; the attempt names it by id. */
   providerName?(providerId: string, workspaceId: string | null): string;
-  now?: () => number;
   wait?: (ms: number) => Promise<void>;
 }
 
@@ -111,10 +110,6 @@ export class AccountDeletionFlow {
     if (this.closed) return;
     this.state = { ...this.state, ...change };
     for (const listener of [...this.listeners]) listener();
-  }
-
-  private now(): number {
-    return (this.deps.now ?? Date.now)();
   }
 
   private graceDays(): number {
@@ -205,12 +200,13 @@ export class AccountDeletionFlow {
   }
 
   /** Scheduled: the phone forgets the account; the page says when it goes. */
-  private async scheduled(deleteAfter: number, stopped: number): Promise<void> {
+  private async scheduled(deleteAfter: number | null, stopped: number): Promise<void> {
     if (this.finished) return;
     this.finished = true;
     this.busy = false;
-    this.set({ sending: null, notice: null, phase: { kind: "scheduled", deleteAfter, stopped } });
-    await rememberPendingDeletion(deleteAfter);
+    this.set({ sending: null, notice: null, phase: { kind: "scheduled", deleteAfter, graceDays: this.graceDays(), stopped } });
+    // Settings says the day only when the server said it; no day is made up here.
+    if (deleteAfter !== null) await rememberPendingDeletion(deleteAfter);
     await this.deps.forgetDeletedAccount();
   }
 
@@ -222,7 +218,7 @@ export class AccountDeletionFlow {
         return true;
       case "scheduled": {
         const at = Date.parse(attempt.deleteAfter ?? "");
-        await this.scheduled(Number.isFinite(at) ? at : deleteAfterFrom(this.now(), this.graceDays()), stoppedAtConfirm(attempt) || stoppedBefore);
+        await this.scheduled(Number.isFinite(at) ? at : null, stoppedAtConfirm(attempt) || stoppedBefore);
         return false;
       }
       case "deleting":
@@ -256,7 +252,7 @@ export class AccountDeletionFlow {
       try {
         value = await api.accountDeletion();
       } catch (error) {
-        if (signedOut(error)) return this.scheduled(deleteAfterFrom(this.now(), this.graceDays()), stoppedBefore);
+        if (signedOut(error)) return this.scheduled(null, stoppedBefore);
         this.busy = false;
         this.set({ sending: null, notice: { kind: "unknown" } });
         return;
@@ -281,7 +277,7 @@ export class AccountDeletionFlow {
       value = await api.accountDeletion();
     } catch (error) {
       // Signed out everywhere: the deletion was scheduled.
-      if (signedOut(error)) return this.scheduled(deleteAfterFrom(this.now(), this.graceDays()), running);
+      if (signedOut(error)) return this.scheduled(null, running);
       this.busy = false;
       this.set({ notice: { kind: "unknown" } });
       return;

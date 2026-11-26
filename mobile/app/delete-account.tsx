@@ -71,7 +71,7 @@ export default function DeleteAccountScreen() {
     else scroll.current?.scrollToEnd({ animated: true });
   }, [notice]);
 
-  if (phase.kind === "scheduled") return <Scheduled deleteAfter={phase.deleteAfter} stopped={phase.stopped} large={large} onDone={() => router.dismissTo("/settings")} />;
+  if (phase.kind === "scheduled") return <Scheduled deleteAfter={phase.deleteAfter} graceDays={phase.graceDays} stopped={phase.stopped} large={large} onDone={() => router.dismissTo("/settings")} />;
   if (phase.kind === "finishing") return <Finishing onSignOut={() => void app.signOut().then(() => router.dismissTo("/settings"))} />;
 
   const header = <Stack.Screen options={{ title: T.title }} />;
@@ -166,20 +166,25 @@ function NoticeFor({ notice, email, onCheck }: { notice: DeletionNotice; email: 
 }
 
 /** Board 26.01 screen 6: what a signed-out person sees after confirming. Nothing here cancels it but signing in. */
-function Scheduled({ deleteAfter, stopped, large, onDone }: { deleteAfter: number; stopped: number; large: boolean; onDone(): void }) {
+function Scheduled({ deleteAfter, graceDays, stopped, large, onDone }: { deleteAfter: number | null; graceDays: number; stopped: number; large: boolean; onDone(): void }) {
   const { palette } = useTheme();
   const insets = useSafeAreaInsets();
-  const on = useMemo(() => deletionDate(deleteAfter), [deleteAfter]);
+  // The day the server gave; when every device was signed out before it was read, the grace it gave instead.
+  const on = useMemo(() => (deleteAfter === null ? null : deletionDate(deleteAfter)), [deleteAfter]);
+  const head = on === null ? T.doneHeadIn(graceDays) : T.doneHead(on);
+  const stoppedText = on === null ? T.doneStoppedIn(stopped) : T.doneStopped(stopped, on);
+  const keep = on === null ? T.doneKeepIn(graceDays) : T.doneKeep(on);
+  const after = on === null ? T.doneAfterIn : T.doneAfter(on);
   return <>
     <Stack.Screen options={{ title: "", headerBackVisible: false, gestureEnabled: false }} />
     <View style={[styles.screen, { backgroundColor: palette.page }]}>
       <ScrollView contentContainerStyle={styles.outcome}>
         <CalendarClock size={40} color={palette.muted} />
-        <Text accessibilityRole="header" style={[styles.outcomeTitle, { color: palette.ink }]}>{T.doneHead(on)}</Text>
-        <Text style={[styles.body, styles.centered, { color: palette.muted }]}>{stopped > 0 ? `${T.doneBody} ${T.doneStopped(stopped, on)}` : T.doneBody}</Text>
-        <Text style={[styles.body, styles.centered, { color: palette.ink }]}>{T.doneKeep(on)}</Text>
+        <Text accessibilityRole="header" style={[styles.outcomeTitle, { color: palette.ink }]}>{head}</Text>
+        <Text style={[styles.body, styles.centered, { color: palette.muted }]}>{stopped > 0 ? `${T.doneBody} ${stoppedText}` : T.doneBody}</Text>
+        <Text style={[styles.body, styles.centered, { color: palette.ink }]}>{keep}</Text>
         {/* At the accessibility sizes the page keeps to what must be said. */}
-        {large ? null : <Text style={[styles.small, styles.centered, { color: palette.muted }]}>{T.doneAfter(on)}</Text>}
+        {large ? null : <Text style={[styles.small, styles.centered, { color: palette.muted }]}>{after}</Text>}
       </ScrollView>
       <View style={[styles.foot, { backgroundColor: palette.page, borderTopColor: palette.border, paddingBottom: Math.max(insets.bottom, 10) }]}>
         <Button testID="delete-account-done" label={T.doneButton} onPress={onDone} />

@@ -182,6 +182,21 @@ it("a refusal that changed nothing says so, and a stale sign-in asks to sign in 
   expect(field().disabled).toBe(false);
 });
 
+it("says the grace the server gave, never a made-up day, when every device was signed out before the day was read", async () => {
+  const read = plainRead();
+  read.deleted.runningWorkspaces = [{ id: "ws_1", name: "scratch", provider: "box", organizationId: "org_p" }];
+  mocks.catalog.api.accountDeletion.mockResolvedValueOnce(read).mockRejectedValue(new CloudApiError("unauthorized", 401));
+  mocks.catalog.api.requestAccountDeletion.mockResolvedValueOnce({ id: "del_1", kind: "self", state: "stopping", requestedAt: "2026-11-25T12:00:00.000Z" });
+  await show();
+  await type("alex@example.com");
+  await act(async () => confirmButton().click());
+  await act(async () => { await vi.waitFor(() => expect(byTestId("delete-account-done")).not.toBeNull(), { timeout: 5_000 }); });
+  expect(container.textContent).toContain(T.doneHeadIn(14));
+  expect(container.textContent).toContain(T.doneStoppedIn(1));
+  expect(container.textContent).toContain(T.doneKeepIn(14));
+  expect(container.textContent).not.toMatch(/ on \d{1,2} [A-Z][a-z]+ \d{4}/);
+});
+
 it("offline: nothing is sent", async () => {
   mocks.app.online = false;
   await show();

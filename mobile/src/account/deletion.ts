@@ -59,6 +59,11 @@ export const accountDeletionText = {
   doneAfter: (on: string) => `After ${on} it cannot be recovered.`,
   doneStopped: (n: number, on: string) => `${n === 1 ? `Your running ${ONE} was` : `Your ${n} running ${W} were`} stopped. ${n === 1 ? "It is" : "They are"} deleted with your account on ${on}.`,
   doneButton: "Done",
+  // Not in copy.mjs (PRO-584 wording to approve): the done page when the server signed every device out before it said the day.
+  doneHeadIn: (days: number) => `Your account will be deleted in ${days} days`,
+  doneStoppedIn: (n: number) => `${n === 1 ? `Your running ${ONE} was` : `Your ${n} running ${W} were`} stopped. ${n === 1 ? "It is" : "They are"} deleted with your account.`,
+  doneKeepIn: (days: number) => `Changed your mind? Sign in within ${days} days to keep your account.`,
+  doneAfterIn: "After that it cannot be recovered.",
   elsewhere: (on: string) => `This account will be deleted on ${on}, so this device was signed out. Sign in before then to keep it.`,
 
   cancelled: "Account deletion cancelled",
@@ -264,9 +269,6 @@ export function deletionDate(at: number | Date): string {
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** When a deletion confirmed at `now` would be deleted. */
-export function deleteAfterFrom(now: number, graceDays: number): number {
-  return now + graceDays * DAY_MS;
-}
 
 /** The provider's reason for not stopping a workspace, in words; the server sends an allowlisted code. */
 const REASONS: Record<string, string> = {
@@ -304,4 +306,9 @@ export function refusalSentence(failure: AccountDeletionFailure | null | undefin
 /** How many running cloud workspaces a deletion stopped when the person confirmed. */
 export function stoppedAtConfirm(attempt: AccountDeletionAttempt | null | undefined): number {
   return (attempt?.workspaces ?? []).filter((workspace) => workspace.action === "stop" && workspace.state === "stopped").length;
+}
+
+/** Before confirming only: the day the footer names if the person confirms now. After confirming the page says only the server's day. */
+export function deleteAfterFrom(now: number, graceDays: number): number {
+  return now + graceDays * DAY_MS;
 }
