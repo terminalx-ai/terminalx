@@ -18,7 +18,7 @@ vi.mock("expo-secure-store", () => ({
 }));
 vi.mock("./protocol", () => ({
   AUTH_CONFIG: {},
-  buildAuthorizeUrl: () => "https://login.terminalx.ai/v1/auth/authorize?x",
+  buildAuthorizeUrl: (_config: unknown, _challenge: string, _state: string, _nonce: string, options?: { fresh?: boolean }) => `https://login.terminalx.ai/v1/auth/authorize?x${options?.fresh ? "&prompt=login&max_age=0" : ""}`,
   authSessionFailure: () => null,
   exchangeAuthorizationCode: mocks.exchange,
   revokeSession: mocks.revoke,
@@ -39,14 +39,15 @@ beforeEach(() => {
 it("asks the browser sheet for a private session when the sign-in must be fresh", async () => {
   mocks.exchange.mockResolvedValue({ ok: true, session: ada });
   await beginSignIn({ fresh: true, expectUserId: "user-ada" });
-  expect(mocks.open).toHaveBeenCalledWith(expect.any(String), "terminalx://auth/callback", { preferEphemeralSession: true });
+  // The server is asked for a sign-in too (Android has no private sheet), and iOS's sheet keeps no cookie.
+  expect(mocks.open).toHaveBeenCalledWith(expect.stringContaining("&prompt=login&max_age=0"), "terminalx://auth/callback", { preferEphemeralSession: true });
   expect(JSON.parse(mocks.store.get(SESSION_KEY)!)).toEqual(ada);
 });
 
 it("opens the ordinary sheet for an ordinary sign-in", async () => {
   mocks.exchange.mockResolvedValue({ ok: true, session: ada });
   expect(await beginSignIn()).toEqual({ status: "signed-in", session: ada });
-  expect(mocks.open).toHaveBeenCalledWith(expect.any(String), "terminalx://auth/callback", undefined);
+  expect(mocks.open).toHaveBeenCalledWith(expect.not.stringContaining("prompt="), "terminalx://auth/callback", undefined);
 });
 
 it("keeps nothing of a sign-in again as another account, and ends that session", async () => {

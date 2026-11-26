@@ -49,6 +49,19 @@ it("says it is stopping running cloud workspaces, follows until they stop, then 
   expect(stored.value).toBeNull();
 });
 
+it("says the day a stopping answer gave when every device is signed out before the scheduled one is read", async () => {
+  const read = plainRead();
+  read.deleted.runningWorkspaces = [{ id: "ws_1", name: "notes", provider: "box", organizationId: "org_p" }];
+  const { flow, api } = setup(read);
+  await flow.load();
+  api.requestAccountDeletion.mockResolvedValueOnce(attempt("stopping", { deleteAfter: "2026-12-09T12:00:07.000Z" }));
+  api.accountDeletion.mockRejectedValueOnce(new CloudApiError("unauthorized", 401));
+  flow.confirm();
+  await vi.waitFor(() => expect(flow.getSnapshot().phase.kind).toBe("scheduled"));
+  expect(flow.getSnapshot().phase).toMatchObject({ deleteAfter: Date.parse("2026-12-09T12:00:07.000Z"), stopped: 1 });
+  expect(stored.value).toBe(Date.parse("2026-12-09T12:00:07.000Z"));
+});
+
 it("takes the day from a scheduled answer read while following", async () => {
   const read = plainRead();
   read.deleted.runningWorkspaces = [{ id: "ws_1", name: "notes", provider: "box", organizationId: "org_p" }];

@@ -53,7 +53,7 @@ export async function beginSignIn(options: SignInOptions = {}): Promise<SignInRe
     SecureStore.setItemAsync(STATE_KEY, state, OPTIONS),
     SecureStore.setItemAsync(NONCE_KEY, nonce, OPTIONS),
   ]);
-  const result = await WebBrowser.openAuthSessionAsync(buildAuthorizeUrl(AUTH_CONFIG, challenge, state, nonce), "terminalx://auth/callback", options.fresh ? { preferEphemeralSession: true } : undefined);
+  const result = await WebBrowser.openAuthSessionAsync(buildAuthorizeUrl(AUTH_CONFIG, challenge, state, nonce, { fresh: options.fresh }), "terminalx://auth/callback", options.fresh ? { preferEphemeralSession: true } : undefined);
   if (result.type === "success") return finishSignIn(result.url);
   const failure = authSessionFailure(result as { type: string; error?: string | null });
   if (failure) throw new Error(failure);

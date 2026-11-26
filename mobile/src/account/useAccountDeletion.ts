@@ -200,6 +200,9 @@ export class AccountDeletionFlow {
   }
 
   /** Scheduled: the phone forgets the account; the page says when it goes. */
+  /** The day a `stopping` attempt said, if it said one: what the page says when the read after is refused. */
+  private stoppingDeleteAfter: number | null = null;
+
   private async scheduled(deleteAfter: number | null, stopped: number): Promise<void> {
     if (this.finished) return;
     this.finished = true;
@@ -213,9 +216,14 @@ export class AccountDeletionFlow {
   /** What an attempt the server answered with means for the page; true while it is still stopping. */
   private async settle(attempt: AccountDeletionAttempt | null | undefined, stoppedBefore: number): Promise<boolean> {
     switch (attempt?.state) {
-      case "stopping":
+      case "stopping": {
+        // The day the server will delete it, once it says so while stopping (terminalx-saas #352): the
+        // sign-out that comes with scheduling refuses every read after, so this is the last chance to learn it.
+        const at = Date.parse(attempt.deleteAfter ?? "");
+        if (Number.isFinite(at)) this.stoppingDeleteAfter = at;
         this.set({ sending: "stopping" });
         return true;
+      }
       case "scheduled": {
         const at = Date.parse(attempt.deleteAfter ?? "");
         await this.scheduled(Number.isFinite(at) ? at : null, stoppedAtConfirm(attempt) || stoppedBefore);
@@ -227,6 +235,8 @@ export class AccountDeletionFlow {
         return false;
       case "refused": {
         this.busy = false;
+        // Nothing was scheduled: a later try makes a new attempt with its own day.
+        this.stoppingDeleteAfter = null;
         const names = new Map((this.state.read?.deleted.runningWorkspaces ?? []).map((workspace) => [workspace.id, workspace.name]));
         const provider = this.deps.providerName ?? (() => T.someProvider);
         const sentence = refusalSentence(attempt.failure, (id) => provider(id, attempt.failure?.workspaceId ?? null), (id) => names.get(id) ?? null);
@@ -252,7 +262,7 @@ export class AccountDeletionFlow {
       try {
         value = await api.accountDeletion();
       } catch (error) {
-        if (signedOut(error)) return this.scheduled(null, stoppedBefore);
+        if (signedOut(error)) return this.scheduled(this.stoppingDeleteAfter, stoppedBefore);
         this.busy = false;
         this.set({ sending: null, notice: { kind: "unknown" } });
         return;
@@ -277,7 +287,7 @@ export class AccountDeletionFlow {
       value = await api.accountDeletion();
     } catch (error) {
       // Signed out everywhere: the deletion was scheduled.
-      if (signedOut(error)) return this.scheduled(null, running);
+      if (signedOut(error)) return this.scheduled(this.stoppingDeleteAfter, running);
       this.busy = false;
       this.set({ notice: { kind: "unknown" } });
       return;
