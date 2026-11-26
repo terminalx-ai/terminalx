@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { AppState, Pressable, StyleSheet, Switch, Text, View } from "react-native";
+import { AppState, Platform, Pressable, StyleSheet, Switch, Text, View } from "react-native";
 import { BellOff, Check, ChevronRight, CircleHelp, CircleX, Gauge, GitMerge, ShieldAlert, TriangleAlert, type LucideIcon } from "lucide-react-native";
 import {
   machineOn,
@@ -24,6 +24,9 @@ import { Button, Card, Screen, SectionTitle } from "../primitives";
 import { useTheme, type Palette } from "../theme";
 import { ChoiceSheet, type Choice } from "./ChoiceSheet";
 import { QUARTER_HOURS, quietSpan, timeOfDay } from "./time";
+
+/** The phone’s own settings, by the name its system gives them. */
+const SYSTEM_SETTINGS = () => Platform.OS === "ios" ? "iOS Settings" : "Settings";
 
 type Tone = "warning" | "success" | "danger" | "muted";
 /** The page's rows in design 22.07's order and words, each with its mark in its colour. */
@@ -95,8 +98,8 @@ export function NotificationsPage() {
       <BellOff size={20} color={palette.warning} />
       <View style={styles.flex}>
         <Text style={[styles.noticeTitle, { color: palette.ink }]}>Notifications are off for TerminalX</Text>
-        <Text style={[styles.detail, styles.noticeDetail, { color: palette.muted }]}>Turn them on in iOS Settings. Your choices below are kept.</Text>
-        <Button label="Open iOS Settings" kind="secondary" size="small" onPress={() => void openNotificationSettings()} style={styles.noticeButton} />
+        <Text style={[styles.detail, styles.noticeDetail, { color: palette.muted }]}>{`Turn them on in ${SYSTEM_SETTINGS()}. Your choices below are kept.`}</Text>
+        <Button label={`Open ${SYSTEM_SETTINGS()}`} kind="secondary" size="small" onPress={() => void openNotificationSettings()} style={styles.noticeButton} />
       </View>
     </Card> : <>
       <Card><Row label="Allow notifications" first><Toggle label="Allow notifications" value={settings.allow} onChange={(on) => void allow(on)} /></Row></Card>

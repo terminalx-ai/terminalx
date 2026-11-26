@@ -1,5 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
+import { Platform } from "react-native";
+import { androidChannel } from "./android-channels";
 import { prepareCategory } from "../notification-actions";
 import { readHosts } from "../store/hosts";
 import { hostDisplayName, FALLBACK_HOST_LABEL } from "../store/host-name";
@@ -234,7 +236,8 @@ async function deliver(hostId: string, event: HostNotification): Promise<void> {
       sound: shown.sound ? "default" : false,
       data: { ...shown.data, silent: !shown.sound },
     },
-    trigger: null,
+    // Android sounds by channel, not by notification: the channel says whether this one makes a sound.
+    trigger: Platform.OS === "android" ? { channelId: await androidChannel(shown.sound) } : null,
   });
 }
 

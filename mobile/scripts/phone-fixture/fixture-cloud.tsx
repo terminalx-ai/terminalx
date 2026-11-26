@@ -21,13 +21,14 @@ import { b64, CHECKPOINT_SCHEMA, checkpointAad, seal, sha256Hex, unb64 } from ".
 import { keyItemName, type SecretStorage } from "../../src/cloud/keys";
 import { useApp } from "../../src/state/AppProvider";
 import { LIVE_ID, liveAnswer, liveNow, liveRole, liveSocket } from "./live-workspace";
+import { handle as accountDeletion } from "./setup/account-deletion";
 import { handle as github } from "./setup/github";
 import { handle as launch } from "./setup/launch";
 import { handle as organization } from "./setup/organization";
 import type { SetupHandler } from "./setup/types";
 
-/** The cloud setup areas (25.01–25.06), asked in this order before the answers below. */
-const SETUP: readonly SetupHandler[] = [github, launch, organization];
+/** The cloud setup areas (25.01–25.06) and Delete account (26.01), asked in this order before the answers below. */
+const SETUP: readonly SetupHandler[] = [accountDeletion, github, launch, organization];
 
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;

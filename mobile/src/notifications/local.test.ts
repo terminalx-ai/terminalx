@@ -5,7 +5,9 @@ const fake = vi.hoisted(() => ({
   storage: new Map<string, string>(),
   permission: { granted: true, status: "granted" } as { granted: boolean; status: string },
   asked: 0,
-  scheduled: [] as { content: Record<string, unknown> }[],
+  scheduled: [] as { content: Record<string, unknown>; trigger?: unknown }[],
+  os: "ios",
+  channels: [] as string[],
 }));
 
 vi.mock("@react-native-async-storage/async-storage", () => ({
@@ -18,13 +20,15 @@ vi.mock("@react-native-async-storage/async-storage", () => ({
 }));
 vi.mock("expo-secure-store", () => ({ WHEN_UNLOCKED_THIS_DEVICE_ONLY: 1, getItemAsync: async () => null, setItemAsync: async () => undefined, deleteItemAsync: async () => undefined }));
 vi.mock("expo-crypto", () => ({ randomUUID: () => "client-id" }));
-vi.mock("react-native", () => ({ Linking: { openSettings: vi.fn(async () => undefined) } }));
+vi.mock("react-native", () => ({ Linking: { openSettings: vi.fn(async () => undefined) }, Platform: { get OS() { return fake.os; } } }));
 vi.mock("expo-notifications", () => ({
   IosAuthorizationStatus: { PROVISIONAL: 3 },
   setNotificationHandler: vi.fn(),
   getPermissionsAsync: async () => fake.permission,
   requestPermissionsAsync: async () => { fake.asked++; fake.permission = { granted: true, status: "granted" }; return fake.permission; },
   scheduleNotificationAsync: async (request: { content: Record<string, unknown> }) => { fake.scheduled.push(request); return "id"; },
+  AndroidImportance: { DEFAULT: 3, HIGH: 4 },
+  setNotificationChannelAsync: async (id: string) => { fake.channels.push(id); return null; },
 }));
 
 const HOSTS = "terminalx:mobile:hosts:v1";
@@ -87,6 +91,7 @@ beforeEach(() => {
   fake.permission = { granted: true, status: "granted" };
   fake.asked = 0;
   fake.scheduled = [];
+  fake.channels = [];
 });
 
 describe("migration from the per-Mac switch", () => {
@@ -290,12 +295,30 @@ describe("delivery", () => {
     const { local } = await modules();
     await local.restoreLocalNotifications(state.connection, "mac");
     expect(fake.scheduled.map((request) => request.content)).toEqual([{ title: "Done", body: "Finished", subtitle: "Studio MacBook", threadIdentifier: "mac:s-1", sound: "default", data: { hostId: "mac", sessionId: "s-1", tabId: "t-1", kind: "finished", detailsHidden: false, silent: false } }]);
+    expect(fake.scheduled[0]!.trigger).toBeNull();
     expect(JSON.parse(fake.storage.get("terminalx:notifications:mac")!)).toEqual({ lastSeenSeq: 3, epoch: "e" });
     // A live event already seen is not shown again; a new one is.
     live(state)[0]!.listener({ event: { seq: 3, epoch: "e", title: "Done", body: "Finished", kind: "finished" } });
     live(state)[0]!.listener({ event: { seq: 4, epoch: "e", title: "Old Mac", body: "No kind", sessionId: "s-1", tabId: "t-1" } });
     await flush(); await flush();
     expect(fake.scheduled.map((request) => request.content.title)).toEqual(["Done", "Old Mac"]);
+  });
+
+  it("sends Android notifications on the channel that sounds, Android sounding by channel rather than by notification", async () => {
+    fake.os = "android";
+    try {
+      fake.storage.set("terminalx:notifications-enabled:mac", "enabled");
+      fake.storage.set(HOSTS, JSON.stringify([{ id: "mac", label: "Paired Mac", hostName: "Studio MacBook", publicKeyB64: "key", endpoint: "ws://mac.local", lastConnectedAt: 1, provenance: { kind: "explicit" } }]));
+      fake.storage.set("terminalx:notifications:mac", JSON.stringify({ lastSeenSeq: 0, epoch: "e" }));
+      const state = mac();
+      state.missedEvents = [{ seq: 1, epoch: "e", title: "Done", body: "Finished", sessionId: "s-1", tabId: "t-1", kind: "finished" }];
+      const { local } = await modules();
+      await local.restoreLocalNotifications(state.connection, "mac");
+      expect(fake.scheduled.map((request) => request.trigger)).toEqual([{ channelId: "alerts" }]);
+      expect(fake.channels.sort()).toEqual(["alerts", "quiet"]);
+    } finally {
+      fake.os = "ios";
+    }
   });
 
   it("keeps the old exports working: enable turns on the master and the machine, disable turns the machine off", async () => {

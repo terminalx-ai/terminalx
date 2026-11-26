@@ -12,7 +12,7 @@ vi.mock("react-native", () => ({
 }));
 
 const { showChoices } = await import("./choices");
-const { keyboardEvents } = await import("./keyboard");
+const { keyboardAvoidingBehavior, keyboardEvents } = await import("./keyboard");
 
 beforeEach(() => {
   native.sheet.mockReset();
@@ -51,5 +51,10 @@ describe("the keyboard", () => {
   it("follows keyboardDidShow on Android, where no Will events come", () => {
     expect(keyboardEvents("android")).toEqual({ show: "keyboardDidShow", hide: "keyboardDidHide" });
     expect(keyboardEvents("ios")).toEqual({ show: "keyboardWillShow", hide: "keyboardWillHide" });
+  });
+
+  it("makes room for it on Android too, where the window no longer shrinks for it", () => {
+    expect(keyboardAvoidingBehavior("android")).toBe("padding");
+    expect(keyboardAvoidingBehavior("ios")).toBe("padding");
   });
 });

@@ -72,7 +72,12 @@ pub enum ConnectionState {
     /// (`replace.rs`), and windows attach to the new one in place. `from`:
     /// its version, when it said. `keeping`: it is handed over, and its
     /// agents and terminals go on running (#765); otherwise they stop.
-    Updating { from: Option<String>, to: String, keeping: bool },
+    /// `wait`: earlier attempts were refused as busy, and why (PRO-589).
+    Updating {
+        from: Option<String>, to: String, keeping: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        wait: Option<super::replace::HandoverWait>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -423,7 +428,7 @@ fn log_report(target: &Target, report: &Report) {
 }
 
 /// The runtime bundled with this app.
-fn source(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
+pub(super) fn source(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
     Ok(app.path().resource_dir()?.join("local-runtime").join(if cfg!(windows) { "terminalx-serve.exe" } else { "terminalx-serve" }))
 }
 

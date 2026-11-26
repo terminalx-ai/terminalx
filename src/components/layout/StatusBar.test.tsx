@@ -41,11 +41,17 @@ vi.mock("@/lib/sessions", () => ({
 }));
 vi.mock("@/lib/statusPolling", () => ({ useResourceSampling: vi.fn() }));
 const runtimeSwitch = vi.hoisted(() => ({ current: null as import("@/lib/localRuntime").RuntimeSwitch | null }));
-vi.mock("@/lib/localRuntime", () => ({
-  bootLocalRuntime: vi.fn(async () => {}),
-  replaceLocalRuntime: vi.fn(async () => {}),
-  useRuntimeSwitch: () => runtimeSwitch.current,
-}));
+vi.mock("@/lib/localRuntime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/localRuntime")>();
+  return {
+    bootLocalRuntime: vi.fn(async () => {}),
+    replaceLocalRuntime: vi.fn(async () => {}),
+    useRuntimeSwitch: () => runtimeSwitch.current,
+    // RuntimeStatus words a refused handover with these (PRO-589).
+    shownHandoverWait: actual.shownHandoverWait,
+    handoverWaitText: actual.handoverWaitText,
+  };
+});
 
 const { StatusBar } = await import("./StatusBar");
 

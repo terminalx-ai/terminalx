@@ -22,8 +22,10 @@ export const STALLED_MS = 2 * 60_000;
  * left behind silently (#766). One still waiting to be replaced, handed over
  * at once when it can be (#765) or once its agents' turns are done, is the
  * status bar's to show (`RuntimeStatus`), as an update chose before it
- * installed. A runtime that exited while starting holds the window with a
- * dialog of its own (PRO-287). */
+ * installed, and so is one being replaced, or whose handover waits for a
+ * quiet moment (PRO-589): nothing is asked of anyone, so nothing is put
+ * over the composer. A runtime that exited while starting holds the window
+ * with a dialog of its own (PRO-287). */
 export function LocalRuntimeNotice() {
   const { state, readAt } = useLocalRuntime();
   const [now, setNow] = useState(() => Date.now());
@@ -41,15 +43,16 @@ export function LocalRuntimeNotice() {
     return () => clearTimeout(timer);
   }, [state, readAt, down]);
 
+  // A runtime handed over, or waiting for its moment to be, keeps
+  // everything running and asks for nothing: it is the status bar's alone
+  // to show. A notice here sat over the composer for as long as that took.
+  if (state?.state === "updating" && state.keeping) return null;
   if (state?.state === "updating") {
-    const doing = state.keeping
-      ? `Handing what the ${state.from ?? "older"} runtime runs over to ${state.to}, the one this app came with. Its agents and terminals keep running.`
-      : `Stopping the ${state.from ?? "older"} runtime and starting ${state.to}, the one this app came with. Each agent picks up its conversation again when its tab starts.`;
     return (
       <aside aria-label="Local runtime version" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
         <div className="min-w-0 flex-1 text-xs">
           <div className="font-medium">Updating the TerminalX runtime</div>
-          <p className="mt-1 text-muted-foreground">{doing}</p>
+          <p className="mt-1 text-muted-foreground">{`Stopping the ${state.from ?? "older"} runtime and starting ${state.to}, the one this app came with. Each agent picks up its conversation again when its tab starts.`}</p>
         </div>
       </aside>
     );

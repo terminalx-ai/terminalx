@@ -188,8 +188,9 @@ pub fn call(
     stream
         .set_read_timeout(Some(timeout))
         .map_err(ControlError::internal)?;
+    // A frame larger than the socket's queue waits out a handover (PRO-589).
     stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
+        .set_write_timeout(Some(crate::hooks::FRAME_WRITE))
         .map_err(ControlError::internal)?;
     stream.write_all(&bytes).map_err(ControlError::internal)?;
     stream.flush().map_err(ControlError::internal)?;

@@ -30,6 +30,12 @@ pub async fn startup_diagnostics_probe() -> Result<super::Snapshot, String> {
     tauri::async_runtime::spawn_blocking(super::start_probe).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())
 }
 
+/// Hides the banner for this incident only. Held validation stays held (PRO-575).
+#[tauri::command]
+pub async fn startup_diagnostics_dismiss(incident: String) -> Result<super::Snapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || super::dismiss(&incident)).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub async fn startup_diagnostics_preview() -> Result<ExportPreview, String> {
     tauri::async_runtime::spawn_blocking(|| {

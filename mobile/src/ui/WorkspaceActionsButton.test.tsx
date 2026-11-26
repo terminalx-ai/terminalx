@@ -76,3 +76,19 @@ it("puts a line under the title when it has one to say (25.10: a runtime too old
   await page.press(button());
   expect(alert.mock.calls[0][1]).toBe(old);
 });
+
+it("lists every action in the app's sheet on Android, whose alert holds three buttons and would drop the rest", async () => {
+  const { setRowActionSheet } = await import("./row-actions");
+  const shown = vi.fn();
+  const remove = setRowActionSheet(shown);
+  try {
+    (Platform as { OS: string }).OS = "android";
+    const four: RowAction[] = [{ name: "new", label: "New conversation", run: stop }, { name: "tab", label: "Add agent tab", run: stop }, ...actions];
+    await page.show(<WorkspaceActionsButton title="Checkout redesign" actions={four} />);
+    await page.press(button());
+    expect(alert).not.toHaveBeenCalled();
+    expect(shown).toHaveBeenCalledExactlyOnceWith({ title: "Checkout redesign", message: undefined, actions: four });
+  } finally {
+    remove();
+  }
+});

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { suppressNativeContextMenu } from "@/lib/contextMenu";
 import { errorMessage, type LocalRuntimeOutdated } from "@/lib/api";
-import { bootLocalRuntime, replaceLocalRuntime, useRuntimeSwitch } from "@/lib/localRuntime";
+import { bootLocalRuntime, handoverWaitText, replaceLocalRuntime, shownHandoverWait, useRuntimeSwitch } from "@/lib/localRuntime";
 
 /**
  * The runtime the app came with, while it is not yet the one running (#766):
@@ -20,17 +20,22 @@ export function RuntimeStatus({ tier }: { tier: "full" | "compact" | "icon" }) {
   useEffect(() => { void bootLocalRuntime(); }, []);
   if (!runtime) return null;
   if (runtime.kind === "updating") {
-    const label = `Updating the runtime to ${runtime.to}`;
+    // Refused again and again as busy (PRO-589): the wait, not a spinner alone.
+    const wait = shownHandoverWait(runtime.wait);
+    const label = wait ? `Runtime update to ${runtime.to} waiting, attempt ${wait.attempts + 1}` : `Updating the runtime to ${runtime.to}`;
     return (
-      <span role="status" aria-label={label} className="flex h-[19px] items-center gap-1 px-1.5 text-muted-foreground">
+      <span role="status" aria-label={label} title={wait ? handoverWaitText(runtime.from, wait) : undefined}
+        className={cn("flex h-[19px] items-center gap-1 px-1.5", wait ? "text-warning" : "text-muted-foreground")}>
         <Loader2 className="size-3 animate-spin" aria-hidden />
-        {tier !== "icon" ? <span>{tier === "full" ? `${label}…` : "Updating runtime…"}</span> : null}
+        {tier !== "icon" ? <span className="tabular-nums">{tier === "full" ? `${label}…` : wait ? `Runtime waiting (${wait.attempts})…` : "Updating runtime…"}</span> : null}
       </span>
     );
   }
   const { outdated } = runtime;
   const version = outdated.running ?? "older";
+  const wait = outdated.failed ? null : shownHandoverWait(outdated.handoverWait);
   const waiting = outdated.failed ? "not updated"
+    : wait ? `waiting, refused ${wait.attempts} times`
     : outdated.work === null ? "checking"
     : outdated.work.length === 0 ? "updating shortly"
     : `waiting for ${outdated.work.length}`;
@@ -44,7 +49,7 @@ export function RuntimeStatus({ tier }: { tier: "full" | "compact" | "icon" }) {
           data-testid="runtime-status"
           className={cn(
             "flex h-[19px] items-center gap-1 rounded px-1.5 leading-[18px] outline-none hover:bg-veil-raised focus-visible:ring-1 focus-visible:ring-ring/50",
-            outdated.failed || outdated.problem ? "text-warning" : "text-muted-foreground",
+            outdated.failed || outdated.problem || wait ? "text-warning" : "text-muted-foreground",
           )}
         >
           {outdated.failed ? <TriangleAlert className="size-3" aria-hidden /> : <Server className="size-3" aria-hidden />}
@@ -78,6 +83,8 @@ export function OutdatedRuntimeDetails({ epoch, outdated }: { epoch: string; out
   const [restarting, setRestarting] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const { running, app, work, problem, failed, keeps, unkept } = outdated;
+  // Kept across readings of its work, unlike `problem` (PRO-589).
+  const wait = failed ? null : shownHandoverWait(outdated.handoverWait);
   const restart = async () => {
     setRestarting(true);
     setFailure(null);
@@ -109,6 +116,7 @@ export function OutdatedRuntimeDetails({ epoch, outdated }: { epoch: string; out
         The runtime your agents and terminals run in is {running ? `version ${running}` : "an earlier version"}; this app is {app}. {waiting}
       </p>
       {busy && <ul className="mt-1 max-h-40 list-disc overflow-y-auto pl-4 text-muted-foreground">{work.map((item, index) => <li key={index}>{item}</li>)}</ul>}
+      {wait && <p role="status" className="mt-1 text-warning">{handoverWaitText(running, wait)} TerminalX keeps trying.</p>}
       {(failure ?? problem) && <p role="alert" className="mt-1 text-destructive">{failure ?? problem}</p>}
       <p className="mt-2 text-muted-foreground">{restarts}</p>
       <div className="mt-2.5 flex justify-end">

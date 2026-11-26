@@ -8,7 +8,7 @@ import { Screen } from "./primitives";
 const TOP = 59; // an iPhone with a Dynamic Island
 const mocks = vi.hoisted(() => ({ os: "ios", tabBar: 74, top: 59, scroll: undefined as any, titleLayout: undefined as any }));
 vi.mock("./theme", () => ({ useTheme: () => ({ palette: { page: "#0c0809", ink: "#f4ecee", border: "#ffffff1a", muted: "#ab9aa0" } }) }));
-vi.mock("./tab-bar-inset", () => ({ useTabBarInset: () => mocks.tabBar }));
+vi.mock("./tab-bar-inset", () => ({ useTabBarInset: () => mocks.tabBar, useInTabs: () => mocks.tabBar > 0 }));
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: mocks.top, bottom: 34, left: 0, right: 0 }) }));
 vi.mock("react-native", () => {
   const flat = (style: any): Record<string, unknown> => Array.isArray(style) ? Object.assign({}, ...style.map(flat)) : style && typeof style === "object" ? style : {};

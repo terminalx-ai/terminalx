@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import { KeyboardAvoidingView, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ChevronRight } from "lucide-react-native";
 import { branchHelp } from "@mobile/cloud/github";
@@ -7,6 +7,7 @@ import type { LaunchRepository } from "@mobile/cloud/launch";
 import { Button } from "../primitives";
 import { TextField } from "../TextField";
 import { useTheme } from "../theme";
+import { keyboardAvoidingBehavior } from "@mobile/ui/keyboard";
 
 /** The launch flow's own page frame: a header, a scrolling body and a foot above the keyboard. */
 export type RepositoriesPage = (title: string, onBack: () => void, body: ReactNode, foot: ReactNode, subtitle?: string) => ReactNode;
@@ -55,7 +56,7 @@ export function BranchSheet({ repository, onDone, onRemove, onClose }: { reposit
   const insets = useSafeAreaInsets();
   const [ref, setRef] = useState(repository.ref);
   return <Modal visible transparent animationType="slide" onRequestClose={onClose}>
-    <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+    <KeyboardAvoidingView style={styles.fill} behavior={keyboardAvoidingBehavior()}>
       <Pressable testID="branch-sheet-backdrop" accessibilityRole="button" accessibilityLabel="Close Branch or tag" onPress={onClose} style={[styles.fill, styles.backdrop]} />
       <View testID="branch-sheet" accessibilityViewIsModal style={[styles.sheet, { backgroundColor: palette.page, borderColor: palette.border, paddingBottom: insets.bottom + 16 }]}>
         <View style={[styles.handle, { backgroundColor: palette.faint }]} />

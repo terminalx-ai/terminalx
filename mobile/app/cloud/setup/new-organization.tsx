@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, View } from "react-native";
+import { KeyboardAvoidingView, ScrollView, StyleSheet, View } from "react-native";
 import * as Crypto from "expo-crypto";
 import { Stack, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -8,7 +8,7 @@ import { useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { chooseSetupOrganization } from "@mobile/cloud/setup-choice";
 import { codeText } from "@mobile/cloud/words";
 import { useApp } from "@mobile/state/AppProvider";
-import { useKeyboardShown } from "@mobile/ui/keyboard";
+import { useKeyboardShown, keyboardAvoidingBehavior } from "@mobile/ui/keyboard";
 import { Notice } from "@mobile/ui/Notice";
 import { Button, EmptyState } from "@mobile/ui/primitives";
 import { Spinner } from "@mobile/ui/Spinner";
@@ -91,7 +91,7 @@ export default function NewOrganizationScreen() {
 
   return <>
     <Stack.Screen options={{ title: "New organization", headerLargeTitle: false, headerBackTitle: "Organization" }} />
-    {catalog && userId ? <KeyboardAvoidingView style={[styles.screen, { backgroundColor: palette.page }]} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={insets.top + 44}>
+    {catalog && userId ? <KeyboardAvoidingView style={[styles.screen, { backgroundColor: palette.page }]} behavior={keyboardAvoidingBehavior()} keyboardVerticalOffset={insets.top + 44}>
       <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" style={styles.screen} contentContainerStyle={styles.page}>
         <TextField testID="organization-name" label={NEW_ORGANIZATION_TEXT.label} placeholder={NEW_ORGANIZATION_TEXT.label} value={name} onChangeText={change}
           autoFocus autoCapitalize="words" autoCorrect={false} returnKeyType="done" onSubmitEditing={() => void create()} disabled={busy}

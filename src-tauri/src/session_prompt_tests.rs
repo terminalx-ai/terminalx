@@ -3247,6 +3247,32 @@ fn a_prompt_an_idle_cli_recorded_shorter_or_edited_is_shown_once_as_changed() {
 #[path = "session_privacy_tests.rs"]
 mod privacy;
 
+/// A prompt on its way when the tabs are held is waited for, with nothing
+/// held meanwhile, for as long as the handover has: with many tabs one is
+/// nearly always at such a moment, and calling the handover off for each
+/// never let it through. What `unsettled_now` says beforehand is the same.
+#[cfg(unix)]
+#[test]
+fn a_prompt_on_its_way_is_waited_for_within_the_time_a_handover_has() {
+    let rig = Rig::with_live_pane();
+    let writer = rig.manager.writers.lock().unwrap().entry(rig.pane.clone()).or_default().clone();
+    assert_eq!(rig.manager.unsettled_now(), None);
+    let ticket = writer.ticket();
+    assert_eq!(rig.manager.unsettled_now().as_deref(), Some("A prompt is on its way into an agent"));
+    let delivered = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        // Deadlocks if the waiting handover kept the writer's lock.
+        drop(ticket.take());
+        drop(ticket);
+    });
+    let began = std::time::Instant::now();
+    let held = rig.manager.hold_tabs(Duration::from_secs(10), |held| held).expect("held once the prompt is in");
+    assert!(began.elapsed() >= Duration::from_millis(350), "{:?}", began.elapsed());
+    assert_eq!(held.tabs.len(), 1);
+    delivered.join().unwrap();
+    assert_eq!(rig.manager.unsettled_now(), None);
+}
+
 /// #960: refusing an in-flight writer releases the handover's locks, so
 /// delivery can settle and the next attempt can carry the same live tab.
 #[cfg(unix)]
