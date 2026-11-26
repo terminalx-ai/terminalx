@@ -1,7 +1,29 @@
 # TerminalX changelog
 
-## 0.2.39
+## 0.2.40
 
+- Windows: TerminalX runs on Windows. Sign-in CLIs and Git commands it starts
+  end with the app, shortcut labels follow the platform, and permission cards
+  notice when their hook goes away. Bots and Local VM are off on Windows,
+  where they don't run, and read-only commands ask on a card there instead of
+  running by themselves (#1529, #1535).
+- Every OS: the app names the computer, its secret store and its file manager
+  the way the system does (Mac, PC or computer; Keychain, Windows encrypted
+  store or secret store; Finder, File Explorer or File Manager). Agent and
+  GitHub CLI install hints give each system's own command. Features a system
+  can't run, such as dictation, keep-awake and the secure key dialogs outside
+  macOS, are shown off with the reason. A failed read in Issues, Git and
+  changes, and Cloud now says so with **Retry** instead of showing an empty
+  list, and unsent text whose save fails is kept and retried (#1613, #1629).
+- Safety: a render error shows a "could not show its window" screen with
+  **Reload** instead of a blank window, and a startup failure shows the reason
+  instead of quitting silently. Approval cards no longer take focus while you
+  type in a terminal or editor. **Keep** on a turn's changes asks first, since
+  undo is gone after it, and checkpoints warn when a turn's undo is about to
+  be pruned. New macOS setting **Option key is Meta in terminals** (on by
+  default). Terminals get a UTF-8 `LANG` when none is set, the browser
+  profile folder is owner-only, and on the phone one unreadable saved host no
+  longer wipes the list (#1576).
 - Relay: a Mac with a phone revocation or an expired pairing code still
   waiting for Relay no longer loses its Relay connection a second after every
   connect. The runtime sent those revocations with a field Relay does not
@@ -9,15 +31,74 @@
   expects, and a request Relay would close the connection for is refused on
   the Mac instead. If Relay refuses the connection again and again, TerminalX
   waits longer between tries, up to 30 minutes, and Settings → Devices says
-  so. The window no longer registers for its phones between two of the
-  runtime's tries seconds apart. Relay's reason for closing is now in the log
-  and in `relay-diagnostics.json`, and a failure that repeats no longer pushes
-  older records out of that file (#1579).
-
+  so. Relay's reason for closing is now in the log and in
+  `relay-diagnostics.json`, and a failure that repeats no longer pushes older
+  records out of that file (#1595).
 - Chat hides the Second opinion footer button by default, including after an
   update. To show it again, turn on **Settings → General → Second opinion
   button**. You can still ask another agent to review a turn from its **…**
-  menu (#1513).
+  menu (#1522).
+- Chat: Claude's `/clear` ends as "Conversation cleared" instead of
+  "✕ Stopped after 0s", and native Codex turns `/clear` down in the composer
+  instead of raising an agent error (#1593).
+- Notifications, including "agent finished", now stack top right under the
+  tabs, so they no longer cover the composer or the last turn's footer
+  (#1502).
+- Command palette: **Move to section** opens on the session's section. It
+  could open on **Remove from section**, so Enter took the session out of its
+  section (#1555).
+- Local runtime: a repository with many worktrees no longer keeps about a
+  dozen `git worktree list` processes running at all times. Sessions are
+  found with one listing per project, and at most four run at once (#1603).
+- Cloud workspaces: when a workspace's machine was deleted at the provider,
+  desktop and phone say so and offer **Delete workspace** and **Create new
+  workspace** instead of **Retry resume**. Its session reads "Unavailable"
+  with the reason instead of "Connecting…" forever, stops retrying, and a
+  queued prompt says it won't be delivered. The server now reports such a
+  machine itself, without a resume first (#1590, #1592, #1602).
+- Cloud Codex tabs: a substituted model is named by its display name, and a
+  new cloud tab no longer sends a Codex model pinned on this computer that
+  nobody picked (#1591).
+- Orchestration: a piece no longer goes to the lead with "No top model of
+  Claude Code is installed (fable)" while Fable is installed. The lead's own
+  model counts as installed, a Claude tier resolves to a listed version of
+  its family, and a "not installed" message says which model list it read
+  (#1604).
+- Bots (experimental): hand-offs, tells, answers and mentions in a bot's chat
+  are cards in the transcript (PRO-539, #1507). A new **Hand-offs** page
+  under Bots shows one thread for each chain, with **Stop** on each open step
+  (PRO-540, #1504); under 820 px wide it shows the list or one thread
+  (PRO-572, #1585). Hand-off cards say what the sender is to the receiver,
+  and when the sender has less access (PRO-571, #1584). Finished hand-offs
+  leave the strip above the chat, and an open one is one line (PRO-520,
+  #1500). The "+" in a bot chat's header is gone (PRO-533, #1503).
+- Bots (experimental): a bot can move to a cloud workspace or another machine
+  and back with its role, memory, duties and items, and the workspace wakes
+  for its duties and sleeps when idle (PRO-482, #1508). Each bot conversation
+  works in one place, personal or an organisation, and its memory, items,
+  sessions and workspaces follow that place (PRO-483, #1505). A check-back
+  set to "when a worker reports" also wakes the bot when the run's lead
+  reports, a run worker reports or is blocked, or a `--report` session from
+  the same chat reports (#1601).
+- Phone: set up TerminalX Cloud from the phone. First-run setup and creating
+  an organization (PRO-527, #1512), connecting a compute provider (PRO-528,
+  #1509), signing agents in (PRO-529, #1510), launching, stopping and
+  deleting a workspace (PRO-530, #1511, #1501, #1506), connecting GitHub and
+  choosing repositories (PRO-537, #1586), a first task at launch (PRO-547,
+  #1527), **New conversation** and **Add agent tab** in a running workspace
+  (PRO-548, #1526, with the runtime side in PRO-546, #1524), and the beta
+  access code screen after sign-in (PRO-551, #1561).
+- Phone: fixes from a full pass of the phone flow. **+** on the Cloud tab can
+  choose the organization, large text sizes no longer clip buttons, titles
+  and badges, and the signed-out Machines screen shows the TerminalX logo
+  instead of "TX" (PRO-554, #1578, #1583, #1587, PRO-578, #1605).
+- Development: CI runs only what a change touches, runs Rust tests under
+  nextest, runs the WebKit checks on Linux in parts, and pins Rust 1.100.0.
+  Flaky Rust and WebKit tests were fixed at the cause (#1515, #1517, #1520,
+  #1521, #1523, #1525, #1528, #1530, #1531, #1534, #1536, #1540, #1543,
+  #1557, #1558, #1575, #1577, #1588, #1598, #1599, #1611).
+
+## 0.2.39
 
 - Bots (experimental): a bot whose session is running no longer reads
   "Quiet". Its sidebar row and the Bots page's **Doing now** say
