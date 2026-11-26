@@ -11,6 +11,7 @@ import { WorktreeCopyNotices } from "@/components/ui/WorktreeCopyNotices";
 import { onOpenOrganizationSettings, onOpenSettingRow, onStatsSettingsRequest } from "@/lib/settingsLinks";
 import { onOpenCloudSetup, type CloudSetupTarget } from "@/lib/cloudSetupFlow";
 import { getAccount, useAccount } from "@/lib/account";
+import { phase2Ready } from "@/lib/phase2Readiness";
 import { CloudSetupFlow } from "@/components/cloudSetup/CloudSetupFlow";
 import { useUnknownSettingLink } from "@/lib/settingsDeepLink";
 import { bootDesktopLinks } from "@/lib/desktopLinks";
@@ -154,6 +155,8 @@ export function AppShell() {
   const runtimeSwitch = useRuntimeSwitch();
   const store = useSessionStore();
   const account = useAccount();
+  const activeOrgId = account.status.identity?.organizationId;
+  const automationOrgId = activeOrgId && phase2Ready(account.status, activeOrgId, "organizationAutomations") ? activeOrgId : undefined;
   const settingsBoundary = useSettingsLeaveBoundary();
   const { canLeave } = settingsBoundary;
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -543,6 +546,7 @@ export function AppShell() {
               </ErrorBoundary>
             ) : (
               <UnselectedWorkspace
+                automationOrgId={automationOrgId}
                 key={opening ? `${opening.view}:new` : store.view}
                 underDialog={opening && !behind ? opening.view : undefined}
                 sidebarOpen={sidebarOpen}
@@ -579,6 +583,7 @@ export function AppShell() {
 /** A pre-session checkout has the same full-height panel frame as a session. */
 function UnselectedWorkspace({
   underDialog,
+  automationOrgId,
   sidebarOpen,
   onToggleSidebar,
   onTogglePanel,
@@ -587,6 +592,7 @@ function UnselectedWorkspace({
 }: {
   /** The view the new-session dialog was opened over: drawn behind it in place of the form's own page. */
   underDialog?: ReturnType<typeof useSessionStore>["view"];
+  automationOrgId?: string;
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   onTogglePanel: () => void;
@@ -675,7 +681,7 @@ function UnselectedWorkspace({
             ) : view === "plans" ? (
               <PlansView />
             ) : view === "automations" ? (
-              <AutomationsView initialAutomationId={store.selectedAutomationId} />
+              <AutomationsView initialAutomationId={store.selectedAutomationId} organizationId={automationOrgId} />
             ) : view === "skills" ? (
               <SkillsView
                 key={`${store.skillsFilter?.projectPath ?? store.selectedProject ?? "home"}:${store.skillsFilter?.agent ?? "all"}`}

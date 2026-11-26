@@ -763,6 +763,7 @@ pub fn run() {
             commands::cloud_schedule_webhook_rotate,
             commands::cloud_schedule_set_active,
             commands::cloud_schedule_delete,
+            commands::cloud_schedule_run_now,
             commands::cloud_schedules_pause_all,
             commands::cloud_workspace_set_access,
             commands::phase2_desktop_contracts_available,

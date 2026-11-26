@@ -1829,6 +1829,17 @@ pub async fn cloud_schedule_set_active(
 }
 
 #[tauri::command]
+pub async fn cloud_schedule_run_now(
+    org_id: String,
+    schedule_id: String,
+    confirm_provider_spend: bool,
+    idempotency_key: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudScheduleRunNow, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedule_run_now(&org_id, &schedule_id, confirm_provider_spend, &idempotency_key))
+}
+
+#[tauri::command]
 pub async fn cloud_schedule_delete(
     schedule_id: String,
     state: tauri::State<'_, crate::AppState>,

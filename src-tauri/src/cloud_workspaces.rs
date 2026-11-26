@@ -1960,6 +1960,19 @@ pub struct CloudScheduleRun {
     pub finished_at: Option<i64>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CloudScheduleRunNow {
+    pub run: CloudScheduleRun,
+    pub duplicate: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudScheduleCreator {
+    pub user_id: String,
+    pub display_name: Option<String>,
+}
+
 /// A scheduled task as the API shows it. The prompt is never returned:
 /// `prompt_bytes` says how long it is.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1970,6 +1983,8 @@ pub struct CloudSchedule {
     pub name: String,
     #[serde(default)]
     pub created_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<CloudScheduleCreator>,
     pub agent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -4607,6 +4622,17 @@ impl CloudWorkspaceService {
     }
 
     /// Delete a scheduled task, its prompt and its runs.
+    pub fn schedule_run_now(&self, org: &str, schedule_id: &str, confirm_provider_spend: bool, idempotency_key: &str) -> Result<CloudScheduleRunNow, CloudWorkspaceClientError> {
+        use crate::account::PHASE2_ORGANIZATION_AUTOMATIONS;
+        if !confirm_provider_spend || !valid_schedule_id(schedule_id) || !valid_idempotency_key(idempotency_key) {
+            return Err(inbox_invalid());
+        }
+        self.phase2_member_in(PHASE2_ORGANIZATION_AUTOMATIONS, "cloud_workspace_runtime_not_ready", org, RequestRisk::Mutation, |client, context| {
+            client.request(context, &["cloud-schedules", schedule_id, "run-now"], None,
+                Some(json!({ "confirmProviderSpend": true })), Some(idempotency_key), RequestRisk::Mutation)
+        })
+    }
+
     pub fn schedule_delete(&self, org: Option<&str>, schedule_id: &str) -> Result<(), CloudWorkspaceClientError> {
         if !valid_schedule_id(schedule_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
@@ -4842,6 +4868,7 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_quota_exceeded"
             | "cloud_schedule_runtime_unsupported"
             | "cloud_schedule_cleanup_pending"
+            | "cloud_schedule_revision_conflict"
             | "cloud_schedule_prompt_shell_command"
             | "cloud_schedule_prompt_slash_command"
             | "cloud_schedule_prompt_file_mention"
@@ -10277,6 +10304,41 @@ mod tests {
     }
 
     #[test]
+    fn phase2_organization_automations_run_now_requires_readiness_and_spend_confirmation() {
+        let (_, held) = test_service("http://127.0.0.1:1");
+        assert_eq!(held.schedule_run_now("org-1", SCHEDULE, true, "run-1").unwrap_err().code, "cloud_workspace_runtime_not_ready");
+        assert_eq!(held.schedule_run_now("org-1", SCHEDULE, false, "run-1").unwrap_err().code, "cloud_workspace_request_invalid");
+        let body = json!({ "run": { "id": "run-1", "scheduledFor": 10, "state": "queued" }, "duplicate": false });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, ready) = phase2_service(&base);
+        let result = ready.schedule_run_now("org-1", SCHEDULE, true, "run-1").unwrap();
+        assert_eq!(result.run.id, "run-1");
+        assert!(!result.duplicate);
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/run-now HTTP/1.1")));
+        assert!(captured.text.to_ascii_lowercase().contains("idempotency-key: run-1"));
+        assert_eq!(sent_body(&captured), json!({ "confirmProviderSpend": true }));
+    }
+
+    #[test]
+    fn phase2_organization_automations_project_creator_without_prompt_or_webhook_secret() {
+        let mut schedule = schedule_json(SCHEDULE, "workspace-1");
+        schedule["creator"] = json!({ "userId": "user-1", "displayName": "Sam" });
+        schedule["prompt"] = json!("not part of the list view");
+        schedule["webhookSecret"] = json!("not part of the list view");
+        let body = json!({ "schedules": [schedule] });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let listed = service.schedules(Some("org-1"), None).unwrap();
+        assert!(request.join().unwrap().text.starts_with("GET /v1/desktop/orgs/org-1/cloud-schedules HTTP/1.1"));
+        let value = serde_json::to_value(&listed).unwrap();
+        let row = &value["schedules"][0];
+        assert_eq!(row["creator"], schedule["creator"]);
+        assert!(row.get("prompt").is_none());
+        assert!(row.get("webhookSecret").is_none());
+    }
+
+    #[test]
     fn phase2_automation_contract_schedules_are_listed_for_one_workspace_and_an_answer_about_another_is_refused() {
         let body = json!({ "schedules": [schedule_json(SCHEDULE, "workspace-1")] });
         let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
@@ -10475,7 +10537,7 @@ mod tests {
 
     #[test]
     fn phase2_automation_contract_a_refused_schedule_keeps_the_servers_reason() {
-        for code in ["cloud_schedule_runtime_unsupported", "cloud_schedule_cleanup_pending", "cloud_schedule_prompt_shell_command", "cloud_schedule_prompt_slash_command", "cloud_schedule_prompt_file_mention"] {
+        for code in ["cloud_schedule_revision_conflict", "cloud_schedule_runtime_unsupported", "cloud_schedule_cleanup_pending", "cloud_schedule_prompt_shell_command", "cloud_schedule_prompt_slash_command", "cloud_schedule_prompt_file_mention"] {
             let (base, _, request) = serve_once(response("409 Conflict", &json!({ "error": code }).to_string(), ""), Duration::ZERO);
             let (_, service) = test_service(&base);
             let error = service.schedule_create(None, &schedule_input()).unwrap_err();
