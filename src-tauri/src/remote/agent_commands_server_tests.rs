@@ -193,7 +193,7 @@ fn refusal(result: Result<Value, (String, Value)>) -> (String, Value) {
 
 fn v2_policy(revision: &str, role: &str, approve: bool, source: Value) -> collab::v2::Snapshot {
     serde_json::from_value(json!({"v": 2, "revision": revision, "members": [
-        {"userId": "admin", "role": role, "canApprove": approve, "writeSource": source}
+        crate::remote::collab::v2::member_fixture(json!({"userId": "admin", "role": role, "canApprove": approve, "writeSource": source}))
     ]})).unwrap()
 }
 
@@ -209,7 +209,6 @@ async fn phase2_collaboration_v2_durable_rpc_preserves_independent_manager_appro
     assert_eq!(hello["you"]["role"], "manager");
     assert_eq!(hello["you"]["canApprove"], false);
     assert!(!hello["capabilities"].as_array().unwrap().iter().any(|v| v == "collab/2"));
-    assert!(!crate::cloud_bootstrap::CAPABILITIES.split(',').any(|v| v == "collaboration-v2"));
     m.agent.seen.lock().unwrap().pending.push("r1".into());
     let decision = m.params("v2-decide-0001", json!({"requestId": "r1", "optionId": "allow"}));
     assert!(command(&m.rpc, &peer, "session.decide", decision).await.is_err());
@@ -278,7 +277,61 @@ async fn phase2_collaboration_v2_everyone_cannot_start_tabs_or_send_terminal_inp
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn phase2_collaboration_v2_production_refresh_and_capabilities_stay_v1() {
+async fn phase2_collaboration_v2_requires_explicit_approval_source_exactly_when_approval_is_granted() {
+    let _home = crate::store::temp_home();
+    for (can_approve, source, valid) in [
+        (false, None, true),
+        (false, Some(json!("explicit")), false),
+        (true, None, false),
+        (true, Some(json!("explicit")), true),
+        (true, Some(Value::Null), false),
+        (true, Some(json!("everyone")), false),
+    ] {
+        let m = machine();
+        let mut member = json!({"userId":"admin", "role":"driver", "writeSource":"everyone", "canApprove":can_approve});
+        if let Some(source) = source { member["approvalSource"] = source; }
+        let result = m.rpc.set_refresh_collaboration(Some(json!({"v":2, "revision":"1", "members":[member]})), 7, true);
+        assert_eq!(result.is_ok(), valid, "{can_approve}: {member}");
+        let stamp = m.rpc.collab.runtime_policy.stamp("admin");
+        assert_eq!(stamp.is_some(), valid);
+        let approval = m.rpc.collab.runtime_policy.admit("admin", stamp.as_ref(), collab::v2::Action::Approve, None);
+        if valid { assert_eq!(approval.is_ok(), can_approve); }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn phase2_collaboration_v2_invalid_approval_source_retires_the_previous_policy() {
+    let _home = crate::store::temp_home();
+    for bad_approval in [None, Some(Value::Null), Some(json!("everyone"))] {
+        let m = machine();
+        m.rpc.collab.install_v2(v2_policy("1", "manager", true, json!("explicit"))).unwrap();
+        let old = m.rpc.collab.runtime_policy.stamp("admin").unwrap();
+        let mut member = json!({"userId":"admin", "role":"driver", "writeSource":"everyone", "canApprove":true});
+        if let Some(source) = bad_approval { member["approvalSource"] = source; }
+        let response = json!({"v":2, "revision":"2", "members":[member]});
+        assert!(m.rpc.set_refresh_collaboration(Some(response), 7, true).is_err());
+        assert!(m.rpc.collab.runtime_policy.stamp("admin").is_none());
+        assert!(m.rpc.collab.runtime_policy.admit("admin", Some(&old), collab::v2::Action::Approve, None).is_err());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn phase2_collaboration_v2_everyone_cannot_acquire_a_lease_without_an_asking_witness() {
+    let _home = crate::store::temp_home();
+    let m = machine();
+    m.rpc.collab.install_v2(v2_policy("11", "driver", false, json!("everyone"))).unwrap();
+    let (peer, _events) = Peer::for_user("everyone-lease".into(), Authority::Participate, Some("admin".into()));
+    call(&m.rpc, &peer, "rpc.hello", json!({"protocol": PROTOCOL, "want": ["collab/1"]})).await.unwrap();
+    let params = json!({ "sessionId": m.session_id, "tabId": m.tab_id });
+    assert_eq!(
+        refusal(command(&m.rpc, &peer, "lease.acquire", params).await),
+        ("forbidden".into(), json!("everyone-tab-read-only")),
+    );
+    assert!(m.rpc.collab.lease(&m.tab_id, crate::cloud_agents::now_ms(), true).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn phase2_collaboration_v2_runtime_advertises_enforcement_without_changing_v1_client_capabilities() {
     let _home = crate::store::temp_home();
     let m = machine();
     m.rpc.set_collaboration(members(json!([{"userId": "admin", "role": "manager", "canApprove": false}])));
@@ -286,7 +339,11 @@ async fn phase2_collaboration_v2_production_refresh_and_capabilities_stay_v1() {
     let hello = call(&m.rpc, &peer, "rpc.hello", json!({"protocol": PROTOCOL, "want": ["collab/1", "collab/2", "session/1", "agent-commands/1"]})).await.unwrap();
     assert_eq!(hello["you"]["canApprove"], true, "v1 managers still always approve");
     assert!(!hello["capabilities"].as_array().unwrap().iter().any(|v| v == "collab/2"));
-    assert!(!crate::cloud_bootstrap::CAPABILITIES.contains("collaboration-v2"));
+    let runtime = crate::cloud_bootstrap::CAPABILITIES.split(',').collect::<Vec<_>>();
+    for capability in ["collaboration-v1", "collaboration-v2", "collaboration-v2-everyone-write-per-tab"] {
+        assert!(runtime.contains(&capability));
+        assert!(!hello["capabilities"].as_array().unwrap().iter().any(|v| v == capability));
+    }
     // The legacy-only entry point cannot silently interpret a v2 payload as v1.
     m.rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 2, "revision": "1", "members": [
         {"userId": "admin", "role": "manager", "canApprove": false, "writeSource": "explicit"}
@@ -642,7 +699,7 @@ async fn phase2_collaboration_v2_bootstrap_refresh_installs_before_actual_rpc_an
             collaboration: Some(serde_json::to_value(v2_policy(revision, role, approve, source)).unwrap()),
             desktop_ready: false,
         };
-        crate::remote::bootstrap_link::relay_session(&session, "collaboration-v2")
+        crate::remote::bootstrap_link::relay_session(&session, crate::cloud_bootstrap::CAPABILITIES)
     };
     let mut unsolicited = refresh("1", "manager", false, json!("explicit"));
     unsolicited.collaboration_v2 = false;
@@ -679,7 +736,6 @@ async fn phase2_collaboration_v2_bootstrap_refresh_installs_before_actual_rpc_an
         "a mailbox generation advance also fences a late host response");
     assert_eq!(m.agent.sends(), vec!["explicit reaches agent"]);
     assert!(m.agent.seen.lock().unwrap().decisions.is_empty());
-    assert!(!crate::cloud_bootstrap::CAPABILITIES.contains("collaboration-v2"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

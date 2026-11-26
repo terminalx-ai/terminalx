@@ -2105,13 +2105,13 @@ mod tests {
                 relay_token_expires_at:0, director_url:"http://127.0.0.1:1".into(),
                 access_mode:crate::cloud_bootstrap::AccessMode::Private, attachments, revocations:vec![], quiesce:None, environment:None,
                 collaboration:Some(json!({"v":2,"revision":revision,"members":[
-                    {"userId":"driver","role":"driver","canApprove":true,"writeSource":source}
+                    {"userId":"driver","role":"driver","canApprove":true,"approvalSource":"explicit", "writeSource":source}
                 ]})),
                 desktop_ready: false,
             };
             super::super::bootstrap_link::relay_session(&session, capabilities)
         };
-        let link = Arc::new(Link { session:Mutex::new(response("1", "explicit", crate::cloud_bootstrap::CAPABILITIES, 7, "first")), completed:Mutex::new(vec![]) });
+        let link = Arc::new(Link { session:Mutex::new(response("1", "explicit", "collaboration-v1", 7, "first")), completed:Mutex::new(vec![]) });
         let devices_path = root.path().join("devices.json");
         let host = RelayHost::new(link.clone(), rpc.clone(), Some(devices_path.clone()));
         let (commands, mut receive) = mpsc::unbounded_channel();
@@ -2205,7 +2205,7 @@ mod tests {
                 self.revoked.lock().unwrap().push(id.into()); Ok(())
             }
         }
-        let member = json!({"userId":"driver", "role":"driver", "canApprove":true, "writeSource":"explicit"});
+        let member = json!({"userId":"driver", "role":"driver", "canApprove":true, "approvalSource":"explicit", "writeSource":"explicit"});
         for (policy, negotiated) in [
             (json!({"v":2, "revision":"01", "members":[member.clone()]}), true),
             (json!({"v":9, "revision":"2", "members":[member.clone()]}), true),

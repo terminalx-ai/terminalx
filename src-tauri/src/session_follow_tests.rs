@@ -1200,7 +1200,7 @@ fn phase2_collaboration_v2_actual_shell_adoption_and_safe_reports_never_authoriz
     let policy = Arc::new(Collaboration::new());
     policy.runtime_policy.bind(rig.dir.path(), 1).unwrap();
     let snapshot: Snapshot = serde_json::from_value(json!({"v":2,"revision":"1","members":[{
-        "userId":"guest","role":"driver","canApprove":true,"writeSource":"everyone"
+        "userId":"guest","role":"driver","canApprove":true,"approvalSource":"explicit", "writeSource":"everyone"
     }]})).unwrap();
     policy.install_v2(snapshot).unwrap();
     let permit = Permit::new(policy.clone(), "guest", policy.runtime_policy.stamp("guest"), Action::Drive);

@@ -177,7 +177,7 @@ pub enum DecisionError {
 pub trait AgentOps: Send + Sync {
     /// A raw current engine witness, not a launch setting or approval count.
     /// Until ManagerOps and its final writers carry this atomically, Everyone
-    /// driving fails closed and collaboration-v2 must remain unadvertised.
+    /// driving fails closed for that tab.
     #[allow(private_interfaces)] // Dormant v2 witness stays internal, not a public capability.
     fn collaboration_v2_witness(&self, _session_id: &str, _tab_id: &str) -> Option<collab::v2::TabWitness> {
         None

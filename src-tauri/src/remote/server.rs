@@ -1265,7 +1265,7 @@ impl WorkspaceRpc {
     }
 
     /// Install the existing refresh response before processing its attachments.
-    /// Capability advertisement remains v1-only pending coordinated rollout.
+    /// A v2 response requires the current runtime to have requested v2.
     pub(crate) fn set_refresh_collaboration(&self, value: Option<Value>, generation: u64, negotiated_v2: bool) -> anyhow::Result<()> {
         let _admission = self.collab.enter_admission();
         anyhow::ensure!(generation == self.generation.load(Ordering::SeqCst), "retired collaboration refresh generation");
@@ -2340,8 +2340,8 @@ impl WorkspaceRpc {
         }
         if self.collab.runtime_policy.everyone(user) {
             let permit = collab::v2::current().ok_or_else(|| RpcError::forbidden("Collaboration provenance missing"))?;
-            permit.check(self.manager()?.collaboration_v2_witness(&session_id, &tab_id).as_ref())
-                .map_err(collaboration_drive_refusal)?;
+            let witness = self.manager().ok().and_then(|manager| manager.collaboration_v2_witness(&session_id, &tab_id));
+            permit.check(witness.as_ref()).map_err(collaboration_drive_refusal)?;
         }
         let busy = agents_busy(&self.agents, &session_id, &tab_id);
         let now = crate::cloud_agents::now_ms();

@@ -690,7 +690,7 @@ exec cat
         let policy = rpc.collab.clone();
         let dir = tempfile::tempdir().unwrap(); policy.runtime_policy.bind(dir.path(), 1).unwrap();
         let snapshot = |revision: &str, role: &str, approve: bool, source: &str| -> Snapshot {
-            serde_json::from_value(json!({"v":2,"revision":revision,"members":[{"userId":"manager","role":role,"canApprove":approve,"writeSource":source}]})).unwrap()
+            serde_json::from_value(json!({"v":2,"revision":revision,"members":[crate::remote::collab::v2::member_fixture(json!({"userId":"manager","role":role,"canApprove":approve,"writeSource":source}))]})).unwrap()
         };
         policy.install_v2(snapshot("1", "driver", true, "explicit")).unwrap();
         let (peer, _events) = crate::remote::server::Peer::for_user("settings-attachment".into(), crate::remote::protocol::Authority::Manage, Some("manager".into()));

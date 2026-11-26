@@ -491,7 +491,7 @@ mod tests {
         fn install(&self, revision: &str) {
             let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
                 "v": 2, "revision": revision, "members": [
-                    {"userId":"explicit", "role":"manager", "canApprove":true, "writeSource":"explicit"},
+                    {"userId":"explicit", "role":"manager", "canApprove":true, "approvalSource":"explicit", "writeSource":"explicit"},
                     {"userId":"everyone", "role":"driver", "canApprove":false, "writeSource":"everyone"}
                 ]
             })).unwrap();

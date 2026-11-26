@@ -2974,7 +2974,7 @@ time.sleep(60)
             let rpc = crate::remote::server::WorkspaceRpc::new(dir.path(), 1, sink.clone(), terminals.clone(), None).unwrap();
             let policy = rpc.collab.clone();
             let policy_dir = tempfile::tempdir().unwrap(); policy.runtime_policy.bind(policy_dir.path(), 1).unwrap();
-            let snapshot = |revision: &str, source: &str| -> Snapshot { serde_json::from_value(serde_json::json!({"v":2,"revision":revision,"members":[{"userId":"guest","role":"manager","canApprove":true,"writeSource":source}]})).unwrap() };
+            let snapshot = |revision: &str, source: &str| -> Snapshot { serde_json::from_value(serde_json::json!({"v":2,"revision":revision,"members":[{"userId":"guest","role":"manager","canApprove":true,"approvalSource":"explicit", "writeSource":source}]})).unwrap() };
             if change != "v1" { policy.install_v2(snapshot("1", "explicit")).unwrap(); }
             let (peer, _notifications) = crate::remote::server::Peer::for_user("raw-attachment".into(), crate::remote::protocol::Authority::Manage, Some("guest".into()));
             let permit = Permit::new(policy.clone(), "guest", policy.runtime_policy.stamp_for_peer("guest", &peer), Action::Configure).for_peer(&peer);
@@ -3043,7 +3043,7 @@ time.sleep(60)
             let pid = terminals.pid("full");
             let policy = Arc::new(Collaboration::new());
             let policy_dir = tempfile::tempdir().unwrap(); policy.runtime_policy.bind(policy_dir.path(), 1).unwrap();
-            let snapshot = |revision: &str| -> Snapshot { serde_json::from_value(serde_json::json!({"v":2,"revision":revision,"members":[{"userId":"guest","role":"manager","canApprove":true,"writeSource":"explicit"}]})).unwrap() };
+            let snapshot = |revision: &str| -> Snapshot { serde_json::from_value(serde_json::json!({"v":2,"revision":revision,"members":[{"userId":"guest","role":"manager","canApprove":true,"approvalSource":"explicit", "writeSource":"explicit"}]})).unwrap() };
             policy.install_v2(snapshot("1")).unwrap();
             let permit = Permit::new(policy.clone(), "guest", policy.runtime_policy.stamp("guest"), Action::Configure);
             struct CountWriter { inner: Box<dyn Write + Send>, written: Arc<AtomicU64> }

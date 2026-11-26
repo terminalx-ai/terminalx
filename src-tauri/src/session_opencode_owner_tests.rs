@@ -100,8 +100,8 @@ impl Rig {
     }
     fn revision(&self, revision: &str, source: &str) {
         self.policy.install_v2(serde_json::from_value::<Snapshot>(json!({"v":2,"revision":revision,"members":[
-            {"userId":"actor","role":"manager","canApprove":true,"writeSource":source},
-            {"userId":"approver","role":"viewer","canApprove":true,"writeSource":null}]})).unwrap()).unwrap();
+            {"userId":"actor","role":"manager","canApprove":true,"approvalSource":"explicit", "writeSource":source},
+            {"userId":"approver","role":"viewer","canApprove":true,"approvalSource":"explicit", "writeSource":null}]})).unwrap()).unwrap();
     }
     fn permit(&self, actor: &str, right: Right) -> Permit {
         Permit::new(self.policy.clone(), actor, self.policy.runtime_policy.stamp(actor), right)
