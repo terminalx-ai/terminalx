@@ -793,6 +793,7 @@ pub fn run() {
             startup::commands::startup_diagnostics_status,
             startup::commands::startup_diagnostics_policy,
             startup::commands::startup_diagnostics_probe,
+            startup::commands::startup_diagnostics_dismiss,
             startup::commands::startup_diagnostics_preview,
             startup::commands::startup_diagnostics_export,
             cloud_agent_client::cloud_agent_enqueue,

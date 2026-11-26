@@ -1,9 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { StartupDiagnostics } from "./StartupDiagnostics";
+import { NoticeColumn } from "@/components/ui/NoticeColumn";
+import { thisComputer } from "@/lib/platform";
 import type { StartupSnapshot } from "@/lib/startupDiagnostics";
 
-const mocks = vi.hoisted(() => ({ status: vi.fn(), policy: vi.fn(), probe: vi.fn(), preview: vi.fn(), export: vi.fn(), save: vi.fn(), openUrl: vi.fn() }));
+const mocks = vi.hoisted(() => ({ status: vi.fn(), policy: vi.fn(), probe: vi.fn(), dismiss: vi.fn(), preview: vi.fn(), export: vi.fn(), save: vi.fn(), openUrl: vi.fn() }));
 vi.mock("@/lib/startupDiagnostics", () => ({ startupDiagnostics: mocks, OPEN_STARTUP_DIAGNOSTICS: "open-startup-diagnostics" }));
 vi.mock("@/lib/api", () => ({ errorMessage: String }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: mocks.save }));
@@ -92,4 +94,48 @@ it("keeps incomplete observation visible even when a prior health result exists"
   await open();
   expect(screen.getByText(/Some owned processes could not be observed/)).toBeTruthy();
   expect(screen.getByText("Incident incident")).toBeTruthy();
+});
+
+const dismissed = (snapshot: StartupSnapshot): StartupSnapshot => ({ ...snapshot, incidents: snapshot.incidents.map((incident) => ({ ...incident, dismissed: { at: 500_000, escalated: true, affectedPanes: 1 } })) });
+
+it("shows the banner in the window's toast stack, not over the composer", async () => {
+  render(<><NoticeColumn><div>Claude Code finished</div></NoticeColumn><StartupDiagnostics /></>);
+  const banner = await screen.findByRole("status", { name: "Local startup incident" });
+  expect(banner.closest("[data-notice-stack]")).toBe(screen.getByText("Claude Code finished").closest("[data-notice-stack]"));
+  expect(banner.className).not.toContain("bottom-16");
+  expect(screen.getByText("1 affected pane. New local validation is held until launch health is demonstrated.")).toBeTruthy();
+});
+
+it("hides the banner for this incident, keeps it hidden after a reload, and shows it for a new incident", async () => {
+  mocks.dismiss.mockResolvedValue(dismissed(state));
+  render(<StartupDiagnostics />);
+  fireEvent.click(await screen.findByRole("button", { name: "Hide startup incident" }));
+  await waitFor(() => expect(screen.queryByRole("status", { name: "Local startup incident" })).toBeNull());
+  expect(mocks.dismiss).toHaveBeenCalledWith("incident");
+  cleanup();
+  // A reload reads the dismissal back from the owner's incident record.
+  mocks.status.mockResolvedValue(dismissed(state));
+  render(<StartupDiagnostics />);
+  await waitFor(() => expect(mocks.status).toHaveBeenCalled());
+  await Promise.resolve();
+  expect(screen.queryByRole("status", { name: "Local startup incident" })).toBeNull();
+  cleanup();
+  mocks.status.mockResolvedValue({ ...dismissed(state), incidents: [{ ...dismissed(state).incidents[0], recoveredAt: 600_000 }, { ...state.incidents[0], id: "second", detectedAt: 700_000 }] });
+  render(<StartupDiagnostics />);
+  expect(await screen.findByRole("status", { name: "Local startup incident" })).toBeTruthy();
+});
+
+it("says plainly in the dialog what is still held once the banner is hidden", async () => {
+  mocks.status.mockResolvedValue({ ...dismissed(state), incidents: [{ ...dismissed(state).incidents[0], recoveryWaits: ["wait"] }] });
+  render(<StartupDiagnostics />);
+  await waitFor(() => expect(mocks.status).toHaveBeenCalled());
+  act(() => { window.dispatchEvent(new Event("open-startup-diagnostics")); });
+  const held = await screen.findByRole("note", { name: "Still held" });
+  expect(held.textContent).toBe(`The banner is hidden, but nothing was released. Still held until this incident recovers: new heavy local validation on ${thisComputer}, and the checks of 1 pipeline. Recovery also waits on 1 permission prompt in the affected panes or in new launches; answer it yourself.`);
+  expect(screen.getByText(/comes back if this incident escalates or reaches more panes/)).toBeTruthy();
+});
+
+it("states what is held even while the banner is showing", async () => {
+  await open();
+  expect(screen.getByRole("note", { name: "Still held" }).textContent).toBe(`Still held until this incident recovers: new heavy local validation on ${thisComputer}, and the checks of 1 pipeline.`);
 });

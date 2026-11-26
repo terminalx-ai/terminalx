@@ -701,7 +701,7 @@ mod tests {
         })).unwrap());
         state.incidents.push(crate::startup::Incident {
             id: uuid::Uuid::new_v4().to_string(), detected_at: 120_000, escalated_at: None,
-            recovered_at: None, launches: vec!["launch".into()], recovery_waits: vec![], blocked_pipelines: vec![], probe: None,
+            recovered_at: None, launches: vec!["launch".into()], recovery_waits: vec![], blocked_pipelines: vec![], probe: None, dismissed: None,
         });
         let path = crate::store::ensure_dir(crate::store::root().unwrap().join("startup")).unwrap().join("incidents.json");
         crate::store::write_json(&path, &state).unwrap();
