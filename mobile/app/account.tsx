@@ -2,6 +2,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import { ChevronRight } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { accountDeletionText } from "@mobile/account/deletion";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { organizationRoleName } from "@mobile/cloud/words";
 import { useApp } from "@mobile/state/AppProvider";
@@ -13,6 +14,7 @@ import { useTheme } from "@mobile/ui/theme";
  * The TerminalX account this phone is signed in to, opened from its row at
  * the top of Settings (22.05). Signing out is here, one step away from a
  * stray tap. Each organization of the account opens its own page (#1292).
+ * Delete account is a row below Sign out (PRO-584): it opens its own page.
  */
 export default function AccountScreen() {
   const app = useApp();
@@ -47,6 +49,18 @@ export default function AccountScreen() {
       </> : null}
       <Text style={[styles.note, { color: palette.muted }]}>Signing out removes the machines this phone paired through your account, and the conversations it saved. Machines you paired with a QR code stay.</Text>
       <Button label="Sign out" kind="danger" onPress={() => void signOut()} />
+      {/* PRO-584: a row below Sign out, not a second red button beside it as an equal. */}
+      <Card>
+        <Pressable testID="account-delete-row" accessibilityRole="button" accessibilityLabel={`${accountDeletionText.rowTitle}. ${accountDeletionText.rowHint}`}
+          onPress={() => router.push("/delete-account")}
+          style={({ pressed }) => [styles.row, pressed && { backgroundColor: palette.raised }]}>
+          <View style={styles.flex}>
+            <Text style={[styles.rowName, { color: palette.danger }]}>{accountDeletionText.rowTitle}</Text>
+            <Text style={[styles.small, { color: palette.muted }]}>{accountDeletionText.rowHint}</Text>
+          </View>
+          <ChevronRight size={18} color={palette.faint} />
+        </Pressable>
+      </Card>
     </> : <View style={styles.block}>
       <Text style={[styles.detail, { color: palette.muted }]}>Not signed in.</Text>
       <Button label={app.signingIn ? "Signing in…" : "Sign in"} disabled={app.signingIn} accessibilityState={{ disabled: app.signingIn, busy: app.signingIn }} icon={app.signingIn ? (color) => <Spinner size={16} color={color} /> : undefined} onPress={() => void app.signIn()} />
@@ -63,5 +77,6 @@ const styles = StyleSheet.create({
   row: { minHeight: 56, paddingHorizontal: 14, paddingVertical: 10, flexDirection: "row", alignItems: "center", gap: 12 },
   rowName: { fontSize: 16 },
   flex: { flex: 1 },
+  small: { fontSize: 13, lineHeight: 18 },
   note: { fontSize: 13, lineHeight: 18, marginHorizontal: 4 },
 });

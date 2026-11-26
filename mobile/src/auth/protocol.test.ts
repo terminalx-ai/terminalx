@@ -11,6 +11,15 @@ describe("mobile OAuth PKCE", () => {
     expect(url.searchParams.has("profileId")).toBe(false);
   });
 
+  it("asks the server for a sign-in, not the browser's remembered one, only when it must be fresh (PRO-584)", () => {
+    const fresh = new URL(buildAuthorizeUrl(AUTH_CONFIG, "challenge", "state", "nonce", { fresh: true }));
+    expect(fresh.searchParams.get("prompt")).toBe("login");
+    expect(fresh.searchParams.get("max_age")).toBe("0");
+    const usual = new URL(buildAuthorizeUrl(AUTH_CONFIG, "challenge", "state", "nonce"));
+    expect(usual.searchParams.has("prompt")).toBe(false);
+    expect(usual.searchParams.has("max_age")).toBe(false);
+  });
+
   it("rejects a callback whose state does not match", async () => {
     const fetchImpl = vi.fn();
     const outcome = await exchangeAuthorizationCode({ config: AUTH_CONFIG, callbackUrl: "terminalx://auth/callback?code=code&state=wrong", verifier: "verifier", expectedState: "right", nonce: "nonce", fetchImpl });

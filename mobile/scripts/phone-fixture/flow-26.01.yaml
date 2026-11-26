@@ -1,0 +1,212 @@
+# 26.01 Delete account (PRO-584): the row, the page for a plain account, typing, deleting, done; blocked;
+# a workspace that did not stop; a refusal; a stale sign-in; offline; the final deletion running; the cancelled notice.
+# The boards are drawn in Ember when dark and in Den when light: MAESTRO_THEME=Den for the light run.
+# Large text: set the simulator's size first (see flow-large-text.yaml).
+appId: com.terminalx.phone.fixture
+env:
+  THEME: ${MAESTRO_THEME || "Ember"}
+name: Delete account (26.01)
+---
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: running }
+- runFlow: steps/pick-theme.yaml
+- tapOn:
+    text: "Account.*"
+- waitForAnimationToEnd
+- scrollUntilVisible:
+    element:
+      id: account-delete-row
+    centerElement: true
+- takeScreenshot: 26.01-01-account-row
+- tapOn:
+    id: account-delete-row
+- waitForAnimationToEnd
+- takeScreenshot: 26.01-02-page-top
+- runFlow: steps/to-confirm.yaml
+- takeScreenshot: 26.01-03-page-confirm
+- tapOn:
+    id: delete-account-email
+# Short, so a tap on the field's centre puts the caret after it at every text size.
+- inputText: "alex@"
+- hideKeyboard
+- takeScreenshot: 26.01-04-mismatch
+- tapOn:
+    id: delete-account-email
+- inputText: "example.com"
+- hideKeyboard
+- takeScreenshot: 26.01-05-ready
+- tapOn:
+    id: delete-account-confirm
+- takeScreenshot: 26.01-06-stopping
+- extendedWaitUntil:
+    visible:
+      id: delete-account-done
+    timeout: 30000
+- takeScreenshot: 26.01-07-scheduled
+- tapOn:
+    id: delete-account-done
+- waitForAnimationToEnd
+- takeScreenshot: 26.01-08-settings-after-stopping
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: blocked }
+- runFlow: steps/open-delete-account.yaml
+- takeScreenshot: 26.01-10-blocked
+# To the end of the page: the footer button is always on screen; the rows above it are what is shot.
+- swipe:
+    start: 50%, 70%
+    end: 50%, 15%
+    duration: 600
+- swipe:
+    start: 50%, 70%
+    end: 50%, 15%
+    duration: 600
+- waitForAnimationToEnd
+- takeScreenshot: 26.01-11-blocked-end
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: stop-refused }
+- runFlow: steps/open-delete-account.yaml
+- runFlow: steps/to-confirm.yaml
+- tapOn:
+    id: delete-account-email
+- inputText: "alex@example.com"
+- hideKeyboard
+- tapOn:
+    id: delete-account-confirm
+- extendedWaitUntil:
+    visible:
+      id: delete-account-refused
+    timeout: 30000
+- runFlow: steps/to-confirm.yaml
+- scrollUntilVisible:
+    element:
+      id: delete-account-refused
+    direction: UP
+- takeScreenshot: 26.01-12-stop-failed
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: refused }
+- runFlow: steps/open-delete-account.yaml
+- runFlow: steps/to-confirm.yaml
+- tapOn:
+    id: delete-account-email
+- inputText: "alex@example.com"
+- hideKeyboard
+- tapOn:
+    id: delete-account-confirm
+- takeScreenshot: 26.01-13-deleting
+- extendedWaitUntil:
+    visible:
+      id: delete-account-refused
+    timeout: 20000
+- takeScreenshot: 26.01-14-refused
+# Tried again: nothing was running, so it is scheduled at once with the server's day.
+- tapOn:
+    id: delete-account-confirm
+- extendedWaitUntil:
+    visible:
+      id: delete-account-done
+    timeout: 20000
+- takeScreenshot: 26.01-14b-scheduled-dated
+- tapOn:
+    id: delete-account-done
+- waitForAnimationToEnd
+- takeScreenshot: 26.01-14c-settings-pending
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: unknown }
+- runFlow: steps/open-delete-account.yaml
+- runFlow: steps/to-confirm.yaml
+- tapOn:
+    id: delete-account-email
+- inputText: "alex@example.com"
+- hideKeyboard
+- tapOn:
+    id: delete-account-confirm
+- extendedWaitUntil:
+    visible:
+      id: delete-account-unknown
+    timeout: 30000
+- takeScreenshot: 26.01-15-unknown
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: changed }
+- runFlow: steps/open-delete-account.yaml
+- runFlow: steps/to-confirm.yaml
+- tapOn:
+    id: delete-account-email
+- inputText: "alex@example.com"
+- hideKeyboard
+- tapOn:
+    id: delete-account-confirm
+- extendedWaitUntil:
+    visible:
+      id: delete-account-changed
+    timeout: 20000
+- takeScreenshot: 26.01-16-changed
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: stale }
+- runFlow: steps/open-delete-account.yaml
+- runFlow: steps/to-confirm.yaml
+- takeScreenshot: 26.01-17-stale
+- tapOn:
+    id: delete-account-sign-in
+- takeScreenshot: 26.01-18-signing-in
+- extendedWaitUntil:
+    visible: "Signed in just now"
+    timeout: 20000
+- takeScreenshot: 26.01-19-signed-in
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: offline, fixtureDeletion: plain }
+- runFlow: steps/open-delete-account.yaml
+- runFlow: steps/to-confirm.yaml
+- tapOn:
+    id: delete-account-email
+- inputText: "alex@example.com"
+- hideKeyboard
+- tapOn:
+    id: delete-account-confirm
+- takeScreenshot: 26.01-20-offline
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: finishing }
+- runFlow: steps/open-delete-account.yaml
+- takeScreenshot: 26.01-21-finishing
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: cancelled }
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+    centerElement: true
+- tapOn: "${THEME} theme"
+# Back to the top, clear of the tab bar (at AX1 the notice is taller than a scroll can bring fully into view).
+- swipe:
+    start: 25%, 30%
+    end: 25%, 70%
+    duration: 500
+- swipe:
+    start: 25%, 30%
+    end: 25%, 70%
+    duration: 500
+- swipe:
+    start: 25%, 30%
+    end: 25%, 70%
+    duration: 500
+- assertVisible:
+    id: settings-deletion-cancelled
+- waitForAnimationToEnd
+- takeScreenshot: 26.01-22-cancelled
