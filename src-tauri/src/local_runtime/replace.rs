@@ -72,7 +72,7 @@ const SETTLE: Duration = Duration::from_secs(15);
 
 /// How long a runtime refused as busy is left alone before it is asked
 /// again, after the first refusal in a row and at most. Each refusal from a
-/// runtime that cannot pick its own moment (0.2.40 and before) held every
+/// runtime that cannot pick its own moment (0.2.41 and before) held every
 /// hook and command of its agents still for up to ten seconds, so asking
 /// every few seconds, as was done, stalled them much of the time for as
 /// long as the runtime stayed busy.
