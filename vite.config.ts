@@ -228,7 +228,7 @@ export default defineConfig(async () => ({
       },
       {
         extends: true,
-        test: { name: "node", environment: "node", include: NODE_TESTS },
+        test: { name: "node", environment: "node", include: NODE_TESTS, setupFiles: ["./src/test/node-platform.ts"] },
       },
     ],
   },
