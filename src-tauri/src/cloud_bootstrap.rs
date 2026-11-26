@@ -237,7 +237,20 @@ pub struct Session {
     /// Who the workspace is shared with (contract §21.3), kept raw and read
     /// by the relay host; absent from an API before PRO-30.
     pub collaboration: Option<serde_json::Value>,
+    /// Untrusted until checked against the installed collaboration snapshot.
+    pub(crate) workspace_ssh: Option<serde_json::Value>,
     pub(crate) desktop_ready: bool,
+}
+
+impl Session {
+    /// The locally requested tokens determine whether the extension is usable.
+    /// A response cannot negotiate capabilities on the runtime's behalf.
+    #[allow(dead_code)]
+    pub(crate) fn workspace_ssh_v2(&self, requested_capabilities: &str) -> Option<serde_json::Value> {
+        let requested = |token| requested_capabilities.split(',').any(|value| value == token);
+        (requested("collaboration-v2") && requested("workspace-ssh-v2"))
+            .then(|| self.workspace_ssh.clone()).flatten()
+    }
 }
 
 /// Read leniently: a field the server adds later must not fail the whole
@@ -292,6 +305,8 @@ pub struct Refreshed {
     // Sent because this runtime advertises `collaboration-v1`.
     #[serde(default)]
     collaboration: Option<serde_json::Value>,
+    #[serde(default)]
+    workspace_ssh: Option<serde_json::Value>,
     #[serde(default)]
     phase2_readiness: Option<serde_json::Value>,
 }
@@ -597,6 +612,7 @@ fn redeem(config: &Config, api: &dyn Api, key: &HostKey, stored: Option<(&str, &
                 quiesce: None,
                 environment: None,
                 collaboration: None,
+                workspace_ssh: None,
                 desktop_ready: read_desktop_readiness(redeemed.phase2_readiness.as_ref()),
             }
         }
@@ -810,6 +826,7 @@ fn session_from_refresh(mut refreshed: Refreshed, relay_host_id: &str) -> Result
         attachments: std::mem::take(&mut refreshed.attachments),
         revocations: std::mem::take(&mut refreshed.revocations),
         collaboration: refreshed.collaboration.take().filter(|value| !value.is_null()),
+        workspace_ssh: refreshed.workspace_ssh.take(),
         desktop_ready: read_desktop_readiness(refreshed.phase2_readiness.as_ref()),
         quiesce: refreshed.quiesce.take().filter(|value| !value.is_null()).and_then(|value| {
             match serde_json::from_value::<QuiesceRequest>(value) {
@@ -1100,6 +1117,23 @@ mod tests {
     }
 
     #[test]
+    fn workspace_ssh_refresh_grants_require_both_locally_requested_tokens() {
+        use serde_json::json;
+        let grants = json!({"v":1, "workspaceId":WORKSPACE, "runtimeGeneration":3, "revision":"7", "grants":[]});
+        let response: Refreshed = serde_json::from_value(json!({
+            "v":1, "workspaceId":WORKSPACE, "organizationId":"org_1",
+            "relayToken":"fresh-relay-token", "relayTokenExpiresAt":1,
+            "directorUrl":"https://relay.example", "attachments":[], "revocations":[],
+            "workspaceSsh":grants
+        })).unwrap();
+        let session = session_from_refresh(response, "host_1").unwrap();
+        for held in [CAPABILITIES, "collaboration-v2", "workspace-ssh-v2"] {
+            assert!(session.workspace_ssh_v2(held).is_none());
+        }
+        assert_eq!(session.workspace_ssh_v2("collaboration-v2,workspace-ssh-v2"), Some(grants));
+    }
+
+    #[test]
     fn cloud_desktop_requires_the_versioned_literal_boolean_and_replaces_it_on_refresh() {
         use serde_json::json;
         assert!(!read_desktop_readiness(None));
@@ -1224,6 +1258,7 @@ mod tests {
                 access_mode: Some(AccessMode::Organization),
                 quiesce: None,
                 collaboration: None,
+                workspace_ssh: None,
                 phase2_readiness: self.refresh_desktop_ready.then(|| serde_json::json!({
                     "version": 1, "flags": { "cloud.desktop.v1": true }
                 })),
