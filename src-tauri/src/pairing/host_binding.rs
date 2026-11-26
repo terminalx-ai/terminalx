@@ -157,6 +157,7 @@ mod tests {
     use crate::account::AccountContext;
     use crate::pairing::cloud::fixture::{KeepAliveServer, Recorded, Reply};
     use crate::pairing::model::{AccountMirror, HostBindingPayload};
+    use crate::pairing::relay::RelayLive;
     use crate::pairing::{registry, AccountListing, PairingManager};
 
     /// One host's row in `host_account_bindings`, as terminalx-server keeps it.
@@ -256,8 +257,14 @@ mod tests {
         last_error: Option<String>,
     }
 
-    /// `relay_ready`'s bind, from a local fence at `fence`.
+    /// `relay_ready`'s bind, from a local fence at `fence`, beside a control
+    /// channel that stays open.
     async fn bind(directory: Arc<Directory>, fence: u64) -> Bind {
+        bind_until(directory, fence, None).await
+    }
+
+    /// As [`bind`]; the control channel closes after `close_after`.
+    async fn bind_until(directory: Arc<Directory>, fence: u64, close_after: Option<std::time::Duration>) -> Bind {
         let _home = crate::store::temp_home();
         let server = KeepAliveServer::start({
             let directory = directory.clone();
@@ -284,7 +291,19 @@ mod tests {
             capabilities: vec![],
         };
         let epoch = manager.epoch.load(Ordering::SeqCst);
-        let bound = manager.bind_host(&server.base, epoch, USER, &mut mirror, &mut payload).await;
+        let (relay, control) = RelayLive::for_test(HOST, 1);
+        // Held open to the end, or closed after `close_after`.
+        let _held = match close_after {
+            Some(after) => {
+                tokio::spawn(async move {
+                    tokio::time::sleep(after).await;
+                    drop(control);
+                });
+                None
+            }
+            None => Some(control),
+        };
+        let bound = manager.bind_host(&server.base, epoch, USER, &relay, &mut mirror, &mut payload).await;
         let inner = manager.inner.lock().unwrap();
         Bind {
             bound,
@@ -343,6 +362,19 @@ mod tests {
         assert_eq!(bind.bound, Some(1));
         // What it said while it waited; relay_ready clears it once listed.
         assert!(matches!(&bind.listing, Some(AccountListing::Pending { reason }) if reason.contains("Relay has not confirmed")), "{:?}", bind.listing);
+    }
+
+    // Review of #1640: the bind runs beside the control loop, and a closed
+    // control channel ends its wait at once, so a new connection starts over.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_closed_control_channel_ends_a_retry_wait_at_once() {
+        let directory = Directory::new(None);
+        *directory.proof_unavailable.lock().unwrap() = u32::MAX;
+        let started = std::time::Instant::now();
+        let bind = bind_until(directory, 1, Some(Duration::from_millis(300))).await;
+        assert!(started.elapsed() < Duration::from_secs(3), "waited {:?}, not the 5 s backoff", started.elapsed());
+        assert_eq!(bind.calls, calls(&[("POST", 1)]), "no registration after the channel closed");
+        assert_eq!(bind.bound, None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

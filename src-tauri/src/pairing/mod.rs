@@ -925,7 +925,7 @@ impl PairingManager {
         // again each time, so a rename in System Settings reaches the directory (#686).
         let saved = saved_host_name(previous.as_ref(), &context.user_id);
         let display_name = resolve_machine_name(crate::store::settings::load().machine_name, saved.clone(), recent_computer_name()).name;
-        let mut mirror = AccountMirror {
+        let mirror = AccountMirror {
             user_id: context.user_id.clone(),
             email: context.email.clone(),
             display_name: context.display_name.clone(),
@@ -936,39 +936,56 @@ impl PairingManager {
             self.set_error(format!("Could not save host binding fence: {error:#}"));
             return;
         }
-        let capabilities = self.host_capabilities();
-        let mut payload = HostBindingPayload {
+        let payload = HostBindingPayload {
             host_id: keypair.host_id(),
             host_public_key_b64: keypair.public_key_b64(),
             binding_generation: generation,
-            display_name: display_name.clone(),
+            display_name,
             platform: "darwin".into(),
             environment_kind: "native".into(),
-            capabilities: capabilities.clone(),
+            capabilities: self.host_capabilities(),
         };
-        let base = crate::account::api_base_url();
-        let Some(generation) = self.bind_host(&base, epoch, &context.user_id, &mut mirror, &mut payload).await else { return };
+        // Off the caller: relay_ready is awaited before the control loop
+        // starts, and a registration may wait minutes for Relay's proof or
+        // the account service. The control loop must answer the cell's pings
+        // meanwhile, or the cell drops this host and the proof never comes.
+        let manager = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let base = crate::account::api_base_url();
+            manager.publish_host(&base, epoch, context, relay, mirror, payload).await;
+        });
+    }
+
+    /// Bind this Mac in the account's machine list, then poll for its phones'
+    /// and computers' grants. Ends with `epoch` or with the control channel.
+    async fn publish_host(
+        self: Arc<Self>,
+        base: &str,
+        epoch: u64,
+        context: AccountContext,
+        relay: RelayLive,
+        mut mirror: AccountMirror,
+        mut payload: HostBindingPayload,
+    ) {
+        let Some(generation) = self.bind_host(base, epoch, &context.user_id, &relay, &mut mirror, &mut payload).await else { return };
         {
             let mut inner = self.inner.lock().unwrap();
             inner.account_listing = None;
             inner.host = Some(HostMetadata {
-                host_id: keypair.host_id(),
-                public_key: keypair.public_key_b64(),
+                host_id: payload.host_id.clone(),
+                public_key: payload.host_public_key_b64.clone(),
                 binding_generation: generation,
-                display_name,
-                platform: "darwin".into(),
-                environment_kind: "native".into(),
-                capabilities,
+                display_name: payload.display_name.clone(),
+                platform: payload.platform.clone(),
+                environment_kind: payload.environment_kind.clone(),
+                capabilities: payload.capabilities.clone(),
                 app_version: env!("CARGO_PKG_VERSION").into(),
                 last_seen_at: Some(Utc::now().to_rfc3339()),
             });
             inner.last_error = None;
         }
         self.emit();
-        let manager = self.clone();
-        tauri::async_runtime::spawn(async move {
-            manager.host_poll(epoch, context.user_id, relay, generation).await;
-        });
+        self.host_poll(epoch, context.user_id, relay, generation).await;
     }
 
     /// Register this Mac in the account's machine list, recovering from a
@@ -981,6 +998,7 @@ impl PairingManager {
         base: &str,
         epoch: u64,
         user_id: &str,
+        relay: &RelayLive,
         mirror: &mut AccountMirror,
         payload: &mut HostBindingPayload,
     ) -> Option<u64> {
@@ -1058,7 +1076,12 @@ impl PairingManager {
                     let wait = host_binding::retry_delay(retries, error.downcast_ref::<cloud::RetryAfter>().map(|after| after.0));
                     log::warn!("host binding: not on the account's machine list yet, retrying in {} s: {error:#}", wait.as_secs());
                     self.set_account_listing(AccountListing::Pending { reason: host_binding::reason(&error, &this_mac) });
-                    tokio::time::sleep(wait).await;
+                    // A closed control channel ends this attempt at once: the
+                    // supervisor reconnects, and relay_ready starts another.
+                    tokio::select! {
+                        _ = tokio::time::sleep(wait) => {}
+                        _ = relay.control_closed() => return None,
+                    }
                     if !self.is_epoch(epoch) {
                         return None;
                     }
