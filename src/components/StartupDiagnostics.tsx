@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { thisComputer } from "@/lib/platform";
 import { save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { AlertTriangle, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { InNoticeColumn } from "@/components/ui/NoticeColumn";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { errorMessage } from "@/lib/api";
 import { OPEN_STARTUP_DIAGNOSTICS, startupDiagnostics, type StartupPolicy, type StartupPreview, type StartupProbe, type StartupRecorderExit, type StartupSnapshot } from "@/lib/startupDiagnostics";
@@ -46,6 +48,8 @@ export function StartupDiagnostics() {
   const makePreview = () => run(async () => {
     setPreview(await startupDiagnostics.preview()); setConsent(false); setSaved(false);
   });
+  const dismiss = (id: string) => run(async () => { setState(await startupDiagnostics.dismiss(id)); });
+  const waits = incident?.recoveryWaits?.length ?? 0;
   const savePreview = () => run(async () => {
     if (!preview || !consent) return;
     const path = await save({ title: "Save local startup diagnostics", defaultPath: "terminalx-startup-diagnostics.json", filters: [{ name: "JSON", extensions: ["json"] }] });
@@ -55,13 +59,22 @@ export function StartupDiagnostics() {
   });
 
   return <>
-    {incident && !open && <aside role="status" aria-label="Local startup incident" className="fixed bottom-16 left-1/2 z-50 flex w-[min(38rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
-      <div className="min-w-0 flex-1 text-xs">
-        <p className="font-medium">{incident.escalatedAt === null ? "Suspected child-process startup stall" : "Child-process startup blocker needs attention"}</p>
-        <p className="mt-1 text-muted-foreground">{panes} affected panes. New local validation is held until launch health is demonstrated.</p>
-      </div>
-      <Button variant="outline" size="sm" onClick={() => setOpen(true)}>Inspect incident</Button>
-    </aside>}
+    {/* With the window's toasts, bottom right, off the composer (PRO-575, PRO-591). Hiding it keeps
+        validation held; the owner shows it again for a new or worse incident. */}
+    {incident && !incident.dismissed && !open && <InNoticeColumn>
+      <aside role="status" aria-label="Local startup incident" data-startup-incident="" className="pointer-events-auto flex w-full items-start gap-2.5 rounded-xl bg-popover p-3 text-sm text-card-foreground shadow-surface hairline animate-fade-in">
+        <AlertTriangle aria-hidden className="mt-0.5 size-4 shrink-0 text-destructive" />
+        <div className="min-w-0 flex-1">
+          <p className="font-medium">{incident.escalatedAt === null ? "Suspected child-process startup stall" : "Child-process startup blocker needs attention"}</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">{panes} affected {panes === 1 ? "pane" : "panes"}. New local validation is held until launch health is demonstrated.</p>
+          {error && <p role="alert" className="mt-1 text-xs text-destructive">{error}</p>}
+          <div className="mt-2.5 flex flex-wrap gap-2">
+            <Button variant="outline" size="sm" onClick={() => setOpen(true)}>Inspect incident</Button>
+          </div>
+        </div>
+        <button type="button" aria-label="Hide startup incident" title="Hide. Validation stays held." disabled={busy} onClick={() => void dismiss(incident.id)} className="rounded-sm p-0.5 text-faint hover:bg-veil-strong hover:text-foreground"><X className="size-3.5" /></button>
+      </aside>
+    </InNoticeColumn>}
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent width="max-w-[48rem]">
         <DialogHeader>
@@ -74,6 +87,8 @@ export function StartupDiagnostics() {
             {incident ? <section aria-label="Incident details" className="space-y-2">
               <p className="break-all font-mono text-xs">Incident {incident.id}</p>
               <p>{incident.escalatedAt !== null ? "Needs attention. " : "Suspected startup stall. "}{panes} affected panes; {incident.blockedPipelines.length} pipelines held.</p>
+              <p role="note" aria-label="Still held">{incident.dismissed ? "The banner is hidden, but nothing was released. " : ""}Still held until this incident recovers: new heavy local validation on {thisComputer}, and the checks of {incident.blockedPipelines.length} {incident.blockedPipelines.length === 1 ? "pipeline" : "pipelines"}.{waits > 0 ? ` Recovery also waits on ${waits} permission ${waits === 1 ? "prompt" : "prompts"} in the affected panes or in new launches; answer ${waits === 1 ? "it" : "them"} yourself.` : ""}</p>
+              {incident.dismissed && <p className="text-xs text-muted-foreground">The banner comes back if this incident escalates or reaches more panes, or for a new incident.</p>}
               <p className="text-xs text-muted-foreground">Detected {new Date(incident.detectedAt).toISOString()}. A small, unchanged process image supports suspicion; it does not identify the cause. Answer visible system or agent prompts yourself.</p>
               {state.censusIncomplete && <p role="status">Some owned processes could not be observed. The incident remains held until observation is complete and fresh launch health is demonstrated.</p>}
               <ul className="max-h-44 space-y-2 overflow-y-auto text-xs">

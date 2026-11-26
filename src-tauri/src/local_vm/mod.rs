@@ -27,3 +27,5 @@ mod guest_key;
 pub(crate) mod stdio_exit;
 
 pub(crate) mod linux_activation;
+#[cfg(test)]
+pub(crate) mod fake_helper;

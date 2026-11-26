@@ -1,5 +1,5 @@
 use super::*;
-use std::os::{fd::AsRawFd, unix::fs::PermissionsExt};
+use std::os::fd::AsRawFd;
 
 pub(crate) struct Fixture {
     pub(crate) dir: tempfile::TempDir,
@@ -33,7 +33,7 @@ impl Fixture {
         .unwrap();
         std::fs::write(dir.path().join("inspection.json"),json!({"Id":"a".repeat(64),"Config":{"Labels":{"ai.terminalx.computer":"1"}},"State":{"Running":true,"Paused":false,"Restarting":false},"Mounts":[],"HostConfig":{"Privileged":false,"PidMode":"private"}}).to_string()).unwrap();
         let driver = dir.path().join("engine-fixture");
-        std::fs::write(&driver,r#"#!/usr/bin/env python3
+        crate::local_vm::fake_helper::install(&driver,r#"#!/usr/bin/env python3
 import sys,json,pathlib,types
 root=pathlib.Path(__file__).parent
 args=sys.argv[1:]
@@ -71,8 +71,7 @@ else:
  result=module.transact(root/'guest',observed,header,data,interrupt)
  if header['action']=='install' and (root/'lose').exists(): sys.exit(73)
 print(json.dumps({'ok':True,'result':result}))
-"#).unwrap();
-        std::fs::set_permissions(&driver, std::fs::Permissions::from_mode(0o700)).unwrap();
+"#);
         let mut bytes = vec![0_u8; 64];
         bytes[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
         bytes[16] = 3;

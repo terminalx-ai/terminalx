@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
-import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Check } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Card } from "@mobile/ui/primitives";
-import { useKeyboardShown } from "@mobile/ui/keyboard";
+import { useKeyboardShown, keyboardAvoidingBehavior } from "@mobile/ui/keyboard";
 import { BAR_TITLE_MAX_SCALE } from "@mobile/ui/text-size";
 import { useTheme } from "@mobile/ui/theme";
 
@@ -15,7 +15,7 @@ export function LoginPage({ children, footer, testID }: { children: ReactNode; f
   const { palette } = useTheme();
   const insets = useSafeAreaInsets();
   const keyboard = useKeyboardShown();
-  return <KeyboardAvoidingView testID={testID} style={[styles.flex, { backgroundColor: palette.page }]} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={92}>
+  return <KeyboardAvoidingView testID={testID} style={[styles.flex, { backgroundColor: palette.page }]} behavior={keyboardAvoidingBehavior()} keyboardVerticalOffset={92}>
     <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" style={styles.flex} contentContainerStyle={[styles.content, footer ? null : { paddingBottom: insets.bottom + 24 }]}>{children}</ScrollView>
     {footer ? <View testID="login-footer" style={[styles.footer, { paddingBottom: (keyboard ? 0 : insets.bottom) + 12, borderTopColor: palette.border, backgroundColor: palette.page }]}>{footer}</View> : null}
   </KeyboardAvoidingView>;

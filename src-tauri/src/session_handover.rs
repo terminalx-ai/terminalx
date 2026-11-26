@@ -399,84 +399,142 @@ impl SessionManager {
     /// is about to settle fails with [`Unsettled`], to be tried again.
     pub(crate) fn hold_tabs<R>(&self, within: Duration, then: impl FnOnce(Held) -> R) -> Result<R> {
         let deadline = Instant::now() + within;
-        let mut runtimes: Vec<(String, Arc<Mutex<TabRuntime>>)> = self.tabs.lock().unwrap().iter().map(|(key, rt)| (key.clone(), rt.clone())).collect();
-        runtimes.sort_by(|a, b| a.0.cmp(&b.0));
-        let writers: Vec<Arc<PaneWriter>> = self.writers.lock().unwrap().values().cloned().collect();
-        // Whoever types into a pane holds its writer and then its tab, so
-        // the writers come first; then each transcript reader, which holds
-        // its tail and then its tab; then the tabs.
-        let mut typing = Vec::with_capacity(writers.len());
-        for writer in &writers {
-            typing.push(take(&writer.typing, deadline, "A prompt being typed into an agent")?);
-        }
-        let mut tails: Vec<Arc<tui::Tail>> = Vec::new();
-        for (_, rt) in &runtimes {
-            if let Engine::Cli(p) = &take(rt, deadline, "An agent tab")?.engine {
-                tails.push(p.tail.clone());
+        // What is about to settle is waited for a moment, with nothing of
+        // this held: a prompt on its way, an agent starting or stopping.
+        // With many tabs one of them is often at such a moment. Not for
+        // long, as the caller holds every hook still meanwhile: a handover
+        // that picks its moment looks for another one instead.
+        let patient = Instant::now() + within.min(Duration::from_secs(1));
+        loop {
+            let _unsettled: anyhow::Error = 'attempt: {
+            // The value, or, unsettled with time left, out of the attempt:
+            // every lock it took is let go of before the wait, or whoever
+            // is to settle things could not.
+            macro_rules! settled {
+                ($read:expr) => {
+                    match $read {
+                        Ok(read) => read,
+                        Err(error) if error.is::<Unsettled>() && Instant::now() < patient => break 'attempt error,
+                        Err(error) => return Err(error),
+                    }
+                };
             }
+            let mut runtimes: Vec<(String, Arc<Mutex<TabRuntime>>)> = self.tabs.lock().unwrap().iter().map(|(key, rt)| (key.clone(), rt.clone())).collect();
+            runtimes.sort_by(|a, b| a.0.cmp(&b.0));
+            let writers: Vec<Arc<PaneWriter>> = self.writers.lock().unwrap().values().cloned().collect();
+            // Whoever types into a pane holds its writer and then its tab, so
+            // the writers come first; then each transcript reader, which holds
+            // its tail and then its tab; then the tabs.
+            let mut typing = Vec::with_capacity(writers.len());
+            for writer in &writers {
+                typing.push(settled!(take(&writer.typing, deadline, "A prompt being typed into an agent")));
+            }
+            let mut tails: Vec<Arc<tui::Tail>> = Vec::new();
+            for (_, rt) in &runtimes {
+                if let Engine::Cli(p) = &settled!(take(rt, deadline, "An agent tab")).engine {
+                    tails.push(p.tail.clone());
+                }
+            }
+            let mut reading = Vec::with_capacity(tails.len());
+            for tail in &tails {
+                reading.push(settled!(take(&tail.application, deadline, "An agent's transcript")));
+            }
+            let mut held = Vec::with_capacity(runtimes.len());
+            for (_, rt) in &runtimes {
+                held.push(settled!(take(rt, deadline, "An agent tab")));
+            }
+            // A CLI started or restarted between reading the tails and holding
+            // the tabs follows a tail that is not held.
+            let unheld = held.iter().any(|rt| matches!(&rt.engine, Engine::Cli(p) if !tails.iter().any(|tail| Arc::ptr_eq(tail, &p.tail))));
+            if unheld {
+                settled!(Err::<(), anyhow::Error>(Unsettled("An agent was starting".into()).into()));
+            }
+            // A prompt handed a place in a pane's line before its writer was
+            // held would be typed by a thread that does not go over.
+            for writer in self.writers.lock().unwrap().values() {
+                let turns = writer.turns.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                if turns.serving < turns.next {
+                    settled!(Err::<(), anyhow::Error>(Unsettled("A prompt is on its way into an agent".into()).into()));
+                }
+            }
+            if self.mobile.has_pending() {
+                settled!(Err::<(), anyhow::Error>(Unsettled("A prompt from a phone is on its way".into()).into()));
+            }
+            // A tab still stopping was refused above. The processes a stop could
+            // not confirm gone (`stop_pids`, `session_stop_pids`, kept for good
+            // when one ignores its signals) lead process groups the terminals
+            // hand over as their own (`pty::Frozen::groups`), which Stop All
+            // ends; waiting for them could hold every handover off for good.
+            let awaited = held.iter().filter_map(|rt| match &rt.engine {
+                Engine::Cli(p) => Some(p.decisions.keys().cloned()),
+                _ => None,
+            }).flatten().collect();
+            let mut records = Vec::new();
+            let mut unadoptable = Vec::new();
+            for rt in &held {
+                if let Some(work) = Self::unadoptable_tab(rt) {
+                    unadoptable.push(work);
+                    continue;
+                }
+                if let Some(record) = settled!(self.tab_record(rt)) {
+                    records.push(record);
+                }
+            }
+            // A tab made meanwhile is one nothing runs in yet: none can start
+            // a CLI while the terminals are frozen.
+            return Ok(then(Held { tabs: records, unadoptable, awaited }));
+            };
+            std::thread::sleep(RETRY * 5);
         }
-        let mut reading = Vec::with_capacity(tails.len());
-        for tail in &tails {
-            reading.push(take(&tail.application, deadline, "An agent's transcript")?);
+    }
+
+    /// What about a tab is about to change, which a handover waits for.
+    fn tab_unsettled(rt: &TabRuntime) -> Option<String> {
+        let name = || format!("{}/{}", rt.session_id, rt.tab_id);
+        if rt.held_queue.sending.is_some() {
+            return Some(format!("A held follow-up in {} is being delivered", name()));
         }
-        let mut held = Vec::with_capacity(runtimes.len());
-        for (_, rt) in &runtimes {
-            held.push(take(rt, deadline, "An agent tab")?);
+        if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() || rt.stdio_starting || rt.automation_completions_in_flight != 0 {
+            return Some(format!("The agent in {} is starting or stopping", name()));
         }
-        // A CLI started or restarted between reading the tails and holding
-        // the tabs follows a tail that is not held.
-        let unheld = held.iter().any(|rt| matches!(&rt.engine, Engine::Cli(p) if !tails.iter().any(|tail| Arc::ptr_eq(tail, &p.tail))));
-        if unheld {
-            return Err(Unsettled("An agent was starting".into()).into());
+        if !rt.compaction.is_idle() {
+            return Some(format!("The agent in {} has compaction state that cannot be handed over", name()));
         }
-        // A prompt handed a place in a pane's line before its writer was
-        // held would be typed by a thread that does not go over.
-        for writer in self.writers.lock().unwrap().values() {
+        None
+    }
+
+    /// What a handover begun now would wait for among the tabs, read without
+    /// holding anything or waiting on any lock: a tab or a pane busy this
+    /// instant is passed over, as holding the tabs waits for it anyway. A
+    /// handover that picks its moment asks this first, so that it holds
+    /// everything still only when that is likely to succeed at once.
+    pub(crate) fn unsettled_now(&self) -> Option<String> {
+        let writers: Vec<Arc<PaneWriter>> = self.writers.lock().unwrap().values().cloned().collect();
+        for writer in &writers {
+            if matches!(writer.typing.try_lock(), Err(std::sync::TryLockError::WouldBlock)) {
+                return Some("A prompt is being typed into an agent".into());
+            }
             let turns = writer.turns.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if turns.serving < turns.next {
-                return Err(Unsettled("A prompt is on its way into an agent".into()).into());
+                return Some("A prompt is on its way into an agent".into());
             }
         }
         if self.mobile.has_pending() {
-            return Err(Unsettled("A prompt from a phone is on its way".into()).into());
+            return Some("A prompt from a phone is on its way".into());
         }
-        // A tab still stopping was refused above. The processes a stop could
-        // not confirm gone (`stop_pids`, `session_stop_pids`, kept for good
-        // when one ignores its signals) lead process groups the terminals
-        // hand over as their own (`pty::Frozen::groups`), which Stop All
-        // ends; waiting for them could hold every handover off for good.
-        let awaited = held.iter().filter_map(|rt| match &rt.engine {
-            Engine::Cli(p) => Some(p.decisions.keys().cloned()),
-            _ => None,
-        }).flatten().collect();
-        let mut records = Vec::new();
-        let mut unadoptable = Vec::new();
-        for rt in &held {
-            if let Some(work) = Self::unadoptable_tab(rt) {
-                unadoptable.push(work);
-                continue;
-            }
-            if let Some(record) = self.tab_record(rt)? {
-                records.push(record);
-            }
-        }
-        // A tab made meanwhile is one nothing runs in yet: none can start a
-        // CLI while the terminals are frozen.
-        Ok(then(Held { tabs: records, unadoptable, awaited }))
+        let tabs: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
+        tabs.iter().find_map(|tab| match tab.try_lock() {
+            Ok(rt) => Self::tab_unsettled(&rt),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => Self::tab_unsettled(&poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        })
     }
 
     /// One held tab as it goes over, or nothing when it holds nothing to
     /// carry. Fails with [`Unsettled`] while it is about to change.
     fn tab_record(&self, rt: &TabRuntime) -> Result<Option<TabRecord>> {
-        let name = || format!("{}/{}", rt.session_id, rt.tab_id);
-        if rt.held_queue.sending.is_some() {
-            return Err(Unsettled(format!("A held follow-up in {} is being delivered", name())).into());
-        }
-        if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() || rt.stdio_starting || rt.automation_completions_in_flight != 0 {
-            return Err(Unsettled(format!("The agent in {} is starting or stopping", name())).into());
-        }
-        if !rt.compaction.is_idle() {
-            return Err(Unsettled(format!("The agent in {} has compaction state that cannot be handed over", name())).into());
+        if let Some(unsettled) = Self::tab_unsettled(rt) {
+            return Err(Unsettled(unsettled).into());
         }
         let mut record = TabRecord {
             session_id: rt.session_id.clone(),

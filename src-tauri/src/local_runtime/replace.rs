@@ -70,6 +70,19 @@ const CHECK_EVERY: Duration = Duration::from_secs(5);
 /// desktop can see it; an older runtime cannot show the prompts it holds.
 const SETTLE: Duration = Duration::from_secs(15);
 
+/// How long a runtime refused as busy is left alone before it is asked
+/// again, after the first refusal in a row and at most. Each refusal from a
+/// runtime that cannot pick its own moment (0.2.41 and before) held every
+/// hook and command of its agents still for up to ten seconds, so asking
+/// every few seconds, as was done, stalled them much of the time for as
+/// long as the runtime stayed busy.
+const BUSY_PAUSE: (Duration, Duration) = (Duration::from_secs(15), Duration::from_secs(300));
+
+/// The pause after `attempts` refusals in a row: doubled each time.
+fn busy_pause(attempts: u32) -> Duration {
+    BUSY_PAUSE.0.saturating_mul(1 << attempts.saturating_sub(1).min(8)).min(BUSY_PAUSE.1)
+}
+
 /// The attached runtime is older than this app, as a window shows it.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -91,6 +104,23 @@ pub struct Outdated {
     /// What `work` names, as the runtime names it, when it `keeps` what it
     /// runs: what Restart now stops, sent back as the reader was shown it.
     pub unkept: Vec<Work>,
+    /// The handover has been refused as busy, and is retried (PRO-589):
+    /// unlike `problem`, kept across readings of its work until the
+    /// handover goes through or is refused for something else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handover_wait: Option<HandoverWait>,
+}
+
+/// The older runtime keeps refusing to hand over because something is still
+/// under way (`handover_busy`), and the desktop keeps asking (PRO-589).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoverWait {
+    /// What the runtime said held it up the last time, which names the
+    /// request still open and for how long.
+    pub reason: String,
+    /// Attempts refused as busy in a row.
+    pub attempts: u32,
 }
 
 /// The runtime is being replaced with the one bundled with this app.
@@ -101,6 +131,8 @@ pub struct Switching {
     pub to: String,
     /// Handed over: what it runs goes on (#765).
     pub keeping: bool,
+    /// Earlier attempts at this handover were refused as busy (PRO-589).
+    pub wait: Option<HandoverWait>,
 }
 
 #[derive(Default)]
@@ -116,6 +148,9 @@ struct Inner {
     stopping: bool,
     /// Look again now rather than at the next check.
     due: bool,
+    /// The older runtime with this epoch refused a handover as busy, and is
+    /// not asked again by itself before this time ([`busy_pause`]).
+    busy_until: Option<(String, Instant)>,
     /// Update now was chosen before the update (#766): replace the older
     /// runtime at once, whatever it runs.
     forced: bool,
@@ -228,7 +263,7 @@ impl Replacement {
                 log::warn!("the local runtime ({running}) is older than this app ({app}); it is replaced {when}");
             }
             inner.pending = Some((epoch.into(), Outdated {
-                running: build.version.as_ref().map(ToString::to_string), app: app.to_string(), work: None, problem: None, failed: false, keeps, unkept: Vec::new(),
+                running: build.version.as_ref().map(ToString::to_string), app: app.to_string(), work: None, problem: None, failed: false, keeps, unkept: Vec::new(), handover_wait: None,
             }));
             // Nothing found under way by every reading before the relaunch
             // counts towards the wait for it to settle; the first reading
@@ -297,11 +332,20 @@ impl Replacement {
     /// Busy is a temporary refusal, even after a long wait (#960). Keep
     /// checking without broadening stop consent: an approved stop may already
     /// have happened, but a retry never gains permission to stop other work.
-    fn handover_busy(&self, epoch: &str, problem: String) {
+    fn handover_busy(&self, epoch: &str, problem: String, reason: String) {
         let mut inner = self.inner.lock().unwrap();
         let Some(outdated) = inner.outdated(epoch) else { return };
         outdated.failed = false;
         outdated.problem = Some(format!("Waiting to update the runtime: {problem}. TerminalX retries automatically while keeping agents and terminals running."));
+        // One already looking for its moment, as asked before this app
+        // relaunched, is no further refusal: looked at again soon.
+        let under_way = reason.starts_with(super::ALREADY_HANDING_OVER);
+        let before = outdated.handover_wait.as_ref().map_or(0, |wait| wait.attempts);
+        let attempts = if under_way { before.max(1) } else { before + 1 };
+        let pause = if under_way { BUSY_PAUSE.0 } else { busy_pause(attempts) };
+        log::warn!("the older local runtime refused to hand over (attempt {attempts}), as something is still under way; asked again in {} s: {problem}", pause.as_secs());
+        outdated.handover_wait = Some(HandoverWait { reason, attempts });
+        inner.busy_until = Some((epoch.to_owned(), Instant::now() + pause));
         inner.switching = None;
         inner.stopping = false;
         inner.quiet_since = None;
@@ -344,6 +388,11 @@ impl Replacement {
         changed
     }
 
+    /// Whether runtime `epoch`, refused as busy, is still left alone at `now`.
+    fn pausing(&self, epoch: &str, now: Instant) -> bool {
+        matches!(&self.inner.lock().unwrap().busy_until, Some((busy, until)) if busy == epoch && now < *until)
+    }
+
     /// Whether every reading of runtime `epoch` since [`SETTLE`] before `now`
     /// found nothing under way.
     fn settled(&self, epoch: &str, now: Instant) -> bool {
@@ -358,7 +407,7 @@ impl Replacement {
         let mut inner = self.inner.lock().unwrap();
         if inner.switching.is_some() { return false; }
         let Some(outdated) = inner.outdated(epoch) else { return false };
-        let switching = Switching { from: outdated.running.clone(), to: outdated.app.clone(), keeping: outdated.keeps };
+        let switching = Switching { from: outdated.running.clone(), to: outdated.app.clone(), keeping: outdated.keeps, wait: outdated.handover_wait.clone() };
         inner.switching = Some(switching);
         inner.stopping = true;
         true
@@ -381,7 +430,10 @@ impl Replacement {
         inner.stopping = false;
         inner.quiet_since = None;
         inner.due = true;
-        if let Some(outdated) = inner.outdated(epoch) { outdated.problem = problem; }
+        if let Some(outdated) = inner.outdated(epoch) {
+            outdated.problem = problem;
+            outdated.handover_wait = None;
+        }
     }
 
     fn failed(&self, epoch: &str, problem: String) {
@@ -393,6 +445,7 @@ impl Replacement {
         if let Some(outdated) = inner.outdated(epoch) {
             outdated.problem = Some(problem);
             outdated.failed = true;
+            outdated.handover_wait = None;
         }
     }
 
@@ -431,8 +484,8 @@ impl Replacement {
 /// anything else, or the attached runtime is older than this app.
 pub(crate) fn shown(replacement: &Replacement, status: super::ui::ConnectionState) -> super::ui::ConnectionState {
     use super::ui::ConnectionState;
-    if let Some(Switching { from, to, keeping }) = replacement.switching() {
-        return ConnectionState::Updating { from, to, keeping };
+    if let Some(Switching { from, to, keeping, wait }) = replacement.switching() {
+        return ConnectionState::Updating { from, to, keeping, wait };
     }
     match status {
         ConnectionState::Connected { epoch, generation, view, unproven, .. } => {
@@ -495,8 +548,9 @@ pub(crate) fn switch(replacement: &Replacement, host: &impl Host, epoch: &str, f
             Ok(())
         }
         Err(error) if keeps && super::launch::refused(&error, "handover_busy") => {
-            log::info!("the older local runtime is waiting to hand over: {error:#}");
-            replacement.handover_busy(epoch, format!("{error:#}"));
+            // What the runtime said, without the code, is what windows show.
+            let reason = error.chain().find_map(|cause| cause.downcast_ref::<Refused>()).map_or_else(|| format!("{error:#}"), |refused| refused.message.clone());
+            replacement.handover_busy(epoch, format!("{error:#}"), reason);
             Ok(())
         }
         // Something it cannot carry came up, or it was replaced meanwhile:
@@ -534,7 +588,7 @@ fn check(replacement: &Replacement, epoch: &str, work: anyhow::Result<Vec<String
     let changed = replacement.found(epoch, work.map_err(|error| format!("Could not tell what it is running: {error:#}")), now);
     // Handed over, nothing is cut short: it is replaced as soon as nothing
     // it cannot carry is running, with no wait for its turns to end (#765).
-    if quiet && (replacement.keeps(epoch) || replacement.settled(epoch, now)) {
+    if quiet && !replacement.pausing(epoch, now) && (replacement.keeps(epoch) || replacement.settled(epoch, now)) {
         if let Err(error) = switch() { log::warn!("replace the older local runtime: {error}"); }
         return false;
     }
@@ -637,6 +691,35 @@ pub(crate) fn hand_over_within(app: &AppHandle, runtime: &Desktop, stop: &[Work]
     let binary = super::supervisor::bundled(app, &home)?;
     runtime.hand_over(&binary, stop, within)?;
     super::launch::taken_over(&home, runtime.epoch(), TAKE_OVER)
+}
+
+/// How long an update waits, once installed, for the runtime to be handed
+/// over to the one it brought before relaunching anyway: most are at once.
+const INSTALLED_WAIT: Duration = Duration::from_secs(12);
+/// How long the runtime is given to find its moment for that, which it goes
+/// on looking for while the app relaunches and after.
+const INSTALLED_PATIENCE: Duration = Duration::from_secs(180);
+
+/// Hand `runtime` over to the runtime of the update just installed over
+/// this app, before the relaunch, so that the relaunched app finds its own
+/// runtime already running and has nothing to update, or to say. `stop` is
+/// what Update now agreed to stop. `Ok(false)` when there is nothing to do
+/// here: the bundle on disk holds the runtime this app came with (where an
+/// update does not replace it in place), or this runtime cannot be handed
+/// over. A runtime still looking for its moment when the wait is up hands
+/// over when it finds one; the relaunched app waits for that in its status
+/// bar, as it does for any older runtime.
+pub(crate) fn hand_over_installed(app: &AppHandle, runtime: &Desktop, stop: &[Work]) -> anyhow::Result<bool> {
+    if !keeps(runtime.build()) { return Ok(false); }
+    let home = crate::paths::canonicalize(&crate::store::root()?)?;
+    let own = super::supervisor::bundled(app, &home)?;
+    // Read from the bundle again: the update replaced it under this app.
+    let updated = super::launch::installed(&super::supervisor::source(app)?, &home)?;
+    if updated == own { return Ok(false); }
+    let began = Instant::now();
+    runtime.hand_over_patiently(&updated, stop, INSTALLED_WAIT, INSTALLED_PATIENCE)?;
+    super::launch::taken_over(&home, runtime.epoch(), INSTALLED_WAIT.saturating_sub(began.elapsed()).max(Duration::from_secs(3)))?;
+    Ok(true)
 }
 
 /// Whether `build` can be handed over to the runtime bundled with this app.
@@ -786,7 +869,7 @@ mod tests {
     }
 
     fn updating() -> ConnectionState {
-        ConnectionState::Updating { from: Some(older()), to: env!("CARGO_PKG_VERSION").into(), keeping: false }
+        ConnectionState::Updating { from: Some(older()), to: env!("CARGO_PKG_VERSION").into(), keeping: false, wait: None }
     }
 
     #[test]
@@ -1104,6 +1187,40 @@ mod tests {
         assert_eq!(replacement.next_now(), Some(Due::Check("old".into())), "read again, to be shown");
     }
 
+    /// A runtime refused as busy is left alone for longer each time: one
+    /// from before it could pick its own moment holds every hook of its
+    /// agents still for each attempt. Update now is not held off by that.
+    #[cfg(unix)]
+    #[test]
+    fn a_busy_runtime_is_asked_again_after_a_pause_that_doubles() {
+        assert_eq!((1..=7).map(|attempts| busy_pause(attempts).as_secs()).collect::<Vec<_>>(), [15, 30, 60, 120, 240, 300, 300]);
+        assert_eq!(busy_pause(u32::MAX), BUSY_PAUSE.1);
+        let replacement = Replacement::default();
+        replacement.attached("old", &handing(&older()), None);
+        let busy = Supervisor::new(&replacement, |_| Err(Refused { code: "handover_busy".into(), message: "A hook or control request did not finish in time".into() }.into()));
+        let asked = std::cell::Cell::new(0);
+        let look = |at: Instant| { check(&replacement, "old", Ok(vec![]), at, || { asked.set(asked.get() + 1); switch(&replacement, &busy, "old", false, &[]) }); };
+        let start = Instant::now();
+        look(start);
+        assert_eq!(asked.get(), 1, "asked as soon as nothing it cannot carry runs");
+        for later in [CHECK_EVERY, 2 * CHECK_EVERY] { look(start + later); }
+        assert_eq!(asked.get(), 1, "left alone for the pause, whatever the checks find");
+        assert!(replacement.pausing("old", start + busy_pause(1) - Duration::from_secs(1)));
+        look(start + busy_pause(1) + Duration::from_secs(1));
+        assert_eq!(asked.get(), 2);
+        look(start + busy_pause(1) + Duration::from_secs(10));
+        assert_eq!(asked.get(), 2, "the second pause is longer");
+        // Another runtime attached meanwhile is not held off by this one's.
+        assert!(!replacement.pausing("another", start));
+        // One already looking for its moment (asked as the update installed)
+        // is looked at again soon, however often it says so.
+        let under_way = Supervisor::new(&replacement, |_| Err(Refused { code: "handover_busy".into(), message: format!("{}, and is waiting for a quiet moment", super::super::ALREADY_HANDING_OVER) }.into()));
+        let before = replacement.outdated("old").unwrap().handover_wait.unwrap().attempts;
+        for _ in 0..5 { switch(&replacement, &under_way, "old", false, &[]).unwrap(); }
+        assert_eq!(replacement.outdated("old").unwrap().handover_wait.unwrap().attempts, before);
+        assert!(!replacement.pausing("old", Instant::now() + BUSY_PAUSE.0 + Duration::from_secs(1)));
+    }
+
     #[cfg(unix)]
     /// #960: a prompt may take longer than six checks to settle. The
     /// periodic watcher must still be able to hand over without consent.
@@ -1111,17 +1228,28 @@ mod tests {
     fn repeated_busy_handovers_keep_retrying_and_complete_after_settling() {
         let replacement = Replacement::default();
         replacement.attached("old", &handing(&older()), None);
-        let busy = Supervisor::new(&replacement, |_| Err(Refused {
-            code: "handover_busy".into(), message: "A prompt is on its way into an agent".into(),
-        }.into()));
-        for _ in 0..12 {
+        let shown_waits = RefCell::new(Vec::new());
+        let busy = Supervisor::new(&replacement, |_| {
+            let wait = match shown(&replacement, connected("old")) { ConnectionState::Updating { wait, .. } => wait, other => panic!("{other:?}") };
+            shown_waits.borrow_mut().push(wait.map(|wait| wait.attempts));
+            Err(Refused { code: "handover_busy".into(), message: "A prompt is on its way into an agent".into() }.into())
+        });
+        for attempt in 1..=12 {
             switch(&replacement, &busy, "old", false, &[]).unwrap();
             assert_eq!(replacement.next_now(), None, "wait for the periodic check");
             assert_eq!(replacement.inner.lock().unwrap().checkable(), Some("old"));
             let outdated = replacement.outdated("old").unwrap();
             assert!(!outdated.failed && outdated.keeps);
             assert!(outdated.problem.unwrap().contains("retries automatically"));
+            // PRO-589: why, without the code, and how many times, kept across
+            // readings of its work, which clear `problem`.
+            let wait = HandoverWait { reason: "A prompt is on its way into an agent".into(), attempts: attempt };
+            assert_eq!(outdated.handover_wait.as_ref(), Some(&wait));
+            assert!(replacement.found("old", Ok(Vec::new()), Instant::now()));
+            assert_eq!(replacement.outdated("old").unwrap().handover_wait, Some(wait), "kept as its work is read");
         }
+        // Each attempt shows windows the refusals before it while under way.
+        assert_eq!(*shown_waits.borrow(), (0..12).map(|before| (before > 0).then_some(before)).collect::<Vec<_>>());
         assert!(busy.steps.borrow().iter().all(|step| !step.starts_with("retire")));
         let retry = Supervisor::new(&replacement, |_| Ok(()));
         switch(&replacement, &retry, "old", false, &[]).unwrap();

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ScrollViewInstance } from "react-native";
+import { KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ScrollViewInstance } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Bell, BellOff, ChevronLeft, MessageSquare, Plus, SquareTerminal, X } from "lucide-react-native";
 import { providerName } from "@mobile/data/conversations";
@@ -13,6 +13,7 @@ import { GlassIconButton } from "./glass";
 import { StateMark } from "./MacIcon";
 import { Button } from "./primitives";
 import { useTheme } from "./theme";
+import { keyboardAvoidingBehavior } from "@mobile/ui/keyboard";
 
 /**
  * The session's bar, drawn here rather than by the navigator: a glass back
@@ -159,7 +160,7 @@ export function NewChatSheet({ visible, sessionId, tabId, onClose, onStarted }: 
 
   return <Modal visible={visible} transparent animationType="slide" onRequestClose={close}>
     <Pressable accessibilityLabel="Close" style={styles.backdrop} onPress={close} />
-    <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined}>
+    <KeyboardAvoidingView behavior={keyboardAvoidingBehavior()}>
       <View style={[styles.sheet, { backgroundColor: palette.card, paddingBottom: insets.bottom + 16 }]}>
         <View style={[styles.grabber, { backgroundColor: palette.border }]} />
         <Text style={[styles.sheetTitle, { color: palette.ink }]}>New chat in this branch</Text>

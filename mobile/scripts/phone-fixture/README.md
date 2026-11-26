@@ -65,6 +65,17 @@ error code) ends the attempt six seconds later, as the browser's pages would.
 picker, a branch, a typed URL, the review, the browser closed early, a member
 and five chosen.
 
+## Delete account (26.01)
+
+`fixtureDeletion: <state>` answers the account deletion routes in memory, in
+the shapes of terminalx-saas `docs/account-deletion.md`; the states are listed
+in `setup/account-deletion.ts` (a plain account, running cloud workspaces, one
+that did not stop, blocked, a stale sign-in, a refusal, a lost answer, a change
+after reading, the final deletion running, and the cancelled notice). Sign in
+again takes four seconds and comes back as the same account. `flow-26.01.yaml`
+shoots every state; for large text set the simulator's text size first, as for
+`flow-large-text.yaml`.
+
 ## Beta access code (25.08)
 
 `fixtureAccessCode: <answer>` starts the phone signed out with no machines.

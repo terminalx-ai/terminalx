@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ScrollViewInstance } from "react-native";
+import { Alert, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ScrollViewInstance } from "react-native";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { MessageSquareDashed, Play, Send, Square, Users } from "lucide-react-native";
@@ -15,7 +15,7 @@ import { accessText, attentionDetail, codeText, connectionLine, leaseLine, outbo
 import { PROVEN_BY_LIVE_CHECK, START_WORDS } from "@mobile/cloud/start-tab";
 import type { CloudWorkspaceSession } from "@mobile/cloud/workspace";
 import { setConversationState, useConversationState } from "@mobile/state/conversation-state";
-import { useKeyboardShown } from "@mobile/ui/keyboard";
+import { useKeyboardShown, keyboardAvoidingBehavior } from "@mobile/ui/keyboard";
 import { Button, EmptyState, StatusDot } from "@mobile/ui/primitives";
 import { GlassIconButton } from "@mobile/ui/glass";
 import { LaunchProgress } from "@mobile/ui/LaunchProgress";
@@ -475,7 +475,7 @@ function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live
     void run(() => session.postNote(tabId, text), () => setNote(""));
   };
 
-  return <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={92}>
+  return <KeyboardAvoidingView style={styles.flex} behavior={keyboardAvoidingBehavior()} keyboardVerticalOffset={92}>
     {shared ? <View style={[styles.wheel, { borderBottomColor: palette.border }]}>
       <Text accessibilityLabel={wheel.text} numberOfLines={1} style={[styles.wheelText, { color: wheel.mine ? palette.accent : palette.muted }]}>{wheel.text}</Text>
       {wheel.canTake ? <Pressable accessibilityRole="button" disabled={sending} onPress={() => void run(() => session.takeWheel(tabId))} style={styles.wheelAction}><Text style={[styles.wheelActionText, { color: palette.accent }]}>Take the wheel</Text></Pressable> : null}

@@ -379,6 +379,26 @@ pub async fn local_runtime_plan_update(app: AppHandle, epoch: String, forced: bo
     }).await.map_err(|error| error.to_string())?
 }
 
+/// An update was just installed over this app: hand runtime `epoch` over to
+/// the runtime it brought now, before the relaunch, so the relaunched app
+/// finds its own runtime running and updates nothing. Never fails the
+/// update: whatever is not done here the relaunched app does, as before.
+/// True when the updated runtime answers.
+#[tauri::command]
+pub async fn local_runtime_hand_over_installed(app: AppHandle, epoch: String, stop: Option<Vec<crate::session::retire::Work>>) -> bool {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let Some(runtime) = state.runtime().filter(|runtime| runtime.epoch() == epoch && runtime.attachment().is_ok()) else { return false };
+        // Not while a restart or a replacement of it is under way.
+        let Ok(_one) = RESTART.try_lock() else { return false };
+        match super::replace::hand_over_installed(&app, &runtime, &stop.unwrap_or_default()) {
+            Ok(true) => { log::info!("handed the local runtime over to the installed update's before relaunching into it"); true }
+            Ok(false) => false,
+            Err(error) => { log::info!("the local runtime was not handed over to the installed update's before the relaunch; the relaunched app sees to it: {error:#}"); false }
+        }
+    }).await.unwrap_or(false)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSettings { quit_behavior: Option<QuitBehavior> }

@@ -195,7 +195,6 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Value> {
 mod tests {
     use super::*;
     use super::super::journal::{new_id, Journal, TaskInput, TaskStatus};
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn a_transport_keeps_the_shape_journals_already_hold() {
@@ -245,8 +244,7 @@ elif a[0]=='exec':
  print((p/'reply.json').read_text())
 else: sys.exit(72)
 "#;
-            std::fs::write(&executable, script).unwrap();
-            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            crate::local_vm::fake_helper::install(&executable, script);
             let inspect = |id: &str, running: bool, label: &str| std::fs::write(dir.path().join("inspection.json"),
                 json!({"Id":id,"State":{"Running":running},"Config":{"Labels":{"ai.terminalx.computer":label}}}).to_string()).unwrap();
             inspect(&"a".repeat(64), true, "1");

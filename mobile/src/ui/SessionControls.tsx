@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { BYPASS_MODE, PERMISSION_MODES, bypassEffect, effortChoices, EFFORT_LABEL, modelForTab, type ModelInfo } from "@terminalx/portable/agentSettings";
 import type { ContextMode } from "@terminalx/portable/continuation";
 import type { AgentEvent } from "@terminalx/portable/events";
@@ -231,9 +232,11 @@ function Chip({ label, disabled, onPress }: { label: string; disabled?: boolean;
 
 function ChoiceSheet({ picker, onClose }: { picker: { title: string; choices: Choice[] } | null; onClose(): void }) {
   const { palette } = useTheme();
+  // The sheet’s foot clears the home indicator, and on Android the navigation bar drawn over the app.
+  const insets = useSafeAreaInsets();
   return <Modal visible={!!picker} transparent animationType="slide" onRequestClose={onClose}>
     <Pressable accessibilityLabel="Close" style={styles.backdrop} onPress={onClose} />
-    <View style={[styles.sheet, { backgroundColor: palette.card }]}>
+    <View style={[styles.sheet, { backgroundColor: palette.card, paddingBottom: insets.bottom + 16 }]}>
       <Text style={[styles.title, { color: palette.ink }]}>{picker?.title}</Text>
       <ScrollView style={styles.list}>
         {picker?.choices.map((choice) => <Pressable key={choice.key} accessibilityRole="button" accessibilityLabel={choice.label} accessibilityState={{ selected: !!choice.current }} onPress={() => { onClose(); choice.onSelect(); }} style={[styles.choice, choice.current && { backgroundColor: palette.selected }]}>
@@ -251,6 +254,7 @@ function ContinueSheet({ tab, models, onClose, onStart }: { tab: TabControls; mo
   const harnesses = [...new Set([tab.harness, ...models.map((model) => model.harness)])];
   const [settings, setSettings] = useState<NewTabSettings>({ harness: tab.harness, model: tab.model, effort: tab.effort ?? null, permissionMode: tab.permissionMode });
   const [mode, setMode] = useState<ContextMode>("focused");
+  const insets = useSafeAreaInsets();
   const own = models.filter((model) => model.harness === settings.harness);
   const model = modelForTab(own, settings.model);
   const efforts = effortChoices(model, settings.effort);
@@ -262,7 +266,7 @@ function ContinueSheet({ tab, models, onClose, onStart }: { tab: TabControls; mo
   </View>;
   return <Modal visible transparent animationType="slide" onRequestClose={onClose}>
     <Pressable accessibilityLabel="Close" style={styles.backdrop} onPress={onClose} />
-    <View style={[styles.sheet, { backgroundColor: palette.card }]}>
+    <View style={[styles.sheet, { backgroundColor: palette.card, paddingBottom: insets.bottom + 16 }]}>
       <Text style={[styles.title, { color: palette.ink }]}>Continue in new session</Text>
       <ScrollView style={styles.list}>
         {row("Agent", harnesses.map((harness) => ({ key: harness, label: harness, selected: harness === settings.harness, onPress: () => setSettings({ harness, model: harness === tab.harness ? tab.model : "", effort: null, permissionMode: settings.permissionMode }) })))}

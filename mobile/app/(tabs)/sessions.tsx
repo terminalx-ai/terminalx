@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { AppState, Pressable, RefreshControl, SectionList, StyleSheet, Text, TextInput, View } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
-import { ChevronDown, MoreHorizontal, Pin, Search, X } from "lucide-react-native";
+import { ChevronDown, MoreHorizontal, Pin, Plus, Search, X } from "lucide-react-native";
 import { chatRows, filterCounts, isCloudRow, LIST_FILTERS, listSections, PINNED_SECTION, withPinnedCloud, type ChatRow, type CloudPinRow, type ListFilter } from "@mobile/data/session-list";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { pinnedCloudRows } from "@mobile/cloud/pins";
@@ -20,7 +20,7 @@ import { GlassIconButton } from "@mobile/ui/glass";
 import { SessionListRow } from "@mobile/ui/SessionListRow";
 import { CloudWorkspaceRow } from "@mobile/ui/CloudWorkspaceRow";
 import { EdgeFade } from "@mobile/ui/EdgeFade";
-import { useTabBarInset } from "@mobile/ui/tab-bar-inset";
+import { newSessionInBar, useTabBarInset } from "@mobile/ui/tab-bar-inset";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTheme } from "@mobile/ui/theme";
 
@@ -124,6 +124,8 @@ export default function SessionsScreen() {
         {state === "waiting" ? <Button label="Try again" kind="secondary" onPress={app.retryConnection} style={styles.retry} /> : null}
         {state === "held" ? <Button label="Reconnect" kind="secondary" onPress={() => app.connection.restart("reconnect was chosen", true)} style={styles.retry} /> : null}
         <GlassIconButton label={searching ? "Close search" : "Search sessions"} size={40} icon={searching ? <X size={20} color={palette.ink} strokeWidth={1.6} /> : <Search size={20} color={palette.ink} strokeWidth={1.6} />} onPress={() => searching ? closeSearch() : setSearching(true)} />
+        {/* Where the tab bar has no New session (Android): start one from here. */}
+        {newSessionInBar() ? null : <GlassIconButton label="New session" size={40} icon={<Plus size={20} color={palette.ink} strokeWidth={1.8} />} onPress={() => router.push("/session/new")} />}
         <GlassIconButton label="Machine options" size={40} icon={<MoreHorizontal size={20} color={palette.ink} strokeWidth={1.8} />} onPress={() => menu.open(host)} />
       </View>
       {searching ? <View style={[styles.search, { backgroundColor: palette.raised, borderColor: palette.border }]}>

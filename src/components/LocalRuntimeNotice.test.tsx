@@ -235,14 +235,10 @@ it("hides for the runtime it was hidden for, and says why trying again failed", 
 
 // #765: a runtime that can be handed over keeps what it runs.
 
-it("says a runtime being handed over keeps its agents and terminals running", async () => {
+it("puts nothing over the window while a runtime is handed over: its agents keep running, and the status bar says so", async () => {
   await mounted();
   await changed({ state: "updating", from: "0.2.24", to: "0.2.25", keeping: true });
-  const notice = screen.getByRole("status").textContent ?? "";
-  expect(notice).toContain("Handing what the 0.2.24 runtime runs over to 0.2.25");
-  expect(notice).toContain("Its agents and terminals keep running.");
-  expect(notice).not.toContain("Stopping");
-  expect(notice).not.toContain("picks up its conversation");
+  expect(screen.queryByRole("status")).toBeNull();
 });
 
 it("says a handover that failed will not be tried again by itself, and Try again keeps what it runs", async () => {
@@ -378,4 +374,20 @@ it("names the commands that fail too, and offers Restart runtime when the runtim
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: /Restart runtime/ })); });
   expect(machines.restartRuntimeForWindow).toHaveBeenCalledExactlyOnceWith("owner", offer);
   expect(native.proveWindow).not.toHaveBeenCalled();
+});
+
+// PRO-589: a handover refused as busy again and again is not a silent spinner.
+
+const blocked = "A hook or control request did not finish in time: hook PermissionRequest, open for 12 s; it is handed over once that has settled.";
+
+it("puts nothing over the window for a handover refused as busy, however often, during attempts or between them", async () => {
+  await mounted();
+  const handing = (attempts: number): LocalRuntimeState => ({ state: "updating", from: "0.2.38", to: "0.2.39", keeping: true, wait: { reason: blocked, attempts } });
+  const between = (attempts: number): LocalRuntimeState => ({ ...connected, outdated: {
+    running: "0.2.38", app: "0.2.39", work: [], problem: null, failed: false, keeps: true, unkept: [], handoverWait: { reason: blocked, attempts },
+  } });
+  for (const state of [handing(1), between(1), handing(2), between(3), handing(40), between(181)]) {
+    await changed(state);
+    expect(screen.queryByRole("status")).toBeNull();
+  }
 });

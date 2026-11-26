@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const updater = vi.hoisted(() => ({ check: vi.fn(), relaunch: vi.fn(), install: vi.fn() }));
-const runtime = vi.hoisted(() => ({ work: vi.fn(), planUpdate: vi.fn() }));
+const runtime = vi.hoisted(() => ({ work: vi.fn(), planUpdate: vi.fn(), handOverInstalled: vi.fn() }));
 /** What happened, in order: the plan must be left after installing and before relaunching. */
 const steps = vi.hoisted(() => [] as string[]);
 vi.mock("@/lib/nativeUpdater", () => ({ check: updater.check }));
@@ -33,6 +33,7 @@ beforeEach(() => {
     steps.push("plan");
     return { epoch, forced, quietSince, madeAt: 2_000, madeBy: 1 };
   });
+  runtime.handOverInstalled.mockReset().mockImplementation(async () => { steps.push("handover"); return true; });
 });
 
 describe("an update the app found by itself", () => {
@@ -98,7 +99,10 @@ describe("the runtime the update comes with (#766)", () => {
     await found();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Update and relaunch" })); });
     await vi.waitFor(() => expect(updater.relaunch).toHaveBeenCalledOnce());
-    expect(steps).toEqual(["read", "install", "plan", "relaunch"]);
+    // The runtime moves to the update's own before the relaunch, so the app
+    // that opens has nothing to update, and nothing to say about it.
+    expect(steps).toEqual(["read", "install", "plan", "handover", "relaunch"]);
+    expect(runtime.handOverInstalled).toHaveBeenCalledExactlyOnceWith("owner", []);
     // Quiet since that reading, if still quiet just before the relaunch.
     expect(runtime.planUpdate).toHaveBeenCalledExactlyOnceWith("owner", false, 1_000, []);
     expect(screen.queryByTestId("update-choice")).toBeNull();
@@ -121,7 +125,7 @@ describe("the runtime the update comes with (#766)", () => {
 
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Update now" })); });
     await vi.waitFor(() => expect(updater.relaunch).toHaveBeenCalledOnce());
-    expect(steps).toEqual(["install", "plan", "relaunch"]);
+    expect(steps).toEqual(["install", "plan", "handover", "relaunch"]);
     expect(runtime.planUpdate).toHaveBeenCalledExactlyOnceWith("owner", true, null, []);
   });
 
@@ -134,6 +138,7 @@ describe("the runtime the update comes with (#766)", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Update now" })); });
     await vi.waitFor(() => expect(updater.relaunch).toHaveBeenCalledOnce());
     expect(runtime.planUpdate).toHaveBeenCalledExactlyOnceWith("owner", true, null, [shown]);
+    expect(runtime.handOverInstalled).toHaveBeenCalledExactlyOnceWith("owner", [shown]);
   });
 
   it("Update when they're done installs now and leaves the runtime to move by itself, without asking again", async () => {
@@ -144,6 +149,8 @@ describe("the runtime the update comes with (#766)", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Update when they're done" })); });
     await vi.waitFor(() => expect(updater.relaunch).toHaveBeenCalledOnce());
     expect(runtime.planUpdate).toHaveBeenCalledExactlyOnceWith("owner", false, null, []);
+    // Nothing the reader did not agree to is stopped for it.
+    expect(runtime.handOverInstalled).toHaveBeenCalledExactlyOnceWith("owner", []);
   });
 
   it("closing the choice updates nothing, and a background check does not take it away", async () => {

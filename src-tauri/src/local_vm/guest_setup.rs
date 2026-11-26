@@ -69,7 +69,6 @@ pub(super) enum Action {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt as _;
 
     fn params(action: Action, key: &str) -> Params {
         Params {
@@ -82,8 +81,7 @@ mod tests {
         }
     }
     fn script(path: &Path, text: &str) {
-        std::fs::write(path, text).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::local_vm::fake_helper::install(path, text);
     }
     fn paths(home: &Path) -> Paths {
         Paths {
@@ -534,16 +532,14 @@ else: sys.exit(99)
     fn capture_without_native_input_readback_cannot_produce_desktop_verification() {
         let home = tempfile::tempdir().unwrap();
         let selected = paths(home.path());
-        std::fs::write(&selected.driver,r#"#!/bin/sh
+        script(&selected.driver,r#"#!/bin/sh
 case "$*" in
   --version) printf 'cua-driver 0.28.0\n';;
   'permissions status --json') printf '%s\n' '{"accessibility":true,"screen_recording":true,"source":{"attribution":"driver-daemon","bundle_id":"com.trycua.driver"}}';;
   'call get_desktop_state') printf '%s\n' '{"screenshot_png_b64":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aUKsAAAAASUVORK5CYII="}';;
   *) exit 99;;
 esac
-"#).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&selected.driver, std::fs::Permissions::from_mode(0o700)).unwrap();
+"#);
         let actor = Actor::default();
         actor
             .launch_with(params(Action::DesktopVerify, "capture"), selected)

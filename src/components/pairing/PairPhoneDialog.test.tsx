@@ -73,7 +73,7 @@ describe("Pair a phone dialog", () => {
     act(() => pairing.openPairPhone());
 
     const dialog = await screen.findByRole("dialog", { name: "Pair a phone" });
-    expect(within(dialog).getByText("Drive this computer's sessions and your cloud workspaces from TerminalX for iPhone")).toBeTruthy();
+    expect(within(dialog).getByText("Drive this computer's sessions and your cloud workspaces from the TerminalX phone app")).toBeTruthy();
     await within(dialog).findByAltText("TerminalX phone pairing QR code");
     expect(mocks.invoke).toHaveBeenCalledWith("pairing_generate", { connectionMode: "automatic" });
     expect(mocks.qr).toHaveBeenCalledWith("terminalx://pair?code=relay-code", expect.objectContaining({ margin: 4, scale: 8 }));

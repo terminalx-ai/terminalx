@@ -892,7 +892,7 @@ fn take_over(adopted: &mut crate::local_runtime::handover::Adopted, sink: &Arc<B
     let sockets = crate::hooks::Adopted {
         own: adopted.take(own)?,
         published: match published { Some((listener, lock)) => Some((adopted.take(listener)?, adopted.take(lock)?)), None => None },
-        held: frames.into_iter().map(|frame| Ok((std::os::unix::net::UnixStream::from(adopted.take(frame.fd)?), frame.line))).collect::<Result<_>>()?,
+        held: frames.into_iter().map(|frame| Ok((std::os::unix::net::UnixStream::from(adopted.take(frame.fd)?), frame.line, frame.queued))).collect::<Result<_>>()?,
     };
     let parked = decisions.into_iter().map(|decision| Ok((decision.request_id, std::os::unix::net::UnixStream::from(adopted.take(decision.fd)?)))).collect::<Result<_>>()?;
     Ok((sockets, waits, parked))

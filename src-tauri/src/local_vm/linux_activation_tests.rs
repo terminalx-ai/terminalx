@@ -1,6 +1,5 @@
 use super::super::linux_install::tests::Fixture;
 use super::*;
-use std::os::unix::fs::PermissionsExt;
 fn enabled(f: &Fixture) {
     f.journal
         .transaction(|s| {
@@ -184,7 +183,7 @@ fn enrollment_requires_original_serving_instance_then_provider_readiness_remains
 fn engine_adapter_uses_exact_detached_route_and_never_treats_ack_as_owner_receipt() {
     let f = Fixture::new();
     let executable = f.dir.path().join("activation-engine");
-    std::fs::write(&executable,r#"#!/usr/bin/env python3
+    crate::local_vm::fake_helper::install(&executable,r#"#!/usr/bin/env python3
 import sys,json,base64
 args=sys.argv[1:]
 if args[0]=='inspect':
@@ -195,8 +194,7 @@ assert args[:10]==['exec','--detach','--user','0:0','--workdir','/','a'*64,'/usr
 assert len(args)==12
 assert base64.b64decode(args[-1])==b'{"action":"start"}'
 print('detached-engine-ack-is-not-a-runtime-receipt')
-"#).unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+"#);
     assert!(
         invoke_at(&executable, &f.binding.target, &json!({"action":"start"}))
             .unwrap()

@@ -1187,10 +1187,9 @@ mod tests {
 
     #[test]
     fn actual_probe_sequence_is_only_version_status_and_promptless_permissions_status() {
-        use std::os::unix::fs::PermissionsExt as _;
         let home = tempfile::tempdir().unwrap();
         let binary = home.path().join("driver");
-        std::fs::write(&binary, r##"#!/bin/sh
+        crate::local_vm::fake_helper::install(&binary, r##"#!/bin/sh
 printf '%s\n' "$*" >> "$HOME/invocations"
 case "$*" in
   --version) printf 'cua-driver 0.28.0\n' ;;
@@ -1198,8 +1197,7 @@ case "$*" in
   'permissions status --json') printf '%s\n' '{"accessibility":true,"screen_recording":false,"source":{"attribution":"driver-daemon","bundle_id":"com.trycua.driver"}}' ;;
   *) exit 99 ;;
 esac
-"##).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+"##);
         let result = inspect_desktop_with(&binary, home.path(), session, &Clock::frozen()).unwrap();
         assert_eq!(result.screen_recording.state, "required");
         assert_eq!(

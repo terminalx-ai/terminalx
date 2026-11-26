@@ -7,8 +7,8 @@ import NetInfo from "@react-native-community/netinfo";
 import { AppState, Linking } from "react-native";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from "react";
 import type { AccessCodeAnswer, AccessCodeRequest } from "../auth/access-code";
-import { beginSignIn, finishSignIn, readSession, redeemHeldAccessCode, refreshStoredSession, signOut as revokeCloudSession, type SignInResult } from "../auth/native";
-import { isAuthCallbackUrl, type AccessHold, type CloudSession } from "../auth/protocol";
+import { beginSignIn, finishSignIn, forgetStoredSession, readSession, redeemHeldAccessCode, refreshStoredSession, signOut as revokeCloudSession, type SignInResult } from "../auth/native";
+import { AUTH_CONFIG, isAuthCallbackUrl, revokeSession, type AccessHold, type CloudSession } from "../auth/protocol";
 import { HostApi, isSessionSummary, type SessionSummary } from "../data/host-api";
 import { handleNotificationEvent, restoreLocalNotifications } from "../notifications/local";
 import { discoverMachines, pairDiscoveredMachine, signOutPairing, type InstallationState } from "../pairing/account";
@@ -77,6 +77,19 @@ interface AppContextValue {
   /** The accepted page has been shown: the access code screen closes. */
   finishAccessCode(): void;
   signOut(): Promise<void>;
+  /**
+   * Sign in again in a sheet that shares nothing with the browser, as the
+   * signed-in account only (PRO-584: deleting the account asks for a recent
+   * sign-in). The new session replaces the old one, which is ended.
+   */
+  reauthenticate(): Promise<"signed-in" | "closed" | "other-account" | "no-account">;
+  /**
+   * The account's deletion is scheduled: the server signed out every device,
+   * so this phone forgets the sign-in, its account pairings and (with the
+   * session gone) its workspace keys and saved conversations, asking nothing
+   * of the server.
+   */
+  forgetDeletedAccount(): Promise<void>;
   refreshMachines(): Promise<void>;
   pairAvailable(host: AccountHost): Promise<void>;
   pairCode(code: string): Promise<void>;
@@ -143,6 +156,8 @@ export function AppProvider({ children }: PropsWithChildren) {
   const [accessCode, setAccessCode] = useState<AccessCodeRequest | null>(null);
   /** Where every sign-in ends, whichever way it came back: signed in, or held for an access code. */
   const land = useCallback((result: SignInResult) => {
+    // A sign-in again as someone else kept nothing: the screen that asked for it says so.
+    if (result.status === "other-account" || result.status === "no-account") return;
     if (result.status === "signed-in") {
       held.current = null;
       setAccessCode(null);
@@ -518,7 +533,7 @@ export function AppProvider({ children }: PropsWithChildren) {
   }, []);
   const finishAccessCode = useCallback(() => setAccessCode(null), []);
 
-  const signOut = useCallback(async () => {
+  const endSession = useCallback(async (remote: boolean) => {
     if (!session) return;
     selectionGeneration.current++;
     connection.stop();
@@ -527,8 +542,9 @@ export function AppProvider({ children }: PropsWithChildren) {
     forgetConversationState("");
     await clearTranscriptCaches();
     api.resetConnection(true);
-    await signOutPairing(session);
-    await revokeCloudSession(session);
+    await signOutPairing(session, { remote });
+    if (remote) await revokeCloudSession(session);
+    else await forgetStoredSession();
     held.current = null;
     setAccessCode(null);
     setSession(null);
@@ -536,6 +552,22 @@ export function AppProvider({ children }: PropsWithChildren) {
     setSessions([]);
     await loadHosts();
   }, [api, connection, loadHosts, session]);
+  const signOut = useCallback(() => endSession(true), [endSession]);
+  const forgetDeletedAccount = useCallback(() => endSession(false), [endSession]);
+
+  const reauthenticate = useCallback(async (): Promise<"signed-in" | "closed" | "other-account" | "no-account"> => {
+    const before = session;
+    if (!before) return "closed";
+    const result = await beginSignIn({ fresh: true, expectUserId: before.user.userId });
+    if (!result) return "closed";
+    if (result.status === "no-account") return "no-account";
+    if (result.status !== "signed-in") return "other-account";
+    land(result);
+    // The sign-in this replaced ends; the new one is already the stored one. The replaced one as it was stored: this
+    // copy's refresh token may be older than a refresh since, and the server would refuse it without a word.
+    void revokeSession(AUTH_CONFIG, result.replaced ?? before);
+    return "signed-in";
+  }, [land, session]);
 
   const pairAvailable = useCallback(async (host: AccountHost) => {
     if (!session) return;
@@ -644,7 +676,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     return accountHosts.filter((host) => !paired.has(host.hostPublicKeyB64));
   }, [accountHosts, hosts]);
 
-  const value = useMemo<AppContextValue>(() => ({ ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, updating, beginUpdate, retryConnection, sessions, loadingMachines, error, logs, connection, api, signIn, signingIn, accessCode, redeemAccessCode, cancelAccessCode, finishAccessCode, signOut, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions, clearError: () => setError(null) }), [ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, updating, beginUpdate, retryConnection, sessions, loadingMachines, error, logs, connection, api, signIn, signingIn, accessCode, redeemAccessCode, cancelAccessCode, finishAccessCode, signOut, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions]);
+  const value = useMemo<AppContextValue>(() => ({ ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, updating, beginUpdate, retryConnection, sessions, loadingMachines, error, logs, connection, api, signIn, signingIn, accessCode, redeemAccessCode, cancelAccessCode, finishAccessCode, signOut, reauthenticate, forgetDeletedAccount, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions, clearError: () => setError(null) }), [ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, updating, beginUpdate, retryConnection, sessions, loadingMachines, error, logs, connection, api, signIn, signingIn, accessCode, redeemAccessCode, cancelAccessCode, finishAccessCode, signOut, reauthenticate, forgetDeletedAccount, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

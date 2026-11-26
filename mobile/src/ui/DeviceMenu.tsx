@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { KeyboardAvoidingView, Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { EyeOff, Eye, Laptop, Monitor, MoreHorizontal, Pencil, Plug, QrCode, Server, Trash2, Unplug } from "lucide-react-native";
 import { useApp } from "@mobile/state/AppProvider";
@@ -8,6 +8,7 @@ import { useMachines } from "@mobile/state/useMachines";
 import { cleanHostName, hostDisplayName, HOST_NAME_MAX } from "@mobile/store/host-name";
 import { Button } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
+import { keyboardAvoidingBehavior } from "@mobile/ui/keyboard";
 
 /**
  * The menu of a machine (PRO-87, #987). Every row in the machine list has
@@ -105,7 +106,7 @@ function DeviceMenu({ machine, options, onClose }: { machine: Machine; options: 
 
   return (
     <Modal visible transparent animationType="fade" onRequestClose={onClose}>
-      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.backdrop}>
+      <KeyboardAvoidingView behavior={keyboardAvoidingBehavior()} style={styles.backdrop}>
         {backdrop}
         <Sheet onClose={close}>
           {mode === "menu" ? <>

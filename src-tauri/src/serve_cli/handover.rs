@@ -22,6 +22,9 @@ use crate::remote::machine_update::Blocker;
 /// Checking a binary new to this machine may take a while (macOS checks it).
 const PLAN_WITHIN: Duration = Duration::from_secs(45);
 const HANDOVER_WITHIN: Duration = Duration::from_secs(90);
+/// How long of that the runtime is given to find a quiet moment for it; one
+/// from before it picked its own moment answers within its own limits.
+const HANDOVER_PATIENCE: Duration = Duration::from_secs(60);
 /// How long a handover whose reply was lost may take to show its new epoch.
 const LOST_REPLY_WITHIN: Duration = Duration::from_secs(15);
 
@@ -59,7 +62,7 @@ pub fn hand_over(data: &Path, binary: &Path, version: &str) -> Result<Outcome> {
         return Ok(Outcome::Busy(named));
     }
     let _: Value = client
-        .call_within("runtime.handover", json!({ "epoch": epoch, "binary": installed, "stop": [] }), HANDOVER_WITHIN)
+        .call_within("runtime.handover", json!({ "epoch": epoch, "binary": installed, "stop": [], "patienceMs": HANDOVER_PATIENCE.as_millis() as u64 }), HANDOVER_WITHIN)
         .context("hand the running runtime over")?;
     crate::local_runtime::launch::taken_over(data, &epoch, HANDOVER_WITHIN)?;
     Ok(Outcome::HandedOver)
@@ -95,7 +98,7 @@ pub fn begin(data: &Path, binary: &Path, stop: &[String]) -> Result<Handed> {
         let named: Vec<String> = unagreed.iter().map(|work| Blocker::of(work).title).collect();
         return Ok(Handed::Refused(format!("The running runtime runs work an update cannot carry over, which nobody agreed to stop ({}); nothing was stopped", named.join("; "))));
     }
-    match client.call_within::<Value>("runtime.handover", json!({ "epoch": epoch, "binary": installed, "stop": agreed }), HANDOVER_WITHIN) {
+    match client.call_within::<Value>("runtime.handover", json!({ "epoch": epoch, "binary": installed, "stop": agreed, "patienceMs": HANDOVER_PATIENCE.as_millis() as u64 }), HANDOVER_WITHIN) {
         Ok(_) => Ok(Handed::Exec { epoch }),
         // The reply may be lost to the exec itself: a runtime under a new
         // epoch says it began.

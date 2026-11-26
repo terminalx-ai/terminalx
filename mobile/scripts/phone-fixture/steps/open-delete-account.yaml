@@ -1,0 +1,13 @@
+# Settings → Account → Delete account, as a person goes, in the board's theme.
+appId: com.terminalx.phone.fixture
+---
+- runFlow: pick-theme.yaml
+- tapOn:
+    text: "Account.*"
+- waitForAnimationToEnd
+- scrollUntilVisible:
+    element:
+      id: account-delete-row
+- tapOn:
+    id: account-delete-row
+- waitForAnimationToEnd
