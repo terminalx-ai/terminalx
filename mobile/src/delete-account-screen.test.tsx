@@ -170,7 +170,7 @@ it("never names a provider by its id when the organization's list has not given 
   await type("alex@example.com");
   await act(async () => confirmButton().click());
   await flush();
-  expect(byTestId("delete-account-refused")!.textContent).toBe(T.failStop(T.someProvider, "elsewhere", "the provider refused"));
+  expect(byTestId("delete-account-refused")!.textContent).toBe(T.failStop(T.aProvider, "elsewhere", "the provider refused"));
   expect(container.textContent).not.toContain("agent37");
 });
 

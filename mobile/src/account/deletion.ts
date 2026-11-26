@@ -59,13 +59,11 @@ export const accountDeletionText = {
   doneAfter: (on: string) => `After ${on} it cannot be recovered.`,
   doneStopped: (n: number, on: string) => `${n === 1 ? `Your running ${ONE} was` : `Your ${n} running ${W} were`} stopped. ${n === 1 ? "It is" : "They are"} deleted with your account on ${on}.`,
   doneButton: "Done",
-  // Not in copy.mjs (PRO-584 wording to approve): the done page when the server signed every device out before it said the day.
+  // The done page when every device was signed out before the server gave the day (copy.mjs hand-off 39).
   doneHeadIn: (days: number) => `Your account will be deleted in ${days} days`,
   doneStoppedIn: (n: number) => `${n === 1 ? `Your running ${ONE} was` : `Your ${n} running ${W} were`} stopped. ${n === 1 ? "It is" : "They are"} deleted with your account.`,
   doneKeepIn: (days: number) => `Changed your mind? Sign in within ${days} days to keep your account.`,
   doneAfterIn: "After that it cannot be recovered.",
-  // Not in copy.mjs: the provider whose name the organization's list has not given.
-  someProvider: "the provider",
   elsewhere: (on: string) => `This account will be deleted on ${on}, so this device was signed out. Sign in before then to keep it.`,
 
   cancelled: "Account deletion cancelled",
@@ -84,14 +82,37 @@ export const accountDeletionText = {
   finishingBody: "The 14 days have passed, so it can no longer be cancelled. You will be signed out when it finishes.",
   signOut: "Sign out",
 
-  // Not on board 26.01: the page has to say these, and the design has no sentence for them (see the pull request).
+  // copy.mjs hand-off 39: sentences the page needs that no board draws.
+  loadFailed: "This page could not be loaded. Check your connection and try again.",
+  retry: "Try again",
+  ownerDetailOne: "You are its only owner and it has 1 other member. Make that member the owner, or remove them.",
+  lastAdminTitle: "The only admin account",
   lastAdmin: "This is the only admin account, so it cannot be deleted.",
-  cleanup: (org: string) => `Clean up ${org}`,
-  cloudCleanupDetail: "Runtime builds, environment images or other cloud resources are still held for it at the provider. Remove them on its page in the web console.",
-  sessionRuntimeDetail: "A session runtime in it has not been shut down. Shut it down from its page in the web console.",
+  sessionRuntime: (org: string) => `Agent sessions still running in ${org}`,
+  sessionRuntimeDetail: (org: string) => `An agent session in ${org} has not shut down yet. Wait for it to end, then confirm again.`,
+  cloudCleanup: (org: string) => `Clean up ${org}`,
+  cloudCleanupDetailPhone: "It still holds runtime builds, environment images or other resources at the provider. Remove them on its page in the web console.",
+  goneTeam: (org: string) => `Your organization, ${org}`,
+  goneTeamDetail: "You are its only member",
+  goneLeaveMany: (names: string) => `You leave ${names}; they keep their work`,
   otherAccount: (email: string) => `That was another account. Sign in again with ${email}.`,
-  unreadable: "Your account could not be read. Check your connection and try again.",
-  tryAgain: "Try again",
+  // Stand-ins in failStop when a name is missing.
+  aProvider: "the provider",
+  aWorkspace: `a ${ONE}`,
+  // failStop's reason, by allowlisted code; `unknown` is also any code the phone does not know.
+  reason: {
+    provider_refused: "the provider refused",
+    provider_unavailable: "the provider is not answering",
+    provider_timed_out: "the provider is not answering",
+    provider_rate_limited: "the provider is limiting requests",
+    provider_credential_invalid: "the organization's key for the provider is no longer valid",
+    provider_retry_exhausted: "the provider kept failing",
+    workspace_needs_attention: `the ${ONE} needs attention`,
+    workspace_busy: `the ${ONE} is busy with another change`,
+    stop_unsupported: "the provider cannot stop it",
+    service_unavailable: "TerminalX could not reach the provider",
+    unknown: "the reason is not known",
+  } as Readonly<Record<string, string>>,
 } as const;
 
 const T = accountDeletionText;
@@ -192,13 +213,13 @@ export function blockerRows(blockers: readonly AccountDeletionBlocker[]): Blocke
     const key = `${blocker.code}:${blocker.organizationId ?? index}`;
     switch (blocker.code) {
       case "sole_owner_with_members":
-        return org ? [{ key, title: T.owner(org), detail: `${T.ownerDetail(blocker.otherMembers ?? 0)} ${T.ownerPhone}`, consoleUrl: url }] : [];
+        return org ? [{ key, title: T.owner(org), detail: `${blocker.otherMembers === 1 ? T.ownerDetailOne : T.ownerDetail(blocker.otherMembers ?? 0)} ${T.ownerPhone}`, consoleUrl: url }] : [];
       case "last_admin":
-        return [{ key, title: T.lastAdmin, detail: "", consoleUrl: null }];
+        return [{ key, title: T.lastAdminTitle, detail: T.lastAdmin, consoleUrl: null }];
       case "cloud_cleanup_required":
-        return org ? [{ key, title: T.cleanup(org), detail: T.cloudCleanupDetail, consoleUrl: url }] : [];
+        return org ? [{ key, title: T.cloudCleanup(org), detail: T.cloudCleanupDetailPhone, consoleUrl: url }] : [];
       case "session_runtime_cleanup_required":
-        return org ? [{ key, title: T.cleanup(org), detail: T.sessionRuntimeDetail, consoleUrl: url }] : [];
+        return org ? [{ key, title: T.sessionRuntime(org), detail: T.sessionRuntimeDetail(org), consoleUrl: url }] : [];
       default:
         return [];
     }
@@ -233,8 +254,9 @@ export function goneRows(read: AccountDeletionRead, email: string): [string, str
     rows.push([running.length === 1 ? `Your running ${ONE}` : `Your ${running.length} running ${W}`, `${names.join(", ")}: stopped when you confirm, deleted after the ${read.graceDays} days`]);
   }
   for (const organization of deleted.organizations) {
-    const detail = organization.workspaces > 0 ? `With its stopped ${W}` : "";
-    rows.push([organization.isPersonal ? `Your personal organization, ${organization.name}` : `Your organization, ${organization.name}`, detail]);
+    // One that is not personal goes with the account only when the person is its only member.
+    if (organization.isPersonal) rows.push([`Your personal organization, ${organization.name}`, organization.workspaces > 0 ? `With its stopped ${W}` : ""]);
+    else rows.push([T.goneTeam(organization.name), T.goneTeamDetail]);
   }
   const saved = [
     ...(deleted.computeKeys ? ["Compute keys"] : []),
@@ -244,7 +266,7 @@ export function goneRows(read: AccountDeletionRead, email: string): [string, str
   if (saved.length) rows.push(["Keys and connections you saved", capitalize(listWords(saved))]);
   rows.push(["Machines and phones paired to your account", "Every signed-in session ends"]);
   const left = deleted.leftOrganizations.map((organization) => organization.name);
-  if (left.length) rows.push(["Your place in other organizations", `You leave ${listWords(left)}; ${left.length === 1 ? "it keeps its work" : "they keep their work"}`]);
+  if (left.length) rows.push(["Your place in other organizations", left.length === 1 ? `You leave ${left[0]}; it keeps its work` : T.goneLeaveMany(listWords(left))]);
   return rows;
 }
 
@@ -272,21 +294,6 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** When a deletion confirmed at `now` would be deleted. */
 
-/** The provider's reason for not stopping a workspace, in words; the server sends an allowlisted code. */
-const REASONS: Record<string, string> = {
-  provider_timed_out: "the provider is not answering",
-  provider_unavailable: "the provider is not answering",
-  provider_retry_exhausted: "the provider is not answering",
-  service_unavailable: "the provider is not answering",
-  provider_refused: "the provider refused",
-  provider_rate_limited: "the provider is limiting requests",
-  provider_credential_invalid: "the organization's provider key is not valid",
-  workspace_needs_attention: "it needs attention",
-  workspace_busy: "it is busy with another change",
-  stop_unsupported: "the provider cannot stop it",
-};
-const UNKNOWN_REASON = "the provider did not say why";
-
 /**
  * The sentence for a refused attempt: a workspace that did not stop names it
  * and the ones that did; a blocker found after confirming says something
@@ -294,12 +301,12 @@ const UNKNOWN_REASON = "the provider did not say why";
  */
 export function refusalSentence(failure: AccountDeletionFailure | null | undefined, providerName: (id: string) => string, workspaceName: (id: string) => string | null): { tone: "danger" | "warning"; text: string; blocked: boolean } {
   if (failure?.code === "workspace_stop_failed") {
-    const name = failure.workspaceName ?? (failure.workspaceId ? workspaceName(failure.workspaceId) : null);
-    if (name && failure.provider) {
-      const why = (failure.reason && REASONS[failure.reason]) || UNKNOWN_REASON;
-      const kept = (failure.stopped ?? []).map((entry) => entry.workspaceName ?? workspaceName(entry.workspaceId)).filter((value): value is string => !!value);
-      return { tone: "danger", text: kept.length ? `${T.failStop(providerName(failure.provider), name, why)} ${T.failStopKept(kept)}` : T.failStop(providerName(failure.provider), name, why), blocked: false };
-    }
+    // Every part from an allowlisted code or a name; a stand-in where one is missing, never a raw code.
+    const name = failure.workspaceName ?? (failure.workspaceId ? workspaceName(failure.workspaceId) : null) ?? T.aWorkspace;
+    const why = (failure.reason && Object.hasOwn(T.reason, failure.reason) ? T.reason[failure.reason] : undefined) ?? T.reason.unknown!;
+    const provider = failure.provider ? providerName(failure.provider) : T.aProvider;
+    const kept = (failure.stopped ?? []).map((entry) => entry.workspaceName ?? workspaceName(entry.workspaceId)).filter((value): value is string => !!value);
+    return { tone: "danger", text: kept.length ? `${T.failStop(provider, name, why)} ${T.failStopKept(kept)}` : T.failStop(provider, name, why), blocked: false };
   }
   if (failure && isBlockerCode(failure.code)) return { tone: "warning", text: T.failBlocked, blocked: true };
   return { tone: "danger", text: T.failRefused, blocked: false };

@@ -27,12 +27,13 @@ name: Delete account (26.01)
 - takeScreenshot: 26.01-03-page-confirm
 - tapOn:
     id: delete-account-email
-- inputText: "alex@example.co"
+# Short, so a tap on the field's centre puts the caret after it at every text size.
+- inputText: "alex@"
 - hideKeyboard
 - takeScreenshot: 26.01-04-mismatch
 - tapOn:
     id: delete-account-email
-- inputText: "m"
+- inputText: "example.com"
 - hideKeyboard
 - takeScreenshot: 26.01-05-ready
 - tapOn:
@@ -187,6 +188,17 @@ name: Delete account (26.01)
 - launchApp:
     clearState: true
     arguments: { fixtureScenario: connected, fixtureDeletion: cancelled }
-- runFlow: steps/pick-theme.yaml
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+- tapOn: "${THEME} theme"
+- scrollUntilVisible:
+    element:
+      id: settings-deletion-cancelled
+    direction: UP
+- swipe:
+    start: 50%, 30%
+    end: 50%, 80%
+    duration: 600
 - waitForAnimationToEnd
 - takeScreenshot: 26.01-22-cancelled

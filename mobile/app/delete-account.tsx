@@ -51,7 +51,7 @@ export default function DeleteAccountScreen() {
     providerName: (providerId, workspaceId) => {
       const orgId = workspaceId ? running.current.get(workspaceId) : undefined;
       // Never the provider's id: in this sentence it would read as a code.
-      return (orgId && names.get(orgId)?.get(providerId)) || T.someProvider;
+      return (orgId && names.get(orgId)?.get(providerId)) || T.aProvider;
     },
   });
   const { phase, read, sending, notice } = deletion;
@@ -80,7 +80,7 @@ export default function DeleteAccountScreen() {
   if (!read) {
     return <>{header}<View style={[styles.screen, styles.loading, { backgroundColor: palette.page }]}>
       {phase.kind === "unreadable"
-        ? <Notice testID="delete-account-unreadable" tone="danger" text={T.unreadable} action={{ label: T.tryAgain, onPress: deletion.reload }} />
+        ? <Notice testID="delete-account-unreadable" tone="danger" text={T.loadFailed} action={{ label: T.retry, onPress: deletion.reload }} />
         : <Spinner size={24} color={palette.muted} />}
     </View></>;
   }

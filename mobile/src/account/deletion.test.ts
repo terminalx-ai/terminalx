@@ -41,6 +41,15 @@ describe("what is deleted", () => {
     expect(blockerRows(read.blockers)).toEqual([]);
   });
 
+  it("names an organization that goes with the account, and several it leaves", () => {
+    const read = plainRead();
+    read.deleted.organizations.push({ id: "org_t", name: "Side project", isPersonal: false, workspaces: 0 });
+    read.deleted.leftOrganizations.push({ id: "org_n", name: "Northwind" });
+    const rows = goneRows(read, "alex@example.com");
+    expect(rows).toContainEqual(["Your organization, Side project", "You are its only member"]);
+    expect(rows).toContainEqual(["Your place in other organizations", "You leave Contoso Labs and Northwind; they keep their work"]);
+  });
+
   it("leaves out what the account does not have", () => {
     const read = plainRead();
     Object.assign(read.deleted, { computeKeys: 0, agentLogins: 0, githubConnections: 0, leftOrganizations: [] });
@@ -60,13 +69,25 @@ describe("before you can delete", () => {
     }]);
   });
 
-  it("has words for the clean-up refusals and none for a code it does not know", () => {
+  it("says one other member as one", () => {
+    expect(blockerRows([{ code: "sole_owner_with_members", organizationId: "o", organizationName: "Northwind", otherMembers: 1 }])[0]!.detail)
+      .toBe("You are its only owner and it has 1 other member. Make that member the owner, or remove them. The phone cannot change owners yet. Open the web console to do it.");
+  });
+
+  it("names the only admin account", () => {
+    expect(blockerRows([{ code: "last_admin" }])).toEqual([{ key: "last_admin:0", title: "The only admin account", detail: "This is the only admin account, so it cannot be deleted.", consoleUrl: null }]);
+  });
+
+  it("has the final words for the clean-up refusals and none for a code it does not know", () => {
     const rows = blockerRows([
       { code: "cloud_cleanup_required", organizationId: "org_1", organizationName: "Northwind" },
       { code: "session_runtime_cleanup_required", organizationId: "org_1", organizationName: "Northwind" },
       { code: "something_new", organizationId: "org_1", organizationName: "<b>raw</b>" },
     ]);
-    expect(rows.map((row) => row.title)).toEqual(["Clean up Northwind", "Clean up Northwind"]);
+    expect(rows.map(({ title, detail }) => [title, detail])).toEqual([
+      ["Clean up Northwind", "It still holds runtime builds, environment images or other resources at the provider. Remove them on its page in the web console."],
+      ["Agent sessions still running in Northwind", "An agent session in Northwind has not shut down yet. Wait for it to end, then confirm again."],
+    ]);
     expect(rows.every((row) => row.consoleUrl === consoleOrganizationUrl("org_1"))).toBe(true);
     // What is drawn: the titles and details (the key only tells rows apart).
     expect(JSON.stringify(rows.map(({ title, detail }) => [title, detail]))).not.toMatch(/cleanup_required|something_new|raw/);
@@ -91,8 +112,19 @@ describe("confirming", () => {
 
   it("never shows a reason code it does not know", () => {
     const sentence = refusalSentence({ code: "workspace_stop_failed", provider: "box", workspaceId: "ws_2", workspaceName: "scratch", reason: "provider_said_<script>" }, () => "Boat", () => null);
-    expect(sentence.text).toContain("(the provider did not say why)");
+    expect(sentence.text).toContain("(the reason is not known)");
     expect(sentence.text).not.toContain("script");
+  });
+
+  it("uses the web's reason table, and stand-ins for a missing provider or workspace name", () => {
+    const say = (reason: string) => refusalSentence({ code: "workspace_stop_failed", provider: "box", workspaceId: "w", workspaceName: "scratch", reason }, () => "Boat", () => null).text;
+    expect(say("provider_retry_exhausted")).toContain("(the provider kept failing)");
+    expect(say("service_unavailable")).toContain("(TerminalX could not reach the provider)");
+    expect(say("provider_credential_invalid")).toContain("(the organization's key for the provider is no longer valid)");
+    expect(say("workspace_needs_attention")).toContain("(the cloud workspace needs attention)");
+    expect(say("workspace_busy")).toContain("(the cloud workspace is busy with another change)");
+    expect(refusalSentence({ code: "workspace_stop_failed", reason: "provider_refused" }, () => "Boat", () => null).text)
+      .toBe("Your account was not deleted and nothing was scheduled: the provider did not stop a cloud workspace (the provider refused). Try again.");
   });
 
   it("says something changed when a blocker appeared after confirming, and not deleted otherwise", () => {
