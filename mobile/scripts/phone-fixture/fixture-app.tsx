@@ -24,6 +24,7 @@ import type { HostConnection, ConnectionStage } from "../../src/transport/connec
 import { useWaited, WAITING_AFTER_MS } from "../../src/state/connection-view";
 import type { AccessCodeAnswer, AccessCodeRequest } from "../../src/auth/access-code";
 import { AUTH_CONFIG, redeemAccessCode, type CloudSession } from "../../src/auth/protocol";
+import { markSignedInAgain } from "./setup/account-deletion";
 
 /**
  * Each state the 22.01–22.05 boards draw.
@@ -372,7 +373,12 @@ export function AppProvider({ children }: PropsWithChildren) {
     cancelAccessCode: () => { ticket.current = null; setAccessCode(null); },
     // Held a few seconds longer than the app's own pause: Maestro trails the screen, and the accepted page is shot.
     finishAccessCode: () => { void pause(8_000).then(() => setAccessCode(null)); },
-    signOut: async () => undefined, refreshMachines: async () => { await pause(1_500); }, pairAvailable: async () => undefined, pairCode: async () => undefined, retryPairing: async () => undefined,
+    signOut: async () => undefined,
+    // Delete account (26.01): signing in again is the system's browser sheet in the app; here it takes a few
+    // seconds and comes back as the same account. Once the deletion is scheduled the phone is signed out.
+    reauthenticate: async () => { await pause(4_000); markSignedInAgain(); return "signed-in"; },
+    forgetDeletedAccount: async () => { setSession(null); setHosts([]); },
+    refreshMachines: async () => { await pause(1_500); }, pairAvailable: async () => undefined, pairCode: async () => undefined, retryPairing: async () => undefined,
     connectHost: async () => true, disconnectHost: () => undefined,
     forgetHost: async (id: string) => setHosts((current) => current.filter((host) => host.id !== id)),
     renameHost: async (id: string, name: string) => setHosts((current) => current.map((host) => host.id === id ? { ...host, customName: name.trim() || undefined } : host)),

@@ -33,7 +33,7 @@ export function Notice({ tone, title, text, items, icon, action, testID }: {
   return <View testID={testID} accessibilityRole={tone === "danger" || tone === "warning" ? "alert" : undefined} style={[styles.notice, frame]}>
     <View style={styles.mark}>{icon ? icon(color) : <Mark size={16} color={color} />}</View>
     <View style={styles.body}>
-      {title ? <Text style={[styles.text, styles.title, words]}>{title}</Text> : null}
+      {title ? <Text style={[styles.text, styles.title, { color: palette.ink }]}>{title}</Text> : null}
       {text ? <Text style={[styles.text, words]}>{text}</Text> : null}
       {items?.map((item, index) => <Text key={index} style={[styles.text, words]}>{item}</Text>)}
       {action ? <View style={styles.actions}><Button label={action.label} kind="secondary" size="small" disabled={action.disabled} onPress={action.onPress} /></View> : null}

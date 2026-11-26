@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ORGANIZATION_DELETION_REFUSALS, organizationDeletionBlockers } from "@terminalx/portable/organizationDeletion";
+import { accountDeletionAttemptSchema, accountDeletionReadSchema, type AccountDeletionAttempt, type AccountDeletionRead } from "../account/deletion";
 import { isPhoneMode, type PhoneMode } from "./agent-settings";
 import type { CheckpointEnvelope, CommandEnvelope } from "./crypto";
 
@@ -721,6 +722,30 @@ export class CloudApi {
     if (!answer.success || answer.data.organizationId !== orgId || answer.data.deleted !== true) throw new CloudApiError("organization_delete_outcome_unknown", 200);
   }
 
+  /**
+   * The signed-in person's own account deletion (PRO-584, terminalx-saas
+   * `docs/account-deletion.md`): what stands in the way, what goes, whether
+   * the sign-in is recent enough to confirm, and the latest attempt.
+   */
+  async accountDeletion(): Promise<AccountDeletionRead> {
+    return read(accountDeletionReadSchema, await this.request("GET", ACCOUNT_DELETION));
+  }
+
+  /**
+   * Confirm: the server stops the running cloud workspaces, then schedules the
+   * deletion and signs out every device. `confirmationEmail` is the account's
+   * own address, never what was typed. Answers the attempt, `stopping` or
+   * already `scheduled`; a refusal is a `CloudApiError` with its stable code.
+   */
+  async requestAccountDeletion(confirmationEmail: string): Promise<AccountDeletionAttempt> {
+    return read(accountDeletionAttemptSchema, await this.request("POST", ACCOUNT_DELETION, { confirmationEmail }));
+  }
+
+  /** The "deletion cancelled" notice was shown; the server stops sending it. */
+  async acknowledgeAccountDeletionNotice(): Promise<void> {
+    await this.request("POST", `${ACCOUNT_DELETION}/notice`, {});
+  }
+
   /** Whether this server deletes organizations for a phone, as of the last organizations read. */
   deletesOrganizations(): boolean {
     return this.phoneDeletion;
@@ -1116,6 +1141,7 @@ export class CloudApi {
 }
 
 const base = (orgId: string) => `/v1/mobile/orgs/${id(orgId)}`;
+const ACCOUNT_DELETION = "/v1/mobile/account/deletion";
 const mailbox = (orgId: string, workspaceId: string) => `${base(orgId)}/cloud-workspaces/${id(workspaceId)}/agent-commands`;
 
 /**

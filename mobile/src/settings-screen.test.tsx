@@ -9,22 +9,31 @@ import AccountScreen from "../app/account";
 import SupportReportScreen from "../app/support-report";
 import { pairingInstance, endPairingInstance } from "./store/pairing-instance";
 import { defaultSettings } from "./notifications/model";
+import { resetCancelledNoticeForTests } from "./account/cancelled-notice";
+import { accountDeletionText } from "./account/deletion";
+import { plainRead } from "./account/fixtures";
+import { resetPendingDeletionForTests } from "./account/pending-deletion";
 
 // #987: Settings in plain words. Machines are managed on the Machines tab only.
 const support = vi.hoisted(() => ({ preview: vi.fn(), submit: vi.fn(), copy: vi.fn(), events: vi.fn(), hosts: vi.fn(), preventRemove: vi.fn() }));
-const mocks = vi.hoisted(() => ({ app: {} as any, push: vi.fn(), back: vi.fn(), setName: vi.fn(), alert: vi.fn(), notifications: null as any, storage: new Map<string, string>(), organizations: [] as any[] }));
+const mocks = vi.hoisted(() => ({ app: {} as any, push: vi.fn(), back: vi.fn(), setName: vi.fn(), alert: vi.fn(), notifications: null as any, storage: new Map<string, string>(), organizations: [] as any[], catalog: null as any }));
 vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
   getItem: async (key: string) => mocks.storage.get(key) ?? null,
   setItem: async (key: string, value: string) => { mocks.storage.set(key, value); },
+  removeItem: async (key: string) => { mocks.storage.delete(key); },
 } }));
-vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => null, useCatalogSnapshot: () => ({ organizations: mocks.organizations.map((organization) => ({ organization })) }) }));
+vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => mocks.catalog, useCatalogSnapshot: () => ({ organizations: mocks.organizations.map((organization) => ({ organization })) }) }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", async (actual) => ({ ...(await actual<typeof import("@mobile/ui/theme")>()), useTheme: () => ({ palette: { accent: "#e7806d", border: "#333" }, name: "Ember", setName: mocks.setName }) }));
 vi.mock("@mobile/support/api", () => ({ supportApi: support }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: support.copy }));
 vi.mock("@mobile/store/hosts", () => ({ readHosts: support.hosts }));
 vi.mock("@mobile/transport/connection", () => ({ scopedConnectionSnapshot: support.events, supportConnectionStages: ["connected"], supportConnectionClassifications: ["relay"] }));
-vi.mock("expo-router", () => ({ usePreventRemove: support.preventRemove, useRouter: () => ({ push: mocks.push, back: mocks.back }) }));
+vi.mock("expo-router", async () => {
+  const { useEffect } = await import("react");
+  // The screen comes into view once, when it is drawn.
+  return { usePreventRemove: support.preventRemove, useRouter: () => ({ push: mocks.push, back: mocks.back }), useFocusEffect: (run: () => void) => useEffect(run, [run]) };
+});
 vi.mock("expo-constants", () => ({ default: { expoConfig: { version: "0.2.32", ios: { buildNumber: "118" } } } }));
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }));
 vi.mock("@mobile/notifications/store", () => ({ useNotificationSettings: () => mocks.notifications }));
@@ -66,6 +75,10 @@ beforeEach(() => {
   mocks.alert.mockReset();
   mocks.notifications = { ...defaultSettings(), allow: true };
   mocks.organizations = [];
+  mocks.catalog = null;
+  mocks.storage.clear();
+  resetPendingDeletionForTests();
+  resetCancelledNoticeForTests();
   const studio = host("studio", { customName: "Studio MacBook" });
   mocks.app = {
     session: { user: { displayName: "Alex", email: "alex@example.com" } },
@@ -197,10 +210,54 @@ it("lists the account's organizations with the role in each, each opening its ow
   await show(<AccountScreen />);
   expect([...container.querySelectorAll("h2")].map((h) => h.textContent)).toEqual(["Organizations"]);
   const rows = [...container.querySelectorAll("button[aria-label]")].map((b) => b.getAttribute("aria-label"));
-  expect(rows).toEqual(["Alex, Owner", "Test organization, Owner", "Other team, Member"]);
+  expect(rows).toEqual(["Alex, Owner", "Test organization, Owner", "Other team, Member", `${accountDeletionText.rowTitle}. ${accountDeletionText.rowHint}`]);
   expect(container.textContent).toContain("Personal · Owner");
   await act(async () => (container.querySelector("button[aria-label='Test organization, Owner']") as HTMLButtonElement).click());
   expect(mocks.push).toHaveBeenCalledWith({ pathname: "/organization/[orgId]", params: { orgId: "org-team" } });
+});
+
+it("has Delete account as a row below Sign out, not a second red button, opening its own page (PRO-584)", async () => {
+  await show(<AccountScreen />);
+  const text = container.textContent!;
+  expect(text.indexOf("Sign out")).toBeLessThan(text.indexOf(accountDeletionText.rowTitle));
+  expect(text).toContain(accountDeletionText.rowHint);
+  expect([...container.querySelectorAll("button")].filter((b) => b.textContent === "Delete account")).toEqual([]);
+  await act(async () => (container.querySelector(`button[aria-label='${accountDeletionText.rowTitle}. ${accountDeletionText.rowHint}']`) as HTMLButtonElement).click());
+  expect(mocks.push).toHaveBeenCalledWith("/delete-account");
+});
+
+it("says on the signed-out card when the account will be deleted, until the day passes (PRO-584)", async () => {
+  mocks.app.session = null;
+  const day = new Date(2099, 11, 9, 12).getTime();
+  mocks.storage.set("terminalx:account-deletion:v1", JSON.stringify({ deleteAfter: day }));
+  await show(<SettingsScreen />);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  expect(container.textContent).toContain(accountDeletionText.doneHead("9 December 2099"));
+  expect(container.textContent).toContain(accountDeletionText.doneKeep("9 December 2099"));
+  expect(container.textContent).toContain("Not signed in");
+
+  act(() => root.unmount());
+  root = createRoot(container);
+  resetPendingDeletionForTests();
+  mocks.storage.set("terminalx:account-deletion:v1", JSON.stringify({ deleteAfter: Date.now() - 1 }));
+  await show(<SettingsScreen />);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  expect(container.textContent).not.toContain("will be deleted on");
+  expect(mocks.storage.has("terminalx:account-deletion:v1")).toBe(false);
+});
+
+it("says once that signing in cancelled the deletion, and that stopped cloud workspaces stay stopped (PRO-584)", async () => {
+  mocks.app.session = { user: { userId: "user-alex", displayName: "Alex", email: "alex@example.com" } };
+  const read = { ...plainRead(), notice: "cancelled", deletion: { id: "del_1", kind: "self", state: "cancelled", requestedAt: "2026-11-25T12:00:00.000Z", workspaces: [{ workspaceId: "ws_1", action: "stop", state: "stopped" }] } };
+  mocks.catalog = { api: { accountDeletion: vi.fn(async () => read), acknowledgeAccountDeletionNotice: vi.fn(async () => undefined) } };
+  await show(<SettingsScreen />);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  expect(container.textContent).toContain(accountDeletionText.cancelled);
+  expect(container.textContent).toContain(accountDeletionText.cancelledStopped);
+  expect(mocks.catalog.api.acknowledgeAccountDeletionNotice).toHaveBeenCalledTimes(1);
+  // Read once for the sign-in: drawn again, it asks nothing more.
+  await show(<SettingsScreen />);
+  expect(mocks.catalog.api.accountDeletion).toHaveBeenCalledTimes(1);
 });
 
 it("offers Sign in in place of the account row when signed out", async () => {

@@ -2,6 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { Pressable, StyleSheet, Switch, Text, useColorScheme, View } from "react-native";
 import { useRouter } from "expo-router";
 import { Bell, Check, ChevronRight } from "lucide-react-native";
+import { useCancelledDeletionNotice } from "@mobile/account/cancelled-notice";
+import { accountDeletionText, deletionDate } from "@mobile/account/deletion";
+import { usePendingDeletion } from "@mobile/account/pending-deletion";
+import { useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { settingsSummary } from "@mobile/notifications/model";
 import { useNotificationSettings } from "@mobile/notifications/store";
 import type { MacSettings } from "@mobile/data/host-api";
@@ -11,6 +15,7 @@ import { useApp } from "@mobile/state/AppProvider";
 import { useHostFeatures } from "@mobile/state/host-features";
 import { useMachines } from "@mobile/state/useMachines";
 import { hostDisplayName } from "@mobile/store/host-name";
+import { Notice } from "@mobile/ui/Notice";
 import { Button, Card, Screen, SectionTitle } from "@mobile/ui/primitives";
 import { Spinner } from "@mobile/ui/Spinner";
 import { THEMES, themePalette, useTheme } from "@mobile/ui/theme";
@@ -64,10 +69,16 @@ export default function SettingsScreen() {
   };
 
   const user = app.session?.user;
+  // PRO-584: after confirming, the day the account goes until then (or until a sign-in cancels it);
+  // after a sign-in that cancelled it, the server's one notice saying so.
+  const pendingDeletion = usePendingDeletion(!!user);
+  const cancelledNotice = useCancelledDeletionNotice(useCloudCatalog()?.api ?? null, user?.userId ?? null);
   const who = user ? user.displayName ?? user.email : null;
   const machineName = machine?.name ?? (app.activeHost ? hostDisplayName(app.activeHost) : null);
 
   return <Screen title="Settings">
+    {cancelledNotice ? <Notice testID="settings-deletion-cancelled" tone="success" title={accountDeletionText.cancelled} text={cancelledNotice} /> : null}
+    {pendingDeletion !== null ? <Notice testID="settings-deletion-pending" tone="info" title={accountDeletionText.doneHead(deletionDate(pendingDeletion))} text={accountDeletionText.doneKeep(deletionDate(pendingDeletion))} /> : null}
     {user ? <Card>
       <Pressable accessibilityRole="button" accessibilityLabel={`Account, ${who}`} onPress={() => router.push("/account")} style={({ pressed }) => [styles.accountRow, pressed && { backgroundColor: palette.raised }]}>
         <View style={[styles.avatar, { backgroundColor: palette.selected }]}><Text style={[styles.avatarText, { color: palette.ink }]}>{[...(who ?? "?")][0]!.toUpperCase()}</Text></View>

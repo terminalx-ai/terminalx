@@ -23,11 +23,26 @@ export type StoredRefreshOutcome =
  */
 export type SignInResult =
   | { status: "signed-in"; session: CloudSession }
-  | { status: "held"; hold: AccessHold };
+  | { status: "held"; hold: AccessHold }
+  /** A sign-in again that came back as someone else: nothing was kept, and that session was ended. */
+  | { status: "other-account" };
 
-export async function beginSignIn(): Promise<SignInResult | null> {
+/**
+ * `fresh` (signing in again before deleting the account, PRO-584): the sheet
+ * shares nothing with the browser, so the web console's sign-in page asks
+ * again even when the browser is signed in to it; otherwise it would approve
+ * at once without the person signing in. `expectUserId`: only that account's
+ * sign-in is kept.
+ */
+export interface SignInOptions { fresh?: boolean; expectUserId?: string }
+
+/** The account a sign-in again must come back as; null for an ordinary sign-in. */
+let expectedUserId: string | null = null;
+
+export async function beginSignIn(options: SignInOptions = {}): Promise<SignInResult | null> {
   // A new sign-in: a callback seen before belongs to an earlier one.
   finished = null;
+  expectedUserId = options.expectUserId ?? null;
   const verifier = base64Url(await Crypto.getRandomBytesAsync(32));
   const state = base64Url(await Crypto.getRandomBytesAsync(16));
   const nonce = base64Url(await Crypto.getRandomBytesAsync(16));
@@ -38,7 +53,7 @@ export async function beginSignIn(): Promise<SignInResult | null> {
     SecureStore.setItemAsync(STATE_KEY, state, OPTIONS),
     SecureStore.setItemAsync(NONCE_KEY, nonce, OPTIONS),
   ]);
-  const result = await WebBrowser.openAuthSessionAsync(buildAuthorizeUrl(AUTH_CONFIG, challenge, state, nonce), "terminalx://auth/callback");
+  const result = await WebBrowser.openAuthSessionAsync(buildAuthorizeUrl(AUTH_CONFIG, challenge, state, nonce), "terminalx://auth/callback", options.fresh ? { preferEphemeralSession: true } : undefined);
   if (result.type === "success") return finishSignIn(result.url);
   const failure = authSessionFailure(result as { type: string; error?: string | null });
   if (failure) throw new Error(failure);
@@ -60,6 +75,7 @@ export function finishSignIn(callbackUrl: string): Promise<SignInResult> {
 }
 
 async function completeSignIn(callbackUrl: string): Promise<SignInResult> {
+  const expected = expectedUserId;
   const [verifier, expectedState, nonce] = await Promise.all([
     SecureStore.getItemAsync(VERIFIER_KEY, OPTIONS),
     SecureStore.getItemAsync(STATE_KEY, OPTIONS),
@@ -68,8 +84,13 @@ async function completeSignIn(callbackUrl: string): Promise<SignInResult> {
   await Promise.all([VERIFIER_KEY, STATE_KEY, NONCE_KEY].map((key) => SecureStore.deleteItemAsync(key, OPTIONS).catch(() => undefined)));
   const outcome = await exchangeAuthorizationCode({ config: AUTH_CONFIG, callbackUrl, verifier, expectedState, nonce });
   if (!outcome.ok) {
-    if (outcome.hold) return { status: "held", hold: outcome.hold };
+    // A hold is an address with no account yet: never the account being signed in to again.
+    if (outcome.hold) return expected ? { status: "other-account" } : { status: "held", hold: outcome.hold };
     throw new Error(outcome.reason);
+  }
+  if (expected && outcome.session.user.userId !== expected) {
+    await revokeSession(AUTH_CONFIG, outcome.session);
+    return { status: "other-account" };
   }
   await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(outcome.session), OPTIONS);
   return { status: "signed-in", session: outcome.session };
@@ -106,6 +127,14 @@ export function refreshStoredSession(session: CloudSession): Promise<StoredRefre
 
 export async function signOut(session: CloudSession): Promise<void> {
   await revokeSession(AUTH_CONFIG, session);
+  await SecureStore.deleteItemAsync(SESSION_KEY, OPTIONS).catch(() => undefined);
+}
+
+/**
+ * Forget the stored session without asking the server: after the account's
+ * deletion was scheduled the server has already signed out every device.
+ */
+export async function forgetStoredSession(): Promise<void> {
   await SecureStore.deleteItemAsync(SESSION_KEY, OPTIONS).catch(() => undefined);
 }
 

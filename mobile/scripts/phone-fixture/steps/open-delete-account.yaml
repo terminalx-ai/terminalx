@@ -1,0 +1,13 @@
+# Settings → Account → Delete account, as a person goes.
+appId: com.terminalx.phone.fixture
+---
+- tapOn: "Settings"
+- tapOn:
+    text: "Account.*"
+- waitForAnimationToEnd
+- scrollUntilVisible:
+    element:
+      id: account-delete-row
+- tapOn:
+    id: account-delete-row
+- waitForAnimationToEnd

@@ -1,0 +1,175 @@
+# 26.01 Delete account (PRO-584): the row, the page for a plain account, typing, deleting, done; blocked;
+# a workspace that did not stop; a refusal; a stale sign-in; offline; the final deletion running; the cancelled notice.
+appId: com.terminalx.phone.fixture
+name: Delete account (26.01)
+---
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: running }
+- tapOn: "Settings"
+- tapOn:
+    text: "Account.*"
+- waitForAnimationToEnd
+- takeScreenshot: 26.01-01-account-row
+- runFlow: steps/open-delete-account.yaml
+- takeScreenshot: 26.01-02-page-top
+- scrollUntilVisible:
+    element:
+      id: delete-account-email
+- takeScreenshot: 26.01-03-page-confirm
+- tapOn:
+    id: delete-account-email
+- inputText: "alex@example.co"
+- hideKeyboard
+- takeScreenshot: 26.01-04-mismatch
+- tapOn:
+    id: delete-account-email
+- inputText: "m"
+- hideKeyboard
+- takeScreenshot: 26.01-05-ready
+- tapOn:
+    id: delete-account-confirm
+- takeScreenshot: 26.01-06-stopping
+- extendedWaitUntil:
+    visible:
+      id: delete-account-done
+    timeout: 30000
+- takeScreenshot: 26.01-07-scheduled
+- tapOn:
+    id: delete-account-done
+- waitForAnimationToEnd
+- takeScreenshot: 26.01-08-settings-pending
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: blocked }
+- runFlow: steps/open-delete-account.yaml
+- takeScreenshot: 26.01-10-blocked
+- scrollUntilVisible:
+    element:
+      id: delete-account-confirm
+- takeScreenshot: 26.01-11-blocked-end
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: stop-refused }
+- runFlow: steps/open-delete-account.yaml
+- scrollUntilVisible:
+    element:
+      id: delete-account-email
+- tapOn:
+    id: delete-account-email
+- inputText: "alex@example.com"
+- hideKeyboard
+- tapOn:
+    id: delete-account-confirm
+- extendedWaitUntil:
+    visible:
+      id: delete-account-refused
+    timeout: 30000
+- scrollUntilVisible:
+    element:
+      id: delete-account-refused
+- takeScreenshot: 26.01-12-stop-failed
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: refused }
+- runFlow: steps/open-delete-account.yaml
+- scrollUntilVisible:
+    element:
+      id: delete-account-email
+- tapOn:
+    id: delete-account-email
+- inputText: "alex@example.com"
+- hideKeyboard
+- tapOn:
+    id: delete-account-confirm
+- takeScreenshot: 26.01-13-deleting
+- extendedWaitUntil:
+    visible:
+      id: delete-account-refused
+    timeout: 20000
+- takeScreenshot: 26.01-14-refused
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: unknown }
+- runFlow: steps/open-delete-account.yaml
+- scrollUntilVisible:
+    element:
+      id: delete-account-email
+- tapOn:
+    id: delete-account-email
+- inputText: "alex@example.com"
+- hideKeyboard
+- tapOn:
+    id: delete-account-confirm
+- extendedWaitUntil:
+    visible:
+      id: delete-account-unknown
+    timeout: 30000
+- takeScreenshot: 26.01-15-unknown
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: changed }
+- runFlow: steps/open-delete-account.yaml
+- scrollUntilVisible:
+    element:
+      id: delete-account-email
+- tapOn:
+    id: delete-account-email
+- inputText: "alex@example.com"
+- hideKeyboard
+- tapOn:
+    id: delete-account-confirm
+- extendedWaitUntil:
+    visible:
+      id: delete-account-changed
+    timeout: 20000
+- takeScreenshot: 26.01-16-changed
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: stale }
+- runFlow: steps/open-delete-account.yaml
+- scrollUntilVisible:
+    element:
+      id: delete-account-sign-in
+- takeScreenshot: 26.01-17-stale
+- tapOn:
+    id: delete-account-sign-in
+- takeScreenshot: 26.01-18-signing-in
+- extendedWaitUntil:
+    visible: "Signed in just now"
+    timeout: 20000
+- takeScreenshot: 26.01-19-signed-in
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: offline, fixtureDeletion: plain }
+- runFlow: steps/open-delete-account.yaml
+- scrollUntilVisible:
+    element:
+      id: delete-account-email
+- tapOn:
+    id: delete-account-email
+- inputText: "alex@example.com"
+- hideKeyboard
+- tapOn:
+    id: delete-account-confirm
+- takeScreenshot: 26.01-20-offline
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: finishing }
+- runFlow: steps/open-delete-account.yaml
+- takeScreenshot: 26.01-21-finishing
+
+- launchApp:
+    clearState: true
+    arguments: { fixtureScenario: connected, fixtureDeletion: cancelled }
+- tapOn: "Settings"
+- waitForAnimationToEnd
+- takeScreenshot: 26.01-22-cancelled
