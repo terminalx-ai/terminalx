@@ -1,5 +1,5 @@
-//! Coordinated PRO-167 contract. No production capability advertises
-//! this implementation. In particular a snapshot is not a mode witness, and
+//! Native collaboration v2 and PRO-587 per-tab enforcement. A snapshot is
+//! distinct from a mode witness, and
 //! an admission at dispatch is not a permit at the final asynchronous writer.
 
 use std::collections::{HashMap, HashSet};

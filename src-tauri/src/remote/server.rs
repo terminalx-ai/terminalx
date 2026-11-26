@@ -2340,8 +2340,8 @@ impl WorkspaceRpc {
         }
         if self.collab.runtime_policy.everyone(user) {
             let permit = collab::v2::current().ok_or_else(|| RpcError::forbidden("Collaboration provenance missing"))?;
-            permit.check(self.manager()?.collaboration_v2_witness(&session_id, &tab_id).as_ref())
-                .map_err(collaboration_drive_refusal)?;
+            let witness = self.manager().ok().and_then(|manager| manager.collaboration_v2_witness(&session_id, &tab_id));
+            permit.check(witness.as_ref()).map_err(collaboration_drive_refusal)?;
         }
         let busy = agents_busy(&self.agents, &session_id, &tab_id);
         let now = crate::cloud_agents::now_ms();

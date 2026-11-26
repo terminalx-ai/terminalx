@@ -2111,7 +2111,7 @@ mod tests {
             };
             super::super::bootstrap_link::relay_session(&session, capabilities)
         };
-        let link = Arc::new(Link { session:Mutex::new(response("1", "explicit", crate::cloud_bootstrap::CAPABILITIES, 7, "first")), completed:Mutex::new(vec![]) });
+        let link = Arc::new(Link { session:Mutex::new(response("1", "explicit", "collaboration-v1", 7, "first")), completed:Mutex::new(vec![]) });
         let devices_path = root.path().join("devices.json");
         let host = RelayHost::new(link.clone(), rpc.clone(), Some(devices_path.clone()));
         let (commands, mut receive) = mpsc::unbounded_channel();

@@ -1,4 +1,4 @@
-# Native collaboration v2 (production held)
+# Native collaboration v2
 
 The coordinated contract is `collaboration: {v:2, revision, members}` on the
 existing bootstrap refresh response. The request remains `{}`. Revision is a
@@ -8,13 +8,16 @@ Members contain `userId`, `role`, independent `canApprove`, and required nullabl
 `writeSource` (`explicit`, `everyone`, `implicit`). No prepare/ack protocol,
 endpoint, or client-supplied generation is introduced.
 
-Production continues to advertise `collaboration-v1` and `collab/1` only.
-The host refresh path preserves and installs the complete v2 response under
-its captured authenticated runtime generation before processing attachments,
-only when native request context records collaboration-v2 negotiation. Production
-request context comes from the unchanged v1-only capability header: unsolicited
-v2 fails closed. There is no activation setting or response-supplied negotiation.
-Tests inject negotiated request context through the same bootstrap/host path.
+The authenticated runtime capability header advertises `collaboration-v1`,
+`collaboration-v2`, and `collaboration-v2-everyone-write-per-tab`. The runtime
+advertisement identifies enforcement support. Everyone Write still requires the
+server's per-organization `cloud.workspaces.general-access-write.v1` readiness
+flag, which defaults off. The desktop RPC capability remains `collab/1`.
+
+The host refresh path installs the complete v2 response under its captured
+authenticated runtime generation before processing attachments, only when
+native request context records collaboration-v2 negotiation. Unsolicited v2
+fails closed.
 V1 manager approval coercion is preserved at its parsing boundary. V2 managers
 without approval keep lifecycle/Manage report authority but cannot configure or
 approve an agent. Everyone drive provenance does not erase independent approval.
@@ -70,8 +73,8 @@ fail closed with `collaboration-provenance-unavailable`; a role-only Actor
 cannot inherit local explicit authority. Explicit null is distinct from a
 missing source, including viewer approvals. V1 Actor behavior is unchanged.
 
-The existing lease request uses the same capabilities header as refresh, whose
-production value still advertises v1 only. There is no new endpoint or ack.
+The existing lease request uses the same runtime capabilities header as refresh.
+The same lease endpoint serves v1 and v2 actors.
 Encrypted-lease regressions exercise both matching admission and refusal of a
 fresh Everyone Actor against stale explicit bootstrap authority. The server
 implementation and production availability remain pending; design acceptance
