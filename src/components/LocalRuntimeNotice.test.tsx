@@ -235,14 +235,10 @@ it("hides for the runtime it was hidden for, and says why trying again failed", 
 
 // #765: a runtime that can be handed over keeps what it runs.
 
-it("says a runtime being handed over keeps its agents and terminals running", async () => {
+it("puts nothing over the window while a runtime is handed over: its agents keep running, and the status bar says so", async () => {
   await mounted();
   await changed({ state: "updating", from: "0.2.24", to: "0.2.25", keeping: true });
-  const notice = screen.getByRole("status").textContent ?? "";
-  expect(notice).toContain("Handing what the 0.2.24 runtime runs over to 0.2.25");
-  expect(notice).toContain("Its agents and terminals keep running.");
-  expect(notice).not.toContain("Stopping");
-  expect(notice).not.toContain("picks up its conversation");
+  expect(screen.queryByRole("status")).toBeNull();
 });
 
 it("says a handover that failed will not be tried again by itself, and Try again keeps what it runs", async () => {
@@ -384,30 +380,14 @@ it("names the commands that fail too, and offers Restart runtime when the runtim
 
 const blocked = "A hook or control request did not finish in time: hook PermissionRequest, open for 12 s; it is handed over once that has settled.";
 
-it("says a handover refused as busy more than once is waiting, why and how many times, during attempts and between them (PRO-589)", async () => {
+it("puts nothing over the window for a handover refused as busy, however often, during attempts or between them", async () => {
   await mounted();
   const handing = (attempts: number): LocalRuntimeState => ({ state: "updating", from: "0.2.38", to: "0.2.39", keeping: true, wait: { reason: blocked, attempts } });
-  const between = (attempts?: number): LocalRuntimeState => ({ ...connected, outdated: {
-    running: "0.2.38", app: "0.2.39", work: [], problem: null, failed: false, keeps: true, unkept: [],
-    ...(attempts === undefined ? {} : { handoverWait: { reason: blocked, attempts } }),
+  const between = (attempts: number): LocalRuntimeState => ({ ...connected, outdated: {
+    running: "0.2.38", app: "0.2.39", work: [], problem: null, failed: false, keeps: true, unkept: [], handoverWait: { reason: blocked, attempts },
   } });
-  // Once is routine: the notice says only that it is handing over.
-  await changed(handing(1));
-  expect(screen.getByRole("status").textContent).toContain("Handing what the 0.2.38 runtime runs over to 0.2.39");
-  await changed(between(1));
-  expect(screen.queryByRole("status")).toBeNull();
-  await changed(handing(2));
-  let notice = screen.getByRole("status").textContent ?? "";
-  expect(notice).toContain("Waiting to update the TerminalX runtime to 0.2.39");
-  expect(notice).toContain(`The 0.2.38 runtime has refused to hand over 2 times, as something it runs has not finished. ${blocked}`);
-  expect(notice).toContain("Trying again now (attempt 3). Its agents and terminals keep running.");
-  // Between attempts it stays, rather than coming and going.
-  await changed(between(3));
-  notice = screen.getByRole("status").textContent ?? "";
-  expect(notice).toContain("refused to hand over 3 times");
-  expect(notice).toContain("TerminalX tries again shortly.");
-  expect(screen.queryByRole("button")).toBeNull();
-  // Refused for something else, or gone through: the wait is over.
-  await changed(between());
-  expect(screen.queryByRole("status")).toBeNull();
+  for (const state of [handing(1), between(1), handing(2), between(3), handing(40), between(181)]) {
+    await changed(state);
+    expect(screen.queryByRole("status")).toBeNull();
+  }
 });

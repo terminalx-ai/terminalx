@@ -72,10 +72,15 @@ export async function pairDiscoveredMachine(session: CloudSession, host: Account
 
 export { accountHostIdentityMatches };
 
-export async function signOutPairing(session: CloudSession): Promise<void> {
+/**
+ * `remote: false` after the account's deletion was scheduled: the server has
+ * already revoked this phone's pairing with every other sign-in, so nothing is
+ * sent or queued for later; only what the phone holds is removed.
+ */
+export async function signOutPairing(session: CloudSession, { remote = true }: { remote?: boolean } = {}): Promise<void> {
   pairingEpoch++;
   const identity = await readInstallation();
-  if (identity?.userId === session.user.userId) {
+  if (remote && identity?.userId === session.user.userId) {
     try {
       await new AccountPairingClient(AUTH_CONFIG.sessionEndpoint, session).logout(identity.clientInstallationId);
       await removePendingLogout(identity.clientInstallationId);

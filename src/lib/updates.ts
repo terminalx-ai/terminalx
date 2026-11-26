@@ -155,10 +155,18 @@ async function install(update: Update, plan: RuntimePlan | null, generation: num
         got += event.data.chunkLength;
         if (total) emit({ kind: "installing", version: update.version, pct: Math.round((got / total) * 100) });
       }
-    // On Windows the installer ends this app before the install returns: the plan is left between download and install.
+    // On Windows the installer ends this app before the install returns: the plan is left between download and install,
+    // and the handover below is the relaunched app's.
     }, windows ? async () => { if (admitted(generation)) await leavePlan(); } : undefined);
     if (!admitted(generation)) return;
     if (!windows) await leavePlan();
+    // The runtime moves to the update's own now, before the relaunch, so
+    // the app that opens finds it running and has nothing to update. What
+    // is not done in the few seconds this takes is the relaunched app's.
+    if (plan && admitted(generation)) {
+      emit({ kind: "installing", version: update.version, pct: 100 });
+      await localRuntime.handOverInstalled(plan.epoch, plan.forced ? plan.stop : []).catch((error: unknown) => console.warn(`TerminalX update: ${errorMessage(error)}`));
+    }
     if (admitted(generation)) await relaunch();
   } catch (error) {
     if (admitted(generation)) emit({ kind: "error", message: errorMessage(error) });

@@ -1,0 +1,12 @@
+# Down to the confirm field, clear of the fixed footer at every text size. Maestro counts an element under the
+# footer as visible, and the field is the page's last row (it cannot be centred), so one more swipe reaches the end.
+appId: com.terminalx.phone.fixture
+---
+- scrollUntilVisible:
+    element:
+      id: delete-account-email
+- swipe:
+    start: 50%, 60%
+    end: 50%, 25%
+    duration: 600
+- waitForAnimationToEnd

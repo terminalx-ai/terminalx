@@ -73,7 +73,12 @@ export function authSessionFailure(result: { type: string; error?: string | null
   return `The sign-in page could not open: ${result.error}`;
 }
 
-export function buildAuthorizeUrl(config: AuthConfig, challenge: string, state: string, nonce: string): string {
+/**
+ * `fresh`: the person must sign in again, whatever the browser remembers (PRO-584, before deleting the account).
+ * Sent as OpenID Connect's `prompt=login` and `max_age=0`, which the authorize route and the console honour
+ * from terminalx-saas #352; a server before it ignores them, and only iOS's private sheet forces it there.
+ */
+export function buildAuthorizeUrl(config: AuthConfig, challenge: string, state: string, nonce: string, { fresh = false }: { fresh?: boolean } = {}): string {
   const url = new URL(config.authorizeEndpoint);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", config.clientId);
@@ -83,6 +88,10 @@ export function buildAuthorizeUrl(config: AuthConfig, challenge: string, state: 
   url.searchParams.set("state", state);
   url.searchParams.set("nonce", nonce);
   url.searchParams.set("scope", "openid profile email offline_access");
+  if (fresh) {
+    url.searchParams.set("prompt", "login");
+    url.searchParams.set("max_age", "0");
+  }
   return url.toString();
 }
 

@@ -2473,6 +2473,12 @@ export const localRuntime = {
    */
   planUpdate: (epoch: string, forced: boolean, quietSince: number | null, stop: LocalRuntimeWorkItem[] = []) =>
     invoke<LocalRuntimeUpdatePlan>("local_runtime_plan_update", { epoch, forced, quietSince, stop }),
+  /**
+   * An update was just installed: hand runtime `epoch` over to the update's own runtime before the relaunch, so the
+   * app that opens has nothing to update. Resolves within seconds either way; true when the updated runtime answers.
+   */
+  handOverInstalled: (epoch: string, stop: LocalRuntimeWorkItem[] = []) =>
+    invoke<boolean>("local_runtime_hand_over_installed", { epoch, stop }),
   settings: () => invoke<LocalRuntimeSettings>("local_runtime_settings"),
   setQuitBehavior: (quitBehavior: QuitBehavior) => invoke<LocalRuntimeSettings>("set_local_runtime_quit_behavior", { quitBehavior }),
 };

@@ -6,7 +6,7 @@ const native = vi.hoisted(() => vi.fn());
 const platform = vi.hoisted(() => ({ windows: true }));
 const order = vi.hoisted(() => [] as string[]);
 const updater = vi.hoisted(() => ({ check: vi.fn(), relaunch: vi.fn() }));
-const runtime = vi.hoisted(() => ({ work: vi.fn(), planUpdate: vi.fn() }));
+const runtime = vi.hoisted(() => ({ work: vi.fn(), planUpdate: vi.fn(), handOverInstalled: vi.fn() }));
 vi.mock("@tauri-apps/api/core", async (original) => ({ ...(await original<object>()), invoke: native }));
 vi.mock("@/lib/nativeUpdater", () => ({ check: updater.check }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: updater.relaunch }));
@@ -29,6 +29,7 @@ beforeEach(() => {
   });
   runtime.work.mockResolvedValue({ epoch: "owner", work: [], readAt: 1 });
   runtime.planUpdate.mockImplementation(async () => { order.push("plan"); });
+  runtime.handOverInstalled.mockImplementation(async () => { order.push("handover"); });
   updater.relaunch.mockImplementation(async () => { order.push("relaunch"); });
 });
 
@@ -42,12 +43,13 @@ async function update() {
 it("leaves the runtime plan before installing on Windows, where installing ends the app", async () => {
   platform.windows = true;
   await update();
-  expect(order).toEqual(["download", "plan", "install", "relaunch"]);
+  // A real Windows install ends the app at "install"; what follows is the relaunched app's.
+  expect(order).toEqual(["download", "plan", "install", "handover", "relaunch"]);
   expect(runtime.planUpdate).toHaveBeenCalledWith("owner", false, 1, []);
 });
 
 it("leaves it after installing elsewhere, as before", async () => {
   platform.windows = false;
   await update();
-  expect(order).toEqual(["download", "install", "plan", "relaunch"]);
+  expect(order).toEqual(["download", "install", "plan", "handover", "relaunch"]);
 });
