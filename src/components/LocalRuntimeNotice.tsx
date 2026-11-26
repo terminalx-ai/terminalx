@@ -3,8 +3,8 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { RuntimeStartFailedDialog } from "@/components/RuntimeStartFailedDialog";
 import { MachineHostError } from "@/components/machines/MachineHostError";
-import { errorMessage, type LocalRuntimeOutdated, type LocalRuntimeUnproven, type LocalRuntimeRestart, type LocalRuntimeRestartRefused, type LocalRuntimeWorkItem } from "@/lib/api";
-import { bootLocalRuntime, proveLocalRuntimeWindow, reconnectLocalRuntime, replaceLocalRuntime, restartLocalRuntime, useLocalRuntime } from "@/lib/localRuntime";
+import { errorMessage, type LocalRuntimeHandoverWait, type LocalRuntimeOutdated, type LocalRuntimeUnproven, type LocalRuntimeRestart, type LocalRuntimeRestartRefused, type LocalRuntimeWorkItem } from "@/lib/api";
+import { bootLocalRuntime, handoverWaitText, proveLocalRuntimeWindow, reconnectLocalRuntime, replaceLocalRuntime, restartLocalRuntime, shownHandoverWait, useLocalRuntime } from "@/lib/localRuntime";
 
 /** What makes the window's key readable again: on a Mac its login Keychain; elsewhere the system's secret store. */
 const UNLOCK = isMac ? "unlock your login Keychain" : `make sure ${secretStoreShort} is unlocked`;
@@ -22,8 +22,10 @@ export const STALLED_MS = 2 * 60_000;
  * left behind silently (#766). One still waiting to be replaced, handed over
  * at once when it can be (#765) or once its agents' turns are done, is the
  * status bar's to show (`RuntimeStatus`), as an update chose before it
- * installed. A runtime that exited while starting holds the window with a
- * dialog of its own (PRO-287). */
+ * installed, unless its handover keeps being refused as busy: then this
+ * says so between attempts as well as during them, with why and how many
+ * times (PRO-589). A runtime that exited while starting holds the window
+ * with a dialog of its own (PRO-287). */
 export function LocalRuntimeNotice() {
   const { state, readAt } = useLocalRuntime();
   const [now, setNow] = useState(() => Date.now());
@@ -45,6 +47,8 @@ export function LocalRuntimeNotice() {
     const doing = state.keeping
       ? `Handing what the ${state.from ?? "older"} runtime runs over to ${state.to}, the one this app came with. Its agents and terminals keep running.`
       : `Stopping the ${state.from ?? "older"} runtime and starting ${state.to}, the one this app came with. Each agent picks up its conversation again when its tab starts.`;
+    const wait = shownHandoverWait(state.wait);
+    if (wait) return <HandoverWaitNotice from={state.from} to={state.to} wait={wait} trying />;
     return (
       <aside aria-label="Local runtime version" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
         <div className="min-w-0 flex-1 text-xs">
@@ -53,6 +57,11 @@ export function LocalRuntimeNotice() {
         </div>
       </aside>
     );
+  }
+  // Between attempts too, so that a wait is not a notice that comes and goes.
+  const between = state?.state === "connected" && state.outdated && !state.outdated.failed ? shownHandoverWait(state.outdated.handoverWait) : null;
+  if (state?.state === "connected" && state.outdated && between) {
+    return <HandoverWaitNotice from={state.outdated.running} to={state.outdated.app} wait={between} trying={false} />;
   }
   if (state?.state === "connected" && state.outdated?.failed && hidden !== state.epoch) {
     const { epoch } = state;
@@ -189,6 +198,23 @@ function UnresponsiveNotice({ epoch, message, keeps }: { epoch: string | null; m
         {!refused && <Button variant="outline" size="sm" disabled={restarting} onClick={() => void restart(keeps ? "keeping" : "stoppingAll")}>{restarting ? "Restarting…" : "Restart runtime"}</Button>}
         {refused && unkept.length > 0 && <Button variant="outline" size="sm" disabled={restarting} onClick={() => void restart("stoppingUnkept")}>{restarting ? "Restarting…" : unkept.length === 1 ? "Restart, stopping that" : "Restart, stopping those"}</Button>}
         {refused && <Button variant="ghost" size="sm" disabled={restarting} onClick={() => void restart("stoppingAll")}>Stop and restart</Button>}
+      </div>
+    </aside>
+  );
+}
+
+/** A handover to the app's runtime refused as busy more than once, and
+ * retried (PRO-589): what holds it up, as the runtime said, and how many
+ * times. `trying`: an attempt is under way now. Nothing to do: it goes
+ * through by itself once that has finished, and the status bar offers
+ * Restart now for whoever will not wait. */
+function HandoverWaitNotice({ from, to, wait, trying }: { from: string | null; to: string; wait: LocalRuntimeHandoverWait; trying: boolean }) {
+  return (
+    <aside aria-label="Local runtime version" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
+      <div className="min-w-0 flex-1 text-xs">
+        <div className="font-medium">Waiting to update the TerminalX runtime to {to}</div>
+        <p className="mt-1 text-warning">{handoverWaitText(from, wait)}</p>
+        <p className="mt-1 text-muted-foreground">{trying ? `Trying again now (attempt ${wait.attempts + 1}).` : "TerminalX tries again shortly."} Its agents and terminals keep running.</p>
       </div>
     </aside>
   );

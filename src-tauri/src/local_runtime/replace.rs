@@ -91,6 +91,23 @@ pub struct Outdated {
     /// What `work` names, as the runtime names it, when it `keeps` what it
     /// runs: what Restart now stops, sent back as the reader was shown it.
     pub unkept: Vec<Work>,
+    /// The handover has been refused as busy, and is retried (PRO-589):
+    /// unlike `problem`, kept across readings of its work until the
+    /// handover goes through or is refused for something else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handover_wait: Option<HandoverWait>,
+}
+
+/// The older runtime keeps refusing to hand over because something is still
+/// under way (`handover_busy`), and the desktop keeps asking (PRO-589).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoverWait {
+    /// What the runtime said held it up the last time, which names the
+    /// request still open and for how long.
+    pub reason: String,
+    /// Attempts refused as busy in a row.
+    pub attempts: u32,
 }
 
 /// The runtime is being replaced with the one bundled with this app.
@@ -101,6 +118,8 @@ pub struct Switching {
     pub to: String,
     /// Handed over: what it runs goes on (#765).
     pub keeping: bool,
+    /// Earlier attempts at this handover were refused as busy (PRO-589).
+    pub wait: Option<HandoverWait>,
 }
 
 #[derive(Default)]
@@ -228,7 +247,7 @@ impl Replacement {
                 log::warn!("the local runtime ({running}) is older than this app ({app}); it is replaced {when}");
             }
             inner.pending = Some((epoch.into(), Outdated {
-                running: build.version.as_ref().map(ToString::to_string), app: app.to_string(), work: None, problem: None, failed: false, keeps, unkept: Vec::new(),
+                running: build.version.as_ref().map(ToString::to_string), app: app.to_string(), work: None, problem: None, failed: false, keeps, unkept: Vec::new(), handover_wait: None,
             }));
             // Nothing found under way by every reading before the relaunch
             // counts towards the wait for it to settle; the first reading
@@ -297,11 +316,14 @@ impl Replacement {
     /// Busy is a temporary refusal, even after a long wait (#960). Keep
     /// checking without broadening stop consent: an approved stop may already
     /// have happened, but a retry never gains permission to stop other work.
-    fn handover_busy(&self, epoch: &str, problem: String) {
+    fn handover_busy(&self, epoch: &str, problem: String, reason: String) {
         let mut inner = self.inner.lock().unwrap();
         let Some(outdated) = inner.outdated(epoch) else { return };
         outdated.failed = false;
         outdated.problem = Some(format!("Waiting to update the runtime: {problem}. TerminalX retries automatically while keeping agents and terminals running."));
+        let attempts = outdated.handover_wait.as_ref().map_or(0, |wait| wait.attempts) + 1;
+        log::warn!("the older local runtime refused to hand over (attempt {attempts}), as something is still under way; retried in {} s: {problem}", SETTLE.as_secs());
+        outdated.handover_wait = Some(HandoverWait { reason, attempts });
         inner.switching = None;
         inner.stopping = false;
         inner.quiet_since = None;
@@ -358,7 +380,7 @@ impl Replacement {
         let mut inner = self.inner.lock().unwrap();
         if inner.switching.is_some() { return false; }
         let Some(outdated) = inner.outdated(epoch) else { return false };
-        let switching = Switching { from: outdated.running.clone(), to: outdated.app.clone(), keeping: outdated.keeps };
+        let switching = Switching { from: outdated.running.clone(), to: outdated.app.clone(), keeping: outdated.keeps, wait: outdated.handover_wait.clone() };
         inner.switching = Some(switching);
         inner.stopping = true;
         true
@@ -381,7 +403,10 @@ impl Replacement {
         inner.stopping = false;
         inner.quiet_since = None;
         inner.due = true;
-        if let Some(outdated) = inner.outdated(epoch) { outdated.problem = problem; }
+        if let Some(outdated) = inner.outdated(epoch) {
+            outdated.problem = problem;
+            outdated.handover_wait = None;
+        }
     }
 
     fn failed(&self, epoch: &str, problem: String) {
@@ -393,6 +418,7 @@ impl Replacement {
         if let Some(outdated) = inner.outdated(epoch) {
             outdated.problem = Some(problem);
             outdated.failed = true;
+            outdated.handover_wait = None;
         }
     }
 
@@ -431,8 +457,8 @@ impl Replacement {
 /// anything else, or the attached runtime is older than this app.
 pub(crate) fn shown(replacement: &Replacement, status: super::ui::ConnectionState) -> super::ui::ConnectionState {
     use super::ui::ConnectionState;
-    if let Some(Switching { from, to, keeping }) = replacement.switching() {
-        return ConnectionState::Updating { from, to, keeping };
+    if let Some(Switching { from, to, keeping, wait }) = replacement.switching() {
+        return ConnectionState::Updating { from, to, keeping, wait };
     }
     match status {
         ConnectionState::Connected { epoch, generation, view, unproven, .. } => {
@@ -495,8 +521,9 @@ pub(crate) fn switch(replacement: &Replacement, host: &impl Host, epoch: &str, f
             Ok(())
         }
         Err(error) if keeps && super::launch::refused(&error, "handover_busy") => {
-            log::info!("the older local runtime is waiting to hand over: {error:#}");
-            replacement.handover_busy(epoch, format!("{error:#}"));
+            // What the runtime said, without the code, is what windows show.
+            let reason = error.chain().find_map(|cause| cause.downcast_ref::<Refused>()).map_or_else(|| format!("{error:#}"), |refused| refused.message.clone());
+            replacement.handover_busy(epoch, format!("{error:#}"), reason);
             Ok(())
         }
         // Something it cannot carry came up, or it was replaced meanwhile:
@@ -786,7 +813,7 @@ mod tests {
     }
 
     fn updating() -> ConnectionState {
-        ConnectionState::Updating { from: Some(older()), to: env!("CARGO_PKG_VERSION").into(), keeping: false }
+        ConnectionState::Updating { from: Some(older()), to: env!("CARGO_PKG_VERSION").into(), keeping: false, wait: None }
     }
 
     #[test]
@@ -1111,17 +1138,28 @@ mod tests {
     fn repeated_busy_handovers_keep_retrying_and_complete_after_settling() {
         let replacement = Replacement::default();
         replacement.attached("old", &handing(&older()), None);
-        let busy = Supervisor::new(&replacement, |_| Err(Refused {
-            code: "handover_busy".into(), message: "A prompt is on its way into an agent".into(),
-        }.into()));
-        for _ in 0..12 {
+        let shown_waits = RefCell::new(Vec::new());
+        let busy = Supervisor::new(&replacement, |_| {
+            let wait = match shown(&replacement, connected("old")) { ConnectionState::Updating { wait, .. } => wait, other => panic!("{other:?}") };
+            shown_waits.borrow_mut().push(wait.map(|wait| wait.attempts));
+            Err(Refused { code: "handover_busy".into(), message: "A prompt is on its way into an agent".into() }.into())
+        });
+        for attempt in 1..=12 {
             switch(&replacement, &busy, "old", false, &[]).unwrap();
             assert_eq!(replacement.next_now(), None, "wait for the periodic check");
             assert_eq!(replacement.inner.lock().unwrap().checkable(), Some("old"));
             let outdated = replacement.outdated("old").unwrap();
             assert!(!outdated.failed && outdated.keeps);
             assert!(outdated.problem.unwrap().contains("retries automatically"));
+            // PRO-589: why, without the code, and how many times, kept across
+            // readings of its work, which clear `problem`.
+            let wait = HandoverWait { reason: "A prompt is on its way into an agent".into(), attempts: attempt };
+            assert_eq!(outdated.handover_wait.as_ref(), Some(&wait));
+            assert!(replacement.found("old", Ok(Vec::new()), Instant::now()));
+            assert_eq!(replacement.outdated("old").unwrap().handover_wait, Some(wait), "kept as its work is read");
         }
+        // Each attempt shows windows the refusals before it while under way.
+        assert_eq!(*shown_waits.borrow(), (0..12).map(|before| (before > 0).then_some(before)).collect::<Vec<_>>());
         assert!(busy.steps.borrow().iter().all(|step| !step.starts_with("retire")));
         let retry = Supervisor::new(&replacement, |_| Ok(()));
         switch(&replacement, &retry, "old", false, &[]).unwrap();
