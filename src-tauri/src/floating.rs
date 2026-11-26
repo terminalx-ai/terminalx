@@ -279,6 +279,9 @@ fn build(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .hidden_title(true)
         .transparent(true)
         .effects(tauri::window::EffectsBuilder::new().effect(tauri::window::Effect::Sidebar).state(tauri::window::EffectState::Active).build());
+    // Windows and Linux: no system title bar; the top strip is the title bar and draws the window's buttons (`WindowControls`).
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.decorations(false);
     let window = builder.build()?;
     over_full_screen(&window);
     Ok(window)

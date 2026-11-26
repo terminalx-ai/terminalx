@@ -1,7 +1,23 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "TerminalX",
+        "width": 1360,
+        "height": 860,
+        "minWidth": 760,
+        "minHeight": 520,
+        "decorations": false,
+        "dragDropEnabled": true
+      }
+    ]
+  },
   "bundle": {
-    "externalBin": ["binaries/agent-browser"],
+    "externalBin": [
+      "binaries/agent-browser"
+    ],
     "resources": {
       "../native/computer-use-macos/.build/release/TerminalX Computer Use Helper.app": null,
       "../native/computer-use-macos/.build/release-dev/TerminalX Computer Use Helper.app": null,

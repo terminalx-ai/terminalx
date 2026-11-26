@@ -371,7 +371,7 @@ jobs:
           persist-credentials: false
       # No limit of its own, as in linux-rust: the job's bounds it.
       - name: Install Linux build dependencies
-        run: sudo infra/ci-runners/apt-mirrors.sh && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh ripgrep
+        run: sudo infra/ci-runners/apt-mirrors.sh && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh ripgrep gnome-keyring
       # tauri-build needs the folder the frontend builds into; no Rust test
       # reads what is in it, so these jobs do not install or build the frontend.
       - name: Stand in for the frontend build
@@ -411,6 +411,13 @@ jobs:
         run: |
           set -o pipefail
           cargo nextest run --locked --lib --profile ci --partition count:${{ matrix.part }}/4 2>&1 | tee "$RUNNER_TEMP/nextest.log"
+      # Linux keeps secrets in the desktop's keyring: one round trip through a real one, GNOME Keyring on a
+      # session bus of its own, unlocked with an empty password. Part 1 has the library's tests built.
+      - name: The system keyring (Secret Service)
+        if: matrix.part == 1
+        working-directory: src-tauri
+        timeout-minutes: 10
+        run: dbus-run-session -- sh -c 'printf "" | gnome-keyring-daemon --unlock --components=secrets >/dev/null && cargo nextest run --locked --lib --profile ci --run-ignored only keychain::linux_store_tests'
       # A flaky test passed on a retry its override allows; a leaky one left a
       # process or a pipe open. Neither fails the run, so both are said here.
       - name: Name the flaky and leaky tests in the summary
@@ -1052,13 +1059,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # windows-latest is off until a Windows runner is set up: the job never
-        # got a runner and left every run unfinished. Add it back here; the
-        # Windows-only steps below are still in place.
-        os: [ubuntu-latest]
+        # A hosted Windows runner: if none starts for this repository, an
+        # administrator allows GitHub-hosted Windows runners for it.
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 75
+    # Every script below is a POSIX one; the PowerShell tests say so themselves.
+    defaults:
+      run:
+        shell: bash
     steps:
+      # Git for Windows turns autocrlf on for every checkout, and the Rust
+      # fixtures read back what they wrote, byte for byte.
+      - name: Keep line endings as committed
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -1125,6 +1140,30 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: src-tauri
         run: cargo test --lib named_pipe_serves_authenticated_control_and_hook_frames
+      # One release, by version and by the SHA-256 of its archive, as linux-rust-tests installs it.
+      - name: Install cargo-nextest
+        if: runner.os == 'Windows'
+        env:
+          NEXTEST_VERSION: "0.9.152"
+          NEXTEST_SHA256: cc6bf4b6a7ac18e462cd6c9bae67e26921b888249c2988c6acabf3df387ed9d6
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --max-time 120 -o "$RUNNER_TEMP/nextest.zip" "https://get.nexte.st/$NEXTEST_VERSION/x86_64-pc-windows-msvc.zip"
+          echo "$NEXTEST_SHA256  $RUNNER_TEMP/nextest.zip" | sha256sum --check
+          unzip -o -q "$RUNNER_TEMP/nextest.zip" -d "${CARGO_HOME:-$HOME/.cargo}/bin"
+          cargo nextest --version
+      # The whole library suite, each test in a process of its own as on Linux
+      # (src-tauri/.config/nextest.toml), without the desktop feature: a test
+      # executable has no application manifest, so the desktop build's
+      # common-controls imports do not resolve in one (CONTRIBUTING.md).
+      - name: Windows library tests
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        run: cargo nextest run --locked --lib --no-default-features --profile ci
+      # The frontend's tests on Windows: paths, line endings and the platform's
+      # words. Locale, time zone and platform are pinned (src/test/system.ts).
+      - name: Windows frontend tests
+        if: runner.os == 'Windows'
+        run: pnpm vitest run
       - name: Desktop script input safety tests
         if: runner.os != 'Linux'
         run: pnpm vitest run scripts/computer-use-modifier-safety.test.mjs scripts/computer-use-mouse-button-routing.test.mjs scripts/computer-use-windows-horizontal-scroll.test.mjs

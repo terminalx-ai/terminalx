@@ -224,11 +224,11 @@ export default defineConfig(async () => ({
     projects: [
       {
         extends: true,
-        test: { name: "dom", environment: "jsdom", include: TEST_FILES, exclude: [...defaultExclude, ...NODE_TESTS], setupFiles: ["./src/test/setup.ts"] },
+        test: { name: "dom", environment: "jsdom", include: TEST_FILES, exclude: [...defaultExclude, ...NODE_TESTS], setupFiles: ["./src/test/system.ts", "./src/test/setup.ts"] },
       },
       {
         extends: true,
-        test: { name: "node", environment: "node", include: NODE_TESTS },
+        test: { name: "node", environment: "node", include: NODE_TESTS, setupFiles: ["./src/test/system.ts"] },
       },
     ],
   },

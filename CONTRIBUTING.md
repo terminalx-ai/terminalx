@@ -42,8 +42,11 @@ run what you change.
   from a home whose `.gitconfig` sets it, and from a folder only your account
   can open: the app refuses state another account could read. Tests that need
   a POSIX shell, `/bin/sh` stand-ins or Linux-only code run on macOS and Linux.
-- macOS on Apple silicon and Linux are checked in CI. Apple native helpers
-  and WebKit layout checks run on macOS; Windows CI remains disabled.
+- macOS on Apple silicon, Linux and Windows are checked in CI. Apple native
+  helpers and WebKit layout checks run on macOS; on Windows, `desktop-platforms`
+  builds the app and runs the library's tests and the frontend's. Every test
+  run sees an English (US) locale, UTC and a Linux platform
+  (`src/test/system.ts`), so the frontend's tests pass in any region.
 
 ## Setup
 

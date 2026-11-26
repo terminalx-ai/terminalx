@@ -20,6 +20,16 @@ Query values are URL-encoded (`%2F` or `/` for a slash, `%20` or `+` for a space
 terminalx://new?project=%2FUsers%2Fme%2Fcode%2Fweb&branch=main&prompt=Fix+the+flaky+archive+test
 ```
 
+## How a link reaches the running app
+
+macOS hands a link to the app that is already running. Windows and Linux start
+the app again with the link instead: the second copy passes it to the running one
+and exits (`tauri-plugin-single-instance`, registered before every other plugin in
+`src-tauri/src/lib.rs`), so the window comes forward and, for a sign-in callback,
+the sign-in it started finishes there. On those two systems the app also
+registers its scheme each time it starts, for builds that no installer
+registered (a development build, an AppImage).
+
 ## What a `new` link may do
 
 - Nothing is created until the person presses **Create session** in the dialog,

@@ -36,6 +36,8 @@ import type { Project } from "@/types/session";
 import { HighlightedText } from "@/components/ui/HighlightedText";
 import { movePaletteSelection, type PaletteNavigationKey } from "@/lib/commandPalette";
 import { groupSettingsByPage, searchSettings, settingsSearchSummary, type SettingSearchMatch } from "@/lib/settingsSearch";
+import { WindowControls } from "@/components/layout/WindowControls";
+import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 
 /** Legacy section names and stable row ids are both accepted by every existing entry point. */
 export type SettingsTab = SettingsSection | SettingId;
@@ -395,7 +397,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     <main className="flex h-full min-w-0 flex-1 bg-background" aria-label="Settings">
       <aside className="flex h-full min-h-0 w-(--sidebar-w) shrink-0 flex-col border-r border-hairline">
         {/* Design 09.02: "← Back to app" with its esc key, right of the traffic lights. The page is named by <main>. */}
-        <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center justify-end pl-[78px] pr-2">
+        <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center justify-end pr-2" style={{ paddingLeft: TITLEBAR_INSET }}>
           <h1 className="sr-only">Settings</h1>
           <button type="button" aria-label="Back to app" aria-keyshortcuts="Escape" onClick={close}
             className="flex h-6 items-center gap-1.5 rounded-md px-1.5 text-[12px] text-muted-foreground outline-none hover:bg-veil-raised hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40">
@@ -536,7 +538,8 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
             <ChevronRight aria-hidden className="size-3 shrink-0" />
             <span aria-current="page" className="whitespace-nowrap text-muted-foreground">{organizationPageLabel}</span>
           </nav>}
-          <div className="ml-auto flex shrink-0 items-center gap-2 empty:hidden"><OpenSettingsFileButton projectPath={section === "repositories" && project && project.kind !== "folder" ? project.path : null} /></div>
+          <div className="ml-auto flex min-w-0 items-center gap-2 empty:hidden"><OpenSettingsFileButton projectPath={section === "repositories" && project && project.kind !== "folder" ? project.path : null} /></div>
+          <WindowControls />
         </div>
         <div className="flex min-h-0 flex-1">
         <section ref={content} className={cn(
