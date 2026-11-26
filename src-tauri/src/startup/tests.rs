@@ -496,7 +496,7 @@ fn the_banner_returns_when_the_incident_escalates_or_reaches_more_panes() {
     assert!(state.active().unwrap().escalated_at.is_some());
     assert_eq!(state.active().unwrap().dismissed, None, "escalation is worse");
     dismiss_in(&mut state, &id, 425_000).unwrap();
-    assert_eq!(state.active().unwrap().dismissed.as_ref().unwrap().escalated, true);
+    assert!(state.active().unwrap().dismissed.as_ref().unwrap().escalated);
     state.tick(430_000);
     assert!(state.active().unwrap().dismissed.is_some());
     state.launches.push(launch("tab:b", Phase::Spawning));
