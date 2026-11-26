@@ -15,6 +15,13 @@
     ]
   },
   "bundle": {
+    "targets": [
+      "nsis"
+    ],
+    "publisher": "TerminalX",
+    "shortDescription": "TerminalX — a desktop workbench for coding agents",
+    "homepage": "https://github.com/terminalx-ai/terminalx",
+    "license": "MIT",
     "externalBin": [
       "binaries/agent-browser"
     ],
@@ -25,6 +32,24 @@
       "../resources/windows/terminalx.cmd": "terminalx.cmd",
       "../resources/windows/tnx.cmd": "tnx.cmd",
       "target/local-runtime/": "local-runtime/"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false,
+        "installerHooks": "windows/hooks.nsh"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/terminalx-ai/raccoon/releases/latest/download/latest-windows.json"
+      ]
     }
   }
 }

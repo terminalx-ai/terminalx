@@ -1131,3 +1131,86 @@ class NextestProfile(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+RELEASE_DESKTOP = ROOT / ".github/workflows/release-desktop.yml"
+# The steps that may read a secret, by job: whether each signing can run, the
+# Windows certificate, and the updater key. No other step sees one.
+RELEASE_DESKTOP_SECRETS = {("plan", "secrets"), ("build", "Prepare Windows signing"), ("sign-updater", "Sign for the updater")}
+
+
+def validate_release_desktop(workflow):
+    """The desktop release workflow: no pull-request trigger, a read-only token
+    everywhere but `publish`, pinned actions without kept credentials, apt in
+    the mirror form, secrets only in the steps named above, no GH_TOKEN where
+    build scripts run, and no updater artifacts in the build (its key never
+    reaches that job)."""
+    triggers = workflow["on"]
+    assert set(triggers) == {"release", "workflow_dispatch"}, "a desktop release runs only for a release or by hand"
+    assert workflow["permissions"] == {"contents": "read"}, "the workflow's token is read-only"
+    for name, job in workflow["jobs"].items():
+        assert "timeout-minutes" in job, f"{name} has no time limit"
+        if name == "publish":
+            assert job.get("permissions") == {"contents": "write"}, "publish writes only contents"
+        else:
+            assert "permissions" not in job, f"{name} widens the token"
+        for step in job["steps"]:
+            label = (name, step.get("id") or step.get("name", ""))
+            action = step.get("uses", "")
+            if action:
+                assert re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", action), "mutable action reference"
+            if action.startswith("actions/checkout@"):
+                assert step.get("with", {}).get("persist-credentials") == "false", "checkout token persisted"
+            if action.startswith("actions/setup-node@"):
+                assert "cache" not in step.get("with", {}), "implicit shared Node cache"
+            if "secrets." in str(step):
+                assert label in RELEASE_DESKTOP_SECRETS, f"{label} reads a secret"
+            if re.search(r"apt-get\b.*\binstall\b", step.get("run", "")):
+                assert step["run"].startswith("sudo infra/ci-runners/apt-mirrors.sh && "), "a package install that leaves the runner's mirror as it is"
+                calls = step["run"].count("apt-get ")
+                assert all(step["run"].count(option) == calls for option in ("Acquire::Retries=5", "Acquire::http::Timeout=30", "Acquire::https::Timeout=30")), "apt without retries and stall limits"
+    build = workflow["jobs"]["build"]
+    assert "GH_TOKEN" not in str(build), "build scripts run with a token that can call the API"
+    builds = [step for step in build["steps"] if "tauri build" in step.get("run", "")]
+    assert builds and all('"createUpdaterArtifacts":false' in step["run"] for step in builds), "the build makes updater artifacts it cannot sign"
+    assert "TAURI_SIGNING_PRIVATE_KEY" not in str(build), "the updater key reaches the build"
+
+
+class ReleaseDesktop(unittest.TestCase):
+    def setUp(self):
+        self.workflow = load(RELEASE_DESKTOP)
+
+    def test_the_desktop_release_keeps_its_secrets_and_token_narrow(self):
+        validate_release_desktop(self.workflow)
+
+    def rejects(self, mutate):
+        workflow = deepcopy(self.workflow)
+        mutate(workflow)
+        with self.assertRaises(AssertionError):
+            validate_release_desktop(workflow)
+
+    def step(self, workflow, job, name):
+        return next(step for step in workflow["jobs"][job]["steps"] if step.get("name") == name or step.get("id") == name)
+
+    def test_a_wider_trigger_or_token_is_rejected(self):
+        self.rejects(lambda w: w["on"].update(pull_request=""))
+        self.rejects(lambda w: w["on"].update(push={"tags": ["v*"]}))
+        self.rejects(lambda w: w.update(permissions={"contents": "write"}))
+        self.rejects(lambda w: w["jobs"]["build"].update(permissions={"contents": "write"}))
+        self.rejects(lambda w: w["jobs"]["publish"].update(permissions={"contents": "write", "actions": "write"}))
+        self.rejects(lambda w: w["jobs"]["build"].pop("timeout-minutes"))
+
+    def test_a_secret_or_token_where_build_scripts_run_is_rejected(self):
+        self.rejects(lambda w: self.step(w, "build", "Build the installers").update(env={"TAURI_SIGNING_PRIVATE_KEY": "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"}))
+        self.rejects(lambda w: self.step(w, "build", "Build the installers").update(env={"GH_TOKEN": "${{ github.token }}"}))
+        self.rejects(lambda w: self.step(w, "sign-updater", "Write the update feeds").update(env={"KEY": "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"}))
+
+    def test_updater_artifacts_in_the_build_are_rejected(self):
+        def unsigned(w):
+            step = self.step(w, "build", "Build the installers")
+            step["run"] = step["run"].replace(' --config \'{"bundle":{"createUpdaterArtifacts":false}}\'', "")
+        self.rejects(unsigned)
+
+    def test_an_unpinned_action_or_kept_credentials_are_rejected(self):
+        self.rejects(lambda w: w["jobs"]["build"]["steps"][1].update(uses="actions/checkout@v4"))
+        self.rejects(lambda w: w["jobs"]["build"]["steps"][1]["with"].update({"persist-credentials": "true"}))

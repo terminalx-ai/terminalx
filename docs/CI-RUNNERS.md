@@ -61,6 +61,12 @@ trial workflow `webkit-linux.yml` that first ran them on Linux is gone.
 (as on Linux) and for `webkit-mac-only`, and fails when a check the suite
 lists runs in neither or in both.
 
+Outside `ci.yml`, `release-desktop.yml` builds and tests the Windows installer
+and the Linux packages for a release, on Windows and Ubuntu 22.04 runners
+(docs/RELEASING.md "Windows and Linux"). It has no pull-request trigger, and
+`test_workflow_security.py` holds it to a read-only token outside its publish
+job, secrets in three named steps only, and no updater artifacts in the build.
+
 ## What a pull request runs
 
 `infra/ci-runners/macos-rust.py` reads the paths a pull request changes, from

@@ -4,6 +4,7 @@ import { check, type Update } from "@/lib/nativeUpdater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { errorMessage, localRuntime, type LocalRuntimeWorkItem } from "@/lib/api";
 import { getPrefs } from "@/lib/prefs";
+import { isWindows } from "@/lib/platform";
 
 /**
  * The app's own update, shared by every place that shows it: the sidebar's
@@ -136,8 +137,14 @@ export async function chooseUpdate(choice: UpdateChoice | null): Promise<void> {
   await install(update, { epoch, forced: choice === "now", quietSince: null, stop: choice === "now" ? unkept : [] }, privacyGeneration);
 }
 
-async function install(update: Update, plan: RuntimePlan | null, generation: number): Promise<void> {
+async function install(update: Update, plan: RuntimePlan | null, generation: number, windows = isWindows): Promise<void> {
   if (!admitted(generation)) return;
+  // Left for the relaunched app. Without it, that app waits by itself until nothing would be cut short, and says so:
+  // the app is installed either way, and is relaunched into. A plan holds only for a newer app opened within minutes,
+  // so one left by an install that then failed is never used.
+  const leavePlan = async () => {
+    if (plan) await localRuntime.planUpdate(plan.epoch, plan.forced, plan.quietSince, plan.stop).catch((error: unknown) => console.warn(`TerminalX update: ${errorMessage(error)}`));
+  };
   try {
     let total = 0;
     let got = 0;
@@ -148,12 +155,10 @@ async function install(update: Update, plan: RuntimePlan | null, generation: num
         got += event.data.chunkLength;
         if (total) emit({ kind: "installing", version: update.version, pct: Math.round((got / total) * 100) });
       }
-    });
+    // On Windows the installer ends this app before the install returns: the plan is left between download and install.
+    }, windows ? async () => { if (admitted(generation)) await leavePlan(); } : undefined);
     if (!admitted(generation)) return;
-    // Left for the relaunched app. Without it, that app waits by itself
-    // until nothing would be cut short, and says so: the app is installed
-    // either way, and is relaunched into.
-    if (plan) await localRuntime.planUpdate(plan.epoch, plan.forced, plan.quietSince, plan.stop).catch((error: unknown) => console.warn(`TerminalX update: ${errorMessage(error)}`));
+    if (!windows) await leavePlan();
     if (admitted(generation)) await relaunch();
   } catch (error) {
     if (admitted(generation)) emit({ kind: "error", message: errorMessage(error) });
