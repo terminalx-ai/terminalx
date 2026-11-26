@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { errorMessage, localRuntime, type LocalRuntimeOutdated, type LocalRuntimeRestart, type LocalRuntimeState, type LocalRuntimeWorkItem } from "@/lib/api";
+import { errorMessage, localRuntime, type LocalRuntimeHandoverWait, type LocalRuntimeOutdated, type LocalRuntimeRestart, type LocalRuntimeState, type LocalRuntimeWorkItem } from "@/lib/api";
 import { reattachLocalTerminals } from "@/lib/terminal";
 
 /**
@@ -141,12 +141,25 @@ export function useLocalRuntime(): LocalRuntimeView {
  */
 export type RuntimeSwitch =
   | { kind: "waiting"; epoch: string; outdated: LocalRuntimeOutdated }
-  | { kind: "updating"; from: string | null; to: string };
+  | { kind: "updating"; from: string | null; to: string; wait?: LocalRuntimeHandoverWait };
 
 export function runtimeSwitchOf(state: LocalRuntimeState | null): RuntimeSwitch | null {
-  if (state?.state === "updating") return { kind: "updating", from: state.from, to: state.to };
+  if (state?.state === "updating") return { kind: "updating", from: state.from, to: state.to, wait: state.wait };
   if (state?.state === "connected" && state.outdated) return { kind: "waiting", epoch: state.epoch, outdated: state.outdated };
   return null;
+}
+
+/**
+ * A handover refused as busy more than once, which windows show with why and
+ * how many times (PRO-589). One refusal is routine: something was finishing.
+ */
+export function shownHandoverWait(wait: LocalRuntimeHandoverWait | undefined): LocalRuntimeHandoverWait | null {
+  return wait && wait.attempts > 1 ? wait : null;
+}
+
+/** What a window says of a handover that keeps being refused (PRO-589). */
+export function handoverWaitText(from: string | null, wait: LocalRuntimeHandoverWait): string {
+  return `The ${from ?? "older"} runtime has refused to hand over ${wait.attempts} times, as something it runs has not finished. ${wait.reason}`;
 }
 
 export function useRuntimeSwitch(): RuntimeSwitch | null {

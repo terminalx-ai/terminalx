@@ -1160,7 +1160,8 @@ jobs:
         working-directory: src-tauri
         run: cargo nextest run --locked --lib --no-default-features --profile ci
       # The frontend's tests on Windows: paths, line endings and the platform's
-      # words. Locale, time zone and platform are pinned (src/test/system.ts).
+      # words. Locale and time zone are pinned (src/test/system.ts), the node
+      # tests' platform too (src/test/node-platform.ts).
       - name: Windows frontend tests
         if: runner.os == 'Windows'
         run: pnpm vitest run

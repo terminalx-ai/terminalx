@@ -167,3 +167,40 @@ it("sends back, with Restart now, only what it listed a handover cannot carry, f
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Try again" })); });
   expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner", [shown]);
 });
+
+// PRO-589: a handover refused as busy again and again says so, why and how often.
+
+const blocked = "A hook or control request did not finish in time: control command pipelines.merge, open for 42 s; it is handed over once that has settled.";
+const handingOver = (attempts?: number): LocalRuntimeState => ({ ...connected, outdated: {
+  running: "0.2.38", app: "0.2.39", work: [], problem: null, failed: false, keeps: true, unkept: [],
+  ...(attempts === undefined ? {} : { handoverWait: { reason: blocked, attempts } }),
+} });
+
+it("shows a handover refused as busy more than once as waiting, with what holds it up and how many times (PRO-589)", async () => {
+  await mounted();
+  // Once is routine: something was finishing.
+  await changed(handingOver(1));
+  expect(item().textContent).toBe("Runtime 0.2.38 · updating shortly");
+  await changed(handingOver(3));
+  expect(item().textContent).toBe("Runtime 0.2.38 · waiting, refused 3 times");
+  expect(item().className).toContain("text-warning");
+  const popover = await details();
+  expect(popover.textContent).toContain(`The 0.2.38 runtime has refused to hand over 3 times, as something it runs has not finished. ${blocked} TerminalX keeps trying.`);
+  expect(screen.queryByRole("alert")).toBeNull();
+  // The next attempt says so while it is under way.
+  await changed({ state: "updating", from: "0.2.38", to: "0.2.39", keeping: true, wait: { reason: blocked, attempts: 3 } });
+  const status = screen.getByRole("status", { name: "Runtime update to 0.2.39 waiting, attempt 4" });
+  expect(status.textContent).toBe("Runtime update to 0.2.39 waiting, attempt 4…");
+  expect(status.getAttribute("title")).toContain(blocked);
+  expect(status.className).toContain("text-warning");
+});
+
+it("drops the wait once the handover is no longer refused as busy (PRO-589)", async () => {
+  await mounted();
+  await changed(handingOver(4));
+  expect(item().textContent).toBe("Runtime 0.2.38 · waiting, refused 4 times");
+  await changed(handingOver());
+  expect(item().textContent).toBe("Runtime 0.2.38 · updating shortly");
+  await changed({ state: "updating", from: "0.2.38", to: "0.2.39", keeping: true, wait: { reason: blocked, attempts: 1 } });
+  expect(screen.getByRole("status", { name: "Updating the runtime to 0.2.39" }).textContent).toBe("Updating the runtime to 0.2.39…");
+});

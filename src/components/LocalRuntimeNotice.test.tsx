@@ -379,3 +379,35 @@ it("names the commands that fail too, and offers Restart runtime when the runtim
   expect(machines.restartRuntimeForWindow).toHaveBeenCalledExactlyOnceWith("owner", offer);
   expect(native.proveWindow).not.toHaveBeenCalled();
 });
+
+// PRO-589: a handover refused as busy again and again is not a silent spinner.
+
+const blocked = "A hook or control request did not finish in time: hook PermissionRequest, open for 12 s; it is handed over once that has settled.";
+
+it("says a handover refused as busy more than once is waiting, why and how many times, during attempts and between them (PRO-589)", async () => {
+  await mounted();
+  const handing = (attempts: number): LocalRuntimeState => ({ state: "updating", from: "0.2.38", to: "0.2.39", keeping: true, wait: { reason: blocked, attempts } });
+  const between = (attempts?: number): LocalRuntimeState => ({ ...connected, outdated: {
+    running: "0.2.38", app: "0.2.39", work: [], problem: null, failed: false, keeps: true, unkept: [],
+    ...(attempts === undefined ? {} : { handoverWait: { reason: blocked, attempts } }),
+  } });
+  // Once is routine: the notice says only that it is handing over.
+  await changed(handing(1));
+  expect(screen.getByRole("status").textContent).toContain("Handing what the 0.2.38 runtime runs over to 0.2.39");
+  await changed(between(1));
+  expect(screen.queryByRole("status")).toBeNull();
+  await changed(handing(2));
+  let notice = screen.getByRole("status").textContent ?? "";
+  expect(notice).toContain("Waiting to update the TerminalX runtime to 0.2.39");
+  expect(notice).toContain(`The 0.2.38 runtime has refused to hand over 2 times, as something it runs has not finished. ${blocked}`);
+  expect(notice).toContain("Trying again now (attempt 3). Its agents and terminals keep running.");
+  // Between attempts it stays, rather than coming and going.
+  await changed(between(3));
+  notice = screen.getByRole("status").textContent ?? "";
+  expect(notice).toContain("refused to hand over 3 times");
+  expect(notice).toContain("TerminalX tries again shortly.");
+  expect(screen.queryByRole("button")).toBeNull();
+  // Refused for something else, or gone through: the wait is over.
+  await changed(between());
+  expect(screen.queryByRole("status")).toBeNull();
+});

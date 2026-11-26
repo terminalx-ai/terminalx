@@ -1,8 +1,8 @@
-// Every test run sees the same computer as CI's Linux runners, whatever it runs on: an English (US) locale, UTC, and a
-// Linux platform. Dates, numbers and the words for "this computer" come out alike on a Mac, on Windows, and in any
-// country. Node takes its locale from Windows' own settings there, not from LANG, so the default locale is pinned
-// where it is read: a format asked for without a locale (or with `[]`) gets en-US. A test that sets a locale or a platform still
-// gets its own.
+// Every test run sees the same clock and language as CI's Linux runners, whatever it runs on: an English (US) locale
+// and UTC, so dates and numbers come out alike on a Mac, on Windows, and in any country. Node takes its locale from
+// Windows' own settings there, not from LANG, so the default locale is pinned where it is read: a format asked for
+// without a locale (or with `[]`) gets en-US. A test that sets a locale still gets its own. The node project's
+// platform is pinned in node-platform.ts.
 
 const LOCALE = "en-US";
 
@@ -37,7 +37,3 @@ pin(Date.prototype, "toLocaleTimeString");
 pin(Number.prototype, "toLocaleString");
 pin(BigInt.prototype, "toLocaleString");
 
-// Node reports its own platform ("Win32", "MacIntel"); jsdom's is empty. Neither is set by a test that wants another.
-if (typeof navigator !== "undefined" && !navigator.platform.startsWith("Linux") && navigator.platform !== "") {
-  Object.defineProperty(navigator, "platform", { configurable: true, get: () => "Linux x86_64" });
-}

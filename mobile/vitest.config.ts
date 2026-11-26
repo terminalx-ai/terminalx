@@ -7,6 +7,6 @@ export default defineConfig({
     dedupe: ["react", "react-dom"],
   },
   esbuild: { jsx: "automatic" },
-  // The same computer in every run as the desktop's tests: en-US, UTC, Linux (src/test/system.ts).
+  // The same computer in every run as the desktop's tests: en-US and UTC (src/test/system.ts).
   test: { include: ["src/**/*.test.{ts,tsx}"], setupFiles: ["../src/test/system.ts", "./vitest.setup.ts"] },
 });

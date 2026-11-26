@@ -1,5 +1,25 @@
 # TerminalX changelog
 
+## 0.2.41
+
+- Phone app: works on Android. Every tab shows its icon and label; with six
+  tabs, New session moves to a + on the Sessions header. Fields stay visible
+  above the keyboard, workspace actions open in the app's own sheet, sign-in
+  finishes once instead of twice, and "sound off" notifications go on a quiet
+  channel. The desktop now says "the TerminalX phone app" (#1631).
+- Startup incident banner: it sits in the bottom-right notice column and can
+  be hidden. Hiding is saved on the incident, so it stays hidden after a
+  restart, and the banner comes back only if the incident gets worse (it
+  escalates or reaches more panes). Recovery no longer waits on permission
+  cards in unrelated tabs, so an incident that passed its health probes now
+  clears (PRO-575, #1633).
+- Runtime updates: when a handover is refused, the update notice and status
+  bar show the wait, its reason and the attempt count, and the log names the
+  request that held the hook bridge. Hook messages over 8 KiB sent during a
+  handover are no longer lost (PRO-589, #1630).
+- Tests: Local VM tests reuse one fake helper per kind, so macOS's first-run
+  check no longer makes them miss deadlines at 16 test threads (PRO-513, #1632).
+
 ## 0.2.40
 
 - Windows: TerminalX runs on Windows. Sign-in CLIs and Git commands it starts

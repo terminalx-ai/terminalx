@@ -156,14 +156,17 @@ fn forwarding(root: &Path, fixture: &FetchFixture, managed: bool) {
             let worker = scope.spawn(super::super::queued(|| scan(&client, fixture)));
             written_rx.recv_timeout(Duration::from_secs(10)).unwrap();
             let frozen = bridge.take(|_| false).unwrap();
-            assert!(frozen.held.is_empty() && frozen.parked.is_empty(), "this case must be an UNREAD listener backlog, not an already-read held frame");
+            // Read while frozen (PRO-589), it goes over as the listener backlog
+            // would have: answered with the new runtime's authority, not this one's.
+            assert!(frozen.parked.is_empty() && frozen.held.iter().all(|(_, _, queued)| *queued), "this case must be read from the listener backlog, not an already-read held frame");
             if cycle {
                 acknowledge(&admin, true, managed);
                 acknowledge(&admin, false, managed);
             }
             let replacement = hooks::ControlEndpoint::adopted(endpoint.socket.clone(), endpoint.token.clone());
             let owner = service(root, &replacement);
-            let adopted = hooks::Adopted { own: frozen.own, published: frozen.published, held: Vec::new() };
+            let held = frozen.held.into_iter().map(|(fd, line, queued)| (std::os::unix::net::UnixStream::from(fd), line, queued)).collect();
+            let adopted = hooks::Adopted { own: frozen.own, published: frozen.published, held };
             let (_, next) = hooks::serve_adopted(replacement, adopted, |_| hooks::HookReply::default(), move |request| owner.handle(request)).unwrap();
             next.thaw();
             scanned(&worker.join().unwrap(), fixture, false);

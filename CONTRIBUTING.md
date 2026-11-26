@@ -45,8 +45,8 @@ run what you change.
 - macOS on Apple silicon, Linux and Windows are checked in CI. Apple native
   helpers and WebKit layout checks run on macOS; on Windows, `desktop-platforms`
   builds the app and runs the library's tests and the frontend's. Every test
-  run sees an English (US) locale, UTC and a Linux platform
-  (`src/test/system.ts`), so the frontend's tests pass in any region.
+  run sees an English (US) locale and UTC (`src/test/system.ts`), and the
+  node tests a Linux platform, so the frontend's tests pass in any region.
 
 ## Setup
 

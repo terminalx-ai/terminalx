@@ -119,6 +119,10 @@ pub struct ControlRecord {
 pub struct FrameRecord {
     pub fd: RawFd,
     pub line: String,
+    /// Read while the bridge was frozen, from what would otherwise have
+    /// waited in the socket's queue (PRO-589). Absent from older records.
+    #[serde(default)]
+    pub queued: bool,
 }
 
 /// A hook waiting on a decision.
@@ -457,7 +461,7 @@ impl Record {
             own: keep(hooks.own),
             published: hooks.published.map(|(listener, lock)| (keep(listener), keep(lock))),
         };
-        let frames = hooks.held.into_iter().map(|(fd, line)| FrameRecord { fd: keep(fd), line }).collect();
+        let frames = hooks.held.into_iter().map(|(fd, line, queued)| FrameRecord { fd: keep(fd), line, queued }).collect();
         let decisions = hooks.parked.into_iter().map(|(request_id, fd)| ParkedRecord { fd: keep(fd), request_id }).collect();
         let panes = terminals.panes.into_iter().map(|pane| PaneRecord {
             id: pane.id, fd: keep(pane.master), pid: pane.pid, group: pane.group, explicit_command: pane.explicit_command, environment: Some(pane.environment),
