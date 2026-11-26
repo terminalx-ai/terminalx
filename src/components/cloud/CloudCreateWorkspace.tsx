@@ -153,13 +153,18 @@ export function CloudCreateWorkspace({
     setForm((current) => (current.provider || !usable[0] ? current : { ...current, provider: usable[0].id }));
   }, []);
 
-  useEffect(() => {
-    loadRepositories();
+  const loadProviders = useCallback(() => {
+    setLoadError(null);
     api
       .cloudProviders()
       .then((result) => showProviders(result.providers))
       .catch((e: unknown) => setLoadError(errorCode(e)));
-  }, [loadRepositories, showProviders]);
+  }, [showProviders]);
+
+  useEffect(() => {
+    loadRepositories();
+    loadProviders();
+  }, [loadRepositories, loadProviders]);
 
   const keep = useCallback(
     (next: PendingCreate | null) => {
@@ -249,7 +254,7 @@ export function CloudCreateWorkspace({
         if (!quoted && !busy) void showPrice();
       }}
     >
-      {loadError && <p className="text-xs text-muted-foreground">Cloud workspaces are unavailable ({loadError}).</p>}
+      {loadError && <p role="alert" className="text-xs text-muted-foreground">Cloud workspaces are unavailable ({loadError}). <Button type="button" size="xs" variant="outline" onClick={loadProviders}>Try again</Button></p>}
       {providers && usable.length === 0 && (
         <NoProvider providers={providers} organizationId={organizationId} onAllowed={showProviders} />
       )}

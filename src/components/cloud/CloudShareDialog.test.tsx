@@ -652,3 +652,18 @@ it("closes a Share profile when capability refresh removes the flag", async () =
   expect(screen.queryByRole("button", { name: /View profile/ })).toBeNull();
   expect(screen.getByTestId("cloud-share-dialog")).toBeTruthy();
 });
+
+describe("a share list that fails to load (3.7)", () => {
+  it("says who it is shared with could not be loaded, and loads it again on Try again", async () => {
+    const answer = mocks.shares.getMockImplementation();
+    mocks.shares.mockRejectedValueOnce({ code: "cloud_workspace_unavailable" });
+    dialog();
+    const alert = (await screen.findByText(/Could not load who this workspace is shared with/)).closest("[role=alert]") as HTMLElement;
+    const before = mocks.shares.mock.calls.length;
+    if (answer) mocks.shares.mockImplementation(answer);
+    fireEvent.click(within(alert).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(mocks.shares.mock.calls.length).toBeGreaterThan(before));
+    expect(await screen.findByTestId("cloud-share-row")).toBeTruthy();
+    expect(screen.queryByText(/Could not load who this workspace is shared with/)).toBeNull();
+  });
+});

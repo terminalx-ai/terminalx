@@ -13,7 +13,7 @@
       "buildNumber": "4",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "NSLocalNetworkUsageDescription": "TerminalX connects directly to a Mac you choose to pair."
+        "NSLocalNetworkUsageDescription": "TerminalX connects directly to a computer you choose to pair."
       }
     },
     "android": {
@@ -53,7 +53,7 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow TerminalX to scan a pairing code shown on your Mac."
+          "cameraPermission": "Allow TerminalX to scan a pairing code shown on your computer."
         }
       ],
       [

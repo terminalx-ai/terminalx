@@ -187,6 +187,16 @@ describe("a workspace's scheduled tasks", () => {
     expect(screen.queryByRole("button", { name: /New scheduled task/ })).toBeNull();
   });
 
+  it("reads the list again on Try again (3.7)", async () => {
+    mocks.list.mockRejectedValueOnce({ code: "cloud_workspace_unavailable" }).mockImplementation(async () => ({ schedules: listed }));
+    open();
+    const alert = await screen.findByTestId("cloud-schedules-load-error");
+    const before = mocks.list.mock.calls.length;
+    fireEvent.click(within(alert).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(mocks.list.mock.calls.length).toBeGreaterThan(before));
+    await waitFor(() => expect(screen.queryByTestId("cloud-schedules-load-error")).toBeNull());
+  });
+
   it("keeps the emergency stop reachable while the list cannot be read and while the form is open", async () => {
     mocks.list.mockRejectedValue({ code: "cloud_workspace_unavailable" });
     open();

@@ -336,7 +336,7 @@ export class HostApi {
     if (!result.ok) throw new Error(result.refusal.message);
     const value = result.value as { events?: unknown; hasMore?: unknown };
     if (!Array.isArray(value?.events) || !value.events.every(isAgentEvent) || typeof value.hasMore !== "boolean" || (value.hasMore && !value.events.length)) {
-      throw new Error("The Mac returned an invalid transcript page. Try loading it again.");
+      throw new Error("The computer returned an invalid transcript page. Try loading it again.");
     }
     return { events: value.events, hasMore: value.hasMore };
   }
@@ -448,7 +448,7 @@ export class HostApi {
     const result = await this.connection.request<{ mediaType?: unknown; data?: unknown }>("session.image", { sessionId, tabId, path });
     if (!result.ok) return { error: result.refusal.message };
     const { mediaType, data } = result.value ?? {};
-    return typeof mediaType === "string" && typeof data === "string" ? { uri: `data:${mediaType};base64,${data}` } : { error: "The Mac sent no image." };
+    return typeof mediaType === "string" && typeof data === "string" ? { uri: `data:${mediaType};base64,${data}` } : { error: "The computer sent no image." };
   }
 
   /** Closes a tab as the desktop's tab strip does: its agent stops, its history stays on the Mac (`closeTab`). */
@@ -534,7 +534,7 @@ export class HostApi {
       if (!result || typeof result !== "object") return;
       const value = result as { type?: unknown; chunk?: unknown; serialized?: unknown; cols?: unknown; rows?: unknown; error?: { message?: unknown } };
       if (typeof value.type !== "string") return;
-      if (value.type === "error") { listener({ type: "error", message: typeof value.error?.message === "string" ? value.error.message : "The Mac ended the terminal view." }); return; }
+      if (value.type === "error") { listener({ type: "error", message: typeof value.error?.message === "string" ? value.error.message : "The computer ended the terminal view." }); return; }
       const size = (n: unknown) => typeof n === "number" && Number.isInteger(n) && n > 0 && n <= 1000;
       listener({ type: value.type, ...(typeof value.chunk === "string" ? { chunk: value.chunk } : {}), ...(typeof value.serialized === "string" ? { serialized: value.serialized } : {}),
         ...(size(value.cols) && size(value.rows) ? { cols: value.cols as number, rows: value.rows as number } : {}) });
@@ -556,13 +556,13 @@ export class HostApi {
     if ((await this.features()).sessionCreate !== 1) return null;
     const result = await this.connection.request<unknown>("sessions.options");
     if (!result.ok) throw new Error(result.refusal.message);
-    if (!isNewSessionOptions(result.value)) throw new Error("The Mac returned new-session choices this phone cannot read.");
+    if (!isNewSessionOptions(result.value)) throw new Error("The computer returned new-session choices this phone cannot read.");
     return result.value;
   }
 
   /** `messageId` names the draft (#675): starting it again after a lost reply gets the first session, not a second one. */
   async createSession(request: NewSessionRequest, messageId?: string): Promise<NewSessionResult> {
-    if ((await this.features()).sessionCreate !== 1) return { created: false, message: "Update TerminalX on this Mac to start sessions from your phone." };
+    if ((await this.features()).sessionCreate !== 1) return { created: false, message: "Update TerminalX on this computer to start sessions from your phone." };
     const where = "quick" in request.where ? { quick: true } : { projectId: request.where.projectId, useWorktree: request.where.useWorktree };
     const result = await this.connection.request<Record<string, unknown>>("sessions.create", {
       ...where,
@@ -579,7 +579,7 @@ export class HostApi {
     });
     if (!result.ok) return { created: false, message: result.refusal.message };
     const value = result.value;
-    if (typeof value.sessionId !== "string" || typeof value.tabId !== "string") return { created: false, message: "The Mac did not say which session it started." };
+    if (typeof value.sessionId !== "string" || typeof value.tabId !== "string") return { created: false, message: "The computer did not say which session it started." };
     // A session started here is one of "Sessions I started or follow" for notifications (#990).
     await recordStartedSessionOn(this.connection, value.sessionId).catch(() => undefined);
     const sent = value.sent as { status?: unknown; queued?: unknown } | undefined;
@@ -590,7 +590,7 @@ export class HostApi {
       title: typeof value.title === "string" ? value.title : "New session",
       native: value.native === true,
       ...(sent && typeof sent.queued === "boolean" ? { queued: sent.queued } : {}),
-      ...(typeof value.sendError === "string" ? { sendError: value.sendError } : !sent ? { sendError: "The Mac did not say whether it sent the first message." } : {}),
+      ...(typeof value.sendError === "string" ? { sendError: value.sendError } : !sent ? { sendError: "The computer did not say whether it sent the first message." } : {}),
     };
   }
 
@@ -606,7 +606,7 @@ export class HostApi {
     if ((await this.features()).macSettings !== 1) return null;
     const result = await this.connection.request<unknown>("mac.settings");
     if (!result.ok) throw new Error(result.refusal.message);
-    if (!isMacSettings(result.value)) throw new Error("The Mac returned settings this phone cannot read.");
+    if (!isMacSettings(result.value)) throw new Error("The computer returned settings this phone cannot read.");
     return result.value;
   }
 
@@ -630,14 +630,14 @@ export class HostApi {
   async botsOverview(): Promise<BotsOverview | null> {
     if ((await this.features()).bots !== 1) return null;
     const overview = readOverview(await this.bots("bots.list"));
-    if (!overview) throw new Error("The Mac returned bots this phone cannot read.");
+    if (!overview) throw new Error("The computer returned bots this phone cannot read.");
     return overview;
   }
 
   /** A bot's home: its record, list, chats, duties and role. */
   async botHome(botId: string): Promise<BotHome> {
     const home = readHome(await this.bots("bots.home", { id: botId }));
-    if (!home) throw new Error("The Mac returned a bot this phone cannot read.");
+    if (!home) throw new Error("The computer returned a bot this phone cannot read.");
     return home;
   }
 
@@ -649,7 +649,7 @@ export class HostApi {
    */
   async answerBot(botId: string, number: number, reply: { answer: number } | { text: string }, question: string): Promise<BotAnswerResult> {
     const answered = readAnswer(await this.bots("bots.answer", { id: botId, number, ...reply, question }));
-    if (!answered) throw new Error("The Mac did not say how the answer went.");
+    if (!answered) throw new Error("The computer did not say how the answer went.");
     return answered;
   }
 
@@ -661,13 +661,13 @@ export class HostApi {
   async setNativeCodex(on: boolean): Promise<MacSettings> {
     const result = await this.connection.request<unknown>("mac.setSettings", { nativeCodex: on });
     if (!result.ok) throw new Error(result.refusal.message);
-    if (!isMacSettings(result.value)) throw new Error("The Mac returned settings this phone cannot read.");
+    if (!isMacSettings(result.value)) throw new Error("The computer returned settings this phone cannot read.");
     return result.value;
   }
 }
 
-/** Said when the Mac stopped naming `bots` (its Bots setting was turned off, or it is older). */
-export const BOTS_OFF = "Bots are off on this Mac. Turn them on in Settings → Experimental → Bots.";
+/** Said when the computer stopped naming `bots`: its Bots setting is off, its system has no Bots yet (Windows), or it is older. */
+export const BOTS_OFF = "Bots are off on this computer, or its system does not have them yet. Where it does, turn them on in Settings → Experimental → Bots.";
 
 function isNewSessionOptions(value: unknown): value is NewSessionOptions {
   if (!value || typeof value !== "object") return false;

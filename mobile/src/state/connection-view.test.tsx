@@ -21,7 +21,7 @@ describe("the one connection state (#983)", () => {
     ["the phone offline", { stage: "reconnecting", online: false }, "offline", "No internet"],
     ["the phone offline, long after", { stage: "unreachable", online: false, waited: true }, "offline", "No internet"],
     ["connected while the OS says offline", { stage: "connected", online: false }, "connected", "Connected"],
-    ["disconnected on the Mac", { stage: "disconnected-on-mac", waited: true, online: false }, "held", "Disconnected on your Mac"],
+    ["disconnected on the computer", { stage: "disconnected-on-mac", waited: true, online: false }, "held", "Disconnected on your computer"],
   ])("%s", (_name, fields, state, words) => {
     const result = connectionState(facts(fields));
     expect(result).toBe(state);

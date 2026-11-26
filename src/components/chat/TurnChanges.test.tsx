@@ -188,3 +188,13 @@ it("cancelling Keep leaves Undo available", async () => {
   expect(api.keepTurn).not.toHaveBeenCalled();
   expect(screen.getByRole("button", { name: "Undo turn" })).toBeDefined();
 });
+it("says a turn's changes could not be read, and reads them again on Retry (3.6)", async () => {
+  vi.mocked(api.turnCheckpoint).mockRejectedValueOnce("the store is locked");
+  card();
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("Couldn’t read this turn’s changes. the store is locked");
+  fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+  expect(await screen.findByText("shell-edit.ts")).toBeDefined();
+  expect(api.turnCheckpoint).toHaveBeenCalledTimes(2);
+  expect(screen.queryByRole("alert")).toBeNull();
+});

@@ -16,7 +16,7 @@ const GITHUB: Provider = Provider::Github;
 /// `gh api <path>` with an optional JSON body on stdin. A failure is
 /// classified from what gh printed, and what it printed is dropped.
 pub(crate) fn gh_api(cwd: &Path, method: &str, path: &str, body: Option<&Value>) -> OpResult<Value> {
-    let mut command = crate::issues::gh().map_err(|_| IssueOpError::with_message(IssueOpErrorKind::NotSignedIn, "The GitHub CLI (gh) is not installed or not on PATH."))?;
+    let mut command = crate::issues::gh().map_err(|_| IssueOpError::with_message(IssueOpErrorKind::NotSignedIn, crate::github::GH_MISSING))?;
     command.current_dir(cwd).args(["api", "-X", method, "-H", "Accept: application/vnd.github+json", path]);
     if body.is_some() {
         command.args(["--input", "-"]);

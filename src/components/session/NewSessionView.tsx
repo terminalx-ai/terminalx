@@ -1,3 +1,4 @@
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { AllowNewMachines } from "@/components/cloud/AllowNewMachines";
 import { ProvidersPaused } from "@/lib/hiddenProviders";
 import type { CloudProviderSummary } from "@/lib/api";
@@ -927,7 +928,7 @@ export function NewSessionView({
             <div className="flex items-center gap-1 px-2.5 pb-2.5">
               <AgentMenu split selection={menuSelection} disabled={busy} onSetup={remote ? undefined : setSetupPick} />
               {!remote && harness && !available && (
-                <span className="min-w-0 truncate text-xs text-warning" title={harness.installHint}>
+                <span className="min-w-0 truncate text-xs text-warning" title={harness.installHint || undefined}>
                   {harness.name} isn't installed
                 </span>
               )}
@@ -997,7 +998,9 @@ export function NewSessionView({
               {/* The notice above already offers the install when it is for this agent. */}
               {!remote && harness && !available && setupTarget?.id !== harness.id && (
                 <p className="text-xs text-muted-foreground">
-                  Install {harness.name} by running <code className="font-mono">{harness.installHint}</code>
+                  {harness.installHint
+                    ? <>Install {harness.name} by running <code className="font-mono">{harness.installHint}</code></>
+                    : <>Install {harness.name} with its <button type="button" className="underline" onClick={() => void openUrl(harness.installUrl)}>setup guide</button>.</>}
                 </p>
               )}
               {/* Reached with a role that changed meanwhile (demoted while drafting): Create is off, with the reason. */}

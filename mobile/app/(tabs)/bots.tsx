@@ -5,6 +5,7 @@ import { ChevronRight, Pause } from "lucide-react-native";
 import { ago, entryQuestion, teamStatus, type Bot, type NeedsYouEntry } from "@mobile/data/bots";
 import { useApp } from "@mobile/state/AppProvider";
 import { useBotsOverview, useNow } from "@mobile/state/bots";
+import { botsOffDetail, useHostWords } from "@mobile/state/host-words";
 import { connectionUsable, useConnectionState } from "@mobile/state/connection-view";
 import { screenMessage } from "@mobile/transport/connection-errors";
 import { Asker, BotAvatar, BotQuestionCard, BotSection, NeedsYouHeading, useBotAnswer } from "@mobile/ui/bots";
@@ -33,9 +34,10 @@ export default function BotsScreen() {
   const value = overview.value;
   const bots = useMemo(() => new Map((value?.bots.bots ?? []).map((bot) => [bot.id, bot])), [value]);
   const now = useNow();
+  const words = useHostWords();
 
-  if (!host) return <Screen title="Bots"><EmptyState title="Choose a Mac" detail="Connect to a paired Mac to see its bots." /><Button label="Open Machines" onPress={() => router.navigate("/(tabs)")} /></Screen>;
-  if (overview.offered === false) return <Screen title="Bots"><EmptyState title="Bots are off" detail="Turn them on on your Mac in Settings → Experimental → Bots." /></Screen>;
+  if (!host) return <Screen title="Bots"><EmptyState title="Choose a computer" detail="Connect to a paired computer to see its bots." /><Button label="Open Machines" onPress={() => router.navigate("/(tabs)")} /></Screen>;
+  if (overview.offered === false) return <Screen title="Bots"><EmptyState title="Bots are off" detail={botsOffDetail(host.platform)} /></Screen>;
 
   const entries = (value?.needsYou.entries ?? []).filter((entry) => bots.has(entry.botId));
   const team = value?.bots.bots ?? [];
@@ -53,7 +55,7 @@ export default function BotsScreen() {
     { text: "Pause all", style: "destructive", onPress: () => {
       setPausing(true);
       void app.api.pauseAllBots().then(() => overview.refresh())
-        .catch((cause: unknown) => Alert.alert("Could not pause the bots", screenMessage(cause, "Couldn’t reach the Mac. Try again once it is connected.")))
+        .catch((cause: unknown) => Alert.alert("Could not pause the bots", screenMessage(cause, `Couldn’t reach ${words.the}. Try again once it is connected.`)))
         .finally(() => setPausing(false));
     } },
   ]);
@@ -65,7 +67,7 @@ export default function BotsScreen() {
   return <Screen title="Bots" titleActions={team.length ? <GlassIconButton label={everyPaused ? "Every bot is paused" : "Pause all bots"} disabled={everyPaused || pausing || !connected} icon={<Pause size={18} color={palette.ink} strokeWidth={1.8} />} onPress={pauseAll} /> : undefined}
     refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} tintColor={palette.accent} />}>
     {overview.error && !value ? <EmptyState title="Bots unavailable" detail={overview.error} /> : null}
-    {!value && !overview.error ? <EmptyState busy title="Loading bots" detail="Reading the team from your Mac." /> : null}
+    {!value && !overview.error ? <EmptyState busy title="Loading bots" detail={`Reading the team from ${words.your}.`} /> : null}
     {entries.length ? <>
       <NeedsYouHeading count={entries.length} />
       {newest ? <NewestQuestion entry={newest} bot={bots.get(newest.botId)!} now={now} connected={connected} answering={answers.answering} error={newest.kind === "item" ? answers.errors[`${newest.botId}:${newest.item.number}`] : undefined}
@@ -83,7 +85,7 @@ export default function BotsScreen() {
     {value ? <>
       <BotSection>{team.length === 1 ? "Team · 1 bot" : `Team · ${team.length} bots`}</BotSection>
       {team.length ? <Card>{team.map((bot, index) => <TeamRow key={bot.id} bot={bot} first={index === 0} status={teamStatus(bot, lines.get(bot.id), counts.get(bot.id)?.needsYou ?? 0, now)} onPress={() => router.push({ pathname: "/bot/[botId]", params: { botId: bot.id, name: bot.name } })} />)}</Card>
-        : <EmptyState title="No bots yet" detail="Hire one on your Mac, from Bots in the sidebar." />}
+        : <EmptyState title="No bots yet" detail={`Hire one on ${words.your}, from Bots in the sidebar.`} />}
     </> : null}
     {overview.error && value ? <Text style={[styles.error, { color: palette.danger }]}>{overview.error}</Text> : null}
     {open && sheetBot ? <BotQuestionSheet bot={sheetBot} item={sheetEntry?.kind === "item" ? sheetEntry.item : null} connected={connected} busy={answers.answering === `${open.botId}:${open.number}`} error={answers.errors[`${open.botId}:${open.number}`]}

@@ -639,6 +639,27 @@ pub struct ExperimentalSettings {
     pub bots: bool,
 }
 
+/// Local VM tasks run their guests on a Mac with Apple silicon, or on 64-bit
+/// Linux (x86_64 or arm64): the platforms `local_vm::guest` installs for.
+pub(crate) const LOCAL_VM_TASKS_SUPPORTED: bool = cfg!(any(all(target_os = "macos", target_arch = "aarch64"), all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64"))));
+/// Why Local VM tasks are off where they cannot run.
+pub(crate) const LOCAL_VM_TASKS_UNSUPPORTED: &str = "Local VM tasks need a Mac with Apple silicon, or Linux.";
+
+impl ExperimentalSettings {
+    /// A switch saved on where its feature cannot run (a settings file copied
+    /// from a Mac) reads as off, so nothing offers what would only fail. The
+    /// desktop and the local runtime both read and publish switches this way.
+    pub(crate) fn supported_only(mut self) -> Self {
+        if !LOCAL_VM_TASKS_SUPPORTED {
+            self.local_vm_tasks = false;
+        }
+        if !crate::bots::SUPPORTED {
+            self.bots = false;
+        }
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum QuitBehavior {

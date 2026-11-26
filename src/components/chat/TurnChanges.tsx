@@ -28,16 +28,20 @@ export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint, r
   const [overlap, setOverlap] = useState<(TurnUndoResult & { action: "undo" | "restore" }) | null>(null);
   /** Keep takes Undo away for good, so it asks first. */
   const [confirmingKeep, setConfirmingKeep] = useState(false);
+  // The turn's read, apart from Keep and Undo: a read that failed is offered again.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
   useEffect(() => {
     let cancelled = false;
     setSaved(null);
     setError(null);
+    setLoadError(null);
     setOverlap(null);
     if (checkpoint) void (checkpoint.api ?? localTurnCheckpoints).get(checkpoint.sessionId, checkpoint.tabId, checkpoint.seq)
       .then((value) => { if (!cancelled) setSaved(value); })
-      .catch((e) => { if (!cancelled) setError(errorMessage(e)); });
+      .catch((e) => { if (!cancelled) setLoadError(errorMessage(e)); });
     return () => { cancelled = true; };
-  }, [checkpoint?.sessionId, checkpoint?.tabId, checkpoint?.seq, checkpoint?.api]);
+  }, [checkpoint?.sessionId, checkpoint?.tabId, checkpoint?.seq, checkpoint?.api, reload]);
   const changes: TurnFileChange[] = saved ? saved.files.map((f) => ({ path: f.path, kind: f.status === "added" ? "create" : f.status === "deleted" ? "delete" : "update", added: f.additions, removed: f.deletions })) : fallback;
   const review = async (action: "keep" | "undo" | "restore", confirmed: string | null = null) => {
     if (!checkpoint || busy) return;
@@ -60,7 +64,7 @@ export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint, r
     finally { setBusy(false); }
   };
   const [all, setAll] = useDisclosure("changes");
-  if (!changes.length && !error && !saved?.unavailableReason) return null;
+  if (!changes.length && !error && !loadError && !saved?.unavailableReason) return null;
   const folded = !all && changes.length > SHOWN + 1;
   const shown = folded ? changes.slice(0, SHOWN) : changes;
   const rest = changes.slice(SHOWN);
@@ -99,6 +103,7 @@ export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint, r
       {saved?.undone && saved.backupRef && !checkpoint?.api?.readOnly && <Button size="sm" variant="ghost" disabled={busy} title={`Backup: ${saved.backupRef}`} onClick={() => void review("restore")}>Restore what Undo removed</Button>}
       {saved?.unavailableReason && <p role="status" className="w-full text-xs text-muted-foreground">{saved.unavailableReason}</p>}
       {error && <p role="alert" className="w-full text-xs text-destructive">{error}</p>}
+      {loadError && <p role="alert" className="w-full text-xs text-destructive">Couldn’t read this turn’s changes. {loadError} <Button size="xs" variant="outline" onClick={() => setReload((n) => n + 1)}>Retry</Button></p>}
       <Dialog open={!!overlap} onOpenChange={(open) => { if (!open && !busy) setOverlap(null); }}>
         <DialogContent showClose={!busy}>
           <DialogTitle>{overlap?.action === "restore" ? "Restore what Undo removed?" : `Undo turn ${saved?.number}?`}</DialogTitle>

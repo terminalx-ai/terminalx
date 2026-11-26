@@ -103,15 +103,15 @@ impl PairingSecrets {
     // one at a time; tests use an in-memory store. Elsewhere than macOS
     // nothing is stored: reads find nothing, writes fail.
     fn read(&self, account: &str) -> Result<Option<Vec<u8>>> {
-        self.store.get(self.service()?, account).context("read pairing secret from Keychain")
+        self.store.get(self.service()?, account).with_context(|| crate::platform_profile::localize("read pairing secret from the Keychain"))
     }
 
     fn write(&self, account: &str, bytes: &[u8]) -> Result<()> {
-        self.store.set(self.service()?, account, bytes).context("save pairing secret to Keychain")
+        self.store.set(self.service()?, account, bytes).with_context(|| crate::platform_profile::localize("save pairing secret to the Keychain"))
     }
 
     fn delete(&self, account: &str) -> Result<()> {
-        self.store.delete(self.service()?, account).context("delete pairing secret from Keychain")
+        self.store.delete(self.service()?, account).with_context(|| crate::platform_profile::localize("delete pairing secret from the Keychain"))
     }
 }
 

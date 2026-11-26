@@ -95,7 +95,7 @@ beforeEach(() => {
 });
 
 describe("migration from the per-Mac switch", () => {
-  it("keeps a Mac that was on, with the master on and default kinds; other paired Macs stay off", async () => {
+  it("keeps a Mac that was on, with the master on and default kinds; other paired computers stay off", async () => {
     fake.storage.set("terminalx:notifications-enabled:mac", "enabled");
     fake.storage.set(HOSTS, JSON.stringify([{ id: "mac" }, { id: "mini" }]));
     const { store } = await modules();
@@ -188,7 +188,7 @@ describe("subscribing", () => {
     expect(live(state)).toHaveLength(1);
   });
 
-  it("still registers the stream when the Mac is disconnected, and changes made offline do not throw", async () => {
+  it("still registers the stream when the computer is disconnected, and changes made offline do not throw", async () => {
     fake.storage.set("terminalx:notifications-enabled:mac", "enabled");
     const state = mac({ notificationFilters: 1 });
     (state.connection.request as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("Host is disconnected"));
@@ -348,7 +348,7 @@ describe("sessions started from this phone", () => {
 
 // PRO-479: a Mac that offers its bots is asked for their questions too, and its notice keeps what answers it.
 describe("a bot's question", () => {
-  it("is asked for while the Mac offers bots, and again without when Bots is switched off", async () => {
+  it("is asked for while the computer offers bots, and again without when Bots is switched off", async () => {
     fake.storage.set("terminalx:notifications-enabled:mac", "enabled");
     const state = mac({ notificationFilters: 1, bots: 1 });
     const { local } = await modules();

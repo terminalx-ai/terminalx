@@ -269,3 +269,29 @@ it("keeps message chronology through live notifications, stale snapshots and cac
   cached.sessions[2].pinned = true;
   expect(buildCloudSessions({ item: item(driver), cached }).map((row) => row.sessionId)).toEqual(["s3", "s2", "s1"]);
 });
+
+describe("a workspace's agent tabs that cannot be read (3.7)", () => {
+  it("tries again a few times, then says so with Try again, which reads them again", async () => {
+    const { dismissError, getErrorToasts } = await import("@/lib/errorToasts");
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const held = runtime(driver);
+      held.client.listAgentTabs.mockRejectedValue(new Error("runtime busy"));
+      mocks.workspaceConnection.mockResolvedValue(held.connection);
+      bootCloudSessions();
+      await retainCloudConnection({ orgId: ORG, workspaceId: WS }, "connect");
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(held.client.listAgentTabs).toHaveBeenCalledTimes(4);
+      const toast = getErrorToasts().find((entry) => entry.action.includes("Couldn’t read this workspace’s agent tabs"));
+      expect(toast?.cause).toContain("runtime busy");
+      held.client.listAgentTabs.mockResolvedValue([]);
+      await toast!.actions![0]!.run();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(held.client.listAgentTabs).toHaveBeenCalledTimes(5);
+      expect(getErrorToasts().some((entry) => entry.action.includes("agent tabs"))).toBe(false);
+      for (const entry of getErrorToasts()) dismissError(entry.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

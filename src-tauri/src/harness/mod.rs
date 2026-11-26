@@ -186,6 +186,9 @@ struct Spec {
     /// program's, and is nobody's session.
     headless: Headless,
     install_hint: &'static str,
+    /// The provider's own command for Windows, run in PowerShell, where its
+    /// docs give one. `None`: Windows is sent to `install_url`, the guide.
+    windows_install_hint: Option<&'static str>,
     install_url: &'static str,
     /// How the app installs and signs in to this CLI by itself (PRO-152).
     /// `None`: only the hint and the guide are offered.
@@ -232,6 +235,7 @@ const REGISTRY: &[Spec] = &[
         packages: &["@anthropic-ai/claude-code"],
         headless: Headless { commands: &["mcp", "doctor", "update", "install", "config", "setup-token"], flags: &["-p", "--print"] },
         install_hint: "curl -fsSL https://claude.ai/install.sh | bash && claude auth login",
+        windows_install_hint: Some("irm https://claude.ai/install.ps1 | iex; claude auth login"),
         install_url: "https://claude.com/product/claude-code",
         // Puts the binary in ~/.local/bin and its versions in ~/.local/share/claude;
         // the download lands in ~/.claude/downloads first.
@@ -252,6 +256,7 @@ const REGISTRY: &[Spec] = &[
         packages: &["@openai/codex"],
         headless: Headless { commands: &["exec", "e", "mcp", "mcp-server", "app-server", "login", "logout", "completion"], flags: &[] },
         install_hint: "curl -fsSL https://chatgpt.com/codex/install.sh | sh && codex login",
+        windows_install_hint: Some("powershell -ExecutionPolicy ByPass -c \"irm https://chatgpt.com/codex/install.ps1 | iex\"; codex login"),
         install_url: "https://developers.openai.com/codex/cli",
         // The standalone build: ~/.local/bin/codex, linked into ~/.codex/packages.
         // Non-interactive, so it neither asks to start Codex nor to remove
@@ -274,7 +279,8 @@ const REGISTRY: &[Spec] = &[
         packages: &["cursor-agent"],
         headless: Headless { commands: &[], flags: &["-p", "--print"] },
         install_hint: "curl https://cursor.com/install -fsS | bash && agent login",
-        install_url: "https://cursor.com/cli",
+        windows_install_hint: Some("irm 'https://cursor.com/install?win32=true' | iex; agent login"),
+        install_url: "https://cursor.com/docs/cli/installation",
         setup: None,
         caps: Capabilities { images: true, steer: false, permission_modes: true, effort: false, slash_commands: false, at_mentions: false, fork: false, resume: true },
     },
@@ -285,7 +291,9 @@ const REGISTRY: &[Spec] = &[
         packages: &["opencode-ai"],
         headless: Headless { commands: &["run", "serve"], flags: &[] },
         install_hint: "curl -fsSL https://opencode.ai/install | bash && opencode auth login",
-        install_url: "https://opencode.ai",
+        // Its docs give Windows only a download, no command.
+        windows_install_hint: None,
+        install_url: "https://opencode.ai/docs",
         setup: None,
         caps: Capabilities { images: true, steer: false, permission_modes: true, effort: false, slash_commands: false, at_mentions: false, fork: false, resume: true },
     },
@@ -302,13 +310,20 @@ pub fn catalog() -> Vec<HarnessInfo> {
                 binary: spec.binary.into(),
                 available: path.is_some(),
                 path: path.map(|p| p.to_string_lossy().into_owned()),
-                install_hint: spec.install_hint.into(),
+                install_hint: install_hint(spec).into(),
                 install_url: spec.install_url.into(),
                 installable: spec.setup.is_some() && cfg!(unix),
                 caps: spec.caps,
             }
         })
         .collect()
+}
+
+/// The command this computer's shell runs to install `spec`'s CLI and sign in,
+/// as its provider gives it. Empty on Windows when the provider gives none:
+/// the reader is sent to the setup guide instead.
+fn install_hint(spec: &Spec) -> &'static str {
+    if cfg!(windows) { spec.windows_install_hint.unwrap_or("") } else { spec.install_hint }
 }
 
 /// What an agent is called in a sentence the reader is shown.
@@ -510,5 +525,22 @@ mod tests {
         for command in ["vim claude.md", "grep -r codex .", "node server.js claude", "npm exec @anthropic-ai/claude-code", "node /usr/lib/node_modules/npm/bin/npx-cli.js @openai/codex", "cat /tmp/claude", "claude-squad", "zsh -l", "git log --author codex", ""] {
             assert_eq!(words(command), None, "{command}");
         }
+    }
+
+    #[test]
+    fn each_agent_s_install_command_is_one_this_system_s_shell_runs() {
+        for spec in REGISTRY {
+            let hint = install_hint(spec);
+            if cfg!(windows) {
+                // PowerShell has no curl | bash; a provider with no Windows command sends the reader to its guide.
+                assert!(!hint.contains("| bash") && !hint.contains("| sh") && !hint.contains("&&"), "{}: {hint}", spec.id);
+                assert_eq!(hint.is_empty(), spec.windows_install_hint.is_none(), "{}", spec.id);
+            } else {
+                assert!(hint.starts_with("curl "), "{}: {hint}", spec.id);
+            }
+            assert!(spec.install_url.starts_with("https://"), "{}", spec.id);
+        }
+        let opencode = REGISTRY.iter().find(|spec| spec.id == "opencode").unwrap();
+        assert!(opencode.windows_install_hint.is_none(), "OpenCode gives Windows a download, not a command");
     }
 }

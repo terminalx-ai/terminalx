@@ -130,7 +130,7 @@ export function NotificationsPage() {
         // Its mark as the Machines list draws it, muted while its notifications are off.
         const icon = iconFor(name, app.accountHosts?.find((account) => account.hostId === host.id) ?? null);
         return <Row key={host.id} icon={<MachineGlyph icon={icon} color={on ? palette.ink : palette.muted} />} label={name} first={index === 0}><Toggle label={`Notifications from ${name}`} value={on} disabled={iosOff} onChange={(on) => void setMachineNotifications(host.id, on)} /></Row>;
-      }) : <Row label="No paired Macs on this phone." first muted />}</Card>
+      }) : <Row label="No paired computers on this phone." first muted />}</Card>
 
       <SectionTitle>Quiet hours</SectionTitle>
       <Card>

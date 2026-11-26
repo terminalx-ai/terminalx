@@ -2288,8 +2288,8 @@ fn create_session(manager: &PhoneHost, connection: &MobileConnection, params: Se
     }
     let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&json!([&request, send_digest(&params.text, &params.attachments)]))?));
     let created = create_once(&manager.mobile.send_ids, message.as_deref(), digest, || connection.call("create", request.clone()))?;
-    let session_id = created["sessionId"].as_str().context("The Mac did not say which session it started.")?.to_string();
-    let tab_id = created["tabId"].as_str().context("The Mac did not say which session it started.")?.to_string();
+    let session_id = created["sessionId"].as_str().context("TerminalX did not say which session it started.")?.to_string();
+    let tab_id = created["tabId"].as_str().context("TerminalX did not say which session it started.")?.to_string();
     let first = SessionSendParams { tab_id: tab_id.clone(), text: params.text, attachments: params.attachments, client_message_id: message };
     let sent = match send_session(manager, connection, first) {
         Ok(reply) => json!({"sent": reply}),

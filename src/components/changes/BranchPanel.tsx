@@ -2,6 +2,7 @@ import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ChevronRight, GitBranch, Loader2, Sparkles } from "@/icons";
 import { WithTooltip } from "@/components/ui/tooltip";
+import { Button } from "@/components/ui/button";
 import { agent, api, errorMessage, git, type BranchOverview, type PullRequest } from "@/lib/api";
 import { localGitSource } from "@/lib/gitSource";
 import { useProjectForge } from "@/lib/projectForge";
@@ -153,7 +154,7 @@ export function BranchPanel({
   const held = !overview || !!found || overview.onBase || !github;
   useEffect(() => onStep?.(held), [held, onStep]);
 
-  if (error && !overview) return <p className="p-4 text-xs text-destructive">{error}</p>;
+  if (error && !overview) return <div role="alert" className="p-4 text-xs text-destructive">Couldn’t read the branch. {error} <Button size="xs" variant="outline" onClick={() => { setError(null); setReread((n) => n + 1); }}>Retry</Button></div>;
   if (!overview) {
     return (
       <p role="status" className="animate-panel-content flex items-center gap-1.5 p-4 text-xs text-faint">
@@ -247,6 +248,8 @@ export function BranchPanel({
       {!overview.onBase && overview.hasRemote && github && top && <div className="border-b border-hairline">{top}</div>}
       {/* One left edge for the tab, 24px from the panel: the branch icon, each box's own edge, the graph's dots and every row
           start on it. Only what is inside a box is indented. */}
+      {/* A later read failed: what is shown is the last read, and says so. */}
+      {error && <div role="alert" className="mx-6 mt-3 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">Couldn’t read the branch again; this is the last read. {error} <Button size="xs" variant="outline" onClick={() => { setError(null); setReread((n) => n + 1); }}>Retry</Button></div>}
       <div className="flex flex-col gap-3 px-6 py-4">
         <header className="flex min-h-6 min-w-0 items-center gap-2">
           {/* The glyph's drawing starts 3px into its box: pulled left by that, its ink lines up with the text and dots below. */}

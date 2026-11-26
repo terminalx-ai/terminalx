@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { cleanDeviceLabel, describeDevice, deviceDescriptionFrom } from "./device-describe";
 
-describe("the phone's name for the Mac", () => {
+describe("the phone's name for the computer", () => {
   it.each([
     ["ios", { interfaceIdiom: "phone" }, { label: "iPhone", platform: "ios" }],
     ["ios", { interfaceIdiom: "pad" }, { label: "iPad", platform: "ios" }],

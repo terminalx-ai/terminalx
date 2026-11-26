@@ -136,7 +136,7 @@ export interface AnswerTarget {
 
 /** Answers on the Mac. Resolves the Mac's refusal in words, or null once answered. */
 export async function answer(intent: Extract<NotificationIntent, { type: "permission" | "question" | "botAnswer" }>, target: AnswerTarget): Promise<string | null> {
-  if (!(await target.reach(intent.hostId))) return intent.type === "botAnswer" ? "The Mac this came from is not connected. Answer it in the app once it is." : "The Mac this came from is not connected. Answer it in the session.";
+  if (!(await target.reach(intent.hostId))) return intent.type === "botAnswer" ? "The computer this came from is not connected. Answer it in the app once it is." : "The computer this came from is not connected. Answer it in the session.";
   try {
     if (intent.type === "botAnswer") {
       await target.answerBot(intent.botId, intent.number, { answer: intent.answer }, intent.question);

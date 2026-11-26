@@ -193,16 +193,90 @@ fn words(id: &str) -> impl Iterator<Item = &str> {
 
 /// The model `agent` offers for `tier`, from the list its CLI gave.
 ///
-/// Claude Code: the family alias (`opus`), which follows the latest release.
+/// Claude Code: the family alias (`opus`), which follows the latest release;
+/// with no alias listed, the first listed version of the family
+/// (`claude-fable-5-2`), current versions coming first in the list
+/// (`harness::claude::models::parse`) and the lead's own model ahead of them
+/// ([`Installed::with_lead`]).
 /// Codex: the first listed model with the family name in its id; `model/list`
 /// puts newer models first, and a model the CLI marks hidden never reaches
 /// the list (`harness::codex::models::parse`).
 pub fn model_for<'a>(agent: &str, tier: Tier, models: &'a [Model]) -> Option<&'a Model> {
     let family = tier.family(agent)?;
-    let mut offered = models.iter().filter(|model| model.harness == agent);
+    let of_family = |model: &&Model| model.harness == agent && words(&model.id).any(|word| word.eq_ignore_ascii_case(family));
     match agent {
-        "claude" => offered.find(|model| model.id == family),
-        _ => offered.find(|model| words(&model.id).any(|word| word.eq_ignore_ascii_case(family))),
+        "claude" => models.iter().find(|model| model.harness == agent && model.id == family).or_else(|| models.iter().find(of_family)),
+        _ => models.iter().find(of_family),
+    }
+}
+
+/// The models a run resolves tiers against, and where each agent's part of
+/// the list came from, so a sentence saying a tier is not installed can be
+/// told apart from one read off an old or a stand-in list (#1533).
+#[derive(Debug, Clone, Default)]
+pub struct Installed {
+    pub models: Vec<Model>,
+    /// By agent: the list this was read from, as a sentence ends with it
+    /// ("the list Claude Code gave 3 minutes ago").
+    pub read: BTreeMap<String, String>,
+}
+
+impl std::ops::Deref for Installed {
+    type Target = [Model];
+
+    fn deref(&self) -> &[Model] {
+        &self.models
+    }
+}
+
+impl From<Vec<Model>> for Installed {
+    fn from(models: Vec<Model>) -> Self {
+        Self { models, read: BTreeMap::new() }
+    }
+}
+
+impl Installed {
+    /// The lead runs `model` on `agent`: whatever its CLI's list says, that
+    /// model is there. One of a known tier that the list leaves out is put
+    /// first, so its tier resolves to it ([`model_for`]). Its efforts are
+    /// those of a listed model of the same tier, else of the agent's built-in
+    /// entry for that tier.
+    pub fn with_lead(mut self, agent: &str, model: &str) -> Self {
+        let Some(tier) = tier_of(agent, model).filter(|_| listed(agent, model, &self.models).is_none()) else { return self };
+        let built_in = match agent {
+            "claude" => crate::models::claude_fallback(),
+            "codex" => crate::harness::codex::models::fallback(),
+            _ => Vec::new(),
+        };
+        let like = self.models.iter().chain(&built_in).find(|other| other.harness == agent && tier_of(agent, &other.id) == Some(tier));
+        let entry = Model {
+            id: model.to_string(),
+            label: crate::models::claude_label(model).unwrap_or_else(|| model.to_string()),
+            harness: agent.to_string(),
+            efforts: like.map(|like| like.efforts.clone()).unwrap_or_default(),
+            default_effort: like.and_then(|like| like.default_effort.clone()),
+            accepts_images: true,
+            is_default: false,
+            upgrade: None,
+            description: None,
+            alias: false,
+            resolved: None,
+        };
+        self.models.insert(0, entry);
+        self
+    }
+
+    /// Why `agent` has no model for `tier`, in a sentence without its full stop.
+    pub fn missing(&self, agent: &str, tier: Tier) -> String {
+        let family = tier.family(agent).unwrap_or_default();
+        let name = agent_name(agent);
+        if !self.models.iter().any(|model| model.harness == agent) {
+            return format!("{name}'s models were not read, and without them no {} model ({family}) can be found", tier.name());
+        }
+        match self.read.get(agent) {
+            Some(read) => format!("No {} model of {name} is installed ({family}) in {read}", tier.name()),
+            None => format!("No {} model of {name} is installed ({family})", tier.name()),
+        }
     }
 }
 
@@ -241,7 +315,7 @@ pub struct LeadModel<'a> {
 
 /// The model and effort of a piece of `kind` on `agent`. What the plan names
 /// stands; what it leaves out comes from the table.
-pub fn choose(kind: &str, agent: &str, plan_model: &str, plan_effort: Option<&str>, table: &Table, models: &[Model], lead: &LeadModel) -> Choice {
+pub fn choose(kind: &str, agent: &str, plan_model: &str, plan_effort: Option<&str>, table: &Table, models: &Installed, lead: &LeadModel) -> Choice {
     let route = table.route(kind, agent);
     // An effort the model does not offer is not sent to it: the model's own default runs.
     let fits = |effort: Option<&str>, model: &str| effort.filter(|effort| listed(agent, model, models).is_some_and(|model| model.efforts.iter().any(|offered| offered == effort))).map(str::to_owned);
@@ -258,8 +332,7 @@ pub fn choose(kind: &str, agent: &str, plan_model: &str, plan_effort: Option<&st
     if let Some(model) = model_for(agent, route.tier, models) {
         return Choice { model: model.id.clone(), effort: effort(&model.id), tier: Some(route.tier), note: None, model_by_kind, effort_by_kind };
     }
-    let family = route.tier.family(agent).unwrap_or_default();
-    let missing = format!("No {} model of {} is installed ({family})", route.tier.name(), agent_name(agent));
+    let missing = models.missing(agent, route.tier);
     // The lead's model runs on the lead's agent only.
     let (model, runs_on) = match lead.agent == agent && !lead.model.is_empty() {
         true => (lead.model.to_string(), format!("the lead's model, {}", lead.model)),
@@ -306,7 +379,7 @@ pub(crate) mod tests {
 
     /// The built-in table and every tier installed, for tests that check a plan.
     pub(crate) static TABLE: std::sync::LazyLock<Table> = std::sync::LazyLock::new(Table::default);
-    pub(crate) static MODELS: std::sync::LazyLock<Vec<Model>> = std::sync::LazyLock::new(installed);
+    pub(crate) static MODELS: std::sync::LazyLock<Installed> = std::sync::LazyLock::new(|| installed().into());
 
     const LEAD: LeadModel = LeadModel { agent: "claude", model: "fable" };
 
@@ -339,11 +412,11 @@ pub(crate) mod tests {
             assert_eq!((found.id.as_str(), found.alias), (alias, true));
         }
         let table = Table::default();
-        let code = choose("code", "claude", "", None, &table, &models, &LEAD);
+        let code = choose("code", "claude", "", None, &table, &models.clone().into(), &LEAD);
         assert_eq!(code, Choice { model: "opus".into(), effort: Some("medium".into()), tier: Some(Tier::Large), note: None, model_by_kind: true, effort_by_kind: true });
         // Haiku offers no effort levels: `search` runs on its own default.
-        assert_eq!(choose("search", "claude", "", None, &table, &models, &LEAD), Choice { model: "haiku".into(), effort: None, tier: Some(Tier::Small), note: None, model_by_kind: true, effort_by_kind: true });
-        assert_eq!(choose("research", "claude", "", None, &table, &models, &LEAD).model, "fable");
+        assert_eq!(choose("search", "claude", "", None, &table, &models.clone().into(), &LEAD), Choice { model: "haiku".into(), effort: None, tier: Some(Tier::Small), note: None, model_by_kind: true, effort_by_kind: true });
+        assert_eq!(choose("research", "claude", "", None, &table, &models.clone().into(), &LEAD).model, "fable");
     }
 
     #[test]
@@ -356,8 +429,8 @@ pub(crate) mod tests {
         assert_eq!(model_for("codex", Tier::Top, &models).unwrap().id, "gpt-6-astra");
         let table = Table::default();
         // Codex ships Terra at low; the table starts it at medium.
-        assert_eq!(choose("review", "codex", "", None, &table, &models, &LEAD), Choice { model: "gpt-6.1-terra".into(), effort: Some("medium".into()), tier: Some(Tier::Mid), note: None, model_by_kind: true, effort_by_kind: true });
-        assert_eq!(choose("logs", "codex", "", None, &table, &models, &LEAD), Choice { model: "gpt-6-luna".into(), effort: None, tier: Some(Tier::Small), note: None, model_by_kind: true, effort_by_kind: true });
+        assert_eq!(choose("review", "codex", "", None, &table, &models.clone().into(), &LEAD), Choice { model: "gpt-6.1-terra".into(), effort: Some("medium".into()), tier: Some(Tier::Mid), note: None, model_by_kind: true, effort_by_kind: true });
+        assert_eq!(choose("logs", "codex", "", None, &table, &models.clone().into(), &LEAD), Choice { model: "gpt-6-luna".into(), effort: None, tier: Some(Tier::Small), note: None, model_by_kind: true, effort_by_kind: true });
         // A family name is a word of the id, not a run of letters inside one.
         let lookalike = [model("codex", "gpt-6-solar", &[], None), model("codex", "gpt-6-SOL", &[], None)];
         assert_eq!(model_for("codex", Tier::Large, &lookalike).unwrap().id, "gpt-6-SOL");
@@ -373,7 +446,7 @@ pub(crate) mod tests {
         assert_eq!(model_for("codex", Tier::Top, &listed).unwrap().id, "gpt-6-astra");
         // A family whose only model is hidden has none: the piece falls back.
         assert!(model_for("codex", Tier::Large, &listed).is_none());
-        let choice = choose("code", "codex", "", None, &Table::default(), &listed, &LeadModel { agent: "codex", model: "gpt-6-astra" });
+        let choice = choose("code", "codex", "", None, &Table::default(), &listed.clone().into(), &LeadModel { agent: "codex", model: "gpt-6-astra" });
         assert_eq!(choice.model, "gpt-6-astra");
         assert!(choice.note.is_some());
     }
@@ -385,15 +458,15 @@ pub(crate) mod tests {
         models.extend(crate::harness::codex::models::fallback());
         let table = Table::default();
         let lead = LeadModel { agent: "codex", model: "gpt-5.6-sol" };
-        let choice = choose("refactor", "codex", "", None, &table, &models, &lead);
+        let choice = choose("refactor", "codex", "", None, &table, &models.clone().into(), &lead);
         assert_eq!((choice.model.as_str(), choice.effort.as_deref(), choice.tier), ("gpt-5.6-sol", Some("medium"), Some(Tier::Large)));
         assert_eq!(choice.note.as_deref(), Some("No top model of Codex is installed (astra): this piece runs on the lead's model, gpt-5.6-sol."));
         // The lead's model runs on the lead's agent only: a Codex worker of a Claude lead takes Codex's default.
-        let other = choose("refactor", "codex", "", None, &table, &models, &LEAD);
+        let other = choose("refactor", "codex", "", None, &table, &models.clone().into(), &LEAD);
         assert_eq!((other.model.as_str(), other.effort.as_deref(), other.tier), ("", None, None));
         assert_eq!(other.note.as_deref(), Some("No top model of Codex is installed (astra): this piece runs on Codex's default model."));
         // An installed tier says nothing.
-        assert_eq!(choose("code", "codex", "", None, &table, &models, &lead).note, None);
+        assert_eq!(choose("code", "codex", "", None, &table, &models.clone().into(), &lead).note, None);
     }
 
     #[test]
@@ -401,18 +474,18 @@ pub(crate) mod tests {
         let models = installed();
         let table = Table::default();
         // Both named: the table is not asked.
-        assert_eq!(choose("search", "claude", "opus", Some("high"), &table, &models, &LEAD), Choice { model: "opus".into(), effort: Some("high".into()), tier: Some(Tier::Large), note: None, model_by_kind: false, effort_by_kind: false });
+        assert_eq!(choose("search", "claude", "opus", Some("high"), &table, &models.clone().into(), &LEAD), Choice { model: "opus".into(), effort: Some("high".into()), tier: Some(Tier::Large), note: None, model_by_kind: false, effort_by_kind: false });
         // The model named: the kind's effort where that model offers it.
-        assert_eq!(choose("code", "claude", "sonnet", None, &table, &models, &LEAD).effort.as_deref(), Some("medium"));
-        assert_eq!(choose("code", "claude", "haiku", None, &table, &models, &LEAD).effort, None);
+        assert_eq!(choose("code", "claude", "sonnet", None, &table, &models.clone().into(), &LEAD).effort.as_deref(), Some("medium"));
+        assert_eq!(choose("code", "claude", "haiku", None, &table, &models.clone().into(), &LEAD).effort, None);
         // The effort named: the kind's model.
-        assert_eq!(choose("code", "claude", "", Some("low"), &table, &models, &LEAD), Choice { model: "opus".into(), effort: Some("low".into()), tier: Some(Tier::Large), note: None, model_by_kind: true, effort_by_kind: false });
+        assert_eq!(choose("code", "claude", "", Some("low"), &table, &models.clone().into(), &LEAD), Choice { model: "opus".into(), effort: Some("low".into()), tier: Some(Tier::Large), note: None, model_by_kind: true, effort_by_kind: false });
         // The model named and the effort left to the kind says which is whose.
-        let named = choose("code", "claude", "sonnet", None, &table, &models, &LEAD);
+        let named = choose("code", "claude", "sonnet", None, &table, &models.clone().into(), &LEAD);
         assert_eq!((named.model_by_kind, named.effort_by_kind), (false, true));
         // A pinned version still knows its tier; a model of no family has none.
-        assert_eq!(choose("code", "claude", "claude-sonnet-5-5", None, &table, &models, &LEAD).tier, Some(Tier::Mid));
-        assert_eq!(choose("code", "codex", "gpt-5.5", None, &table, &models, &LEAD).tier, None);
+        assert_eq!(choose("code", "claude", "claude-sonnet-5-5", None, &table, &models.clone().into(), &LEAD).tier, Some(Tier::Mid));
+        assert_eq!(choose("code", "codex", "gpt-5.5", None, &table, &models.clone().into(), &LEAD).tier, None);
     }
 
     #[test]
@@ -448,5 +521,49 @@ pub(crate) mod tests {
         assert_eq!((Tier::Top.family("claude"), Tier::Top.family("codex"), Tier::Top.family("cursor")), (Some("fable"), Some("astra"), None));
         assert_eq!(serde_json::to_value(Tier::Large).unwrap(), json!("large"));
         assert_eq!((tier_of("claude", "opus"), tier_of("codex", "gpt-6.1-terra"), tier_of("codex", "opus")), (Some(Tier::Large), Some(Tier::Mid), None));
+    }
+
+    /// What the CLI lists with no Fable alias: the shape of the list the #1533 run read.
+    fn without_fable_alias() -> Vec<Model> {
+        installed().into_iter().filter(|model| model.id != "fable").collect()
+    }
+
+    #[test]
+    fn a_claude_tier_with_no_alias_listed_resolves_to_a_listed_version_of_its_family() {
+        let models = without_fable_alias();
+        assert_eq!(model_for("claude", Tier::Top, &models).map(|model| model.id.as_str()), Some("claude-fable-5-1"));
+        // The alias, when listed, still comes first: it follows the latest release.
+        assert_eq!(model_for("claude", Tier::Top, &installed()).map(|model| model.id.as_str()), Some("fable"));
+        let none: Vec<Model> = installed().into_iter().filter(|model| !model.id.contains("fable")).collect();
+        assert!(model_for("claude", Tier::Top, &none).is_none());
+    }
+
+    #[test]
+    fn the_leads_own_model_is_installed_whatever_the_list_says() {
+        let none: Installed = installed().into_iter().filter(|model| !model.id.contains("fable")).collect::<Vec<_>>().into();
+        let lead = LeadModel { agent: "claude", model: "claude-fable-5-2" };
+        // Without it, the piece says nothing of the top tier is installed, though the lead runs on it.
+        let said = choose("research", "claude", "", None, &Table::default(), &none, &lead);
+        assert_eq!(said.note.as_deref(), Some("No top model of Claude Code is installed (fable): this piece runs on the lead's model, claude-fable-5-2."));
+        // With it, the tier resolves to the lead's model, at the table's effort, and nothing is said.
+        let with = none.with_lead("claude", "claude-fable-5-2");
+        assert_eq!((with[0].id.as_str(), with[0].label.as_str(), with[0].efforts.len()), ("claude-fable-5-2", "Fable 5.2", 5));
+        let choice = choose("research", "claude", "", None, &Table::default(), &with, &lead);
+        assert_eq!((choice.model.as_str(), choice.effort.as_deref(), choice.tier, choice.note), ("claude-fable-5-2", Some("medium"), Some(Tier::Top), None));
+        // A model that is listed already, or of no known tier, or the agent's default, adds nothing.
+        for model in ["opus", "claude-opus-5-5", "", "my-proxy-model"] {
+            assert_eq!(Installed::from(installed()).with_lead("claude", model).len(), installed().len(), "{model}");
+        }
+    }
+
+    #[test]
+    fn a_missing_tier_says_which_list_it_was_read_from() {
+        let mut none: Installed = installed().into_iter().filter(|model| !model.id.contains("fable")).collect::<Vec<_>>().into();
+        none.read.insert("claude".into(), "the list Claude Code gave 3 hours ago".into());
+        assert_eq!(none.missing("claude", Tier::Top), "No top model of Claude Code is installed (fable) in the list Claude Code gave 3 hours ago");
+        let choice = choose("research", "claude", "", None, &Table::default(), &none, &LeadModel { agent: "codex", model: "gpt-6.1-sol" });
+        assert_eq!(choice.note.as_deref(), Some("No top model of Claude Code is installed (fable) in the list Claude Code gave 3 hours ago: this piece runs on Claude Code's default model."));
+        // An agent of which nothing was read is not said to have nothing installed.
+        assert_eq!(Installed::default().missing("claude", Tier::Top), "Claude Code's models were not read, and without them no top model (fable) can be found");
     }
 }

@@ -8,7 +8,7 @@ import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { Check, ChevronsUpDown, CircleAlert, ExternalLink, Loader2, Monitor, Moon, RefreshCw, Sun } from "@/icons";
 import { bindingText, useKeymap } from "@/lib/shortcuts";
-import { isMac } from "@/lib/platform";
+import { isMac, profile } from "@/lib/platform";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { checkForUpdate, installUpdate, useUpdate } from "@/lib/updates";
@@ -320,7 +320,7 @@ export function AppearanceTab() {
       />
       <RegisteredSetting setting="appearance.mode"
         description={light ? <>
-          System follows macOS.
+          System follows {profile.osName}.
           {toggleKeys && <span className="mt-0.5 block text-faint">{bindingText(toggleKeys)} switches light and dark</span>}
         </> : "This theme has no light palette, so the mode control is disabled."}
         disabled={!light}

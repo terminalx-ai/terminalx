@@ -33,6 +33,7 @@ import {
 } from "@/lib/cloudAgents";
 import { TERMINAL_OUTBOX_STATES, type CloudAgentScope, type OutboxEntry } from "@/lib/cloudAgentApi";
 import { cn } from "@/lib/cn";
+import { secretStoreShort } from "@/lib/platform";
 import { effectiveYou, notShared, sharingKnown, useCollab } from "@/lib/cloudCollab";
 import { useMachinePlace } from "./workspacePlace";
 import { CloudImageError } from "@/lib/cloudComposer";
@@ -126,6 +127,9 @@ export function CloudAgentSessions({
   const snapshot = useCloudAgents(scope);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A failed read of the runtime’s tab list, apart from a failed action, so its Retry reads the list again.
+  const [tabsError, setTabsError] = useState<string | null>(null);
+  const [tabsAttempt, setTabsAttempt] = useState(0);
   const connected = state.state === "connected";
   const machine = useMachinePlace();
   const generation = connected ? `${state.runtimeGeneration}:${state.runtimeEpoch ?? ""}` : null;
@@ -146,14 +150,14 @@ export function CloudAgentSessions({
     if (!generation) return;
     let cancelled = false;
     const stop = watchLiveTabs(scope, client);
-    void syncLiveTabs(scope, client).catch((e: unknown) => !cancelled && setError(errorText(e)));
+    void syncLiveTabs(scope, client).then(() => !cancelled && setTabsError(null), (e: unknown) => !cancelled && setTabsError(errorText(e)));
     // Commands that waited for the runtime: learn their outcome now.
     startOutboxPolling(scope);
     return () => {
       cancelled = true;
       stop();
     };
-  }, [generation, client, scope.organizationId, scope.workspaceId]);
+  }, [generation, client, scope.organizationId, scope.workspaceId, tabsAttempt]);
 
   // The sidebar's + on a machine opens the form on the project it chose.
   const [formProject, setFormProject] = useState<string | null>(null);
@@ -220,7 +224,8 @@ export function CloudAgentSessions({
           }}
         />
       )}
-      {error && <p className="px-4 py-1 text-xs text-red-500">Agent: {error}</p>}
+      {error && <p role="alert" className="px-4 py-1 text-xs text-red-500">Agent: {error}</p>}
+      {tabsError && <p role="alert" className="px-4 py-1 text-xs text-red-500">Couldn’t read this workspace’s agent tabs. {tabsError} <Button size="xs" variant="outline" onClick={() => { setTabsError(null); setTabsAttempt((n) => n + 1); }}>Retry</Button></p>}
       {rows.length ? (
         <ul className="flex min-h-0 flex-1 flex-col overflow-y-auto py-1" aria-label="Agent sessions">
           {rows.map((row) => (
@@ -481,7 +486,7 @@ export function commandError(e: unknown): string {
   if (code === KEY_MISSING) return "Connect to this workspace once so this device can encrypt commands for it.";
   // The key is there but could not be read: connecting again would not help.
   if (code === KEY_STORE_UNAVAILABLE) {
-    return "This device could not read its key for this workspace from the system key store (the Keychain on a Mac), so the command was not sent. Unlock the key store or allow TerminalX to use it, then send again.";
+    return `This device could not read its key for this workspace from ${secretStoreShort}, so the command was not sent. Unlock it or allow TerminalX to use it, then send again.`;
   }
   if (code === DEV_SCOPE_NOTICE) return DEV_SCOPE_NOTICE;
   if (code === "cloud_workspace_collaboration_forbidden") return "Your access to this workspace does not allow this. Ask an admin for driver or approver access.";

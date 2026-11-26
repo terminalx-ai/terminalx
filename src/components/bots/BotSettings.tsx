@@ -194,7 +194,7 @@ function RunsOn({ bot }: { bot: Bot }) {
       <div role="radiogroup" aria-label="Runs on" aria-busy={busy} onKeyDown={moveBetweenRadios} className="flex min-w-0 flex-wrap gap-2.5">
         <ChoiceCard icon={Laptop} title={ThisComputer} note={`Works while ${thisComputer} is awake. Uses your local agent logins. No compute cost.`} checked={place.kind === "thisMac"} busy={busy} disabled={place.kind === "other"} onSelect={() => setChoosing("back")} testId="bot-runs-on-this-mac" />
         <ChoiceCard icon={Cloud} title="Cloud workspace" note={`Always on. Keeps working when ${thisComputer} is off or asleep. Billed per hour of work.`} checked={place.kind === "cloud"} busy={busy} disabled={place.kind === "other" || place.kind === "machine"} badge={place.kind === "cloud" ? here : undefined} onSelect={() => setChoosing("cloud")} testId="bot-runs-on-cloud" />
-        <ChoiceCard icon={Server} title="Another machine" note="A paired Mac or a headless server you own." checked={place.kind === "machine"} busy={busy} disabled={place.kind === "other" || place.kind === "cloud"} badge={place.kind === "machine" ? here : undefined} onSelect={() => setChoosing("machine")} testId="bot-runs-on-machine" />
+        <ChoiceCard icon={Server} title="Another machine" note="A paired computer or a headless server you own." checked={place.kind === "machine"} busy={busy} disabled={place.kind === "other" || place.kind === "cloud"} badge={place.kind === "machine" ? here : undefined} onSelect={() => setChoosing("machine")} testId="bot-runs-on-machine" />
       </div>
       {place.kind === "other" && (
         <p className="text-[12px] text-warning" data-testid="bot-runs-on-unknown">

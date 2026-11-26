@@ -142,7 +142,7 @@ describe("the Sessions header and the machine's row say the same (#983)", () => 
     }
   });
 
-  it("offers Try again on the Sessions header only once the phone has waited for the Mac", async () => {
+  it("offers Try again on the Sessions header only once the phone has waited for the computer", async () => {
     mocks.app.connectionStage = "unreachable";
     await show(<SessionsScreen />);
     expect(container.textContent).not.toContain("Try again");
@@ -153,16 +153,16 @@ describe("the Sessions header and the machine's row say the same (#983)", () => 
     expect(mocks.app.retryConnection).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps Disconnected on your Mac and its Reconnect", async () => {
+  it("keeps Disconnected on your computer and its Reconnect", async () => {
     mocks.app.connectionStage = "disconnected-on-mac";
     await show(<SessionsScreen />);
-    expect(container.textContent).toContain("Disconnected on your Mac");
+    expect(container.textContent).toContain("Disconnected on your computer");
     const reconnect = [...container.querySelectorAll("button")].find((button) => button.textContent === "Reconnect")!;
     await act(async () => { reconnect.click(); });
     expect(mocks.app.connection.restart).toHaveBeenCalledWith("reconnect was chosen", true);
     await show(<MachinesScreen />);
     // The machine row keeps its own words for it (#994).
-    expect(container.textContent).toContain("Disconnected on your Mac · tap to reconnect");
+    expect(container.textContent).toContain("Disconnected on your computer · tap to reconnect");
   });
 
   it("never shows what the connection log holds: paths, addresses, raw failures", async () => {

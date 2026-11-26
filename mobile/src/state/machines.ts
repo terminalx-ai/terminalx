@@ -2,7 +2,7 @@ import { ACCOUNT_PAIRING_CAPABILITY, HEADLESS_PHONE_PAIRING_CAPABILITY } from ".
 import type { AccountHost } from "../pairing/account-client";
 import { accountHostIdentityMatches } from "../pairing/account-identity";
 import type { AccountMachinePrefs } from "../store/account-machines";
-import { cleanHostName, FALLBACK_HOST_LABEL, hostDisplayNames } from "../store/host-name";
+import { cleanHostName, hostDisplayNames, isFallbackLabel } from "../store/host-name";
 import type { StoredHost } from "../store/hosts";
 import { connectionWords, type ConnectionState } from "./connection-view";
 
@@ -88,7 +88,7 @@ export function kindName(platform: string | undefined, environment?: AccountHost
   if (value === "darwin" || value === "macos" || value === "mac") return "Mac";
   if (value === "linux") return "Linux machine";
   if (value === "win32" || value === "windows") return "Windows PC";
-  return "Mac";
+  return "Computer";
 }
 
 export function machineList(input: MachineInput): { paired: PairedMachine[]; available: AvailableMachine[]; hidden: AvailableMachine[] } {
@@ -102,7 +102,7 @@ export function machineList(input: MachineInput): { paired: PairedMachine[]; ava
     ...input.hosts.map((host) => {
       const account = byKey.get(host.publicKeyB64) ?? null;
       // Its own name: what it reports, else what the account calls it, else what it was saved with ("Paired Mac" is this app's, not its own).
-      const own = cleanHostName([host.hostName, account?.displayName, host.label === FALLBACK_HOST_LABEL ? null : host.label].find((name) => !isGenericName(name)));
+      const own = cleanHostName([host.hostName, account?.displayName, isFallbackLabel(host.label) ? null : host.label].find((name) => !isGenericName(name)));
       const fallback = isGenericName(host.label) ? kindName(account?.platform, account?.environmentKind) : host.label;
       return { id: host.id, customName: host.customName, hostName: own ?? undefined, label: fallback, own };
     }),

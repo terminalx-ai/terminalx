@@ -40,16 +40,16 @@ describe("the phone's new-session form", () => {
     expect(blocked({ ...ready, text: "  " }, options)).toBe("Write the first message.");
     expect(blocked({ ...ready, where: null }, options)).toBe("Choose a project or a quick chat.");
     expect(blocked({ ...ready, where: { projectId: "p-notes", useWorktree: true } }, options)).toContain("not a Git repository");
-    expect(blocked({ ...ready, where: { projectId: "gone", useWorktree: false } }, options)).toBe("That project is no longer on this Mac.");
-    expect(blocked({ ...ready, agent: "opencode" }, options)).toBe("OpenCode is not installed on this Mac.");
+    expect(blocked({ ...ready, where: { projectId: "gone", useWorktree: false } }, options)).toBe("That project is no longer on this computer.");
+    expect(blocked({ ...ready, agent: "opencode" }, options)).toBe("OpenCode is not installed on this computer.");
     expect(request(ready)).toEqual({ where: { projectId: "p-repo", useWorktree: true }, agent: "codex", model: "gpt-5.6", effort: "medium", mode: "bypassPermissions", title: "", text: "Fix the login redirect" });
   });
 });
 
-describe("the Mac's side of a new session", () => {
+describe("the computer's side of a new session", () => {
   const api = (request: ReturnType<typeof vi.fn>) => new HostApi({ request, onEvent: () => () => {} } as unknown as HostConnection);
 
-  it("notifies an open settings view when the Mac's file changes and removes listeners on close", () => {
+  it("notifies an open settings view when the computer's file changes and removes listeners on close", () => {
     let event!: (value: { method: string }) => void;
     const host = new HostApi({ onEvent: (listener: typeof event) => { event = listener; return () => {}; } } as unknown as HostConnection);
     const changed = vi.fn();
@@ -67,7 +67,7 @@ describe("the Mac's side of a new session", () => {
     const old = vi.fn(async (method: string) => method === "sync.capabilities" ? { ok: true, value: { sendIds: 1 } } : { ok: false, refusal: { message: "unknown method" } });
     const host = api(old);
     await expect(host.newSessionOptions()).resolves.toBeNull();
-    await expect(host.createSession(request({ ...initialChoices(options), text: "hi" }), "draft")).resolves.toEqual({ created: false, message: "Update TerminalX on this Mac to start sessions from your phone." });
+    await expect(host.createSession(request({ ...initialChoices(options), text: "hi" }), "draft")).resolves.toEqual({ created: false, message: "Update TerminalX on this computer to start sessions from your phone." });
     await expect(host.macSettings()).resolves.toBeNull();
     expect(old.mock.calls.map((call) => call[0])).toEqual(["sync.capabilities"]);
   });
@@ -93,7 +93,7 @@ describe("the Mac's side of a new session", () => {
     await expect(api(host).createSession({ where: { quick: true }, agent: "claude", model: "", text: "Hi" })).resolves.toEqual({ created: true, sessionId: "s-1", tabId: "t-1", title: "Hi", native: false, sendError: "The agent is busy; the mobile prompt must wait." });
   });
 
-  it("reads and changes Native Codex, and keeps the Mac's refusal", async () => {
+  it("reads and changes Native Codex, and keeps the computer's refusal", async () => {
     const host = vi.fn(async (method: string, params?: { nativeCodex?: boolean }) => {
       if (method === "sync.capabilities") return { ok: true, value: { macSettings: 1 } };
       if (method === "mac.settings") return { ok: true, value: { nativeCodex: false } };

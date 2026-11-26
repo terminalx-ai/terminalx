@@ -13,7 +13,7 @@ const org = (orgId: string, workspaces: CloudWorkspaceItem[]): CatalogOrganizati
 });
 const web = [{ identity: "https://GitHub.com/Acme/Web.git", fullName: "acme/web", primary: true }];
 
-describe("a cloud workspace's project, as the Mac names it (#1403)", () => {
+describe("a cloud workspace's project, as the computer names it (#1403)", () => {
   it("is its primary repository's identity, else a blank project by its name", () => {
     expect(workspaceProject(workspace("w1", "org-1", web).workspace)).toBe("github.com/acme/web");
     const second = [{ identity: "github.com/acme/api", primary: false }, { identity: null, cloneUrl: "git@github.com:acme/site.git", primary: true }];
@@ -24,7 +24,7 @@ describe("a cloud workspace's project, as the Mac names it (#1403)", () => {
 });
 
 describe("the pinned cloud rows (#1403)", () => {
-  it("lists the workspaces of the projects the Mac pinned, in organizations this phone can read", () => {
+  it("lists the workspaces of the projects the computer pinned, in organizations this phone can read", () => {
     const snapshot = {
       organizations: [
         org("org-1", [workspace("w1", "org-1", web, 20), workspace("w2", "org-1", [{ identity: "github.com/acme/api", primary: true }]), workspace("notes", "org-1", [], 10)]),

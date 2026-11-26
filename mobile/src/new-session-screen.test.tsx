@@ -110,7 +110,7 @@ describe("starting a session from the phone", () => {
     await click("Codex");
     expect(button("GPT-5")!.getAttribute("aria-pressed")).toBe("true");
     expect(button("medium")!.getAttribute("aria-pressed")).toBe("true");
-    expect(container.textContent).toContain("Native Codex is on for this Mac");
+    expect(container.textContent).toContain("Native Codex is on for this computer");
     await click("On the checkout");
     await click("Plan");
     await type("First message", "Fix the login redirect");
@@ -122,7 +122,7 @@ describe("starting a session from the phone", () => {
     expect(mocks.app.refreshSessions).toHaveBeenCalled();
   });
 
-  it("keeps the draft id when the Mac's reply is lost, so starting it again finds the first session", async () => {
+  it("keeps the draft id when the computer's reply is lost, so starting it again finds the first session", async () => {
     mocks.app.api.createSession.mockResolvedValueOnce({ created: false, message: "The paired-device connection or account changed." });
     await render(<NewSessionScreen />);
     await click("Quick chat");
@@ -147,10 +147,10 @@ describe("starting a session from the phone", () => {
     expect(button("New worktree")).toBeUndefined();
   });
 
-  it("says when the Mac cannot start sessions for a phone", async () => {
+  it("says when the computer cannot start sessions for a phone", async () => {
     mocks.app.api.newSessionOptions.mockResolvedValue(null);
     await render(<NewSessionScreen />);
-    expect(container.textContent).toContain("Update TerminalX on this Mac");
+    expect(container.textContent).toContain("Update TerminalX on this computer");
   });
 
   it("no longer puts New session on the sessions screen: it is the tab bar's", async () => {
@@ -159,19 +159,19 @@ describe("starting a session from the phone", () => {
   });
 });
 
-describe("this Mac's settings on the phone", () => {
-  it("reloads the open switch when the Mac's settings file changes", async () => {
+describe("this computer's settings on the phone", () => {
+  it("reloads the open switch when the computer's settings file changes", async () => {
     await render(<SettingsScreen />);
     mocks.app.api.macSettings.mockResolvedValue({ nativeCodex: true });
     await act(async () => mocks.app.api.onSettingsChanged.mock.calls[0][0]());
     expect((container.querySelector("input[aria-label='Native Codex']") as HTMLInputElement).checked).toBe(true);
   });
 
-  it("turns Native Codex on for the Mac's next Codex sessions", async () => {
+  it("turns Native Codex on for the computer's next Codex sessions", async () => {
     await render(<SettingsScreen />);
     // Under the machine's name (#987), not "This Mac".
     expect(container.textContent).toContain("Studio");
-    expect(container.textContent).not.toContain("This Mac");
+    expect(container.textContent).not.toContain("This computer");
     const toggle = container.querySelector("input[aria-label='Native Codex']") as HTMLInputElement;
     expect(toggle.checked).toBe(false);
     await act(async () => { toggle.click(); });
@@ -179,7 +179,7 @@ describe("this Mac's settings on the phone", () => {
     expect((container.querySelector("input[aria-label='Native Codex']") as HTMLInputElement).checked).toBe(true);
   });
 
-  it("puts the switch back and says why when the Mac refuses", async () => {
+  it("puts the switch back and says why when the computer refuses", async () => {
     mocks.app.api.setNativeCodex.mockRejectedValue(new Error("this paired device is read-only"));
     await render(<SettingsScreen />);
     await act(async () => { (container.querySelector("input[aria-label='Native Codex']") as HTMLInputElement).click(); });
@@ -201,7 +201,7 @@ describe("choosing an agent account from the phone", () => {
   const withAccounts = {
     ...options,
     agents: [
-      { ...options.agents[0], accounts: [{ id: "local", label: "This Mac's login", agent: "claude" }, { id: WORK, label: "Work · Max", agent: "claude" }], defaultAccount: "local", projectDefaults: { "p-repo": WORK } },
+      { ...options.agents[0], accounts: [{ id: "local", label: "This computer's login", agent: "claude" }, { id: WORK, label: "Work · Max", agent: "claude" }], defaultAccount: "local", projectDefaults: { "p-repo": WORK } },
       options.agents[1], options.agents[2],
     ],
   };
@@ -213,10 +213,10 @@ describe("choosing an agent account from the phone", () => {
   }
 
   it("shows no Account section with one account, and names none in the request", async () => {
-    const one = { ...claude, accounts: [{ id: "local", label: "This Mac's login", agent: "claude" }] };
+    const one = { ...claude, accounts: [{ id: "local", label: "This computer's login", agent: "claude" }] };
     await render(<Form agent={one} initial={initialChoices(options)} />);
     expect(container.textContent).not.toContain("Account");
-    expect(button("This Mac's login")).toBeUndefined();
+    expect(button("This computer's login")).toBeUndefined();
     expect(container.querySelector("output")!.textContent).toBe("none");
     // A Mac without accounts sends no `accounts`: the form and request are as before.
     await render(<Form agent={options.agents[0] as NewSessionAgent} initial={initialChoices(options)} />);
@@ -228,10 +228,10 @@ describe("choosing an agent account from the phone", () => {
     await render(<Form agent={claude} initial={initialChoices(withAccounts)} />);
     expect(container.textContent).toContain("Account");
     expect(button("Work · Max")!.getAttribute("aria-pressed")).toBe("true");
-    expect(button("This Mac's login")!.getAttribute("aria-pressed")).toBe("false");
+    expect(button("This computer's login")!.getAttribute("aria-pressed")).toBe("false");
     expect(container.querySelector("output")!.textContent).toBe(WORK);
-    await click("This Mac's login");
-    expect(button("This Mac's login")!.getAttribute("aria-pressed")).toBe("true");
+    await click("This computer's login");
+    expect(button("This computer's login")!.getAttribute("aria-pressed")).toBe("true");
     expect(container.querySelector("output")!.textContent).toBe("local");
     // A quick chat has no project default: the agent's applies.
     await render(<Form agent={claude} initial={{ ...initialChoices(withAccounts), where: { quick: true } }} />);
@@ -245,7 +245,7 @@ describe("choosing an agent account from the phone", () => {
     await render(<NewSessionScreen />);
     // The project's default is chosen first.
     expect(button("Work · Max")!.getAttribute("aria-pressed")).toBe("true");
-    await click("This Mac's login");
+    await click("This computer's login");
     await type("First message", "Fix the login redirect");
     await click("Start session");
     expect(mocks.app.api.createSession).toHaveBeenLastCalledWith(expect.objectContaining({ agent: "claude", account: "local" }), "draft-1");
@@ -254,14 +254,14 @@ describe("choosing an agent account from the phone", () => {
     await render(<NewSessionScreen key="again" />);
     await type("First message", "Fix the login redirect");
     await click("Start session");
-    await click("This Mac's login");
+    await click("This computer's login");
     await click("Start session");
     const ids = mocks.app.api.createSession.mock.calls.slice(-2).map((call: unknown[]) => call[1]);
     expect(ids[0]).not.toBe(ids[1]);
     expect(mocks.app.api.createSession.mock.calls.at(-2)[0]).toMatchObject({ account: WORK });
   });
 
-  it("reads accounts from the Mac with no token field, and sends the account chosen", async () => {
+  it("reads accounts from the computer with no token field, and sends the account chosen", async () => {
     const calls: [string, unknown][] = [];
     const host = new HostApi({ request: vi.fn(async (method: string, params?: unknown) => {
       calls.push([method, params]);

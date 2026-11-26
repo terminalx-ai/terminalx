@@ -101,7 +101,7 @@ export default function SettingsScreen() {
 
     <SectionTitle>Privacy and help</SectionTitle>
     <Card>
-      <LinkRow label="How your data stays on your Mac" onPress={() => router.push("/privacy")} />
+      <LinkRow label="How your data stays on your computer" onPress={() => router.push("/privacy")} />
       <LinkRow label="Connection log" divided onPress={() => router.push("/connection-log")} />
       <LinkRow label="Send a support report" divided onPress={() => router.push("/support-report")} />
       <View style={[styles.linkRow, { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }]}><Text style={[styles.linkLabel, styles.flex, { color: palette.ink }]}>Version</Text><Text selectable style={[styles.value, { color: palette.muted }]}>{appVersion()}</Text></View>

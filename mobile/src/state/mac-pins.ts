@@ -50,7 +50,7 @@ export function useMacPins() {
     try {
       result = await change();
     } catch (cause) {
-      Alert.alert(failed, cause instanceof Error ? cause.message : "The Mac could not be reached. Try again.");
+      Alert.alert(failed, cause instanceof Error ? cause.message : "The computer could not be reached. Try again.");
       return;
     }
     if (!result.done) { Alert.alert(failed, result.message); return; }

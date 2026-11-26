@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { thisComputer } from "@/lib/platform";
+import { isMac, thisComputer } from "@/lib/platform";
 import QRCode from "qrcode";
 import { Check, Copy, Loader2, RefreshCw, Smartphone, X } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -130,16 +130,17 @@ function PairPhoneBody() {
           {mode === "automatic" && <RelayLine signedIn={signedIn} accountReady={account.ready} accountBusy={account.busy} status={status} />}
           <div className={cn(sectionLabel, "mt-1")}>On the phone</div>
           <ol className={cn(soft, "grid list-decimal gap-1 pl-4")}>
-            <li>Open TerminalX and tap Pair a Mac</li>
+            <li>Open TerminalX and tap Add a machine (+)</li>
             <li>Scan this code, then compare the fingerprint</li>
             <li>Approve here when the phone asks</li>
           </ol>
           <label className="mt-1 flex items-center gap-3">
-            <span className="text-[12.5px]">Keep {thisComputer} awake while a phone is connected</span>
+            <span className="text-[12.5px]">Keep {thisComputer} awake while a phone is connected{!isMac && <span className="block text-xs text-muted-foreground">Available on macOS only.</span>}</span>
             <Switch
               className="ml-auto"
               aria-label={`Keep ${thisComputer} awake while a phone is connected`}
-              checked={status.keepAwake}
+              disabled={!isMac}
+              checked={isMac && status.keepAwake}
               onCheckedChange={(enabled) => void setKeepAwake(enabled)}
             />
           </label>
