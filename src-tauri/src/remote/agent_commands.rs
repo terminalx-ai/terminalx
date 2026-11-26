@@ -315,6 +315,7 @@ pub fn reply(session_id: &str, tab_id: &str, outcome: &str, category: Option<&st
     let (code, fallback) = match reason {
         "tab-unknown" => ("not_found", "no such tab"),
         "forbidden" => ("forbidden", "this needs driver access to the tab, or the right to approve for a decision"),
+        super::collab::v2::EVERYONE_TAB_READ_ONLY => ("forbidden", "Everyone Write requires an owned tab that asks before running commands"),
         "lease-held" => ("lease_held", "someone else is driving this tab"),
         "payload-invalid" => ("invalid_params", "the command is malformed"),
         crate::cloud_agents::mailbox::ATTACHMENT_MISSING => ("invalid_params", "an image of this message did not reach the runtime"),

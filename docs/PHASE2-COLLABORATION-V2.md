@@ -27,11 +27,15 @@ member/provenance. Queued work keeps its original stamp rather than acquiring a
 new one at delivery. Generation changes and legacy responses invalidate active
 v2 authorization.
 
-Admission is per tab. Everyone prose requires an owned supported engine, known
-stored and pending modes, and a raw current provider stance. Claude `dontAsk`,
-bypass, unknown modes, Codex `never`, unknown approval/sandbox combinations,
-shells and hand-started/adopted engines fail closed. Approval counts do not prove
-safety. A raw terminal write taints that PTY launch until managed replacement;
+Admission is per tab. Everyone prose requires an owned supported engine, a
+stored Ask mode (`manual`, `plan`, or `acceptEdits` and their aliases), an
+Ask mode for any pending change, and a compatible raw current provider stance.
+Auto, Claude `dontAsk`, bypass, unknown modes, Codex `never`, unknown
+approval/sandbox combinations, shells, and hand-started or adopted engines fail
+closed. Refused drives return `everyone-tab-read-only` as direct RPC
+`error.data.reason` or mailbox receipt category. Tab creation and raw
+terminal input return `everyone-explicit-access-required` to participants
+whose drive authority comes from Everyone. Approval counts do not prove safety. A raw terminal write taints that PTY launch until managed replacement;
 a delayed safe provider report cannot clear that latch.
 
 Mailbox judgment/application and follow-up dispatch serialize against policy

@@ -107,6 +107,13 @@ pub(crate) enum Action {
     Configure,
 }
 
+pub(crate) const EVERYONE_TAB_READ_ONLY: &str = "everyone-tab-read-only";
+pub(crate) const EVERYONE_EXPLICIT_ACCESS_REQUIRED: &str = "everyone-explicit-access-required";
+
+#[derive(Debug, thiserror::Error)]
+#[error("Everyone Write requires an owned tab that asks before running commands")]
+pub(crate) struct EveryoneTabReadOnly;
+
 /// A current owned supported engine's raw report, kept distinct from saved
 /// settings and next-start intent. None, adopted/by-hand/shell or unsupported
 /// engines provide no witness. Approval counts do not appear here.
@@ -121,12 +128,12 @@ pub(crate) struct TabWitness {
 
 impl TabWitness {
     pub fn allows_everyone(&self) -> bool {
-        let known = |mode: &str| matches!(mode, "plan" | "manual" | "default" | "ask" | "auto" | "acceptEdits" | "accept_edits");
-        if !self.owned || !known(&self.stored_mode) || self.pending_mode.as_deref().is_some_and(|mode| !known(mode)) {
+        let asks = |mode: &str| matches!(mode, "plan" | "manual" | "default" | "ask" | "acceptEdits" | "accept_edits");
+        if !self.owned || !asks(&self.stored_mode) || self.pending_mode.as_deref().is_some_and(|mode| !asks(mode)) {
             return false;
         }
         match (self.harness.as_str(), &self.actual) {
-            ("claude", Some(Stance::Mode { mode })) => known(mode),
+            ("claude", Some(Stance::Mode { mode })) => asks(mode),
             ("codex", Some(Stance::Sandboxed { approval, sandbox })) => {
                 approval == "on-request" && matches!(sandbox.as_str(), "read-only" | "workspace-write")
             }
@@ -338,8 +345,8 @@ impl RuntimePolicy {
             Action::Configure => ensure!(member.access().can_configure() && member.write_source != Some(WriteSource::Everyone), "explicit configuration authority required"),
             Action::Drive => {
                 ensure!(member.access().can_drive(), "driver access required");
-                if member.write_source == Some(WriteSource::Everyone) {
-                    ensure!(witness.is_some_and(TabWitness::allows_everyone), "Everyone drive requires a current safe owned tab");
+                if member.write_source == Some(WriteSource::Everyone) && !witness.is_some_and(TabWitness::allows_everyone) {
+                    return Err(EveryoneTabReadOnly.into());
                 }
             }
         }

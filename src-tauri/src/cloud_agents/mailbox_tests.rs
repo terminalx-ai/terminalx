@@ -290,7 +290,9 @@ fn phase2_collaboration_v2_everyone_drive_is_per_tab_and_explicit_approval_is_in
     h.ops.v2_witnesses.lock().unwrap().insert("tab-1".into(), v2_safe_witness());
     h.ops.v2_witnesses.lock().unwrap().insert("tab-2".into(), unsafe_tab);
     let unsafe_send = lease_for(&h.agents, "unsafe", "tab-2", "send", json!({"v": 1, "text": "unsafe"}));
-    assert_eq!(stamped_lease_fixture(&h.agents, &unsafe_send).outcome, "rejected");
+    let receipt = stamped_lease_fixture(&h.agents, &unsafe_send);
+    assert_eq!(receipt.outcome, "rejected");
+    assert_eq!(receipt.category.as_deref(), Some("everyone-tab-read-only"));
     let safe_send = lease(&h.agents, "safe", "send", json!({"v": 1, "text": "safe", "mode": "bypassPermissions"}));
     let receipt = stamped_lease_fixture(&h.agents, &safe_send);
     assert_eq!(receipt.outcome, "applied", "another unsafe tab cannot prohibit safe-tab prose");
@@ -308,10 +310,36 @@ fn phase2_collaboration_v2_everyone_drive_is_per_tab_and_explicit_approval_is_in
 }
 
 #[test]
+fn phase2_collaboration_v2_org_only_driver_cannot_approve_or_steer_after_bypass_switch() {
+    let h = harness();
+    v2_collaboration(&h, v2_snapshot("1", "driver", false, json!("everyone")));
+    h.ops.pending.lock().unwrap().push("r1".into());
+    h.ops.v2_witnesses.lock().unwrap().insert("tab-1".into(), v2_safe_witness());
+    let decision = lease(&h.agents, "approval", "permission-decision",
+        json!({"v": 1, "requestId": "r1", "optionId": "allow"}));
+    assert_eq!(stamped_lease_fixture(&h.agents, &decision).outcome, "rejected");
+    assert!(h.ops.decisions.lock().unwrap().is_empty());
+
+    let send = lease(&h.agents, "initial", "send", json!({"v": 1, "text": "inspect"}));
+    assert_eq!(stamped_lease_fixture(&h.agents, &send).outcome, "applied");
+    *h.ops.busy.lock().unwrap() = true;
+    h.ops.v2_witnesses.lock().unwrap().get_mut("tab-1").unwrap().pending_mode = Some("bypassPermissions".into());
+    let steer = lease(&h.agents, "after-switch", "steer", json!({"v": 1, "text": "continue"}));
+    let receipt = stamped_lease_fixture(&h.agents, &steer);
+    assert_eq!(receipt.category.as_deref(), Some("everyone-tab-read-only"));
+}
+
+#[test]
 fn phase2_collaboration_v2_encrypted_mailbox_requires_stored_pending_and_raw_actual_mode_witness() {
     use crate::harness::settings::Stance;
     let mut cases = vec![("safe Claude", v2_safe_witness(), true)];
-    for mode in ["", "bypassPermissions", "dontAsk", "future-mode", "never, workspace-write"] {
+    for (saved, actual) in [("plan", "plan"), ("manual", "default"), ("acceptEdits", "acceptEdits")] {
+        let mut witness = v2_safe_witness();
+        witness.stored_mode = saved.into();
+        witness.actual = Some(Stance::Mode { mode: actual.into() });
+        cases.push(("supported asking mode", witness, true));
+    }
+    for mode in ["", "auto", "bypassPermissions", "dontAsk", "future-mode", "never, workspace-write"] {
         let mut witness = v2_safe_witness();
         witness.stored_mode = mode.into();
         cases.push(("stored unsafe or unknown", witness, false));

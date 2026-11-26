@@ -242,6 +242,15 @@ pub fn decide(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> an
     decided
 }
 
+fn collaboration_refusal(error: &anyhow::Error) -> &'static str {
+    use crate::remote::collab::v2::{EveryoneTabReadOnly, EVERYONE_TAB_READ_ONLY};
+    if error.is::<EveryoneTabReadOnly>() {
+        EVERYONE_TAB_READ_ONLY
+    } else {
+        "collaboration-policy-changed"
+    }
+}
+
 fn judge(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> anyhow::Result<()>) -> Decided {
     let refused = |category: &'static str, extra: Value| Decided::Refused(("rejected", Some(category), extra));
     let Some(tab) = agents.tab(command.tab_id) else {
@@ -254,8 +263,8 @@ fn judge(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> anyhow:
     if let Some(collab) = agents.collab() {
         let action = if command.kind == "permission-decision" { crate::remote::collab::v2::Action::Approve } else { crate::remote::collab::v2::Action::Drive };
         let witness = agents.ops.collaboration_v2_witness(&tab.session_id, command.tab_id);
-        if collab.runtime_policy.admit(command.actor_id, command.policy_stamp.as_ref(), action, witness.as_ref()).is_err() {
-            return refused("collaboration-policy-changed", json!({}));
+        if let Err(error) = collab.runtime_policy.admit(command.actor_id, command.policy_stamp.as_ref(), action, witness.as_ref()) {
+            return refused(collaboration_refusal(&error), json!({}));
         }
         if collab.runtime_policy.everyone(command.actor_id) && typed_text(command).is_some_and(slash::is_command) {
             // Everyone-provenance input cannot use commands to change stance,
@@ -329,8 +338,8 @@ fn judge(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> anyhow:
     }
     if let Some(permit) = crate::remote::collab::v2::current() {
         let witness = agents.ops.collaboration_v2_witness(&tab.session_id, command.tab_id);
-        if permit.check(witness.as_ref()).is_err() {
-            return refused("collaboration-policy-changed", json!({}));
+        if let Err(error) = permit.check(witness.as_ref()) {
+            return refused(collaboration_refusal(&error), json!({}));
         }
     }
     if let Err(error) = mark() {
