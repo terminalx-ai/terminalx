@@ -69,6 +69,21 @@ describe("before you can delete", () => {
     }]);
   });
 
+  it("shows a general row for a code it has no words for, or one without its organization's name: never an empty card", () => {
+    expect(blockerRows([{ code: "billing_hold", organizationId: "org 2", organizationName: "Contoso" }])).toEqual([{
+      key: "billing_hold:org 2",
+      title: "Something in Contoso stands in the way",
+      detail: "This app cannot show what it is. Open the web console to see it.",
+      consoleUrl: "https://console.terminalx.ai/organizations/org%202",
+    }]);
+    expect(blockerRows([{ code: "sole_owner_with_members", organizationId: null, organizationName: " ", otherMembers: 2 }])).toEqual([{
+      key: "sole_owner_with_members:0",
+      title: "Something stands in the way",
+      detail: "This app cannot show what it is. Open the web console to see it.",
+      consoleUrl: "https://console.terminalx.ai",
+    }]);
+  });
+
   it("says one other member as one", () => {
     expect(blockerRows([{ code: "sole_owner_with_members", organizationId: "o", organizationName: "Northwind", otherMembers: 1 }])[0]!.detail)
       .toBe("You are its only owner and it has 1 other member. Make that member the owner, or remove them. The phone cannot change owners yet. Open the web console to do it.");
@@ -78,19 +93,20 @@ describe("before you can delete", () => {
     expect(blockerRows([{ code: "last_admin" }])).toEqual([{ key: "last_admin:0", title: "The only admin account", detail: "This is the only admin account, so it cannot be deleted.", consoleUrl: null }]);
   });
 
-  it("has the final words for the clean-up refusals and none for a code it does not know", () => {
+  it("has the final words for the clean-up refusals, and a general row for a code it does not know", () => {
     const rows = blockerRows([
       { code: "cloud_cleanup_required", organizationId: "org_1", organizationName: "Northwind" },
       { code: "session_runtime_cleanup_required", organizationId: "org_1", organizationName: "Northwind" },
-      { code: "something_new", organizationId: "org_1", organizationName: "<b>raw</b>" },
+      { code: "something_new", organizationId: "org_1", organizationName: "Northwind" },
     ]);
     expect(rows.map(({ title, detail }) => [title, detail])).toEqual([
       ["Clean up Northwind", "It still holds runtime builds, environment images or other resources at the provider. Remove them on its page in the web console."],
       ["Agent sessions still running in Northwind", "An agent session in Northwind has not shut down yet. Wait for it to end, then confirm again."],
+      ["Something in Northwind stands in the way", "This app cannot show what it is. Open the web console to see it."],
     ]);
     expect(rows.every((row) => row.consoleUrl === consoleOrganizationUrl("org_1"))).toBe(true);
     // What is drawn: the titles and details (the key only tells rows apart).
-    expect(JSON.stringify(rows.map(({ title, detail }) => [title, detail]))).not.toMatch(/cleanup_required|something_new|raw/);
+    expect(JSON.stringify(rows.map(({ title, detail }) => [title, detail]))).not.toMatch(/cleanup_required|something_new/);
   });
 });
 

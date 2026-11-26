@@ -1,6 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { AppState } from "react-native";
-import { CloudApiError, type CloudApi } from "../cloud/api";
+import { CloudApiError, NotSentSignedOutError, type CloudApi } from "../cloud/api";
 import {
   ACCOUNT_DELETION_ERRORS as E,
   accountDeletionText as T,
@@ -10,6 +10,7 @@ import {
   type AccountDeletionAttempt,
   type AccountDeletionRead,
 } from "./deletion";
+import { forgetConfirmedDeletion, rememberConfirmedDeletion, setDeletionPageOpen } from "./confirmed-deletion";
 import { rememberPendingDeletion } from "./pending-deletion";
 
 /** How often the page asks again while running cloud workspaces are being stopped (they settle within 15 minutes). */
@@ -21,7 +22,10 @@ export type DeletionNotice =
   | { kind: "blocked" }
   | { kind: "unknown" }
   | { kind: "offline" }
-  | { kind: "other-account" };
+  | { kind: "other-account" }
+  /** Sign in again was held at the private beta: that address has no account. */
+  | { kind: "no-account" }
+  | { kind: "sign-in-failed" };
 
 export type DeletionPhase =
   | { kind: "loading" }
@@ -48,13 +52,17 @@ export interface AccountDeletionDeps {
   api: Pick<CloudApi, "accountDeletion" | "requestAccountDeletion"> | null;
   /** The account's own address: the page sends nothing until what was typed matches it. */
   email: string | null;
+  /** The account's id: a confirmation is kept under it until it is settled, also after the page closes. */
+  userId: string | null;
   online: boolean;
-  reauthenticate(): Promise<"signed-in" | "closed" | "other-account">;
+  reauthenticate(): Promise<ReauthOutcome>;
   forgetDeletedAccount(): Promise<void>;
   /** A provider's name as people know it, from the organization of that workspace; the attempt names it by id. */
   providerName?(providerId: string, workspaceId: string | null): string;
   wait?: (ms: number) => Promise<void>;
 }
+
+export type ReauthOutcome = "signed-in" | "closed" | "other-account" | "no-account";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -68,7 +76,8 @@ function answeredRefusal(error: unknown): boolean {
 
 /** Signed out by the server: after confirming, that is the deletion being scheduled (every device is signed out). */
 function signedOut(error: unknown): boolean {
-  return error instanceof CloudApiError && error.status === 401;
+  // Only a 401 the server sent: one the phone made because it holds no session says nothing about the deletion.
+  return error instanceof CloudApiError && error.status === 401 && !(error instanceof NotSentSignedOutError);
 }
 
 /**
@@ -100,11 +109,14 @@ export class AccountDeletionFlow {
   /** The page is (again) on screen: answers land on it. */
   open(): void {
     this.closed = false;
+    setDeletionPageOpen(true);
   }
 
   /** The page went away: a late answer changes nothing, and following stops. */
   close(): void {
     this.closed = true;
+    // What follows a confirmation from here on is the app's (`useSettleConfirmedDeletion`), until it is settled.
+    setDeletionPageOpen(false);
   }
 
   private set(change: Partial<DeletionState>): void {
@@ -134,8 +146,11 @@ export class AccountDeletionFlow {
     let value: AccountDeletionRead;
     try {
       value = await api.accountDeletion();
-    } catch {
-      if (read === this.reads && this.state.phase.kind === "loading") this.set({ phase: { kind: "unreadable" } });
+    } catch (error) {
+      if (read !== this.reads) return;
+      // The final deletion has started: the server refuses the read, and the page says so rather than "check your connection".
+      if (error instanceof CloudApiError && error.code === E.inProgress) this.set({ phase: { kind: "finishing" } });
+      else if (this.state.phase.kind === "loading") this.set({ phase: { kind: "unreadable" } });
       return;
     }
     if (this.finished || read !== this.reads) return;
@@ -145,8 +160,9 @@ export class AccountDeletionFlow {
     // Opened again while running ones are stopping, or after the final deletion started.
     if (attempt?.state === "stopping" && !this.busy) {
       this.busy = true;
-      this.set({ sending: "stopping" });
-      void this.follow(value.deleted.runningWorkspaces.length);
+      const running = value.deleted.runningWorkspaces.length;
+      // As after confirming here: the day the stopping attempt says is kept, for when every device is signed out.
+      void this.settle(attempt, running).then((stopping) => stopping ? this.follow(running) : undefined);
     } else if (attempt?.state === "deleting") this.set({ phase: { kind: "finishing" } });
   }
 
@@ -181,7 +197,10 @@ export class AccountDeletionFlow {
     this.busy = true;
     const running = read.deleted.runningWorkspaces.length;
     this.set({ mismatch: false, notice: null, sending: running ? "stopping" : "deleting" });
+    const { userId } = this.deps;
     void (async () => {
+      // Kept before it is sent: leaving the page, or the app closing, before it is settled does not lose it.
+      if (userId) await rememberConfirmedDeletion({ userId, deleteAfter: null });
       let attempt: AccountDeletionAttempt;
       try {
         attempt = await api.requestAccountDeletion(confirmation);
@@ -197,6 +216,8 @@ export class AccountDeletionFlow {
     const code = error instanceof CloudApiError ? error.code : "";
     this.busy = false;
     this.set({ sending: null });
+    // Refused for certain: nothing is left to settle. Already asked, or no answer: what the server holds decides.
+    if (code !== E.alreadyRequested && code !== E.inProgress && (code === E.recentSignIn || code === E.mismatch || code === E.blocked || answeredRefusal(error))) await forgetConfirmedDeletion();
     if (code === E.recentSignIn) {
       if (this.state.read) this.set({ read: { ...this.state.read, recentSignIn: false }, notice: { kind: "stale" } });
     } else if (code === E.mismatch) {
@@ -224,6 +245,7 @@ export class AccountDeletionFlow {
     this.finished = true;
     this.busy = false;
     this.set({ sending: null, notice: null, phase: { kind: "scheduled", deleteAfter, graceDays: this.graceDays(), stopped } });
+    await forgetConfirmedDeletion();
     // Settings says the day only when the server said it; no day is made up here.
     if (deleteAfter !== null) await rememberPendingDeletion(deleteAfter);
     await this.deps.forgetDeletedAccount();
@@ -238,6 +260,7 @@ export class AccountDeletionFlow {
         const at = Date.parse(attempt.deleteAfter ?? "");
         if (Number.isFinite(at)) this.stoppingDeleteAfter = at;
         this.set({ sending: "stopping" });
+        if (this.deps.userId) await rememberConfirmedDeletion({ userId: this.deps.userId, deleteAfter: this.stoppingDeleteAfter });
         return true;
       }
       case "scheduled": {
@@ -247,10 +270,12 @@ export class AccountDeletionFlow {
       }
       case "deleting":
         this.busy = false;
+        await forgetConfirmedDeletion();
         this.set({ sending: null, phase: { kind: "finishing" } });
         return false;
       case "refused": {
         this.busy = false;
+        await forgetConfirmedDeletion();
         // Nothing was scheduled: a later try makes a new attempt with its own day.
         this.stoppingDeleteAfter = null;
         const names = new Map((this.state.read?.deleted.runningWorkspaces ?? []).map((workspace) => [workspace.id, workspace.name]));
@@ -315,6 +340,7 @@ export class AccountDeletionFlow {
       return;
     }
     // Nothing under way: the earlier request changed nothing.
+    await forgetConfirmedDeletion();
     this.busy = false;
     this.set({ sending: null, notice: null });
   }
@@ -323,12 +349,13 @@ export class AccountDeletionFlow {
     if (this.busy || this.state.signingIn) return;
     this.set({ signingIn: true });
     void this.deps.reauthenticate().then(async (outcome) => {
-      if (outcome === "other-account") this.set({ notice: { kind: "other-account" } });
+      if (outcome === "other-account" || outcome === "no-account") this.set({ notice: { kind: outcome } });
       if (outcome === "signed-in") {
-        if (this.state.notice?.kind === "stale" || this.state.notice?.kind === "other-account") this.set({ notice: null });
+        const kind = this.state.notice?.kind;
+        if (kind === "stale" || kind === "other-account" || kind === "no-account" || kind === "sign-in-failed") this.set({ notice: null });
         await this.load(true);
       }
-    }, () => undefined).finally(() => this.set({ signingIn: false }));
+    }, () => { this.set({ notice: { kind: "sign-in-failed" } }); }).finally(() => this.set({ signingIn: false }));
   };
 }
 

@@ -96,6 +96,12 @@ export const accountDeletionText = {
   goneTeamDetail: "You are its only member",
   goneLeaveMany: (names: string) => `You leave ${names}; they keep their work`,
   otherAccount: (email: string) => `That was another account. Sign in again with ${email}.`,
+  // Not in copy.mjs (PR "Wording to approve"): a sign-in again held at the private beta, and one that did not finish.
+  noAccount: (email: string) => `That address has no TerminalX account. Sign in again with ${email}.`,
+  signInFailed: "Signing in did not finish. Try again.",
+  // Not in copy.mjs (PR "Wording to approve"): a blocker this app has no words for, or one without its organization's name.
+  otherBlockerTitle: (org: string | null) => org ? `Something in ${org} stands in the way` : "Something stands in the way",
+  otherBlocker: "This app cannot show what it is. Open the web console to see it.",
   // Stand-ins in failStop when a name is missing.
   aProvider: "the provider",
   aWorkspace: `a ${ONE}`,
@@ -202,26 +208,27 @@ const BLOCKERS = ["sole_owner_with_members", "last_admin", "session_runtime_clea
 export interface BlockerRow { key: string; title: string; detail: string; consoleUrl: string | null }
 
 /**
- * Before you can delete, one row per blocker the phone has words for. A code
- * it does not know is left out of the list; the page still counts it as
- * standing in the way.
+ * Before you can delete, one row per blocker. A code the phone has no words
+ * for, or one that came without its organization's name, is a general row
+ * that opens the web console: never left out, so the card is never empty.
  */
 export function blockerRows(blockers: readonly AccountDeletionBlocker[]): BlockerRow[] {
   return blockers.flatMap((blocker, index): BlockerRow[] => {
     const org = blocker.organizationName?.trim() || null;
     const url = blocker.organizationId ? consoleOrganizationUrl(blocker.organizationId) : null;
     const key = `${blocker.code}:${blocker.organizationId ?? index}`;
+    const general: BlockerRow[] = [{ key, title: T.otherBlockerTitle(org), detail: T.otherBlocker, consoleUrl: url ?? WEB_CONSOLE }];
     switch (blocker.code) {
       case "sole_owner_with_members":
-        return org ? [{ key, title: T.owner(org), detail: `${blocker.otherMembers === 1 ? T.ownerDetailOne : T.ownerDetail(blocker.otherMembers ?? 0)} ${T.ownerPhone}`, consoleUrl: url }] : [];
+        return org ? [{ key, title: T.owner(org), detail: `${blocker.otherMembers === 1 ? T.ownerDetailOne : T.ownerDetail(blocker.otherMembers ?? 0)} ${T.ownerPhone}`, consoleUrl: url }] : general;
       case "last_admin":
         return [{ key, title: T.lastAdminTitle, detail: T.lastAdmin, consoleUrl: null }];
       case "cloud_cleanup_required":
-        return org ? [{ key, title: T.cloudCleanup(org), detail: T.cloudCleanupDetailPhone, consoleUrl: url }] : [];
+        return org ? [{ key, title: T.cloudCleanup(org), detail: T.cloudCleanupDetailPhone, consoleUrl: url }] : general;
       case "session_runtime_cleanup_required":
-        return org ? [{ key, title: T.sessionRuntime(org), detail: T.sessionRuntimeDetail(org), consoleUrl: url }] : [];
+        return org ? [{ key, title: T.sessionRuntime(org), detail: T.sessionRuntimeDetail(org), consoleUrl: url }] : general;
       default:
-        return [];
+        return general;
     }
   });
 }

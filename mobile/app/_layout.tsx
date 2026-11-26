@@ -6,7 +6,8 @@ import { StatusBar } from "expo-status-bar";
 import { Alert, Platform, Settings, useColorScheme } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { ACCESS_CODE_ROUTE, accessCodeRouting } from "@mobile/auth/access-code";
-import { CloudProvider } from "@mobile/cloud/CloudProvider";
+import { useSettleConfirmedDeletion } from "@mobile/account/confirmed-deletion";
+import { CloudProvider, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { answer, intentOf } from "@mobile/notification-actions";
 import { AppProvider, useApp } from "@mobile/state/AppProvider";
 import { RowActionSheetHost } from "@mobile/ui/RowActionSheetHost";
@@ -40,6 +41,9 @@ function Navigation() {
   const lightText = useColorScheme() !== "light" || name === "Ember";
   const router = useRouter();
   const app = useApp();
+  const catalog = useCloudCatalog();
+  // A deletion confirmed on the Delete account page and left before it was settled (PRO-584): settled from here.
+  useSettleConfirmedDeletion({ api: catalog?.api ?? null, userId: app.session?.user.userId ?? null, forgetDeletedAccount: app.forgetDeletedAccount });
   const response = Notifications.useLastNotificationResponse();
   // Each response once: the hook hands the same one back after a re-render or relaunch.
   const handled = useRef(new Set<string>());

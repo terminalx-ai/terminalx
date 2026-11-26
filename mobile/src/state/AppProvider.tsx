@@ -82,7 +82,7 @@ interface AppContextValue {
    * signed-in account only (PRO-584: deleting the account asks for a recent
    * sign-in). The new session replaces the old one, which is ended.
    */
-  reauthenticate(): Promise<"signed-in" | "closed" | "other-account">;
+  reauthenticate(): Promise<"signed-in" | "closed" | "other-account" | "no-account">;
   /**
    * The account's deletion is scheduled: the server signed out every device,
    * so this phone forgets the sign-in, its account pairings and (with the
@@ -157,7 +157,7 @@ export function AppProvider({ children }: PropsWithChildren) {
   /** Where every sign-in ends, whichever way it came back: signed in, or held for an access code. */
   const land = useCallback((result: SignInResult) => {
     // A sign-in again as someone else kept nothing: the screen that asked for it says so.
-    if (result.status === "other-account") return;
+    if (result.status === "other-account" || result.status === "no-account") return;
     if (result.status === "signed-in") {
       held.current = null;
       setAccessCode(null);
@@ -555,15 +555,17 @@ export function AppProvider({ children }: PropsWithChildren) {
   const signOut = useCallback(() => endSession(true), [endSession]);
   const forgetDeletedAccount = useCallback(() => endSession(false), [endSession]);
 
-  const reauthenticate = useCallback(async (): Promise<"signed-in" | "closed" | "other-account"> => {
+  const reauthenticate = useCallback(async (): Promise<"signed-in" | "closed" | "other-account" | "no-account"> => {
     const before = session;
     if (!before) return "closed";
     const result = await beginSignIn({ fresh: true, expectUserId: before.user.userId });
     if (!result) return "closed";
+    if (result.status === "no-account") return "no-account";
     if (result.status !== "signed-in") return "other-account";
     land(result);
-    // The sign-in this replaced ends; the new one is already the stored one.
-    void revokeSession(AUTH_CONFIG, before);
+    // The sign-in this replaced ends; the new one is already the stored one. The replaced one as it was stored: this
+    // copy's refresh token may be older than a refresh since, and the server would refuse it without a word.
+    void revokeSession(AUTH_CONFIG, result.replaced ?? before);
     return "signed-in";
   }, [land, session]);
 

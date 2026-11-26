@@ -89,6 +89,19 @@ export class CloudApiError extends Error {
 }
 
 /**
+ * No request was sent: the phone holds no session (signed out, or its refresh was refused). For every screen it is
+ * `account_signed_out` like the server's own refusal; only what needs to know that the server said nothing (the
+ * account deletion, where the server's 401 means "scheduled") tells it apart (PRO-584).
+ */
+export class NotSentSignedOutError extends CloudApiError {
+  readonly sent = false;
+  constructor() {
+    super("account_signed_out", 401);
+    this.name = "NotSentSignedOutError";
+  }
+}
+
+/**
  * The kinds of refusal the cloud setup screens tell apart (connecting
  * compute, agent logins, launching a workspace). Each code the account
  * service answers these routes with is one of them (`REFUSALS`).
@@ -733,8 +746,9 @@ export class CloudApi {
 
   /**
    * Confirm: the server stops the running cloud workspaces, then schedules the
-   * deletion and signs out every device. `confirmationEmail` is the account's
-   * own address, never what was typed. Answers the attempt, `stopping` or
+   * deletion and signs out every device. `confirmationEmail` is what the
+   * person typed, trimmed; the server checks it against the account's address.
+   * Answers the attempt, `stopping` or
    * already `scheduled`; a refusal is a `CloudApiError` with its stable code.
    */
   async requestAccountDeletion(confirmationEmail: string): Promise<AccountDeletionAttempt> {
@@ -1098,7 +1112,7 @@ export class CloudApi {
 
   private async request(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown, headers: Record<string, string> = {}, secrets: readonly string[] = []): Promise<unknown> {
     const token = await this.options.accessToken();
-    if (!token) throw new CloudApiError("account_signed_out", 401);
+    if (!token) throw new NotSentSignedOutError();
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {

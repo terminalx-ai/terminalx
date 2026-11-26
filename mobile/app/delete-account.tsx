@@ -45,6 +45,7 @@ export default function DeleteAccountScreen() {
   const deletion = useAccountDeletion({
     api: catalog?.api ?? null,
     email,
+    userId: app.session?.user.userId ?? null,
     online: app.online,
     reauthenticate: app.reauthenticate,
     forgetDeletedAccount: app.forgetDeletedAccount,
@@ -163,6 +164,8 @@ function NoticeFor({ notice, email, onCheck }: { notice: DeletionNotice; email: 
     case "unknown": return <Notice testID="delete-account-unknown" tone="warning" text={T.failUnknown} action={{ label: T.check, onPress: onCheck }} />;
     case "offline": return <Notice testID="delete-account-offline" tone="danger" text={T.offline} icon={(color) => <WifiOff size={16} color={color} />} />;
     case "other-account": return <Notice testID="delete-account-other-account" tone="warning" text={T.otherAccount(email)} />;
+    case "no-account": return <Notice testID="delete-account-no-account" tone="warning" text={T.noAccount(email)} />;
+    case "sign-in-failed": return <Notice testID="delete-account-sign-in-failed" tone="danger" text={T.signInFailed} />;
   }
 }
 
