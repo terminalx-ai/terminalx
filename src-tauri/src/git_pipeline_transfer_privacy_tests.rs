@@ -73,11 +73,14 @@ pub(super) fn run(root: &Path, managed: bool) {
         let worker = scope.spawn(crate::github_process::queued(|| act(&client)));
         written_rx.recv_timeout(Duration::from_secs(10)).unwrap();
         let frozen = bridge.take(|_| false).unwrap();
-        assert!(frozen.held.is_empty() && frozen.parked.is_empty(), "must be unread listener backlog");
+        // Read while frozen (PRO-589), it goes over as the listener backlog
+        // would have: answered with the new runtime's authority, not this one's.
+        assert!(frozen.parked.is_empty() && frozen.held.iter().all(|(_, _, queued)| *queued), "must be read from the listener backlog");
         acknowledge(&admin, true, managed); acknowledge(&admin, false, managed);
         let replacement = crate::hooks::ControlEndpoint::adopted(endpoint.socket.clone(), endpoint.token.clone());
         let owner = service(root, &replacement);
-        let adopted = crate::hooks::Adopted { own:frozen.own, published:frozen.published, held:Vec::new() };
+        let held = frozen.held.into_iter().map(|(fd, line, queued)| (std::os::unix::net::UnixStream::from(fd), line, queued)).collect();
+        let adopted = crate::hooks::Adopted { own:frozen.own, published:frozen.published, held };
         let (_, next) = crate::hooks::serve_adopted(replacement, adopted, |_| crate::hooks::HookReply::default(), move |request| owner.handle(request)).unwrap();
         next.thaw(); refused(worker.join().unwrap()); bridge = next;
     });

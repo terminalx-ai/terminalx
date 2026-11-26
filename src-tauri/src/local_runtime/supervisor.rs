@@ -72,7 +72,12 @@ pub enum ConnectionState {
     /// (`replace.rs`), and windows attach to the new one in place. `from`:
     /// its version, when it said. `keeping`: it is handed over, and its
     /// agents and terminals go on running (#765); otherwise they stop.
-    Updating { from: Option<String>, to: String, keeping: bool },
+    /// `wait`: earlier attempts were refused as busy, and why (PRO-589).
+    Updating {
+        from: Option<String>, to: String, keeping: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        wait: Option<super::replace::HandoverWait>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

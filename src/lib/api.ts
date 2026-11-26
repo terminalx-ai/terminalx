@@ -2362,8 +2362,16 @@ export type LocalRuntimeState =
   | { state: "unavailable"; message: string; startFailed?: LocalRuntimeStartFailed }
   /** There, but not answering: reconnecting reaches the same wedged runtime (#661). `keeps`: restarting it hands what it runs to a fresh runtime first (#765). */
   | { state: "unresponsive"; message: string; epoch: string | null; keeps: boolean }
-  /** The runtime is being replaced with the one bundled with this app (#730). `from`: its version, when it said. `keeping`: it is handed over, and its agents and terminals keep running (#765). */
-  | { state: "updating"; from: string | null; to: string; keeping: boolean };
+  /** The runtime is being replaced with the one bundled with this app (#730). `from`: its version, when it said. `keeping`: it is handed over, and its agents and terminals keep running (#765). `wait`: earlier attempts were refused as busy (PRO-589). */
+  | { state: "updating"; from: string | null; to: string; keeping: boolean; wait?: LocalRuntimeHandoverWait };
+
+/** The older runtime keeps refusing to hand over because something it runs is still under way, and the desktop keeps asking (PRO-589). */
+export interface LocalRuntimeHandoverWait {
+  /** What the runtime said held it up the last time: the request still open, and for how long. */
+  reason: string;
+  /** Attempts refused as busy in a row. */
+  attempts: number;
+}
 
 /**
  * A runtime older than this app, until it is replaced (#730): at once, keeping what it runs, when it can be handed over
@@ -2385,6 +2393,8 @@ export interface LocalRuntimeOutdated {
   keeps: boolean;
   /** When it `keeps`: what `work` names, as the runtime names it. Restart now sends it back, so that only what was shown stops. */
   unkept: LocalRuntimeWorkItem[];
+  /** The handover has been refused as busy and is being retried (PRO-589); unlike `problem`, kept until it goes through. */
+  handoverWait?: LocalRuntimeHandoverWait;
 }
 
 /** A runtime the desktop started that exited, or never ran, before it attached (PRO-287, `launch.rs`). */
