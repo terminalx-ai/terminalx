@@ -111,12 +111,11 @@ impl Peer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     #[test]
     fn one_mcp_connection_preserves_catalog_and_call_sequence_and_reaps_only_its_helper() {
         let home = tempfile::tempdir().unwrap();
         let driver = home.path().join("driver");
-        std::fs::write(&driver,r#"#!/bin/sh
+        crate::local_vm::fake_helper::install(&driver,r#"#!/bin/sh
 while IFS= read -r line; do
   printf '%s\n' "$line" >> "$HOME/messages"
   case "$line" in
@@ -126,8 +125,7 @@ while IFS= read -r line; do
     *'"id":4,'*) printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"second"}]}}' ;;
   esac
 done
-"#).unwrap();
-        std::fs::set_permissions(&driver, std::fs::Permissions::from_mode(0o700)).unwrap();
+"#);
         let paths = Paths {
             home: home.path().into(),
             driver,
