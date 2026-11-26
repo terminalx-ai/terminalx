@@ -2,11 +2,12 @@
 //! failure. The owner watches on its own clock, independently of PR metadata.
 //! No action here kills a process, answers a permission, or changes a gate.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "macos")]
@@ -21,6 +22,10 @@ pub use validation::validation_pending;
 pub mod commands;
 pub use probe::probe_cli;
 
+/// The most launch records kept (PRO-575). Above it the oldest settled ones are dropped first:
+/// exited or unobserved, and running or waiting ones whose process is gone. The active incident's
+/// own launches, live roots, unsettled starts and pending validation recorders are always kept, so
+/// only those can take the file past it.
 const HISTORY: usize = 256;
 pub const CHANGED: &str = "startup_incident";
 
@@ -85,16 +90,42 @@ pub struct Incident {
     pub escalated_at: Option<i64>,
     pub recovered_at: Option<i64>,
     pub launches: Vec<String>,
-    /// Human waits hold recovery, but do not make their pipelines affected.
-    /// Keep their identities separately to retain dismissal progress on restart.
+    /// The permission waits holding recovery now (see [`Snapshot::holds_recovery`]), rewritten
+    /// on every refresh, so it never outgrows the waits that are live. They do not make their
+    /// pipelines affected.
     #[serde(default)]
     pub recovery_waits: Vec<String>,
     /// Pipelines whose new local checks were held, including dependencies
     /// not themselves exhibiting the signature. No PR metadata is required.
     pub blocked_pipelines: Vec<String>,
     pub probe: Option<probe::Probe>,
+    /// The person hid this incident's banner (PRO-575). Held validation stays held. Cleared
+    /// when the incident gets worse than it was then: see [`Incident::worse_than`].
+    #[serde(default)]
+    pub dismissed: Option<Dismissal>,
 }
 
+/// What the incident looked like when its banner was hidden.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Dismissal {
+    pub at: i64,
+    pub escalated: bool,
+    pub affected_panes: usize,
+}
+
+impl Incident {
+    /// Distinct panes among this incident's launches, as the banner counts them.
+    fn affected_panes(&self, launches: &[Launch]) -> usize {
+        launches.iter().filter(|launch| self.launches.contains(&launch.id)).map(|launch| launch.pane.as_str()).collect::<HashSet<_>>().len()
+    }
+
+    /// "Worse" than when the banner was hidden: the incident has escalated since, or more panes
+    /// are affected than then. Anything else (time passing, probes, waits) keeps it hidden.
+    fn worse_than(&self, dismissal: &Dismissal, launches: &[Launch]) -> bool {
+        self.escalated_at.is_some() && !dismissal.escalated || self.affected_panes(launches) > dismissal.affected_panes
+    }
+}
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
@@ -122,7 +153,7 @@ impl Snapshot {
         if !overdue.is_empty() {
             if self.active().is_none() {
                 self.incidents.push(Incident { id: uuid::Uuid::new_v4().to_string(), detected_at: at,
-                    escalated_at: None, recovered_at: None, launches: vec![], recovery_waits: vec![], blocked_pipelines: vec![], probe: None });
+                    escalated_at: None, recovered_at: None, launches: vec![], recovery_waits: vec![], blocked_pipelines: vec![], probe: None, dismissed: None });
             }
             let incident = self.incidents.last_mut().expect("active incident");
             for id in overdue { if !incident.launches.contains(&id) { incident.launches.push(id); } }
@@ -132,17 +163,78 @@ impl Snapshot {
                 incident.escalated_at = Some(at);
             }
         }
-        // Retire completed history, never a live owner or pending recorder.
-        // Those identities are still needed for census and checkout admission.
-        while self.launches.len() > HISTORY {
-            let removable = self.launches.iter().position(|launch|
-                matches!(launch.phase, Phase::Exited | Phase::Unobserved)
-                    && (launch.recorder.is_none() || launch.phase == Phase::Exited)
-                    && !self.active().is_some_and(|incident| incident.launches.contains(&launch.id) || incident.recovery_waits.contains(&launch.id)));
-            let Some(index) = removable else { break };
-            self.launches.remove(index);
+        if let Some(incident) = self.incidents.iter_mut().rev().find(|incident| incident.recovered_at.is_none()) {
+            if incident.dismissed.as_ref().is_some_and(|dismissal| incident.worse_than(dismissal, &self.launches)) { incident.dismissed = None; }
+        }
+        self.prune();
+    }
+
+    /// Retire settled history beyond [`HISTORY`], oldest first, never a live owner, an unsettled
+    /// start or a pending recorder: those are still needed for census and checkout admission.
+    /// One pass with sets, so a file of thousands of records shrinks on its first refresh.
+    fn prune(&mut self) {
+        let excess = self.launches.len().saturating_sub(HISTORY);
+        if excess > 0 {
+            // Not the waits list read from disk: an old file lists thousands. The waits that hold
+            // recovery are live by definition, and are found again after pruning.
+            let kept: HashSet<&str> = self.active().map(|incident| incident.launches.iter().map(String::as_str).collect()).unwrap_or_default();
+            let retired: HashSet<String> = self.launches.iter().filter(|launch| !kept.contains(launch.id.as_str()) && settled_record(launch))
+                .take(excess).map(|launch| launch.id.clone()).collect();
+            self.launches.retain(|launch| !retired.contains(&launch.id));
         }
         if self.incidents.len() > 16 { self.incidents.drain(..self.incidents.len() - 16); }
+        let known: HashSet<&str> = self.launches.iter().map(|launch| launch.id.as_str()).collect();
+        for incident in &mut self.incidents { incident.recovery_waits.retain(|id| known.contains(id.as_str())); }
+    }
+
+    /// Whether this permission wait holds the incident's recovery (PRO-575). A wait in one of the
+    /// incident's own panes does: the prompt may hide its stalled child. So does a wait that began
+    /// after detection (a launch's progress time is when its wait began, as observing the same
+    /// card again is not progress) by a launch whose startup is not yet proven, since that may be
+    /// a new stall behind the card. A proven launch waiting elsewhere is a person's decision, not a
+    /// startup failure, and does not hold it.
+    fn holds_recovery(incident: &Incident, panes: &HashSet<&str>, launch: &Launch) -> bool {
+        launch.phase == Phase::PermissionPrompt
+            && (panes.contains(launch.pane.as_str()) || !launch.startup_proven && launch.last_progress_at > incident.detected_at)
+    }
+
+    /// Ids of the permission waits holding this incident's recovery now.
+    fn recovery_waits(&self, incident: &Incident) -> Vec<String> {
+        let panes: HashSet<&str> = self.launches.iter().filter(|launch| incident.launches.contains(&launch.id)).map(|launch| launch.pane.as_str()).collect();
+        self.launches.iter().filter(|launch| Self::holds_recovery(incident, &panes, launch)).map(|launch| launch.id.clone()).collect()
+    }
+
+    /// Every launch of the incident has run or closed: running, exited, or unobserved with its
+    /// exact process gone. Losing observation afterwards cannot hide one of them still stalling.
+    fn incident_settled(&self, incident: &Incident) -> bool {
+        self.launches.iter().filter(|launch| incident.launches.contains(&launch.id)).all(|launch| match launch.phase {
+            Phase::Running | Phase::Exited => true,
+            Phase::Unobserved => process_gone(launch),
+            Phase::Spawning | Phase::AwaitingReady | Phase::PermissionPrompt => false,
+        })
+    }
+}
+
+/// History that may be retired: an exit, a lost child (never a pending recorder's), or a running
+/// or waiting record whose exact process birth no longer exists.
+fn settled_record(launch: &Launch) -> bool {
+    match launch.phase {
+        Phase::Exited => true,
+        Phase::Unobserved => launch.recorder.is_none(),
+        Phase::Running | Phase::PermissionPrompt => launch.recorder.is_none() && process_gone(launch),
+        Phase::Spawning | Phase::AwaitingReady => false,
+    }
+}
+
+/// The launch's exact process birth is no longer alive. Unknown identity is never "gone".
+fn process_gone(launch: &Launch) -> bool {
+    let birth = match launch.evidence {
+        Evidence::Readiness => launch.pid_birth.as_deref(),
+        Evidence::SmallUnchangingImage => Some(launch.generation.as_str()),
+    };
+    match (launch.pid, birth) {
+        (Some(pid), Some(birth)) => process_identity(Some(pid)).as_deref() != Some(birth),
+        _ => false,
     }
 }
 
@@ -311,6 +403,22 @@ pub fn start(manager: crate::session::SessionManager, sink: Arc<dyn crate::sink:
 }
 
 pub fn start_probe() -> Result<Snapshot> { probe::start(&directory()?)?; snapshot() }
+
+/// Hide the banner for this open incident (PRO-575). Held validation stays held, and the
+/// dismissal lives in the incident record, so it survives a restart for this incident only.
+pub fn dismiss(incident: &str) -> Result<Snapshot> {
+    update_at(&directory()?, |state| dismiss_in(state, incident, now()))?;
+    snapshot()
+}
+
+fn dismiss_in(state: &mut Snapshot, id: &str, at: i64) -> Result<()> {
+    let index = state.incidents.iter().position(|incident| incident.id == id && incident.recovered_at.is_none())
+        .context("That startup incident is no longer open.")?;
+    let incident = &state.incidents[index];
+    let dismissal = Dismissal { at, escalated: incident.escalated_at.is_some(), affected_panes: incident.affected_panes(&state.launches) };
+    state.incidents[index].dismissed = Some(dismissal);
+    Ok(())
+}
 
 /// Export is an allowlist projection, never serialization of the local record.
 /// In particular panes, PIDs, paths, commands, output, environment and account

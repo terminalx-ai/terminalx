@@ -178,14 +178,16 @@ pub(super) fn refresh(directory: &Path, state: &mut Snapshot, at: i64) -> Result
     // Probe requests also refresh outside the monitor tick. Join newly overdue
     // launches before any caller can recover the existing host incident.
     state.tick(at);
-    let Some(incident) = state.incidents.iter_mut().rev().find(|incident| incident.recovered_at.is_none()) else { return Ok(()) };
-    // Human waits anywhere on this host block recovery. Retain their progress
-    // boundary after dismissal so an older probe cannot clear that wait.
-    // These launches do not belong to the stalled startup: pipeline admission
-    // must not mistake an unrelated permission card for an affected session.
-    for launch in state.launches.iter().filter(|launch| launch.phase == Phase::PermissionPrompt) {
-        if !incident.recovery_waits.contains(&launch.id) { incident.recovery_waits.push(launch.id.clone()); }
-    }
+    let Some(index) = state.incidents.iter().rposition(|incident| incident.recovered_at.is_none()) else { return Ok(()) };
+    // Only waits that may hide this incident's stall hold it (PRO-575): its own panes' waits, and
+    // unproven starts that began waiting after detection. An agent waiting on a person in another
+    // pane does not; nor does its activity, which is no evidence about this incident's launches.
+    // These launches do not belong to the stalled startup: pipeline admission must not mistake
+    // an unrelated permission card for an affected session.
+    let waits = state.recovery_waits(&state.incidents[index]);
+    let settled = state.incident_settled(&state.incidents[index]);
+    let incident = &mut state.incidents[index];
+    incident.recovery_waits = waits;
     let Some(probe) = &mut incident.probe else { return Ok(()) };
     // Treat ids from disk as data, not a path capability.
     let id = uuid::Uuid::parse_str(&probe.id)?;
@@ -199,14 +201,20 @@ pub(super) fn refresh(directory: &Path, state: &mut Snapshot, at: i64) -> Result
     let completed_at = probe.result.as_ref().zip(probe.owner_exit.as_ref())
         .map_or(at, |(result, exit)| result.finished_at.max(exit.finished_at));
     probe.observation_timed_out |= completed_at.saturating_sub(probe.started_at) >= OBSERVE_MS;
-    let still_stalled = state.launches.iter().any(|launch| launch.phase == Phase::PermissionPrompt
-        || incident.launches.contains(&launch.id) && matches!(launch.phase, Phase::Spawning | Phase::AwaitingReady));
-    let last_progress = state.launches.iter().filter(|launch| incident.launches.contains(&launch.id) || incident.recovery_waits.contains(&launch.id))
+    let still_stalled = !incident.recovery_waits.is_empty()
+        || state.launches.iter().any(|launch| incident.launches.contains(&launch.id) && matches!(launch.phase, Phase::Spawning | Phase::AwaitingReady));
+    let last_progress = state.launches.iter().filter(|launch| incident.launches.contains(&launch.id))
         .map(|launch| launch.last_progress_at).max().unwrap_or(incident.detected_at);
     // Both health steps must follow progress. A later completion alone can
-    // contain a shell result from before readiness, exit or a human wait.
+    // contain a shell result from before readiness or exit. Observation lost
+    // after the probe voids it only while one of the incident's launches may
+    // still be stalling unseen: once every one has run or closed (exact process
+    // birth gone), the passing probe stands and recovers it with no new run.
+    // Re-running it automatically instead would start recorder processes on a
+    // timer whenever any pane's short-lived child goes unseen, which it does
+    // every few seconds on a busy Mac, and still never settle the incident.
     let fresh_observation = !state.census_incomplete && probe.started_at > last_progress
-        && state.observation_lost_at.is_none_or(|lost| probe.started_at > lost);
+        && (settled || state.observation_lost_at.is_none_or(|lost| probe.started_at > lost));
     let recorder_succeeded = probe.owner_exit.as_ref().is_some_and(|exit| !exit.failed());
     if fresh_observation && !still_stalled && recorder_succeeded && probe.result.as_ref().is_some_and(|result| healthy(result) && result.finished_at > last_progress) {
         incident.recovered_at = Some(at);

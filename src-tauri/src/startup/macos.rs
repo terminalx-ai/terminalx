@@ -345,6 +345,10 @@ mod tests {
     fn incomplete_census_cannot_recover_with_a_previously_healthy_probe() {
         use super::super::{probe, tests::recorder_exit};
         let directory = tempfile::tempdir().unwrap();
+        // A child that is really alive (this test process): losing sight of it is not its closing.
+        let me = std::process::id();
+        let birth = identity(me).unwrap();
+        let child = |rss, cpu| Child { pane: "tab:a".into(), pid: me, birth: birth.clone(), rss, cpu, threads: 1 };
         let mut state = Snapshot::default();
         observe(&mut state, vec![child(96 * 1024, 10)], &[], 0);
         state.tick(120_000);
@@ -367,7 +371,7 @@ mod tests {
         assert_eq!(state.observation_lost_at, Some(160_000));
         observe(&mut state, vec![], &[], 170_000);
         probe::refresh(directory.path(), &mut state, 170_000).unwrap();
-        assert!(state.active().is_some(), "a complete later census cannot reuse stale probe evidence");
+        assert!(state.active().is_some(), "a complete later census cannot reuse stale probe evidence while the lost child lives");
         observe(&mut state, vec![child(96 * 1024, 10)], &[], 180_000);
         state.tick(180_000);
         assert_eq!(state.incidents.len(), 1);
