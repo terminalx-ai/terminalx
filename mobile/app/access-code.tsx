@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { BackHandler, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { BackHandler, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Stack } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { CircleCheck, UserRound, WifiOff } from "lucide-react-native";
 import { ACCEPTED_PAUSE_MS, ACCESS_CODE_TEXT, refusalText, type AccessCodeAnswer, type AccessCodeRefusal, type AccessCodeRequest } from "@mobile/auth/access-code";
 import { useApp } from "@mobile/state/AppProvider";
 import { clockText, useRemaining } from "@mobile/ui/countdown";
-import { useKeyboardShown } from "@mobile/ui/keyboard";
+import { useKeyboardShown, keyboardAvoidingBehavior } from "@mobile/ui/keyboard";
 import { Notice } from "@mobile/ui/Notice";
 import { Button, Card, EmptyState } from "@mobile/ui/primitives";
 import { Spinner } from "@mobile/ui/Spinner";
@@ -150,7 +150,7 @@ function AccessCodeForm({ request }: { request: AccessCodeRequest }) {
           ? <Notice testID="access-code-unanswered" tone="danger" text={ACCESS_CODE_TEXT.unanswered} action={{ label: ACCESS_CODE_TEXT.tryAgain, onPress: send }} />
           : null;
 
-  return <KeyboardAvoidingView style={[styles.screen, { backgroundColor: palette.page }]} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={insets.top + 44}>
+  return <KeyboardAvoidingView style={[styles.screen, { backgroundColor: palette.page }]} behavior={keyboardAvoidingBehavior()} keyboardVerticalOffset={insets.top + 44}>
     {header}
     <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" style={styles.screen} contentContainerStyle={styles.page}>
       <Text style={[styles.intro, { color: palette.muted }]}>{ACCESS_CODE_TEXT.intro}</Text>

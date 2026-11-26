@@ -19,7 +19,7 @@ import { hostDisplayName } from "@mobile/store/host-name";
 import { canRetry, connectionProblem, isTransportError, mayHaveArrived, problemText, screenMessage } from "@mobile/transport/connection-errors";
 import { Button, Card, EmptyState, StatusDot } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
-import { useKeyboardShown } from "@mobile/ui/keyboard";
+import { useKeyboardShown, keyboardAvoidingBehavior } from "@mobile/ui/keyboard";
 import { showChoices } from "@mobile/ui/choices";
 import { Glass } from "@mobile/ui/glass";
 import { EdgeFade } from "@mobile/ui/EdgeFade";
@@ -574,7 +574,7 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
   const dimmed = connected ? undefined : styles.dimmed;
   // The bar is drawn in this screen, so the view starts where the screen does: no offset.
   // The view makes room for the keyboard with padding, which a floating composer ignores: the inner view is what shrinks, and the composer floats at its foot.
-  return <PromptImageContext.Provider value={imageSource}><KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}><View style={styles.flex}>{noticeLine}<TranscriptList inset={composerHeight} data={items} keyExtractor={(item) => item.key} contentContainerStyle={styles.transcriptRows} earlier={transcriptHeader} ListEmptyComponent={emptyTranscript} renderItem={({ item }) => item.kind === "turn" ? <TranscriptRow row={item.row} /> : <NoteCard note={item.note} first={item.first} />} latest={<>{transcript.compacting ? <CompactingLine /> : null}{transcript.pendingAsks.map((ask) => ask.kind === "questions"
+  return <PromptImageContext.Provider value={imageSource}><KeyboardAvoidingView style={styles.flex} behavior={keyboardAvoidingBehavior()}><View style={styles.flex}>{noticeLine}<TranscriptList inset={composerHeight} data={items} keyExtractor={(item) => item.key} contentContainerStyle={styles.transcriptRows} earlier={transcriptHeader} ListEmptyComponent={emptyTranscript} renderItem={({ item }) => item.kind === "turn" ? <TranscriptRow row={item.row} /> : <NoteCard note={item.note} first={item.first} />} latest={<>{transcript.compacting ? <CompactingLine /> : null}{transcript.pendingAsks.map((ask) => ask.kind === "questions"
   // Until the Mac has said what it takes, nothing can be sent; one that takes no answer shows the question to be answered there.
   ? <QuestionCard key={ask.requestId} ask={ask} stateKey={stateKey} connected={connected} answering={answeringPermission !== null || (connected && answersQuestions === null)} readOnly={answersQuestions === false ? ANSWER_ON_MAC : null} error={permissionErrors[ask.requestId]} onAnswer={(answers) => void answerQuestions(ask, answers)} />
   : <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission !== null} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><SessionControls sessionId={sessionId} tabId={tabId} events={events} asks={transcript.pendingAsks.length} connected={connected} onOpenTab={(next) => router.setParams({ tabId: next, hostId })}>{(controls) => {
@@ -777,7 +777,7 @@ function TerminalPane({ hostId, sessionId, tabId, connected, state }: { hostId: 
     void write(keySequence("enter", modes()));
   };
   const sendsText = mode === "buffered" && input.length > 0;
-  return <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+  return <KeyboardAvoidingView style={styles.flex} behavior={keyboardAvoidingBehavior()}>
     {/* The agent's screen, edge to edge on the terminal's own black, with how the link is doing in a corner. */}
     <View style={[styles.flex, { backgroundColor: palette.terminal }]}>
       {/* The screen and its history, scrolled as any list; a line wider than the screen wraps onto the next. */}

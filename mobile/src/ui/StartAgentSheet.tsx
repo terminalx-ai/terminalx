@@ -15,6 +15,7 @@ import { Button, Card } from "./primitives";
 import { Spinner } from "./Spinner";
 import { TextField } from "./TextField";
 import { useTheme } from "./theme";
+import { keyboardAvoidingBehavior } from "@mobile/ui/keyboard";
 
 /** What became of a start: the tab it opened, and whether its first message may not have reached the agent. */
 export interface StartedTab { tabId: string; promptNotSent: boolean; text: string }
@@ -161,7 +162,7 @@ export function StartAgentSheet({ kind, session, snapshot, sessionId, from, text
   const locked = busy;
   return <Modal visible transparent animationType="slide" onRequestClose={onClose}>
     <Pressable testID="start-sheet-backdrop" accessibilityRole="button" accessibilityLabel="Close" onPress={busy ? undefined : onClose} style={styles.backdrop} />
-    <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined}>
+    <KeyboardAvoidingView behavior={keyboardAvoidingBehavior()}>
       <View testID="start-sheet" accessibilityViewIsModal style={[styles.sheet, { backgroundColor: palette.page, borderColor: palette.border, paddingBottom: insets.bottom + 16 }]}>
         <View style={[styles.handle, { backgroundColor: palette.faint }]} />
         <Text accessibilityRole="header" style={[styles.title, { color: palette.ink }]}>{conversation ? START_WORDS.newConversation : START_WORDS.addTab}</Text>

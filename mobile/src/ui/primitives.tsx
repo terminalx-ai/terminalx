@@ -2,7 +2,7 @@ import { cloneElement, type ReactElement, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View, type PressableProps, type ScrollViewProps, type ViewProps } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LargeTitle } from "./glass";
-import { useTabBarInset } from "./tab-bar-inset";
+import { useInTabs, useTabBarInset } from "./tab-bar-inset";
 import { TopBar, useTopBar } from "./top-bar";
 import { useTheme } from "./theme";
 
@@ -16,12 +16,13 @@ import { useTheme } from "./theme";
 export function Screen({ children, contentContainerStyle, title, titleActions, aboveTitle, refreshControl, ...props }: ScrollViewProps & { title?: string; titleActions?: ReactNode; aboveTitle?: ReactNode }) {
   const { palette } = useTheme();
   const insets = useSafeAreaInsets();
-  // In a tab, the bar floats over the foot of the page: the last of it scrolls clear.
+  // In a tab on iOS, the bar floats over the foot of the page: the last of it scrolls clear.
+  const inTabs = useInTabs();
   const bar = useTabBarInset();
   const top = useTopBar();
   const style = { backgroundColor: palette.page };
-  const content = [styles.screen, { paddingBottom: (bar || insets.bottom) + 24 }, contentContainerStyle];
-  if (!bar) return <ScrollView automaticallyAdjustContentInsets contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" style={style} contentContainerStyle={content} refreshControl={refreshControl} {...props}>{aboveTitle}{title ? <LargeTitle title={title}>{titleActions}</LargeTitle> : null}{children}</ScrollView>;
+  const content = [styles.screen, { paddingBottom: (inTabs ? bar : insets.bottom) + 24 }, contentContainerStyle];
+  if (!inTabs) return <ScrollView automaticallyAdjustContentInsets contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" style={style} contentContainerStyle={content} refreshControl={refreshControl} {...props}>{aboveTitle}{title ? <LargeTitle title={title}>{titleActions}</LargeTitle> : null}{children}</ScrollView>;
   const { contentInset, contentOffset, scrollIndicatorInsets, paddingTop } = top.insets;
   // Where the content is padded rather than inset, the pull-to-refresh spinner is moved below the bar.
   const refresh = refreshControl && paddingTop ? cloneElement(refreshControl as ReactElement<{ progressViewOffset?: number }>, { progressViewOffset: paddingTop }) : refreshControl;

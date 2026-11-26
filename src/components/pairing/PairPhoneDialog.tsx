@@ -55,7 +55,7 @@ function PairPhoneDialog() {
           <div className="min-w-0 leading-4">
             <DialogTitle className="text-sm font-semibold">Pair a phone</DialogTitle>
             <DialogDescription className="truncate text-[11.5px] text-faint">
-              Drive {thisComputer}'s sessions and your cloud workspaces from TerminalX for iPhone
+              Drive {thisComputer}'s sessions and your cloud workspaces from the TerminalX phone app
             </DialogDescription>
           </div>
           <DialogClose asChild>

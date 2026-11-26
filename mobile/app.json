@@ -17,10 +17,17 @@
       }
     },
     "android": {
+      "package": "com.terminalx.next.mobile",
+      "versionCode": 1,
+      "softwareKeyboardLayoutMode": "pan",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#111111"
-      }
+      },
+      "allowBackup": false,
+      "blockedPermissions": [
+        "android.permission.SYSTEM_ALERT_WINDOW"
+      ]
     },
     "plugins": [
       "expo-router",
@@ -47,6 +54,14 @@
         "expo-camera",
         {
           "cameraPermission": "Allow TerminalX to scan a pairing code shown on your Mac."
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
         }
       ],
       "expo-notifications",

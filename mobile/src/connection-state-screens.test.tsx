@@ -7,7 +7,7 @@ import SessionsScreen from "../app/(tabs)/sessions";
 import CloudScreen from "../app/(tabs)/cloud";
 
 // #983: one quiet connection state on every list, and a list spinner only for a pull to refresh.
-const mocks = vi.hoisted(() => ({ app: {} as any, catalog: null as any }));
+const mocks = vi.hoisted(() => ({ app: {} as any, catalog: null as any, os: "ios" }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/pairing/account", () => ({ accountHostIdentityMatches: () => true }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
@@ -28,7 +28,7 @@ vi.mock("react-native", () => {
     AppState: { currentState: "active" },
     // No launch arguments: the Cloud tab reads `-openWorkspace` from them on iOS.
     Settings: { get: () => undefined },
-    View: Box, Text: Box, ScrollView: Box, Platform: { OS: "ios", select: ({ default: fallback }: any) => fallback },
+    View: Box, Text: Box, ScrollView: Box, Platform: { get OS() { return mocks.os; }, select: ({ default: fallback }: any) => fallback },
     // The spinner of the connection line, drawn so a test can see it.
     ActivityIndicator: () => <i data-spinner />,
     // The pull to refresh, drawn as a button: clicking it is the person pulling.
@@ -127,6 +127,18 @@ describe("the Sessions header and the machine's row say the same (#983)", () => 
       expect(!!container.querySelector("[data-spinner]")).toBe(spinner);
       // None of the old words, attempt counts or addresses.
       for (const old of ["Reconnecting", "attempt", "Can’t connect", "Host unreachable", "Requesting secure credential", "Live · end-to-end", "192.0.2.4"]) expect(container.textContent).not.toContain(old);
+    }
+  });
+
+  it("puts New session on the Sessions header on Android, whose tab bar has no room for it", async () => {
+    await show(<SessionsScreen />);
+    expect(container.querySelector("[aria-label=\"New session\"]")).toBeNull();
+    mocks.os = "android";
+    try {
+      await show(<SessionsScreen />);
+      expect(container.querySelector("[aria-label=\"New session\"]")).not.toBeNull();
+    } finally {
+      mocks.os = "ios";
     }
   });
 

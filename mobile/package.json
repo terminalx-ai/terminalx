@@ -7,6 +7,7 @@
   "scripts": {
     "start": "APP_VARIANT=development expo start --dev-client",
     "ios": "APP_VARIANT=development expo prebuild --platform ios --no-clean && APP_VARIANT=development expo run:ios",
+    "android": "node scripts/android.mjs",
     "ios:simulator": "python3 scripts/ios-simulator.py",
     "typecheck": "tsc --noEmit",
     "lint": "expo lint",
@@ -28,6 +29,7 @@
     "expo": "~58.0.23",
     "expo-auth-session": "~58.0.17",
     "expo-blur": "~58.0.5",
+    "expo-build-properties": "~58.0.12",
     "expo-camera": "~58.0.14",
     "expo-clipboard": "~58.0.4",
     "expo-constants": "~58.0.15",
@@ -45,6 +47,7 @@
     "expo-secure-store": "~58.0.2",
     "expo-speech-recognition": "58.0.1",
     "expo-status-bar": "~58.0.4",
+    "expo-symbols": "~58.0.5",
     "expo-web-browser": "~58.0.7",
     "fflate": "0.8.3",
     "lucide-react-native": "1.40.0",
