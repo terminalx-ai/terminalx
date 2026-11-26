@@ -3394,9 +3394,9 @@ fn phase2_collaboration_v2_native_config_command_rechecks_independent_approval_a
     index::save(&[entry]).unwrap();
     let policy = Arc::new(Collaboration::new());
     let dir = tempfile::tempdir().unwrap(); policy.runtime_policy.bind(dir.path(), 1).unwrap();
-    let snapshot = |revision: &str, approve: bool| -> Snapshot { serde_json::from_value(json!({"v":2,"revision":revision,"members":[{
+    let snapshot = |revision: &str, approve: bool| -> Snapshot { serde_json::from_value(json!({"v":2,"revision":revision,"members":[crate::remote::collab::v2::member_fixture(json!({
         "userId":"manager","role":"manager","canApprove":approve,"writeSource":"explicit"
-    }]})).unwrap() };
+    }))]})).unwrap() };
     policy.install_v2(snapshot("1", true)).unwrap();
     let permit = Permit::new(policy.clone(), "manager", policy.runtime_policy.stamp("manager"), Action::Configure);
     let writer = Arc::new(PaneWriter::default()); rig.manager.writers.lock().unwrap().insert(rig.pane.clone(), writer.clone());

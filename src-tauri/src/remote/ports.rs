@@ -677,7 +677,7 @@ async fn phase2_collaboration_v2_port_final_writer_keeps_original_revision_and_d
     let policy = Arc::new(Collaboration::new());
     policy.runtime_policy.bind(dir.path(), 1).unwrap();
     let snapshot = |revision: &str, source: &str| -> Snapshot { serde_json::from_value(json!({"v":2,"revision":revision,"members":[{
-        "userId":"guest","role":"driver","canApprove":true,"writeSource":source
+        "userId":"guest","role":"driver","canApprove":true,"approvalSource":"explicit", "writeSource":source
     }]})).unwrap() };
     policy.install_v2(snapshot("1", "explicit")).unwrap();
     let permit = Permit::new(policy.clone(), "guest", policy.runtime_policy.stamp("guest"), Action::Configure);

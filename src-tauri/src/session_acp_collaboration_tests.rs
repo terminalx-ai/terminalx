@@ -153,7 +153,7 @@ impl Policy {
     }
     fn revision(&self, revision: &str) {
         let snapshot: Snapshot = serde_json::from_value(json!({"v":2,"revision":revision,"members":[
-            {"userId":"explicit","role":"manager","canApprove":true,"writeSource":"explicit"},
+            {"userId":"explicit","role":"manager","canApprove":true,"approvalSource":"explicit", "writeSource":"explicit"},
             {"userId":"everyone","role":"driver","canApprove":false,"writeSource":"everyone"}]})).unwrap();
         self.policy.install_v2(snapshot).unwrap();
     }

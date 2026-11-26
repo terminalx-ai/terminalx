@@ -20,12 +20,24 @@ pub(crate) enum WriteSource {
     Implicit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ApprovalSource {
+    Explicit,
+}
+
+fn present_approval_source<'de, D: serde::Deserializer<'de>>(decoder: D) -> std::result::Result<Option<ApprovalSource>, D::Error> {
+    ApprovalSource::deserialize(decoder).map(Some)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Member {
     pub user_id: String,
     pub role: Role,
     pub can_approve: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_approval_source")]
+    pub approval_source: Option<ApprovalSource>,
     // Required even when null: omission must not become explicit drive.
     #[serde(deserialize_with = "required_source")]
     pub write_source: Option<WriteSource>,
@@ -47,6 +59,14 @@ pub(crate) struct Snapshot {
     pub v: u8,
     pub revision: String,
     pub members: Vec<Member>,
+}
+
+#[cfg(test)]
+pub(crate) fn member_fixture(mut member: serde_json::Value) -> serde_json::Value {
+    if member["canApprove"] == true {
+        member["approvalSource"] = serde_json::json!("explicit");
+    }
+    member
 }
 
 fn canonical_revision(revision: &str) -> bool {
@@ -75,6 +95,8 @@ impl Snapshot {
                 | (Role::Driver, Some(_))
                 | (Role::Manager, Some(WriteSource::Explicit | WriteSource::Implicit)));
             ensure!(valid, "invalid collaboration drive provenance");
+            ensure!(member.can_approve == (member.approval_source == Some(ApprovalSource::Explicit)),
+                "invalid collaboration approval provenance");
         }
         self.members.sort_by(|a, b| a.user_id.cmp(&b.user_id));
         Ok(())

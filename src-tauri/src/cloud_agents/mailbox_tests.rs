@@ -239,7 +239,7 @@ fn open_receipt(agents: &CloudAgents, lease: &Lease, receipt: &Receipt) -> Value
 
 fn v2_snapshot(revision: &str, role: &str, can_approve: bool, source: Value) -> crate::remote::collab::v2::Snapshot {
     serde_json::from_value(json!({"v": 2, "revision": revision, "members": [
-        {"userId": "u1", "role": role, "canApprove": can_approve, "writeSource": source}
+        crate::remote::collab::v2::member_fixture(json!({"userId": "u1", "role": role, "canApprove": can_approve, "writeSource": source}))
     ]})).unwrap()
 }
 

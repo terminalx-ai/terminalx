@@ -1265,7 +1265,7 @@ impl WorkspaceRpc {
     }
 
     /// Install the existing refresh response before processing its attachments.
-    /// Capability advertisement remains v1-only pending coordinated rollout.
+    /// A v2 response requires the current runtime to have requested v2.
     pub(crate) fn set_refresh_collaboration(&self, value: Option<Value>, generation: u64, negotiated_v2: bool) -> anyhow::Result<()> {
         let _admission = self.collab.enter_admission();
         anyhow::ensure!(generation == self.generation.load(Ordering::SeqCst), "retired collaboration refresh generation");

@@ -193,7 +193,7 @@ fn refusal(result: Result<Value, (String, Value)>) -> (String, Value) {
 
 fn v2_policy(revision: &str, role: &str, approve: bool, source: Value) -> collab::v2::Snapshot {
     serde_json::from_value(json!({"v": 2, "revision": revision, "members": [
-        {"userId": "admin", "role": role, "canApprove": approve, "writeSource": source}
+        crate::remote::collab::v2::member_fixture(json!({"userId": "admin", "role": role, "canApprove": approve, "writeSource": source}))
     ]})).unwrap()
 }
 
@@ -273,6 +273,45 @@ async fn phase2_collaboration_v2_everyone_cannot_start_tabs_or_send_terminal_inp
         let error = m.rpc.authorize_participant(&peer, spec).unwrap_err();
         assert_eq!(error.code, "forbidden");
         assert_eq!(error.data.unwrap()["reason"], "everyone-explicit-access-required");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn phase2_collaboration_v2_requires_explicit_approval_source_exactly_when_approval_is_granted() {
+    let _home = crate::store::temp_home();
+    for (can_approve, source, valid) in [
+        (false, None, true),
+        (false, Some(json!("explicit")), false),
+        (true, None, false),
+        (true, Some(json!("explicit")), true),
+        (true, Some(Value::Null), false),
+        (true, Some(json!("everyone")), false),
+    ] {
+        let m = machine();
+        let mut member = json!({"userId":"admin", "role":"driver", "writeSource":"everyone", "canApprove":can_approve});
+        if let Some(source) = source { member["approvalSource"] = source; }
+        let result = m.rpc.set_refresh_collaboration(Some(json!({"v":2, "revision":"1", "members":[member]})), 7, true);
+        assert_eq!(result.is_ok(), valid, "{can_approve}: {member}");
+        let stamp = m.rpc.collab.runtime_policy.stamp("admin");
+        assert_eq!(stamp.is_some(), valid);
+        let approval = m.rpc.collab.runtime_policy.admit("admin", stamp.as_ref(), collab::v2::Action::Approve, None);
+        if valid { assert_eq!(approval.is_ok(), can_approve); }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn phase2_collaboration_v2_invalid_approval_source_retires_the_previous_policy() {
+    let _home = crate::store::temp_home();
+    for bad_approval in [None, Some(Value::Null), Some(json!("everyone"))] {
+        let m = machine();
+        m.rpc.collab.install_v2(v2_policy("1", "manager", true, json!("explicit"))).unwrap();
+        let old = m.rpc.collab.runtime_policy.stamp("admin").unwrap();
+        let mut member = json!({"userId":"admin", "role":"driver", "writeSource":"everyone", "canApprove":true});
+        if let Some(source) = bad_approval { member["approvalSource"] = source; }
+        let response = json!({"v":2, "revision":"2", "members":[member]});
+        assert!(m.rpc.set_refresh_collaboration(Some(response), 7, true).is_err());
+        assert!(m.rpc.collab.runtime_policy.stamp("admin").is_none());
+        assert!(m.rpc.collab.runtime_policy.admit("admin", Some(&old), collab::v2::Action::Approve, None).is_err());
     }
 }
 

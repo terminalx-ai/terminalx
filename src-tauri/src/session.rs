@@ -10821,7 +10821,7 @@ while True:
         }
         fn revision(&self, revision: &str) {
             self.policy.install_v2(serde_json::from_value::<Snapshot>(json!({"v":2,"revision":revision,"members":[
-                {"userId":"explicit","role":"manager","canApprove":true,"writeSource":"explicit"},
+                {"userId":"explicit","role":"manager","canApprove":true,"approvalSource":"explicit", "writeSource":"explicit"},
                 {"userId":"everyone","role":"driver","canApprove":false,"writeSource":"everyone"}]})).unwrap()).unwrap();
         }
         fn permit(&self, right: Right) -> Permit { Permit::new(self.policy.clone(), "explicit", self.policy.runtime_policy.stamp("explicit"), right) }

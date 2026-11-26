@@ -20,7 +20,7 @@ fn policy() -> (Arc<Collaboration>, tempfile::TempDir) {
 
 fn install(policy: &Collaboration, revision: &str, source: &str) {
     let snapshot: Snapshot = serde_json::from_value(json!({"v":2,"revision":revision,"members":[
-        {"userId":"original","role":"driver","canApprove":true,"writeSource":source}
+        {"userId":"original","role":"driver","canApprove":true,"approvalSource":"explicit", "writeSource":source}
     ]})).unwrap();
     policy.install_v2(snapshot).unwrap();
 }

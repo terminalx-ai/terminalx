@@ -619,14 +619,18 @@ fn action_for(kind: &str) -> crate::remote::collab::v2::Action {
 
 fn lease_provenance(collab: &crate::remote::collab::Collaboration, lease: &Lease) -> anyhow::Result<crate::remote::collab::v2::Stamp> {
     use anyhow::Context;
-    use crate::remote::collab::v2::Member;
+    use crate::remote::collab::v2::{ApprovalSource, Member};
     let actor = &lease.actor;
     let revision = actor.collaboration_revision.as_deref().context("missing lease revision")?;
     let role = actor.role.as_ref().context("missing lease role")?;
     let role = serde_json::from_value(serde_json::Value::String(role.clone()))?;
+    let can_approve = actor.can_approve.context("missing independent lease approval")?;
     let member = Member {
         user_id: actor.user_id.clone(), role,
-        can_approve: actor.can_approve.context("missing independent lease approval")?,
+        can_approve,
+        // The lease stamp matches this claim against a validated member of
+        // the installed snapshot. The Actor cannot attest approval by itself.
+        approval_source: can_approve.then_some(ApprovalSource::Explicit),
         write_source: actor.write_source.context("missing lease drive source")?,
     };
     collab.runtime_policy.lease_stamp(revision, lease.runtime_generation, member)

@@ -5,8 +5,12 @@ existing bootstrap refresh response. The request remains `{}`. Revision is a
 canonical nonnegative decimal bigint string in `0..=9223372036854775807`,
 ordered and bounded without numeric conversion.
 Members contain `userId`, `role`, independent `canApprove`, and required nullable
-`writeSource` (`explicit`, `everyone`, `implicit`). No prepare/ack protocol,
-endpoint, or client-supplied generation is introduced.
+`writeSource` (`explicit`, `everyone`, `implicit`). For a runtime advertising
+`collaboration-v2-everyone-write-per-tab`, a member with `canApprove: true`
+must include `approvalSource: "explicit"`. A member with `canApprove: false`
+must omit the field. Missing, null, unknown, or contradictory approval
+provenance retires the previous policy and refuses the replacement snapshot.
+The existing endpoints and runtime generation fencing still apply.
 
 The authenticated runtime capability header advertises `collaboration-v1`,
 `collaboration-v2`, and `collaboration-v2-everyone-write-per-tab`. The runtime
@@ -68,7 +72,8 @@ requires lead review of all apply paths and race tests.
 The additive v2 lease Actor has `collaborationRevision` and required nullable
 `writeSource`. Native checks its generation, bounded canonical revision, user,
 role, independent approval and drive source against the installed snapshot
-before decrypting/applying input. Missing, stale, future or conflicting fields
+before decrypting/applying input. The snapshot is the authority for approval
+provenance. The Actor's approval bit cannot grant approval on its own. Missing, stale, future or conflicting fields
 fail closed with `collaboration-provenance-unavailable`; a role-only Actor
 cannot inherit local explicit authority. Explicit null is distinct from a
 missing source, including viewer approvals. V1 Actor behavior is unchanged.

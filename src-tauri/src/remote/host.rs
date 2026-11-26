@@ -2105,7 +2105,7 @@ mod tests {
                 relay_token_expires_at:0, director_url:"http://127.0.0.1:1".into(),
                 access_mode:crate::cloud_bootstrap::AccessMode::Private, attachments, revocations:vec![], quiesce:None, environment:None,
                 collaboration:Some(json!({"v":2,"revision":revision,"members":[
-                    {"userId":"driver","role":"driver","canApprove":true,"writeSource":source}
+                    {"userId":"driver","role":"driver","canApprove":true,"approvalSource":"explicit", "writeSource":source}
                 ]})),
                 desktop_ready: false,
             };
@@ -2205,7 +2205,7 @@ mod tests {
                 self.revoked.lock().unwrap().push(id.into()); Ok(())
             }
         }
-        let member = json!({"userId":"driver", "role":"driver", "canApprove":true, "writeSource":"explicit"});
+        let member = json!({"userId":"driver", "role":"driver", "canApprove":true, "approvalSource":"explicit", "writeSource":"explicit"});
         for (policy, negotiated) in [
             (json!({"v":2, "revision":"01", "members":[member.clone()]}), true),
             (json!({"v":9, "revision":"2", "members":[member.clone()]}), true),

@@ -379,7 +379,7 @@ async fn the_runtime_policy_admits_a_managers_phone_where_it_admits_their_deskto
     // shared its collaboration state with them; the list is what is new.
     let f = fixture();
     let snapshot = json!({ "v": 2, "revision": "1", "members": [
-        { "userId": "owner", "role": "manager", "canApprove": true, "writeSource": "explicit" },
+        { "userId": "owner", "role": "manager", "canApprove": true, "approvalSource":"explicit", "writeSource": "explicit" },
         { "userId": "plain", "role": "manager", "canApprove": false, "writeSource": "explicit" },
     ]});
     f.rpc.collab.install_v2(serde_json::from_value(snapshot).unwrap()).unwrap();
