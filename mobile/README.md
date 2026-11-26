@@ -1,6 +1,6 @@
 # TerminalX mobile
 
-The iOS companion is an Expo development build. It connects to one paired Mac at a time and keeps sessions on that Mac as the source of truth.
+The phone companion, for iPhone and Android, is an Expo development build. It connects to one paired Mac at a time and keeps sessions on that Mac as the source of truth.
 
 ## Development
 
@@ -10,6 +10,19 @@ pnpm --dir mobile ios
 ```
 
 Use a development build rather than Expo Go because pairing credentials require device-only SecureStore storage.
+
+### Android
+
+```sh
+pnpm --dir mobile android
+```
+
+This generates `mobile/android/` from `app.json` (Expo prebuild; the folder is never committed), builds the development app and runs it on the connected phone or emulator. Start the code server with `pnpm --dir mobile start` if it is not already running.
+
+- A phone over Wi-Fi: turn on Developer options and Wireless debugging, then run `adb pair <ip>:<pairing port> <code>` and `adb connect <ip>:<port>` with the values the phone shows. Pair TerminalX itself with "Only this network" in the desktop's Pair a phone dialog.
+- Building on Windows: install CMake 3.31 or newer from the Android SDK manager (`sdkmanager "cmake;3.31.6"`) and set `cmake.dir` to it in `mobile/android/local.properties`. The SDK's CMake 3.22 loops on react-native-worklets ("build.ninja still dirty after 100 tries") when pnpm links the packages. If `ANDROID_SDK_HOME` and `ANDROID_USER_HOME` are both set, unset `ANDROID_SDK_HOME`: the Android Gradle plugin refuses two locations for its preferences.
+- `-PreactNativeArchitectures=arm64-v8a` builds for a current phone only, which is much quicker.
+- Not on Android yet: pasting an image into the composer, which uses an iOS-only native module.
 
 To build for your own iPhone with a free personal Apple team, which cannot sign push notifications or the shared bundle id, give the build a bundle id of your own:
 

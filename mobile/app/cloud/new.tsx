@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Alert, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View, type ScrollViewInstance } from "react-native";
+import { Alert, Keyboard, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, View, type ScrollViewInstance } from "react-native";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Crypto from "expo-crypto";
@@ -26,6 +26,7 @@ import { ScreenHeader } from "@mobile/ui/SessionChrome";
 import { TextField } from "@mobile/ui/TextField";
 import { useTheme } from "@mobile/ui/theme";
 import { setConversationState, takeConversationState } from "@mobile/state/conversation-state";
+import { keyboardAvoidingBehavior } from "@mobile/ui/keyboard";
 
 /** The longest name the server takes for a workspace. */
 const NAME_MAX = 80;
@@ -372,7 +373,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   ]);
 
   // `subtitle`: a page about every workspace of the organization says so in place of its name (25.11's Choose repositories).
-  const page = (title: string, onBack: () => void, body: ReactNode, foot: ReactNode, subtitle?: string) => <KeyboardAvoidingView style={styles.page} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+  const page = (title: string, onBack: () => void, body: ReactNode, foot: ReactNode, subtitle?: string) => <KeyboardAvoidingView style={styles.page} behavior={keyboardAvoidingBehavior()}>
     {subtitle ? <ScreenHeader title={title} subtitle={subtitle} onBack={onBack} /> : header(title, onBack)}
     <ScrollView ref={scroller} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}
       onContentSizeChange={() => { if (typing.current) scroller.current?.scrollToEnd({ animated: false }); }}>{body}</ScrollView>

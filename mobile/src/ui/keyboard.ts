@@ -27,3 +27,13 @@ export function useKeyboardShown(): boolean {
   }, []);
   return shown;
 }
+
+/**
+ * How a view makes room for the keyboard: it pads itself, on Android as on iOS, so a sheet's field and
+ * buttons sit above the keyboard. Android draws edge to edge, where the window no longer shrinks for the
+ * keyboard; a page with no such view is panned by the system instead (app.json's
+ * `softwareKeyboardLayoutMode: "pan"`), which keeps the field being typed into in sight.
+ */
+export function keyboardAvoidingBehavior(_os: string = Platform.OS): "padding" {
+  return "padding";
+}

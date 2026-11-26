@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { KeyboardAvoidingView, Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ArrowUp } from "lucide-react-native";
 import { answerOrder, type Bot, type BotItem } from "../data/bots";
@@ -9,6 +9,7 @@ import { connectionUsable, useConnectionState } from "../state/connection-view";
 import { Asker, useBotAnswer, type AnswerOutcome } from "./bots";
 import { Button } from "./primitives";
 import { useTheme } from "./theme";
+import { keyboardAvoidingBehavior } from "@mobile/ui/keyboard";
 
 /**
  * A bot's question as a sheet (23.08, "A question from a push"): over the
@@ -39,7 +40,7 @@ export function BotQuestionSheet({ bot, item, connected, busy, error, onAnswer, 
   const blocked = !connected || busy;
   const reply = typed.trim();
   return <Modal visible transparent animationType="slide" onRequestClose={onClose}>
-    <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+    <KeyboardAvoidingView style={styles.fill} behavior={keyboardAvoidingBehavior()}>
       {/* The chat it came from stays in sight behind, dimmed: a tap there closes the sheet. */}
       <Pressable testID="bot-question-backdrop" accessibilityRole="button" accessibilityLabel="Close the question" onPress={onClose} style={[styles.fill, styles.backdrop]} />
       <View testID="bot-question-sheet" accessibilityViewIsModal style={[styles.sheet, { backgroundColor: palette.card, borderColor: palette.border, paddingBottom: insets.bottom + 16 }]}>

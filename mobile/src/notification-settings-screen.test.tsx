@@ -7,6 +7,7 @@ const fake = vi.hoisted(() => ({
   storage: new Map<string, string>(),
   permission: { granted: true, status: "granted" } as { granted: boolean; status: string },
   openedSettings: 0,
+  os: "ios",
   app: {} as any,
 }));
 
@@ -40,6 +41,7 @@ vi.mock("react-native", () => {
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
     AppState: { addEventListener: () => ({ remove: () => undefined }), currentState: "active" },
     Alert: { alert: vi.fn() },
+    Platform: { get OS() { return fake.os; } },
     Linking: { openSettings: async () => { fake.openedSettings++; } },
     Modal: ({ visible, children }: any) => visible ? <div role="dialog">{children}</div> : null,
     Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-selected={accessibilityState?.selected} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
@@ -152,6 +154,21 @@ describe("with iOS notifications off (22.07 frame 4)", () => {
     expect(toggle("Reaches a usage limit")!.disabled).toBe(true);
     expect(container.querySelector("[data-dimmed=true]")).not.toBeNull();
     expect((await loadNotificationSettings()).kinds.usage_limit).toBe(true);
+  });
+
+  it("names the phone’s own Settings on Android, which has no iOS Settings", async () => {
+    fake.os = "android";
+    try {
+      fake.permission = { granted: false, status: "denied" };
+      await render(<NotificationsPage />);
+      await settle();
+      const notice = container.querySelector("section[role=alert]")!;
+      expect(notice.textContent).toContain("Turn them on in Settings. Your choices below are kept.");
+      expect(notice.textContent).not.toContain("iOS");
+      expect(button("Open Settings")).toBeTruthy();
+    } finally {
+      fake.os = "ios";
+    }
   });
 });
 

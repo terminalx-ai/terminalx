@@ -26,6 +26,8 @@ export type SignInResult =
   | { status: "held"; hold: AccessHold };
 
 export async function beginSignIn(): Promise<SignInResult | null> {
+  // A new sign-in: a callback seen before belongs to an earlier one.
+  finished = null;
   const verifier = base64Url(await Crypto.getRandomBytesAsync(32));
   const state = base64Url(await Crypto.getRandomBytesAsync(16));
   const nonce = base64Url(await Crypto.getRandomBytesAsync(16));
@@ -43,7 +45,21 @@ export async function beginSignIn(): Promise<SignInResult | null> {
   return null;
 }
 
-export async function finishSignIn(callbackUrl: string): Promise<SignInResult> {
+/**
+ * The last callback finished, and how. On Android the callback reaches the app twice, as the sign-in's
+ * own result and as a link: the second gets the first's outcome rather than finding the one-time
+ * verifier already spent and reporting a failure.
+ */
+let finished: { url: string; outcome: Promise<SignInResult> } | null = null;
+
+export function finishSignIn(callbackUrl: string): Promise<SignInResult> {
+  if (finished?.url === callbackUrl) return finished.outcome;
+  const outcome = completeSignIn(callbackUrl);
+  finished = { url: callbackUrl, outcome };
+  return outcome;
+}
+
+async function completeSignIn(callbackUrl: string): Promise<SignInResult> {
   const [verifier, expectedState, nonce] = await Promise.all([
     SecureStore.getItemAsync(VERIFIER_KEY, OPTIONS),
     SecureStore.getItemAsync(STATE_KEY, OPTIONS),
