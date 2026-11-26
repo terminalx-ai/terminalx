@@ -12,6 +12,8 @@ const f = vi.hoisted(() => ({
   notifyMention: vi.fn(async (_name: string, _workspace: string, _authorized: () => boolean) => {}),
   roster: vi.fn(async (_org: string) => ({ members: [{ userId: "actor", email: "aisha@example.test", displayName: "Aisha Khan", role: "member" }] })),
   quote: vi.fn(async (_where: unknown): Promise<string | null> => "can you check the widths?"),
+  nudge: vi.fn<(_action: string, _cause: unknown, options: { actions: { run: () => void }[] }) => void>(),
+  openCloudSession: vi.fn(),
   prefs: { mentionNotifications: true },
   resync: vi.fn(async (): Promise<void> => {}), invoke: vi.fn(), invalidate: vi.fn(), reconcile: vi.fn(), configure: vi.fn(), enable: vi.fn(),
 }));
@@ -19,6 +21,7 @@ vi.mock("@/lib/api", () => ({ api: f.api, invoke: f.invoke }));
 f.invoke.mockImplementation((command, args) => {
   switch (command) {
     case "phase2_desktop_contracts_available": return f.api.phase2DesktopContractsAvailable();
+    case "nudge_overlay_show": return Promise.resolve();
     case "desktop_inbox": return f.api.desktopInbox(args.after, args.waitMs);
     case "desktop_inbox_stream": return f.api.desktopInboxStream(args.after, args.lastEventId);
     case "desktop_inbox_receipts": return f.api.desktopInboxReceipts(args.eventIds);
@@ -42,7 +45,8 @@ vi.mock("@/lib/mentionNotices", async (original) => {
   return { ...actual, lookUpMentionQuote: f.quote };
 });
 vi.mock("@/lib/cloudAgents", () => ({ loadCloudAgents: vi.fn(), refreshFromCheckpoint: vi.fn() }));
-vi.mock("@/lib/cloudDashboard", () => ({ openCloudSession: vi.fn() }));
+vi.mock("@/lib/cloudDashboard", () => ({ openCloudSession: f.openCloudSession }));
+vi.mock("@/lib/errorToasts", () => ({ showError: f.nudge }));
 vi.mock("@/lib/cloudReadMarkers", async (original) => {
   const actual = await original<typeof import("./cloudReadMarkers")>();
   f.configure.mockImplementation(actual.configureCloudReadMarkers);
@@ -461,6 +465,39 @@ it("checkpoints mixed presence and coalesced marker hints while retaining startu
   expect(JSON.parse(localStorage.getItem("terminalx.inbox.v1:a")!).cursor).toBe("22");
   expect(getReassignedNotices()).toEqual([]);
   expect(f.notify).not.toHaveBeenCalled();
+});
+
+describe("nudges (PRO-145)", () => {
+  const event = { ...share, type: "workspace.nudged", payload: { actorId: "actor", sessionId: "sess-1", text: "private nudge" } } as const;
+  const ready = { org: ["team.events.v1", "team.nudges.v1"] };
+
+  it("shows a generic notice after access confirmation and fences the open action on revocation", async () => {
+    f.api.cloudWorkspaces.mockResolvedValue(listWorkspace());
+    deliver([event], true, ready);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.nudge).toHaveBeenCalledOnce();
+    expect(f.invoke).toHaveBeenCalledWith("nudge_overlay_show", { orgId: "org", contextRevision: "1" });
+    expect(JSON.stringify(f.nudge.mock.calls)).not.toContain(event.payload.text);
+    expect(localStorage.getItem(inboxKey)).not.toContain(event.payload.text);
+    const open = f.nudge.mock.calls[0][2].actions[0].run;
+    open();
+    expect(f.openCloudSession).toHaveBeenCalledWith("cloud:org:workspace:sess-1");
+    setCatalogList({ workspaces: [] });
+    open();
+    expect(f.openCloudSession).toHaveBeenCalledOnce();
+  });
+
+  it("holds the notice without org readiness or when the server purged the text", async () => {
+    f.api.cloudWorkspaces.mockResolvedValue(listWorkspace());
+    deliver([event], true, { org: ["team.events.v1"] });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.nudge).not.toHaveBeenCalled();
+    resetDesktopInbox();
+    localStorage.clear();
+    deliver([{ ...event, payload: { actorId: "actor", sessionId: "sess-1" } }], true, ready);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.nudge).not.toHaveBeenCalled();
+  });
 });
 
 describe("mentions (PRO-141)", () => {

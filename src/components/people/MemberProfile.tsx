@@ -1,4 +1,4 @@
-import { useState, type ComponentProps } from "react";
+import { useState, type ComponentProps, type ReactNode } from "react";
 import { Popover } from "radix-ui";
 import { initials } from "@/lib/cloudPeople";
 import { cn } from "@/lib/cn";
@@ -23,9 +23,10 @@ function Photo({ member, className }: { member: OrganizationMember; className?: 
 }
 
 /** The same accessible profile, whether opened from a face or a member menu. */
-export function MemberProfile({ member, online, open, onOpenChange, className, ...buttonProps }: {
+export function MemberProfile({ member, online, open, onOpenChange, className, extra, ...buttonProps }: {
   member: OrganizationMember;
   online?: boolean;
+  extra?: ReactNode;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
 } & Omit<ComponentProps<"button">, "children">) {
@@ -58,6 +59,7 @@ export function MemberProfile({ member, online, open, onOpenChange, className, .
               ? `Joined ${joined.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}`
               : "Join date unavailable"}
           </p>
+          {extra}
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>

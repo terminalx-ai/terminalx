@@ -514,6 +514,10 @@ export const api = {
   cloudWorkspaceUnfollow: (orgId: string, workspaceId: string) => invoke<WorkspaceFollowingResponse>("cloud_workspace_follow_delete", { orgId, workspaceId, input: {} }),
   cloudWorkspaceReassign: (orgId: string, workspaceId: string, input: WorkspaceReassignInput) => invoke<WorkspaceReassignResponse>("cloud_workspace_reassign", { orgId, workspaceId, input }),
   /** PRO-141: who could be mentioned (`check`), or record a sent message's mentions. Ids only. */
+  nudgePreference: (orgId: string) => invoke<{ enabled: boolean }>("nudge_preference", { orgId }),
+  nudgePreferenceSet: (orgId: string, enabled: boolean) => invoke<{ enabled: boolean }>("nudge_preference_set", { orgId, enabled }),
+  nudgeSend: (orgId: string, input: { targetUserId: string; workspaceId: string; sessionId: string; text: string }) =>
+    invoke<{ delivered: boolean }>("nudge_send", { orgId, input }),
   cloudWorkspaceMentions: (orgId: string, workspaceId: string, input: WorkspaceMentionsInput) => invoke<WorkspaceMentionsResponse>("cloud_workspace_mentions", { orgId, workspaceId, input }),
   desktopPresencePut: (orgId: string, input: PresencePutInput) => invoke<PresencePutResponse>("desktop_presence_put", { orgId, input }),
   desktopPresenceRead: (orgId: string, input: PresenceReadInput) => invoke<PresenceReadResponse>("desktop_presence_read", { orgId, input }),
@@ -1838,7 +1842,8 @@ export type DesktopInboxEvent =
   | { id: string; type: "workspace.share-added" | "workspace.presence-changed"; workspaceId: string; organizationId: string; payload: Record<string, never>; createdAt: string }
   | { id: string; type: "workspace.reassigned"; workspaceId: string; organizationId: string; payload: WorkspaceReassignedPayload; createdAt: string }
   | { id: string; type: "workspace.read-marker-changed"; workspaceId: string; organizationId: string; payload: DesktopReadMarker; createdAt: string }
-  | { id: string; type: "workspace.mentioned"; workspaceId: string; organizationId: string; payload: WorkspaceMentionedPayload; createdAt: string };
+  | { id: string; type: "workspace.mentioned"; workspaceId: string; organizationId: string; payload: WorkspaceMentionedPayload; createdAt: string }
+  | { id: string; type: "workspace.nudged"; workspaceId: string; organizationId: string; payload: { actorId: string; sessionId: string; text?: string }; createdAt: string };
 export interface WorkspaceReassignedPayload { actorId: string; previousOwnerId: string; note?: string }
 /** PRO-141: ids only. The quoted text is read from this device's own transcript. */
 export interface WorkspaceMentionedPayload { actorId: string; sessionId: string; tabId: string; messageId: string }

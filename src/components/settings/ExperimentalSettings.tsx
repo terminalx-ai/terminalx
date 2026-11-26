@@ -1,3 +1,4 @@
+import { NudgePreference } from "./NudgePreference";
 import { useSettingsFile } from "@/lib/settingsFile";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState } from "react";
@@ -193,6 +194,7 @@ export function ExperimentalTab() {
       <RegisteredSetting setting="experimental.bots"
         control={<Switch aria-label="Bots" checked={!botsOff && (bots ?? false)} disabled={!!botsOff || bots === null} onCheckedChange={(on) => void changeBots(on)} />}
       />
+      <NudgePreference />
       {(vmOff || botsOff) && <p data-testid="experimental-unsupported-note" className="pb-2 text-xs text-muted-foreground">{[vmOff, botsOff].filter(Boolean).join(" ")}</p>}
       {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}
     </div>
