@@ -154,6 +154,13 @@ async function install(update: Update, plan: RuntimePlan | null, generation: num
     // until nothing would be cut short, and says so: the app is installed
     // either way, and is relaunched into.
     if (plan) await localRuntime.planUpdate(plan.epoch, plan.forced, plan.quietSince, plan.stop).catch((error: unknown) => console.warn(`TerminalX update: ${errorMessage(error)}`));
+    // The runtime moves to the update's own now, before the relaunch, so
+    // the app that opens finds it running and has nothing to update. What
+    // is not done in the few seconds this takes is the relaunched app's.
+    if (plan && admitted(generation)) {
+      emit({ kind: "installing", version: update.version, pct: 100 });
+      await localRuntime.handOverInstalled(plan.epoch, plan.forced ? plan.stop : []).catch((error: unknown) => console.warn(`TerminalX update: ${errorMessage(error)}`));
+    }
     if (admitted(generation)) await relaunch();
   } catch (error) {
     if (admitted(generation)) emit({ kind: "error", message: errorMessage(error) });

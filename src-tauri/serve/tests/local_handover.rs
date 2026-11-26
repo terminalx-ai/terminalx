@@ -288,3 +288,81 @@ fn a_runtime_is_handed_over_only_to_an_installed_runtime_and_again_after() {
     assert!(texts(&events, "assistant_text").iter().any(|text| text == "after twice"));
     assert!(!closed(&events));
 }
+
+/// The incident this was written for: a runtime with a command under way at
+/// every moment someone else picked refused its handover 181 times running,
+/// and each refusal had held its hooks still for ten seconds. Given time, it
+/// picks its own moment: a slow command is let finish, the commands arriving
+/// behind it are held back and answered by the runtime that takes over, and
+/// the handover goes through the first time it is asked.
+#[test]
+fn a_runtime_busy_at_every_moment_is_handed_over_the_first_time_it_is_asked() {
+    if std::process::Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("skipped: python3 is not installed");
+        return;
+    }
+    let world = AgentWorld::new();
+    // A `gh` that takes its time: what makes a command slow, as GitHub does.
+    // In the first place the runtime looks for a program, before the real one.
+    let gh = world.home.join(".local/bin/gh");
+    std::fs::create_dir_all(gh.parent().unwrap()).unwrap();
+    std::fs::write(&gh, "#!/bin/sh\nsleep 12\necho '[]'\n").unwrap();
+    std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    assert!(std::process::Command::new("git").args(["remote", "add", "origin", "https://github.com/example/project.git"]).current_dir(&world.project).status().unwrap().success());
+    let binary = installed(&world);
+    let serve = Serve::start(world.command(), &world.data);
+    let created = serve.control("sessions.create", json!({
+        "project": world.project, "agent": "claude", "prompt": "echo:hello", "useWorktree": false, "onMain": true, "mode": "manual",
+    }));
+    let tab = created["tabId"].as_str().unwrap().to_string();
+    serve.wait_events(&tab, "the first turn to end", |events| count(events, "turn_completed") >= 1);
+    let before = serve.control("status", json!({}));
+    let epoch = before["localRuntime"]["epoch"].clone();
+
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    // The callers end with the test, however it ends.
+    struct Stop<'a>(&'a std::sync::atomic::AtomicBool);
+    impl Drop for Stop<'_> {
+        fn drop(&mut self) { self.0.store(true, std::sync::atomic::Ordering::Relaxed); }
+    }
+    std::thread::scope(|scope| {
+        let _stop = Stop(&stop);
+        // The slow command, under way for longer than a handover ever waited.
+        let slow_command = scope.spawn(|| {
+            let began = std::time::Instant::now();
+            let response = serve.try_control("issues.list", json!({ "project": world.project, "provider": "github" }));
+            (response, began.elapsed())
+        });
+        // Commands back to back from three callers, as agents send them.
+        let callers: Vec<_> = (0..3).map(|_| scope.spawn(|| {
+            let mut answered = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let response = serve.try_control("sessions.list", json!({}));
+                assert_eq!(response["ok"], true, "a command sent during the handover is answered, not refused: {response}");
+                answered += 1;
+            }
+            answered
+        })).collect();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        let asked = std::time::Instant::now();
+        let reply = serve.try_control("runtime.handover", json!({ "epoch": epoch, "binary": binary, "patienceMs": 120_000 }));
+        assert_eq!(reply["result"]["handingOver"], true, "handed over the first time it is asked: {reply}");
+        let after = wait_until("the runtime that took over", || {
+            let status = serve.try_control("status", json!({}));
+            (status["ok"] == true && status["result"]["localRuntime"]["epoch"] != epoch).then(|| status["result"].clone())
+        });
+        assert_eq!(after["pid"], before["pid"], "the same process");
+        let (sent, took) = slow_command.join().unwrap();
+        eprintln!("the slow command took {took:?}; the handover was answered after {:?}", asked.elapsed());
+        assert_eq!(sent["ok"], true, "the slow command was let finish, and answered: {sent}");
+        assert!(asked.elapsed() >= std::time::Duration::from_secs(8), "the handover waited for it rather than cutting it short");
+        assert!(took >= std::time::Duration::from_secs(10), "it was slow, or this shows nothing: {took:?}");
+        drop(_stop);
+        let answered: usize = callers.into_iter().map(|caller| caller.join().unwrap()).sum();
+        assert!(answered > 0);
+    });
+    // The agent is still there, and takes a prompt as before.
+    serve.control("send", json!({ "target": tab, "text": "and then the tests" }));
+    serve.wait_events(&tab, "the follow-up's turn to end", |events| count(events, "turn_completed") >= 2);
+}

@@ -1105,6 +1105,12 @@ struct Gate {
 #[derive(Default)]
 struct GateState {
     frozen: bool,
+    /// A handover is waiting for a quiet moment that did not come by itself
+    /// ([`Bridge::drain`]): a control command read now is held as one read
+    /// while frozen is, so that those under way end and none takes their
+    /// place. Hook events, and what the desktop itself asks (`runtime.*`),
+    /// are answered as ever.
+    draining: bool,
     /// Every frame on the bridge, by its ticket: what it is, since when, and
     /// whether a handover waits for it (PRO-589).
     open: std::collections::HashMap<u64, Open>,
@@ -1183,6 +1189,29 @@ fn describe(line: &str) -> String {
     }
 }
 
+/// Whether a frame read while the bridge drains is held: a control command
+/// from a CLI, an agent or an automation. Not a hook's event, which its CLI
+/// gives ten seconds; and not what the desktop asks for its windows
+/// (`runtime.*`), the handover itself among it, which nobody would see held.
+#[cfg(unix)]
+fn held_while_draining(line: &str) -> bool {
+    #[derive(Deserialize)]
+    struct Head { command: Option<String> }
+    matches!(serde_json::from_str::<Head>(line), Ok(Head { command: Some(command) }) if !command.starts_with("runtime."))
+}
+
+/// Whether the other end of `stream` has closed it: nothing more to read,
+/// and no one to read a reply. A caller writes its one frame and waits, so
+/// an end of stream here is one that stopped waiting.
+#[cfg(unix)]
+fn hung_up(stream: &std::os::unix::net::UnixStream) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut byte = 0u8;
+    // SAFETY: a one-byte buffer that outlives the call, on an open socket.
+    let read = unsafe { libc::recv(stream.as_raw_fd(), std::ptr::addr_of_mut!(byte).cast(), 1, libc::MSG_PEEK | libc::MSG_DONTWAIT) };
+    read == 0
+}
+
 #[cfg(unix)]
 impl GateState {
     /// A frame comes onto the bridge.
@@ -1252,7 +1281,7 @@ impl Busy {
     fn read(&self, stream: std::os::unix::net::UnixStream, line: &str) -> Option<std::os::unix::net::UnixStream> {
         let what = describe(line);
         let mut state = self.gate.lock();
-        if state.frozen {
+        if state.frozen || (state.draining && held_while_draining(line)) {
             state.held.push(HeldFrame { stream, line: line.to_string(), queued: true });
             return None;
         }
@@ -1541,7 +1570,58 @@ impl Bridge {
             state.frozen = false;
             state.taken = false;
             state.sealed = false;
-            std::mem::take(&mut state.held)
+            // Still draining, a command goes on being held: only what a
+            // drain does not hold is answered now.
+            let draining = state.draining;
+            let (kept, answered): (Vec<_>, Vec<_>) = std::mem::take(&mut state.held).into_iter()
+                .partition(|frame| draining && frame.queued && held_while_draining(&frame.line));
+            state.held = kept;
+            answered
+        };
+        self.gate.changed.notify_all();
+        for frame in held {
+            self.dispatch(frame);
+        }
+    }
+
+    /// Wait, freezing nothing, until no frame is being answered, or until
+    /// `deadline`: whether none is. A handover that begins then finds the
+    /// bridge at rest at once, where one begun at any other moment waits on
+    /// whatever happens to be under way, with every hook held meanwhile.
+    pub(crate) fn quiet_by(&self, deadline: std::time::Instant) -> bool {
+        let mut state = self.gate.lock();
+        while state.busy() > 0 {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() { return false; }
+            state = self.gate.changed.wait_timeout(state, left).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
+        }
+        true
+    }
+
+    /// The frames being answered, the longest open first, for saying what a
+    /// handover is waiting for; nothing when none is.
+    pub(crate) fn busy_named(&self) -> Option<String> {
+        let state = self.gate.lock();
+        (state.busy() > 0).then(|| named(&state, Phase::Busy))
+    }
+
+    /// Hold every control command read from here on, as one read while
+    /// frozen is held, until [`Self::undrain`] or the handover: those under
+    /// way come to an end and none takes their place, so a quiet moment
+    /// comes however many agents are at work. Hook events and the desktop's
+    /// own requests are answered meanwhile.
+    pub(crate) fn drain(&self) {
+        self.gate.lock().draining = true;
+    }
+
+    /// Answer control commands again, those held while draining first.
+    pub(crate) fn undrain(&self) {
+        let held = {
+            let mut state = self.gate.lock();
+            if !state.draining { return; }
+            state.draining = false;
+            // Frozen, they stay held with the rest, for the thaw or the handover.
+            if state.frozen { Vec::new() } else { std::mem::take(&mut state.held) }
         };
         self.gate.changed.notify_all();
         for frame in held {
@@ -1551,6 +1631,13 @@ impl Bridge {
 
     /// Answer a held frame as any frame is answered.
     fn dispatch(&self, HeldFrame { stream, line, queued }: HeldFrame) {
+        // A command whose caller gave up while it was held is not carried
+        // out behind their back: told it failed, they send it again, and a
+        // prompt would arrive twice. A hook's event is taken in regardless.
+        if held_while_draining(&line) && hung_up(&stream) {
+            log::info!("a held {} was dropped: whoever sent it stopped waiting", describe(&line));
+            return;
+        }
         let dispatch = self.publisher.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).dispatch.clone();
         let busy = Busy::begin(&self.gate, describe(&line));
         // A frame held across handover has no surviving positive network
@@ -2929,6 +3016,92 @@ mod tests {
         assert_eq!(answered_there.recv_timeout(Duration::from_secs(10)).unwrap(), ("taken".to_string(), LARGE));
         assert_eq!(second.join().unwrap()["output"]["by"], "new");
         assert!(answered.try_recv().is_err(), "the runtime handed over answers nothing of it");
+    }
+
+    /// A handover that finds no quiet moment holds control commands back,
+    /// so that those under way end and none takes their place: a command
+    /// read meanwhile is held and answered later, by this runtime or the
+    /// next, while hooks and the desktop's own requests are answered as
+    /// ever. An attempt called off meanwhile does not let the held ones in.
+    #[cfg(unix)]
+    #[test]
+    fn a_draining_bridge_holds_commands_back_and_answers_hooks_and_the_desktop() {
+        use std::os::unix::net::UnixStream;
+        use std::sync::{mpsc, Mutex};
+        let _home = crate::store::temp_home();
+        let wait = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !done() {
+                assert!(std::time::Instant::now() < deadline, "{what}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let soon = || std::time::Instant::now() + Duration::from_millis(100);
+        let (release, released) = mpsc::channel::<()>();
+        let released = Mutex::new(released);
+        let carried_out = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = carried_out.clone();
+        let endpoint = prepare_control().unwrap();
+        let (own, token) = (endpoint.socket.clone(), endpoint.token.clone());
+        let (_socket, bridge) = serve(endpoint,
+            |_frame: HookFrame| HookReply { output: Some(json!({ "hook": true })), refused: None },
+            move |request| {
+                if request.command == "browser.snapshot" { released.lock().unwrap().recv().unwrap(); }
+                log.lock().unwrap().push(request.command.clone());
+                crate::control::ControlResponse::success(request.id, json!({ "did": request.command }))
+            }).unwrap();
+        let ask = |frame: Value| {
+            let socket = own.clone();
+            std::thread::spawn(move || {
+                let mut stream = UnixStream::connect(&socket).unwrap();
+                stream.write_all(format!("{frame}\n").as_bytes()).unwrap();
+                let mut reply = String::new();
+                BufReader::new(stream).read_line(&mut reply).unwrap();
+                serde_json::from_str::<Value>(&reply).unwrap()
+            })
+        };
+        let command = |command: &str| json!({"id": command, "token": token, "command": command, "params": {}});
+
+        assert!(bridge.quiet_by(soon()), "nothing is under way");
+        let slow = ask(command("browser.snapshot"));
+        wait("the slow command is under way", &|| bridge.busy_named().is_some());
+        assert!(!bridge.quiet_by(soon()));
+        assert!(bridge.busy_named().unwrap().contains("browser.snapshot"), "{:?}", bridge.busy_named());
+
+        bridge.drain();
+        let held = ask(command("sessions.list"));
+        wait("a command read while draining is held", &|| bridge.gate.lock().held.len() == 1);
+        let hook = ask(json!({"tab": "t", "session": "s", "token": "t", "event": "Stop", "payload": {}}));
+        assert_eq!(hook.join().unwrap()["output"]["hook"], true, "a hook is answered while draining");
+        let desktop = ask(command("runtime.ping"));
+        assert_eq!(desktop.join().unwrap()["result"]["did"], "runtime.ping", "so is what the desktop asks");
+        assert!(!held.is_finished() && !slow.is_finished());
+
+        // The one under way ends, and none took its place: quiet, with a
+        // command waiting its turn.
+        release.send(()).unwrap();
+        assert_eq!(slow.join().unwrap()["result"]["did"], "browser.snapshot");
+        assert!(bridge.quiet_by(std::time::Instant::now() + Duration::from_secs(10)));
+        assert_eq!(bridge.gate.lock().held.len(), 1);
+
+        // An attempt called off: still draining, the command stays held.
+        bridge.freeze(Duration::from_secs(5)).unwrap();
+        bridge.thaw();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!held.is_finished(), "held until the draining ends");
+        assert_eq!(bridge.gate.lock().held.len(), 1);
+
+        // One whose caller gives up meanwhile is not carried out later.
+        let mut gone = UnixStream::connect(&own).unwrap();
+        gone.write_all(format!("{}\n", command("tabs.close")).as_bytes()).unwrap();
+        wait("the second command is held", &|| bridge.gate.lock().held.len() == 2);
+        drop(gone);
+
+        bridge.undrain();
+        assert_eq!(held.join().unwrap()["result"]["did"], "sessions.list", "answered once commands are let in again");
+        assert!(bridge.gate.lock().held.is_empty());
+        wait("everything held is done with", &|| bridge.busy_named().is_none());
+        assert_eq!(*carried_out.lock().unwrap(), ["browser.snapshot", "runtime.ping", "sessions.list"], "not the one nobody waited for");
     }
 
     /// PRO-589: a freeze that a frame under way outlasts says which frame,

@@ -428,7 +428,7 @@ fn log_report(target: &Target, report: &Report) {
 }
 
 /// The runtime bundled with this app.
-fn source(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
+pub(super) fn source(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
     Ok(app.path().resource_dir()?.join("local-runtime").join(if cfg!(windows) { "terminalx-serve.exe" } else { "terminalx-serve" }))
 }
 
