@@ -337,8 +337,12 @@ impl Replacement {
         let Some(outdated) = inner.outdated(epoch) else { return };
         outdated.failed = false;
         outdated.problem = Some(format!("Waiting to update the runtime: {problem}. TerminalX retries automatically while keeping agents and terminals running."));
-        let attempts = outdated.handover_wait.as_ref().map_or(0, |wait| wait.attempts) + 1;
-        let pause = busy_pause(attempts);
+        // One already looking for its moment, as asked before this app
+        // relaunched, is no further refusal: looked at again soon.
+        let under_way = reason.starts_with(super::ALREADY_HANDING_OVER);
+        let before = outdated.handover_wait.as_ref().map_or(0, |wait| wait.attempts);
+        let attempts = if under_way { before.max(1) } else { before + 1 };
+        let pause = if under_way { BUSY_PAUSE.0 } else { busy_pause(attempts) };
         log::warn!("the older local runtime refused to hand over (attempt {attempts}), as something is still under way; asked again in {} s: {problem}", pause.as_secs());
         outdated.handover_wait = Some(HandoverWait { reason, attempts });
         inner.busy_until = Some((epoch.to_owned(), Instant::now() + pause));
@@ -694,7 +698,7 @@ pub(crate) fn hand_over_within(app: &AppHandle, runtime: &Desktop, stop: &[Work]
 const INSTALLED_WAIT: Duration = Duration::from_secs(12);
 /// How long the runtime is given to find its moment for that, which it goes
 /// on looking for while the app relaunches and after.
-const INSTALLED_PATIENCE: Duration = Duration::from_secs(600);
+const INSTALLED_PATIENCE: Duration = Duration::from_secs(180);
 
 /// Hand `runtime` over to the runtime of the update just installed over
 /// this app, before the relaunch, so that the relaunched app finds its own
@@ -1208,6 +1212,13 @@ mod tests {
         assert_eq!(asked.get(), 2, "the second pause is longer");
         // Another runtime attached meanwhile is not held off by this one's.
         assert!(!replacement.pausing("another", start));
+        // One already looking for its moment (asked as the update installed)
+        // is looked at again soon, however often it says so.
+        let under_way = Supervisor::new(&replacement, |_| Err(Refused { code: "handover_busy".into(), message: format!("{}, and is waiting for a quiet moment", super::super::ALREADY_HANDING_OVER) }.into()));
+        let before = replacement.outdated("old").unwrap().handover_wait.unwrap().attempts;
+        for _ in 0..5 { switch(&replacement, &under_way, "old", false, &[]).unwrap(); }
+        assert_eq!(replacement.outdated("old").unwrap().handover_wait.unwrap().attempts, before);
+        assert!(!replacement.pausing("old", Instant::now() + BUSY_PAUSE.0 + Duration::from_secs(1)));
     }
 
     #[cfg(unix)]

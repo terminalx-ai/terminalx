@@ -61,7 +61,9 @@ struct Pacing {
     /// control commands are ([`crate::hooks::Bridge::drain`]).
     drain_after: Duration,
     /// How long commands are held back at a stretch. Whoever sent one waits
-    /// that long at most for it to begin.
+    /// that long at most for it to begin: well within the 30 seconds the
+    /// command line gives a command, or it would give up on one that is
+    /// then carried out all the same.
     drain_for: Duration,
     /// How long they are answered again before being held back once more.
     drain_rest: Duration,
@@ -72,9 +74,9 @@ struct Pacing {
 
 const PACING: Pacing = Pacing {
     settle: Duration::from_secs(3),
-    drain_after: Duration::from_secs(15),
-    drain_for: Duration::from_secs(30),
-    drain_rest: Duration::from_secs(15),
+    drain_after: Duration::from_secs(10),
+    drain_for: Duration::from_secs(12),
+    drain_rest: Duration::from_secs(10),
     gap: (Duration::from_millis(500), Duration::from_secs(8)),
 };
 
@@ -466,7 +468,7 @@ pub(crate) fn begin(lifetime: &super::Lifetime, params: Value) -> Result<Value, 
         fn drop(&mut self) { UNDER_WAY.store(false, std::sync::atomic::Ordering::SeqCst); }
     }
     if UNDER_WAY.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return Err(ControlError::new("handover_busy", "This runtime is already being handed over, and is waiting for a quiet moment; it is handed over once that has come.", Some("Try again in a moment.".into())));
+        return Err(ControlError::new("handover_busy", format!("{}, and is waiting for a quiet moment; it is handed over once that has come.", super::ALREADY_HANDING_OVER), Some("Try again in a moment.".into())));
     }
     let under_way = UnderWay;
     let (ready, readied) = std::sync::mpsc::channel::<Result<(), ControlError>>();
@@ -518,7 +520,7 @@ fn hand_over(runtime: &Runtime, binary: &Verified, ready: &std::sync::mpsc::Send
         thawed();
         return Err(Unsettled("A prompt or an agent's start is being admitted".into()).into());
     };
-    let terminals = match runtime.terminals.freeze(SETTLE_WITHIN) {
+    let terminals = match runtime.terminals.freeze(settle) {
         Ok(terminals) => terminals,
         Err(error) => {
             drop((admission, steps));
@@ -574,7 +576,9 @@ fn hand_over(runtime: &Runtime, binary: &Verified, ready: &std::sync::mpsc::Send
         if runtime.terminals.stopped_since_refresh() {
             for fd in kept.iter().map(AsRawFd::as_raw_fd).chain([runtime.owner]) { let _ = set_cloexec(fd, true); }
             let _ = std::fs::remove_file(&path);
-            return Err(Unsettled("A terminal was closed during the handover".into()).into());
+            // Not one to look for another moment after: the desktop was
+            // told this one was going ahead, and has seen it not happen.
+            anyhow::bail!("A terminal was closed as the handover began; it was called off");
         }
         log::info!("the runtime hands {} terminal(s) and {} agent tab(s) to {}", record.panes.len(), record.tabs.len(), binary.path.display());
         log::logger().flush();

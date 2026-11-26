@@ -399,21 +399,22 @@ impl SessionManager {
     /// is about to settle fails with [`Unsettled`], to be tried again.
     pub(crate) fn hold_tabs<R>(&self, within: Duration, then: impl FnOnce(Held) -> R) -> Result<R> {
         let deadline = Instant::now() + within;
-        // What is about to settle is waited for, with nothing held, until
-        // `deadline`: a prompt on its way, an agent starting or stopping.
-        // With many tabs one of them is nearly always at such a moment, and
-        // calling the whole handover off for it would never let it through.
-        'again: loop {
-            // The value, or, unsettled with time left, everything let go of
-            // and tried again.
+        // What is about to settle is waited for a moment, with nothing of
+        // this held: a prompt on its way, an agent starting or stopping.
+        // With many tabs one of them is often at such a moment. Not for
+        // long, as the caller holds every hook still meanwhile: a handover
+        // that picks its moment looks for another one instead.
+        let patient = Instant::now() + within.min(Duration::from_secs(1));
+        loop {
+            let _unsettled: anyhow::Error = 'attempt: {
+            // The value, or, unsettled with time left, out of the attempt:
+            // every lock it took is let go of before the wait, or whoever
+            // is to settle things could not.
             macro_rules! settled {
                 ($read:expr) => {
                     match $read {
                         Ok(read) => read,
-                        Err(error) if error.is::<Unsettled>() && Instant::now() < deadline => {
-                            std::thread::sleep(RETRY * 5);
-                            continue 'again;
-                        }
+                        Err(error) if error.is::<Unsettled>() && Instant::now() < patient => break 'attempt error,
                         Err(error) => return Err(error),
                     }
                 };
@@ -482,6 +483,8 @@ impl SessionManager {
             // A tab made meanwhile is one nothing runs in yet: none can start
             // a CLI while the terminals are frozen.
             return Ok(then(Held { tabs: records, unadoptable, awaited }));
+            };
+            std::thread::sleep(RETRY * 5);
         }
     }
 

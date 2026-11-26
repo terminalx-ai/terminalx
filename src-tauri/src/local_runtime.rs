@@ -259,6 +259,11 @@ impl Drop for RequestGuard {
     }
 }
 
+/// How a runtime already looking for the moment to hand over begins its
+/// refusal of a second request (`handover_busy`): the desktop reads it as
+/// the first still going, not as one more refusal to wait longer after.
+pub(crate) const ALREADY_HANDING_OVER: &str = "This runtime is already being handed over";
+
 fn unavailable() -> ControlError {
     ControlError::new("runtime_stopping", "The local runtime is stopping; no new work was accepted.", None::<String>)
 }
