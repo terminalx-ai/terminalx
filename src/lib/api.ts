@@ -880,6 +880,14 @@ export const api = {
     invoke<CommitInfo[]>("log_commits", { cwd, range: range ?? null, limit: limit ?? 100 }),
 };
 
+export interface OrganizationPlan {
+  plan: "free" | "pro" | "teams";
+  seatsUsed: number;
+  memberLimit: number | null;
+  catalog: { teams: { currency: "USD"; unitAmountMinor: number; interval: "month"; memberLimit: number } };
+  upgradeTarget: "plans";
+}
+
 export interface OrganizationSummary {
   id: string;
   name: string;
@@ -891,6 +899,7 @@ export interface OrganizationSummary {
   /** The organization's cloud computer name and colour (PRO-370); null or absent when not chosen. */
   computerName?: string | null;
   computerColor?: string | null;
+  plan?: OrganizationPlan;
 }
 
 export interface AccountIdentity {

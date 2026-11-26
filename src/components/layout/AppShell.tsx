@@ -84,6 +84,7 @@ import { WorktreeCleanupDialog } from "@/components/cleanup/WorktreeCleanupDialo
 import { CleanupIndicator } from "@/components/cleanup/CleanupIndicator";
 import { bootStatus, useStatus } from "@/lib/status";
 import { useRuntimeSwitch } from "@/lib/localRuntime";
+import { PlansView } from "@/components/account/PlansView";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
 import { bootBots, pauseAllBots, shutBots, useBotStore } from "@/lib/bots";
@@ -638,7 +639,7 @@ function UnselectedWorkspace({
           <span className="min-w-0 flex-1 truncate px-1 text-sm text-muted-foreground">
             {view === "issues"
               ? "Issues"
-              : view === "agents" || view === "skills" || view === "project" || view === "bots"
+              : view === "agents" || view === "skills" || view === "project" || view === "bots" || view === "plans"
                 ? ""
                 : view === "automations"
                   ? "Automations"
@@ -671,6 +672,8 @@ function UnselectedWorkspace({
             ) : view === "bots" ? (
               // Nothing until the switch is read on: off, AppShell sends the view back to the welcome screen.
               botsOn ? <BotsView /> : null
+            ) : view === "plans" ? (
+              <PlansView />
             ) : view === "automations" ? (
               <AutomationsView initialAutomationId={store.selectedAutomationId} />
             ) : view === "skills" ? (

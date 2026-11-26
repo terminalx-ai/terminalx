@@ -59,6 +59,17 @@ it("lists members and pending invitations with their status", async () => {
   expect(within(invites).getByRole("listitem", { name: "stale@example.com" }).textContent).toContain("Expired");
 });
 
+it("shows only the server-projected Teams seat usage", async () => {
+  const props = { accountEmail: "admin@example.com", contextRevision: "account-1" };
+  const view = render(<OrganizationMembers {...props} plan={{
+    plan: "teams", seatsUsed: 4, memberLimit: 7, upgradeTarget: "plans",
+    catalog: { teams: { currency: "USD", unitAmountMinor: 2300, interval: "month", memberLimit: 7 } },
+  }} />);
+  await screen.findByText("4 of 7 seats used on Teams");
+  view.rerender(<OrganizationMembers {...props} />);
+  expect(screen.queryByText(/seats used on Teams/)).toBeNull();
+});
+
 it("never offers controls for the owner or the viewer's own row", async () => {
   await renderAs();
   expect(screen.queryByRole("combobox", { name: "Role for owner@example.com" })).toBeNull();

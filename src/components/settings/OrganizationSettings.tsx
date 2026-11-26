@@ -118,7 +118,7 @@ export function OrganizationSettings({ organization, page = "general", onDeleted
   const content = (() => {
     switch (shown) {
       case "members":
-        return <RegisteredSetting setting="organizations.members" instance={organization.id}><div className="contents"><OrganizationMembers accountEmail={accountEmail} contextRevision={contextRevision} organizationId={organization.id} /></div></RegisteredSetting>;
+        return <RegisteredSetting setting="organizations.members" instance={organization.id}><div className="contents"><OrganizationMembers accountEmail={accountEmail} contextRevision={contextRevision} organizationId={organization.id} plan={organization.plan} /></div></RegisteredSetting>;
       case "cloudCompute":
         return <OrganizationCloudCompute key={organization.id} organizationName={name} panels={{
           providers: <RegisteredSetting setting="organizations.providers" instance={organization.id}><div className="contents"><ProviderControls contextRevision={contextRevision} /></div></RegisteredSetting>,

@@ -154,6 +154,46 @@ pub struct OnboardingContext {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OrganizationPlan {
+    plan: OrganizationPlanTier,
+    seats_used: u32,
+    #[serde(deserialize_with = "required_member_limit")]
+    member_limit: Option<u32>,
+    catalog: OrganizationPlanCatalog,
+    upgrade_target: OrganizationUpgradeTarget,
+}
+
+fn required_member_limit<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<Option<u32>, D::Error> {
+    Option::<u32>::deserialize(decoder)
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum OrganizationPlanTier { Free, Pro, Teams }
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum OrganizationUpgradeTarget { Plans }
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OrganizationPlanCatalog { teams: OrganizationTeamsPrice }
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OrganizationTeamsPrice {
+    currency: String,
+    unit_amount_minor: u32,
+    interval: OrganizationPlanInterval,
+    member_limit: u32,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum OrganizationPlanInterval { Month }
+
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrganizationSummary {
     pub id: String,
@@ -170,6 +210,8 @@ pub struct OrganizationSummary {
     pub computer_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<OrganizationPlan>,
 }
 
 /// What creating an organization did (PRO-16): the organization, and whether
@@ -319,6 +361,8 @@ struct Organization {
     computer_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     computer_color: Option<String>,
+    #[serde(default, skip_serializing)]
+    plan: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -346,7 +390,9 @@ pub(crate) const PHASE2_AFFECTED_WORKSPACES: &str = "cloud.agent-logins.affected
 pub(crate) const PHASE2_GENERAL_ACCESS: &str = "cloud.workspaces.general-access.v1";
 pub(crate) const PHASE2_PRECREATE_USAGE: &str = "cloud.workspaces.precreate-usage.v1";
 pub(crate) const PHASE2_ADMIN_SHARE: &str = "cloud.workspaces.admin-share.v1";
-const PHASE2_FEATURES: [&str; 20] = [
+const PHASE2_TEAMS_PLAN: &str = "organization.teams-plan.v1";
+const PHASE2_FEATURES: [&str; 21] = [
+    PHASE2_TEAMS_PLAN,
     PHASE2_EVENTS, PHASE2_PRESENCE, PHASE2_FOLLOW_REASSIGN, PHASE2_MENTIONS, PHASE2_RESTART_DETAILS,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_WEBHOOK_TRIGGER,
     "cloud.environment-info.v1",
@@ -544,7 +590,7 @@ impl AccountManager {
         let session = inner.session.as_mut().expect("signed in");
         session.organizations = organizations
             .iter()
-            .map(|id| Organization { org_id: (*id).into(), name: (*id).into(), role: "member".into(), is_personal: false, cloud: None, computer_name: None, computer_color: None })
+            .map(|id| Organization { org_id: (*id).into(), name: (*id).into(), role: "member".into(), is_personal: false, cloud: None, computer_name: None, computer_color: None, plan: None })
             .collect();
         session.capabilities.flags.insert(MULTI_ORG_CAPABILITY.into(), multi_org);
     }
@@ -734,7 +780,9 @@ impl AccountManager {
         }
         let before = serde_json::to_value(snapshot(&inner)).ok();
         let stored_changed = serde_json::to_value(&candidate).ok() != serde_json::to_value(current).ok()
-            || candidate.capabilities.phase2_readiness != current.capabilities.phase2_readiness;
+            || candidate.capabilities.phase2_readiness != current.capabilities.phase2_readiness
+            || candidate.organizations.iter().map(|org| &org.plan)
+                .ne(current.organizations.iter().map(|org| &org.plan));
         if stored_changed {
             // Saved so a relaunch starts from the current roles, not the ones at sign-in.
             inner.set_session(Some(candidate));
@@ -1727,7 +1775,14 @@ fn snapshot(inner: &Inner) -> AccountStatus {
             let account = account_key(&session.cloud.user_id, &session.cloud.cloud_profile_id);
             OnboardingContext { revision: format!("{scope}:{}", inner.generation), scope, account }
         }),
-        organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone(), is_personal: org.is_personal, cloud: org.cloud.clone(), computer_name: org.computer_name.clone(), computer_color: org.computer_color.clone() }).collect()).unwrap_or_default(),
+        organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone(), is_personal: org.is_personal, cloud: org.cloud.clone(), computer_name: org.computer_name.clone(), computer_color: org.computer_color.clone(),
+            plan: if phase2_enabled(session, PHASE2_TEAMS_PLAN, Some(&org.org_id)) {
+                org.plan.clone().and_then(|plan| serde_json::from_value::<OrganizationPlan>(plan).ok())
+                    .filter(|plan| plan.catalog.teams.currency == "USD" && plan.catalog.teams.member_limit > 0)
+            } else {
+                None
+            },
+        }).collect()).unwrap_or_default(),
         multi_org: inner.session.as_ref().is_some_and(multi_org),
         catalog_feed: inner.session.as_ref().is_some_and(catalog_feed),
         member_workspaces: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get(MEMBER_WORKSPACES_CAPABILITY) == Some(&true)),
@@ -2072,7 +2127,7 @@ mod tests {
 
     #[test]
     fn a_created_organization_says_whether_it_was_selected() {
-        let organization = OrganizationSummary { id: "org-1".into(), name: "Team".into(), role: "owner".into(), is_personal: false, cloud: None, computer_name: None, computer_color: None };
+        let organization = OrganizationSummary { id: "org-1".into(), name: "Team".into(), role: "owner".into(), is_personal: false, cloud: None, computer_name: None, computer_color: None, plan: None };
         let unselected = OrganizationCreated { organization: organization.clone(), selected: false };
         assert_eq!(
             serde_json::to_value(&unselected).unwrap(),
@@ -2511,6 +2566,36 @@ mod tests {
     }
 
     #[test]
+    fn phase2_teams_plan_is_scoped_and_never_persisted() {
+        let manager = signed_in("org-a");
+        let mut answer = body("member");
+        let plan = json!({
+            "plan": "teams", "seatsUsed": 4, "memberLimit": 7, "upgradeTarget": "plans",
+            "catalog": { "teams": { "currency": "USD", "unitAmountMinor": 2300, "interval": "month", "memberLimit": 7 } }
+        });
+        answer.organizations[0].plan = Some(plan.clone());
+        let mut other = answer.organizations[0].clone();
+        other.org_id = "org-b".into();
+        answer.organizations.push(other);
+        answer.capabilities.phase2_readiness = json!({
+            "version": 1, "organizations": {
+                "org-a": { (PHASE2_TEAMS_PLAN): true },
+                "org-b": { (PHASE2_TEAMS_PLAN): false }
+            }
+        });
+        assert!(serde_json::to_value(&answer.organizations[0]).unwrap().get("plan").is_none());
+        let start = Instant::now();
+        assert!(manager.refresh_roles_with(true, start, |_| Ok(answer.clone())));
+        let projected = serde_json::to_value(manager.snapshot()).unwrap();
+        assert_eq!(projected["organizations"][0]["plan"], plan);
+        assert!(projected["organizations"][1].get("plan").is_none());
+
+        answer.organizations[0].plan.as_mut().unwrap()["payer"] = json!("sensitive");
+        assert!(manager.refresh_roles_with(true, start + ROLES_REFRESH_FLOOR, |_| Ok(answer)));
+        assert!(manager.snapshot().organizations[0].plan.is_none());
+    }
+
+    #[test]
     fn phase2_readiness_is_independent_and_fails_closed_on_refresh() {
         let manager = signed_in("org-a");
         let start = Instant::now();
@@ -2708,7 +2793,7 @@ mod tests {
         let mut session = from.clone();
         session.access_token = "rotated-access".into();
         session.refresh_token = "rotated-refresh".into();
-        session.organizations = vec![Organization { org_id: "org-a".into(), name: "Acme".into(), role: role.into(), is_personal: false, cloud: None, computer_name: None, computer_color: None }];
+        session.organizations = vec![Organization { org_id: "org-a".into(), name: "Acme".into(), role: role.into(), is_personal: false, cloud: None, computer_name: None, computer_color: None, plan: None }];
         session
     }
 
