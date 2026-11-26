@@ -14,17 +14,16 @@ name: Delete account (26.01)
 - tapOn:
     text: "Account.*"
 - waitForAnimationToEnd
-- takeScreenshot: 26.01-01-account-row
 - scrollUntilVisible:
     element:
       id: account-delete-row
+    centerElement: true
+- takeScreenshot: 26.01-01-account-row
 - tapOn:
     id: account-delete-row
 - waitForAnimationToEnd
 - takeScreenshot: 26.01-02-page-top
-- scrollUntilVisible:
-    element:
-      id: delete-account-email
+- runFlow: steps/to-confirm.yaml
 - takeScreenshot: 26.01-03-page-confirm
 - tapOn:
     id: delete-account-email
@@ -47,25 +46,30 @@ name: Delete account (26.01)
 - tapOn:
     id: delete-account-done
 - waitForAnimationToEnd
-- takeScreenshot: 26.01-08-settings-pending
+- takeScreenshot: 26.01-08-settings-after-stopping
 
 - launchApp:
     clearState: true
     arguments: { fixtureScenario: connected, fixtureDeletion: blocked }
 - runFlow: steps/open-delete-account.yaml
 - takeScreenshot: 26.01-10-blocked
-- scrollUntilVisible:
-    element:
-      id: delete-account-confirm
+# To the end of the page: the footer button is always on screen; the rows above it are what is shot.
+- swipe:
+    start: 50%, 70%
+    end: 50%, 15%
+    duration: 600
+- swipe:
+    start: 50%, 70%
+    end: 50%, 15%
+    duration: 600
+- waitForAnimationToEnd
 - takeScreenshot: 26.01-11-blocked-end
 
 - launchApp:
     clearState: true
     arguments: { fixtureScenario: connected, fixtureDeletion: stop-refused }
 - runFlow: steps/open-delete-account.yaml
-- scrollUntilVisible:
-    element:
-      id: delete-account-email
+- runFlow: steps/to-confirm.yaml
 - tapOn:
     id: delete-account-email
 - inputText: "alex@example.com"
@@ -76,18 +80,18 @@ name: Delete account (26.01)
     visible:
       id: delete-account-refused
     timeout: 30000
+- runFlow: steps/to-confirm.yaml
 - scrollUntilVisible:
     element:
       id: delete-account-refused
+    direction: UP
 - takeScreenshot: 26.01-12-stop-failed
 
 - launchApp:
     clearState: true
     arguments: { fixtureScenario: connected, fixtureDeletion: refused }
 - runFlow: steps/open-delete-account.yaml
-- scrollUntilVisible:
-    element:
-      id: delete-account-email
+- runFlow: steps/to-confirm.yaml
 - tapOn:
     id: delete-account-email
 - inputText: "alex@example.com"
@@ -100,14 +104,24 @@ name: Delete account (26.01)
       id: delete-account-refused
     timeout: 20000
 - takeScreenshot: 26.01-14-refused
+# Tried again: nothing was running, so it is scheduled at once with the server's day.
+- tapOn:
+    id: delete-account-confirm
+- extendedWaitUntil:
+    visible:
+      id: delete-account-done
+    timeout: 20000
+- takeScreenshot: 26.01-14b-scheduled-dated
+- tapOn:
+    id: delete-account-done
+- waitForAnimationToEnd
+- takeScreenshot: 26.01-14c-settings-pending
 
 - launchApp:
     clearState: true
     arguments: { fixtureScenario: connected, fixtureDeletion: unknown }
 - runFlow: steps/open-delete-account.yaml
-- scrollUntilVisible:
-    element:
-      id: delete-account-email
+- runFlow: steps/to-confirm.yaml
 - tapOn:
     id: delete-account-email
 - inputText: "alex@example.com"
@@ -124,9 +138,7 @@ name: Delete account (26.01)
     clearState: true
     arguments: { fixtureScenario: connected, fixtureDeletion: changed }
 - runFlow: steps/open-delete-account.yaml
-- scrollUntilVisible:
-    element:
-      id: delete-account-email
+- runFlow: steps/to-confirm.yaml
 - tapOn:
     id: delete-account-email
 - inputText: "alex@example.com"
@@ -143,10 +155,7 @@ name: Delete account (26.01)
     clearState: true
     arguments: { fixtureScenario: connected, fixtureDeletion: stale }
 - runFlow: steps/open-delete-account.yaml
-# The fixed footer covers the card until the field below it is in view; Maestro counts it as visible anyway.
-- scrollUntilVisible:
-    element:
-      id: delete-account-email
+- runFlow: steps/to-confirm.yaml
 - takeScreenshot: 26.01-17-stale
 - tapOn:
     id: delete-account-sign-in
@@ -160,9 +169,7 @@ name: Delete account (26.01)
     clearState: true
     arguments: { fixtureScenario: offline, fixtureDeletion: plain }
 - runFlow: steps/open-delete-account.yaml
-- scrollUntilVisible:
-    element:
-      id: delete-account-email
+- runFlow: steps/to-confirm.yaml
 - tapOn:
     id: delete-account-email
 - inputText: "alex@example.com"
