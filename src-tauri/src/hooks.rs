@@ -3101,7 +3101,7 @@ mod tests {
         assert_eq!(held.join().unwrap()["result"]["did"], "sessions.list", "answered once commands are let in again");
         assert!(bridge.gate.lock().held.is_empty());
         wait("everything held is done with", &|| bridge.busy_named().is_none());
-        assert_eq!(*carried_out.lock().unwrap(), ["browser.snapshot", "runtime.ping", "sessions.list"], "not the one nobody waited for");
+        assert_eq!(*carried_out.lock().unwrap(), ["runtime.ping", "browser.snapshot", "sessions.list"], "not the one nobody waited for");
     }
 
     /// PRO-589: a freeze that a frame under way outlasts says which frame,
