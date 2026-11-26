@@ -149,24 +149,24 @@ fn forwarding(root: &Path, fixture: &FetchFixture, managed: bool) {
     let (_, _admin_bridge) = hooks::serve(admin.clone(), |_| hooks::HookReply::default(), move |request| owner.handle(request)).unwrap();
     for cycle in [true, false] {
         bridge.freeze(Duration::from_secs(5)).unwrap();
-        // Taken before the request is written: a frame written to a bridge
-        // that is only frozen is read and held (PRO-589), and this case is
-        // the one left unread in the listener's queue for the next runtime.
-        let frozen = bridge.take(|_| false).unwrap();
-        assert!(frozen.held.is_empty() && frozen.parked.is_empty(), "this case must be an UNREAD listener backlog, not an already-read held frame");
         let (written_tx, written_rx) = std::sync::mpsc::channel();
         *crate::local_runtime::client::AFTER_WORKSPACE_WRITE.lock().unwrap() = Some(Box::new(move || { written_tx.send(()).unwrap(); }));
         let before = launches(root);
         std::thread::scope(|scope| {
             let worker = scope.spawn(super::super::queued(|| scan(&client, fixture)));
             written_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            let frozen = bridge.take(|_| false).unwrap();
+            // Read while frozen (PRO-589), it goes over as the listener backlog
+            // would have: answered with the new runtime's authority, not this one's.
+            assert!(frozen.parked.is_empty() && frozen.held.iter().all(|(_, _, queued)| *queued), "this case must be read from the listener backlog, not an already-read held frame");
             if cycle {
                 acknowledge(&admin, true, managed);
                 acknowledge(&admin, false, managed);
             }
             let replacement = hooks::ControlEndpoint::adopted(endpoint.socket.clone(), endpoint.token.clone());
             let owner = service(root, &replacement);
-            let adopted = hooks::Adopted { own: frozen.own, published: frozen.published, held: Vec::new() };
+            let held = frozen.held.into_iter().map(|(fd, line, queued)| (std::os::unix::net::UnixStream::from(fd), line, queued)).collect();
+            let adopted = hooks::Adopted { own: frozen.own, published: frozen.published, held };
             let (_, next) = hooks::serve_adopted(replacement, adopted, |_| hooks::HookReply::default(), move |request| owner.handle(request)).unwrap();
             next.thaw();
             scanned(&worker.join().unwrap(), fixture, false);
