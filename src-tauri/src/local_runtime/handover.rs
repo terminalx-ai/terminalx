@@ -87,6 +87,14 @@ trait Moments {
     fn quiet_by(&self, until: std::time::Instant) -> std::result::Result<(), String>;
     fn drain(&self);
     fn undrain(&self);
+    /// The time [`converge`] paces itself by, `quiet_by` waits against, and
+    /// a deadline is set on. The clock, but for a script whose time passes
+    /// only as it says: on a busy machine a thread can be held off the CPU
+    /// for longer than a pacing step, which no real handover is affected
+    /// by but a test of its pacing would be.
+    fn now(&self) -> std::time::Instant { std::time::Instant::now() }
+    /// A pause between attempts, on the same clock.
+    fn pause(&self, time: Duration) { std::thread::sleep(time) }
 }
 
 /// Try `attempt` at moments found quiet until it goes through or `deadline`
@@ -105,10 +113,10 @@ fn converge(deadline: std::time::Instant, pacing: Pacing, moments: &impl Moments
     use std::time::Instant;
     let mut last: Option<anyhow::Error> = None;
     let mut gap = pacing.gap.0;
-    let mut drain_at = Instant::now() + pacing.drain_after;
+    let mut drain_at = moments.now() + pacing.drain_after;
     let mut draining: Option<Instant> = None;
     let outcome = loop {
-        let now = Instant::now();
+        let now = moments.now();
         if now >= deadline {
             break Err(last.unwrap_or_else(|| Unsettled("Nothing came to rest in time".into()).into()));
         }
@@ -136,7 +144,7 @@ fn converge(deadline: std::time::Instant, pacing: Pacing, moments: &impl Moments
             Err(error) if error.is::<Unsettled>() => {
                 log::info!("the handover found something unsettled at a quiet moment, and looks for another: {error:#}");
                 last = Some(error);
-                std::thread::sleep(gap.min(deadline.saturating_duration_since(Instant::now())));
+                moments.pause(gap.min(deadline.saturating_duration_since(moments.now())));
                 gap = (gap * 2).min(pacing.gap.1);
             }
             Err(error) => break Err(error),
@@ -956,7 +964,11 @@ mod tests {
     use super::*;
 
     /// A runtime whose quiet moments are scripted: quiet from `quiet_after`
-    /// looks on, or only while control commands are held back.
+    /// looks on, or only while control commands are held back. Its time
+    /// passes only as the script says (see [`Moments::now`]): each look that finds something under way takes
+    /// 5 ms, or what is left until `until`, however long the machine running
+    /// the test takes to get through it. CI's macOS suite once held this
+    /// thread off the CPU past `drain_after` before its fifth look.
     #[derive(Default)]
     struct Scripted {
         looks: std::cell::Cell<u32>,
@@ -964,6 +976,12 @@ mod tests {
         only_drained: bool,
         draining: std::cell::Cell<bool>,
         drains: std::cell::Cell<u32>,
+        epoch: std::cell::OnceCell<std::time::Instant>,
+        elapsed: std::cell::Cell<Duration>,
+    }
+
+    impl Scripted {
+        fn within(&self, time: Duration) -> std::time::Instant { self.now() + time }
     }
 
     impl Moments for Scripted {
@@ -971,11 +989,13 @@ mod tests {
             self.looks.set(self.looks.get() + 1);
             let quiet = if self.only_drained { self.draining.get() } else { self.looks.get() > self.quiet_after };
             if quiet { return Ok(()); }
-            std::thread::sleep(until.saturating_duration_since(std::time::Instant::now()).min(Duration::from_millis(5)));
+            self.pause(until.saturating_duration_since(self.now()).min(Duration::from_millis(5)));
             Err("A hook or control request is still under way: control browser.snapshot, open for 40 s".into())
         }
         fn drain(&self) { self.draining.set(true); self.drains.set(self.drains.get() + 1); }
         fn undrain(&self) { self.draining.set(false); }
+        fn now(&self) -> std::time::Instant { *self.epoch.get_or_init(std::time::Instant::now) + self.elapsed.get() }
+        fn pause(&self, time: Duration) { self.elapsed.set(self.elapsed.get() + time); }
     }
 
     const QUICK: Pacing = Pacing {
@@ -986,8 +1006,6 @@ mod tests {
         gap: (Duration::from_millis(1), Duration::from_millis(4)),
     };
 
-    fn within(time: Duration) -> std::time::Instant { std::time::Instant::now() + time }
-
     /// The incident behind this: a runtime with a command under way at
     /// every instant someone else picked refused 181 handovers in a row,
     /// each of which had held its hooks still for ten seconds. It holds
@@ -996,7 +1014,7 @@ mod tests {
     fn nothing_is_held_still_until_a_moment_is_found_quiet() {
         let runtime = Scripted { quiet_after: 4, ..Default::default() };
         let attempts = std::cell::Cell::new(0);
-        converge(within(Duration::from_secs(10)), QUICK, &runtime, |settle| {
+        converge(runtime.within(Duration::from_secs(10)), QUICK, &runtime, |settle| {
             assert_eq!(settle, QUICK.settle, "little time, as every hook is held meanwhile");
             assert_eq!(runtime.looks.get(), 5, "only once a look found it quiet");
             attempts.set(attempts.get() + 1);
@@ -1012,12 +1030,12 @@ mod tests {
     #[test]
     fn commands_are_held_back_when_no_quiet_moment_comes_by_itself() {
         let runtime = Scripted { only_drained: true, ..Default::default() };
-        let began = std::time::Instant::now();
-        converge(within(Duration::from_secs(10)), QUICK, &runtime, |_| {
+        let began = runtime.now();
+        converge(runtime.within(Duration::from_secs(10)), QUICK, &runtime, |_| {
             assert!(runtime.draining.get());
             Ok(())
         }).unwrap();
-        assert!(began.elapsed() >= QUICK.drain_after, "not before a quiet moment was waited for without it");
+        assert!(runtime.now() - began >= QUICK.drain_after, "not before a quiet moment was waited for without it");
         assert_eq!(runtime.drains.get(), 1);
         assert!(!runtime.draining.get(), "answered again afterwards");
     }
@@ -1028,7 +1046,7 @@ mod tests {
     #[test]
     fn holding_back_comes_in_stretches_and_what_was_in_the_way_is_named_when_time_is_up() {
         let runtime = Scripted { quiet_after: u32::MAX, ..Default::default() };
-        let error = converge(within(Duration::from_millis(450)), QUICK, &runtime, |_| panic!("never quiet")).unwrap_err();
+        let error = converge(runtime.within(Duration::from_millis(450)), QUICK, &runtime, |_| panic!("never quiet")).unwrap_err();
         assert!(runtime.drains.get() >= 2, "{} stretches", runtime.drains.get());
         assert!(!runtime.draining.get(), "answered again once it is off");
         let refusal = failed(error);
@@ -1043,14 +1061,14 @@ mod tests {
     fn an_attempt_that_finds_something_unsettled_is_made_again_and_any_other_failure_ends_it() {
         let runtime = Scripted::default();
         let attempts = std::cell::Cell::new(0);
-        converge(within(Duration::from_secs(10)), QUICK, &runtime, |_| {
+        converge(runtime.within(Duration::from_secs(10)), QUICK, &runtime, |_| {
             attempts.set(attempts.get() + 1);
             if attempts.get() < 4 { Err(Unsettled("An agent was starting".into()).into()) } else { Ok(()) }
         }).unwrap();
         assert_eq!(attempts.get(), 4);
 
         attempts.set(0);
-        let error = converge(within(Duration::from_secs(10)), QUICK, &runtime, |_| {
+        let error = converge(runtime.within(Duration::from_secs(10)), QUICK, &runtime, |_| {
             attempts.set(attempts.get() + 1);
             Err(Unkept(2).into())
         }).unwrap_err();
