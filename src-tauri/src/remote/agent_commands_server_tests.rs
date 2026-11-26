@@ -256,8 +256,25 @@ async fn phase2_collaboration_v2_durable_command_rejects_stale_stamp_before_jour
     assert!(m.agent.sends().is_empty());
     // The production ManagerOps equivalent has no raw witness yet; no
     // inference from saved default mode or zero pending approvals is allowed.
-    assert!(command(&m.rpc, &peer, "session.send", params).await.is_err());
+    assert_eq!(
+        refusal(command(&m.rpc, &peer, "session.send", params).await),
+        ("forbidden".into(), json!("everyone-tab-read-only")),
+    );
     assert!(m.agent.sends().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn phase2_collaboration_v2_everyone_cannot_start_tabs_or_send_terminal_input() {
+    let _home = crate::store::temp_home();
+    let m = machine();
+    m.rpc.collab.install_v2(v2_policy("11", "driver", false, json!("everyone"))).unwrap();
+    let (peer, _events) = Peer::for_user("everyone-configure".into(), Authority::Participate, Some("admin".into()));
+    for method in ["session.addTab", "pty.write"] {
+        let spec = protocol::find_method(method).unwrap();
+        let error = m.rpc.authorize_participant(&peer, spec).unwrap_err();
+        assert_eq!(error.code, "forbidden");
+        assert_eq!(error.data.unwrap()["reason"], "everyone-explicit-access-required");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

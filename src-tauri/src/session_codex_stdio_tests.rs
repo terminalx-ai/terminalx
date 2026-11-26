@@ -2358,7 +2358,7 @@ fn phase2_collaboration_v2_native_writer_rechecks_original_policy_and_mode_after
             let session: index::SessionEntry = serde_json::from_value(json!({
                 "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
                 "created":index::now(), "modified":index::now(),
-                "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "created":index::now()}]
+                "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"acceptEdits", "created":index::now()}]
             })).unwrap();
             index::save(&[session]).unwrap();
             let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
@@ -2481,7 +2481,7 @@ fn phase2_native_start_fixture() {
 
 #[cfg(unix)]
 fn phase2_reported_engine(root: &Path, mut report: Value) -> (Stdio, Outbound) {
-    let mut engine = Stdio::new(root.to_string_lossy().into_owned(),String::new(),None,"auto".into(),None);
+    let mut engine = Stdio::new(root.to_string_lossy().into_owned(),String::new(),None,"acceptEdits".into(),None);
     let request = |actions: Vec<StdioAction>, method: &str| actions.into_iter().find_map(|action| match action {
         StdioAction::Write(frame) if serde_json::from_str::<Value>(&frame.line).unwrap()["method"] == method => Some(frame), _ => None,
     }).unwrap();
@@ -2510,7 +2510,7 @@ fn phase2_collaboration_v2_native_provider_reports_reach_actual_writer_only_with
     ] {
         let _home = store::temp_home(); let root = store::root().unwrap();
         let entry: index::SessionEntry = serde_json::from_value(json!({"id":"stdio-owner","projectPath":root,"cwd":root,"title":"fixture","created":index::now(),"modified":index::now(),
-            "tabs":[{"id":"tab","harness":"codex","transport":"experimentalCodexStdio","permissionMode":"auto","created":index::now()}]})).unwrap(); index::save(&[entry]).unwrap();
+            "tabs":[{"id":"tab","harness":"codex","transport":"experimentalCodexStdio","permissionMode":"acceptEdits","created":index::now()}]})).unwrap(); index::save(&[entry]).unwrap();
         let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),Arc::new(crate::sink::NoObserver),Arc::new(Host::new()),Arc::new(pty::Terminals::new()),Arc::new(Default::default()),Arc::new(Default::default()),crate::hooks::prepare_control().unwrap());
         let rt_arc = manager.runtime("stdio-owner","tab").unwrap(); let (engine,frame) = phase2_reported_engine(&root,report.clone()); let launch = engine.launch.clone();
         let mut rt = rt_arc.lock().unwrap(); rt.engine = Engine::CodexStdio(engine);
@@ -2535,7 +2535,7 @@ fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_onl
         let _home = store::temp_home();
         let root = store::root().unwrap();
         let entry: index::SessionEntry = serde_json::from_value(json!({"id":"stdio-owner","projectPath":root,"cwd":root,"title":"fixture","created":index::now(),"modified":index::now(),
-            "tabs":[{"id":"tab","harness":"codex","transport":"experimentalCodexStdio","permissionMode":"auto","created":index::now()}]})).unwrap();
+            "tabs":[{"id":"tab","harness":"codex","transport":"experimentalCodexStdio","permissionMode":"acceptEdits","created":index::now()}]})).unwrap();
         index::save(&[entry]).unwrap();
         let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)), Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()), Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
         let rt_arc = manager.runtime("stdio-owner", "tab").unwrap();

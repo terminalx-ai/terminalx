@@ -97,6 +97,19 @@ const MAX_WRITERS: usize = 64;
 /// Longest session title `session.update` accepts, in characters.
 const MAX_TITLE_CHARS: usize = 200;
 /// Launch modes a tab may be given (`src/lib/models.ts` `PERMISSION_MODES`).
+fn collaboration_drive_refusal(error: anyhow::Error) -> RpcError {
+    if error.is::<collab::v2::EveryoneTabReadOnly>() {
+        return RpcError::forbidden(error.to_string())
+            .with_data(json!({ "reason": collab::v2::EVERYONE_TAB_READ_ONLY }));
+    }
+    RpcError::forbidden("Collaboration policy or tab safety changed")
+}
+
+fn everyone_configuration_refusal() -> RpcError {
+    RpcError::forbidden("Starting sessions and using terminal input require an explicit share")
+        .with_data(json!({ "reason": collab::v2::EVERYONE_EXPLICIT_ACCESS_REQUIRED }))
+}
+
 const PERMISSION_MODES: [&str; 5] = ["plan", "manual", "auto", "acceptEdits", "bypassPermissions"];
 /// Sink events after which the session list is sent again (`session/2`).
 const SESSION_EVENTS: [&str; 3] = ["session_created", "session_updated", crate::session_ops::SESSION_DELETED_EVENT];
@@ -1642,6 +1655,12 @@ impl WorkspaceRpc {
             _ => Role::Viewer,
         };
         let access = self.access(peer);
+        if (matches!(method, "pty.write" | "pty.resize" | "pty.control" | "session.toTerminal")
+            || protocol::MANAGER_START.contains(&method))
+            && self.collab.runtime_policy.everyone(peer.user_id.as_deref().unwrap_or(""))
+        {
+            return Err(everyone_configuration_refusal());
+        }
         // A shell is arbitrary code as the workspace's user: it can edit the
         // agent's settings, read its tokens or start an agent with other
         // flags. So typing into one needs what changing those settings
@@ -1890,7 +1909,7 @@ impl WorkspaceRpc {
                 if let Some(hook) = hook { hook(); }
             }
             let action = if matches!(method.as_str(), "session.decide") { collab::v2::Action::Approve }
-                else if matches!(method.as_str(), "session.send" | "session.steer" | "session.stop" | "session.interrupt" | protocol::FOLLOW_UP_METHOD) { collab::v2::Action::Drive }
+                else if matches!(method.as_str(), "session.send" | "session.steer" | "session.stop" | "session.interrupt" | "lease.acquire" | protocol::FOLLOW_UP_METHOD) { collab::v2::Action::Drive }
                 else { collab::v2::Action::Configure };
             let permit = collab::v2::Permit::new(rpc.collab.clone(), peer.user_id.as_deref().unwrap_or(""), policy_stamp.clone(), action).for_peer(&peer);
             permit.with(|| crate::github_process::with_ticket(ticket, || rpc.execute_blocking(&peer, &method, params, policy_stamp)))
@@ -1907,6 +1926,9 @@ impl WorkspaceRpc {
         // block acknowledgement of a queued request behind a partial write.
         let _configuration_admission = (configuration && method != "pty.write").then(|| self.collab.enter_admission());
         if configuration {
+            if self.collab.runtime_policy.everyone(peer.user_id.as_deref().unwrap_or("")) {
+                return Err(everyone_configuration_refusal());
+            }
             if !self.access(peer).can_configure() {
                 return Err(RpcError::forbidden("Agent settings and terminal input need independent approval rights"));
             }
@@ -2025,7 +2047,7 @@ impl WorkspaceRpc {
                 let _admission = self.collab.enter_admission();
                 if let Some(permit) = collab::v2::current().filter(|_| self.collab.runtime_policy.is_v2()) {
                     let (session, tab) = self.known_tab(&params)?;
-                    permit.check(self.manager()?.collaboration_v2_witness(&session, &tab).as_ref()).map_err(|_| RpcError::forbidden("Collaboration policy or tab safety changed"))?;
+                    permit.check(self.manager()?.collaboration_v2_witness(&session, &tab).as_ref()).map_err(collaboration_drive_refusal)?;
                 }
                 self.session_interrupt(peer, params)
             },
@@ -2311,9 +2333,15 @@ impl WorkspaceRpc {
     fn lease_acquire(&self, peer: &Peer, params: Value, take_over: bool) -> Result<Value, RpcError> {
         let (session_id, tab_id) = self.known_tab(&params)?;
         let user = peer.user_id.as_deref().ok_or_else(|| RpcError::forbidden("driving needs a signed-in person"))?;
+        let _admission = self.collab.enter_admission();
         let access = self.access(peer);
         if !access.can_drive() || take_over && access.role != Role::Manager {
             return Err(lease_refusal(LeaseRefusal::Forbidden));
+        }
+        if self.collab.runtime_policy.everyone(user) {
+            let permit = collab::v2::current().ok_or_else(|| RpcError::forbidden("Collaboration provenance missing"))?;
+            permit.check(self.manager()?.collaboration_v2_witness(&session_id, &tab_id).as_ref())
+                .map_err(collaboration_drive_refusal)?;
         }
         let busy = agents_busy(&self.agents, &session_id, &tab_id);
         let now = crate::cloud_agents::now_ms();
@@ -4745,7 +4773,7 @@ impl WorkspaceRpc {
         let tab = session.tabs.iter().find(|tab| tab.id == tab_id).ok_or_else(|| RpcError::not_found("no such tab"))?;
         if self.collab.runtime_policy.is_v2() {
             let permit = collab::v2::current().ok_or_else(|| RpcError::forbidden("Collaboration provenance missing"))?;
-            permit.check(self.manager()?.collaboration_v2_witness(&session.id, &tab.id).as_ref()).map_err(|_| RpcError::forbidden("Collaboration policy or tab safety changed"))?;
+            permit.check(self.manager()?.collaboration_v2_witness(&session.id, &tab.id).as_ref()).map_err(collaboration_drive_refusal)?;
             if self.collab.runtime_policy.everyone(peer.user_id.as_deref().unwrap_or("")) && slash::is_command(params.get("text").and_then(Value::as_str).unwrap_or("")) {
                 permit.check_configuration().map_err(|_| RpcError::forbidden("Explicit configuration authority required"))?;
             }
