@@ -43,6 +43,31 @@ pub fn lock() -> Admitted {
     Admitted { _guard: guard }
 }
 
+/// [`lock`], given up on at `deadline` (`None`): for a handover, which holds
+/// every hook still while it waits and so must not wait behind whatever
+/// holds admission, a step's git work among it, for as long as that takes.
+pub fn lock_by(deadline: std::time::Instant) -> Option<Admitted> {
+    loop {
+        match ADMISSION.try_lock() {
+            Ok(guard) => {
+                HELD.with(|held| held.set(true));
+                return Some(Admitted { _guard: guard });
+            }
+            Err(std::sync::TryLockError::Poisoned(error)) => {
+                HELD.with(|held| held.set(true));
+                return Some(Admitted { _guard: error.into_inner() });
+            }
+            Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        }
+    }
+}
+
+/// Whether nothing holds admission this instant: a handover picks such a moment.
+pub fn free() -> bool {
+    !matches!(ADMISSION.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+}
+
 /// Admission for a prompt or start in one tab. A tab whose agent is being
 /// stopped behind a [`Kind::Hold`] fence is waited for first, without
 /// holding admission, so every other tab is admitted meanwhile.
@@ -480,5 +505,34 @@ mod tests {
         assert!(!stopping(&open("parked", Some("t2")).unwrap_err()));
         drop((hold, closing));
         assert!(!held("parked", "t1"));
+    }
+}
+
+#[cfg(test)]
+mod bounded {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// A handover does not wait on admission for longer than it has: it
+    /// holds every hook still meanwhile.
+    #[test]
+    fn admission_is_given_up_on_at_the_deadline_and_taken_once_free() {
+        let (taken, held) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _admitted = lock();
+            taken.send(()).unwrap();
+            released.recv().unwrap();
+        });
+        held.recv().unwrap();
+        assert!(!free());
+        let began = Instant::now();
+        assert!(lock_by(began + Duration::from_millis(150)).is_none());
+        assert!(began.elapsed() >= Duration::from_millis(150) && began.elapsed() < Duration::from_secs(5), "{:?}", began.elapsed());
+        release.send(()).unwrap();
+        let admitted = lock_by(Instant::now() + Duration::from_secs(10)).expect("free once its holder is done");
+        assert!(!free());
+        drop(admitted);
+        holder.join().unwrap();
     }
 }

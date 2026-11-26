@@ -646,6 +646,7 @@ pub fn run() {
             local_runtime::ui::local_runtime_replace,
             local_runtime::ui::local_runtime_work,
             local_runtime::ui::local_runtime_plan_update,
+            local_runtime::ui::local_runtime_hand_over_installed,
             local_runtime::ui::local_runtime_settings,
             local_runtime::ui::set_local_runtime_quit_behavior,
             commands::list_projects,

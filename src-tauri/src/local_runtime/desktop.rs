@@ -27,7 +27,11 @@ const LOOP_STALL: Duration = Duration::from_secs(120);
 /// How long an owner has to come to rest, write its handover record and say
 /// so: each part of it is given 10 seconds, and stopping what it cannot
 /// carry, when the reader agreed to, takes as long as Stop does.
-const HANDOVER_TIMEOUT: Duration = Duration::from_secs(90);
+/// A runtime that picks its own moment (told how long it has, `patienceMs`)
+/// looks for one for most of this, holding nothing still meanwhile.
+const HANDOVER_TIMEOUT: Duration = Duration::from_secs(300);
+/// What of that is left for it to say so once its time is up.
+const HANDOVER_REPLY: Duration = Duration::from_secs(60);
 /// How long an owner has to check the binary it would be handed over to: it
 /// gives that binary 30 seconds to say which handovers it reads.
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(45);
@@ -374,8 +378,20 @@ impl Desktop {
     /// the reader agreed to. Returns once the owner says it is handing over;
     /// [`super::launch::taken_over`] says when the new runtime answers.
     pub fn hand_over(&self, binary: &std::path::Path, stop: &[crate::session::retire::Work], within: Option<Duration>) -> Result<()> {
+        let within = within.unwrap_or(HANDOVER_TIMEOUT);
+        self.hand_over_patiently(binary, stop, within, within.saturating_sub(HANDOVER_REPLY.min(within / 2)))
+    }
+
+    /// [`Self::hand_over`], waiting `within` for an owner told it has
+    /// `patience` to find its moment. With more patience than that, an owner
+    /// that picks its own moment goes on looking after this has given up on
+    /// hearing of it, and hands over when it finds one, whoever is there to
+    /// be told: as an update that is about to relaunch the app wants.
+    pub fn hand_over_patiently(&self, binary: &std::path::Path, stop: &[crate::session::retire::Work], within: Duration, patience: Duration) -> Result<()> {
+        // A runtime that picks its own moment is told how long it has to
+        // find one; one from before it could answers within its own limits.
         let _: serde_json::Value = self.client.call_within("runtime.handover",
-            serde_json::json!({"epoch": self.client.epoch(), "binary": binary, "stop": stop}), within.unwrap_or(HANDOVER_TIMEOUT))?;
+            serde_json::json!({"epoch": self.client.epoch(), "binary": binary, "stop": stop, "patienceMs": patience.as_millis() as u64}), within)?;
         Ok(())
     }
 

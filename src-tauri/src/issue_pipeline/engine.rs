@@ -232,6 +232,12 @@ impl Running {
     }
 }
 
+/// How many steps are running now: a handover picks a moment when none is.
+#[cfg(unix)]
+pub(crate) fn steps_running() -> usize {
+    STEPS.load(Ordering::Relaxed)
+}
+
 /// No step starts until this is dropped (#765).
 #[cfg(unix)]
 pub(crate) struct PausedSteps(());

@@ -48,6 +48,134 @@ pub const FORMATS_COMMAND: &str = "handover-formats";
 
 /// How long each part of the runtime is given to come to rest.
 const SETTLE_WITHIN: Duration = Duration::from_secs(10);
+/// The longest a handover goes on looking for its moment, whatever is asked.
+const PATIENCE_MAX: Duration = Duration::from_secs(600);
+
+/// How a handover given time finds its moment ([`converge`]).
+#[derive(Clone, Copy)]
+struct Pacing {
+    /// How long each part is given to come to rest in an attempt begun at a
+    /// moment found quiet: little, as every hook is held meanwhile.
+    settle: Duration,
+    /// How long a quiet moment is waited for with nothing held back, before
+    /// control commands are ([`crate::hooks::Bridge::drain`]).
+    drain_after: Duration,
+    /// How long commands are held back at a stretch. Whoever sent one waits
+    /// that long at most for it to begin: well within the 30 seconds the
+    /// command line gives a command, or it would give up on one that is
+    /// then carried out all the same.
+    drain_for: Duration,
+    /// How long they are answered again before being held back once more.
+    drain_rest: Duration,
+    /// The pause after an attempt that found something unsettled after all,
+    /// at first and at most: each such attempt held every hook for a moment.
+    gap: (Duration, Duration),
+}
+
+const PACING: Pacing = Pacing {
+    settle: Duration::from_secs(3),
+    drain_after: Duration::from_secs(10),
+    drain_for: Duration::from_secs(12),
+    drain_rest: Duration::from_secs(10),
+    gap: (Duration::from_millis(500), Duration::from_secs(8)),
+};
+
+/// What a handover watches to find its moment.
+trait Moments {
+    /// Wait, holding nothing still, until nothing is under way, or until
+    /// `until`: then what still is.
+    fn quiet_by(&self, until: std::time::Instant) -> std::result::Result<(), String>;
+    fn drain(&self);
+    fn undrain(&self);
+}
+
+/// Try `attempt` at moments found quiet until it goes through or `deadline`
+/// passes, and then say what was last in the way.
+///
+/// A runtime with many agents is never at rest at a moment someone else
+/// picks: asked to come to rest within ten seconds of an arbitrary instant,
+/// it refused for as long as any command happened to be under way then, and
+/// every refused attempt had held all its hooks still for those ten seconds.
+/// So it picks the moment itself. It watches, holding nothing, for an
+/// instant with nothing under way, and only then holds everything still,
+/// which then takes no time. If no such instant comes by itself, new control
+/// commands are held back for a while, so that those under way end and none
+/// takes their place. Only `attempt` not being [`Unsettled`] ends it early.
+fn converge(deadline: std::time::Instant, pacing: Pacing, moments: &impl Moments, mut attempt: impl FnMut(Duration) -> Result<()>) -> Result<()> {
+    use std::time::Instant;
+    let mut last: Option<anyhow::Error> = None;
+    let mut gap = pacing.gap.0;
+    let mut drain_at = Instant::now() + pacing.drain_after;
+    let mut draining: Option<Instant> = None;
+    let outcome = loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break Err(last.unwrap_or_else(|| Unsettled("Nothing came to rest in time".into()).into()));
+        }
+        match draining {
+            None if now >= drain_at => {
+                log::info!("no quiet moment for the handover yet; control commands are held back for up to {} s", pacing.drain_for.as_secs());
+                moments.drain();
+                draining = Some(now + pacing.drain_for);
+            }
+            Some(until) if now >= until => {
+                moments.undrain();
+                draining = None;
+                drain_at = now + pacing.drain_rest;
+            }
+            _ => {}
+        }
+        // Looked at again when the holding back begins or ends.
+        let until = deadline.min(draining.unwrap_or(drain_at));
+        if let Err(waiting) = moments.quiet_by(until) {
+            last = Some(Unsettled(waiting).into());
+            continue;
+        }
+        match attempt(pacing.settle) {
+            Ok(()) => break Ok(()),
+            Err(error) if error.is::<Unsettled>() => {
+                log::info!("the handover found something unsettled at a quiet moment, and looks for another: {error:#}");
+                last = Some(error);
+                std::thread::sleep(gap.min(deadline.saturating_duration_since(Instant::now())));
+                gap = (gap * 2).min(pacing.gap.1);
+            }
+            Err(error) => break Err(error),
+        }
+    };
+    moments.undrain();
+    outcome
+}
+
+/// The runtime's own state, as a handover watches it.
+struct Watched<'a>(&'a Runtime);
+
+impl Moments for Watched<'_> {
+    fn quiet_by(&self, until: std::time::Instant) -> std::result::Result<(), String> {
+        const LOOK_EVERY: Duration = Duration::from_millis(50);
+        loop {
+            // The frames first, woken as each ends; the rest is looked at.
+            if !self.0.bridge.quiet_by(until) {
+                return Err(match self.0.bridge.busy_named() {
+                    Some(open) => format!("A hook or control request is still under way: {open}"),
+                    None => "A hook or control request was under way".into(),
+                });
+            }
+            let waiting = if crate::issue_pipeline::engine::steps_running() != 0 {
+                Some("An issue pipeline step is under way".to_string())
+            } else if !crate::issue_pipeline::admission::free() {
+                Some("A prompt or an agent's start is being admitted".to_string())
+            } else {
+                self.0.manager.unsettled_now()
+            };
+            let Some(waiting) = waiting else { return Ok(()) };
+            if std::time::Instant::now() + LOOK_EVERY >= until { return Err(waiting); }
+            std::thread::sleep(LOOK_EVERY);
+        }
+    }
+
+    fn drain(&self) { self.0.bridge.drain(); }
+    fn undrain(&self) { self.0.bridge.undrain(); }
+}
 /// How long the binary taking over is given to say what it reads.
 const ASK_WITHIN: Duration = Duration::from_secs(30);
 /// How long the reply to the handover may take to be written before exec.
@@ -329,12 +457,31 @@ pub(crate) fn begin(lifetime: &super::Lifetime, params: Value) -> Result<Value, 
         log::info!("stopping {session}/{tab} before the handover, as asked");
         runtime.manager.stop(session, tab).map_err(|error| failed(error.context("stop an agent the handover cannot carry")))?;
     }
+    // How long the desktop waits for this runtime to find its moment. One
+    // that names no time is answered at once, as before it could say.
+    let patience = Duration::from_millis(params["patienceMs"].as_u64().unwrap_or(0)).min(PATIENCE_MAX);
+    // One handover looks for its moment at a time: a second would only hold
+    // everything still under the first.
+    static UNDER_WAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    struct UnderWay;
+    impl Drop for UnderWay {
+        fn drop(&mut self) { UNDER_WAY.store(false, std::sync::atomic::Ordering::SeqCst); }
+    }
+    if UNDER_WAY.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err(ControlError::new("handover_busy", format!("{}, and is waiting for a quiet moment; it is handed over once that has come.", super::ALREADY_HANDING_OVER), Some("Try again in a moment.".into())));
+    }
+    let under_way = UnderWay;
     let (ready, readied) = std::sync::mpsc::channel::<Result<(), ControlError>>();
     let (go, gone) = std::sync::mpsc::channel::<()>();
     // This request is the handover itself: nothing waits for it.
     let _aside = crate::hooks::step_aside();
     std::thread::Builder::new().name("runtime-handover".into()).spawn(move || {
-        let outcome = hand_over(runtime, &verified, &ready, gone, &agreed);
+        let _under_way = under_way;
+        let outcome = if patience.is_zero() {
+            hand_over(runtime, &verified, &ready, &gone, &agreed, SETTLE_WITHIN)
+        } else {
+            converge(std::time::Instant::now() + patience, PACING, &Watched(runtime), |settle| hand_over(runtime, &verified, &ready, &gone, &agreed, settle))
+        };
         if let Err(error) = outcome {
             log::warn!("the runtime was not handed over: {error:#}");
             let _ = ready.send(Err(failed(error)));
@@ -353,22 +500,27 @@ pub(crate) fn begin(lifetime: &super::Lifetime, params: Value) -> Result<Value, 
 
 /// Hold everything still, write the record, and exec `binary`. Returns only
 /// when the handover is off, with everything going on as before.
-fn hand_over(runtime: &Runtime, binary: &Verified, ready: &std::sync::mpsc::Sender<Result<(), ControlError>>, go: std::sync::mpsc::Receiver<()>, agreed: &[String]) -> Result<()> {
+fn hand_over(runtime: &Runtime, binary: &Verified, ready: &std::sync::mpsc::Sender<Result<(), ControlError>>, go: &std::sync::mpsc::Receiver<()>, agreed: &[String], settle: Duration) -> Result<()> {
     // No Local VM work is live but what the reader agreed to cut, and none
     // starts until the exec or until the handover is off.
-    let _vm = crate::local_vm::supervisor::prepare_handover(SETTLE_WITHIN, agreed).map_err(|error| Unsettled(format!("{error:#}")))?;
+    let _vm = crate::local_vm::supervisor::prepare_handover(settle, agreed).map_err(|error| Unsettled(format!("{error:#}")))?;
     // No frame is answered from here on, once those under way are: what
     // they wait for (a pipeline step, the admission lock) is not held yet.
-    runtime.bridge.freeze(SETTLE_WITHIN).map_err(|error| Unsettled(format!("{error:#}")))?;
+    runtime.bridge.freeze(settle).map_err(|error| Unsettled(format!("{error:#}")))?;
     let thawed = || runtime.bridge.thaw();
     // No pipeline step starts, and none is running.
-    let Some(steps) = crate::issue_pipeline::engine::pause_steps(SETTLE_WITHIN) else {
+    let Some(steps) = crate::issue_pipeline::engine::pause_steps(settle) else {
         thawed();
         return Err(Unsettled("An issue pipeline step is under way".into()).into());
     };
-    // No turn, start or send is admitted.
-    let admission = crate::issue_pipeline::admission::lock();
-    let terminals = match runtime.terminals.freeze(SETTLE_WITHIN) {
+    // No turn, start or send is admitted. Whatever holds admission is not
+    // waited on for longer than the rest: every hook is held meanwhile.
+    let Some(admission) = crate::issue_pipeline::admission::lock_by(std::time::Instant::now() + settle) else {
+        drop(steps);
+        thawed();
+        return Err(Unsettled("A prompt or an agent's start is being admitted".into()).into());
+    };
+    let terminals = match runtime.terminals.freeze(settle) {
         Ok(terminals) => terminals,
         Err(error) => {
             drop((admission, steps));
@@ -379,7 +531,7 @@ fn hand_over(runtime: &Runtime, binary: &Verified, ready: &std::sync::mpsc::Send
         }
     };
     let path = runtime.home.join("run").join(format!("handover-{}.json", std::process::id()));
-    let outcome = runtime.manager.hold_tabs(SETTLE_WITHIN, |held| -> Result<()> {
+    let outcome = runtime.manager.hold_tabs(settle, |held| -> Result<()> {
         // Started since what had to be stopped was named: asked about first.
         if !held.unadoptable.is_empty() {
             return Err(Unkept(held.unadoptable.len()).into());
@@ -424,7 +576,9 @@ fn hand_over(runtime: &Runtime, binary: &Verified, ready: &std::sync::mpsc::Send
         if runtime.terminals.stopped_since_refresh() {
             for fd in kept.iter().map(AsRawFd::as_raw_fd).chain([runtime.owner]) { let _ = set_cloexec(fd, true); }
             let _ = std::fs::remove_file(&path);
-            return Err(Unsettled("A terminal was closed during the handover".into()).into());
+            // Not one to look for another moment after: the desktop was
+            // told this one was going ahead, and has seen it not happen.
+            anyhow::bail!("A terminal was closed as the handover began; it was called off");
         }
         log::info!("the runtime hands {} terminal(s) and {} agent tab(s) to {}", record.panes.len(), record.tabs.len(), binary.path.display());
         log::logger().flush();
@@ -800,6 +954,109 @@ pub fn read(path: &Path) -> Result<Adopted> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A runtime whose quiet moments are scripted: quiet from `quiet_after`
+    /// looks on, or only while control commands are held back.
+    #[derive(Default)]
+    struct Scripted {
+        looks: std::cell::Cell<u32>,
+        quiet_after: u32,
+        only_drained: bool,
+        draining: std::cell::Cell<bool>,
+        drains: std::cell::Cell<u32>,
+    }
+
+    impl Moments for Scripted {
+        fn quiet_by(&self, until: std::time::Instant) -> std::result::Result<(), String> {
+            self.looks.set(self.looks.get() + 1);
+            let quiet = if self.only_drained { self.draining.get() } else { self.looks.get() > self.quiet_after };
+            if quiet { return Ok(()); }
+            std::thread::sleep(until.saturating_duration_since(std::time::Instant::now()).min(Duration::from_millis(5)));
+            Err("A hook or control request is still under way: control browser.snapshot, open for 40 s".into())
+        }
+        fn drain(&self) { self.draining.set(true); self.drains.set(self.drains.get() + 1); }
+        fn undrain(&self) { self.draining.set(false); }
+    }
+
+    const QUICK: Pacing = Pacing {
+        settle: Duration::from_millis(10),
+        drain_after: Duration::from_millis(60),
+        drain_for: Duration::from_millis(80),
+        drain_rest: Duration::from_millis(40),
+        gap: (Duration::from_millis(1), Duration::from_millis(4)),
+    };
+
+    fn within(time: Duration) -> std::time::Instant { std::time::Instant::now() + time }
+
+    /// The incident behind this: a runtime with a command under way at
+    /// every instant someone else picked refused 181 handovers in a row,
+    /// each of which had held its hooks still for ten seconds. It holds
+    /// nothing until a moment it found quiet itself.
+    #[test]
+    fn nothing_is_held_still_until_a_moment_is_found_quiet() {
+        let runtime = Scripted { quiet_after: 4, ..Default::default() };
+        let attempts = std::cell::Cell::new(0);
+        converge(within(Duration::from_secs(10)), QUICK, &runtime, |settle| {
+            assert_eq!(settle, QUICK.settle, "little time, as every hook is held meanwhile");
+            assert_eq!(runtime.looks.get(), 5, "only once a look found it quiet");
+            attempts.set(attempts.get() + 1);
+            Ok(())
+        }).unwrap();
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(runtime.drains.get(), 0, "a moment came by itself: no command was held back");
+    }
+
+    /// With agents sending commands back to back no moment comes by itself:
+    /// commands are held back so that those under way end, and it goes
+    /// through then. They are answered again whatever comes of it.
+    #[test]
+    fn commands_are_held_back_when_no_quiet_moment_comes_by_itself() {
+        let runtime = Scripted { only_drained: true, ..Default::default() };
+        let began = std::time::Instant::now();
+        converge(within(Duration::from_secs(10)), QUICK, &runtime, |_| {
+            assert!(runtime.draining.get());
+            Ok(())
+        }).unwrap();
+        assert!(began.elapsed() >= QUICK.drain_after, "not before a quiet moment was waited for without it");
+        assert_eq!(runtime.drains.get(), 1);
+        assert!(!runtime.draining.get(), "answered again afterwards");
+    }
+
+    /// Commands are not held back for good: at a stretch, with a rest
+    /// between, so whoever sent one waits a bounded time for it to begin.
+    /// When the time is up, what was last in the way is said.
+    #[test]
+    fn holding_back_comes_in_stretches_and_what_was_in_the_way_is_named_when_time_is_up() {
+        let runtime = Scripted { quiet_after: u32::MAX, ..Default::default() };
+        let error = converge(within(Duration::from_millis(450)), QUICK, &runtime, |_| panic!("never quiet")).unwrap_err();
+        assert!(runtime.drains.get() >= 2, "{} stretches", runtime.drains.get());
+        assert!(!runtime.draining.get(), "answered again once it is off");
+        let refusal = failed(error);
+        assert_eq!(refusal.code, "handover_busy");
+        assert!(refusal.message.contains("control browser.snapshot, open for 40 s"), "{}", refusal.message);
+    }
+
+    /// Something found unsettled once everything was held (a tab starting,
+    /// say) lets go of everything and looks for another moment; anything
+    /// else ends it at once.
+    #[test]
+    fn an_attempt_that_finds_something_unsettled_is_made_again_and_any_other_failure_ends_it() {
+        let runtime = Scripted::default();
+        let attempts = std::cell::Cell::new(0);
+        converge(within(Duration::from_secs(10)), QUICK, &runtime, |_| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() < 4 { Err(Unsettled("An agent was starting".into()).into()) } else { Ok(()) }
+        }).unwrap();
+        assert_eq!(attempts.get(), 4);
+
+        attempts.set(0);
+        let error = converge(within(Duration::from_secs(10)), QUICK, &runtime, |_| {
+            attempts.set(attempts.get() + 1);
+            Err(Unkept(2).into())
+        }).unwrap_err();
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(failed(error).code, "handover_unadoptable");
+    }
 
     /// #467: supervised terminals that cannot be carried refuse the handover
     /// as work it cannot carry, which the desktop reads again and waits on,
