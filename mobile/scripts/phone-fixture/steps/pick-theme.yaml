@@ -1,0 +1,11 @@
+# On Settings, the theme the boards are drawn in (Ember dark, Den light), then back to the top.
+appId: com.terminalx.phone.fixture
+---
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "${THEME} theme"
+- tapOn: "${THEME} theme"
+- scrollUntilVisible:
+    element:
+      text: "Account.*"
+    direction: UP

@@ -50,7 +50,8 @@ export default function DeleteAccountScreen() {
     forgetDeletedAccount: app.forgetDeletedAccount,
     providerName: (providerId, workspaceId) => {
       const orgId = workspaceId ? running.current.get(workspaceId) : undefined;
-      return (orgId && names.get(orgId)?.get(providerId)) || providerId;
+      // Never the provider's id: in this sentence it would read as a code.
+      return (orgId && names.get(orgId)?.get(providerId)) || T.someProvider;
     },
   });
   const { phase, read, sending, notice } = deletion;

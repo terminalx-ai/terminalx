@@ -1,3 +1,4 @@
+import { boat } from "../../../src/cloud/testing/server";
 import type { SetupHandler } from "./types";
 
 /**
@@ -77,7 +78,10 @@ function read(state: string) {
 
 export const handle: SetupHandler = async (request) => {
   const state = request.argument("fixtureDeletion");
-  if (!state || !request.path.startsWith(PATH)) return undefined;
+  if (!state) return undefined;
+  // The organizations of the running workspaces list Boat, so the page names it as people know it.
+  if (request.method === "GET" && /^\/v1\/mobile\/orgs\/(org-personal|org-northwind)\/cloud-providers$/.test(request.path)) return request.json(200, { providers: [boat] });
+  if (!request.path.startsWith(PATH)) return undefined;
   // Signed out everywhere once it is scheduled: every request is refused, as the server's are.
   if (scheduled) return request.json(401, { error: "unauthorized" });
   if (request.path === `${PATH}/notice`) return request.json(200, {});

@@ -161,6 +161,19 @@ it("a failed deletion: says nothing was deleted, keeps what was typed, and Delet
   expect(container.textContent).toContain(T.doneHead("9 December 2026"));
 });
 
+it("never names a provider by its id when the organization's list has not given its name", async () => {
+  const read = plainRead();
+  read.deleted.runningWorkspaces = [{ id: "ws_9", name: "elsewhere", provider: "agent37", organizationId: "org_other" }];
+  mocks.catalog.api.accountDeletion.mockResolvedValue(read);
+  mocks.catalog.api.requestAccountDeletion.mockResolvedValueOnce({ id: "del_1", kind: "self", state: "refused", requestedAt: "2026-11-25T12:00:00.000Z", failure: { code: "workspace_stop_failed", provider: "agent37", workspaceId: "ws_9", workspaceName: "elsewhere", reason: "provider_refused", stopped: [] } });
+  await show();
+  await type("alex@example.com");
+  await act(async () => confirmButton().click());
+  await flush();
+  expect(byTestId("delete-account-refused")!.textContent).toBe(T.failStop(T.someProvider, "elsewhere", "the provider refused"));
+  expect(container.textContent).not.toContain("agent37");
+});
+
 it("a refusal that changed nothing says so, and a stale sign-in asks to sign in again before typing", async () => {
   mocks.catalog.api.requestAccountDeletion.mockRejectedValueOnce(new CloudApiError("account_deletion_busy", 409));
   await show();

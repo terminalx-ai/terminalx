@@ -64,6 +64,8 @@ export const accountDeletionText = {
   doneStoppedIn: (n: number) => `${n === 1 ? `Your running ${ONE} was` : `Your ${n} running ${W} were`} stopped. ${n === 1 ? "It is" : "They are"} deleted with your account.`,
   doneKeepIn: (days: number) => `Changed your mind? Sign in within ${days} days to keep your account.`,
   doneAfterIn: "After that it cannot be recovered.",
+  // Not in copy.mjs: the provider whose name the organization's list has not given.
+  someProvider: "the provider",
   elsewhere: (on: string) => `This account will be deleted on ${on}, so this device was signed out. Sign in before then to keep it.`,
 
   cancelled: "Account deletion cancelled",

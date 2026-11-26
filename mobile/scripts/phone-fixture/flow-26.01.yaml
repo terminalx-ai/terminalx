@@ -1,17 +1,26 @@
 # 26.01 Delete account (PRO-584): the row, the page for a plain account, typing, deleting, done; blocked;
 # a workspace that did not stop; a refusal; a stale sign-in; offline; the final deletion running; the cancelled notice.
+# The boards are drawn in Ember when dark and in Den when light: MAESTRO_THEME=Den for the light run.
+# Large text: set the simulator's size first (see flow-large-text.yaml).
 appId: com.terminalx.phone.fixture
+env:
+  THEME: ${MAESTRO_THEME || "Ember"}
 name: Delete account (26.01)
 ---
 - launchApp:
     clearState: true
     arguments: { fixtureScenario: connected, fixtureDeletion: running }
-- tapOn: "Settings"
+- runFlow: steps/pick-theme.yaml
 - tapOn:
     text: "Account.*"
 - waitForAnimationToEnd
 - takeScreenshot: 26.01-01-account-row
-- runFlow: steps/open-delete-account.yaml
+- scrollUntilVisible:
+    element:
+      id: account-delete-row
+- tapOn:
+    id: account-delete-row
+- waitForAnimationToEnd
 - takeScreenshot: 26.01-02-page-top
 - scrollUntilVisible:
     element:
@@ -134,9 +143,10 @@ name: Delete account (26.01)
     clearState: true
     arguments: { fixtureScenario: connected, fixtureDeletion: stale }
 - runFlow: steps/open-delete-account.yaml
+# The fixed footer covers the card until the field below it is in view; Maestro counts it as visible anyway.
 - scrollUntilVisible:
     element:
-      id: delete-account-sign-in
+      id: delete-account-email
 - takeScreenshot: 26.01-17-stale
 - tapOn:
     id: delete-account-sign-in
@@ -170,6 +180,6 @@ name: Delete account (26.01)
 - launchApp:
     clearState: true
     arguments: { fixtureScenario: connected, fixtureDeletion: cancelled }
-- tapOn: "Settings"
+- runFlow: steps/pick-theme.yaml
 - waitForAnimationToEnd
 - takeScreenshot: 26.01-22-cancelled

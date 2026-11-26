@@ -228,7 +228,7 @@ export class AccountDeletionFlow {
       case "refused": {
         this.busy = false;
         const names = new Map((this.state.read?.deleted.runningWorkspaces ?? []).map((workspace) => [workspace.id, workspace.name]));
-        const provider = this.deps.providerName ?? ((id: string) => id);
+        const provider = this.deps.providerName ?? (() => T.someProvider);
         const sentence = refusalSentence(attempt.failure, (id) => provider(id, attempt.failure?.workspaceId ?? null), (id) => names.get(id) ?? null);
         this.set({ sending: null, notice: { kind: "refused", tone: sentence.tone, text: sentence.text } });
         // A blocker that appeared after confirming: the list is read again so the page shows it.
