@@ -37,6 +37,17 @@ vi.mock("@/lib/models", async (original) => ({
   useModelsLoaded: () => listed.loaded,
 }));
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
+// PRO-154: organization snippets for one test; the others get the real hooks.
+const orgSnippets = vi.hoisted(() => ({ list: null as null | { id: string; name: string; keyword: string; body: string; createdBy: string; updatedBy: string; updatedAt: string }[] }));
+vi.mock("@/lib/sharedSetups", async (original) => {
+  const real = await original<typeof import("@/lib/sharedSetups")>();
+  return {
+    ...real,
+    // The real hooks always run, so the hook order stays the same.
+    useOrganizationSnippets: () => { const live = real.useOrganizationSnippets(); return orgSnippets.list ?? live; },
+    useSharedSetupsOrg: () => { const live = real.useSharedSetupsOrg(); return orgSnippets.list ? { id: "org-a", name: "Fixture Labs", role: "member" as const } : live; },
+  };
+});
 
 const { Composer } = await import("./Composer");
 const { setPrefs } = await import("@/lib/prefs");
@@ -1061,6 +1072,27 @@ describe("composer history (PRO-85)", () => {
       fireEvent.mouseDown(await screen.findByRole("option", { name: /review-pr/ }));
       await waitFor(() => expect(box.value).toBe("Review the open PR.\nList risks."));
     } finally { act(() => setPrefs({ promptSnippets: [] })); }
+  });
+
+  it("offers a teammate's organization snippet in the / picker, marked with the organization (PRO-154)", async () => {
+    orgSnippets.list = [{ id: "s-1", name: "release", keyword: "release-notes", body: "Write release notes for this branch.", createdBy: "u-2", updatedBy: "u-2", updatedAt: "2026-11-27T00:00:00Z" }];
+    act(() => setPrefs({ promptSnippets: [{ id: "a", name: "review-pr", text: "Review the open PR." }] }));
+    try {
+      const list = { commands: [], note: null };
+      function CloudComposer() {
+        const [draft, setDraft] = useState("");
+        return <Composer tab={tab} commands={{ key: "cloud|org-snippets", known: () => null, load: async () => list }} busy={false} draft={draft} onDraftChange={setDraft} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+      }
+      render(<CloudComposer />);
+      const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+      fireEvent.change(box, { target: { value: "/", selectionStart: 1 } });
+      await waitFor(() => expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["/review-prReview the open PR.Snippet", "/release-notesWrite release notes for this branch.Fixture Labs"]));
+      fireEvent.mouseDown(screen.getByRole("option", { name: /release-notes/ }));
+      await waitFor(() => expect(box.value).toBe("Write release notes for this branch."));
+    } finally {
+      orgSnippets.list = null;
+      act(() => setPrefs({ promptSnippets: [] }));
+    }
   });
 
   it("asks for a snippet's {{variables}} and inserts the filled text", async () => {

@@ -325,6 +325,33 @@ describe("new session in a cloud project", () => {
     expect(flow.confirmCloudCreate.mock.calls[1][0]).toBe(flow.confirmCloudCreate.mock.calls[0][0]);
   });
 
+  it("with new-chat prompts set, still resends the same create after an unknown outcome (PRO-154 review)", async () => {
+    const { setPrefs } = await import("@/lib/prefs");
+    setPrefs({ actionPrompts: { general: "Prefer small commits.", branchNames: "Use feat/<topic>." } });
+    try {
+      flow.planCloudStart.mockReturnValue({ kind: "create" });
+      flow.prepareCloudCreate.mockImplementation(async (_project: unknown, request: { prompt: string; agent: string; model: string; effort: string | null; mode: string; idleSuspendMinutes?: number }) => ({
+        ...prepared,
+        form: { prompt: request.prompt, agent: request.agent, model: request.model, effort: request.effort ?? "", mode: request.mode, idleSuspendMinutes: request.idleSuspendMinutes },
+      }));
+      flow.confirmCloudCreate.mockRejectedValueOnce({ code: "cloud_workspace_request_timeout", status: 0, retryWithSameIdempotencyKey: true }).mockResolvedValue({ workspace: { id: "ws-new" } });
+      render(form());
+      type("Start the API");
+      await screen.findByTestId("cloud-idle-line");
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+      await waitFor(() => expect(flow.confirmCloudCreate).toHaveBeenCalledTimes(1));
+      // The saved form keeps the person's words; the prompts are added where the launch is built.
+      expect(flow.prepareCloudCreate.mock.calls[0][1].prompt).toBe("Start the API");
+      await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+      await waitFor(() => expect(flow.confirmCloudCreate).toHaveBeenCalledTimes(2));
+      expect(flow.prepareCloudCreate).toHaveBeenCalledTimes(1);
+      expect(flow.confirmCloudCreate.mock.calls[1][0]).toBe(flow.confirmCloudCreate.mock.calls[0][0]);
+    } finally {
+      setPrefs({ actionPrompts: {} });
+    }
+  });
+
   it("at the limit, says so and creates nothing", async () => {
     const { CreateRefused } = await import("@/lib/cloudCreate");
     flow.planCloudStart.mockReturnValue({ kind: "create" });

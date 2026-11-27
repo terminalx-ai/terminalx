@@ -3,13 +3,15 @@ import { bindingText } from "@/lib/shortcuts";
 import { SettingsLeaveBoundaryContext, SettingsLeaveGuardContext, useSettingsLeaveBoundary } from "./settingsLeaveGuard";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { settingsSectionOffered } from "@/lib/settingsSections";
+import { useSharedSetupsOrg } from "@/lib/sharedSetups";
 import { mcpSettingsOffered } from "@/lib/mcpServers";
 import { SettingsFileError } from "./SettingsFile";
+import { useInvites } from "@/lib/myInvites";
 import { BadgeLegend, CantSaveToast, OpenSettingsFileButton } from "./SettingSources";
 import { useSettingsFile } from "@/lib/settingsFile";
 import type { SourceBadgeKind } from "@/lib/settingSources";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { ArrowLeft, BarChart3, Bot, Wrench, Building2, ChevronDown, ChevronRight, FlaskConical, FolderPlus, Folders, HardDrive, Info, Keyboard, KeyRound, Laptop, Mic, Monitor, Network, Palette, Plug, Plus, Return, Search, Server, Settings, Smartphone, UserRound, X } from "@/icons";
+import { ArrowLeft, BarChart3, Bot, MessageSquare, Sparkles, Wrench, Building2, ChevronDown, ChevronRight, FlaskConical, FolderPlus, Folders, HardDrive, Info, Keyboard, KeyRound, Laptop, Mic, Monitor, Network, Palette, Plug, Plus, Return, Search, Server, Settings, Smartphone, UserRound, X } from "@/icons";
 import type { LucideIcon } from "lucide-react";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";
 import { OrgMark } from "@/components/layout/OrgMark";
@@ -55,6 +57,8 @@ const SECTION_ICONS: Record<SettingsSection, LucideIcon> = {
   appearance: Palette,
   agents: Bot,
   orchestrator: Network,
+  defaultModels: Sparkles,
+  prompts: MessageSquare,
   environment: KeyRound,
   mcp: Server,
   localVms: Monitor,
@@ -113,12 +117,19 @@ const navClass = (selected: boolean) => cn(
 const NESTED_CLASS = "ml-[15px] grid min-w-0 grid-cols-[minmax(0,1fr)] gap-px border-l border-hairline py-0.5 pl-2";
 
 /** Projects or Organizations in the menu: one row with its count, opening and closing what it lists (design 11.14). */
-function MenuGroupRow({ label, icon: Icon, count, open, controls, onToggle }: { label: string; icon: LucideIcon; count: number; open: boolean; controls: string; onToggle: () => void }) {
+/** "1 invite" beside Organizations while invitations wait (PRO-175, 12.20). */
+function InviteBadge({ count, className }: { count: number; className?: string }) {
+  if (!count) return null;
+  return <span className={cn("shrink-0 rounded-[4px] bg-[#f2766b]/15 px-1.5 text-[11px] leading-4 text-[#f2766b]", className)}>{count} invite{count === 1 ? "" : "s"}</span>;
+}
+
+function MenuGroupRow({ label, icon: Icon, count, open, controls, onToggle, invites = 0 }: { label: string; icon: LucideIcon; count: number; open: boolean; controls: string; onToggle: () => void; invites?: number }) {
   const Chevron = open ? ChevronDown : ChevronRight;
   return <button type="button" aria-expanded={open} aria-controls={open ? controls : undefined} onClick={onToggle} className={navClass(false)}>
     <Icon aria-hidden className="size-4 shrink-0" />
     <span className={cn("truncate", open && "font-medium text-foreground")}>{label}</span>
-    <span className="ml-auto shrink-0 text-[12px] tabular-nums text-faint">{count}</span>
+    {!open && <InviteBadge count={invites} className="ml-auto" />}
+    <span className={cn("shrink-0 text-[12px] tabular-nums text-faint", (open || !invites) && "ml-auto")}>{count}</span>
     <Chevron aria-hidden className="size-3 shrink-0 text-faint" />
   </button>;
 }
@@ -179,8 +190,9 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const orchestratorRuns = switches?.orchestratorRuns === true;
   const localVmTasks = switches?.localVmTasks === true;
   // settingsSectionOffered reads the switches as last read; these re-run it when one changes.
+  const sharedSetups = useSharedSetupsOrg() !== null;
   const mcpOffered = mcpSettingsOffered(useAccount().status);
-  const offered = useCallback((key: string) => settingsSectionOffered(key as Parameters<typeof settingsSectionOffered>[0]), [orchestratorRuns, localVmTasks, mcpOffered]);
+  const offered = useCallback((key: string) => settingsSectionOffered(key as Parameters<typeof settingsSectionOffered>[0]), [orchestratorRuns, localVmTasks, sharedSetups, mcpOffered]);
   // searchSettings reads the Experimental switch itself; the switches re-run it when one changes.
   // Grouped by page, pages in order of their best row; `results` is the rows in that displayed order, which ↑/↓ walk.
   // Every organization the person belongs to has pages, cloud-enabled or not; data privacy mode turns them off.
@@ -188,6 +200,8 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const privacy = useDataPrivacy().enabled;
   const activeOrganizationId = defaultOrgId(account);
   const memberships: readonly OrganizationSummary[] = !privacy && account.state === "signed-in" ? (account.organizations ?? []) : [];
+  const invites = useInvites();
+  const pendingInvites = !privacy && invites.enabled ? invites.invites.filter((invite) => !invite.expired && invite.expiresAt > Date.now()).length : 0;
   const organization = section === "organizations" && organizationId ? memberships.find((candidate) => candidate.id === organizationId) : undefined;
   // An organization's row opens on the organization already open, else the active one (`open` below): a member of it
   // is not offered the rows of pages they do not manage, which their menu leaves out too.
@@ -198,7 +212,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const pages = useMemo(() => groupSettingsByPage(searchSettings(query).filter((match) =>
     (match.id !== "organizations.billing" || searchBilling)
     && (match.row.section !== "organizations" || match.row.scope !== "organization" || !searchRole || roleManagesOrganizationPage(searchRole, organizationPageForRow(match.id))),
-  )), [query, orchestratorRuns, localVmTasks, searchRole, searchBilling, mcpOffered]);
+  )), [query, orchestratorRuns, localVmTasks, searchRole, searchBilling, sharedSetups, mcpOffered]);
   const results = useMemo(() => pages.flatMap((page) => page.matches), [pages]);
   const searching = !!query.trim();
   // The live control slot of each result row, by row id (see SettingControlSlots).
@@ -480,13 +494,14 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
                 </div>}
                 {/* Organizations work as projects do: each a row with the person's role, expanding to the pages
                     they can manage, and Create organization at the end (design 11.16). */}
-                <MenuGroupRow label="Organizations" icon={Building2} count={memberships.length} open={organizationsOpen} controls="settings-menu-organizations" onToggle={() => setOrganizationsOpen((open) => !open)} />
+                <MenuGroupRow label="Organizations" icon={Building2} count={memberships.length} invites={pendingInvites} open={organizationsOpen} controls="settings-menu-organizations" onToggle={() => setOrganizationsOpen((open) => !open)} />
                 {organizationsOpen && <div id="settings-menu-organizations" role="group" aria-label="Organizations" className={NESTED_CLASS}>
                   {/* The list of organizations, with which of them the sidebar shows, leads the group as Project
                       templates leads Projects. */}
                   <button type="button" aria-current={section === "organizations" && !organization ? "page" : undefined} onClick={() => chooseOrganization(null)} className={navClass(section === "organizations" && !organization)}>
                     <Building2 aria-hidden className="size-4 shrink-0" />
                     <span className="truncate">All organizations</span>
+                    <InviteBadge count={pendingInvites} className="ml-auto" />
                   </button>
                   {memberships.map((candidate) => {
                     const open = organization?.id === candidate.id;

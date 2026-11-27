@@ -80,6 +80,8 @@ mod codex_device_login;
 mod cloud_workspaces;
 #[allow(dead_code)]
 mod workspace_ssh;
+#[cfg(all(feature = "desktop", unix))]
+mod ssh_proxy;
 #[cfg(unix)]
 #[allow(dead_code)]
 mod workspace_ssh_payload;
@@ -96,6 +98,8 @@ mod desktop_inbox;
 mod organization_github_app;
 #[cfg(feature = "desktop")]
 mod organization_members;
+#[cfg(feature = "desktop")]
+mod organization_invites;
 #[cfg(feature = "desktop")]
 mod organization_compute;
 #[cfg(feature = "desktop")]
@@ -292,6 +296,7 @@ pub struct AppState {
     pub account: Arc<account::AccountManager>,
     pub cloud_workspaces: Arc<cloud_workspaces::CloudWorkspaceService>,
     pub organization_members: Arc<organization_members::OrganizationMembersService>,
+    pub organization_invites: Arc<organization_invites::OrganizationInvitesService>,
     pub organization_compute: Arc<organization_compute::OrganizationComputeService>,
     pub organization_github_app: Arc<organization_github_app::OrganizationGithubAppService>,
     pub workspace_config: Arc<organization_workspace_config::WorkspaceConfigService>,
@@ -425,6 +430,7 @@ pub fn run() {
     let paired = pairing.clone();
     let work_claims = Arc::new(work_claims::WorkClaims::new(account.clone(), move || paired.host_id()));
     let organization_members = Arc::new(organization_members::OrganizationMembersService::new(account.clone()));
+    let organization_invites = Arc::new(organization_invites::OrganizationInvitesService::new(account.clone()));
     let agent_keys = Arc::new(cloud_agent_client::KeychainKeys::default());
     let cloud_agents = Arc::new(
         cloud_agent_client::CloudAgentClient::new(account.clone(), Arc::new(cloud_agent_client::CachedKeys::new(agent_keys.clone())))
@@ -448,6 +454,7 @@ pub fn run() {
         account: account.clone(),
         cloud_workspaces,
         organization_members,
+        organization_invites,
         organization_compute,
         organization_github_app,
         workspace_config,
@@ -715,6 +722,10 @@ pub fn run() {
             commands::organization_invite_revoke,
             commands::organization_member_role_update,
             commands::organization_member_remove,
+            commands::my_invites,
+            commands::my_invite_welcome,
+            commands::my_invite_accept,
+            commands::my_invite_decline,
             commands::organization_compute_policy,
             commands::organization_compute_usage,
             commands::organization_compute_policy_update,
@@ -812,6 +823,7 @@ pub fn run() {
             commands::cloud_workspace_mentions,
             commands::announcements_current,
             commands::nudge_preference,
+            commands::shared_setups,
             commands::nudge_preference_set,
             mcp_servers::commands::mcp_servers,
             mcp_servers::commands::mcp_server_save,
@@ -851,6 +863,14 @@ pub fn run() {
             cloud_remote::cloud_remote_send,
             cloud_remote::cloud_remote_activate,
             cloud_remote::cloud_remote_detach,
+            #[cfg(unix)]
+            cloud_remote::cloud_ssh_prepare,
+            #[cfg(unix)]
+            cloud_remote::cloud_ssh_finish,
+            #[cfg(unix)]
+            cloud_remote::cloud_ssh_remove,
+            #[cfg(unix)]
+            cloud_remote::cloud_ssh_stream,
             cloud_remote::cloud_port_forward,
             cloud_remote::cloud_port_unforward,
             cloud_remote::cloud_port_forwards,

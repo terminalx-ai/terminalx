@@ -5,6 +5,7 @@ import { cn } from "@/lib/cn";
 import type { OrganizationMember } from "@/lib/organizationMembers";
 import { PrivacyImage, externalImage } from "@/components/ui/privacy-image";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
+import { SharedSlotsSection } from "./SharedSlotsSection";
 
 export function memberName(member: OrganizationMember) {
   return member.displayName?.trim() || member.email || `User ${member.userId.slice(0, 8)}`;
@@ -59,6 +60,7 @@ export function MemberProfile({ member, online, open, onOpenChange, className, e
             </div>
           </div>
           {member.email && <p className="mt-3 break-all select-text text-xs">{member.email}</p>}
+          <SharedSlotsSection userId={member.userId} name={name} />
           {extra}
         </Popover.Content>
       </Popover.Portal>
