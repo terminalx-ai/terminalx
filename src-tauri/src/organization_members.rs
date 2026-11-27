@@ -110,6 +110,7 @@ fn known_error_code(code: &str) -> bool {
             | "already_member"
             | "personal_org_no_invites"
             | "organization_requires_pro"
+            | "organization_member_limit_reached"
             | "invite_rate_limited"
             | "invite_recently_sent"
             | "cannot_change_own_role"
@@ -505,6 +506,15 @@ mod tests {
                 retry_after_seconds: Some(42),
             }
         );
+    }
+
+    #[test]
+    fn preserves_organization_member_limit_reached() {
+        let (base, server) = serve_once("409 Conflict", "", r#"{"error":"organization_member_limit_reached"}"#);
+        let revision = AccountManager::context_revision(&context());
+        let error = service(&base).invite("new@example.com", "member", &revision).unwrap_err();
+        server.join().unwrap();
+        assert_eq!((error.code.as_str(), error.status), ("organization_member_limit_reached", Some(409)));
     }
 
     #[test]

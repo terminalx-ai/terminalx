@@ -4798,6 +4798,7 @@ fn known_error_code(code: &str) -> bool {
             | "presence_unavailable"
             | "inbox_unavailable"
             | "organization_admin_required"
+            | "organization_member_limit_reached"
             | "active_organization_required"
             | "cloud_workspace_not_found"
             | "cloud_workspace_operation_not_found"
@@ -7770,6 +7771,18 @@ mod tests {
         assert!(!serde_json::to_string(&error)
             .unwrap()
             .contains("provider account secret"));
+    }
+
+    #[test]
+    fn organization_member_limit_reached_is_preserved() {
+        let (base, _, request) = serve_once(
+            response("409 Conflict", r#"{"error":"organization_member_limit_reached"}"#, ""),
+            Duration::ZERO,
+        );
+        let (_, service) = test_service(&base);
+        let error = service.providers().unwrap_err();
+        request.join().unwrap();
+        assert_eq!((error.code.as_str(), error.status), ("organization_member_limit_reached", Some(409)));
     }
 
     #[test]

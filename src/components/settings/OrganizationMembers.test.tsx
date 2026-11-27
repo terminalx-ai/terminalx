@@ -18,6 +18,12 @@ vi.mock("@/lib/organizationMembers", async (importOriginal) => ({
 
 vi.mock("@/lib/account", async () => (await import("@/test/rosterFlags")).rosterFlagAccountMock);
 
+const privacy = vi.hoisted(() => ({ ready: true, enabled: false, managed: false }));
+vi.mock("@/lib/dataPrivacy", async (original) => ({
+  ...await original<typeof import("@/lib/dataPrivacy")>(),
+  useDataPrivacy: () => privacy,
+}));
+
 const api = vi.mocked(organizationMembers);
 
 const roster = (overrides: Partial<OrganizationRoster> = {}): OrganizationRoster => ({
@@ -44,6 +50,7 @@ const renderAs = async (email = "admin@example.com", contextRevision = "account-
 
 beforeEach(() => {
   vi.resetAllMocks();
+  privacy.enabled = false;
   refreshRosterFlags();
   api.list.mockResolvedValue(roster());
 });
@@ -61,13 +68,24 @@ it("lists members and pending invitations with their status", async () => {
 
 it("shows only the server-projected Teams seat usage", async () => {
   const props = { accountEmail: "admin@example.com", contextRevision: "account-1" };
-  const view = render(<OrganizationMembers {...props} plan={{
+  const page = <OrganizationMembers {...props} plan={{
     plan: "teams", seatsUsed: 4, memberLimit: 7, upgradeTarget: "plans",
     catalog: { teams: { currency: "USD", unitAmountMinor: 2300, interval: "month", memberLimit: 7 } },
-  }} />);
+  }} />;
+  const view = render(page);
   await screen.findByText("4 of 7 seats used on Teams");
-  view.rerender(<OrganizationMembers {...props} />);
+  expect(screen.getByText("1 pending invite takes a seat when accepted")).toBeTruthy();
+  privacy.enabled = true;
+  view.rerender(<OrganizationMembers {...page.props} />);
   expect(screen.queryByText(/seats used on Teams/)).toBeNull();
+});
+
+it("shows a clear message when the organization has reached its member limit", async () => {
+  api.invite.mockRejectedValue({ status: 409, code: "organization_member_limit_reached" });
+  await renderAs();
+  fireEvent.change(screen.getByRole("textbox", { name: "Invite email" }), { target: { value: "new@example.com" } });
+  fireEvent.click(screen.getByRole("button", { name: "Invite" }));
+  await screen.findByText("This organization has reached its member limit.");
 });
 
 it("never offers controls for the owner or the viewer's own row", async () => {

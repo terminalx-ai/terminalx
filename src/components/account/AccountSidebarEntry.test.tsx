@@ -5,7 +5,21 @@ import type { PairingStatus } from "@/types/pairing";
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), open: vi.fn(), listener: null as null | ((event: { payload: PairingStatus }) => void) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (_event, listener) => { mocks.listener = listener; return () => {}; }) }));
-vi.mock("@/lib/account", () => ({ signIn: vi.fn(), signOut: vi.fn(), openPasteLink: vi.fn(), useAccount: () => ({ ready: true, busy: false, status: { state: "signed-in", identity: { name: "Ada", email: "ada@example.invalid" } } }) }));
+const access = vi.hoisted(() => ({ plans: false, privacy: { ready: true, enabled: false, managed: false } }));
+vi.mock("@/lib/dataPrivacy", async (original) => ({
+  ...await original<typeof import("@/lib/dataPrivacy")>(),
+  useDataPrivacy: () => access.privacy,
+}));
+vi.mock("@/lib/account", () => ({
+  signIn: vi.fn(), signOut: vi.fn(), openPasteLink: vi.fn(),
+  useAccount: () => ({
+    ready: true, busy: false,
+    status: {
+      state: "signed-in", identity: { name: "Ada", email: "ada@example.invalid", organizationId: "org-a" },
+      organizations: access.plans ? [{ id: "org-a", plan: { plan: "free" } }] : [],
+    },
+  }),
+}));
 
 import { bootPairing } from "@/lib/pairing";
 import { AccountSidebarEntry } from "./AccountSidebarEntry";
@@ -19,7 +33,11 @@ beforeAll(async () => {
   mocks.invoke.mockResolvedValue(connected);
   await bootPairing();
 });
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  access.plans = false;
+  access.privacy.enabled = false;
+});
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 it("explains a drop on hover and retries through the native supervisor without opening Account", async () => {
@@ -82,6 +100,19 @@ it("shows the person's picture from the sign-in service in place of their initia
   // Without one from the sign-in service, GitHub's is tried first.
   rerender(<AccountAvatar identity={{ name: "Bo", email: "b@x.io", organization: null }} />);
   expect(screen.getByTestId("account-picture").getAttribute("src")).toContain("email=b%40x.io");
+});
+
+it("removes the plan entry from an open account menu when privacy is enabled", async () => {
+  publish(connected);
+  access.plans = true;
+  const view = render(<AccountSidebarEntry onOpenAccount={mocks.open} />);
+  fireEvent.keyDown(screen.getByRole("button", { name: "Ada" }), { key: "Enter" });
+  await screen.findByRole("menuitem", { name: /Upgrade to Pro/ });
+  expect(screen.getByText("free")).toBeTruthy();
+  access.privacy.enabled = true;
+  view.rerender(<AccountSidebarEntry onOpenAccount={mocks.open} />);
+  expect(screen.queryByRole("menuitem", { name: /Upgrade to Pro/ })).toBeNull();
+  expect(screen.queryByText("free")).toBeNull();
 });
 
 it("logs out from the account menu", async () => {

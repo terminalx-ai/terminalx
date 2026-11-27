@@ -1,5 +1,5 @@
 import { PRIVACY_MESSAGE, useDataPrivacy } from "@/lib/dataPrivacy";
-import { Loader2, LogOut, Settings, UserRound } from "@/icons";
+import { Gem, Loader2, LogOut, Settings, UserRound } from "@/icons";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { Button } from "@/components/ui/button";
 import { openPasteLink, signIn, signOut, useAccount } from "@/lib/account";
@@ -37,6 +37,7 @@ export function AccountSidebarEntry({ onOpenAccount }: { onOpenAccount: () => vo
                 <span className="block truncate">{identity.name ?? identity.email}</span>
                 {(privacy.enabled || relayDropped) && <span aria-hidden className="mt-0.5 block h-[15px]" />}
               </span>
+              {plan && <span aria-hidden className="shrink-0 rounded border border-hairline px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground">{plan.plan}</span>}
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent side="top" align="start" className="w-60">
@@ -44,8 +45,8 @@ export function AccountSidebarEntry({ onOpenAccount }: { onOpenAccount: () => vo
             <DropdownMenuSeparator />
             {plan && (
               <DropdownMenuItem onSelect={openPlans}>
+                <Gem className={plan.plan === "free" ? "text-warning" : undefined} />
                 <span>{plan.plan === "free" ? "Upgrade to Pro" : "View plans"}</span>
-                <span className="ml-auto rounded bg-veil-raised px-1.5 text-[10px] uppercase">{plan.plan}</span>
               </DropdownMenuItem>
             )}
             <DropdownMenuItem onSelect={onOpenAccount}><Settings /> Settings</DropdownMenuItem>

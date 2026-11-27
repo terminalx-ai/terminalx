@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Copy, Loader2, MoreHorizontal, RefreshCw } from "@/icons";
 import type { OrganizationPlan } from "@/lib/api";
+import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { Button } from "@/components/ui/button";
 import {
   isInvitableEmail,
@@ -34,8 +35,10 @@ interface OrganizationMembersProps {
 }
 export function OrganizationMembers(props: OrganizationMembersProps) {
   const profiles = useFeatureFlag(featureFlags.teamRoster, props.organizationId);
+  const privacy = useDataPrivacy();
+  const plan = privacy.ready && !privacy.enabled ? props.plan : undefined;
   // A rollout kill unmounts open profiles, action menus and pending UI callbacks.
-  return <OrganizationMembersContent key={profiles ? "profiles" : "legacy"} {...props} profiles={profiles} />;
+  return <OrganizationMembersContent key={profiles ? "profiles" : "legacy"} {...props} plan={plan} profiles={profiles} />;
 }
 function OrganizationMembersContent({ accountEmail, contextRevision, organizationId, profiles, plan }: OrganizationMembersProps & { profiles: boolean }) {
   const cached = useOrganizationRoster(organizationId, profiles);
@@ -165,6 +168,10 @@ function OrganizationMembersContent({ accountEmail, contextRevision, organizatio
   const emailInvalid = trimmed.length > 0 && !isInvitableEmail(trimmed);
   const alreadyMember = roster.members.some((member) => member.email.toLowerCase() === trimmed.toLowerCase());
 
+  const now = Date.now();
+  const pendingSeats = roster.pendingInvites.filter((invite) =>
+    invite.status === "pending" && (invite.expiresAt === undefined || invite.expiresAt > now),
+  ).length;
   return (
     <div className="rounded-lg border border-hairline p-3">
       <div className="flex items-center justify-between">
@@ -174,11 +181,14 @@ function OrganizationMembersContent({ accountEmail, contextRevision, organizatio
         </Button>
       </div>
       {plan?.plan === "teams" && (
-        <p className="mt-1 text-xs text-muted-foreground">
-          {plan.memberLimit === null
+        <div className="mt-1 space-y-0.5 text-xs text-muted-foreground">
+          <p>{plan.memberLimit === null
             ? `${plan.seatsUsed} seats used on Teams`
-            : `${plan.seatsUsed} of ${plan.memberLimit} seats used on Teams`}
-        </p>
+            : `${plan.seatsUsed} of ${plan.memberLimit} seats used on Teams`}</p>
+          {pendingSeats > 0 && <p>{pendingSeats === 1
+            ? "1 pending invite takes a seat when accepted"
+            : `${pendingSeats} pending invites take seats when accepted`}</p>}
+        </div>
       )}
       {!manage && (
         <p className="mt-1 text-[11px] text-muted-foreground">Only owners and admins can invite or manage members.</p>

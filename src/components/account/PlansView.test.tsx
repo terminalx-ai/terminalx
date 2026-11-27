@@ -38,6 +38,8 @@ it("uses the current organization's catalog and clears it as soon as privacy is 
   expect(screen.getByRole("heading", { name: "Plans" })).toBeTruthy();
   expect(screen.getByText(/23.75 per seat/)).toBeTruthy();
   expect(screen.getByText("Up to 8 members")).toBeTruthy();
+  expect(screen.getByText("Local work on this Mac")).toBeTruthy();
+  expect(screen.getByText("Cloud and organizations of your own")).toBeTruthy();
   privacy.enabled = true;
   view.rerender(<PlansView />);
   expect(screen.queryByText("Up to 8 members")).toBeNull();
