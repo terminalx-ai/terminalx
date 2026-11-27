@@ -600,6 +600,11 @@ async fn open_direct(target: &Target, endpoint: &str) -> Result<Connection, Dial
     Ok(connection)
 }
 
+fn resolve_agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| crate::data_privacy::http_agent().build())
+}
+
 /// The cell for the credential, from the director as the phone asks
 /// (`POST /v1/resolve`), else the saved one.
 async fn resolve_cell(relay: &RelayCredential) -> (String, u64) {
@@ -607,8 +612,7 @@ async fn resolve_cell(relay: &RelayCredential) -> (String, u64) {
     let url = format!("{}/v1/resolve", relay.info.director_url.trim_end_matches('/'));
     let body = json!({ "v": 1, "relayHostId": relay.info.relay_host_id, "resumeToken": relay.resume_token.as_str() });
     let resolved = tokio::task::spawn_blocking(move || -> Result<(String, u64)> {
-        let response: Value = crate::data_privacy::http_agent()
-            .build()
+        let response: Value = resolve_agent()
             .post(&url)
             .timeout(Duration::from_secs(5))
             .send_json(body)
@@ -1643,3 +1647,13 @@ impl Owners {
 #[cfg(test)]
 #[path = "machine_client_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod agent_pool_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_agent_is_pooled_across_calls() {
+        assert!(std::ptr::eq(resolve_agent(), resolve_agent()));
+    }
+}

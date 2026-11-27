@@ -1731,12 +1731,17 @@ struct ConnectionOpen {
 
 type Socket = crate::data_privacy::Socket;
 
+fn assign_agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| crate::data_privacy::http_agent().build())
+}
+
 async fn assign(director_url: &str, relay_token: &str, relay_host_id: &str) -> Result<(String, u64)> {
     let url = format!("{}/v1/assign", director_url.trim_end_matches('/'));
     let token = relay_token.to_string();
     let host = relay_host_id.to_string();
     let response: Value = tokio::task::spawn_blocking(move || -> Result<Value> {
-        let response = crate::data_privacy::http_agent().build().post(&url)
+        let response = assign_agent().post(&url)
             .timeout(CONNECT_TIMEOUT)
             .set("authorization", &format!("Bearer {token}"))
             .send_json(json!({ "v": 1, "relayHostId": host }))
@@ -2454,5 +2459,10 @@ mod tests {
         link.complete_attachment("att-1", "code").unwrap();
         assert_eq!(std::fs::read_to_string(FileLink::pairing_dir(&path).join("att-1.pairing")).unwrap(), "code");
         assert!(link.complete_attachment("../x", "code").is_err());
+    }
+
+    #[test]
+    fn assign_agent_is_pooled_across_calls() {
+        assert!(std::ptr::eq(assign_agent(), assign_agent()));
     }
 }

@@ -8,6 +8,7 @@
 //! (`window.__terminalxBrowserPage = "<page id>"`) through agent-browser,
 //! then evaluates that marker on each candidate until one answers.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -21,6 +22,39 @@ use super::{BrowserError, BrowserResult, BrowserRuntime, Target};
 pub const MARKER_KEY: &str = "__terminalxBrowserPage";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 const CALL_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn cdp_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| ureq::AgentBuilder::new().timeout(HTTP_TIMEOUT).build())
+}
+
+fn cdp_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
+    static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
+    match RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("browser-cdp")
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())
+    }) {
+        Ok(rt) => Ok(rt),
+        Err(e) => Err(e.clone()),
+    }
+}
+
+fn block_on_cdp<F, T>(future: F) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, String>> + Send + 'static,
+    T: Send + 'static,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+            return tokio::task::block_in_place(|| handle.block_on(future));
+        }
+    }
+    cdp_runtime()?.block_on(future)
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct PageTarget {
@@ -57,8 +91,7 @@ pub fn mark_page(rt: &BrowserRuntime, target: &Target) -> BrowserResult<()> {
 }
 
 pub fn list_page_targets(port: u16) -> BrowserResult<Vec<PageTarget>> {
-    let agent = ureq::AgentBuilder::new().timeout(HTTP_TIMEOUT).build();
-    let response = agent
+    let response = cdp_agent()
         .get(&format!("http://127.0.0.1:{port}/json/list"))
         .call()
         .map_err(|e| BrowserError::new("browser_error", format!("DevTools listing failed: {e}")))?;
@@ -131,16 +164,29 @@ fn parse_message(message: &Message) -> Option<Value> {
     }
 }
 
-/// The page target carrying `page_id`'s marker.
-pub async fn find_marked_page(port: u16, page_id: &str) -> Result<PageTarget, String> {
-    let targets = list_page_targets(port).map_err(|e| e.message)?;
+/// The page target carrying `page_id`'s marker, along with the already-open
+/// DevTools connection used to confirm it.
+pub async fn find_marked_page(port: u16, page_id: &str) -> Result<(PageTarget, PageConnection), String> {
+    let targets = tokio::task::spawn_blocking(move || list_page_targets(port))
+        .await
+        .map_err(|e| format!("DevTools listing failed: {e}"))?
+        .map_err(|e| e.message)?;
     let probe = format!("window.{MARKER_KEY}");
+    let expected = page_id.to_string();
+    let mut probes = tokio::task::JoinSet::new();
     for target in targets {
-        let Ok(mut connection) = PageConnection::connect(&target.ws_url).await else { continue };
-        if let Ok(Value::String(found)) = connection.evaluate(&probe).await {
-            if found == page_id {
-                return Ok(target);
-            }
+        let probe = probe.clone();
+        let expected = expected.clone();
+        probes.spawn(async move {
+            let mut connection = PageConnection::connect(&target.ws_url).await.ok()?;
+            let found = connection.evaluate(&probe).await.ok()?;
+            (found.as_str() == Some(expected.as_str())).then_some((target, connection))
+        });
+    }
+    while let Some(joined) = probes.join_next().await {
+        if let Ok(Some(matched)) = joined {
+            probes.abort_all();
+            return Ok(matched);
         }
     }
     Err(format!("No DevTools page carries the marker for {page_id}; it may have navigated. Retry."))
@@ -152,18 +198,11 @@ pub fn call_on_page(rt: &BrowserRuntime, target: &Target, method: &str, params: 
     mark_page(rt, target)?;
     let page_id = target.page.id.clone();
     let method = method.to_string();
-    let handle = std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
-        runtime.block_on(async move {
-            let found = find_marked_page(port, &page_id).await?;
-            let mut connection = PageConnection::connect(&found.ws_url).await?;
-            connection.call(&method, params, |_, _| {}).await
-        })
-    });
-    handle
-        .join()
-        .map_err(|_| BrowserError::new("browser_error", "DevTools call panicked"))?
-        .map_err(|e| BrowserError::new("browser_error", e))
+    block_on_cdp(async move {
+        let (_found, mut connection) = find_marked_page(port, &page_id).await?;
+        connection.call(&method, params, |_, _| {}).await
+    })
+    .map_err(|e| BrowserError::new("browser_error", e))
 }
 
 #[cfg(test)]
@@ -183,5 +222,87 @@ mod tests {
         assert_eq!(targets.len(), 2);
         assert_eq!(targets[0].ws_url, "ws://127.0.0.1:1/devtools/page/A");
         assert_eq!(targets[1].kind, "browser_ui");
+    }
+
+    #[test]
+    fn cdp_agent_is_shared_across_calls() {
+        assert!(std::ptr::eq(cdp_agent(), cdp_agent()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn find_marked_page_probes_targets_concurrently_and_reuses_open_connection() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Slow target that accepts WS and stalls forever on evaluate.
+        let slow_ws = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let slow_addr = slow_ws.local_addr().unwrap();
+        let slow_task = tokio::spawn(async move {
+            if let Ok((stream, _)) = slow_ws.accept().await {
+                if let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await {
+                    let _ = ws.next().await;
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+            }
+        });
+
+        // Fast matching target: answers marker evaluation AND a follow-up command on the SAME socket.
+        let fast_ws = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fast_addr = fast_ws.local_addr().unwrap();
+        let fast_accepts = Arc::new(AtomicUsize::new(0));
+        let fast_accepts_clone = fast_accepts.clone();
+        let fast_task = tokio::spawn(async move {
+            let (stream, _) = fast_ws.accept().await.unwrap();
+            fast_accepts_clone.fetch_add(1, Ordering::SeqCst);
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let req: Value = serde_json::from_str(&text).unwrap();
+                let id = req["id"].as_u64().unwrap();
+                let reply = match req["method"].as_str() {
+                    Some("Runtime.evaluate") => json!({"id": id, "result": {"result": {"value": "page-42"}}}),
+                    Some("Page.ping") => json!({"id": id, "result": {"ok": true}}),
+                    _ => json!({"id": id, "result": {}}),
+                };
+                ws.send(Message::Text(reply.to_string().into())).await.unwrap();
+            }
+        });
+
+        // Mock /json/list HTTP server listing the slow target FIRST, then the matching target.
+        let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_port = http.local_addr().unwrap().port();
+        let body = json!([
+            {"id": "slow", "type": "page", "url": "https://slow", "title": "Slow", "webSocketDebuggerUrl": format!("ws://{slow_addr}/devtools/page/slow")},
+            {"id": "fast", "type": "page", "url": "https://fast", "title": "Fast", "webSocketDebuggerUrl": format!("ws://{fast_addr}/devtools/page/fast")},
+        ])
+        .to_string();
+        let http_task = tokio::spawn(async move {
+            let (mut stream, _) = http.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            stream.write_all(resp.as_bytes()).await.unwrap();
+        });
+
+        let started = std::time::Instant::now();
+        let (target, mut conn) = find_marked_page(http_port, "page-42").await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3), "concurrent probe must not wait on stalled target");
+        assert_eq!(target.id, "fast");
+        let pong = conn.call("Page.ping", json!({}), |_, _| {}).await.unwrap();
+        assert_eq!(pong["ok"], true);
+        assert_eq!(fast_accepts.load(Ordering::SeqCst), 1, "reused the already-open WebSocket connection");
+
+        drop(conn);
+        slow_task.abort();
+        let _ = fast_task.await;
+        let _ = http_task.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_on_cdp_uses_existing_tokio_runtime_handle() {
+        let value = block_on_cdp(async { Ok::<_, String>(42) }).unwrap();
+        assert_eq!(value, 42);
     }
 }

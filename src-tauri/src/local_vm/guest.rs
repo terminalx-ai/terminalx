@@ -24,7 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -135,8 +135,68 @@ pub struct Identity {
     pub account: Option<super::linux_profile::Account>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct IdentityStat {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+    ctime: i64,
+    ctime_nsec: i64,
+    mode: u32,
+    uid: u32,
+}
+
+impl IdentityStat {
+    fn from_metadata(meta: &fs::Metadata) -> Self {
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            len: meta.len(),
+            mtime: meta.mtime(),
+            mtime_nsec: meta.mtime_nsec(),
+            ctime: meta.ctime(),
+            ctime_nsec: meta.ctime_nsec(),
+            mode: meta.permissions().mode(),
+            uid: meta.uid(),
+        }
+    }
+
+    fn probe(base: &Path) -> Result<Self> {
+        let meta = fs::symlink_metadata(base.join("identity.json"))
+            .context("Guest identity is not installed")?;
+        // SAFETY: geteuid has no arguments or memory preconditions.
+        if !meta.is_file()
+            || meta.permissions().mode() & 0o077 != 0
+            || meta.uid() != unsafe { libc::geteuid() }
+        {
+            bail!("Guest identity must be an owner-only regular file owned by this user");
+        }
+        Ok(Self::from_metadata(&meta))
+    }
+}
+
+#[derive(Clone)]
+struct TranscriptCursor {
+    log_path: PathBuf,
+    offset: u64,
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+    tail_anchor: Vec<u8>,
+}
+
+const TRANSCRIPT_ANCHOR_BYTES: usize = 64;
+
 impl Identity {
     fn load(base: &Path) -> Result<Self> {
+        Self::load_with_stat(base).map(|(identity, _)| identity)
+    }
+
+    fn load_with_stat(base: &Path) -> Result<(Self, IdentityStat)> {
         let path = base.join("identity.json");
         let mut file = OpenOptions::new().read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&path)
@@ -162,7 +222,7 @@ impl Identity {
         if identity.protocol != PROTOCOL {
             bail!("Incompatible local guest protocol");
         }
-        Ok(identity)
+        Ok((identity, IdentityStat::from_metadata(&metadata)))
     }
 
     /// Only the installing host holds the key; a worker, which runs as this
@@ -297,6 +357,8 @@ struct ProvisioningBaseline {
 pub struct Guest {
     base: PathBuf,
     state: Mutex<State>,
+    identity_stat: Mutex<Option<IdentityStat>>,
+    transcript_cursors: Mutex<BTreeMap<String, TranscriptCursor>>,
     manager: SessionManager,
     sink: Arc<dyn EventSink>,
     stopped: AtomicBool,
@@ -403,7 +465,7 @@ impl Guest {
     }
 
     fn open(base: PathBuf, manager: SessionManager, sink: Arc<dyn EventSink>) -> Result<Self> {
-        let identity = Identity::load(&base)?;
+        let (identity, identity_stat) = Identity::load_with_stat(&base)?;
         let previously_initialized = base
             .join("runtime/local-vm-guest/owner.lock")
             .try_exists()?
@@ -491,6 +553,8 @@ impl Guest {
         Ok(Self {
             base,
             state: Mutex::new(state),
+            identity_stat: Mutex::new(Some(identity_stat)),
+            transcript_cursors: Mutex::new(BTreeMap::new()),
             manager,
             sink,
             stopped: AtomicBool::new(false),
@@ -504,10 +568,25 @@ impl Guest {
     }
 
     fn save(&self, state: &State) -> Result<()> {
-        atomic_private_write(
-            &self.base.join("runtime").join(STATE),
-            &serde_json::to_vec(state)?,
-        )
+        self.save_bytes(&serde_json::to_vec(state)?)
+    }
+
+    fn save_bytes(&self, bytes: &[u8]) -> Result<()> {
+        atomic_private_write(&self.base.join("runtime").join(STATE), bytes)
+    }
+
+    fn check_identity_cached(&self, expected: &Identity) -> Result<()> {
+        if let Ok(stat) = IdentityStat::probe(&self.base) {
+            if *self.identity_stat.lock().unwrap() == Some(stat) {
+                return Ok(());
+            }
+        }
+        let (identity, stat) = Identity::load_with_stat(&self.base)?;
+        if identity != *expected {
+            bail!("Installed guest identity changed");
+        }
+        *self.identity_stat.lock().unwrap() = Some(stat);
+        Ok(())
     }
 
     pub fn shutdown(&self) {
@@ -584,9 +663,41 @@ impl Guest {
     }
 
     fn checkpoint_setup(&self, state: &mut State) -> Result<()> {
+        let updates = self.setup_actor.receipts();
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let mut needs_change = false;
+        for update in &updates {
+            let Some(op) = state.setup_operations.get(&update.receipt.idempotency_key) else {
+                continue;
+            };
+            if op.receipt.action != update.receipt.action {
+                bail!("Guest setup receipt action mismatch");
+            }
+            if op.receipt != update.receipt
+                || op.helper_exit_confirmed != update.helper_exit_confirmed
+            {
+                if !matches!(
+                    op.receipt.status,
+                    setup::Status::Working | setup::Status::NeedsAttention
+                ) {
+                    if update.helper_exit_confirmed && !op.helper_exit_confirmed {
+                        needs_change = true;
+                        break;
+                    }
+                    continue;
+                }
+                needs_change = true;
+                break;
+            }
+        }
+        if !needs_change {
+            return Ok(());
+        }
         let mut next = state.clone();
         let mut changed = false;
-        for update in self.setup_actor.receipts() {
+        for update in updates {
             let Some(op) = next
                 .setup_operations
                 .get_mut(&update.receipt.idempotency_key)
@@ -872,22 +983,22 @@ impl Guest {
     /// completion and artifact retention are owned by this runtime thread.
     fn tick(&self) -> Result<()> {
         let mut state = self.state.lock().unwrap();
-        if Identity::load(&self.base)? != state.identity {
-            bail!("Installed guest identity changed");
-        }
+        self.check_identity_cached(&state.identity)?;
         self.checkpoint_recovery_receipts(&mut state)?;
         self.checkpoint_setup(&mut state)?;
-        let previous = serde_json::to_vec(&*state)?;
+        let mut dirty = false;
         let ids: Vec<_> = state.records.keys().cloned().collect();
         for id in ids {
             let record = state.records.get_mut(&id).unwrap();
             if matches!(
                 record.task.status,
                 TaskStatus::Running | TaskStatus::Waiting | TaskStatus::Canceling
-            ) {
-                self.collect(record)?;
+            ) && self.collect(record)?
+            {
+                dirty = true;
             }
             if record.artifacts_pending {
+                dirty = true;
                 match self.retain(record) {
                     Ok(()) => { record.artifacts_pending = false; record.retention_failures = 0; }
                     Err(error) => {
@@ -908,8 +1019,9 @@ impl Guest {
                 }
             }
         }
-        if serde_json::to_vec(&*state)? != previous {
-            self.save(&state)?;
+        if dirty {
+            let bytes = serde_json::to_vec(&*state)?;
+            self.save_bytes(&bytes)?;
         }
         if setup::holds_admission(&state, self.boot_identity.as_deref())
             || self.setup_actor.busy()
@@ -1055,49 +1167,159 @@ impl Guest {
         self.save(&state)
     }
 
-    fn collect(&self, record: &mut Record) -> Result<()> {
+    fn collect(&self, record: &mut Record) -> Result<bool> {
         let (Some(session), Some(tab)) =
             (&record.task.worker_session_id, &record.task.worker_tab_id)
         else {
-            return Ok(());
+            return Ok(false);
         };
         let (session, tab) = (session.clone(), tab.clone());
+        let task_id = record.task.target.task_id.clone();
+        let existing_cursor = self
+            .transcript_cursors
+            .lock()
+            .unwrap()
+            .get(&task_id)
+            .cloned();
+        let log_path = match &existing_cursor {
+            Some(cursor) => cursor.log_path.clone(),
+            None => crate::store::log_path(&session, &tab)?,
+        };
         // Reading the durable log does not instantiate/resume a worker.
-        let events: Vec<AgentEvent> =
-            crate::store::read_lines(&crate::store::log_path(&session, &tab)?)?;
-        if events.len() < record.source_events as usize {
-            unknown(record, "Provider transcript rolled back");
-            return Ok(());
-        }
-        let retained: Vec<_> = record
-            .task
-            .events
-            .iter()
-            .filter(|e| e.payload.get("sessionId").is_some() && e.payload.get("seq").is_some())
-            .collect();
-        if retained.len() != record.source_events as usize
-            || retained.iter().zip(&events).any(|(prior, source)| {
-                serde_json::to_value(source).ok().as_ref() != Some(&prior.payload)
-            })
-        {
-            unknown(
-                record,
-                "Retained provider transcript changed; possible timeline rollback",
-            );
-            return Ok(());
-        }
+        let mut dirty = false;
+        let new_events = match fs::metadata(&log_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if record.source_events > 0 {
+                    unknown(record, "Provider transcript rolled back");
+                    return Ok(true);
+                }
+                Vec::new()
+            }
+            Err(error) => return Err(error.into()),
+            Ok(meta) => {
+                let (dev, ino, len, mtime, mtime_nsec) = (
+                    meta.dev(),
+                    meta.ino(),
+                    meta.len(),
+                    meta.mtime(),
+                    meta.mtime_nsec(),
+                );
+                // Fast path 1: file metadata is identical to our last verified read.
+                if let Some(cur) = &existing_cursor {
+                    if (cur.dev, cur.ino, cur.len, cur.mtime, cur.mtime_nsec)
+                        == (dev, ino, len, mtime, mtime_nsec)
+                    {
+                        Vec::new()
+                    } else if cur.dev == dev && cur.ino == ino && len > cur.offset {
+                        // Fast path 2: appended bytes on the same inode; verify tail anchor then read only the delta.
+                        match read_incremental_events(&log_path, cur)? {
+                            Some((delta_events, consumed, new_anchor)) => {
+                                let new_offset = cur.offset + consumed;
+                                self.transcript_cursors.lock().unwrap().insert(
+                                    task_id.clone(),
+                                    TranscriptCursor {
+                                        log_path: log_path.clone(),
+                                        offset: new_offset,
+                                        dev,
+                                        ino,
+                                        len,
+                                        mtime,
+                                        mtime_nsec,
+                                        tail_anchor: new_anchor,
+                                    },
+                                );
+                                delta_events
+                            }
+                            None => {
+                                // Tail anchor mismatch -> fall back to full prefix verification.
+                                match verify_and_read_full(&log_path, record)? {
+                                    FullRead::Tampered(msg) => {
+                                        unknown(record, msg);
+                                        return Ok(true);
+                                    }
+                                    FullRead::Ok { delta, offset, anchor } => {
+                                        self.transcript_cursors.lock().unwrap().insert(
+                                            task_id.clone(),
+                                            TranscriptCursor {
+                                                log_path: log_path.clone(),
+                                                offset,
+                                                dev,
+                                                ino,
+                                                len,
+                                                mtime,
+                                                mtime_nsec,
+                                                tail_anchor: anchor,
+                                            },
+                                        );
+                                        delta
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Shrunk, replaced inode, or in-place overwrite -> full prefix verification.
+                        match verify_and_read_full(&log_path, record)? {
+                            FullRead::Tampered(msg) => {
+                                unknown(record, msg);
+                                return Ok(true);
+                            }
+                            FullRead::Ok { delta, offset, anchor } => {
+                                self.transcript_cursors.lock().unwrap().insert(
+                                    task_id.clone(),
+                                    TranscriptCursor {
+                                        log_path: log_path.clone(),
+                                        offset,
+                                        dev,
+                                        ino,
+                                        len,
+                                        mtime,
+                                        mtime_nsec,
+                                        tail_anchor: anchor,
+                                    },
+                                );
+                                delta
+                            }
+                        }
+                    }
+                } else {
+                    match verify_and_read_full(&log_path, record)? {
+                        FullRead::Tampered(msg) => {
+                            unknown(record, msg);
+                            return Ok(true);
+                        }
+                        FullRead::Ok { delta, offset, anchor } => {
+                            self.transcript_cursors.lock().unwrap().insert(
+                                task_id.clone(),
+                                TranscriptCursor {
+                                    log_path: log_path.clone(),
+                                    offset,
+                                    dev,
+                                    ino,
+                                    len,
+                                    mtime,
+                                    mtime_nsec,
+                                    tail_anchor: anchor,
+                                },
+                            );
+                            delta
+                        }
+                    }
+                }
+            }
+        };
         let mut completed = None;
-        for source in events.iter().skip(record.source_events as usize) {
+        for source in &new_events {
             if source.session_id != session
                 || source.tab_id != tab
                 || source.seq <= record.source_seq
             {
                 unknown(record, "Provider transcript identity/sequence changed");
-                return Ok(());
+                return Ok(true);
             }
             record.source_seq = source.seq;
             record.source_events += 1;
             event(&mut record.task, serde_json::to_value(source)?);
+            dirty = true;
             if source.subagent.is_none() {
                 if let Payload::TurnCompleted {
                     status,
@@ -1124,9 +1346,14 @@ impl Guest {
                 }
             }
         }
-        if let Ok(entry) = crate::store::index::get(&session) {
-            record.task.provider_conversation_id =
-                entry.tab(&tab).and_then(|t| t.provider_session_id.clone());
+        if dirty || record.task.provider_conversation_id.is_none() {
+            if let Ok(entry) = crate::store::index::get(&session) {
+                let next_conversation = entry.tab(&tab).and_then(|t| t.provider_session_id.clone());
+                if record.task.provider_conversation_id != next_conversation {
+                    record.task.provider_conversation_id = next_conversation;
+                    dirty = true;
+                }
+            }
         }
         if let Some((status, final_text, auth_failed)) = completed {
             // No task releases the desktop while an autonomous CLI remains
@@ -1159,18 +1386,26 @@ impl Guest {
                 &mut record.task,
                 json!({"type":"taskSettled","status":status}),
             );
+            dirty = true;
         } else if self.manager.status_of(&session, &tab) == crate::store::index::TabStatus::Waiting
         {
-            record.task.status = TaskStatus::Waiting;
+            if record.task.status != TaskStatus::Waiting {
+                record.task.status = TaskStatus::Waiting;
+                dirty = true;
+            }
         } else if self.manager.is_running(&session, &tab) {
-            record.task.status = TaskStatus::Running;
+            if record.task.status != TaskStatus::Running {
+                record.task.status = TaskStatus::Running;
+                dirty = true;
+            }
         } else if record.task.status != TaskStatus::Waiting {
             unknown(
                 record,
                 "Guest worker disconnected without a retained turn result",
             );
+            dirty = true;
         }
-        Ok(())
+        Ok(dirty)
     }
 
     fn cancel(&self, target: &TaskTarget) -> Result<Value> {
@@ -1232,7 +1467,7 @@ impl Guest {
             let record = state.records.get_mut(&target.task_id).unwrap();
             match result {
                 Ok(()) => {
-                    self.collect(record)?;
+                    let _ = self.collect(record)?;
                     record.task.status = TaskStatus::Canceled;
                     record.artifacts_pending = true;
                     record.retention_failures = 0;
@@ -1508,9 +1743,11 @@ impl Guest {
 
     fn checkpoint_recovery_receipts(&self, state: &mut State) -> Result<()> {
         let mut receipts = self.recovery_receipts.lock().unwrap();
-        let mut next = state.clone();
-        let mut finished = Vec::new();
-        for (index, receipt) in receipts.iter_mut().enumerate() {
+        if receipts.is_empty() {
+            return Ok(());
+        }
+        let mut any_ready = false;
+        for receipt in receipts.iter_mut() {
             if receipt.result.is_none() {
                 receipt.result = match receipt.receiver.try_recv() {
                     Ok(result) => Some(result),
@@ -1520,6 +1757,16 @@ impl Guest {
                     )),
                 };
             }
+            if receipt.result.is_some() {
+                any_ready = true;
+            }
+        }
+        if !any_ready {
+            return Ok(());
+        }
+        let mut next = state.clone();
+        let mut finished = Vec::new();
+        for (index, receipt) in receipts.iter_mut().enumerate() {
             let Some(result) = &receipt.result else {
                 continue;
             };
@@ -2138,6 +2385,118 @@ fn worker(task: &Task) -> Result<(String, String)> {
 /// (`journal::MAX_TASK_EVENTS`): past it the event is counted, not kept, so a
 /// task's history cannot grow this state, written on every tick, without
 /// bound (review 2). The sequence still moves, so the host sees the gap.
+fn parse_jsonl_events(bytes: &[u8]) -> (Vec<AgentEvent>, usize) {
+    let mut events = Vec::new();
+    let mut consumed = 0usize;
+    let mut start = 0usize;
+    while start < bytes.len() {
+        let end = match bytes[start..].iter().position(|&b| b == b'\n') {
+            Some(rel) => start + rel + 1,
+            None => {
+                // Final segment without trailing newline: consume only if valid JSON.
+                let slice = &bytes[start..];
+                let trimmed = std::str::from_utf8(slice).ok().map(str::trim);
+                match trimmed {
+                    Some("") => consumed = bytes.len(),
+                    Some(line) => {
+                        if let Ok(ev) = serde_json::from_str::<AgentEvent>(line) {
+                            events.push(ev);
+                            consumed = bytes.len();
+                        }
+                    }
+                    None => {}
+                }
+                break;
+            }
+        };
+        let slice = &bytes[start..end];
+        if let Ok(text) = std::str::from_utf8(slice) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                if let Ok(ev) = serde_json::from_str::<AgentEvent>(trimmed) {
+                    events.push(ev);
+                }
+            }
+        }
+        consumed = end;
+        start = end;
+    }
+    (events, consumed)
+}
+
+fn anchor_tail(prev_anchor: &[u8], appended: &[u8]) -> Vec<u8> {
+    if appended.len() >= TRANSCRIPT_ANCHOR_BYTES {
+        appended[appended.len() - TRANSCRIPT_ANCHOR_BYTES..].to_vec()
+    } else {
+        let keep = (TRANSCRIPT_ANCHOR_BYTES - appended.len()).min(prev_anchor.len());
+        let mut out = Vec::with_capacity(keep + appended.len());
+        out.extend_from_slice(&prev_anchor[prev_anchor.len() - keep..]);
+        out.extend_from_slice(appended);
+        out
+    }
+}
+
+fn read_incremental_events(
+    path: &Path,
+    cur: &TranscriptCursor,
+) -> Result<Option<(Vec<AgentEvent>, u64, Vec<u8>)>> {
+    let mut file = File::open(path)?;
+    if !cur.tail_anchor.is_empty() {
+        let anchor_start = cur.offset.saturating_sub(cur.tail_anchor.len() as u64);
+        file.seek(SeekFrom::Start(anchor_start))?;
+        let mut check = vec![0u8; cur.tail_anchor.len()];
+        if file.read_exact(&mut check).is_err() || check != cur.tail_anchor {
+            return Ok(None);
+        }
+    } else {
+        file.seek(SeekFrom::Start(cur.offset))?;
+    }
+    let mut delta = Vec::new();
+    file.read_to_end(&mut delta)?;
+    let (events, consumed) = parse_jsonl_events(&delta);
+    let new_anchor = anchor_tail(&cur.tail_anchor, &delta[..consumed]);
+    Ok(Some((events, consumed as u64, new_anchor)))
+}
+
+enum FullRead {
+    Tampered(&'static str),
+    Ok {
+        delta: Vec<AgentEvent>,
+        offset: u64,
+        anchor: Vec<u8>,
+    },
+}
+
+fn verify_and_read_full(path: &Path, record: &Record) -> Result<FullRead> {
+    let raw = fs::read(path)?;
+    let (events, consumed) = parse_jsonl_events(&raw);
+    if events.len() < record.source_events as usize {
+        return Ok(FullRead::Tampered("Provider transcript rolled back"));
+    }
+    let retained: Vec<_> = record
+        .task
+        .events
+        .iter()
+        .filter(|e| e.payload.get("sessionId").is_some() && e.payload.get("seq").is_some())
+        .collect();
+    if retained.len() != record.source_events as usize
+        || retained.iter().zip(&events).any(|(prior, source)| {
+            serde_json::to_value(source).ok().as_ref() != Some(&prior.payload)
+        })
+    {
+        return Ok(FullRead::Tampered(
+            "Retained provider transcript changed; possible timeline rollback",
+        ));
+    }
+    let anchor = anchor_tail(&[], &raw[..consumed]);
+    let delta = events.into_iter().skip(record.source_events as usize).collect();
+    Ok(FullRead::Ok {
+        delta,
+        offset: consumed as u64,
+        anchor,
+    })
+}
+
 fn event(task: &mut Task, payload: Value) {
     task.last_event_seq += 1;
     task.updated_at = now();
@@ -5284,5 +5643,113 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("result.txt"));
+    }
+
+    #[test]
+    fn tick_skips_state_rewrite_when_idle_and_collects_transcripts_incrementally() {
+        let (_home, guest, mut task) = setup();
+        let entry = crate::session_ops::create_quick_chat_blocking(
+            guest.sink.as_ref(),
+            crate::session_ops::NewQuickChat {
+                section_id: None,
+                parent: None,
+                title: Some("Incremental collect".into()),
+                cwd: Some(guest.base.join("workspaces").to_string_lossy().into_owned()),
+                tab: Some(crate::session_ops::NewTab {
+                    harness: "codex".into(),
+                    transport: crate::store::index::AgentTransport::Pty,
+                    model: String::new(),
+                    effort: None,
+                    permission_mode: Some("manual".into()),
+                }),
+            },
+        )
+        .unwrap();
+        let tab_id = entry.tabs[0].id.clone();
+        let log_path = crate::store::log_path(&entry.id, &tab_id).unwrap();
+        task.worker_session_id = Some(entry.id.clone());
+        task.worker_tab_id = Some(tab_id.clone());
+        task.status = TaskStatus::Waiting;
+        let rec = record(task.clone());
+        seed(&guest, rec);
+
+        // First tick with empty transcript: idle, state.json must not be rewritten.
+        let state_path = guest.base.join("runtime").join(STATE);
+        let meta_before = fs::metadata(&state_path).unwrap();
+        guest.tick().unwrap();
+        let meta_after = fs::metadata(&state_path).unwrap();
+        assert_eq!(meta_before.ino(), meta_after.ino(), "idle tick must not rewrite state.json");
+
+        // Append event 1 -> tick collects it incrementally and saves once.
+        let ev1 = AgentEvent {
+            id: "ev-1".into(),
+            session_id: entry.id.clone(),
+            tab_id: tab_id.clone(),
+            harness: "codex".into(),
+            seq: 1,
+            ts: now(),
+            message_ts: None,
+            prompt_request_id: None,
+            subagent: None,
+            payload: Payload::AssistantText { block: None, text: "first".into() },
+        };
+        crate::store::append_line(&log_path, &serde_json::to_string(&ev1).unwrap()).unwrap();
+        guest.tick().unwrap();
+        let offset1 = guest
+            .transcript_cursors
+            .lock()
+            .unwrap()
+            .get(&task.target.task_id)
+            .unwrap()
+            .offset;
+        assert!(offset1 > 0);
+        assert_eq!(guest.state.lock().unwrap().records[&task.target.task_id].source_events, 1);
+
+        // Idle tick after event 1: cursor metadata matches, state.json is NOT rewritten.
+        let meta_after_ev1 = fs::metadata(&state_path).unwrap();
+        guest.tick().unwrap();
+        let meta_idle2 = fs::metadata(&state_path).unwrap();
+        assert_eq!(meta_after_ev1.ino(), meta_idle2.ino(), "second idle tick must not rewrite state.json");
+
+        // Append event 2 -> incremental read advances cursor from offset1 without re-parsing event 1.
+        let ev2 = AgentEvent {
+            id: "ev-2".into(),
+            session_id: entry.id.clone(),
+            tab_id: tab_id.clone(),
+            harness: "codex".into(),
+            seq: 2,
+            ts: now(),
+            message_ts: None,
+            prompt_request_id: None,
+            subagent: None,
+            payload: Payload::AssistantText { block: None, text: "second".into() },
+        };
+        crate::store::append_line(&log_path, &serde_json::to_string(&ev2).unwrap()).unwrap();
+        guest.tick().unwrap();
+        let offset2 = guest
+            .transcript_cursors
+            .lock()
+            .unwrap()
+            .get(&task.target.task_id)
+            .unwrap()
+            .offset;
+        assert!(offset2 > offset1);
+        assert_eq!(guest.state.lock().unwrap().records[&task.target.task_id].source_events, 2);
+
+        // Tamper with the transcript by rolling back to event 1 -> caught via fallback full verification.
+        let mut tampered = serde_json::to_string(&ev1).unwrap();
+        tampered.push('\n');
+        fs::write(&log_path, tampered).unwrap();
+        guest.tick().unwrap();
+        assert_eq!(
+            guest.state.lock().unwrap().records[&task.target.task_id].task.status,
+            TaskStatus::OutcomeUnknown
+        );
+
+        // Replacing identity.json invalidates the cached IdentityStat immediately.
+        let mut altered = guest.state.lock().unwrap().identity.clone();
+        altered.generation = super::super::journal::new_id();
+        atomic_private_write(&guest.base.join("identity.json"), &serde_json::to_vec(&altered).unwrap()).unwrap();
+        assert!(guest.tick().is_err());
     }
 }
