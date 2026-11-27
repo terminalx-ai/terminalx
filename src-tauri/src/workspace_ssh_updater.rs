@@ -174,8 +174,42 @@ const RELEASE_ROOT: &str =
     "https://github.com/terminalx-ai/terminalx/releases/download/workspace-openssh";
 
 #[cfg(target_os = "linux")]
-fn download(name: &str, limit: usize) -> anyhow::Result<Vec<u8>> {
+#[derive(Debug, PartialEq, Eq)]
+enum AttemptFailure {
+    Download,
+    Verification,
+    Held,
+}
+
+#[cfg(target_os = "linux")]
+fn reportable_outcome(result: Result<Outcome, AttemptFailure>) -> Option<Outcome> {
+    match result {
+        Ok(outcome) => Some(outcome),
+        Err(AttemptFailure::Verification) => Some(Outcome::VerificationFailed),
+        Err(AttemptFailure::Download) => {
+            log::warn!("workspace SSH update deferred: release download failed");
+            None
+        }
+        Err(AttemptFailure::Held) => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_release_asset(reader: impl std::io::Read, limit: usize) -> Result<Vec<u8>, AttemptFailure> {
     use std::io::Read as _;
+    let mut bytes = Vec::new();
+    reader
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| AttemptFailure::Download)?;
+    if bytes.is_empty() || bytes.len() > limit {
+        return Err(AttemptFailure::Verification);
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn download(name: &str, limit: usize) -> Result<Vec<u8>, AttemptFailure> {
     let agent = crate::data_privacy::http_agent()
         .timeout(std::time::Duration::from_secs(30))
         .redirects(3)
@@ -183,17 +217,8 @@ fn download(name: &str, limit: usize) -> anyhow::Result<Vec<u8>> {
     let response = agent
         .get(&format!("{RELEASE_ROOT}/{name}"))
         .call()
-        .map_err(|_| anyhow::anyhow!("workspace SSH release download failed"))?;
-    let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .take(limit as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    anyhow::ensure!(
-        !bytes.is_empty() && bytes.len() <= limit,
-        "invalid SSH release asset size"
-    );
-    Ok(bytes)
+        .map_err(|_| AttemptFailure::Download)?;
+    read_release_asset(response.into_reader(), limit)
 }
 
 #[cfg(target_os = "linux")]
@@ -246,13 +271,16 @@ fn attempt(cloud: &crate::cloud_bootstrap::Bootstrapped, api: &crate::cloud_boot
     if !ready() {
         return;
     }
-    let install_release = || -> anyhow::Result<Outcome> {
+    let install_release = || -> Result<Outcome, AttemptFailure> {
         let active = installed_version(&install);
-        let version = active.as_deref().map(Version::parse).transpose()?;
+        let Ok(version) = active.as_deref().map(Version::parse).transpose() else {
+            return Ok(Outcome::CandidateFailed);
+        };
         let manifest = download("manifest.json", 4096)?;
         let signature = download("manifest.json.sig", 4096)?;
         let verified =
-            payload::verify_manifest(&manifest, &signature, architecture, version.as_ref())?;
+            payload::verify_manifest(&manifest, &signature, architecture, version.as_ref())
+                .map_err(|_| AttemptFailure::Verification)?;
         if active.as_deref() == Some(verified.version()) {
             return Ok(
                 if cloud
@@ -267,15 +295,21 @@ fn attempt(cloud: &crate::cloud_bootstrap::Bootstrapped, api: &crate::cloud_boot
             );
         }
         if !ready() {
-            anyhow::bail!("workspace SSH update held");
+            return Err(AttemptFailure::Held);
         }
         let bytes = download(verified.locator(), payload::MAX_PAYLOAD)?;
         if !ready() {
-            anyhow::bail!("workspace SSH update held");
+            return Err(AttemptFailure::Held);
         }
-        let staged = install.stage(&verified, &bytes)?;
-        if cloud.refresh(api).is_err() || !ready() {
-            anyhow::bail!("workspace SSH update held");
+        let staged = install
+            .stage(&verified, &bytes)
+            .map_err(|_| AttemptFailure::Verification)?;
+        if cloud.refresh(api).is_err() {
+            log::warn!("workspace SSH update deferred: readiness refresh failed");
+            return Err(AttemptFailure::Held);
+        }
+        if !ready() {
+            return Err(AttemptFailure::Held);
         }
         let runtime = match cloud.ssh_runtime.get() {
             Some(runtime) => runtime.clone(),
@@ -295,7 +329,9 @@ fn attempt(cloud: &crate::cloud_bootstrap::Bootstrapped, api: &crate::cloud_boot
             Err(_) => Ok(Outcome::CandidateFailed),
         }
     };
-    let outcome = install_release().unwrap_or(Outcome::VerificationFailed);
+    let Some(outcome) = reportable_outcome(install_release()) else {
+        return;
+    };
     if let Some(current) = current() {
         let version = cloud
             .ssh_runtime
@@ -323,6 +359,37 @@ pub(crate) fn start(cloud: std::sync::Arc<crate::cloud_bootstrap::Bootstrapped>,
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn workspace_ssh_updater_omits_status_when_download_is_interrupted() {
+        use std::io::Read as _;
+        let reader = std::io::repeat(0).take(1).chain(BrokenDownload);
+        let result = read_release_asset(reader, 8);
+        assert_eq!(result, Err(AttemptFailure::Download));
+        assert!(reportable_outcome(result.map(|_| Outcome::Updated)).is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    struct BrokenDownload;
+
+    #[cfg(target_os = "linux")]
+    impl std::io::Read for BrokenDownload {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::ConnectionReset.into())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn workspace_ssh_updater_reports_verification_failure_for_invalid_downloaded_asset() {
+        let result = read_release_asset(&b"oversized"[..], 4);
+        assert_eq!(result, Err(AttemptFailure::Verification));
+        assert!(matches!(
+            reportable_outcome(result.map(|_| Outcome::Updated)),
+            Some(Outcome::VerificationFailed)
+        ));
+    }
 
     #[test]
     #[cfg(unix)]
