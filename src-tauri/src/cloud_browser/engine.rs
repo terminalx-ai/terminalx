@@ -165,15 +165,16 @@ pub(super) fn end_where(prefix: &str) {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(super) fn switched(on: bool) {
     if !on {
-        return withdraw(true);
-    }
-    #[cfg(target_os = "linux")]
-    if let Some(handle) = runtime() {
+        withdraw(true);
+    } else if let Some(handle) = runtime() {
+        #[cfg(target_os = "linux")]
         handle.spawn(async {
             if let Some(pool) = crate::remote::cloud_desktop::shared_pool() {
                 pool.set_debugging(true).await;
             }
         });
+        #[cfg(not(target_os = "linux"))]
+        let _ = handle;
     }
 }
 
