@@ -98,6 +98,7 @@ impl Process {
     }
 
     /// No process: what a slot holds between one Chrome and the next.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn stopped() -> Self {
         Self {
             child: None,
@@ -300,6 +301,7 @@ fn parse_display(bytes: &[u8]) -> io::Result<u16> {
         .ok_or_else(|| io::Error::other("invalid Xvfb display"))
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct Desktop {
     // Drop graphics clients before the server, and all processes before their private files.
     chrome: Process,
@@ -433,6 +435,7 @@ impl Desktop {
 
     /// Start Chrome again, with or without the runtime's DevTools pipe. Its
     /// open tabs close; the rest of the desktop stays.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     async fn relaunch_chrome(&mut self, debugging: bool) -> Result<(), DesktopError> {
         // The old Chrome and its pipe go first: a second Chrome on the same
         // profile would hand its window to the first and exit.
@@ -529,6 +532,7 @@ pub(crate) struct DesktopLease {
 
 /// An agent's hold on the desktop (PRO-209): it keeps the desktop up with no
 /// viewer, like a stream does, and names Chrome's DevTools endpoint.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct AgentLease {
     pub(crate) devtools: Arc<crate::cloud_browser::cdp::Cdp>,
     pool: Weak<DesktopPool>,
@@ -540,6 +544,7 @@ impl Drop for AgentLease {
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 static SHARED: std::sync::OnceLock<Arc<DesktopPool>> = std::sync::OnceLock::new();
 
 /// The workspace's one desktop, shared by its viewers and its agents, its
@@ -556,6 +561,7 @@ pub(crate) fn shared_pool_in(workdir: Option<PathBuf>) -> Arc<DesktopPool> {
 }
 
 /// The shared desktop, for an agent: set up by the relay server first.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn shared_pool() -> Option<Arc<DesktopPool>> {
     SHARED.get().cloned()
 }
@@ -637,6 +643,7 @@ impl DesktopPool {
 
     /// Start the desktop if it is not up, and hold it for an agent. A Chrome
     /// started without the runtime's DevTools pipe is started again with it.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) async fn agent(self: &Arc<Self>) -> Result<AgentLease, DesktopError> {
         let mut state = self.state.lock().await;
         if state.desktop.as_mut().is_some_and(|desktop| !desktop.is_running()) {
@@ -660,6 +667,7 @@ impl DesktopPool {
 
     /// The switch changed: Chrome has the DevTools pipe only while it is on.
     /// A running Chrome that differs is started again now, never left on.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) async fn set_debugging(&self, on: bool) {
         let mut state = self.state.lock().await;
         let Some(desktop) = state.desktop.as_mut() else { return };
