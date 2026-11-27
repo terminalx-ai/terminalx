@@ -1,12 +1,15 @@
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useConnectionLogs } from "@mobile/state/AppProvider";
+import { useApp } from "@mobile/state/AppProvider";
+import { useConnectionLogs } from "@mobile/state/connection-log-store";
 import { Card } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
 
 /** The connection log, newest first (#987: moved here from Settings, behind a link). */
 export default function ConnectionLogScreen() {
-  const logs = useConnectionLogs();
+  const storeLogs = useConnectionLogs();
+  const app = useApp();
+  const logs = storeLogs.length ? storeLogs : app.logs;
   const { palette } = useTheme();
   const insets = useSafeAreaInsets();
   return <ScrollView contentInsetAdjustmentBehavior="automatic" style={{ backgroundColor: palette.page }} contentContainerStyle={[styles.page, { paddingBottom: insets.bottom + 24 }]}>
