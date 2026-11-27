@@ -249,3 +249,47 @@ fn workspace_ssh_payload_resolves_current_to_a_version_pinned_daemon() {
     std::os::unix::fs::symlink("9.7p1", root.join("9.8p1")).unwrap();
     assert!(guard.active_daemon().is_err());
 }
+
+#[test]
+fn workspace_ssh_payload_missing_or_old_verifier_reports_verification_failed() {
+    let fixture = tempfile::tempdir().unwrap();
+    let signer = TestSigner::generate();
+    let raw = serde_json::to_vec(&manifest("9.7p1", b"payload")).unwrap();
+    let signature = signer.sign(&raw);
+    let legacy = fixture.path().join("legacy-verifier");
+    fs::write(&legacy, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&legacy, fs::Permissions::from_mode(0o700)).unwrap();
+    for verifier in [fixture.path().join("missing"), legacy] {
+        let error = verify_with_program(
+            &raw,
+            &signature,
+            Architecture::X86_64,
+            None,
+            &signer.public,
+            &verifier,
+        )
+        .err()
+        .expect("an unavailable verifier must hold the update");
+        assert!(error.is::<VerificationFailed>());
+        assert_eq!(error.to_string(), "verification_failed");
+    }
+}
+
+#[test]
+fn workspace_ssh_payload_cleans_read_only_directories_after_a_late_unpack_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let install = InstallLock::acquire(root.path()).unwrap();
+    let target = root.path().join("9.7p1");
+    let result = install.commit_stage(&target, |scratch| {
+        let child = scratch.join("usr/sbin");
+        fs::create_dir_all(&child)?;
+        fs::write(child.join("sshd"), b"fixture")?;
+        for directory in [&child, &scratch.join("usr"), scratch] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o555))?;
+        }
+        bail!("simulated late archive validation failure")
+    });
+    assert!(result.unwrap_err().to_string().contains("simulated late"));
+    assert!(!target.exists());
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+}

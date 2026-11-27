@@ -1,13 +1,13 @@
 //! Private per-connection OpenSSH listener lifecycle.
 use crate::workspace_ssh::parse_public_key;
-use crate::workspace_ssh_payload::{InstallLock, StagedVersion, Version};
+use crate::workspace_ssh_payload::{remove_private_tree, InstallLock, StagedVersion, Version};
 use anyhow::{bail, ensure, Context, Result};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{
@@ -33,6 +33,20 @@ impl Daemon {
             uncertain_session_exit: AtomicBool::new(false),
             fresh_in_this_runtime: true,
         }
+    }
+
+    fn installed(install: &InstallLock, configuration: PathBuf) -> Result<Self> {
+        let daemon = install.active_daemon()?;
+        let directory = daemon
+            .ancestors()
+            .nth(3)
+            .context("invalid installed OpenSSH path")?;
+        Ok(Self {
+            directory: directory.to_owned(),
+            configuration,
+            uncertain_session_exit: AtomicBool::new(false),
+            fresh_in_this_runtime: false,
+        })
     }
 
     fn command(&self) -> Command {
@@ -226,6 +240,28 @@ impl Listener {
         Ok(Session { process, daemon })
     }
 
+    /// Resume new admissions after runtime start. The caller owns the
+    /// install lock, so current cannot change between lookup and route pin.
+    pub(super) fn restore(
+        &self,
+        install: &InstallLock,
+        configuration: PathBuf,
+        host_key: &str,
+        ready: impl Fn() -> bool,
+    ) -> Result<()> {
+        ensure!(ready(), "SSH readiness is held");
+        let daemon = Daemon::installed(install, configuration)?;
+        daemon.check(host_key)?;
+        let mut routing = self.routing.lock().unwrap();
+        ensure!(
+            routing.active.is_none(),
+            "SSH listener is already initialized"
+        );
+        ensure!(ready(), "SSH readiness was withdrawn");
+        routing.active = Some(Arc::new(daemon));
+        Ok(())
+    }
+
     pub(super) fn activate(
         &self,
         install: &InstallLock,
@@ -328,8 +364,7 @@ impl Listener {
             .collect();
         for path in retired {
             version_name(&install.root, &path)?;
-            thaw(&path)?;
-            fs::remove_dir_all(&path)?;
+            remove_private_tree(&path)?;
             routing.retired.remove(&path);
         }
         File::open(&install.root)?.sync_all()?;
@@ -358,22 +393,10 @@ fn name_str(path: &Path) -> Result<String> {
         .context("invalid OpenSSH version path")
 }
 
-fn thaw(directory: &Path) -> Result<()> {
-    let meta = fs::symlink_metadata(directory)?;
-    ensure!(meta.is_dir(), "unsafe retired SSH directory");
-    fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
-    for item in fs::read_dir(directory)? {
-        let item = item?;
-        if item.file_type()?.is_dir() {
-            thaw(&item.path())?;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn candidate(root: &Path, version: &str) -> Daemon {
         let directory = root.join(version);
@@ -384,6 +407,34 @@ mod tests {
             uncertain_session_exit: AtomicBool::new(false),
             fresh_in_this_runtime: true,
         }
+    }
+
+    #[test]
+    fn workspace_ssh_listener_restored_route_stays_pinned_to_its_version() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path();
+        let install = InstallLock::acquire(root).unwrap();
+        let current = root.join("current");
+        for version in ["9.6p1", "9.7p1"] {
+            let daemon = root.join(version).join("usr/sbin/sshd");
+            fs::create_dir_all(daemon.parent().unwrap()).unwrap();
+            fs::write(&daemon, version).unwrap();
+            fs::set_permissions(daemon, fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        symlink("9.6p1", &current).unwrap();
+        let original = Daemon::installed(&install, root.join("sshd_config")).unwrap();
+        fs::remove_file(&current).unwrap();
+        symlink("9.7p1", &current).unwrap();
+        assert_eq!(
+            original.command().get_program(),
+            root.join("9.6p1/usr/sbin/sshd")
+        );
+        let updated = Daemon::installed(&install, root.join("sshd_config")).unwrap();
+        assert_eq!(
+            updated.command().get_program(),
+            root.join("9.7p1/usr/sbin/sshd")
+        );
+        assert!(!original.fresh_in_this_runtime);
     }
 
     #[test]
