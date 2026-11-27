@@ -916,7 +916,7 @@ export interface OrganizationPlan {
 /** The desktop Organization > Billing page (PRO-596); every value comes from the server. */
 export interface OrganizationBilling {
   plan: "free" | "pro" | "teams";
-  /** "organization" for a paid Teams plan; otherwise the person pays for themselves. */
+  /** "organization" for a paid Teams plan, or a lapsed one its owner still manages; otherwise the person pays for themselves. */
   billedTo: "personal" | "organization";
   seats: { used: number; limit: number } | null;
   seatPrice: { currency: string; unitAmountMinor: number; interval: "month" } | null;

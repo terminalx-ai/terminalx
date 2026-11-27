@@ -89,6 +89,15 @@ describe("Organization > Billing (PRO-596)", () => {
     expect(mocks.openPlans).toHaveBeenCalled();
   });
 
+  it("keeps Manage payment for the owner of a lapsed Teams subscription", async () => {
+    mocks.billing.mockResolvedValue({ ...teams, plan: "free", nextCharge: null });
+    show();
+    expect(await screen.findByText("Free")).toBeTruthy();
+    expect(screen.queryByText("Active")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Manage payment" }));
+    await waitFor(() => expect(mocks.portal).toHaveBeenCalledWith("org-1", "organization"));
+  });
+
   it("renders an empty state when the server has no billing for the organization", async () => {
     mocks.billing.mockRejectedValue({ code: "organization_billing_unavailable", status: 404 });
     show();

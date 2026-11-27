@@ -1045,7 +1045,8 @@ impl OrganizationBilling {
             && self.next_charge.as_ref().is_none_or(|charge| billing_currency(&charge.currency)
                 && chrono::DateTime::parse_from_rfc3339(&charge.date).is_ok())
             && self.seats.as_ref().is_none_or(|seats| seats.limit > 0)
-            && matches!(self.plan, BillingPlan::Teams) == (self.billed_to == BillingView::Organization)
+            // A lapsed Teams subscription is still the organization's to manage, whatever the plan now is.
+            && (!matches!(self.plan, BillingPlan::Teams) || self.billed_to == BillingView::Organization)
     }
 }
 
@@ -7770,7 +7771,7 @@ mod tests {
     #[test]
     fn organization_billing_rejects_inconsistent_answers_and_keeps_its_error_code() {
         for body in [
-            r#"{"plan":"pro","billedTo":"organization","seats":null,"seatPrice":null,"nextCharge":null,"payer":null,"canManageBilling":false}"#,
+            r#"{"plan":"teams","billedTo":"personal","seats":null,"seatPrice":null,"nextCharge":null,"payer":null,"canManageBilling":false}"#,
             r#"{"plan":"free","billedTo":"personal","seats":null,"seatPrice":null,"nextCharge":{"date":"soon","amountMinor":1,"currency":"USD"},"payer":null,"canManageBilling":false}"#,
             r#"{"plan":"free","billedTo":"personal","seats":null,"seatPrice":null,"nextCharge":{"date":"2099-02-15T00:00:00Z","amountMinor":1,"currency":"usd"},"payer":null,"canManageBilling":false}"#,
         ] {
