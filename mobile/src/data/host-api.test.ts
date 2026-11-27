@@ -484,4 +484,31 @@ describe("pins on the computer (#1403)", () => {
     await expect(api.cloudPins()).resolves.toEqual({});
     expect(older.mock.calls.map(([method]) => method)).toEqual(["sync.capabilities"]);
   });
+
+  it("preserves exact cached SessionSummary[] reference when host answers notModified (P-46)", async () => {
+    const summary = {
+      id: "s1",
+      title: "Fix perf",
+      project: "Repo",
+      worktree: "wt",
+      modified: "2026-11-01T00:00:00Z",
+      tabs: [{ id: "t1", harness: "claude", status: "idle" as const }],
+    };
+    let count = 0;
+    const request = vi.fn(async (method: string) => {
+      if (method === "sync.capabilities") return { ok: true, value: { conditionalLists: 1 } };
+      count++;
+      if (count === 1) return { ok: true, value: { sessions: [summary], version: "v1" } };
+      return { ok: true, value: { notModified: true, version: "v1" } };
+    });
+    const api = hostApi(request);
+    const first = await api.summaries();
+    const second = await api.summaries();
+    expect(first).not.toBeNull();
+    expect(second).toBe(first);
+
+    const status = await api.summariesWithStatus();
+    expect(status.notModified).toBe(true);
+    expect(status.sessions).toBe(first);
+  });
 });

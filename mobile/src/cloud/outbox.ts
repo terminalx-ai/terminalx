@@ -105,6 +105,19 @@ export interface OutboxOptions {
   now?: () => number;
 }
 
+interface CachedView {
+  updatedAt: number;
+  keySetVersion: number;
+  state: OutboxState;
+  wake: string | null;
+  category: string | null;
+  error: string | null;
+  asleep: boolean;
+  resultIv: string | null;
+  resultCiphertext: string | null;
+  entry: OutboxEntry;
+}
+
 export class CloudOutbox {
   private items: Stored[] = [];
   private loaded: Promise<void> | null = null;
@@ -115,6 +128,10 @@ export class CloudOutbox {
   private refused: { item: Stored; said: string } | null = null;
   /** One write at a time, in order. */
   private saving: Promise<void> = Promise.resolve();
+  /** Decrypted view cache keyed by clientCommandId, invalidated on item mutation or key set version change. */
+  private readonly viewCache = new Map<string, CachedView>();
+  private entriesCache: { version: number; keySetVersion: number; list: OutboxEntry[] } | null = null;
+  private itemsVersion = 0;
 
   constructor(private readonly options: OutboxOptions) {}
 
@@ -134,12 +151,22 @@ export class CloudOutbox {
       } catch {
         this.items = [];
       }
+      this.itemsVersion++;
     })());
   }
 
   /** The entries of a tab (or of the workspace), oldest first. */
   entries(tabId?: string): OutboxEntry[] {
-    return this.items.filter((item) => !tabId || item.envelope.tabId === tabId).map((item) => this.view(item));
+    const keySetVersion = this.options.keys.version;
+    if (!tabId) {
+      if (this.entriesCache && this.entriesCache.version === this.itemsVersion && this.entriesCache.keySetVersion === keySetVersion) {
+        return this.entriesCache.list;
+      }
+      const list = this.items.map((item) => this.view(item));
+      this.entriesCache = { version: this.itemsVersion, keySetVersion, list };
+      return list;
+    }
+    return this.items.filter((item) => item.envelope.tabId === tabId).map((item) => this.view(item));
   }
 
   /** Whether anything is still on its way. */
@@ -277,8 +304,7 @@ export class CloudOutbox {
     this.publish();
   }
 
-  /**
-   * Let go of a command that was refused for good or cancelled: it is no
+  /** Let go of a command that was refused for good or cancelled: it is no
    * longer shown. One still on its way is never dropped here (that is `cancel`).
    */
   async dismiss(clientCommandId: string): Promise<void> {
@@ -286,6 +312,8 @@ export class CloudOutbox {
     const item = this.items.find((entry) => entry.envelope.clientCommandId === clientCommandId);
     if (!item || (item.state !== "rejected" && item.state !== "cancelled")) return;
     this.items = this.items.filter((entry) => entry !== item);
+    this.viewCache.delete(clientCommandId);
+    this.itemsVersion++;
     await this.save();
     this.publish();
   }
@@ -294,6 +322,9 @@ export class CloudOutbox {
   async clear(): Promise<void> {
     this.items = [];
     this.refused = null;
+    this.viewCache.clear();
+    this.entriesCache = null;
+    this.itemsVersion++;
     this.loaded = Promise.resolve();
     await this.options.storage.removeItem(itemName(this.options.scope)).catch(() => undefined);
     this.publish();
@@ -357,6 +388,23 @@ export class CloudOutbox {
 
   private view(item: Stored): OutboxEntry {
     const { envelope } = item;
+    const keySetVersion = this.options.keys.version;
+    const asleep = item.state === "queued" && item.asleep === true;
+    const cached = this.viewCache.get(envelope.clientCommandId);
+    if (
+      cached &&
+      cached.updatedAt === item.updatedAt &&
+      cached.keySetVersion === keySetVersion &&
+      cached.state === item.state &&
+      cached.wake === item.wake &&
+      cached.category === item.category &&
+      cached.error === item.error &&
+      cached.asleep === asleep &&
+      cached.resultIv === item.resultIv &&
+      cached.resultCiphertext === item.resultCiphertext
+    ) {
+      return cached.entry;
+    }
     const scope = this.options.scope;
     let payload: Record<string, unknown> | null = null;
     const held = this.options.keys.get(envelope.keyId);
@@ -372,7 +420,7 @@ export class CloudOutbox {
       const own = held ? [held] : [];
       receipt = openReceipt({ scope, clientCommandId: envelope.clientCommandId, resultIv: item.resultIv, resultCiphertext: item.resultCiphertext, keys: [...own, ...this.options.keys.all().filter((key) => key !== held)] });
     }
-    return {
+    const entry: OutboxEntry = {
       clientCommandId: envelope.clientCommandId,
       tabId: envelope.tabId,
       kind: envelope.kind,
@@ -385,8 +433,21 @@ export class CloudOutbox {
       createdAt: item.createdAt,
       updatedAt: item.updatedAt,
       error: item.error,
-      asleep: item.state === "queued" && item.asleep === true,
+      asleep,
     };
+    this.viewCache.set(envelope.clientCommandId, {
+      updatedAt: item.updatedAt,
+      keySetVersion,
+      state: item.state,
+      wake: item.wake,
+      category: item.category,
+      error: item.error,
+      asleep,
+      resultIv: item.resultIv,
+      resultCiphertext: item.resultCiphertext,
+      entry,
+    });
+    return entry;
   }
 
   private fingerprint(): string {
@@ -397,14 +458,17 @@ export class CloudOutbox {
     const settled = this.items.filter((item) => TERMINAL_OUTBOX_STATES.has(item.state));
     if (settled.length > SETTLED_KEPT) {
       const drop = new Set(settled.slice(0, settled.length - SETTLED_KEPT));
+      for (const dropped of drop) this.viewCache.delete(dropped.envelope.clientCommandId);
       this.items = this.items.filter((item) => !drop.has(item));
     }
+    this.itemsVersion++;
     const body = JSON.stringify({ v: 1, items: this.items });
     this.saving = this.saving.then(() => this.options.storage.setItem(itemName(this.options.scope), body)).catch(() => undefined);
     return this.saving;
   }
 
   private publish(): void {
+    this.itemsVersion++;
     for (const listener of [...this.listeners]) listener();
   }
 }

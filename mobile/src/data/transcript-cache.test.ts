@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import type { AgentEvent } from "@terminalx/portable/events";
-import { clearTranscriptCaches, readCache, reclaimOrphanChunks, savedCursors, writeCache, type SyncCursor } from "./transcript-cache";
+import { cacheEpoch, clearTranscriptCaches, readCache, readSaved, reclaimOrphanChunks, savedCursors, writeCache, writeSaved, type SyncCursor } from "./transcript-cache";
 import { keepPrefetched, startPrefetch } from "./prefetch";
 import { HostApi } from "./host-api";
 import type { HostConnection } from "../transport/connection";
@@ -353,5 +353,23 @@ describe("reclaiming chunks a save cut short left behind (#1340)", () => {
     expect([...storage.keys()].some((key) => key.startsWith("terminalx:saved:v1:"))).toBe(true);
     await clearTranscriptCaches("host");
     expect(storage.size).toBe(0);
+  });
+
+  it("skips duplicate AsyncStorage writes in writeSaved when the serialized value is unchanged (P-47)", async () => {
+    const epoch = cacheEpoch("host");
+    const payload = { harness: "claude", model: "opus", permissionMode: "auto", status: "idle" };
+    await writeSaved("host", "tab:1", payload, epoch);
+    expect(written).toHaveLength(1);
+    written.length = 0;
+
+    // Identical value skips AsyncStorage.setItem entirely.
+    await writeSaved("host", "tab:1", { ...payload }, epoch);
+    expect(written).toHaveLength(0);
+
+    // Changed value writes once.
+    await writeSaved("host", "tab:1", { ...payload, model: "sonnet" }, epoch);
+    expect(written).toHaveLength(1);
+    const read = await readSaved("host", "tab:1", (v): v is typeof payload => !!v && typeof v === "object");
+    expect(read?.model).toBe("sonnet");
   });
 });

@@ -185,4 +185,144 @@ final class SnapshotRenderingTests: XCTestCase {
 
         XCTAssertNil(SnapshotRenderHeuristics.tabStripCompaction(parent: parent, children: children))
     }
+
+    func testTabStripCompactionGatesBeforeFetchingChildAttributes() {
+        var roleReads = 0
+        var selectionReads = 0
+
+        let nonTabStrip = SnapshotRenderNode(role: "AXGroup")
+        let nonTabStripResult = SnapshotRenderHeuristics.tabStripCompaction(
+            parent: nonTabStrip,
+            childCount: 25,
+            childRole: { _ in
+                roleReads += 1
+                return (role: "AXTab", roleDescription: "tab")
+            },
+            isChildSelected: { _ in
+                selectionReads += 1
+                return true
+            }
+        )
+        XCTAssertNil(nonTabStripResult)
+        XCTAssertEqual(roleReads, 0)
+        XCTAssertEqual(selectionReads, 0)
+
+        let smallScrollArea = SnapshotRenderNode(role: "AXScrollArea", roleDescription: "scroll area")
+        let smallResult = SnapshotRenderHeuristics.tabStripCompaction(
+            parent: smallScrollArea,
+            childCount: 9,
+            childRole: { _ in
+                roleReads += 1
+                return (role: "AXTab", roleDescription: "tab")
+            },
+            isChildSelected: { _ in
+                selectionReads += 1
+                return true
+            }
+        )
+        XCTAssertNil(smallResult)
+        XCTAssertEqual(roleReads, 0)
+        XCTAssertEqual(selectionReads, 0)
+    }
+
+    func testTabStripCompactionShortCircuitsNonTabScrollAreaAndLimitsSelectionReads() {
+        let scrollArea = SnapshotRenderNode(role: "AXScrollArea", roleDescription: "scroll area")
+        var roleReads = 0
+        var selectionReads = 0
+
+        let nonTabResult = SnapshotRenderHeuristics.tabStripCompaction(
+            parent: scrollArea,
+            childCount: 20,
+            childRole: { _ in
+                roleReads += 1
+                return (role: "AXGroup", roleDescription: "group")
+            },
+            isChildSelected: { _ in
+                selectionReads += 1
+                return false
+            }
+        )
+        XCTAssertNil(nonTabResult)
+        // Once 11 children are non-tabs out of 20, only 9 remain so 10 tabs is impossible.
+        XCTAssertEqual(roleReads, 11)
+        XCTAssertEqual(selectionReads, 0)
+
+        var selectedCheckedIndexes: [Int] = []
+        let mixedResult = SnapshotRenderHeuristics.tabStripCompaction(
+            parent: scrollArea,
+            childCount: 14,
+            childRole: { index in
+                if index == 0 || index == 13 {
+                    return (role: "AXButton", roleDescription: "button")
+                }
+                return (role: "AXRadioButton", roleDescription: "tab")
+            },
+            isChildSelected: { index in
+                selectedCheckedIndexes.append(index)
+                return index == 5
+            }
+        )
+        XCTAssertEqual(mixedResult, SnapshotTabStripCompaction(retainedIndexes: [0, 5, 13], omittedCount: 11))
+        XCTAssertEqual(Set(selectedCheckedIndexes), Set(1...12))
+    }
+
+    func testSelectVisibleRowsPrefersDirectVisibleRowsWithoutFetchingAllRows() {
+        var allRowsCalled = false
+        var parentFrameChecked = false
+        var rowFrameChecks = 0
+
+        let direct = SnapshotRenderHeuristics.selectVisibleRows(
+            directVisibleRows: { Array(0..<30) },
+            allRows: {
+                allRowsCalled = true
+                return Array(0..<500)
+            },
+            hasParentFrame: {
+                parentFrameChecked = true
+                return true
+            },
+            isRowVisible: { _ in
+                rowFrameChecks += 1
+                return true
+            }
+        )
+
+        XCTAssertEqual(direct, Array(0..<20))
+        XCTAssertFalse(allRowsCalled)
+        XCTAssertFalse(parentFrameChecked)
+        XCTAssertEqual(rowFrameChecks, 0)
+
+        let emptyDirect = SnapshotRenderHeuristics.selectVisibleRows(
+            directVisibleRows: { [Int]() },
+            allRows: {
+                allRowsCalled = true
+                return [1, 2, 3]
+            },
+            hasParentFrame: {
+                parentFrameChecked = true
+                return true
+            },
+            isRowVisible: { _ in true }
+        )
+        XCTAssertEqual(emptyDirect, [])
+        XCTAssertFalse(allRowsCalled)
+        XCTAssertFalse(parentFrameChecked)
+    }
+
+    func testSelectVisibleRowsFallbackStopsAfterCollectingTwentyVisibleRows() {
+        var checkedRows = 0
+
+        let fallback = SnapshotRenderHeuristics.selectVisibleRows(
+            directVisibleRows: { nil as [Int]? },
+            allRows: { Array(0..<1000) },
+            hasParentFrame: { true },
+            isRowVisible: { row in
+                checkedRows += 1
+                return row >= 5
+            }
+        )
+
+        XCTAssertEqual(fallback, Array(5..<25))
+        XCTAssertEqual(checkedRows, 25)
+    }
 }

@@ -1,7 +1,7 @@
 import { hkdf } from "@noble/hashes/hkdf";
 import { sha256 } from "@noble/hashes/sha256";
 import nacl from "tweetnacl";
-import { concat, decodeCanonicalBase64, encodeBase64, encodeHandshakeTranscript, validateHandshake, type MobileE2EEHello, type MobileE2EETransport } from "./e2ee-contract";
+import { concat, decodeAnyCanonicalBase64, decodeCanonicalBase64, encodeBase64, encodeHandshakeTranscript, validateHandshake, type MobileE2EEHello, type MobileE2EETransport } from "./e2ee-contract";
 import { openFrame, sealFrame } from "./e2ee-framing";
 
 const SALT_LABEL = new TextEncoder().encode("terminalx-mobile-e2ee/v2/salt\0");
@@ -112,15 +112,6 @@ export function deriveKeySchedule(sharedSecret: Uint8Array, transcript: Uint8Arr
   const salt = sha256(concat([SALT_LABEL, clientNonce, desktopNonce]));
   const expanded = hkdf(sha256, sharedSecret, salt, concat([INFO_LABEL, transcriptHash]), 96);
   return { mobileToDesktopKey: expanded.slice(0, 32), desktopToMobileKey: expanded.slice(32, 64), sessionId: expanded.slice(64, 96), transcriptHash };
-}
-
-function decodeAnyCanonicalBase64(value: string): Uint8Array | null {
-  try {
-    const bytes = Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
-    return encodeBase64(bytes) === value ? bytes : null;
-  } catch {
-    return null;
-  }
 }
 
 function equal(left: Uint8Array, right: Uint8Array): boolean {

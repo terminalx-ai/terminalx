@@ -117,4 +117,32 @@ describe("a cloud tab's transcript without a connection", () => {
     expect(await reading).toMatchObject({ kind: "transcript", version: 4 });
     expect(h.blobs.size).toBe(0);
   });
+
+  it("stores lightweight metadata and avoids redundant re-decryption across cached + refresh (P-14)", async () => {
+    const h = await harness();
+    h.fetchCheckpoint.mockResolvedValueOnce(checkpoint(4, { events: [{ id: "e4", seq: 4 }] }));
+    const initial = await h.transcripts.refresh("tab-1");
+    expect(initial).toMatchObject({ kind: "transcript", epoch: 1, version: 4 });
+    expect(await h.transcripts.cachedMeta("tab-1")).toMatchObject({ epoch: 1, version: 4, keyId: "k1" });
+
+    // Passing the already-opened cached result into refresh() avoids re-reading or re-decrypting storage.
+    const getItemSpy = vi.fn(async (name: string) => h.blobs.get(name) ?? null);
+    const transcripts2 = new CloudTranscripts(
+      scope,
+      { checkpoint: h.fetchCheckpoint as never },
+      h.keys,
+      { getItem: getItemSpy, setItem: async (n, v) => void h.blobs.set(n, v), removeItem: async (n) => void h.blobs.delete(n) },
+    );
+
+    const cached = await transcripts2.cached("tab-1");
+    expect(cached).toMatchObject({ kind: "transcript", version: 4 });
+    const readsAfterCached = getItemSpy.mock.calls.length;
+
+    h.fetchCheckpoint.mockResolvedValueOnce(null);
+    const refreshed = await transcripts2.refresh("tab-1", cached);
+    expect(refreshed).toBe(cached);
+    // Zero extra storage reads when held result was handed into refresh().
+    expect(getItemSpy).toHaveBeenCalledTimes(readsAfterCached);
+    expect(h.fetchCheckpoint).toHaveBeenLastCalledWith("org-1", "ws-1", "tab-1", { epoch: 1, version: 4 });
+  });
 });

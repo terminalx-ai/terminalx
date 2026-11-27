@@ -141,10 +141,14 @@ export function commandFirstLine(command: string): { line: string; cut: boolean 
 /** The calls in a run of work items: a run of one tool, which `groupWork` folded, counts call by call. */
 const runCalls = (item: WorkItem): ToolCall[] | null => item.kind === "tool" ? [item.call] : item.kind === "tool_group" ? item.calls : null;
 
+const turnRowsCache = new WeakMap<Turn, TurnRow[]>();
+
 // A turn is a grouping for transcript semantics, not a virtualization unit.
 // Give the list individual message blocks with stable keys during streaming,
 // tool completion, reconnects, and insertion of earlier turns.
 export function turnRows(turn: Turn): TurnRow[] {
+  const cached = turnRowsCache.get(turn);
+  if (cached) return cached;
   const rows: TurnRow[] = [];
   const addMarkdown = (key: string, text: string, ts?: string) => {
     for (const [index, token] of markdownBlocks(text).entries()) rows.push({ key: `${key}:${index}`, kind: "markdown", token, startsTurn: false, ts: index === 0 ? ts : undefined });
@@ -192,5 +196,6 @@ export function turnRows(turn: Turn): TurnRow[] {
   }
   if (turn.finalText) addMarkdown(`final:${turn.key}`, turn.finalText);
   if (rows.length) rows[0].startsTurn = true;
+  turnRowsCache.set(turn, rows);
   return rows;
 }

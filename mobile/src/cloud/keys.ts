@@ -38,11 +38,17 @@ export class WorkspaceKeys {
   private currentKeyId: string | null = null;
   private keys = new Map<string, HeldKey>();
   private loaded: Promise<void> | null = null;
+  private _version = 0;
 
   constructor(
     private readonly scope: CommandScope,
     private readonly storage: SecretStorage,
   ) {}
+
+  /** Monotonic version bumped whenever the held key set changes. */
+  get version(): number {
+    return this._version;
+  }
 
   /** Read what the secure store holds, once. */
   load(): Promise<void> {
@@ -55,6 +61,7 @@ export class WorkspaceKeys {
         // Unreadable: as if none were held; the next connection fetches them again.
         this.keys.clear();
         this.currentKeyId = null;
+        this._version++;
       }
     })());
   }
@@ -99,6 +106,7 @@ export class WorkspaceKeys {
   async clear(): Promise<void> {
     this.keys.clear();
     this.currentKeyId = null;
+    this._version++;
     this.loaded = Promise.resolve();
     await this.storage.delete(keyItemName(this.scope)).catch(() => undefined);
   }
@@ -108,5 +116,6 @@ export class WorkspaceKeys {
     for (const entry of stored.keys ?? []) next.set(entry.keyId, { keyId: entry.keyId, key: keyFromB64(entry.key), createdAt: entry.createdAt, retiredAt: entry.retiredAt });
     this.keys = next;
     this.currentKeyId = stored.currentKeyId && next.has(stored.currentKeyId) ? stored.currentKeyId : null;
+    this._version++;
   }
 }

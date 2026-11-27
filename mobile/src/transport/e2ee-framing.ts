@@ -1,6 +1,5 @@
 import nacl from "tweetnacl";
 import type { MobileE2EEDirection, MobileE2EEPayloadKind } from "./e2ee-contract";
-import { concat } from "./e2ee-contract";
 
 const NONCE_LENGTH = 24;
 const SESSION_ID_LENGTH = 32;
@@ -16,9 +15,15 @@ type FrameFields = {
 
 export function sealFrame(args: FrameFields & { payload: Uint8Array; counter: bigint }): Uint8Array {
   validate(args.key, args.sessionId, args.counter);
-  const header = encodeHeader(args);
+  const plaintext = new Uint8Array(HEADER_LENGTH + args.payload.length);
+  writeHeader(plaintext, args);
+  plaintext.set(args.payload, HEADER_LENGTH);
   const nonce = encodeNonce(args);
-  return concat([nonce, nacl.secretbox(concat([header, args.payload]), nonce, args.key)]);
+  const boxed = nacl.secretbox(plaintext, nonce, args.key);
+  const frame = new Uint8Array(NONCE_LENGTH + boxed.length);
+  frame.set(nonce, 0);
+  frame.set(boxed, NONCE_LENGTH);
+  return frame;
 }
 
 export function openFrame(args: FrameFields & { frame: Uint8Array; expectedCounter: bigint }): Uint8Array | null {
@@ -32,12 +37,16 @@ export function openFrame(args: FrameFields & { frame: Uint8Array; expectedCount
   return plaintext.slice(HEADER_LENGTH);
 }
 
-function encodeHeader(args: Omit<FrameFields, "key"> & { counter: bigint }): Uint8Array {
-  const header = new Uint8Array(HEADER_LENGTH);
+function writeHeader(header: Uint8Array, args: Omit<FrameFields, "key"> & { counter: bigint }): void {
   header.set(args.sessionId);
   header[32] = args.direction === "mobile-to-desktop" ? 0 : 1;
   header[33] = args.payloadKind === "text" ? 0 : 1;
   writeUint64(header, 34, args.counter);
+}
+
+function encodeHeader(args: Omit<FrameFields, "key"> & { counter: bigint }): Uint8Array {
+  const header = new Uint8Array(HEADER_LENGTH);
+  writeHeader(header, args);
   return header;
 }
 

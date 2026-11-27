@@ -1,4 +1,4 @@
-import { createContext, memo, useContext, useEffect, useRef, useState, type ComponentRef } from "react";
+import { createContext, memo, useContext, useEffect, useMemo, useRef, useState, type ComponentRef } from "react";
 import { Keyboard, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { Check, CheckCheck } from "lucide-react-native";
 import { askAgentNote, COMPACTING_LINE, compactionStatus, messageTime, questionAnswers, questionsLabel, toggleQuestionChoice } from "@terminalx/portable/transcript";
@@ -172,9 +172,10 @@ function DeliveryMark({ delivery }: { delivery: MessageDelivery }) {
  * A whole turn, drawn row by row as the transcript list draws it: a cloud workspace's tab draws its turns this way.
  * `deliveredTo` is what a delivered message's tick says aloud took it.
  */
-export function TurnCard({ turn, deliveredTo = "mac" }: { turn: Turn; deliveredTo?: MessagePlace }) {
-  return <DeliveredTo.Provider value={deliveredTo}><View>{turnRows(turn).map((row) => <TranscriptRow key={row.key} row={row} />)}</View></DeliveredTo.Provider>;
-}
+export const TurnCard = memo(function TurnCard({ turn, deliveredTo = "mac" }: { turn: Turn; deliveredTo?: MessagePlace }) {
+  const rows = useMemo(() => turnRows(turn), [turn]);
+  return <DeliveredTo.Provider value={deliveredTo}><View>{rows.map((row) => <TranscriptRow key={row.key} row={row} />)}</View></DeliveredTo.Provider>;
+});
 
 export const TranscriptRow = memo(function TranscriptRow({ row }: { row: TurnRow }) {
   return <View style={row.startsTurn ? styles.turnStart : styles.row}>

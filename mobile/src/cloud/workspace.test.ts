@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudApiError, type CloudCommand, type CloudWorkspace } from "./api";
 import { b64, checkpointAad, unb64, type CheckpointEnvelope, type CommandEnvelope } from "./crypto";
 import { NOW, pairingCode, Runtime } from "./fake-runtime";
-import { CloudWorkspaceSession, RESUME_QUIET_MS } from "./workspace";
+import { CloudWorkspaceSession, RESUME_QUIET_MS, STREAM_BATCH_MS } from "./workspace";
 
 const scope = { organizationId: "org-1", workspaceId: "ws-1" };
 const key = new Uint8Array(randomBytes(32));
@@ -981,6 +981,62 @@ describe("a cloud workspace on the phone", () => {
       await h.session.deliverHeld({ allowWake: true });
       expect(h.session.getSnapshot().outbox).toMatchObject([{ state: "queued", wake: "queued", asleep: false }]);
       expect(h.posted.at(-1)).toEqual(h.posted[0]);
+      h.session.close();
+    });
+  });
+
+  describe("streaming batching and lazy checkpoint loading (P-13, P-14)", () => {
+    it("batches rapid streamed session.event chunks into a single snapshot publish (P-13)", async () => {
+      const h = harness();
+      await h.session.start();
+      await connected(h);
+      const stop = h.session.view("t1");
+      await vi.waitFor(() => expect(tab(h).events.map((entry) => entry.seq)).toEqual([2]));
+
+      let publishes = 0;
+      const unsub = h.session.subscribe(() => { publishes++; });
+      for (let seq = 3; seq <= 12; seq++) {
+        h.runtimes[0].encrypted({ event: "session.event", params: { subscriptionId: "sub-1", cursor: `c${seq}`, event: event(seq) } });
+      }
+      await settle();
+      // Events are queued until the batch window elapses.
+      expect(publishes).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(STREAM_BATCH_MS);
+      expect(publishes).toBe(1);
+      expect(tab(h).events.map((entry) => entry.seq)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+      unsub();
+      stop();
+      h.session.close();
+    });
+
+    it("loads checkpoints lazily for the active tab first and defers unopened tabs until viewed (P-14)", async () => {
+      const earlier = await keyed();
+      const h = harness({
+        state: "suspended",
+        secrets: earlier.secrets,
+        checkpoints: [
+          checkpoint(2, [event(1), event(2)], { tabId: "t1" }),
+          checkpoint(3, [{ ...event(3), tabId: "t2" }], { tabId: "t2" }),
+          checkpoint(4, [{ ...event(4), tabId: "t3" }], { tabId: "t3" }),
+        ],
+      });
+
+      await h.session.start();
+      // All 3 tabs are listed immediately, but ONLY active tab t1 had its checkpoint fetched & opened.
+      expect(h.session.getSnapshot().tabs.map((entry) => entry.tabId)).toEqual(["t1", "t2", "t3"]);
+      expect(h.api.checkpoint).toHaveBeenCalledTimes(1);
+      expect(h.api.checkpoint).toHaveBeenCalledWith("org-1", "ws-1", "t1", null);
+      expect(h.session.getSnapshot().tabs.find((entry) => entry.tabId === "t1")?.events).toHaveLength(2);
+      expect(h.session.getSnapshot().tabs.find((entry) => entry.tabId === "t2")?.events).toHaveLength(0);
+
+      // Viewing t2 lazily loads t2's checkpoint on demand (still not touching t3).
+      const stopT2 = h.session.view("t2");
+      await vi.waitFor(() => expect(h.session.getSnapshot().tabs.find((entry) => entry.tabId === "t2")?.events).toHaveLength(1));
+      expect(h.api.checkpoint).toHaveBeenCalledTimes(2);
+      expect(h.api.checkpoint).toHaveBeenLastCalledWith("org-1", "ws-1", "t2", null);
+      expect(h.session.getSnapshot().tabs.find((entry) => entry.tabId === "t3")?.events).toHaveLength(0);
+      stopT2();
       h.session.close();
     });
   });

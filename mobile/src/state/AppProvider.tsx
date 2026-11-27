@@ -30,7 +30,10 @@ import { CONNECTION_LOG_CAPACITY, HostConnection, type ConnectionLogEntry, type 
 import { isTransportError } from "../transport/connection-errors";
 import { phoneNetwork } from "../transport/network";
 import { useWaited } from "./connection-view";
+import { CONNECTION_LOG_STORAGE_KEY, connectionLogStore, useConnectionLogs } from "./connection-log-store";
 import { currentDeviceDescription } from "./device-name";
+
+export { connectionLogStore, useConnectionLogs };
 
 interface AppContextValue {
   ready: boolean;
@@ -125,8 +128,48 @@ interface AppContextValue {
   clearError(): void;
 }
 
+export interface AppConnectionState {
+  connectionStage: ConnectionStage;
+  connectionAttempt: number;
+  connectionEpoch: number;
+  connectionSince: number | null;
+  connectionWaiting: boolean;
+  online: boolean;
+  updating: boolean;
+}
+
+export interface AppActions {
+  connection: HostConnection;
+  api: HostApi;
+  refreshNetwork(): void;
+  beginUpdate(): () => void;
+  retryConnection(): void;
+  signIn(): Promise<void>;
+  redeemAccessCode(code: string): Promise<AccessCodeAnswer>;
+  cancelAccessCode(): void;
+  finishAccessCode(): void;
+  signOut(): Promise<void>;
+  reauthenticate(): Promise<"signed-in" | "closed" | "other-account" | "no-account">;
+  forgetDeletedAccount(): Promise<void>;
+  refreshMachines(): Promise<void>;
+  pairAvailable(host: AccountHost): Promise<void>;
+  pairCode(code: string): Promise<void>;
+  retryPairing(): Promise<void>;
+  connectHost(host: StoredHost): Promise<boolean>;
+  disconnectHost(): void;
+  forgetHost(hostId: string): Promise<void>;
+  renameHost(hostId: string, name: string): Promise<void>;
+  reconnectHost(hostId: string): Promise<void>;
+  renameAccountMachine(hostId: string, name: string): Promise<void>;
+  hideAccountMachine(hostId: string, hidden: boolean): Promise<void>;
+  refreshSessions(): Promise<void>;
+  clearError(): void;
+}
+
 const AppContext = createContext<AppContextValue | null>(null);
-const LOG_KEY = "terminalx:connection-log:v1";
+const AppConnectionContext = createContext<AppConnectionState | null>(null);
+const AppActionsContext = createContext<AppActions | null>(null);
+const LOG_KEY = CONNECTION_LOG_STORAGE_KEY;
 
 export function AppProvider({ children }: PropsWithChildren) {
   const device = useMemo(() => currentDeviceDescription(), []);
@@ -159,10 +202,15 @@ export function AppProvider({ children }: PropsWithChildren) {
   const refreshNetwork = useCallback(() => { void Promise.resolve().then(() => NetInfo.refresh()).catch(() => undefined); }, []);
   const updates = useRef(0);
   const [updating, setUpdating] = useState(false);
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessions, setSessionsState] = useState<SessionSummary[]>([]);
+  const sessionsRef = useRef<SessionSummary[]>([]);
+  const setSessions = useCallback((next: SessionSummary[]) => {
+    sessionsRef.current = next;
+    setSessionsState(next);
+  }, []);
   const [loadingMachines, setLoadingMachines] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [logs, setLogs] = useState<ConnectionLogEntry[]>([]);
+  const clearError = useCallback(() => setError(null), []);
   const [pairingProgress, setPairingProgress] = useState<PairingProgress | null>(null);
   const [signingIn, setSigningIn] = useState(false);
   // The held sign-in's ticket: in memory only, never in state, a log or storage (PRO-551).
@@ -210,11 +258,12 @@ export function AppProvider({ children }: PropsWithChildren) {
    * with "not modified" when nothing changed (#1283).
    */
   const showSessions = useCallback((host: string, values: SessionSummary[], epoch: number) => {
+    if (sessionsRef.current === values) return;
     setSessions(values);
     void writeSaved(host, "summaries", values, epoch);
     const version = api.listVersion("sessions.summaries");
     void writeSaved(host, "summariesVersion", version ? { version, count: values.length } : null, epoch);
-  }, [api]);
+  }, [api, setSessions]);
 
   /** A stored host changed (a name): the list, and the active host when it is that one, follow. */
   const adoptHost = useCallback((next: StoredHost | null) => {
@@ -305,8 +354,16 @@ export function AppProvider({ children }: PropsWithChildren) {
           const generation = selectionGeneration.current;
           const epoch = cacheEpoch(host);
           try {
-            const values = await api.summaries();
-            if (values && selectionGeneration.current === generation && activeHostRef.current?.id === host) showSessions(host, values, epoch);
+            if (typeof api.summariesWithStatus === "function") {
+              const result = await api.summariesWithStatus();
+              if (selectionGeneration.current === generation && activeHostRef.current?.id === host) {
+                if (result.notModified && result.sessions === sessionsRef.current) continue;
+                if (result.sessions) showSessions(host, result.sessions, epoch);
+              }
+            } else {
+              const values = await api.summaries();
+              if (values && selectionGeneration.current === generation && activeHostRef.current?.id === host) showSessions(host, values, epoch);
+            }
           } catch (cause) {
             // The connection's own failure is shown as the connection state, not as an error (#983).
             if (isTransportError(cause)) connection.reportError("Session list refresh failed", cause);
@@ -383,7 +440,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         // Finished in the background: a connection failure here is retried at the next open, not reported.
         .catch((cause: unknown) => { if (!startup.signal.aborted && !isTransportError(cause)) setError(readableError(cause)); });
       if (rawLogs) {
-        try { setLogs((JSON.parse(rawLogs) as ConnectionLogEntry[]).slice(-CONNECTION_LOG_CAPACITY)); } catch { /* Ignore a corrupt redacted log. */ }
+        try { connectionLogStore.hydrate((JSON.parse(rawLogs) as ConnectionLogEntry[]).slice(-CONNECTION_LOG_CAPACITY)); } catch { /* Ignore a corrupt redacted log. */ }
       }
       const initialUrl = await Linking.getInitialURL();
       if (startup.signal.aborted) return;
@@ -428,11 +485,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       }
     });
     const log = connection.onLog((entry) => {
-      setLogs((existing) => {
-        const next = [...existing, entry].slice(-CONNECTION_LOG_CAPACITY);
-        void AsyncStorage.setItem(LOG_KEY, JSON.stringify(next));
-        return next;
-      });
+      connectionLogStore.append(entry);
     });
     let summariesTimer: ReturnType<typeof setTimeout> | undefined;
     const event = connection.onEvent((message) => {
@@ -450,14 +503,17 @@ export function AppProvider({ children }: PropsWithChildren) {
       // Catching up on what changed is "Updating…"; the list's later refreshes are quiet.
       void refreshSessions().finally(beginUpdate());
     });
-    return () => { clearTimeout(summariesTimer); stage(); log(); event(); resumed(); connection.stop(); };
+    return () => { clearTimeout(summariesTimer); stage(); log(); event(); resumed(); void connectionLogStore.flush(); connection.stop(); };
   }, [api, beginUpdate, connection, loadHosts, refreshHostName, refreshSessions]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
       // The home screen (PRO-50): the connection is told, so that coming back is one quick, quiet resume
       // to the same Mac and session. "inactive" (the app switcher, a system sheet) is not leaving.
-      if (state === "background") return connection.background();
+      if (state === "background") {
+        void connectionLogStore.flush();
+        return connection.background();
+      }
       if (state !== "active") return;
       // The reading may have gone stale while the app was away (PRO-603).
       refreshNetwork();
@@ -743,14 +799,47 @@ export function AppProvider({ children }: PropsWithChildren) {
     return accountHosts.filter((host) => !paired.has(host.hostPublicKeyB64));
   }, [accountHosts, hosts]);
 
-  const value = useMemo<AppContextValue>(() => ({ ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, refreshNetwork, updating, beginUpdate, retryConnection, sessions, loadingMachines, error, logs, connection, api, signIn, signingIn, accessCode, redeemAccessCode, cancelAccessCode, finishAccessCode, signOut, reauthenticate, forgetDeletedAccount, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions, clearError: () => setError(null) }), [ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, refreshNetwork, updating, beginUpdate, retryConnection, sessions, loadingMachines, error, logs, connection, api, signIn, signingIn, accessCode, redeemAccessCode, cancelAccessCode, finishAccessCode, signOut, reauthenticate, forgetDeletedAccount, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions]);
+  const connectionState = useMemo<AppConnectionState>(() => ({
+    connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, updating,
+  }), [connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, updating]);
 
-  return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
+  const actions = useMemo<AppActions>(() => ({
+    connection, api, refreshNetwork, beginUpdate, retryConnection, signIn, redeemAccessCode, cancelAccessCode, finishAccessCode, signOut, reauthenticate, forgetDeletedAccount, refreshMachines, pairAvailable, pairCode, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions, clearError,
+  }), [connection, api, refreshNetwork, beginUpdate, retryConnection, signIn, redeemAccessCode, cancelAccessCode, finishAccessCode, signOut, reauthenticate, forgetDeletedAccount, refreshMachines, pairAvailable, pairCode, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions, clearError]);
+
+  const value = useMemo<AppContextValue>(() => ({
+    ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost,
+    ...connectionState,
+    sessions, loadingMachines, error,
+    get logs() { return connectionLogStore.getSnapshot(); },
+    ...actions,
+    signingIn, accessCode, pairingProgress,
+  }), [ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionState, sessions, loadingMachines, error, actions, signingIn, accessCode, pairingProgress]);
+
+  return (
+    <AppActionsContext.Provider value={actions}>
+      <AppConnectionContext.Provider value={connectionState}>
+        <AppContext.Provider value={value}>{children}</AppContext.Provider>
+      </AppConnectionContext.Provider>
+    </AppActionsContext.Provider>
+  );
 }
 
 export function useApp(): AppContextValue {
   const value = useContext(AppContext);
   if (!value) throw new Error("useApp must be used inside AppProvider");
+  return value;
+}
+
+export function useAppConnection(): AppConnectionState {
+  const value = useContext(AppConnectionContext);
+  if (!value) throw new Error("useAppConnection must be used inside AppProvider");
+  return value;
+}
+
+export function useAppActions(): AppActions {
+  const value = useContext(AppActionsContext);
+  if (!value) throw new Error("useAppActions must be used inside AppProvider");
   return value;
 }
 
