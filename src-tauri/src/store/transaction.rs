@@ -66,16 +66,52 @@ fn lock(path: &Path, deadline: Instant, shared: bool) -> Result<File> {
             bail!("store transaction lock is not private");
         }
     }
-    loop {
-        let acquired = if shared { lock.try_lock_shared() } else { lock.try_lock() };
-        match acquired {
-            Ok(()) => break,
-            Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(5));
+    let acquired = if shared { lock.try_lock_shared() } else { lock.try_lock() };
+    match acquired {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                bail!("timed out waiting for the store transaction lock; no changes were written");
             }
-            Err(std::fs::TryLockError::WouldBlock) => bail!("timed out waiting for the store transaction lock; no changes were written"),
-            Err(std::fs::TryLockError::Error(error)) => return Err(error).context("lock store transaction"),
+            // Wait using a blocking OS flock/LockFileEx call so the kernel wakes
+            // us immediately on release instead of polling in a 5ms sleep loop.
+            let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cancelled_waiter = std::sync::Arc::clone(&cancelled);
+            let (tx, rx) = std::sync::mpsc::sync_channel::<std::io::Result<File>>(1);
+            std::thread::Builder::new()
+                .name("store-tx-lock".into())
+                .spawn(move || {
+                    let res = if shared { lock.lock_shared() } else { lock.lock() };
+                    match res {
+                        Ok(()) => {
+                            if cancelled_waiter.load(std::sync::atomic::Ordering::Acquire)
+                                || tx.send(Ok(lock)).is_err()
+                            {
+                                // Caller timed out; drop immediately to release the OS lock.
+                            }
+                        }
+                        Err(err) => {
+                            let _ = tx.send(Err(err));
+                        }
+                    }
+                })
+                .context("spawn store transaction lock waiter")?;
+            match rx.recv_timeout(remaining) {
+                Ok(Ok(file)) => return Ok(file),
+                Ok(Err(error)) => return Err(error).context("lock store transaction"),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    cancelled.store(true, std::sync::atomic::Ordering::Release);
+                    // Drain in case the waiter sent just before seeing `cancelled`.
+                    let _ = rx.try_recv();
+                    bail!("timed out waiting for the store transaction lock; no changes were written");
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    bail!("store transaction lock waiter exited unexpectedly");
+                }
+            }
         }
+        Err(std::fs::TryLockError::Error(error)) => return Err(error).context("lock store transaction"),
     }
     // File drop releases the OS lock on success, error and unwinding; the OS
     // releases it on process death. Keep the sidecar itself forever.
@@ -169,5 +205,28 @@ mod tests {
         std::fs::write(&path, b"").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
         assert!(run(&path, Duration::ZERO, || -> Result<()> { panic!("public lock admitted"); }).is_err());
+    }
+
+    #[test]
+    fn contended_lock_wakes_via_blocking_flock_and_respects_timeout() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("contended.lock");
+        let held = lock(&path, Instant::now() + Duration::from_secs(1), false).unwrap();
+
+        // Finite timeout expires while the lock is held.
+        let started = Instant::now();
+        let timed_out = run(&path, Duration::from_millis(30), || Ok(()));
+        assert!(timed_out.is_err());
+        assert!(started.elapsed() >= Duration::from_millis(25));
+
+        // Releasing the lock wakes a waiting acquirer promptly via OS flock.
+        let path_for_thread = path.clone();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(held);
+        });
+        let value = run(&path_for_thread, Duration::from_secs(5), || Ok(99)).unwrap();
+        releaser.join().unwrap();
+        assert_eq!(value, 99);
     }
 }

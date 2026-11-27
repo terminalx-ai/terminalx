@@ -178,3 +178,34 @@ fn fields_a_newer_build_wrote_survive_a_save_here() {
     assert_eq!(saved[USER]["futureField"], serde_json::json!({"kept": true}));
     assert_eq!(saved[USER]["plain"]["EDITOR"], "vim");
 }
+
+#[test]
+fn watch_state_skips_unchanged_environment_and_wakes_on_change_or_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let env_path = dir.path().join("environment.json");
+    std::fs::write(&env_path, "{}").unwrap();
+    let stamp1 = super::super::file_stamp(&env_path).unwrap();
+
+    let mut watch = WatchState::default();
+    let mut attempts = BTreeMap::new();
+    let now = std::time::Instant::now();
+
+    assert!(!watch.should_refresh(stamp1, false, &attempts, now), "no refresh while window unavailable");
+    assert!(watch.should_refresh(stamp1, true, &attempts, now), "initial refresh runs once");
+
+    watch.initialized = true;
+    watch.last_stamp = stamp1;
+    watch.window_was_available = true;
+    assert!(!watch.should_refresh(stamp1, true, &attempts, now), "unchanged file skips disk read+parse");
+    assert!(watch.next_wait(true, &attempts, now, true) >= Duration::from_secs(5), "idle wait avoids 250ms polling");
+
+    // A pending retry schedules wakeup only when due.
+    attempts.insert("rev1".into(), Retry { after: now + Duration::from_secs(10), delay: Duration::from_secs(10) });
+    assert!(!watch.should_refresh(stamp1, true, &attempts, now));
+    assert!(watch.should_refresh(stamp1, true, &attempts, now + Duration::from_secs(11)));
+
+    // File modification triggers immediate refresh.
+    super::super::write_atomic(&env_path, br#"{"user":{"names":[],"revision":"r1"}}"#).unwrap();
+    let stamp2 = super::super::file_stamp(&env_path).unwrap();
+    assert!(watch.should_refresh(stamp2, true, &attempts, now));
+}

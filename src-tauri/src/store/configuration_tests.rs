@@ -569,3 +569,18 @@ fn a_checkout_name_that_ends_in_a_space_is_a_repository() {
     assert_eq!(found.root, work.canonical().unwrap());
     assert_eq!(found.identity, work.join(".git").canonical().unwrap().to_string_lossy());
 }
+
+#[test]
+fn repository_combines_git_rev_parse_and_caches_per_cwd() {
+    let f = Fixture::new();
+    let path = f.repo.path();
+    TEST_REPO_GIT_SPAWNS.with(|c| c.set(0));
+    let first = repository(path).unwrap();
+    assert_eq!(TEST_REPO_GIT_SPAWNS.with(|c| c.get()), 1, "primary checkout discovery must combine into a single git spawn");
+    for _ in 0..10 {
+        let again = repository(path).unwrap();
+        assert_eq!(again.root, first.root);
+        assert_eq!(again.identity, first.identity);
+    }
+    assert_eq!(TEST_REPO_GIT_SPAWNS.with(|c| c.get()), 1, "cached cwd lookups must spawn zero git processes");
+}

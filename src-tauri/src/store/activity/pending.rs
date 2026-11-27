@@ -72,7 +72,7 @@ pub(super) fn keep(root: &Path, event: &ActivityEvent, since: Option<i64>) -> Re
     }
     builder.create(&dir).map_err(|error| failed(error.into()))?;
     let bytes = serde_json::to_vec(&Record { event: event.clone(), since })?;
-    crate::store::write_atomic(&path(root, event), &bytes).map_err(failed)
+    crate::store::write_atomic_nosync(&path(root, event), &bytes).map_err(failed)
 }
 
 /// Keep a PR for the writer unless history or the inbox has it already.
