@@ -435,15 +435,16 @@ describe("share dialog", () => {
   it("tells the organization's owner they are the Owner, and an admin that they are an Admin", async () => {
     // The API's role for both is `manager`; the roster (or the account) says which.
     dialog();
-    await waitFor(() => expect(screen.getByTestId("cloud-share-you").textContent).toBe("Your access: Owner (the organization's owner: manages this workspace and who it is shared with)."));
-    expect(screen.getByTestId("cloud-share-you").textContent).not.toContain("Admin");
+    await waitFor(() => expect(screen.getByTestId("cloud-share-you").textContent).toBe("You are the owner"));
+    expect(screen.getByTestId("cloud-share-you").title).toBe("Owner (the organization's owner: manages this workspace and who it is shared with)");
     cleanup();
 
     // The account's own organization list wins over the roster, and is there before the roster loads.
     const before = account.status;
     account.status = { ...account.status, identity: { organizationId: "org-1", email: "me@example.com", name: "Me", organization: "Acme" }, organizations: [{ id: "org-1", name: "Acme", role: "admin" }] };
     dialog();
-    expect((await screen.findByTestId("cloud-share-you")).textContent).toBe("Your access: Admin (an organization admin: manages this workspace and who it is shared with).");
+    expect((await screen.findByTestId("cloud-share-you")).textContent).toBe("You are an admin");
+    expect(screen.getByTestId("cloud-share-you").title).toBe("Admin (an organization admin: manages this workspace and who it is shared with)");
     account.status = before;
   });
 
@@ -473,7 +474,8 @@ describe("share dialog", () => {
     dialog();
     const row = await screen.findByTestId("cloud-share-row");
     expect(row.textContent).toContain("Driver · can approve");
-    expect(screen.getByTestId("cloud-share-you").textContent).toBe("Your access: Viewer (can read everything, not send), can approve permissions.");
+    expect(screen.getByTestId("cloud-share-you").textContent).toBe("You are a viewer");
+    expect(screen.getByTestId("cloud-share-you").title).toBe("Viewer (can read everything, not send), can approve permissions");
     expect(screen.queryByLabelText("Add person")).toBeNull();
     expect(screen.queryByRole("button", { name: /Revoke/ })).toBeNull();
     expect(within(row).queryByRole("combobox")).toBeNull();
@@ -511,9 +513,10 @@ describe("share dialog", () => {
     let resolveRoster!: (value: unknown) => void;
     mocks.members.mockImplementationOnce(() => new Promise((resolve) => { resolveRoster = resolve; }));
     render(<CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments" createdBy="u-me" onClose={() => undefined} />);
-    expect((await screen.findByTestId("cloud-share-you")).textContent).toMatch(/^Your access: Admin \(/);
+    expect((await screen.findByTestId("cloud-share-you")).textContent).toBe("You are an admin");
     await act(async () => resolveRoster({ members: [{ userId: "u-me", email: "me@example.com", displayName: "Me", role: "member" }], pendingInvites: [], viewerRole: "member", canManageMembers: false, contextRevision: "r1" }));
-    await waitFor(() => expect(screen.getByTestId("cloud-share-you").textContent).toMatch(/^Your access: Creator \(/));
+    await waitFor(() => expect(screen.getByTestId("cloud-share-you").textContent).toBe("You created this workspace"));
+    expect(screen.getByTestId("cloud-share-you").title).toMatch(/^Creator \(/);
   });
 
   it("shares a workspace in another organization with that organization's own members", async () => {
@@ -911,11 +914,13 @@ describe("organization workspace-group readiness", () => {
     renderEditor();
     const mode = await screen.findByRole("combobox", { name: "General access" });
     fireEvent.change(mode, { target: { value: "organisation" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save General access" }));
+    // The dialog's one Save saves General access when no people changes are staged.
+    expect(screen.queryByRole("button", { name: "Save General access" })).toBeNull();
+    fireEvent.click(save());
     await waitFor(() => expect(mocks.generalAccessPut).toHaveBeenCalledWith("ws-1", "org-1", {
       accessRevision: "9007199254740993", generalAccess: { mode: "organisation", role: "read" },
     }, revision));
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Save General access" })).toBeNull());
+    await waitFor(() => expect((save() as HTMLButtonElement).disabled).toBe(true));
     expect(mocks.apply).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Revoke Alice" }));
     expect((screen.getByRole("combobox", { name: "General access" }) as HTMLSelectElement).disabled).toBe(true);

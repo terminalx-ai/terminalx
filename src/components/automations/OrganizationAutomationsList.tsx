@@ -7,7 +7,8 @@ import { describeTiming, runText, scheduleErrorMessage, whenText } from "@/lib/c
 
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/menu";
-import { Cloud, Monitor, MoreHorizontal } from "@/icons";
+import { CalendarClock, Cloud, Monitor, MoreHorizontal } from "@/icons";
+import { InlineError, NoAccessNote, SkeletonRows, SurfaceState } from "@/components/ui/SurfaceState";
 import { confirmInApp } from "@/lib/confirm";
 import { WebhookSecretDialog } from "@/components/cloud/WebhookDetails";
 import { copyText } from "@/lib/clipboard";
@@ -144,6 +145,7 @@ function ScopedList({ organizationId, listVersion, locals, localLoading, onSelec
 
   const displayLocal = scope !== "cloud";
   const displayCloud = scope !== "local";
+  const loading = (displayLocal && localLoading) || (displayCloud && cloudAllowed && !loaded && !failed);
   const rows = [
     ...(displayLocal ? locals.map((row) => ({ ...row, key: `local:${row.id}`, by: "—", source: "This Mac", run: undefined, latestRun: undefined, edit: undefined, duplicate: undefined, link: undefined, open: () => onSelectLocal(row.id) })) : []),
     ...(displayCloud ? cloud.map((row) => ({
@@ -178,9 +180,10 @@ function ScopedList({ organizationId, listVersion, locals, localLoading, onSelec
       {createdSecret && <WebhookSecretDialog secret={createdSecret} onClose={() => setCreatedSecret(null)} />}
       {editError && <p role="alert" className="mt-3 text-sm text-destructive">{editError}</p>}
       {notice && <p role="status" className="mt-3 text-sm text-muted-foreground">{notice}</p>}
-      {displayCloud && (!cloudAllowed || failed) && <p role="status" className="mt-3 text-sm text-muted-foreground">Cloud automations unavailable.</p>}
-      {((displayLocal && localLoading) || (displayCloud && cloudAllowed && !loaded && !failed))
-        && <p role="status" className="mt-3 text-sm text-muted-foreground">Reading automations…</p>}
+      {displayCloud && !cloudAllowed && <NoAccessNote className="mt-3">Cloud automations unavailable.</NoAccessNote>}
+      {displayCloud && cloudAllowed && failed && <InlineError className="mt-3"
+        retry={{ label: "Try again", onAction: () => setRefreshVersion((version) => version + 1) }}>Couldn’t load cloud automations.</InlineError>}
+      {loading && <p role="status" className="sr-only">Reading automations…</p>}
       {rows.length > 0 && (
         <table className="mt-3 w-full table-fixed text-left text-xs">
           <thead>
@@ -210,7 +213,9 @@ function ScopedList({ organizationId, listVersion, locals, localLoading, onSelec
                     {row.latestRun ? <>{row.latestRun.label}{row.latestRun.at && ` · ${row.latestRun.at}`}</> : "—"}
                   </td>
                   <td className="truncate px-2 py-2.5 text-muted-foreground">{row.by}</td>
-                  <td className="px-2 py-2.5 text-right">
+                  <td className="px-2 py-2.5">
+                    {/* The same height with or without a menu, so every row lines up. */}
+                    <span className="flex h-6 items-center justify-end">
                     {actions && <DropdownMenu modal={false}>
                       <DropdownMenuTrigger asChild>
                         <Button variant="ghost" size="icon-xs" aria-label={`Actions for ${row.name}`}><MoreHorizontal /></Button>
@@ -222,6 +227,7 @@ function ScopedList({ organizationId, listVersion, locals, localLoading, onSelec
                         {row.link && <DropdownMenuItem onSelect={row.link}>Copy link</DropdownMenuItem>}
                       </DropdownMenuContent>
                     </DropdownMenu>}
+                    </span>
                   </td>
                 </tr>
               );
@@ -229,8 +235,10 @@ function ScopedList({ organizationId, listVersion, locals, localLoading, onSelec
           </tbody>
         </table>
       )}
+      {loading && <SkeletonRows rows={rows.length ? 1 : 4} className="mt-1" />}
       {rows.length === 0 && (!displayLocal || !localLoading) && (!displayCloud || loaded)
-        && <p className="mt-3 text-sm text-muted-foreground">No automations yet.</p>}
+        && <SurfaceState status="empty" icon={CalendarClock} title="No automations yet"
+          description="Run an agent on a schedule, on a GitHub event or from a webhook." />}
     </div>
   );
 }
