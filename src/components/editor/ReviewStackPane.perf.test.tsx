@@ -43,7 +43,7 @@ vi.mock("@/components/changes/DiffPane", async () => {
   };
 });
 
-const { ReviewStackPane } = await import("./ReviewStackPane");
+const { REVIEW_RECYCLE_THRESHOLD, ReviewStackPane } = await import("./ReviewStackPane");
 
 type ObserverEntry = { target: Element; callback: IntersectionObserverCallback };
 let observers: ObserverEntry[] = [];
@@ -100,7 +100,15 @@ afterEach(() => {
 });
 
 describe("ReviewStackPane off-screen editor recycling (P-41)", () => {
-  it("unmounts off-screen DiffPane views and remounts them without refetching when scrolled back", async () => {
+  it("unmounts off-screen DiffPane views in large reviews and remounts them without refetching when scrolled back", async () => {
+    mocks.changesBetween.mockResolvedValue(
+      Array.from({ length: REVIEW_RECYCLE_THRESHOLD + 1 }, (_, i) => ({
+        path: i === 0 ? "a.ts" : `file-${i}.ts`,
+        status: "modified" as const,
+        additions: 2,
+        deletions: 1,
+      })),
+    );
     const entry: DiffEditorEntry = {
       id: "review-1",
       kind: "diff",
@@ -132,5 +140,28 @@ describe("ReviewStackPane off-screen editor recycling (P-41)", () => {
     act(() => emitIntersection(sectionA, true));
     await screen.findByTestId("diff-pane-a.ts");
     expect(mocks.fileContentsAt.mock.calls.length).toBe(fetches);
+  });
+
+  it("keeps loaded DiffPane views mounted in smaller reviews so comments and lines remain reachable", async () => {
+    const entry: DiffEditorEntry = {
+      id: "review-small",
+      kind: "diff",
+      sessionId: "s1",
+      root: "/repo",
+      workspaceRoot: "/repo",
+      rel: "a.ts",
+      name: "Review",
+      dirty: false,
+      viewMode: "source",
+      diff: { stack: true, scope: "all", mode: "diff", range: { base: "base", head: "head" } },
+    };
+    render(<ReviewStackPane entry={entry} visible />);
+    const sectionA = await screen.findByRole("region", { name: "a.ts" });
+    act(() => emitIntersection(sectionA, true));
+    await screen.findByTestId("diff-pane-a.ts");
+
+    act(() => emitIntersection(sectionA, false));
+    expect(screen.getByTestId("diff-pane-a.ts")).toBeTruthy();
+    expect(mocks.diffPaneUnmounts).toBe(0);
   });
 });

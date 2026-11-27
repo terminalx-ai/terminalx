@@ -20,13 +20,13 @@ import type { SessionEntry } from "@/types/session";
 import type { CloudSessionModel } from "@/lib/cloudSession";
 import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { TerminalView } from "@/components/terminal/TerminalView";
+import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
 import { EmptySession } from "./EmptySession";
 import { TabView } from "./TabView";
 import { TabActions } from "./TabStrip";
 import { WorkspaceTabStrip, stripTabId } from "./WorkspaceTabStrip";
 
 const BrowserView = lazy(() => import("@/components/browser/BrowserView").then((m) => ({ default: m.BrowserView })));
-const CloudTerminalPane = lazy(() => import("@/components/cloud/CloudTerminalPane").then((m) => ({ default: m.CloudTerminalPane })));
 const ReviewTab = lazy(() => import("@/components/editor/EditorSplit").then((m) => ({ default: m.ReviewTab })));
 
 /** Stable, keyed tab bodies share a grid: moving a tab never remounts its chat,
@@ -215,7 +215,7 @@ export const WorkspacePanes = memo(function WorkspacePanes({ session, selected, 
               <TabView session={owner} tab={tab.tab} active={active} focused={active && pane.id === focused.id} continuationOpen={continuationOpen} workspace={localRemovableWorkspace(owner)} />
             </LazyTabBody>
           ) : tab.kind === "terminal" && remote ? (
-            <Suspense fallback={null}><RemoteTerminal cloud={remote.cloud} id={tab.id} active={active} /></Suspense>
+            <RemoteTerminal cloud={remote.cloud} id={tab.id} active={active} />
           ) : tab.kind === "terminal" ? <>
             <TerminalView id={tab.id} visible={active} focused={active && pane.id === focused.id} moveToDock />
             {tab.pane.exited && <div className="absolute bottom-2 left-3 rounded-md bg-popover px-2 py-1 text-[11px] text-muted-foreground hairline">Process exited{tab.pane.exitCode != null ? ` (${tab.pane.exitCode})` : ""}.</div>}
