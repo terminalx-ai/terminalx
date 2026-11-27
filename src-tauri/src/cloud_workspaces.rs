@@ -2169,6 +2169,26 @@ pub struct TeamArtifactPublishInput {
     pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// What the caller saw of the slug: none had it, or its current version.
+    /// The server refuses with `team_artifact_slug_taken` when that has changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect: Option<TeamArtifactExpect>,
+}
+
+/// `"new"`, or `{"version": n}`: the slug's state a publish is held to (PRO-158).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TeamArtifactExpect {
+    New(TeamArtifactExpectNew),
+    Version {
+        version: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TeamArtifactExpectNew {
+    New,
 }
 
 /// The server's cap on one version (1 MiB of UTF-8); refused here before sending.
@@ -2186,7 +2206,10 @@ fn team_artifact_input_valid(input: &TeamArtifactPublishInput) -> Result<(), Clo
             && !slug.starts_with('-') && !slug.ends_with('-')
     });
     if title.is_empty() || title.chars().count() > 120 || title.chars().any(char::is_control)
-        || !TEAM_ARTIFACT_CONTENT_TYPES.contains(&input.content_type.as_str()) || input.content.contains('\0') || !slug_ok {
+        || !TEAM_ARTIFACT_CONTENT_TYPES.contains(&input.content_type.as_str()) || input.content.contains('\0') || !slug_ok
+        // An expectation is about a slug the caller names, and a version is never 0.
+        || (input.expect.is_some() && input.slug.is_none())
+        || matches!(input.expect, Some(TeamArtifactExpect::Version { version: 0 })) {
         return Err(inbox_invalid());
     }
     Ok(())
@@ -5495,6 +5518,7 @@ fn known_error_code(code: &str) -> bool {
             | "team_artifact_publish_forbidden"
             | "team_artifact_storage_full"
             | "team_artifact_version_current"
+            | "team_artifact_slug_taken"
             | "shared_setups_unavailable"
             | "snippet_keyword_taken"
             | "action_prompt_conflict"
@@ -5897,6 +5921,33 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    /// PRO-158: what a publish expects of its slug goes to the server as `"new"` or `{"version": n}`.
+    #[test]
+    fn a_team_artifact_publish_carries_what_it_expects_of_the_slug() {
+        let input = |extra: serde_json::Value| {
+            let mut body = serde_json::json!({"title": "Plan", "contentType": "text/markdown", "content": "# Plan"});
+            body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<TeamArtifactPublishInput>(body)
+        };
+        let new = input(serde_json::json!({"slug": "plan", "expect": "new"})).unwrap();
+        assert_eq!(new.expect, Some(TeamArtifactExpect::New(TeamArtifactExpectNew::New)));
+        assert_eq!(serde_json::to_value(&new).unwrap()["expect"], "new");
+        assert!(team_artifact_input_valid(&new).is_ok());
+        let version = input(serde_json::json!({"slug": "plan", "expect": {"version": 3}})).unwrap();
+        assert_eq!(serde_json::to_value(&version).unwrap()["expect"], serde_json::json!({"version": 3}));
+        assert!(team_artifact_input_valid(&version).is_ok());
+        // Left out, nothing is sent: a publish is as before.
+        let plain = input(serde_json::json!({})).unwrap();
+        assert!(serde_json::to_value(&plain).unwrap().get("expect").is_none());
+        // Malformed, or with no slug to hold it to: refused before sending.
+        assert!(input(serde_json::json!({"slug": "plan", "expect": "old"})).is_err());
+        assert!(input(serde_json::json!({"slug": "plan", "expect": {"version": -1}})).is_err());
+        assert!(team_artifact_input_valid(&input(serde_json::json!({"expect": "new"})).unwrap()).is_err());
+        assert!(team_artifact_input_valid(&input(serde_json::json!({"slug": "plan", "expect": {"version": 0}})).unwrap()).is_err());
+        // The server's refusal keeps its own code.
+        assert!(known_error_code("team_artifact_slug_taken"));
+    }
 
     fn context() -> AccountContext {
         AccountContext {
