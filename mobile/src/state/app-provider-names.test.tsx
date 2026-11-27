@@ -45,7 +45,7 @@ vi.mock("react-native", () => ({
   Linking: { getInitialURL: async () => null, addEventListener: () => ({ remove: () => undefined }) },
   Platform: { OS: "ios", constants: { interfaceIdiom: "phone" } },
 }));
-vi.mock("../auth/native", () => ({ beginSignIn: vi.fn(), finishSignIn: vi.fn(), readSession: async () => fake.session, refreshStoredSession: async (session: unknown) => ({ status: "fresh", session }), signOut: vi.fn() }));
+vi.mock("../auth/native", () => ({ beginSignIn: vi.fn(), finishSignIn: vi.fn(), readSession: async () => fake.session, refreshStoredSession: async () => ({ status: "fresh", session: fake.session }), signOut: vi.fn() }));
 vi.mock("../auth/protocol", () => ({ isAuthCallbackUrl: () => false }));
 vi.mock("../notifications/local", () => ({ handleNotificationEvent: vi.fn(), restoreLocalNotifications: vi.fn() }));
 vi.mock("../pairing/account", () => ({ discoverMachines: fake.discover, pairDiscoveredMachine: vi.fn(), signOutPairing: vi.fn() }));
