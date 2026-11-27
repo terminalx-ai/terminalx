@@ -4895,7 +4895,7 @@ fn decode_response<T: DeserializeOwned>(
     let no_content = response.status() == 204;
     let bytes = bounded_body_limited(response, risk, limit)?;
     // A 204 (PRO-239's DELETE) has no body: it reads as JSON null, which only `()` and `Value` accept.
-    let bytes = if no_content && bytes.iter().all(u8::is_ascii_whitespace) { b"null".to_vec() } else { bytes };
+    let bytes = if no_content && bytes.iter().all(u8::is_ascii_whitespace) { b"null".to_vec() } else { bytes.to_vec() };
     serde_json::from_slice(&bytes).map_err(|_| post_send_error(risk))
 }
 
