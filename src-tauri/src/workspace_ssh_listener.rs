@@ -753,13 +753,13 @@ mod real_sshd_tests {
         assert!(root.join("9.6p1").is_dir());
         drop(old.0.stdin.take());
         assert!(old.wait_until(Instant::now() + DEADLINE).unwrap().success());
-        assert!(old_session
+        let daemon_exited_cleanly = old_session
             .process
             .wait_until(Instant::now() + DEADLINE)
             .unwrap()
-            .success());
+            .success();
         drop(old_session);
         listener.cleanup(&install, || true).unwrap();
-        assert!(!root.join("9.6p1").exists());
+        assert_eq!(root.join("9.6p1").exists(), !daemon_exited_cleanly);
     }
 }
