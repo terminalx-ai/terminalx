@@ -1333,7 +1333,8 @@ impl WorkspaceRpc {
         let weak_peer = Arc::downgrade(peer);
         let current_key = key.clone();
         let allowed = move || weak_rpc.upgrade().zip(weak_peer.upgrade()).is_some_and(|(rpc, peer)| {
-            rpc.generation() == generation && rpc.workspace_ssh_key(&peer).as_ref() == Some(&current_key)
+            rpc.generation() == generation && peer.granted(protocol::WORKSPACE_SSH)
+                && rpc.workspace_ssh_key(&peer).as_ref() == Some(&current_key)
         });
         let (socket, session) = runtime.open(|| allowed().then_some(key)).map_err(|_| unavailable())?;
         drop(admission);

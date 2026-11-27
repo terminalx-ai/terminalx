@@ -422,6 +422,7 @@ impl Runtime {
             crate::workspace_ssh::LOGIN_SHELL_HELD
         );
         let install = InstallLock::acquire(root)?;
+        install.active_daemon()?;
         let state = root.join("listener");
         private_directory(&state)?;
         let host = state.join("host");
