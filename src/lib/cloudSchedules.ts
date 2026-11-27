@@ -221,6 +221,7 @@ const ERRORS: Record<string, string> = {
   cloud_provider_connection_required: "The organization's compute provider is not connected, so nothing could be started.",
   cloud_schedule_runtime_unsupported: "This workspace's runtime cannot run scheduled tasks yet. Resume the workspace once so it updates, then try again.",
   cloud_schedule_cleanup_pending: "A run of this task is still starting or stopping its workspace. Pause the task, then delete it when the workspace has stopped.",
+  cloud_schedule_run_active: "This automation has a queued or running task. Wait for it to finish, then save again.",
   cloud_schedule_prompt_shell_command: "The prompt starts with “!”, which the agent's CLI would run as a shell command with nobody watching. Write it as a request instead.",
   cloud_schedule_prompt_slash_command: "The prompt starts with a slash command, which changes what the agent may do. Write it as a request instead.",
   cloud_schedule_prompt_file_mention: "The prompt mentions a file outside the project with “@”. Mention only files inside the project.",

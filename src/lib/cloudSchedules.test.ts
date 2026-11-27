@@ -126,6 +126,7 @@ describe("scheduled tasks: what the dialog says", () => {
     expect(runText(webhook, true)).toBe("Failed: the prompt exceeded 32 KiB after inserting the webhook payload");
     expect(runText({ ...webhook, category: "webhook-payload-forbidden" }, true)).toContain("a command or a forbidden file mention");
     expect(scheduleErrorMessage("cloud_schedule_cleanup_pending")).toContain("Pause the task");
+    expect(scheduleErrorMessage("cloud_schedule_run_active")).toContain("Wait for it to finish, then save again.");
     expect(scheduleErrorMessage("cloud_schedule_needs_approval")).toContain("Delete the task and make it again");
     expect(scheduleErrorMessage("something_new")).toBe("That did not work (something_new).");
   });

@@ -4939,6 +4939,7 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_schedule_runtime_unsupported"
             | "cloud_schedule_cleanup_pending"
             | "cloud_schedule_revision_conflict"
+            | "cloud_schedule_run_active"
             | "cloud_schedule_prompt_shell_command"
             | "cloud_schedule_prompt_slash_command"
             | "cloud_schedule_prompt_file_mention"
@@ -10424,6 +10425,18 @@ mod tests {
         expected["expectedUpdatedAt"] = json!(revision);
         expected["confirmProviderSpend"] = json!(true);
         assert_eq!(sent_body(&request), expected);
+    }
+
+    #[test]
+    fn phase2_organization_automations_patch_preserves_active_run_refusal() {
+        let (base, _, request) = serve_once(
+            response("409 Conflict", r#"{"error":"cloud_schedule_run_active"}"#, ""),
+            Duration::ZERO,
+        );
+        let (_, service) = phase2_service(&base);
+        let error = service.schedule_patch("org-1", SCHEDULE, 10, true, &schedule_input()).unwrap_err();
+        assert_eq!(error.code, "cloud_schedule_run_active");
+        assert!(request.join().unwrap().text.starts_with("PATCH "));
     }
 
     #[test]
