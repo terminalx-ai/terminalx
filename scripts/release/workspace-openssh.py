@@ -194,12 +194,12 @@ def build(args):
     with tempfile.TemporaryDirectory() as scratch:
         scratch = Path(scratch)
         source = extract_source(args.source, scratch, portable)
-        prefix = f"/opt/terminalx/openssh/{args.version}/usr"
+        prefix = f"/var/lib/terminalx/openssh/{args.version}/usr"
         run(
             "./configure", f"--prefix={prefix}", f"--sbindir={prefix}/sbin",
             f"--libexecdir={prefix}/libexec",
-            "--sysconfdir=/etc/terminalx/workspace-ssh",
-            "--with-privsep-path=/var/lib/terminalx/workspace-ssh/empty",
+            "--sysconfdir=/var/lib/terminalx/openssh",
+            "--with-privsep-path=/var/lib/terminalx/openssh/empty",
             "--without-pam", "--without-selinux", "--without-kerberos5",
             cwd=source,
         )
