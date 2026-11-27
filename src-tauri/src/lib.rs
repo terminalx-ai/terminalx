@@ -833,6 +833,7 @@ pub fn run() {
             commands::team_artifacts_publish_set_setting,
             commands::announcements_current,
             commands::nudge_preference,
+            commands::shared_setups,
             commands::nudge_preference_set,
             mcp_servers::commands::mcp_servers,
             mcp_servers::commands::mcp_server_save,

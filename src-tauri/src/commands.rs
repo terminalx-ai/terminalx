@@ -1676,6 +1676,13 @@ pub async fn team_artifact_pick_file(app: tauri::AppHandle, org_id: String, stat
     }).await.map_err(|_| "unreadable".to_string())?
 }
 
+/// PRO-154: shared model slots, organization snippets and action prompts.
+#[tauri::command]
+pub async fn shared_setups(org_id: String, op: crate::cloud_workspaces::SharedSetupsOp, state: tauri::State<'_, crate::AppState>) -> Result<serde_json::Value, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    let risk = op.risk();
+    cloud_command!(state, risk, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.shared_setups(&org_id, op))
+}
+
 /// PRO-241: the organization's current announcement for this build.
 #[tauri::command]
 pub async fn announcements_current(org_id: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::CurrentAnnouncement, crate::cloud_workspaces::CloudWorkspaceClientError> {

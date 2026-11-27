@@ -173,6 +173,8 @@ const SETTINGS_PAGE_ICONS: Record<SettingsSection, LucideIcon> = {
   general: Settings,
   appearance: Palette,
   agents: Bot,
+  defaultModels: Sparkles,
+  prompts: MessageSquare,
   orchestrator: Workflow,
   environment: KeyRound,
   mcp: Server,
