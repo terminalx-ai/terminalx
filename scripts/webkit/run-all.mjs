@@ -78,6 +78,7 @@ export const checks = [
   // Split from dictation-edits (2026-11): its Right Option case, which only a Mac can make.
   "dictation-hold-to-talk",
   "intro-slides",
+  "organization-billing",
 ];
 
 /**

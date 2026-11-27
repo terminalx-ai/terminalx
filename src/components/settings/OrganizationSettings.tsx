@@ -1,6 +1,6 @@
 import { RegisteredSetting } from "./settingsRegistry";
 import { useState } from "react";
-import { Cpu, Github, KeyRound, Loader2, Settings2, SlidersHorizontal, Stethoscope, Users, Variable, Waypoints } from "@/icons";
+import { CreditCard, Cpu, Github, KeyRound, Loader2, Settings2, SlidersHorizontal, Stethoscope, Users, Variable, Waypoints } from "@/icons";
 import type { LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage, type OrganizationSummary } from "@/lib/api";
@@ -10,6 +10,7 @@ import { isMultiOrg } from "@/lib/multiOrg";
 import { organizationName } from "@/lib/organizationVisibility";
 import { OrganizationAgentLogins } from "./OrganizationAgentLogins";
 import { OrganizationAgentRoutes } from "./OrganizationAgentRoutes";
+import { OrganizationBilling } from "./OrganizationBilling";
 import { OrganizationCloudCompute } from "./OrganizationCloudCompute";
 import { OrganizationCloudTeardown } from "./OrganizationCloudTeardown";
 import { OrganizationDelete } from "./OrganizationDelete";
@@ -24,16 +25,18 @@ import { ProviderControls } from "./ProviderControls";
 import { managesWorkStatus, OrganizationWorkStatusSettings } from "./WorkStatusSettings";
 import { openCloudSetup, unfinishedFlow } from "@/lib/cloudSetupFlow";
 import { loadSetups } from "@/lib/organizationSetup";
+import { phase2Ready } from "@/lib/phase2Readiness";
 
 /** "an owner", for "You are an owner of Acme" and the pages' subtitle. */
 export const ORGANIZATION_ROLE: Record<string, string> = { owner: "an owner", admin: "an administrator", member: "a member" };
 
 /** An organization's pages, nested under it in the Settings menu as a project's are (PRO-464, design 11.16). */
-export type OrganizationPage = "general" | "members" | "cloudCompute" | "agentLogins" | "modelAccess" | "github" | "workspace" | "environment" | "diagnostics";
+export type OrganizationPage = "general" | "members" | "cloudCompute" | "billing" | "agentLogins" | "modelAccess" | "github" | "workspace" | "environment" | "diagnostics";
 export const ORGANIZATION_PAGES: readonly { page: OrganizationPage; label: string; icon: LucideIcon }[] = [
   { page: "general", label: "General", icon: Settings2 },
   { page: "members", label: "Members", icon: Users },
   { page: "cloudCompute", label: "Cloud compute", icon: Cpu },
+  { page: "billing", label: "Billing", icon: CreditCard },
   { page: "agentLogins", label: "Agent logins", icon: KeyRound },
   { page: "modelAccess", label: "Model access", icon: Waypoints },
   { page: "github", label: "GitHub", icon: Github },
@@ -52,9 +55,13 @@ export function roleManagesOrganizationPage(role: string, page: OrganizationPage
   return role !== "member" || !MANAGERS_ONLY.has(page);
 }
 
-/** The pages `organization` has for the person: those they can manage, and those its being active or not allows. */
-export function organizationPages(organization: Pick<OrganizationSummary, "role">, active: boolean) {
-  return ORGANIZATION_PAGES.filter(({ page }) => (active || !ACTIVE_ONLY.has(page)) && roleManagesOrganizationPage(organization.role, page));
+/**
+ * The pages `organization` has for the person: those they can manage, and those its being active or not allows.
+ * Billing (PRO-596) is there for every member once the server reports its readiness for that organization.
+ */
+export function organizationPages(organization: Pick<OrganizationSummary, "role">, active: boolean, billing = false) {
+  return ORGANIZATION_PAGES.filter(({ page }) => (page !== "billing" || billing)
+    && (active || !ACTIVE_ONLY.has(page)) && roleManagesOrganizationPage(organization.role, page));
 }
 
 /** The page an organization's row lives on. Rows not named here (the overview, console, work status, teardown, delete…) are on General. */
@@ -63,6 +70,7 @@ export function organizationPageForRow(row: string | null | undefined): Organiza
     case "organizations.members": return "members";
     case "organizations.providers":
     case "organizations.compute": return "cloudCompute";
+    case "organizations.billing": return "billing";
     case "organizations.agentLogins": return "agentLogins";
     case "organizations.agentRoutes": return "modelAccess";
     case "organizations.github": return "github";
@@ -95,7 +103,7 @@ export function OrganizationSettings({ organization, page = "general", onDeleted
   const name = organizationName(organization);
   const active = organization.id === defaultOrgId(status);
   const member = organization.role === "member";
-  const shown = organizationPages(organization, active).some((entry) => entry.page === page) ? page : "general";
+  const shown = organizationPages(organization, active, phase2Ready(status, organization.id, "desktopBilling")).some((entry) => entry.page === page) ? page : "general";
   // With every organization live (CS-18) the active one only picks where new cloud work starts.
   const activeLabel = isMultiOrg(status) ? "default organization" : "active organization";
   const accountEmail = status.identity?.email ?? "";
@@ -124,6 +132,8 @@ export function OrganizationSettings({ organization, page = "general", onDeleted
           providers: <RegisteredSetting setting="organizations.providers" instance={organization.id}><div className="contents"><ProviderControls contextRevision={contextRevision} /></div></RegisteredSetting>,
           limits: <RegisteredSetting setting="organizations.compute" instance={organization.id}><div className="contents"><OrganizationCompute contextRevision={contextRevision} /></div></RegisteredSetting>,
         }} />;
+      case "billing":
+        return <RegisteredSetting setting="organizations.billing" instance={organization.id}><div className="contents"><OrganizationBilling key={organization.id} organization={organization} contextRevision={contextRevision} /></div></RegisteredSetting>;
       case "agentLogins":
         return <RegisteredSetting setting="organizations.agentLogins" instance={organization.id}><div className="contents"><OrganizationAgentLogins key={organization.id} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} /></div></RegisteredSetting>;
       case "modelAccess":

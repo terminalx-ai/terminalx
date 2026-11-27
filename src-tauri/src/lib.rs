@@ -820,6 +820,8 @@ pub fn run() {
             commands::cloud_workspace_restart,
             commands::cloud_workspace_details,
             commands::cloud_workspace_precreate_usage,
+            commands::organization_billing,
+            commands::organization_billing_portal,
             commands::cloud_workspace_start_progress,
             commands::cloud_workspace_idle_suspend,
             commands::cloud_workspace_set_idle_suspend,
