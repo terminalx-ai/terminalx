@@ -229,6 +229,13 @@ describe("which pages an organization has (PRO-464)", () => {
     expect(labels("owner", false)).toEqual(["General", "Agent logins", "Model access"]);
     expect(labels("member", false)).toEqual(["General", "Agent logins", "Model access"]);
   });
+  it("adds Billing for any role only where its readiness is on (PRO-596)", () => {
+    const withBilling = (role: string, active: boolean) => organizationPages({ role }, active, true).map((entry) => entry.label);
+    expect(withBilling("owner", true)).toEqual(["General", "Members", "Cloud compute", "Billing", "Agent logins", "Model access", "GitHub", "Workspace settings", "Environment", "Diagnostics"]);
+    expect(withBilling("member", false)).toEqual(["General", "Billing", "Agent logins", "Model access"]);
+    expect(labels("owner", true)).not.toContain("Billing");
+    expect(organizationPageForRow("organizations.billing")).toBe("billing");
+  });
   it("finds the page each organization row is on", () => {
     expect(organizationPageForRow("organizations.providers")).toBe("cloudCompute");
     expect(organizationPageForRow("organizations.compute")).toBe("cloudCompute");

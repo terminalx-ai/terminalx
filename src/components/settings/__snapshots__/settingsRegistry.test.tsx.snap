@@ -116,6 +116,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "organizations.workStatus",
   "organizations.workspace",
   "organizations.environment",
+  "organizations.billing",
   "organizations.diagnostics",
   "organizations.teardown",
   "organizations.delete",

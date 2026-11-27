@@ -25,6 +25,7 @@ import { PROJECT_PAGES, projectPageForRow, projectPages, type ProjectPage } from
 import { ACTIONS_SUBTITLE } from "./RepositoryActionsPage";
 import { ORGANIZATION_PAGES, ORGANIZATION_ROLE, organizationPageForRow, organizationPages, roleManagesOrganizationPage, type OrganizationPage } from "./OrganizationSettings";
 import { signIn, useAccount } from "@/lib/account";
+import { phase2Ready } from "@/lib/phase2Readiness";
 import { defaultOrgId } from "@/lib/cloudCatalog";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { organizationName } from "@/lib/organizationVisibility";
@@ -190,10 +191,14 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const organization = section === "organizations" && organizationId ? memberships.find((candidate) => candidate.id === organizationId) : undefined;
   // An organization's row opens on the organization already open, else the active one (`open` below): a member of it
   // is not offered the rows of pages they do not manage, which their menu leaves out too.
-  const searchRole = (organization ?? memberships.find((candidate) => candidate.id === activeOrganizationId))?.role;
+  const searchOrganization = organization ?? memberships.find((candidate) => candidate.id === activeOrganizationId);
+  const searchRole = searchOrganization?.role;
+  // Billing (PRO-596) is found only where its page exists: the server reports it ready for that organization.
+  const searchBilling = !!searchOrganization && phase2Ready(account, searchOrganization.id, "desktopBilling");
   const pages = useMemo(() => groupSettingsByPage(searchSettings(query).filter((match) =>
-    match.row.section !== "organizations" || match.row.scope !== "organization" || !searchRole || roleManagesOrganizationPage(searchRole, organizationPageForRow(match.id)),
-  )), [query, orchestratorRuns, localVmTasks, searchRole, mcpOffered]);
+    (match.id !== "organizations.billing" || searchBilling)
+    && (match.row.section !== "organizations" || match.row.scope !== "organization" || !searchRole || roleManagesOrganizationPage(searchRole, organizationPageForRow(match.id))),
+  )), [query, orchestratorRuns, localVmTasks, searchRole, searchBilling, mcpOffered]);
   const results = useMemo(() => pages.flatMap((page) => page.matches), [pages]);
   const searching = !!query.trim();
   // The live control slot of each result row, by row id (see SettingControlSlots).
@@ -246,7 +251,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     ?? (section === "repositories" && target ? repositories[0] : undefined);
 
   const organizationPageShown: OrganizationPage = organization
-    ? (() => { const wanted = organizationPage ?? organizationPageForRow(target); return organizationPages(organization, organization.id === activeOrganizationId).some((entry) => entry.page === wanted) ? wanted : "general"; })()
+    ? (() => { const wanted = organizationPage ?? organizationPageForRow(target); return organizationPages(organization, organization.id === activeOrganizationId, phase2Ready(account, organization.id, "desktopBilling")).some((entry) => entry.page === wanted) ? wanted : "general"; })()
     : "general";
   const organizationPageLabel = ORGANIZATION_PAGES.find((entry) => entry.page === organizationPageShown)!.label;
   // A message elsewhere asks for an organization's page (settingsLinks.ts): the one it names, else the active one.
@@ -496,7 +501,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
                           <Chevron aria-hidden className="ml-auto size-3 shrink-0 text-faint" />
                         </button>
                         {open && <div role="group" aria-label={`${name} settings`} className={NESTED_CLASS}>
-                          {organizationPages(candidate, candidate.id === activeOrganizationId).map((entry) => (
+                          {organizationPages(candidate, candidate.id === activeOrganizationId, phase2Ready(account, candidate.id, "desktopBilling")).map((entry) => (
                             <MenuPageRow key={entry.page} label={entry.label} icon={entry.icon} current={entry.page === organizationPageShown} onClick={() => chooseOrganization(candidate.id, entry.page)} />
                           ))}
                         </div>}
