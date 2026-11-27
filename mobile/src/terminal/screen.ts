@@ -67,22 +67,31 @@ function look(cell: IBufferCell): Omit<Span, "text"> {
 const same = (a: Span, b: Omit<Span, "text">) =>
   a.fg === b.fg && a.bg === b.bg && a.bold === b.bold && a.italic === b.italic && a.underline === b.underline && a.dim === b.dim;
 
+const rowPlainText = (row: Row): string => row.spans.map((span) => span.text).join("").trimEnd();
+
+interface CachedScrollbackRow {
+  row: Row;
+  text: string;
+}
+
 export class TerminalScreen {
   private readonly term: Terminal;
+  private readonly scrollbackLimit: number;
   private readonly disposables: IDisposable[] = [];
   private disposed = false;
   private dirty = true;
   private scrollEvents = 0;
   private lastScrollEvents = 0;
   private lastBaseY = 0;
-  private cachedScrollback: Row[] = [];
+  private cachedScrollback: CachedScrollbackRow[] = [];
   private cachedLines: Row[] | null = null;
   private cachedViewport: Row[] | null = null;
   private cachedBufferType: "normal" | "alternate" | null = null;
   private _extractedRows = 0;
 
   constructor(cols: number, rows: number, scrollback = SCROLLBACK) {
-    this.term = new Terminal({ cols: Math.max(1, cols), rows: Math.max(1, rows), scrollback, allowProposedApi: true });
+    this.scrollbackLimit = Math.max(0, scrollback);
+    this.term = new Terminal({ cols: Math.max(1, cols), rows: Math.max(1, rows), scrollback: this.scrollbackLimit, allowProposedApi: true });
     this.disposables.push(
       this.term.onScroll(() => {
         if (this.term.buffer.active.type === "normal") this.scrollEvents++;
@@ -149,34 +158,119 @@ export class TerminalScreen {
     if (baseY === 0) {
       this.cachedScrollback = [];
     } else if (baseY < this.lastBaseY || this.cachedScrollback.length === 0) {
-      this.cachedScrollback = this.extractRange(buffer, 0, baseY, cell);
+      this.cachedScrollback = this.extractScrollbackRange(buffer, 0, baseY, cell);
+    } else if (baseY < this.scrollbackLimit) {
+      // Buffer is not full: scrollback never evicts lines (DECSTBM scroll-region
+      // events may increment `scrollEvents`, so ignore `scrollDelta` here).
+      if (baseY > this.cachedScrollback.length) {
+        const newlyScrolled = this.extractScrollbackRange(buffer, this.cachedScrollback.length, baseY, cell);
+        this.cachedScrollback = this.cachedScrollback.concat(newlyScrolled);
+      }
     } else if (scrollDelta > 0 || baseY > this.cachedScrollback.length) {
-      const added = Math.max(scrollDelta, baseY - this.cachedScrollback.length);
-      if (added >= baseY) {
-        this.cachedScrollback = this.extractRange(buffer, 0, baseY, cell);
+      // Buffer is at the scrollback cap: grow if needed, or determine the exact
+      // eviction shift (guarding against DECSTBM false positives where `onScroll`
+      // fires without evicting scrollback lines).
+      const shift = this.resolveScrollbackShift(buffer, baseY, scrollDelta);
+      if (shift === null) {
+        this.cachedScrollback = this.extractScrollbackRange(buffer, 0, baseY, cell);
       } else {
-        const evicted = Math.max(0, this.cachedScrollback.length + added - baseY);
-        const kept = evicted > 0 ? this.cachedScrollback.slice(evicted) : this.cachedScrollback;
-        if (evicted > 0) {
-          for (let i = 0; i < kept.length; i++) {
-            const expectedKey = `normal:${i}`;
-            if (kept[i].key !== expectedKey) kept[i] = { key: expectedKey, spans: kept[i].spans };
+        const { evicted, added } = shift;
+        if (evicted > 0 || added > 0) {
+          const kept = evicted > 0 ? this.cachedScrollback.slice(evicted) : this.cachedScrollback;
+          if (evicted > 0) {
+            for (let i = 0; i < kept.length; i++) {
+              const expectedKey = `normal:${i}`;
+              if (kept[i].row.key !== expectedKey) {
+                kept[i] = { ...kept[i], row: { key: expectedKey, spans: kept[i].row.spans } };
+              }
+            }
           }
+          const newlyScrolled = added > 0 ? this.extractScrollbackRange(buffer, baseY - added, baseY, cell) : [];
+          this.cachedScrollback = kept.concat(newlyScrolled);
         }
-        const newlyScrolled = this.extractRange(buffer, baseY - added, baseY, cell);
-        this.cachedScrollback = kept.concat(newlyScrolled);
       }
     }
     this.lastBaseY = baseY;
     this.lastScrollEvents = this.scrollEvents;
 
     const viewport = this.extractRange(buffer, baseY, buffer.length, cell);
-    const combined = this.cachedScrollback.length ? this.cachedScrollback.concat(viewport) : viewport;
+    const combined = this.cachedScrollback.length
+      ? this.cachedScrollback.map((entry) => entry.row).concat(viewport)
+      : viewport;
     this.cachedBufferType = "normal";
     this.cachedViewport = viewport;
     this.cachedLines = combined;
     this.dirty = false;
     return combined;
+  }
+
+  /**
+   * Determines how many cached scrollback lines were evicted and how many new
+   * scrollback lines must be extracted when `baseY >= scrollbackLimit`.
+   * Returns `null` if the shift is ambiguous (e.g. identical repeated lines) or
+   * exceeds cached history, triggering a full safe re-extract.
+   */
+  private resolveScrollbackShift(
+    buffer: IBuffer,
+    baseY: number,
+    scrollDelta: number,
+  ): { evicted: number; added: number } | null {
+    const cachedLen = this.cachedScrollback.length;
+    if (cachedLen === 0 || baseY < cachedLen) return null;
+    const topLine = buffer.getLine(0);
+    if (!topLine) return null;
+    const topText = topLine.translateToString(true);
+
+    const matchesAt = (evicted: number): boolean => {
+      const keptLen = cachedLen - evicted;
+      if (keptLen <= 0) return false;
+      if (this.cachedScrollback[evicted].text !== topText) return false;
+      const lastLine = buffer.getLine(keptLen - 1);
+      if (!lastLine || this.cachedScrollback[cachedLen - 1].text !== lastLine.translateToString(true)) {
+        return false;
+      }
+      if (keptLen >= 3) {
+        const mid = keptLen >> 1;
+        const midLine = buffer.getLine(mid);
+        if (!midLine || this.cachedScrollback[evicted + mid].text !== midLine.translateToString(true)) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    const maxCandidate = Math.min(scrollDelta, cachedLen - 1);
+    const expectedEvicted = Math.max(0, cachedLen + scrollDelta - baseY);
+    const matchesZero = matchesAt(0);
+    const matchesExpected = expectedEvicted > 0 && expectedEvicted < cachedLen && matchesAt(expectedEvicted);
+
+    // Unambiguous DECSTBM no-eviction (or initial fill to cap).
+    if (matchesZero && !matchesExpected) {
+      return { evicted: 0, added: baseY - cachedLen };
+    }
+    // Unambiguous exact eviction matching `scrollDelta`.
+    if (matchesExpected && !matchesZero) {
+      return { evicted: expectedEvicted, added: baseY - (cachedLen - expectedEvicted) };
+    }
+    // Ambiguous (identical lines) -> fall back to safe full re-extract.
+    if (matchesZero && matchesExpected) return null;
+
+    // Mixed DECSTBM + real scrollback evictions: locate a unique shift in 1..maxCandidate.
+    let found = -1;
+    for (let evicted = 1; evicted <= maxCandidate; evicted++) {
+      if (evicted === expectedEvicted) continue;
+      if (matchesAt(evicted)) {
+        if (found !== -1) return null; // Ambiguous shift -> full safe re-extract.
+        found = evicted;
+      }
+    }
+    if (found === -1) return null;
+    return { evicted: found, added: baseY - (cachedLen - found) };
+  }
+
+  private extractScrollbackRange(buffer: IBuffer, start: number, end: number, cell: IBufferCell): CachedScrollbackRow[] {
+    const rows = this.extractRange(buffer, start, end, cell);
+    return rows.map((row) => ({ row, text: rowPlainText(row) }));
   }
 
   /** Only what the screen shows now, its history aside. */

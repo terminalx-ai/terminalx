@@ -106,4 +106,44 @@ describe("the phone's terminal screen", () => {
     expect(wrapped).not.toContain("line-0");
     screen.dispose();
   });
+
+  it("preserves exact scrollback contents during DECSTBM scroll-region scrolls both below and at the scrollback cap (P-45)", async () => {
+    // 1. Below scrollback cap (rows=4, scrollback=10): 6 lines push 3 lines into scrollback.
+    const belowCap = new TerminalScreen(20, 4, 10);
+    await belowCap.write("L0\r\nL1\r\nL2\r\nL3\r\nL4\r\nL5\r\nL6");
+    expect(text(belowCap).slice(0, 3)).toEqual(["L0", "L1", "L2"]);
+    const beforeDecstbmBelow = belowCap.extractedRowsCount;
+
+    // DECSTBM scroll region (rows 2..4) triggers xterm onScroll without evicting scrollback.
+    await belowCap.write("\x1b[2;4r\x1b[4;1Hx\r\ny\r\nz\r\n");
+    const afterBelow = text(belowCap);
+    // Top scrollback lines must stay intact (not sliced or duplicated).
+    expect(afterBelow.slice(0, 3)).toEqual(["L0", "L1", "L2"]);
+    // Only the 4 viewport rows were extracted (zero scrollback re-extraction).
+    expect(belowCap.extractedRowsCount - beforeDecstbmBelow).toBe(4);
+    belowCap.dispose();
+
+    // 2. At scrollback cap (rows=4, scrollback=5): fill scrollback completely to cap=5.
+    const atCap = new TerminalScreen(20, 4, 5);
+    await atCap.write(Array.from({ length: 12 }, (_, i) => `S${i}`).join("\r\n"));
+    const initialAtCap = text(atCap);
+    expect(initialAtCap).toHaveLength(9); // 5 scrollback + 4 viewport
+    expect(initialAtCap.slice(0, 5)).toEqual(["S3", "S4", "S5", "S6", "S7"]);
+    const beforeDecstbmAtCap = atCap.extractedRowsCount;
+
+    // DECSTBM scroll region at cap must NOT evict or duplicate scrollback lines.
+    await atCap.write("\x1b[2;4r\x1b[4;1Ha\r\nb\r\nc\r\n");
+    const afterDecstbmAtCap = text(atCap);
+    expect(afterDecstbmAtCap.slice(0, 5)).toEqual(["S3", "S4", "S5", "S6", "S7"]);
+    expect(atCap.extractedRowsCount - beforeDecstbmAtCap).toBe(4);
+
+    // 3. Mixed DECSTBM scroll + real full-screen scroll in the same batch at cap.
+    await atCap.write("\x1b[2;4r\x1b[4;1Hd\r\ne\r\n\x1b[r\x1b[4;1H\r\nM1\r\nM2");
+    const afterMixed = text(atCap);
+    // Resetting scroll region and scrolling 2 real lines evicts S3, S4 and keeps S5, S6, S7 + 2 newly scrolled lines.
+    expect(afterMixed.slice(0, 3)).toEqual(["S5", "S6", "S7"]);
+    expect(afterMixed.at(-2)).toBe("M1");
+    expect(afterMixed.at(-1)).toBe("M2");
+    atCap.dispose();
+  });
 });
