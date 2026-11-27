@@ -11,7 +11,8 @@ export function CloudGeneralAccessControls({ mode, pending, everyone, editable, 
   editable: boolean;
   disabled: boolean;
   onChoose: (mode: Mode) => void;
-  onSave: () => void;
+  /** Its own Save button; left out where the dialog's Save also saves General access. */
+  onSave?: () => void;
 }) {
   const heading = useId();
   const selected = pending ?? mode;
@@ -27,7 +28,7 @@ export function CloudGeneralAccessControls({ mode, pending, everyone, editable, 
           </select>
         ) : <span>{mode === "organisation" ? everyone : "Only people invited"}</span>}
         {selected === "organisation" && <span>Read</span>}
-        {editable && pending && pending !== mode && (
+        {onSave && editable && pending && pending !== mode && (
           <Button size="sm" className="ms-auto" disabled={disabled} onClick={onSave}>Save General access</Button>
         )}
       </div>

@@ -3,9 +3,14 @@ import { useRouter } from "expo-router";
 import { Platform } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { InTabs, newSessionInBar, TabBarInset, tabBarHeight } from "@mobile/ui/tab-bar-inset";
+import { textSizeScreenLayout } from "@mobile/ui/text-size";
 import { useTheme } from "@mobile/ui/theme";
 import { useApp } from "@mobile/state/AppProvider";
 import { useBotsOffered } from "@mobile/state/bots";
+
+// Each tab laid out again when the text size changes (PRO-601). Expo Router hands `screenLayout` on to the
+// navigator as it does for Stack, but NativeTabs' props type leaves it out, so it is spread in.
+const TAB_PAGE = { screenLayout: textSizeScreenLayout };
 
 // The system tab bar, Liquid Glass on iOS 26 and later: the tabs on the left and, set apart on the
 // right where iOS sets its one special tab, a new session. Outline marks throughout, the filled ones
@@ -20,6 +25,7 @@ export default function TabLayout() {
   const bots = useBotsOffered(app.api, app.activeHost?.id) === true;
   // On iOS the bar floats over the content: a tab's last row scrolls clear of it.
   return <InTabs.Provider value={true}><TabBarInset.Provider value={tabBarHeight(insets.bottom)}><NativeTabs
+    {...TAB_PAGE}
     tintColor={palette.ink}
     minimizeBehavior="onScrollDown"
     labelVisibilityMode="labeled"

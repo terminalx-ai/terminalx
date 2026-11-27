@@ -458,6 +458,55 @@ also check manually in Settings → About. An available update appears in the
 sidebar and a dismissible notice; installation requires Update and relaunch.
 Development builds skip the background checks.
 
+## Windows and Linux
+
+`.github/workflows/release-desktop.yml` builds the Windows installer (NSIS) and
+the Linux packages (AppImage, deb, rpm) for a release. It runs when a release
+is published (stable `vX.Y.Z` tags only), after `release.py` has published the
+macOS assets, or by hand (`gh workflow run release-desktop.yml`, optionally
+with `-f tag=vX.Y.Z -f publish=true`). Run by hand without a tag, it builds and
+tests the selected branch, and signs and publishes nothing: an updater
+signature is only ever made for a tagged release.
+
+Each build is tested before anything is kept: on Windows the installer is run
+silently, the app, its sidecar, CLI shims, bundled runtime and computer-use
+script are checked, the `terminalx://` scheme must be registered, and the
+uninstaller must remove the app, the scheme and TerminalX's CLI shim while
+keeping a file of the same name that is not TerminalX's; on Linux the deb and rpm are
+read and the AppImage extracted, each holding the runtime, which must start.
+
+Windows and Linux have update feeds of their own, so the macOS assets and
+`latest.json` are never touched: `latest-windows.json` and `latest-linux.json`,
+written by `scripts/release/desktop-feed.py` (tests in `test_desktop_feed.py`).
+`tauri.windows.conf.json` and `tauri.linux.conf.json` point the updater at them.
+They are attached last, after the installers and their `.sig` files, with
+`SHA256SUMS-desktop` and fixed-name copies
+(`TerminalX-latest-x64-setup.exe`, `TerminalX-latest-amd64.AppImage`,
+`TerminalX-latest-amd64.deb`, `TerminalX-latest-x86_64.rpm`). Until they are
+attached, an installed Windows or Linux app finds no update for its system and
+says nothing; that is not an error.
+
+What the workflow needs, as repository secrets and variables:
+
+- `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: the
+  updater key above. Without them the installers are built and tested and kept
+  as the run's artifacts, and nothing is published: an installed app takes
+  only a signed update. The key is used in one step of its own job, which runs
+  no build scripts, and every signature is checked against the public key in
+  `tauri.conf.json`. Whether the key goes into GitHub at all is the owner's
+  call; otherwise the artifacts can be signed locally with `pnpm tauri signer
+  sign` and attached by hand with the feeds `desktop-feed.py` writes.
+- `WINDOWS_CERTIFICATE` (a base64 PFX) and `WINDOWS_CERTIFICATE_PASSWORD`, with
+  the variable `WINDOWS_TIMESTAMP_URL`: Authenticode. With them Tauri signs the
+  app, its sidecars and the installer, and `scripts/build-local-runtime.mjs`
+  the bundled runtime. Without them the installer is unsigned and Windows
+  SmartScreen names no publisher.
+
+The Windows installer installs per user (`%LOCALAPPDATA%TerminalX`), with no
+administrator prompt, so updates install passively. Uninstalling removes the
+CLI shims Settings > Install CLI wrote, and only those
+(`src-tauri/windows/hooks.nsh`); an update keeps them.
+
 ## The cloud runtime (`terminalx-serve`)
 
 Cloud workspaces run the headless `terminalx-serve` binary, not the desktop

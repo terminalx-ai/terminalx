@@ -160,10 +160,22 @@ pub fn command_elsewhere(harness: &str, step: Step) -> Result<String> {
 fn command_for(harness: &str, step: Step, elsewhere: bool) -> Result<String> {
     let spec = super::REGISTRY.iter().find(|spec| spec.id == harness && super::visible(spec.id)).context("unknown agent")?;
     let Some(setup) = spec.setup.as_ref() else { bail!("{} cannot be installed from TerminalX. Follow its setup guide.", spec.name) };
-    if cfg!(windows) {
-        bail!("Installing {} from TerminalX is not supported on Windows. Follow its setup guide.", spec.name);
-    }
     let home = dirs::home_dir().context("no home directory")?;
+    if cfg!(windows) {
+        let Some(windows) = setup.windows.as_ref() else { bail!("{} has no Windows installer TerminalX can run. Follow its setup guide.", spec.name) };
+        return Ok(match step {
+            Step::Install => windows::install_line(spec.name, windows.installer, windows.env, &windows.writes.iter().map(|dir| home.join(dir)).collect::<Vec<_>>()),
+            Step::Login => {
+                crate::binpath::invalidate();
+                let Some(binary) = crate::binpath::resolve(spec.binary) else { bail!("{} is not installed.", spec.name) };
+                let login = match setup.login_elsewhere {
+                    Some(login) if elsewhere => login,
+                    _ => setup.login,
+                };
+                windows::login_line(spec.name, windows.installer, &binary, login)
+            }
+        });
+    }
     Ok(match step {
         Step::Install => install_line(spec.name, setup.installer, PROTOCOLS, setup.runner, &setup.writes.iter().map(|dir| home.join(dir)).collect::<Vec<_>>()),
         Step::Login => {
@@ -288,6 +300,134 @@ fn wrapped(script: &str, args: &[String]) -> String {
 /// closed, escaped and reopened.
 fn quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', r#"'\''"#))
+}
+
+/// The same two steps on Windows, in Windows PowerShell: the provider's
+/// `install.ps1`, then the CLI's sign-in, with the same checks and the same
+/// [`exit`] codes as the POSIX scripts above.
+///
+/// The line starts `powershell.exe` by its absolute path, so the pane runs it
+/// directly (`pty::direct_program`) whatever shell the reader uses, with no
+/// profile. The script goes as `-EncodedCommand`, its values written into it
+/// as single-quoted PowerShell strings: nothing in them is read as code.
+mod windows {
+    use std::borrow::Cow;
+    use std::path::{Path, PathBuf};
+
+    use base64::Engine;
+
+    const INSTALL: &str = r#"$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+Write-Host "==> Installing $name with its official installer"
+Write-Host "    $url"
+Write-Host ''
+foreach ($dir in $writes) {
+  $at = $dir
+  while (-not (Test-Path -LiteralPath $at)) { $up = Split-Path -Parent $at; if (-not $up) { break }; $at = $up }
+  $probe = Join-Path $at ('.terminalx-setup-' + [guid]::NewGuid().ToString('N'))
+  try { [IO.File]::WriteAllText($probe, ''); Remove-Item -LiteralPath $probe -Force }
+  catch { [Console]::Error.WriteLine("$name cannot be installed: $at is not writable by $env:USERNAME."); exit @NO_PERMISSION@ }
+}
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ('terminalx-setup-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $tmp | Out-Null
+$script = Join-Path $tmp 'install.ps1'
+Write-Host '==> Downloading the installer'
+try {
+  $response = Invoke-WebRequest -Uri $url -OutFile $script -PassThru -UseBasicParsing -TimeoutSec 60
+} catch {
+  Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+  if ($_.Exception.Response) { [Console]::Error.WriteLine("The installer could not be downloaded ($($_.Exception.Message))."); exit @DOWNLOAD@ }
+  [Console]::Error.WriteLine("Could not reach $url. Check the internet connection, then try again.")
+  exit @OFFLINE@
+}
+$final = $response.BaseResponse.ResponseUri
+$text = Get-Content -LiteralPath $script -Raw
+$start = "$text".TrimStart()
+# A page of markup is not an installer; a script may still open with a <# ... #> help block.
+if (($final -and $final.Scheme -ne 'https') -or -not $text -or ($start.StartsWith('<') -and -not $start.StartsWith('<#'))) {
+  Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+  [Console]::Error.WriteLine("What came back from $url is not an installer.")
+  exit @DOWNLOAD@
+}
+Write-Host '==> Running the installer'
+& "$PSHOME\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File $script
+$status = $LASTEXITCODE
+Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+if ($status -eq 0) { Write-Host ''; Write-Host "==> $name is installed"; exit 0 }
+try { Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -TimeoutSec 10 | Out-Null } catch { if (-not $_.Exception.Response) { exit @OFFLINE@ } }
+exit @INSTALL@
+"#;
+
+    const LOGIN: &str = r#"$ProgressPreference = 'SilentlyContinue'
+Write-Host "==> Signing in to $name"
+Write-Host '    Your browser opens to finish. If it does not, open the link below.'
+Write-Host ''
+& $exe @loginArgs
+$status = $LASTEXITCODE
+if ($status -eq 0) { exit 0 }
+try { Invoke-WebRequest -Uri $probe -Method Head -UseBasicParsing -TimeoutSec 10 | Out-Null } catch { if (-not $_.Exception.Response) { exit @OFFLINE@ } }
+exit @LOGIN@
+"#;
+
+    pub(super) fn install_line(name: &str, installer: &str, env: &[(&str, &str)], writes: &[PathBuf]) -> String {
+        let settings: String = env.iter().map(|(key, value)| format!("$env:{key} = {}\n", literal(value))).collect();
+        let values = [("name", literal(name)), ("url", literal(installer)), ("writes", list(writes.iter().map(|dir| dir.to_string_lossy())))];
+        line(&format!("{settings}{}", script(INSTALL, &values)))
+    }
+
+    pub(super) fn login_line(name: &str, probe: &str, binary: &Path, login: &[&str]) -> String {
+        let values = [("name", literal(name)), ("probe", literal(probe)), ("exe", literal(&binary.to_string_lossy())), ("loginArgs", list(login.iter().map(|word| Cow::Borrowed(*word))))];
+        line(&script(LOGIN, &values))
+    }
+
+    /// The script with its values set first, and its exit codes by number.
+    fn script(body: &str, values: &[(&str, String)]) -> String {
+        let mut text: String = values.iter().map(|(name, value)| format!("${name} = {value}\n")).collect();
+        let body = [("@NO_PERMISSION@", super::exit::NO_PERMISSION), ("@OFFLINE@", super::exit::OFFLINE), ("@DOWNLOAD@", super::exit::DOWNLOAD), ("@INSTALL@", super::exit::INSTALL), ("@LOGIN@", super::exit::LOGIN)]
+            .iter()
+            .fold(body.to_string(), |body, (name, code)| body.replace(name, &code.to_string()));
+        debug_assert!(!body.contains("exit @"), "an exit code without a name");
+        text.push_str(&body);
+        text
+    }
+
+    /// A PowerShell string that is only text: single quotes, a quote in it doubled. PowerShell takes the typographic
+    /// single quotes (U+2018, U+2019, U+201A, U+201B) as quotes too, so those are doubled as well: a home folder
+    /// named with a curly apostrophe stays text.
+    pub(super) fn literal(value: &str) -> String {
+        let mut text = String::with_capacity(value.len() + 2);
+        text.push('\'');
+        for character in value.chars() {
+            if matches!(character, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+                text.push(character);
+            }
+            text.push(character);
+        }
+        text.push('\'');
+        text
+    }
+
+    fn list<'a>(items: impl Iterator<Item = Cow<'a, str>>) -> String {
+        format!("@({})", items.map(|item| literal(&item)).collect::<Vec<_>>().join(", "))
+    }
+
+    /// The pane's command: Windows PowerShell by its absolute path, the script encoded.
+    fn line(script: &str) -> String {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let powershell = format!(r"{root}\System32\WindowsPowerShell\v1.0\powershell.exe");
+        let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
+        format!("{} -NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}", super::quote(&powershell))
+    }
+
+    /// The script a line carries, for tests to read.
+    #[cfg(test)]
+    pub(super) fn decode(line: &str) -> String {
+        let encoded = line.rsplit(' ').next().unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+        let units: Vec<u16> = bytes.chunks(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+        String::from_utf16(&units).unwrap()
+    }
 }
 
 #[cfg(test)]
@@ -535,6 +675,67 @@ esac
             }
             std::fs::set_permissions(world.home().join(".claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
             world.terminals.kill_all();
+        }
+    }
+}
+
+/// The Windows steps' lines, read back as the script they carry. They are made
+/// on every system, so these run everywhere.
+#[cfg(test)]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn the_windows_install_runs_the_provider_s_script_through_powershell_with_the_same_exit_codes() {
+        let line = windows::install_line("Codex", "https://chatgpt.com/codex/install.ps1", &[("CODEX_NON_INTERACTIVE", "1")], &[PathBuf::from(r"C:\Users\ada\.codex")]);
+        assert!(line.starts_with('\'') && line.contains(r"\System32\WindowsPowerShell\v1.0\powershell.exe' -NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand "), "{line}");
+        let script = windows::decode(&line);
+        for expected in [
+            "$env:CODEX_NON_INTERACTIVE = '1'\n",
+            "$name = 'Codex'\n",
+            "$url = 'https://chatgpt.com/codex/install.ps1'\n",
+            r"$writes = @('C:\Users\ada\.codex')",
+            "-ExecutionPolicy Bypass -File $script",
+            "$final.Scheme -ne 'https'",
+        ] {
+            assert!(script.contains(expected), "missing {expected:?} in\n{script}");
+        }
+        for code in [exit::NO_PERMISSION, exit::OFFLINE, exit::DOWNLOAD, exit::INSTALL] {
+            assert!(script.contains(&format!("exit {code}")), "exit {code}");
+        }
+        assert!(!script.contains("exit @"), "every exit code has its number");
+    }
+
+    #[test]
+    fn the_windows_sign_in_runs_the_cli_itself_and_says_why_it_ended() {
+        let line = windows::login_line("Claude Code", "https://claude.ai/install.ps1", std::path::Path::new(r"C:\Users\ada\.local\bin\claude.exe"), &["auth", "login"]);
+        let script = windows::decode(&line);
+        assert!(script.contains(r"$exe = 'C:\Users\ada\.local\bin\claude.exe'"), "{script}");
+        assert!(script.contains("$loginArgs = @('auth', 'login')"), "{script}");
+        assert!(script.contains("& $exe @loginArgs"));
+        assert!(script.contains(&format!("exit {}", exit::LOGIN)) && script.contains(&format!("exit {}", exit::OFFLINE)));
+    }
+
+    #[test]
+    fn a_value_with_a_quote_stays_text_in_the_windows_script() {
+        assert_eq!(windows::literal("it's"), "'it''s'");
+        // PowerShell ends a string at a typographic quote too: each is doubled the same way.
+        assert_eq!(windows::literal("O\u{2019}Brien"), "'O\u{2019}\u{2019}Brien'");
+        assert_eq!(windows::literal("\u{2018}a\u{201A}b\u{201B}"), "'\u{2018}\u{2018}a\u{201A}\u{201A}b\u{201B}\u{201B}'");
+        let line = windows::install_line("A'; Remove-Item x; '", "https://example.com/install.ps1", &[], &[]);
+        let script = windows::decode(&line);
+        assert!(script.contains("$name = 'A''; Remove-Item x; '''\n"), "{script}");
+    }
+
+    /// On Windows the registry's agents with a Windows installer are installable, and their install
+    /// step is the PowerShell one.
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_claude_and_codex_install_from_the_app() {
+        for agent in ["claude", "codex"] {
+            let line = command(agent, Step::Install).unwrap();
+            assert!(line.contains("-EncodedCommand"), "{agent}: {line}");
+            assert!(windows::decode(&line).contains(".ps1'"), "{agent}");
         }
     }
 }

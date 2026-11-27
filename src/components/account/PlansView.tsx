@@ -6,11 +6,13 @@ import { useAccount } from "@/lib/account";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { openWelcome } from "@/lib/sessions";
 import { Button } from "@/components/ui/button";
+import { Check } from "@/icons";
+import { cn } from "@/lib/cn";
 
 const TIERS = [
   {
     id: "free", name: "Free", description: "Local work on this Mac",
-    features: ["Local sessions with Claude Code and Codex", "Worktrees, diffs, checks, and pull requests", "Phone pairing over the encrypted relay", "Local VM and the TerminalX command line"],
+    features: ["Local sessions with Claude Code and Codex", "Worktrees, diffs, checks and pull requests", "Phone pairing over the encrypted relay", "Local VM and the TerminalX command line"],
   },
   {
     id: "pro", name: "Pro", description: "Cloud and organizations of your own",
@@ -18,7 +20,7 @@ const TIERS = [
   },
   {
     id: "teams", name: "Teams", description: "One bill for your organization",
-    features: ["A plan shared by the organization", "Seats follow accepted invites", "Owners can view seat usage and billing in the console"],
+    features: ["One plan for every member", "Seats follow accepted invites", "Owners see seats and billing in the console"],
   },
 ] as const;
 
@@ -61,35 +63,37 @@ export function PlansView() {
           <p className="mb-4 text-sm text-muted-foreground">Pro is billed to you. Teams is billed to your organization.</p>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             {TIERS.map((tier) => (
-              <section key={tier.id} className="rounded-lg border border-hairline p-4">
-                <div className="flex items-center justify-between gap-2">
+              <section key={tier.id} className={cn("flex flex-col rounded-lg border p-4", plan.plan === tier.id ? "border-hairline-strong bg-veil-raised" : "border-hairline")}>
+                <div className="flex items-center gap-2">
                   <h2 className="font-medium">{tier.name}</h2>
-                  {plan.plan === tier.id && <span className="rounded bg-veil-raised px-1.5 py-0.5 text-xs">Your plan</span>}
+                  {plan.plan === tier.id && <span className="rounded bg-veil-strong px-1.5 py-0.5 text-xs text-muted-foreground">Your plan</span>}
                 </div>
-                <p className="mt-2 text-sm text-muted-foreground">{tier.id === "teams" ? `One bill for ${org.name}` : tier.description}</p>
-                {tier.id === "free" && <p className="mt-2 text-sm">$0</p>}
-                {tier.id === "pro" && pro && <p className="mt-2 text-sm">{formatPrice(pro)} / {pro.interval}</p>}
-                {tier.id === "teams" && (
-                  <div className="mt-2 space-y-1 text-sm">
-                    <p>{formatPrice(teams)} per seat / {teams.interval}</p>
-                    <p className="text-muted-foreground">Up to {teams.memberLimit} members</p>
-                  </div>
-                )}
-                <ul className="mt-3 list-disc space-y-1 pl-4 text-xs">
-                  {tier.features.map((feature) => <li key={feature}>{feature}</li>)}
+                {tier.id === "free" && <p className="mt-2 text-2xl font-semibold">$0</p>}
+                {tier.id === "pro" && pro && <p className="mt-2 text-2xl font-semibold">{formatPrice(pro)} <span className="text-xs font-normal text-muted-foreground">/ {pro.interval}</span></p>}
+                {tier.id === "teams" && <p className="mt-2 text-2xl font-semibold">{formatPrice(teams)} <span className="text-xs font-normal text-muted-foreground">per seat / {teams.interval}</span></p>}
+                <p className="mt-1 text-xs text-muted-foreground">{tier.id === "teams" ? `One bill for ${org.name}` : tier.description}</p>
+                {tier.id === "teams" && <p className="text-xs text-muted-foreground">Up to {teams.memberLimit} members</p>}
+                <ul className="mt-4 mb-4 space-y-2 text-xs">
+                  {tier.features.map((feature) => (
+                    <li key={feature} className="flex gap-2"><Check className="mt-px size-3.5 shrink-0 text-add" aria-hidden />{feature}</li>
+                  ))}
                 </ul>
-                {tier.id === "pro" && upgrade && (
-                  <Button className="mt-3" size="sm" onClick={() => void openConsole(upgrade)}>Upgrade to Pro</Button>
-                )}
-                {tier.id === "teams" && canManage && manage && (
-                  <Button className="mt-3" size="sm" variant="secondary" onClick={() => void openConsole(manage)}>Manage in console</Button>
-                )}
-                {tier.id === "teams" && !canManage && <p className="mt-3 text-xs text-muted-foreground">Ask an owner to switch.</p>}
+                <div className="mt-auto">
+                  {tier.id === "pro" && upgrade && (
+                    <Button className="w-full" size="sm" onClick={() => void openConsole(upgrade)}>Upgrade to Pro</Button>
+                  )}
+                  {tier.id === "teams" && canManage && manage && (
+                    <Button className="w-full" size="sm" variant="secondary" onClick={() => void openConsole(manage)}>Manage in console</Button>
+                  )}
+                  {tier.id === "teams" && !canManage && <p className="text-center text-xs text-muted-foreground">Ask an owner to switch.</p>}
+                </div>
               </section>
             ))}
           </div>
-          <p className="mt-4 text-xs text-muted-foreground">Cloud compute is billed by your provider.</p>
-          <p className="mt-1 text-xs text-muted-foreground">Checkout, invoices and seat changes open in the web console.</p>
+          <div className="mt-4 flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            <p>Checkout, invoices and seat changes open in the web console.</p>
+            <p>Cloud compute is billed by your provider.</p>
+          </div>
           {consoleError && <p className="mt-2 text-xs text-destructive" role="alert">{consoleError}</p>}
           </>
         ) : <p className="text-sm text-muted-foreground">Plans are unavailable for this organization.</p>}

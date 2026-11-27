@@ -110,7 +110,7 @@ macro_rules! secret_store { () => { "macOS Keychain" } }
 #[cfg(windows)]
 macro_rules! secret_store { () => { "the Windows encrypted store" } }
 #[cfg(not(any(target_os = "macos", windows)))]
-macro_rules! secret_store { () => { "the secret store" } }
+macro_rules! secret_store { () => { "the system keyring" } }
 
 const REFRESH_NOT_SAVED: &str = concat!("The account session refreshed, but ", secret_store!(), " could not save it.");
 
@@ -435,13 +435,15 @@ pub(crate) const PHASE2_ADMIN_SHARE: &str = "cloud.workspaces.admin-share.v1";
 pub(crate) const PHASE2_ORGANIZATION_AUTOMATIONS: &str = "cloud.automations.organization.v1";
 const PHASE2_TEAMS_PLAN: &str = "organization.teams-plan.v1";
 pub(crate) const PHASE2_NUDGES: &str = "team.nudges.v1";
+pub(crate) const PHASE2_WORKSPACE_SSH: &str = "cloud.workspaces.ssh.v1";
 /// Organization model routes (PRO-310): custom providers owners set for everyone.
 pub(crate) const PHASE2_ORGANIZATION_ROUTES: &str = "cloud.agent-routes.organization.v1";
-const PHASE2_FEATURES: [&str; 24] = [
+const PHASE2_FEATURES: [&str; 25] = [
     PHASE2_ORGANIZATION_ROUTES,
     PHASE2_TEAMS_PLAN,
     PHASE2_ORGANIZATION_AUTOMATIONS,
     PHASE2_NUDGES,
+    PHASE2_WORKSPACE_SSH,
     PHASE2_EVENTS, PHASE2_PRESENCE, PHASE2_FOLLOW_REASSIGN, PHASE2_MENTIONS, PHASE2_RESTART_DETAILS,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_WEBHOOK_TRIGGER,
     "cloud.environment-info.v1",

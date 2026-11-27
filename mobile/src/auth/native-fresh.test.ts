@@ -80,7 +80,8 @@ it("signing in again waits for a refresh of the old session, and hands back the 
   const refresh = deferred<{ status: "refreshed"; session: typeof refreshed }>();
   mocks.refresh.mockReturnValue(refresh.promise);
   mocks.exchange.mockResolvedValue({ ok: true, session: ada });
-  const refreshing = refreshStoredSession(old);
+  mocks.store.set(SESSION_KEY, JSON.stringify(old));
+  const refreshing = refreshStoredSession();
   const signingIn = beginSignIn({ fresh: true, expectUserId: "user-ada" });
   await tick();
   refresh.resolve({ status: "refreshed", session: refreshed });
@@ -94,7 +95,8 @@ it("a refresh of the old session that is refused after a sign-in stored a new on
   const refresh = deferred<{ status: "rejected" }>();
   mocks.refresh.mockReturnValue(refresh.promise);
   mocks.exchange.mockResolvedValue({ ok: true, session: ada });
-  const refreshing = refreshStoredSession(old);
+  mocks.store.set(SESSION_KEY, JSON.stringify(old));
+  const refreshing = refreshStoredSession();
   await beginSignIn();
   refresh.resolve({ status: "rejected" });
   expect(await refreshing).toEqual({ status: "fresh", session: ada });
@@ -104,11 +106,47 @@ it("a refresh of the old session that is refused after a sign-in stored a new on
 it("a refresh that ends after the session was forgotten does not write it back", async () => {
   const refresh = deferred<{ status: "refreshed"; session: typeof old }>();
   mocks.refresh.mockReturnValue(refresh.promise);
-  const refreshing = refreshStoredSession(old);
+  mocks.store.set(SESSION_KEY, JSON.stringify(old));
+  const refreshing = refreshStoredSession();
   await forgetStoredSession();
   refresh.resolve({ status: "refreshed", session: { ...old, accessToken: "a1c" } });
   expect(await refreshing).toEqual({ status: "rejected" });
   expect(mocks.store.has(SESSION_KEY)).toBe(false);
+});
+
+// PRO-600: the server ends the whole sign-in when a refresh token it has replaced comes back after its minute's grace.
+// A copy of the session kept elsewhere is never what is refreshed: only the stored one is.
+it("refreshes the stored session, which a refresh elsewhere may have replaced, and sends nothing for a fresh one", async () => {
+  const later = { ...old, accessToken: "a1b", refreshToken: "r1b", expiresAt: 2 };
+  mocks.store.set(SESSION_KEY, JSON.stringify(old));
+  mocks.refresh.mockResolvedValueOnce({ status: "refreshed", session: later });
+  expect(await refreshStoredSession()).toEqual({ status: "refreshed", session: later });
+  // Due again: refreshed with the refresh token stored now, never the replaced one.
+  mocks.refresh.mockResolvedValueOnce({ status: "refreshed", session: { ...later, refreshToken: "r1c" } });
+  await refreshStoredSession();
+  expect(mocks.refresh.mock.calls.map(([, session]) => session.refreshToken)).toEqual(["r1", "r1b"]);
+  const fresh = { ...later, refreshToken: "r1d", expiresAt: Date.now() + 10 * 60_000 };
+  mocks.store.set(SESSION_KEY, JSON.stringify(fresh));
+  expect(await refreshStoredSession()).toEqual({ status: "fresh", session: fresh });
+  expect(mocks.refresh).toHaveBeenCalledTimes(2);
+});
+
+it("sends nothing when no session is stored, and says so", async () => {
+  mocks.store.delete(SESSION_KEY);
+  expect(await refreshStoredSession()).toEqual({ status: "rejected" });
+  expect(mocks.refresh).not.toHaveBeenCalled();
+});
+
+it("shares one refresh between callers that ask at once", async () => {
+  const refresh = deferred<{ status: "refreshed"; session: typeof old }>();
+  mocks.refresh.mockReturnValue(refresh.promise);
+  mocks.store.set(SESSION_KEY, JSON.stringify(old));
+  const first = refreshStoredSession();
+  const second = refreshStoredSession();
+  await tick();
+  refresh.resolve({ status: "refreshed", session: { ...old, refreshToken: "r1b" } });
+  expect(await first).toEqual(await second);
+  expect(mocks.refresh).toHaveBeenCalledTimes(1);
 });
 
 it("forgets the stored session without asking the server", async () => {

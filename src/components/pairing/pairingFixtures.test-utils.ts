@@ -9,6 +9,7 @@ export const emptyStatus: PairingStatus = {
   pendingApproval: null,
   keepAwake: true,
   lastError: null,
+  accountListing: { state: "off" },
 };
 
 export const relayReady: PairingStatus["relay"] = { phase: "connected", message: null, attempt: 0 };

@@ -298,6 +298,7 @@ fn the_directory_maps_online_offline_not_available_this_mac_and_paired() {
     let directory = serde_json::to_value(rig.pairing.list().unwrap()).unwrap();
     let machine = |id: &str| directory["machines"].as_array().unwrap().iter().find(|machine| machine["machineId"] == id).unwrap().clone();
     assert_eq!(directory["signedIn"], true);
+    assert_eq!(directory["email"], "fixture@example.invalid", "the account whose list it is");
     assert_eq!(directory["installation"], "ready");
     assert_eq!(directory["machines"].as_array().unwrap().len(), 4);
     assert_eq!(
@@ -362,7 +363,7 @@ fn signed_out_and_untrusted_installations_list_no_machines() {
         _ => (500, json!({})),
     });
     let rig = rig(&account.base, true, Vec::new());
-    assert_eq!(serde_json::to_value(rig.pairing.list().unwrap()).unwrap(), json!({ "signedIn": true, "installation": "reauthenticationRequired", "machines": [] }));
+    assert_eq!(serde_json::to_value(rig.pairing.list().unwrap()).unwrap(), json!({ "signedIn": true, "email": "fixture@example.invalid", "installation": "reauthenticationRequired", "machines": [] }));
     assert!(account.find("GET", "/v1/account/hosts").is_empty(), "no directory for an untrusted installation");
 }
 

@@ -106,6 +106,13 @@ describe("scheduled tasks: what the dialog says", () => {
     expect(scheduleErrorMessage("cloud_schedule_estimate_not_supported")).toContain("cannot say yet what a scheduled task costs");
   });
 
+  it("names every run state in sentence case", () => {
+    expect(runText({ state: "succeeded" })).toBe("Succeeded");
+    expect(runText({ state: "completed" })).toBe("Completed");
+    expect(runText({ state: "cancel-requested" })).toBe("Cancel requested");
+    expect(runText({ state: "TIMED_OUT" })).toBe("Timed out");
+  });
+
   it("says plainly that a workspace left running can cost a whole month", () => {
     const lines = costLines(estimate({ keepsMachineRunning: true, monthlyMaxMicros: 86_400_000 }), 5);
     expect(lines[1]).toContain("left running after a run");

@@ -53,7 +53,26 @@ pub async fn set_native_menu(app: AppHandle, window: WebviewWindow, groups: Vec<
     if window.label() != "main" {
         return Err("Only the main window owns the application menu".into());
     }
+    // A menu bar only on macOS; elsewhere the window draws the same groups as its own menu (`AppMenu`).
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
     build(&app, &groups).map_err(|error| error.to_string())
+}
+
+/// The items of the window's own menu (Windows, Linux) that are not actions of the webview: Quit and Stop all and
+/// quit, the same requests as the menu bar's and the tray's.
+#[tauri::command]
+pub async fn app_menu_item(app: AppHandle, window: WebviewWindow, id: String) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("Only the main window owns the application menu".into());
+    }
+    match id.as_str() {
+        crate::quit::MENU_ID => app.exit(0),
+        crate::quit::STOP_ALL_MENU_ID => crate::quit::stop_all_and_quit(&app),
+        _ => return Err("Unknown menu item".into()),
+    }
+    Ok(())
 }
 
 fn build(app: &AppHandle, groups: &[Group]) -> tauri::Result<()> {
@@ -161,6 +180,20 @@ pub async fn native_window_action(window: WebviewWindow, action: String) -> Resu
         "fullscreen" => window.is_fullscreen().and_then(|full| window.set_fullscreen(!full)),
         _ => return Err("Unknown window action".into()),
     }.map_err(|error| error.to_string())
+}
+
+/// True on Windows when Git for Windows' `sh.exe` is not found: setup, archive and action scripts cannot run, and
+/// the window says so once, with where to get it. Always false elsewhere.
+#[tauri::command]
+pub async fn posix_shell_missing() -> bool {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(|| crate::binpath::posix_sh().is_none()).await.unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 #[cfg(test)]
