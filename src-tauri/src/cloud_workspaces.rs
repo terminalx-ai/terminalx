@@ -2871,7 +2871,7 @@ impl CloudWorkspaceService {
         if !crate::desktop_inbox::valid_cursor(after) || wait_ms > 25_000 { return Err(inbox_invalid()); }
         self.inbox_account(RequestRisk::Read, |client, context| {
             let mut url = client.inbox_url(&[])?;
-            url.query_pairs_mut().append_pair("after", after).append_pair("waitMs", &wait_ms.to_string()).append_pair("presence", "1").append_pair("mentions", "1");
+            url.query_pairs_mut().append_pair("after", after).append_pair("waitMs", &wait_ms.to_string()).append_pair("presence", "1").append_pair("mentions", "1").append_pair("nudges", "1");
             let page: crate::desktop_inbox::InboxPage = client.send_url("GET", context, url, None, None, RequestRisk::Read, CATALOG_RESPONSE_LIMIT_BYTES)?;
             if page.v != 1 || page.events.len() > 100 || page.cursor.parse::<i64>().unwrap() < after.parse::<i64>().unwrap()
                 || page.events.iter().any(|event| event.id().parse::<i64>().unwrap() > page.cursor.parse::<i64>().unwrap()) { return Err(post_send_error(RequestRisk::Read)); }
@@ -2884,7 +2884,7 @@ impl CloudWorkspaceService {
         if !crate::desktop_inbox::valid_cursor(after) || last_event_id.is_some_and(|id| !crate::desktop_inbox::valid_cursor(id)) { return Err(inbox_invalid()); }
         self.inbox_account(RequestRisk::Read, |client, context| {
             let mut url = client.inbox_url(&["stream"])?;
-            url.query_pairs_mut().append_pair("after", after).append_pair("presence", "1").append_pair("mentions", "1");
+            url.query_pairs_mut().append_pair("after", after).append_pair("presence", "1").append_pair("mentions", "1").append_pair("nudges", "1");
             let mut request = client.authorized_request("GET", context, &url).set("accept", "text/event-stream");
             if let Some(id) = last_event_id { request = request.set("Last-Event-ID", id); }
             let response = match request.call() {
@@ -6316,7 +6316,7 @@ mod tests {
         let filtered = service.inbox(id, 0).unwrap();
         assert!(filtered.has_more && filtered.events.is_empty());
         let requests = requests.join().unwrap();
-        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox?after=0&waitMs=25000&presence=1&mentions=1 HTTP/1.1"));
+        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox?after=0&waitMs=25000&presence=1&mentions=1&nudges=1 HTTP/1.1"));
         assert!(requests[1].starts_with("POST /v1/desktop/organization-inbox/receipts HTTP/1.1"));
         assert_eq!(serde_json::from_str::<Value>(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap(), json!({"eventIds":[id]}));
         for request in requests { phase2_headers(&request); assert!(!request.contains("userId")); }
@@ -6349,7 +6349,7 @@ mod tests {
         assert!(service.inbox_stream(&page.cursor, None).is_err());
         assert_eq!(service.inbox(&page.cursor, 0).unwrap().cursor, page.cursor);
         let requests = requests.join().unwrap();
-        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox/stream?after=0&presence=1&mentions=1 HTTP/1.1"));
+        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox/stream?after=0&presence=1&mentions=1&nudges=1 HTTP/1.1"));
         assert!(requests[0].to_ascii_lowercase().contains("last-event-id: 9007199254740992"));
         assert!(requests[2].contains("after=9007199254740994"));
         for request in requests { phase2_headers(&request); }
