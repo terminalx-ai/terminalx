@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use url::Url;
 
 use crate::account::{
-    AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN, PHASE2_MENTIONS, PHASE2_NUDGES,
+    AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN, PHASE2_ANNOUNCEMENTS, PHASE2_MENTIONS, PHASE2_NUDGES,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_PRESENCE, PHASE2_RESTART_DETAILS,
     PHASE2_ADMIN_SHARE, PHASE2_AFFECTED_WORKSPACES, PHASE2_GENERAL_ACCESS, PHASE2_PRECREATE_USAGE, PHASE2_WEBHOOK_TRIGGER, PHASE2_WORKSPACE_GROUPS,
 };
@@ -1988,6 +1988,24 @@ pub struct NudgePreference {
     pub enabled: bool,
 }
 
+/// PRO-241: what the sidebar's card shows, for this app's version.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DesktopAnnouncement {
+    pub id: String,
+    pub title: String,
+    pub body: String,
+    pub link: Option<String>,
+    pub is_new: bool,
+    pub published_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CurrentAnnouncement {
+    pub announcement: Option<DesktopAnnouncement>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NudgeReceipt {
@@ -3041,6 +3059,19 @@ impl CloudWorkspaceService {
     pub fn nudge_preference(&self, org: &str) -> Result<NudgePreference, CloudWorkspaceClientError> {
         self.phase2_member_in(PHASE2_NUDGES, "nudges_unavailable", org, RequestRisk::Read, |client, context| {
             client.request(context, &["nudges", "preference"], None, None, None, RequestRisk::Read)
+        })
+    }
+
+    /// The organization's current announcement for this build (PRO-241). The version is the app's own, never the
+    /// page's. A link that is not https is dropped: the card opens it in the browser.
+    pub fn current_announcement(&self, org: &str) -> Result<CurrentAnnouncement, CloudWorkspaceClientError> {
+        self.phase2_member_in(PHASE2_ANNOUNCEMENTS, "announcements_unavailable", org, RequestRisk::Read, |client, context| {
+            let mut value: CurrentAnnouncement = client.request(context, &["announcements", "current"],
+                Some(("appVersion", env!("CARGO_PKG_VERSION"))), None, None, RequestRisk::Read)?;
+            if let Some(announcement) = value.announcement.as_mut() {
+                if announcement.link.as_deref().is_some_and(|link| !link.starts_with("https://")) { announcement.link = None; }
+            }
+            Ok(value)
         })
     }
 
@@ -4963,6 +4994,7 @@ fn known_error_code(code: &str) -> bool {
             | "workspace_mentions_unavailable"
             | "nudge_rate_limited"
             | "nudges_unavailable"
+            | "announcements_unavailable"
             | "presence_rate_limited"
             | "presence_device_limit"
             | "presence_capacity_exceeded"
@@ -5583,6 +5615,36 @@ mod tests {
             session_id: "session-1".into(),
             text: text.into(),
         }
+    }
+
+    #[test]
+    fn phase2_announcement_sends_the_app_version_and_drops_a_link_that_is_not_https() {
+        let card = |link: &str| format!(r#"{{"announcement":{{"id":"a","title":"Team cloud workspaces","body":"Run sessions on your own machines.","link":{link},"isNew":true,"publishedAt":"2026-11-20T00:00:00.000Z"}}}}"#);
+        let (base, requests) = serve_each(vec![
+            response("200 OK", &card(r#""https://example.com/changelog""#), ""),
+            response("200 OK", &card(r#""javascript:alert(1)""#), ""),
+            response("200 OK", r#"{"announcement":null}"#, ""),
+        ]);
+        let (_, service) = phase2_service(&base);
+        let first = service.current_announcement("org-1").unwrap().announcement.unwrap();
+        assert_eq!((first.title.as_str(), first.link.as_deref(), first.is_new), ("Team cloud workspaces", Some("https://example.com/changelog"), true));
+        assert_eq!(service.current_announcement("org-1").unwrap().announcement.unwrap().link, None);
+        assert!(service.current_announcement("org-1").unwrap().announcement.is_none());
+        let requests = requests.join().unwrap();
+        for request in &requests {
+            assert!(request.starts_with(&format!("GET /v1/desktop/orgs/org-1/announcements/current?appVersion={} HTTP/1.1", env!("CARGO_PKG_VERSION"))));
+            phase2_headers(request);
+        }
+    }
+
+    #[test]
+    fn phase2_announcement_is_gated_and_strict() {
+        let (base, _requests) = serve_each(vec![response("200 OK", r#"{"announcement":null,"extra":1}"#, "")]);
+        let (_, gated) = test_service(&base);
+        assert_eq!(gated.current_announcement("org-1").unwrap_err().code, "announcements_unavailable");
+        let (_, service) = phase2_service(&base);
+        assert!(service.current_announcement("org-1").is_err());
+        assert!(known_error_code("announcements_unavailable"));
     }
 
     #[test]
