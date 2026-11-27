@@ -169,6 +169,141 @@ impl Status {
     }
 }
 
+#[cfg(target_os = "linux")]
+const RELEASE_ROOT: &str =
+    "https://github.com/terminalx-ai/terminalx/releases/download/workspace-openssh";
+
+#[cfg(target_os = "linux")]
+fn download(name: &str, limit: usize) -> anyhow::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let agent = crate::data_privacy::http_agent()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirects(3)
+        .build();
+    let response = agent
+        .get(&format!("{RELEASE_ROOT}/{name}"))
+        .call()
+        .map_err(|_| anyhow::anyhow!("workspace SSH release download failed"))?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        !bytes.is_empty() && bytes.len() <= limit,
+        "invalid SSH release asset size"
+    );
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn installed_version(install: &crate::workspace_ssh_payload::InstallLock) -> Option<String> {
+    let daemon = install.active_daemon().ok()?;
+    Some(daemon.ancestors().nth(3)?.file_name()?.to_str()?.to_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn attempt(cloud: &crate::cloud_bootstrap::Bootstrapped, api: &crate::cloud_bootstrap::HttpApi) {
+    use crate::workspace_ssh::{LoginShell, PRIVATE_SSHD};
+    use crate::workspace_ssh_listener::Runtime;
+    use crate::workspace_ssh_payload::{self as payload, Architecture, Version};
+    use std::path::Path;
+    use std::sync::Arc;
+
+    let now = || u64::try_from(crate::remote::host::now_ms()).unwrap_or(0);
+    let started = now();
+    let Some(decision) = cloud.workspace_ssh_update_decision(started) else {
+        return;
+    };
+    if let Some(reason) = LoginShell::current_account().hold_reason() {
+        log::info!("workspace SSH updater held: {reason}");
+        return;
+    }
+    let Some(service_state) = Path::new(PRIVATE_SSHD).ancestors().nth(5) else {
+        return;
+    };
+    let architecture = match std::env::consts::ARCH {
+        "x86_64" => Architecture::X86_64,
+        "aarch64" => Architecture::Aarch64,
+        _ => return,
+    };
+    let install = match state_install_lock(service_state) {
+        Ok(install) => install,
+        Err(_) => {
+            log::warn!("workspace SSH updater could not lock its state");
+            return;
+        }
+    };
+    let current = || {
+        cloud
+            .workspace_ssh_update_decision(now())
+            .filter(|current| {
+                current.workspace_id == decision.workspace_id
+                    && current.runtime_generation == decision.runtime_generation
+            })
+    };
+    let ready = || current().is_some() && LoginShell::current_account() == LoginShell::Usable;
+    if !ready() {
+        return;
+    }
+    let install_release = || -> anyhow::Result<Outcome> {
+        let active = installed_version(&install);
+        let version = active.as_deref().map(Version::parse).transpose()?;
+        let manifest = download("manifest.json", 4096)?;
+        let signature = download("manifest.json.sig", 4096)?;
+        let verified =
+            payload::verify_manifest(&manifest, &signature, architecture, version.as_ref())?;
+        if active.as_deref() == Some(verified.version()) {
+            return Ok(Outcome::UpToDate);
+        }
+        if !ready() {
+            anyhow::bail!("workspace SSH update held");
+        }
+        let bytes = download(verified.locator(), payload::MAX_PAYLOAD)?;
+        if !ready() {
+            anyhow::bail!("workspace SSH update held");
+        }
+        let staged = install.stage(&verified, &bytes)?;
+        if cloud.refresh(api).is_err() || !ready() {
+            anyhow::bail!("workspace SSH update held");
+        }
+        let runtime = match cloud.ssh_runtime.get() {
+            Some(runtime) => runtime.clone(),
+            None => match Runtime::prepare(&install) {
+                Ok(runtime) => Arc::new(runtime),
+                Err(_) => return Ok(Outcome::CandidateFailed),
+            },
+        };
+        match runtime.activate(&install, staged, ready) {
+            Ok(()) => {
+                let _ = cloud.ssh_runtime.set(runtime);
+                Ok(Outcome::Updated)
+            }
+            Err(error) if error.to_string() == "SSH activation rolled back" => {
+                Ok(Outcome::RolledBack)
+            }
+            Err(_) => Ok(Outcome::CandidateFailed),
+        }
+    };
+    let outcome = install_release().unwrap_or(Outcome::VerificationFailed);
+    if let Some(current) = current() {
+        if let Ok(status) = Status::new(installed_version(&install), outcome, started) {
+            if cloud
+                .report_ssh_update(api, &current, CAPABILITY, &status, now())
+                .is_err()
+            {
+                log::warn!("workspace SSH updater status was not accepted");
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn start(cloud: std::sync::Arc<crate::cloud_bootstrap::Bootstrapped>, origin: &str) {
+    let api = crate::cloud_bootstrap::HttpApi::new(origin);
+    drop(spawn_periodic(move || attempt(&cloud, &api)));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

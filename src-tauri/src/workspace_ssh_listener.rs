@@ -411,11 +411,12 @@ impl Listener {
 pub(crate) struct Runtime {
     listener: Listener,
     host_key: String,
+    configuration: PathBuf,
 }
 
 impl Runtime {
     pub(crate) fn restore(root: &Path) -> Result<Self> {
-        use crate::workspace_ssh::{atomic_write, private_directory, public_key, LoginShell};
+        use crate::workspace_ssh::LoginShell;
 
         ensure!(
             LoginShell::current_account() == LoginShell::Usable,
@@ -423,7 +424,19 @@ impl Runtime {
         );
         let install = InstallLock::acquire(root)?;
         install.active_daemon()?;
-        let state = root.join("listener");
+        let runtime = Self::prepare(&install)?;
+        runtime.listener.restore(
+            &install,
+            runtime.configuration.clone(),
+            &runtime.host_key,
+            || true,
+        )?;
+        Ok(runtime)
+    }
+
+    pub(crate) fn prepare(install: &InstallLock) -> Result<Self> {
+        use crate::workspace_ssh::{atomic_write, private_directory, public_key};
+        let state = install.root.join("listener");
         private_directory(&state)?;
         let host = state.join("host");
         let host_key = public_key(&host, true)?;
@@ -438,9 +451,26 @@ impl Runtime {
         atomic_write(&configuration, format!(
             "HostKey \"{path}\"\nAuthorizedKeysFile none\nAllowUsers terminalx-runtime\nAuthenticationMethods publickey\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nDisableForwarding yes\nPermitUserRC no\nPermitUserEnvironment no\nPrintMotd no\n"
         ).as_bytes())?;
-        let listener = Listener::default();
-        listener.restore(&install, configuration, &host_key, || true)?;
-        Ok(Self { listener, host_key })
+        Ok(Self {
+            listener: Listener::default(),
+            host_key,
+            configuration,
+        })
+    }
+
+    pub(crate) fn activate(
+        &self,
+        install: &InstallLock,
+        staged: StagedVersion,
+        ready: impl Fn() -> bool,
+    ) -> Result<()> {
+        let candidate = Daemon::staged(staged, self.configuration.clone());
+        self.listener
+            .activate(install, candidate, &self.host_key, &ready)?;
+        if self.listener.cleanup(install, ready).is_err() {
+            log::warn!("workspace SSH could not clean up a retired version");
+        }
+        Ok(())
     }
 
     pub(crate) fn host_key(&self) -> &str {

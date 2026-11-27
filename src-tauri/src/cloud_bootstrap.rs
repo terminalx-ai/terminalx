@@ -340,7 +340,7 @@ pub trait Api {
     fn redeem(&self, token: &str, key: &HostKey) -> Result<Redeemed, CallError>;
     fn refresh(&self, credential: &str) -> Result<Refreshed, CallError>;
     #[cfg(target_os = "linux")]
-    fn refresh_workspace_ssh(&self, credential: &str) -> Result<Refreshed, CallError> {
+    fn refresh_workspace_ssh(&self, credential: &str, _listener_ready: bool) -> Result<Refreshed, CallError> {
         self.refresh(credential)
     }
 }
@@ -386,8 +386,10 @@ impl Api for HttpApi {
         self.post("/v1/cloud-workspace-bootstrap/refresh", credential, serde_json::json!({}), Some((CAPABILITIES_HEADER, CAPABILITIES)))
     }
     #[cfg(target_os = "linux")]
-    fn refresh_workspace_ssh(&self, credential: &str) -> Result<Refreshed, CallError> {
-        let capabilities = format!("{CAPABILITIES},workspace-ssh-v1,workspace-ssh-v2");
+    fn refresh_workspace_ssh(&self, credential: &str, listener_ready: bool) -> Result<Refreshed, CallError> {
+        let updater = crate::workspace_ssh_updater::CAPABILITY;
+        let suffix = if listener_ready { ",workspace-ssh-v1,workspace-ssh-v2" } else { "" };
+        let capabilities = format!("{CAPABILITIES},{updater}{suffix}");
         self.post("/v1/cloud-workspace-bootstrap/refresh", credential, serde_json::json!({}), Some((CAPABILITIES_HEADER, &capabilities)))
     }
 }
@@ -650,11 +652,7 @@ impl Bootstrapped {
         let requested_ssh = self.ssh_runtime.get().is_some()
             && crate::workspace_ssh::LoginShell::current_account().hold_reason().is_none();
         #[cfg(target_os = "linux")]
-        let refreshed = if requested_ssh {
-            api.refresh_workspace_ssh(&self.credential)
-        } else {
-            api.refresh(&self.credential)
-        };
+        let refreshed = api.refresh_workspace_ssh(&self.credential, requested_ssh);
         #[cfg(not(target_os = "linux"))]
         let refreshed = api.refresh(&self.credential);
         #[cfg(not(target_os = "linux"))]
@@ -703,10 +701,20 @@ impl Bootstrapped {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn workspace_ssh_update_decision(&self, now_ms: u64) -> Option<crate::workspace_ssh_updater::Decision> {
+        use crate::workspace_ssh_updater::{Decision, CAPABILITY};
+        if self.is_rejected() {
+            return None;
+        }
+        let session = self.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let generation = crate::remote::host::token_identity(&session.relay_token).ok()?.runtime_generation;
+        Decision::read(session.ssh_updater.as_ref(), CAPABILITY, &session.workspace_id, generation, now_ms)
+    }
+
     /// Report only through the credential bound to the current workspace.
     /// The capability is supplied explicitly so a report cannot negotiate
     /// updater support on behalf of the refresh path.
-    #[allow(dead_code)]
     pub(crate) fn report_ssh_update(
         &self,
         api: &HttpApi,
