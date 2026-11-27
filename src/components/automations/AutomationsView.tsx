@@ -288,10 +288,7 @@ export function AutomationsView({ initialAutomationId = null }: { initialAutomat
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
       <header className="flex shrink-0 items-center gap-2 border-b border-hairline px-4 py-3">
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight">Automations</h1>
-          <p className="text-xs text-muted-foreground">Scheduled, issue-driven and manual agent runs</p>
-        </div>
+        <h1 className="text-lg font-semibold tracking-tight">Automations</h1>
         <div className="ml-auto flex items-center gap-1">
           <WithTooltip label="Refresh">
             <Button variant="ghost" size="icon-sm" aria-label="Refresh automations" onClick={() => void refresh()}>

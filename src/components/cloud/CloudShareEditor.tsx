@@ -410,8 +410,8 @@ export function CloudShareEditor({
         </div>
         <DialogDescription>{privacy ? "Sharing is paused while data privacy mode is on."
           : paused ? "Workspace group sharing is paused until it is available again."
-          : "People with access see agent tabs, terminals, files and Git. Drivers can send to agents. Typing in terminals also needs permission approval."}
-          {!paused && offerAdmin && " Admin grants include permission approval."}</DialogDescription>
+          : "People with access see agent tabs, terminals, files and Git. Drivers can also send to agents."}
+          {!paused && offerAdmin && " Admins also manage who has access."}</DialogDescription>
       </DialogHeader>
 
       {paused ? <div className="flex flex-col gap-2 text-xs">
@@ -430,12 +430,6 @@ export function CloudShareEditor({
           <p className="text-muted-foreground" data-testid="cloud-share-you">
             Your access: {yourAccessText(listed.you, orgRole ?? self?.role ?? null, creator)}.
           </p>
-          {generalAccess && (
-            <CloudGeneralAccessControls mode={generalAccess.mode} pending={generalChoice}
-              everyone={`Everyone at ${organization}`} editable={!!generalRevision} disabled={locked || dirty}
-              onChoose={(mode) => setGeneralDraft(generalRevision ? { mode, revision: generalRevision } : undefined)}
-              onSave={saveGeneralAccess} />
-          )}
           {rows.length > 0 ? <>
             <h3 className="font-medium">People and groups with access</h3>
             <ul className="divide-y divide-hairline rounded-md border border-hairline" aria-label="People and groups with access">
@@ -474,11 +468,11 @@ export function CloudShareEditor({
                         {offerAdmin && row.subject.type === "user" ? <option value="manager">{ADMIN_SHARE_LABEL}</option>
                           : row.role === "manager" && <option value="manager" disabled>Admin</option>}
                       </select>
-                      <label className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+                      <label className="flex min-w-0 items-center gap-1.5 text-muted-foreground" title="Approves permission requests and types in terminals">
                         <Switch size="sm" aria-label={`Can approve permissions: ${row.name}`} checked={row.canApprove}
                           disabled={locked || row.role === "manager"} title={row.role === "manager" ? MANAGER_APPROVAL_REASON : undefined}
                           onCheckedChange={(canApprove) => stage({ ...row, canApprove }, "put")} />
-                        Can approve permissions
+                        Can approve
                       </label>
                       <Button size="icon-xs" variant="ghost" aria-label={`Revoke ${row.name}`} disabled={locked}
                         onClick={() => stage(row, "remove")}><X /></Button>
@@ -490,6 +484,12 @@ export function CloudShareEditor({
           </> : <p className="text-muted-foreground">
             {access === "private" ? "Only the creator can see this private workspace." : "No people or groups have been added. Organization admins and the creator already have access."}
           </p>}
+          {generalAccess && (
+            <CloudGeneralAccessControls mode={generalAccess.mode} pending={generalChoice}
+              everyone={`Everyone at ${organization}`} editable={!!generalRevision} disabled={locked || dirty}
+              onChoose={(mode) => setGeneralDraft(generalRevision ? { mode, revision: generalRevision } : undefined)}
+              onSave={saveGeneralAccess} />
+          )}
           {access === "organization" && <div className="flex flex-wrap items-center justify-between gap-2 border-t border-hairline pt-3 text-muted-foreground">
             <span>{becameVisible ? "Workspace is now visible in the organization’s sidebar." : "Visible in the organization’s sidebar."}</span>
             {canChangeVisibility && <Button size="sm" variant="outline" disabled={locked || dirty} onClick={() => setConfirm("private")}>

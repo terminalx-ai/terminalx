@@ -12,8 +12,7 @@ it("opens a profile with a photo, organization role, join date and presence", as
   fireEvent.click(screen.getByRole("button", { name: "View profile: Alice Example" }));
   const profile = await screen.findByRole("dialog", { name: "Profile of Alice Example" });
   expect(within(profile).getByText("alice@example.com")).toBeTruthy();
-  expect(within(profile).getByText("Admin")).toBeTruthy();
-  expect(within(profile).getByText(`Joined ${new Date(member.createdAt).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}`)).toBeTruthy();
+  expect(within(profile).getByText(`Admin · Joined ${new Date(member.createdAt).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}`)).toBeTruthy();
   expect(within(profile).getByLabelText("Online")).toBeTruthy();
   expect(within(profile).getByRole("img", { name: "Alice Example" }).getAttribute("src")).toBe(member.photoUrl);
   fireEvent.keyDown(profile, { key: "Escape" });
@@ -26,7 +25,7 @@ it("falls back to initials for missing and broken photos and unknown dates", asy
   expect(screen.getByRole("button").textContent).toBe("AE");
   fireEvent.click(screen.getByRole("button"));
   const profile = await screen.findByRole("dialog");
-  expect(within(profile).getByText("Join date unavailable")).toBeTruthy();
+  expect(within(profile).queryByText(/Joined|unavailable/)).toBeNull();
   expect(within(profile).getByLabelText("Presence unavailable")).toBeTruthy();
 });
 

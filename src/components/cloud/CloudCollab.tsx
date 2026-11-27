@@ -106,24 +106,24 @@ export function PresenceAvatars({ collabKey, you, tabLabel, nudgeSession }: { co
     return `${nameOf(person.userId)} · ${ROLE_BADGE[person.role] ?? person.role}${person.activity === "typing" ? " · typing" : ""}${where ? ` · on ${where}` : ""}`;
   };
   return (
-    <span className="ml-1 flex shrink-0 items-center -space-x-1" data-testid="session-presence" aria-label={`Also here: ${others.map((person) => nameOf(person.userId)).join(", ")}`}>
+    <span className="ml-1 flex shrink-0 items-center -space-x-0.5" data-testid="session-presence" aria-label={`Also here: ${others.map((person) => nameOf(person.userId)).join(", ")}`}>
       {shown.map((person) => (
         profiles || nudgeSession ? <MemberProfile
           key={person.userId}
           member={memberOf(person.userId)}
           online
           extra={nudgeSession && <SessionNudge session={nudgeSession} userId={person.userId} />}
-          className={cn("size-5 border border-background text-[9px]", person.activity === "typing" && "ring-1 ring-accent")}
+          className={cn("size-5 text-[9px] ring-2 ring-background", person.activity === "typing" && "ring-accent")}
           title={describe(person)}
           data-testid="session-presence-person"
         /> : (
-          <span key={person.userId} className={cn("flex size-5 items-center justify-center rounded-full border border-background bg-well text-[9px] font-medium text-foreground", person.activity === "typing" && "ring-1 ring-accent")} title={describe(person)} data-testid="session-presence-person">
+          <span key={person.userId} className={cn("flex size-5 items-center justify-center rounded-full bg-veil-strong text-[9px] font-medium text-foreground ring-2 ring-background", person.activity === "typing" && "ring-accent")} title={describe(person)} data-testid="session-presence-person">
             {initials(nameOf(person.userId))}
           </span>
         )
       ))}
       {others.length > shown.length && (
-        <span className="flex h-5 items-center rounded-full border border-background bg-well px-1 text-[9px] text-muted-foreground" title={others.slice(HEADER_FACES).map(describe).join("\n")}>
+        <span className="flex h-5 items-center rounded-full bg-veil-strong px-1 text-[9px] text-muted-foreground ring-2 ring-background" title={others.slice(HEADER_FACES).map(describe).join("\n")}>
           +{others.length - shown.length}
         </span>
       )}

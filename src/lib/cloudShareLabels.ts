@@ -92,7 +92,7 @@ export function shareRoleLabel(role: CloudShareRole): string {
   }
 }
 
-export const ADMIN_SHARE_LABEL = "Admin — Manages the workspace and who it’s shared with";
+export const ADMIN_SHARE_LABEL = "Admin";
 export const MANAGER_APPROVAL_REASON = "Admin without permission approval is not supported by this workspace runtime.";
 
 export const OUTCOME_UNKNOWN = "cloud_workspace_request_outcome_unknown";
