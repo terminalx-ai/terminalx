@@ -4712,6 +4712,11 @@ impl CloudWorkspaceService {
             }
             self.schedule_readiness(Some(org), Some(context), input.workspace_mode.as_deref(), input.github_trigger.is_some(), input.webhook_trigger.is_some())?;
             result.configuration = Self::schedule_configuration(&input).map_err(|_| post_send_error(RequestRisk::Read))?;
+            // The editor consumes a full timing DTO. The create/PATCH wire
+            // format omits fields that do not apply to the chosen preset.
+            if let Some(timing) = input.schedule {
+                result.configuration["schedule"] = json!(timing);
+            }
             client.normalize_schedule(&mut result.schedule, &mut [], RequestRisk::Read)?;
             Ok(result)
         })
@@ -10487,19 +10492,25 @@ mod tests {
         let (_, held) = test_service("http://127.0.0.1:1");
         assert_eq!(held.schedule_edit("org-1", SCHEDULE).err().unwrap().code, "cloud_workspace_runtime_not_ready");
         assert_eq!(held.schedule_patch("org-1", SCHEDULE, 10, false, &schedule_input()).unwrap_err().code, "cloud_workspace_request_invalid");
-        let input = schedule_input();
+        let mut input = schedule_input();
+        let timing = input.schedule.as_mut().unwrap();
+        timing.preset = "hourly".into();
+        timing.hour = 0;
+        timing.weekdays.clear();
         let configuration = CloudWorkspaceService::schedule_configuration(&input).unwrap();
         let mut schedule = schedule_json(SCHEDULE, &input.workspace_id);
         schedule["updatedAt"] = json!(1_785_000_000_123u64);
         schedule["consoleUrl"] = json!(format!("https://console.terminalx.ai/organizations/org-1/automations/{SCHEDULE}"));
         schedule["webhookSecret"] = json!("must not reach the UI");
-        let body = json!({ "schedule": schedule, "configuration": configuration });
+        let mut projected_configuration = configuration.clone();
+        projected_configuration["schedule"] = json!(input.schedule);
+        let body = json!({ "schedule": schedule, "configuration": projected_configuration });
         let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
         let (_, reader) = phase2_service(&base);
         let editable = reader.schedule_edit("org-1", SCHEDULE).unwrap();
         assert!(request.join().unwrap().text.starts_with(&format!("GET /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/edit HTTP/1.1")));
         let projected = serde_json::to_value(&editable).unwrap();
-        assert_eq!(projected["configuration"], configuration);
+        assert_eq!(projected["configuration"], projected_configuration);
         assert_eq!(projected["schedule"]["consoleUrl"], schedule["consoleUrl"]);
         assert!(projected["schedule"].get("webhookSecret").is_none());
 
@@ -10513,6 +10524,8 @@ mod tests {
         let request = request.join().unwrap();
         assert!(request.text.starts_with(&format!("PATCH /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE} HTTP/1.1")));
         let mut expected = configuration;
+        assert!(expected["schedule"].get("hour").is_none());
+        assert!(expected["schedule"].get("weekdays").is_none());
         expected["expectedUpdatedAt"] = json!(revision);
         expected["confirmProviderSpend"] = json!(true);
         assert_eq!(sent_body(&request), expected);
