@@ -1683,6 +1683,77 @@ pub async fn cloud_workspace_mentions(org_id: String, workspace_id: String, inpu
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.workspace_mentions(&org_id, &workspace_id, input))
 }
 
+// Team artifacts (PRO-158).
+#[tauri::command]
+pub async fn team_artifacts_list(org_id: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::TeamArtifactList, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.team_artifacts(&org_id))
+}
+
+#[tauri::command]
+pub async fn team_artifact_get(org_id: String, artifact_id: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::TeamArtifactDetail, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.team_artifact(&org_id, &artifact_id))
+}
+
+#[tauri::command]
+pub async fn team_artifact_content(org_id: String, artifact_id: String, version: u32, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::TeamArtifactContent, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.team_artifact_content(&org_id, &artifact_id, version))
+}
+
+#[tauri::command]
+pub async fn team_artifact_publish(org_id: String, input: crate::cloud_workspaces::TeamArtifactPublishInput, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::TeamArtifactPublished, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.publish_team_artifact(&org_id, input))
+}
+
+#[tauri::command]
+pub async fn team_artifact_delete(org_id: String, artifact_id: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::TeamArtifactDeleted, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.delete_team_artifact(&org_id, &artifact_id))
+}
+
+#[tauri::command]
+pub async fn team_artifact_version_delete(org_id: String, artifact_id: String, version: u32, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::TeamArtifactVersionDeleted, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.delete_team_artifact_version(&org_id, &artifact_id, version))
+}
+
+/// The file the person picks for Publish… (PRO-158). The picker is opened
+/// here, so the window learns only the file chosen: its name and its text,
+/// refused past the team artifact cap. `None` when nothing was picked.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamArtifactPickedFile {
+    name: String,
+    content: Option<String>,
+    refused: Option<&'static str>,
+}
+
+#[tauri::command]
+pub async fn team_artifact_pick_file(app: tauri::AppHandle, org_id: String, state: tauri::State<'_, crate::AppState>) -> Result<Option<TeamArtifactPickedFile>, String> {
+    use std::io::Read;
+    use tauri_plugin_dialog::DialogExt;
+    // Nothing is picked or read for an organization without team artifacts.
+    let service = state.cloud_workspaces.clone();
+    let ready = tauri::async_runtime::spawn_blocking(move || service.team_artifacts_ready(&org_id)).await;
+    if !matches!(ready, Ok(Ok(()))) { return Err("team_artifacts_unavailable".to_string()); }
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(picked) = app.dialog().file().add_filter("Pages and notes", &["md", "markdown", "html", "htm", "txt"]).blocking_pick_file() else {
+            return Ok(None);
+        };
+        let path = picked.into_path().map_err(|_| "unreadable".to_string())?;
+        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let limit = crate::cloud_workspaces::TEAM_ARTIFACT_CONTENT_BYTES;
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(&path).and_then(|file| file.take(limit as u64 + 1).read_to_end(&mut bytes));
+        let (content, refused) = match read {
+            Err(_) => (None, Some("unreadable")),
+            Ok(_) if bytes.len() > limit => (None, Some("too_large")),
+            Ok(_) => match String::from_utf8(bytes) {
+                Ok(text) => (Some(text), None),
+                Err(_) => (None, Some("not_text")),
+            },
+        };
+        Ok(Some(TeamArtifactPickedFile { name, content, refused }))
+    }).await.map_err(|_| "unreadable".to_string())?
+}
+
 /// PRO-154: shared model slots, organization snippets and action prompts.
 #[tauri::command]
 pub async fn shared_setups(org_id: String, op: crate::cloud_workspaces::SharedSetupsOp, state: tauri::State<'_, crate::AppState>) -> Result<serde_json::Value, crate::cloud_workspaces::CloudWorkspaceClientError> {
@@ -4454,6 +4525,31 @@ pub async fn cloud_control_set_setting(app: tauri::AppHandle, enabled: bool) -> 
     }
     crate::cloud_control::set_enabled(enabled)?;
     Ok(CloudControlSettingChange { enabled: crate::cloud_control::enabled(), refused: None })
+}
+
+/// Whether agents may publish team artifacts (PRO-158).
+#[tauri::command]
+pub fn team_artifacts_publish_setting() -> bool {
+    crate::team_artifact_control::enabled()
+}
+
+/// Turn "Let agents publish team artifacts" on (after the person agrees in a native dialog) or off.
+#[tauri::command]
+pub async fn team_artifacts_publish_set_setting(app: tauri::AppHandle, enabled: bool) -> Result<CloudControlSettingChange, String> {
+    if enabled && !crate::team_artifact_control::enabled() {
+        let answer = cloud_control_question(
+            app,
+            "Let agents publish team artifacts?".to_string(),
+            "Agents in local sessions will be able to publish files from their session's folder to everyone in your organization. Tabs that ask before acting still ask you each time; tabs that run without asking publish without another question.".to_string(),
+            "Turn on".to_string(),
+        )
+        .await;
+        if answer != crate::cloud_control::Answer::Accepted {
+            return Ok(CloudControlSettingChange { enabled: crate::team_artifact_control::enabled(), refused: Some(answer.wire()) });
+        }
+    }
+    crate::team_artifact_control::set_enabled(enabled)?;
+    Ok(CloudControlSettingChange { enabled: crate::team_artifact_control::enabled(), refused: None })
 }
 
 /// Ask the person about a cloud request that came from the command line.
