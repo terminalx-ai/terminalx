@@ -79,16 +79,43 @@ import { SessionCost } from "./SessionCost";
 import { RunMenu, RunRestartOffer, offersRunMenu } from "./RunMenu";
 import { WindowControls } from "@/components/layout/WindowControls";
 import { AppMenu } from "@/components/layout/AppMenu";
+import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
+import { registerProjectSearch } from "@/lib/projectSearch";
+import type { FileSource } from "@/lib/workspaceFiles";
 
 const RunView = lazy(() => import("@/components/orchestration/RunView").then((m) => ({ default: m.RunView })));
 const BrowserView = lazy(() => import("@/components/browser/BrowserView").then((m) => ({ default: m.BrowserView })));
 const EditorSplit = lazy(() => import("@/components/editor/EditorSplit").then((m) => ({ default: m.EditorSplit })));
 const QuickOpen = lazy(() => import("@/components/editor/QuickOpen").then((m) => ({ default: m.QuickOpen })));
 const ProjectSearch = lazy(() => import("@/components/editor/ProjectSearch").then((m) => ({ default: m.ProjectSearch })));
-const CloudTerminalPane = lazy(() => import("@/components/cloud/CloudTerminalPane").then((m) => ({ default: m.CloudTerminalPane })));
 const CloudPortsView = lazy(() => import("@/components/cloud/CloudPorts").then((m) => ({ default: m.CloudPortsView })));
 const MachineContinueDialog = lazy(() => import("@/components/machines/MachineContinueDialog").then((m) => ({ default: m.MachineContinueDialog })));
 const ContinuationDialog = lazy(() => import("./ContinuationDialog").then((m) => ({ default: m.ContinuationDialog })));
+
+/**
+ * Registers ⌘P / ⇧⌘F / ⇧⌘H synchronously on session mount so first-press shortcuts
+ * are never dropped while lazy dialog chunks load, and fetches each chunk only on first use.
+ */
+function SessionFileDialogs({ sessionId, root, source, branch }: { sessionId: string; root: string; source?: FileSource; branch?: string | null }) {
+  const [quickOpenMounted, setQuickOpenMounted] = useState(false);
+  const [searchRequest, setSearchRequest] = useState<{ mode: "find" | "replace"; query?: string } | null>(null);
+  const canRewrite = !source || (!!source.replaceText && !source.readOnly);
+
+  useShortcut("files.quickOpen", () => setQuickOpenMounted(true), { enabled: !quickOpenMounted });
+  useShortcut("files.search", () => setSearchRequest({ mode: "find" }), { enabled: !searchRequest });
+  useShortcut("files.replace", () => { if (canRewrite) setSearchRequest({ mode: "replace" }); }, { enabled: !searchRequest });
+  useEffect(() => {
+    if (searchRequest) return;
+    return registerProjectSearch((query) => setSearchRequest({ mode: "find", query }));
+  }, [searchRequest]);
+
+  return (
+    <Suspense fallback={null}>
+      {quickOpenMounted && <QuickOpen sessionId={sessionId} root={root} source={source} branch={branch} initialOpen />}
+      {searchRequest && <ProjectSearch sessionId={sessionId} root={root} source={source} initialOpen={searchRequest} />}
+    </Suspense>
+  );
+}
 
 /** Why a quick chat's panel has no Changes, Repo or PR. */
 const NO_REPOSITORY = "No repository here: Changes, Repo and PR need one. Point this chat at a repository, or move it to a project, to use them.";
@@ -1167,18 +1194,16 @@ export const SessionView = memo(function SessionView({
                   className={cn("absolute inset-0 flex flex-col", (selected?.kind !== "terminal" || terminal.id !== selected.id) && "invisible")}
                 >
                   {selected?.kind === "terminal" && terminal.id === selected.id && (
-                    <Suspense fallback={null}>
-                      <CloudTerminalPane
-                        workspace={cloud.workspaceKey}
-                        terminal={terminal}
-                        client={cloud.client!}
-                        connected={cloud.connected}
-                        manage={cloud.manage}
-                        mayControl={cloud.mayControlTerminals}
-                        you={cloud.collab.live ? cloud.collab.you : null}
-                        base={cloud.terminalBase}
-                      />
-                    </Suspense>
+                    <CloudTerminalPane
+                      workspace={cloud.workspaceKey}
+                      terminal={terminal}
+                      client={cloud.client!}
+                      connected={cloud.connected}
+                      manage={cloud.manage}
+                      mayControl={cloud.mayControlTerminals}
+                      you={cloud.collab.live ? cloud.collab.you : null}
+                      base={cloud.terminalBase}
+                    />
                   )}
                 </div>
               ))}
@@ -1235,21 +1260,11 @@ export const SessionView = memo(function SessionView({
           />
         ))}
       </PanelPresence>
-      <Suspense fallback={null}>
-        {cloud ? (
-          cloud.fileSource && (
-            <>
-              <QuickOpen sessionId={session.id} root={session.cwd} source={cloud.fileSource} />
-              <ProjectSearch sessionId={session.id} root={session.cwd} source={cloud.fileSource} />
-            </>
-          )
-        ) : (
-          <>
-            <QuickOpen sessionId={session.id} root={session.cwd} branch={session.branch} />
-            <ProjectSearch sessionId={session.id} root={session.cwd} />
-          </>
-        )}
-      </Suspense>
+      {cloud ? (
+        cloud.fileSource && <SessionFileDialogs sessionId={session.id} root={session.cwd} source={cloud.fileSource} />
+      ) : (
+        <SessionFileDialogs sessionId={session.id} root={session.cwd} branch={session.branch} />
+      )}
     </div>
     </TerminalChatProvider>
   );

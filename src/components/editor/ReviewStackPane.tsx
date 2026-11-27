@@ -17,6 +17,9 @@ import { selectSessionTab } from "@/lib/terminal";
 import type { ChangeRange } from "@/lib/changes";
 import type { ChangedFile } from "@/types/session";
 
+/** Reviews above this file count recycle off-screen CodeMirror editors to bound memory (P-41). */
+export const REVIEW_RECYCLE_THRESHOLD = 12;
+
 /**
  * The scope's one review tab (PRO-392, design 05.01): every changed file one
  * after another, each under a header with its path, its counts and Viewed,
@@ -151,7 +154,7 @@ function ReviewStack({ entry, source, visible }: { entry: DiffEditorEntry; sourc
       {!range ? <p className="p-4 text-sm text-muted-foreground">No snapshots are available for this turn. Choose All changes in the Changes panel to review the workspace.</p>
         : files === null ? !error && <p role="status" className="p-4 text-sm text-muted-foreground">Loading changes…</p>
         : !files.length ? <p className="p-4 text-sm text-muted-foreground">No changes in this scope.</p>
-        : <div ref={content}>{files.map((file) => <StackedFile key={JSON.stringify([file.path, file.oldPath, range.base, range.head])} source={source} file={file} range={range} mode={mode} hideWhitespace={hideWhitespace}
+        : <div ref={content}>{files.map((file) => <StackedFile key={JSON.stringify([file.path, file.oldPath, range.base, range.head])} source={source} file={file} range={range} mode={mode} hideWhitespace={hideWhitespace} recycle={files.length > REVIEW_RECYCLE_THRESHOLD}
           viewed={viewed.status(file).viewed} onViewed={file.blobHash ? (on) => viewed.set(file, on) : undefined} onOpenFile={file.status !== "deleted" ? () => openWorkspaceFile(entry.sessionId, entry.root, file.path, undefined, entry.workspaceRoot) : undefined} onOpen={() => openFile(file)} />)}</div>}
     </div>
   </div>;
@@ -159,8 +162,8 @@ function ReviewStack({ entry, source, visible }: { entry: DiffEditorEntry; sourc
 
 type Pair = { before: string; after: string; size?: number | null };
 
-function StackedFile({ source, file, range, mode, hideWhitespace, viewed, onViewed, onOpen, onOpenFile }: {
-  source: GitSource; file: ChangedFile; range: ChangeRange; mode: "unified" | "split"; hideWhitespace: boolean;
+function StackedFile({ source, file, range, mode, hideWhitespace, recycle, viewed, onViewed, onOpen, onOpenFile }: {
+  source: GitSource; file: ChangedFile; range: ChangeRange; mode: "unified" | "split"; hideWhitespace: boolean; recycle: boolean;
   onOpenFile?: () => void;
   viewed: boolean; onViewed?: (on: boolean) => void; onOpen(): void;
 }) {
@@ -169,31 +172,37 @@ function StackedFile({ source, file, range, mode, hideWhitespace, viewed, onView
   const section = useRef<HTMLElement>(null);
   const body = useRef<HTMLDivElement>(null);
   const lastHeight = useRef<number>(160);
-  // Files load once near the viewport, and recycle their CodeMirror views when scrolled far off-screen
-  // while keeping a height-preserving placeholder so multi-file reviews never retain unbounded live editors.
+  // Files load once near the viewport. In large multi-file reviews (`recycle`), off-screen
+  // CodeMirror views are recycled behind a height-preserving placeholder to bound live editors;
+  // smaller reviews keep loaded editors mounted so lines, comments and threads stay in the DOM.
   const noObserver = typeof IntersectionObserver === "undefined";
   const [everNear, setEverNear] = useState(noObserver);
   const [inWindow, setInWindow] = useState(noObserver);
   useEffect(() => {
     if (noObserver || !section.current) return;
+    if (!recycle && everNear) {
+      setInWindow(true);
+      return;
+    }
     const observer = new IntersectionObserver(
       (entries) => {
         const intersecting = entries.some((e) => e.isIntersecting);
         if (intersecting) {
           setEverNear(true);
           setInWindow(true);
-        } else {
+          if (!recycle) observer.disconnect();
+        } else if (recycle) {
           if (body.current && body.current.offsetHeight > 0) {
             lastHeight.current = body.current.offsetHeight;
           }
           setInWindow(false);
         }
       },
-      { rootMargin: "1200px 0px" },
+      { rootMargin: recycle ? "1200px 0px" : "800px 0px" },
     );
     observer.observe(section.current);
     return () => observer.disconnect();
-  }, [noObserver]);
+  }, [noObserver, recycle, everNear]);
   const [pair, setPair] = useState<Pair | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
@@ -226,7 +235,7 @@ function StackedFile({ source, file, range, mode, hideWhitespace, viewed, onView
     </header>
     {/* Its own stacking context: the editor's gutters must not draw over the next file's sticky header. */}
     <div ref={body} className={cn("isolate", viewed && "opacity-60")}>
-      {!inWindow ? <div aria-hidden data-testid="review-file-placeholder" style={{ height: lastHeight.current }} />
+      {recycle && everNear && !inWindow ? <div aria-hidden data-testid="review-file-placeholder" style={{ height: lastHeight.current }} />
         : media && media !== "svg" ? <p className="px-4 py-3 text-xs text-muted-foreground">{media === "pdf" ? "PDF" : "Image"} changed. <Button size="xs" variant="outline" onClick={onOpen}>Open to compare</Button></p>
         : error ? <div role="alert" className="px-4 py-3 text-xs text-destructive">{error} <Button size="xs" variant="outline" onClick={() => setRetry((n) => n + 1)}>Retry</Button></div>
         : !pair ? <p role="status" className="min-h-16 px-4 py-3 text-xs text-muted-foreground">Loading file diff…</p>

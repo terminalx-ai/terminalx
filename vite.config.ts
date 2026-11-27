@@ -275,7 +275,7 @@ export default defineConfig(async () => ({
           if (norm.includes("/radix-ui/") || norm.includes("/@radix-ui/")) return "vendor-radix";
           if (norm.includes("/@xterm/")) return "vendor-xterm";
           if ((norm.includes("/@codemirror/") && !norm.includes("/@codemirror/lang-")) || norm.includes("/@lezer/highlight/") || norm.includes("/@lezer/common/") || norm.includes("/@lezer/lr/")) return "vendor-codemirror";
-          if (norm.includes("/streamdown/") || norm.includes("/remend/") || norm.includes("/remark-") || norm.includes("/unified/") || norm.includes("/mdast-") || norm.includes("/micromark") || norm.includes("/hast-") || norm.includes("/rehype-")) return "vendor-markdown";
+          if ((norm.includes("/streamdown/") && !norm.includes("highlighted-body")) || norm.includes("/remend/") || norm.includes("/remark-") || norm.includes("/unified/") || norm.includes("/mdast-") || norm.includes("/micromark") || norm.includes("/hast-") || norm.includes("/rehype-")) return "vendor-markdown";
           if ((norm.includes("/shiki/") || norm.includes("/@shikijs/core/") || norm.includes("/@shikijs/engine-javascript/") || norm.includes("/@streamdown/code/")) && !norm.includes("/@shikijs/langs/") && !norm.includes("/@shikijs/themes/")) return "vendor-shiki";
           if (norm.includes("/lucide-react/")) return "vendor-icons";
           if (norm.includes("/react-material-icon-theme/")) return "vendor-material-icons";

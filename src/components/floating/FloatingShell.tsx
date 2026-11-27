@@ -32,6 +32,7 @@ import { bootPairing } from "@/lib/pairing";
 import { isQuickChat, quickChatsOf } from "@/lib/quickChats";
 import { bootSessions, openTarget, selectSession, useSessionStore } from "@/lib/sessions";
 import { subscribeTabPty } from "@/lib/tabViews";
+import { subscribeTerminals } from "@/lib/terminal";
 import { getTerminalState } from "@/lib/terminal";
 import { sessionStatus, TAB_STATUS_LABEL, type SessionEntry, type TabStatus } from "@/types/session";
 import { WindowControls } from "@/components/layout/WindowControls";
@@ -74,6 +75,7 @@ export function FloatingShell() {
   useEffect(() => {
     void subscribeAgentEvents();
     void subscribeTabPty();
+    void subscribeTerminals();
     void bootSessions();
     void bootPairing();
     void loadModels();

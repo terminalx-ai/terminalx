@@ -42,6 +42,7 @@ import { loadModels, onAgentSettingsRequest } from "@/lib/models";
 import { startNotifications } from "@/lib/notify";
 import { bootCloudWorkClaims } from "@/lib/cloudWorkClaims";
 import { subscribeTabPty } from "@/lib/tabViews";
+import { subscribeTerminals } from "@/lib/terminal";
 import { MergedCleanupNotices } from "@/components/ui/MergedCleanupNotices";
 import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
 import { Toasts } from "@/components/ui/Toasts";
@@ -179,6 +180,7 @@ export function AppShell() {
   useEffect(() => {
     void subscribeAgentEvents();
     void subscribeTabPty();
+    void subscribeTerminals();
     void bootSessions();
     // Launch where the app was left (PRO-130): the session and its panel tab, or the page.
     bootLastView();
