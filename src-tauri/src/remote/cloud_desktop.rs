@@ -97,6 +97,16 @@ impl Process {
         })
     }
 
+    /// No process: what a slot holds between one Chrome and the next.
+    fn stopped() -> Self {
+        Self {
+            child: None,
+            files: None,
+            #[cfg(target_os = "linux")]
+            runtime_lifetime: None,
+        }
+    }
+
     fn child(&mut self) -> &mut Child {
         self.child
             .as_mut()
@@ -126,7 +136,7 @@ impl Process {
 
     #[cfg(not(target_os = "linux"))]
     fn is_running(&mut self) -> bool {
-        matches!(self.child().try_wait(), Ok(None))
+        self.child.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None)))
     }
 }
 
@@ -252,14 +262,33 @@ async fn write_cookie(
     }
 }
 
-/// `DevToolsActivePort`: the port, then the browser target's path.
-fn parse_devtools(text: &str) -> Option<String> {
-    let mut lines = text.lines();
-    let port: u16 = lines.next()?.trim().parse().ok().filter(|port| *port != 0)?;
-    let path = lines.next()?.trim();
-    let id = path.strip_prefix("/devtools/browser/")?;
-    (!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
-        .then(|| format!("ws://127.0.0.1:{port}{path}"))
+/// Chrome on `display`. With `debugging`, `--remote-debugging-pipe` and
+/// nothing else: the DevTools protocol on fds 3 and 4, whose other ends only
+/// this runtime holds. No port is opened and no profile path changes.
+fn spawn_chrome(
+    chrome: &Path,
+    display: &str,
+    authority: &Path,
+    files: &Arc<tempfile::TempDir>,
+    debugging: bool,
+) -> Result<(Process, Option<Arc<crate::cloud_browser::cdp::Cdp>>), DesktopError> {
+    let mut app = command(chrome);
+    app.env("DISPLAY", display)
+        .env("XAUTHORITY", authority)
+        .env("HOME", files.path())
+        .current_dir(files.path())
+        .args(["--no-first-run", "--no-default-browser-check"]);
+    let pipes = if debugging {
+        let pipes = crate::cloud_browser::cdp::ChromePipes::new().map_err(|_| DesktopError::ChromeStartupFailed)?;
+        app.arg("--remote-debugging-pipe");
+        pipes.hand_to(&mut app);
+        Some(pipes)
+    } else {
+        None
+    };
+    app.arg("about:blank");
+    let process = Process::spawn(&mut app, Some(files.clone())).map_err(|_| DesktopError::ChromeStartupFailed)?;
+    Ok((process, pipes.map(crate::cloud_browser::cdp::ChromePipes::connect)))
 }
 
 fn parse_display(bytes: &[u8]) -> io::Result<u16> {
@@ -274,12 +303,16 @@ fn parse_display(bytes: &[u8]) -> io::Result<u16> {
 pub(crate) struct Desktop {
     // Drop graphics clients before the server, and all processes before their private files.
     chrome: Process,
+    /// The runtime's DevTools pipe to Chrome, while agents may use it (PRO-209).
+    devtools: Option<Arc<crate::cloud_browser::cdp::Cdp>>,
     // Not watched: closing the terminal window must not restart the desktop.
     _terminal: Option<Process>,
     manager: Process,
     xvfb: Process,
     files: Arc<tempfile::TempDir>,
     display: String,
+    authority: PathBuf,
+    chrome_path: PathBuf,
     vnc: PathBuf,
 }
 
@@ -296,8 +329,15 @@ impl Desktop {
 
     /// `workdir` is where the terminal opens (the workspace checkout).
     pub(crate) async fn start_in(dirs: &[&str], workdir: Option<&Path>) -> Result<Self, DesktopError> {
+        Self::start_with(dirs, workdir, false).await
+    }
+
+    /// `debugging`: Chrome takes DevTools commands from the runtime alone,
+    /// over a pipe, for the cloud browser for agents (PRO-209). Only while
+    /// the workspace offers that tool; otherwise Chrome starts as it always has.
+    pub(crate) async fn start_with(dirs: &[&str], workdir: Option<&Path>, debugging: bool) -> Result<Self, DesktopError> {
         let tools = Tools::discover(dirs)?;
-        let mut desktop = tokio::time::timeout(START_TIMEOUT, Self::launch(tools, workdir))
+        let mut desktop = tokio::time::timeout(START_TIMEOUT, Self::launch(tools, workdir, debugging))
             .await
             .map_err(|_| DesktopError::StartupFailed)??;
         tokio::time::sleep(STARTUP_GRACE).await;
@@ -314,7 +354,7 @@ impl Desktop {
         self.xvfb.is_running() && self.manager.is_running() && self.chrome.is_running()
     }
 
-    async fn launch(tools: Tools, workdir: Option<&Path>) -> Result<Self, DesktopError> {
+    async fn launch(tools: Tools, workdir: Option<&Path>, debugging: bool) -> Result<Self, DesktopError> {
         let files = Arc::new(
             tempfile::Builder::new()
                 .prefix("terminalx-desktop-")
@@ -367,23 +407,7 @@ impl Desktop {
             app
         };
         let manager = Process::spawn(&mut launch(&tools.window_manager), Some(files.clone()))?;
-        // A private profile and a loopback DevTools port on an ephemeral
-        // number, for the cloud browser for agents (PRO-209). Chrome writes
-        // the chosen port to `DevToolsActivePort` in the profile.
-        let profile = files.path().join("chrome");
-        let chrome = Process::spawn(
-            launch(&tools.chrome)
-                .arg(format!("--user-data-dir={}", profile.display()))
-                .args([
-                    "--remote-debugging-address=127.0.0.1",
-                    "--remote-debugging-port=0",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "about:blank",
-                ]),
-            Some(files.clone()),
-        )
-        .map_err(|_| DesktopError::ChromeStartupFailed)?;
+        let (chrome, devtools) = spawn_chrome(&tools.chrome, &display, &authority, &files, debugging)?;
         let terminal = tools.terminal.as_deref().and_then(|path| {
             let mut terminal = launch(path);
             if let Some(dir) = workdir.filter(|dir| dir.is_dir()) {
@@ -395,26 +419,34 @@ impl Desktop {
         });
         Ok(Self {
             chrome,
+            devtools,
             _terminal: terminal,
             manager,
             xvfb,
             files,
             display,
+            authority,
+            chrome_path: tools.chrome,
             vnc: tools.vnc,
         })
     }
 
-    /// Chrome's DevTools browser endpoint, once Chrome has written it:
-    /// `ws://127.0.0.1:<port><path>`.
-    async fn devtools(&self) -> Result<String, DesktopError> {
-        let file = self.files.path().join("chrome").join("DevToolsActivePort");
-        for _ in 0..50 {
-            if let Some(endpoint) = tokio::fs::read_to_string(&file).await.ok().as_deref().and_then(parse_devtools) {
-                return Ok(endpoint);
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+    /// Start Chrome again, with or without the runtime's DevTools pipe. Its
+    /// open tabs close; the rest of the desktop stays.
+    async fn relaunch_chrome(&mut self, debugging: bool) -> Result<(), DesktopError> {
+        // The old Chrome and its pipe go first: a second Chrome on the same
+        // profile would hand its window to the first and exit.
+        self.devtools = None;
+        drop(std::mem::replace(&mut self.chrome, Process::stopped()));
+        tokio::time::sleep(STARTUP_GRACE).await;
+        let (chrome, devtools) = spawn_chrome(&self.chrome_path, &self.display, &self.authority, &self.files, debugging)?;
+        self.chrome = chrome;
+        self.devtools = devtools;
+        tokio::time::sleep(STARTUP_GRACE).await;
+        if !self.chrome.is_running() {
+            return Err(DesktopError::ChromeStartupFailed);
         }
-        Err(DesktopError::ChromeStartupFailed)
+        Ok(())
     }
 
     pub(crate) async fn connect(
@@ -498,7 +530,7 @@ pub(crate) struct DesktopLease {
 /// An agent's hold on the desktop (PRO-209): it keeps the desktop up with no
 /// viewer, like a stream does, and names Chrome's DevTools endpoint.
 pub(crate) struct AgentLease {
-    pub(crate) devtools: String,
+    pub(crate) devtools: Arc<crate::cloud_browser::cdp::Cdp>,
     pool: Weak<DesktopPool>,
 }
 
@@ -563,7 +595,7 @@ impl DesktopPool {
         }
         if state.desktop.is_none() {
             let dirs: Vec<_> = self.bin_dirs.iter().map(String::as_str).collect();
-            let desktop = Desktop::start_in(&dirs, self.workdir.as_deref()).await?;
+            let desktop = Desktop::start_with(&dirs, self.workdir.as_deref(), crate::cloud_browser::debugging_wanted()).await?;
             self.watch_health(desktop.files.path().to_owned());
             state.desktop = Some(desktop);
         }
@@ -603,7 +635,8 @@ impl DesktopPool {
         Tools::discover(&dirs).is_ok()
     }
 
-    /// Start the desktop if it is not up, and hold it for an agent.
+    /// Start the desktop if it is not up, and hold it for an agent. A Chrome
+    /// started without the runtime's DevTools pipe is started again with it.
     pub(crate) async fn agent(self: &Arc<Self>) -> Result<AgentLease, DesktopError> {
         let mut state = self.state.lock().await;
         if state.desktop.as_mut().is_some_and(|desktop| !desktop.is_running()) {
@@ -611,22 +644,29 @@ impl DesktopPool {
         }
         if state.desktop.is_none() {
             let dirs: Vec<_> = self.bin_dirs.iter().map(String::as_str).collect();
-            let desktop = Desktop::start_in(&dirs, self.workdir.as_deref()).await?;
+            let desktop = Desktop::start_with(&dirs, self.workdir.as_deref(), true).await?;
             self.watch_health(desktop.files.path().to_owned());
             state.desktop = Some(desktop);
         }
-        let devtools = match state.desktop.as_ref().expect("desktop started").devtools().await {
-            Ok(devtools) => devtools,
-            Err(error) => {
-                if state.connected == 0 {
-                    state.desktop = None;
-                }
-                return Err(error);
-            }
-        };
+        let desktop = state.desktop.as_mut().expect("desktop started");
+        if desktop.devtools.as_ref().is_none_or(|cdp| cdp.is_closed()) {
+            desktop.relaunch_chrome(true).await?;
+        }
+        let devtools = desktop.devtools.clone().ok_or(DesktopError::ChromeStartupFailed)?;
         state.connected += 1;
         state.generation = state.generation.wrapping_add(1);
         Ok(AgentLease { devtools, pool: Arc::downgrade(self) })
+    }
+
+    /// The switch changed: Chrome has the DevTools pipe only while it is on.
+    /// A running Chrome that differs is started again now, never left on.
+    pub(crate) async fn set_debugging(&self, on: bool) {
+        let mut state = self.state.lock().await;
+        let Some(desktop) = state.desktop.as_mut() else { return };
+        if desktop.devtools.is_some() != on && desktop.relaunch_chrome(on).await.is_err() {
+            // A desktop whose Chrome cannot start is stopped, not left as it was.
+            state.desktop = None;
+        }
     }
 
     fn watch_health(self: &Arc<Self>, files: PathBuf) {
@@ -689,17 +729,6 @@ impl Drop for DesktopLease {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reads_only_a_loopback_browser_devtools_endpoint() {
-        assert_eq!(
-            parse_devtools("41235\n/devtools/browser/0b9e-4f1a\n").as_deref(),
-            Some("ws://127.0.0.1:41235/devtools/browser/0b9e-4f1a")
-        );
-        for invalid in ["", "0\n/devtools/browser/a", "41235\n/devtools/page/a", "41235\n/devtools/browser/", "x\n/devtools/browser/a", "1\n/devtools/browser/a?b"] {
-            assert_eq!(parse_devtools(invalid), None, "{invalid:?}");
-        }
-    }
 
     #[test]
     fn accepts_only_a_bounded_numeric_display() {
@@ -1130,6 +1159,37 @@ mod tests {
         Ok(())
     }
 
+    /// PRO-209 review: Chrome gets the DevTools protocol only on a pipe only
+    /// the runtime holds, only while agents may use it; otherwise it starts
+    /// exactly as before, with no port and no other profile.
+    #[tokio::test]
+    async fn chrome_has_a_devtools_pipe_only_while_debugging_and_never_a_port() {
+        let files = Arc::new(tempfile::tempdir().unwrap());
+        let chrome = files.path().join("chrome-fixture");
+        let seen = files.path().join("seen");
+        std::fs::write(&chrome, format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{0}.args'\n[ -e /dev/fd/3 ] && [ -e /dev/fd/4 ] && echo pipe > '{0}.fds'\nexec /bin/sleep 15\n",
+            seen.display()
+        )).unwrap();
+        std::fs::set_permissions(&chrome, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for debugging in [false, true] {
+            let _ = std::fs::remove_file(seen.with_extension("fds"));
+            let (mut process, devtools) = spawn_chrome(&chrome, ":42", &files.path().join("Xauthority"), &files, debugging).unwrap();
+            let args = seen.with_extension("args");
+            for _ in 0..100 {
+                if args.exists() && (!debugging || seen.with_extension("fds").exists()) { break; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let argv = std::fs::read_to_string(&args).unwrap();
+            assert!(!argv.contains("--remote-debugging-port") && !argv.contains("--remote-debugging-address") && !argv.contains("--user-data-dir"), "{argv}");
+            assert_eq!(argv.contains("--remote-debugging-pipe"), debugging, "{argv}");
+            assert_eq!(seen.with_extension("fds").exists(), debugging, "fds 3 and 4 only with the pipe");
+            assert_eq!(devtools.is_some(), debugging);
+            assert!(process.is_running());
+            std::fs::remove_file(&args).unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn each_connection_gets_its_own_process_and_watch_mode() {
         let files = tempfile::tempdir().unwrap();
@@ -1139,9 +1199,12 @@ mod tests {
         let idle = || Process::spawn(command(Path::new("/bin/sleep")).arg("15"), None).unwrap();
         let desktop = Desktop {
             chrome: idle(),
+            devtools: None,
             _terminal: None,
             manager: idle(),
             xvfb: idle(),
+            authority: files.path().join("Xauthority"),
+            chrome_path: PathBuf::from("/bin/sleep"),
             files: Arc::new(files),
             display: ":42".into(),
             vnc,

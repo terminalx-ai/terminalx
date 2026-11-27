@@ -302,7 +302,7 @@ function CloudBrowserCard({ ask, onAnswer, busy, blockedReason, aside, cardRef, 
           {url && <><span>· starts at</span><code className="truncate font-mono text-foreground">{url}</code></>}
         </p>
         <p className="leading-relaxed text-muted-foreground">
-          {agent} can open pages, click and type until it closes this browser session. One approval covers the whole session; a new session asks again. You and anyone watching see every step in the Desktop tab, and can take control there.
+          {agent} and its sub-agents in this tab can open pages, click and type in a new tab until it closes this browser session. It uses the desktop’s Chrome, with any sites signed in there. One approval covers the whole session; a new session asks again. You and anyone watching see every step in the Desktop tab, and can take control there.
         </p>
         {plan && <p className="whitespace-pre-wrap break-words text-muted-foreground" data-testid="cloud-browser-plan">Plan: {plan}</p>}
       </div>

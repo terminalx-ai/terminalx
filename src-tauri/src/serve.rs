@@ -712,6 +712,9 @@ fn start(options: &Options, guest_mode: bool, adopted: Inherited, owner: Option<
     }
     crate::workspace_setup::recover(&manager);
     let hooked = manager.clone();
+    // A cloud browser session never outlives its agent's CLI launch (PRO-209).
+    let launches = manager.clone();
+    crate::cloud_browser::set_liveness(move |session, tab, token| launches.cli_launch_alive(session, tab, token));
     let mut service = crate::control::ControlService::headless(
         sink.clone(),
         manager.clone(),

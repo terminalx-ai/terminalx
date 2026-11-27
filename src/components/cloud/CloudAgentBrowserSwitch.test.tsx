@@ -43,6 +43,7 @@ it("turns on for an owner and says who did it and when", async () => {
   await screen.findByText(/^On · turned on by you, /);
   expect(m.get).toHaveBeenLastCalledWith("ws", "org", true);
   expect(screen.queryByText("Only the workspace owner and admins can change this.")).toBeNull();
+  expect(screen.getByTestId("agent-browser-signed-in").textContent).toBe("It uses the desktop’s Chrome, with any sites signed in there.");
 });
 
 it("is read-only for drivers and viewers", async () => {

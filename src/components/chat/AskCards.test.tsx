@@ -381,6 +381,8 @@ it("asks once for a cloud browser session, and can open the Desktop tab", () => 
   expect(screen.getByText("Cloud browser")).toBeTruthy();
   expect(screen.getByText("http://localhost:5173/sign-in")).toBeTruthy();
   expect(screen.getByTestId("cloud-browser-ask").textContent).toContain("One approval covers the whole session; a new session asks again.");
+  expect(screen.getByTestId("cloud-browser-ask").textContent).toContain("Claude Code and its sub-agents in this tab");
+  expect(screen.getByTestId("cloud-browser-ask").textContent).toContain("with any sites signed in there");
   expect(screen.getByTestId("cloud-browser-plan").textContent).toBe("Plan: Sign in as the fixture user and check the dashboard.");
   const labels = screen.getAllByRole("button").map((b) => (b.textContent ?? "").trim());
   expect(labels.map((label) => ["Deny", "Open Desktop tab", "Allow for this browser session"].find((name) => label.startsWith(name)))).toEqual(["Deny", "Open Desktop tab", "Allow for this browser session"]);

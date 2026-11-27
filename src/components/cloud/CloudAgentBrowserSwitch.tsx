@@ -11,6 +11,8 @@ import { openOrganizationSettings } from "@/lib/settingsLinks";
 import { cloudWorkspaceKey } from "@/types/target";
 
 const ABOUT = "Agents in this workspace’s tabs can open pages, click and type in Chrome on the cloud desktop. Tabs that ask show one approval per browser session.";
+/** The one thing a person must know before turning it on (PRO-209 review). */
+const SIGNED_IN = "It uses the desktop’s Chrome, with any sites signed in there.";
 
 function errorCode(error: unknown): string | null {
   return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : null;
@@ -89,6 +91,7 @@ export function CloudAgentBrowserSwitch({ item }: { item: CloudWorkspaceListItem
         disabled={!state || busy || missing || !state.canChange} onCheckedChange={(next) => void set(next)} />
     </div>
     <p className="text-muted-foreground">{ABOUT}</p>
+    <p className="text-muted-foreground" data-testid="agent-browser-signed-in">{SIGNED_IN}</p>
     {missing && <div className="space-y-2 rounded-md border border-warning/40 bg-warning/5 px-3 py-2" data-testid="agent-browser-missing">
       <p>This environment was built without the Linux desktop and Chrome. Add them in Cloud compute › Environment, then restart the workspace.</p>
       <Button size="xs" variant="outline" onClick={() => openOrganizationSettings(w.orgId)}><ExternalLink /> Open Cloud compute</Button>

@@ -1901,7 +1901,9 @@ impl WorkspaceRpc {
             if !self.desktop_access(peer, DesktopAccess::Control) {
                 return Err(RpcError::forbidden("You need edit access to take control of the cloud desktop"));
             }
-            crate::cloud_browser::set_held(held == "desktop.takeControl");
+            // Control comes back if this person disconnects without handing it back.
+            let holder = Arc::downgrade(peer);
+            crate::cloud_browser::set_held(held == "desktop.takeControl", Some(Box::new(move || holder.upgrade().is_some_and(|peer| !peer.hung_up()))));
             return Ok(crate::cloud_browser::desktop_agent_state());
         }
         if method != "desktop.open" {

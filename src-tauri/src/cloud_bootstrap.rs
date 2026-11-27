@@ -1286,9 +1286,12 @@ mod tests {
         let boot = establish(&config, &server, &quick()).unwrap();
         assert!(boot.session.lock().unwrap().desktop_ready);
         *server.down.borrow_mut() = true;
+        assert!(boot.session.lock().unwrap().agent_browser_ready);
         for expected in [true, true, false, false] {
             assert!(boot.refresh(&server).is_err());
             assert_eq!(boot.session.lock().unwrap().desktop_ready, expected);
+            // PRO-209: the cloud browser for agents fails closed with it.
+            assert_eq!(boot.session.lock().unwrap().agent_browser_ready, expected);
         }
         *server.down.borrow_mut() = false;
         boot.refresh(&server).unwrap();
@@ -1301,6 +1304,7 @@ mod tests {
         assert!(matches!(boot.refresh(&server), Err(CallError::Rejected)));
         assert!(boot.is_rejected());
         assert!(!boot.session.lock().unwrap().desktop_ready);
+        assert!(!boot.session.lock().unwrap().agent_browser_ready);
     }
 
     #[test]
@@ -1379,7 +1383,7 @@ mod tests {
                 workspace_ssh: None,
                 ssh_updater: None,
                 phase2_readiness: self.refresh_desktop_ready.then(|| serde_json::json!({
-                    "version": 1, "flags": { "cloud.desktop.v1": true }
+                    "version": 1, "flags": { "cloud.desktop.v1": true, "cloud.desktop.agent-browser.v1": true }
                 })),
             })
         }
