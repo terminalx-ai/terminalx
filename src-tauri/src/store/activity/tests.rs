@@ -463,7 +463,7 @@ fn in_flight_save_cannot_overtake_shutdown() {
     let clock = Instant::now();
     // Hold the actual atomic-write facility at its entry, while the activity
     // owner is already processing a start. Quit must join that owner.
-    let write_gate = crate::store::WRITE_LOCK.lock().unwrap();
+    let write_gate = crate::store::write_lock_for(&dir.path().join(FILE)).lock().unwrap();
     let (entered, wait) = std::sync::mpsc::channel();
     let start = {
         let c = c.clone();

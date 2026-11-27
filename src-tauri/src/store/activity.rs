@@ -226,10 +226,6 @@ fn handover_clock_ms() -> Option<u64> {
 }
 
 impl Tabs {
-    fn unchanged(&self, key: &str, state: TabStatus) -> bool {
-        self.0.get(key).is_some_and(|previous| previous.state == state)
-    }
-
     /// The work a transition starts or stops, if any.
     fn step(
         &mut self,
@@ -397,21 +393,36 @@ impl Collector {
         };
         // Persist the cutoff before recovery or any live work. A retry can never
         // import post-upgrade event logs on top of their live counters.
-        collector.save()?;
+        collector.save_durable()?;
         collector.recover();
         collector.import_pending();
         Ok(collector)
     }
 
     fn save(&mut self) -> Result<()> {
+        self.save_with_sync(false)
+    }
+
+    fn save_durable(&mut self) -> Result<()> {
+        self.save_with_sync(true)
+    }
+
+    fn save_with_sync(&mut self, durable: bool) -> Result<()> {
         self.dirty = true;
         self.data.generation += 1;
         let result = (|| {
             let bytes = serde_json::to_vec(&self.data)?;
-            super::write_atomic(&self.root.join(FILE), &bytes)?;
+            if durable {
+                // One fsync barrier on the primary snapshot at durable boundaries
+                // (open, pending import, shutdown); never issue a second F_FULLFSYNC
+                // on the backup copy.
+                super::write_atomic(&self.root.join(FILE), &bytes)?;
+            } else {
+                super::write_atomic_nosync(&self.root.join(FILE), &bytes)?;
+            }
             // A second complete snapshot recovers a missing/corrupt primary.
             // Generations handle a crash between the two atomic replacements.
-            super::write_atomic(&self.root.join(BACKUP), &bytes)
+            super::write_atomic_nosync(&self.root.join(BACKUP), &bytes)
         })();
         if let Err(error) = &result {
             self.error = Some(format!("Save activity history: {error:#}"));
@@ -439,13 +450,13 @@ impl Collector {
         if self.stopped {
             return Ok(false);
         }
-        let unchanged = self.tabs.unchanged(key, state);
         let event = self.tabs.step(key, state, source, at, clock);
         let started = event.as_ref().is_some_and(|event| event.kind == START);
+        let counted = event.is_some();
         if let Some(event) = event {
             self.data.count(event);
         }
-        if !unchanged || self.dirty {
+        if counted || self.dirty {
             self.save()?;
         }
         Ok(started)
@@ -491,7 +502,7 @@ impl Collector {
         let before = self.data.imported.len();
         self.data.imported.retain(|name| present.contains(name.as_str()));
         changed |= self.data.imported.len() != before;
-        if (changed && self.save().is_err()) || self.dirty {
+        if (changed && self.save_durable().is_err()) || self.dirty {
             return;
         }
         for kept in inbox.kept {
@@ -503,12 +514,12 @@ impl Collector {
     }
 
     fn shutdown(&mut self, at: i64, clock: Instant) -> Result<()> {
-        // Close all intervals in memory, then commit one final snapshot.
+        // Close all intervals in memory, then commit one final durable snapshot.
         for event in self.tabs.close(at, clock) {
             self.data.count(event);
         }
         self.stopped = true;
-        self.save()
+        self.save_durable()
     }
 }
 

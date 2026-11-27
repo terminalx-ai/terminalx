@@ -6,10 +6,26 @@ use std::process::Stdio;
 
 const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_GROUPS: usize = 50;
+/// Run expensive `git rev-list --objects --disk-usage` periodically in the
+/// background rather than synchronously on every turn start/end.
+const BYTE_TRIM_EVERY_PINS: u64 = 10;
+const BYTE_TRIM_INTERVAL_SECS: i64 = 300;
+
+static IN_FLIGHT_BYTE_TRIMS: std::sync::LazyLock<std::sync::Mutex<BTreeSet<PathBuf>>> =
+    std::sync::LazyLock::new(Default::default);
+
+#[cfg(test)]
+thread_local! {
+    static TEST_DISK_BYTES_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Default, Serialize, Deserialize)]
 struct Ledger {
     clock: u64,
+    #[serde(default)]
+    last_byte_trim_clock: u64,
+    #[serde(default)]
+    last_byte_trim_at: i64,
     groups: BTreeMap<String, Group>,
 }
 #[derive(Default, Serialize, Deserialize)]
@@ -38,6 +54,8 @@ fn run_input(cwd: &Path, args: &[&str], input: &str) -> Result<String> {
 }
 
 fn disk_bytes(cwd: &Path, ledger: &Ledger) -> Result<u64> {
+    #[cfg(test)]
+    TEST_DISK_BYTES_CALLS.with(|c| c.set(c.get() + 1));
     let refs: Vec<_> = ledger.groups.values().flat_map(|group| group.refs.keys().map(String::as_str)).collect();
     if refs.is_empty() {
         return Ok(0);
@@ -52,6 +70,14 @@ fn disk_bytes(cwd: &Path, ledger: &Ledger) -> Result<u64> {
 fn ledger_path(cwd: &Path) -> Result<PathBuf> {
     let dir = run(cwd, &["rev-parse", "--absolute-git-dir"])?;
     Ok(Path::new(crate::git::path_line(&dir)).join("raccoon-checkpoint-retention.json"))
+}
+
+fn root_and_ledger_path(cwd: &Path) -> Result<(String, PathBuf)> {
+    let raw = run(cwd, &["rev-parse", "--show-toplevel", "--absolute-git-dir"])?;
+    let mut lines = raw.split('\n');
+    let root = crate::git::path_line(lines.next().context("missing checkout root")?).to_string();
+    let git_dir = crate::git::path_line(lines.next().context("missing git dir")?);
+    Ok((root, Path::new(git_dir).join("raccoon-checkpoint-retention.json")))
 }
 
 fn load(path: &Path) -> Result<Ledger> {
@@ -71,11 +97,80 @@ fn protected_groups(ledger: &Ledger, state: &crate::checkpoints::RetentionState)
     protected
 }
 
+fn byte_trim_due(ledger: &Ledger, now_secs: i64) -> bool {
+    if ledger.groups.len() <= 1 {
+        return false;
+    }
+    if ledger.clock.saturating_sub(ledger.last_byte_trim_clock) >= BYTE_TRIM_EVERY_PINS {
+        return true;
+    }
+    ledger.last_byte_trim_at > 0 && now_secs.saturating_sub(ledger.last_byte_trim_at) >= BYTE_TRIM_INTERVAL_SECS
+}
+
+fn run_byte_trim_locked(cwd: &Path, max_bytes: u64) -> Result<bool> {
+    if !cwd.exists() {
+        return Ok(false);
+    }
+    let (root, path) = root_and_ledger_path(cwd)?;
+    let mut ledger = load(&path)?;
+    if ledger.groups.is_empty() {
+        return Ok(false);
+    }
+    let state = crate::checkpoints::retention_state(&root)?;
+    let protected = protected_groups(&ledger, &state);
+    let evicted = trim_bytes(cwd, &mut ledger, &protected, max_bytes)?;
+    ledger.last_byte_trim_clock = ledger.clock;
+    ledger.last_byte_trim_at = chrono::Utc::now().timestamp();
+    crate::store::write_json_nosync(&path, &ledger)?;
+    Ok(evicted)
+}
+
+fn schedule_async_byte_trim(root: PathBuf) {
+    {
+        let mut inflight = IN_FLIGHT_BYTE_TRIMS.lock().unwrap_or_else(|e| e.into_inner());
+        if !inflight.insert(root.clone()) {
+            return;
+        }
+    }
+    let root_for_thread = root.clone();
+    let spawn = std::thread::Builder::new()
+        .name("checkpoint-byte-trim".into())
+        .spawn(move || {
+            struct Guard(PathBuf);
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    IN_FLIGHT_BYTE_TRIMS
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&self.0);
+                }
+            }
+            let _guard = Guard(root_for_thread.clone());
+            let Some(root_str) = root_for_thread.to_str() else { return };
+            if !root_for_thread.exists() {
+                return;
+            }
+            if let Err(error) = crate::checkpoints::workspace_locked(root_str, || {
+                run_byte_trim_locked(&root_for_thread, MAX_BYTES).map(|_| ())
+            }) {
+                if root_for_thread.exists() {
+                    log::debug!("async checkpoint byte trim skipped for {}: {error:#}", root_for_thread.display());
+                }
+            }
+        });
+    if spawn.is_err() {
+        IN_FLIGHT_BYTE_TRIMS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&root);
+    }
+}
+
 pub fn pin(cwd: &Path, updates: &[(String, &str)]) -> Result<()> {
     if updates.is_empty() {
         return Ok(());
     }
-    let path = ledger_path(cwd)?;
+    let (root, path) = root_and_ledger_path(cwd)?;
     let mut ledger = load(&path)?;
     let refs = run(cwd, &["for-each-ref", "--format=%(refname)", "refs/raccoon-checkpoints/"])?;
     let present: BTreeSet<_> = refs.lines().collect();
@@ -87,8 +182,7 @@ pub fn pin(cwd: &Path, updates: &[(String, &str)]) -> Result<()> {
         });
         !group.refs.is_empty()
     });
-    let root = run(cwd, &["rev-parse", "--show-toplevel"])?;
-    let state = crate::checkpoints::retention_state(crate::git::path_line(&root))?;
+    let state = crate::checkpoints::retention_state(&root)?;
     let mut owned = state.owned.clone();
     let current: BTreeSet<_> = updates.iter().map(|(name, _)| name.rsplit_once('/').unwrap().0.to_string()).collect();
     owned.extend(current.iter().cloned());
@@ -109,12 +203,17 @@ pub fn pin(cwd: &Path, updates: &[(String, &str)]) -> Result<()> {
     }
     input.push_str("prepare\ncommit\n");
     // Record ownership before publishing refs so a failed write cannot orphan them.
-    crate::store::write_json(&path, &ledger)?;
+    crate::store::write_json_nosync(&path, &ledger)?;
     run_input(cwd, &["update-ref", "--stdin"], &input)?;
     let mut protected = protected_groups(&ledger, &state);
     protected.extend(current);
-    trim(cwd, &mut ledger, &protected, MAX_GROUPS, MAX_BYTES)?;
-    crate::store::write_json(&path, &ledger)
+    if trim_groups(cwd, &mut ledger, &protected, MAX_GROUPS)? {
+        crate::store::write_json_nosync(&path, &ledger)?;
+    }
+    if byte_trim_due(&ledger, chrono::Utc::now().timestamp()) {
+        schedule_async_byte_trim(PathBuf::from(root));
+    }
+    Ok(())
 }
 
 /// How many more turns in this checkout `group` lasts before the count limit
@@ -155,20 +254,35 @@ fn evict_oldest(cwd: &Path, ledger: &mut Ledger, protected: &BTreeSet<String>) -
     Ok(true)
 }
 
-fn trim(cwd: &Path, ledger: &mut Ledger, protected: &BTreeSet<String>, max_groups: usize, max_bytes: u64) -> Result<()> {
-    // These are soft limits while a turn runs. Never sacrifice overlap evidence
-    // or the current operation's backup to meet a storage target. A later pin
-    // resumes eviction once the running window closes.
+fn trim_groups(cwd: &Path, ledger: &mut Ledger, protected: &BTreeSet<String>, max_groups: usize) -> Result<bool> {
+    let mut evicted = false;
     while ledger.groups.len() > max_groups {
         if !evict_oldest(cwd, ledger, protected)? {
             break;
         }
+        evicted = true;
     }
+    Ok(evicted)
+}
+
+fn trim_bytes(cwd: &Path, ledger: &mut Ledger, protected: &BTreeSet<String>, max_bytes: u64) -> Result<bool> {
+    let mut evicted = false;
     while disk_bytes(cwd, ledger)? > max_bytes {
         if !evict_oldest(cwd, ledger, protected)? {
             break;
         }
+        evicted = true;
     }
+    Ok(evicted)
+}
+
+#[cfg(test)]
+fn trim(cwd: &Path, ledger: &mut Ledger, protected: &BTreeSet<String>, max_groups: usize, max_bytes: u64) -> Result<()> {
+    // These are soft limits while a turn runs. Never sacrifice overlap evidence
+    // or the current operation's backup to meet a storage target. A later pin
+    // resumes eviction once the running window closes.
+    trim_groups(cwd, ledger, protected, max_groups)?;
+    trim_bytes(cwd, ledger, protected, max_bytes)?;
     Ok(())
 }
 
@@ -285,5 +399,39 @@ mod tests {
         crate::git::run(dir.path(), &["init", "-q", "--separate-git-dir", git_dir.to_str().unwrap(), work.to_str().unwrap()]).unwrap();
         let ledger = ledger_path(&work).unwrap();
         assert_eq!(crate::paths::canonicalize(ledger.parent().unwrap()).unwrap(), crate::paths::canonicalize(&git_dir).unwrap());
+    }
+
+    #[test]
+    fn pin_skips_synchronous_disk_usage_and_throttles_periodic_byte_trim() {
+        let _home = crate::store::temp_home();
+        let repo = super::super::super::tests::repo();
+        let cwd = repo.path();
+        let tree = snapshot_tree(cwd).unwrap();
+
+        TEST_DISK_BYTES_CALLS.with(|c| c.set(0));
+        for i in 0..4 {
+            pin(cwd, &[(format!("refs/raccoon-checkpoints/session/tab-{i}/start"), &tree)]).unwrap();
+        }
+        assert_eq!(
+            TEST_DISK_BYTES_CALLS.with(|c| c.get()),
+            0,
+            "pin() must not synchronously run git rev-list --disk-usage on every turn"
+        );
+
+        let mut ledger = load(&ledger_path(cwd).unwrap()).unwrap();
+        assert!(!byte_trim_due(&ledger, 1_000), "below pin threshold on fresh ledger");
+        ledger.clock = BYTE_TRIM_EVERY_PINS;
+        assert!(byte_trim_due(&ledger, 1_000), "due once pin threshold reached");
+        ledger.last_byte_trim_clock = ledger.clock;
+        ledger.last_byte_trim_at = 1_000;
+        assert!(!byte_trim_due(&ledger, 1_100), "throttled before interval elapses");
+        assert!(byte_trim_due(&ledger, 1_000 + BYTE_TRIM_INTERVAL_SECS), "due after interval elapses");
+
+        // Explicit byte trim runs disk_bytes and updates ledger timestamps.
+        assert!(run_byte_trim_locked(cwd, 0).unwrap());
+        assert!(TEST_DISK_BYTES_CALLS.with(|c| c.get()) >= 1);
+        let after = load(&ledger_path(cwd).unwrap()).unwrap();
+        assert_eq!(after.last_byte_trim_clock, after.clock);
+        assert!(after.last_byte_trim_at > 0);
     }
 }

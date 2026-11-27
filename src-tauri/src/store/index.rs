@@ -1099,10 +1099,13 @@ pub fn reopen_tab(session_id: &str, tab_id: &str) -> Result<TabEntry> {
 }
 
 pub fn get(session_id: &str) -> Result<SessionEntry> {
-    load()?
+    let mut session = load_file()?
+        .sessions
         .into_iter()
         .find(|s| s.id == session_id)
-        .ok_or_else(|| anyhow!("session {session_id} not found"))
+        .ok_or_else(|| anyhow!("session {session_id} not found"))?;
+    super::message_activity::project(std::slice::from_mut(&mut session))?;
+    Ok(session)
 }
 
 pub fn update_session<R>(session_id: &str, f: impl FnOnce(&mut SessionEntry) -> Result<R>) -> Result<R> {

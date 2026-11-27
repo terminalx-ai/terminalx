@@ -13,13 +13,31 @@ use super::{schema, Settings};
 
 static FILES: LazyLock<Mutex<HashMap<PathBuf, FileState>>> = LazyLock::new(Default::default);
 
-#[derive(Default)]
 struct FileState {
-    good: Settings,
+    good: Arc<Settings>,
     // Preserve fields this version does not understand when a control saves.
     source: Option<Value>,
     error: Option<String>,
     problem: Option<Problem>,
+    // None = never loaded; Some(None) = NotFound; Some(Some(stamp)) = loaded from this file stamp.
+    stamp: Option<Option<crate::store::FileStamp>>,
+}
+
+impl Default for FileState {
+    fn default() -> Self {
+        Self {
+            good: Arc::new(Settings::default()),
+            source: None,
+            error: None,
+            problem: None,
+            stamp: None,
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_REFRESH_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// What a problem in a settings file does to the values it holds
@@ -207,13 +225,115 @@ fn validate(source: &str, raw: &RawValue, expected: &Value, key: &str, pattern: 
     Ok(())
 }
 
-fn parse(source: &str) -> Result<Settings> { parse_input(source, true) }
+/// Single-pass JSON deserializer that builds a `Value` while detecting whether
+/// any object contains duplicate keys.
+struct CheckedValue {
+    value: Value,
+    has_duplicate_keys: bool,
+}
+
+impl<'de> Deserialize<'de> for CheckedValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = CheckedValue;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("any valid JSON value")
+            }
+            fn visit_bool<E>(self, v: bool) -> std::result::Result<Self::Value, E> {
+                Ok(CheckedValue { value: Value::Bool(v), has_duplicate_keys: false })
+            }
+            fn visit_i64<E>(self, v: i64) -> std::result::Result<Self::Value, E> {
+                Ok(CheckedValue { value: Value::from(v), has_duplicate_keys: false })
+            }
+            fn visit_u64<E>(self, v: u64) -> std::result::Result<Self::Value, E> {
+                Ok(CheckedValue { value: Value::from(v), has_duplicate_keys: false })
+            }
+            fn visit_f64<E>(self, v: f64) -> std::result::Result<Self::Value, E> {
+                Ok(CheckedValue { value: Value::from(v), has_duplicate_keys: false })
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<Self::Value, E> {
+                Ok(CheckedValue { value: Value::String(v.to_owned()), has_duplicate_keys: false })
+            }
+            fn visit_string<E>(self, v: String) -> std::result::Result<Self::Value, E> {
+                Ok(CheckedValue { value: Value::String(v), has_duplicate_keys: false })
+            }
+            fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
+                Ok(CheckedValue { value: Value::Null, has_duplicate_keys: false })
+            }
+            fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+                Ok(CheckedValue { value: Value::Null, has_duplicate_keys: false })
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error> {
+                let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                let mut has_duplicate_keys = false;
+                while let Some(item) = seq.next_element::<CheckedValue>()? {
+                    has_duplicate_keys |= item.has_duplicate_keys;
+                    items.push(item.value);
+                }
+                Ok(CheckedValue { value: Value::Array(items), has_duplicate_keys })
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> std::result::Result<Self::Value, A::Error> {
+                let mut obj = serde_json::Map::new();
+                let mut has_duplicate_keys = false;
+                while let Some((key, item)) = map.next_entry::<String, CheckedValue>()? {
+                    has_duplicate_keys |= item.has_duplicate_keys;
+                    if obj.insert(key, item.value).is_some() {
+                        has_duplicate_keys = true;
+                    }
+                }
+                Ok(CheckedValue { value: Value::Object(obj), has_duplicate_keys })
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+/// Fast in-memory schema check against `TEMPLATE` with zero re-parsing.
+fn validate_value(value: &Value, expected: &Value, pattern: &str) -> bool {
+    if let Some(constraint) = schema::constraint(pattern) {
+        return constraint.rule.accepts(value);
+    }
+    match expected {
+        Value::Object(properties) => value.as_object().is_some_and(|obj| {
+            obj.iter().all(|(name, child)| {
+                let Some(kind) = DYNAMIC_MAPS.get(pattern).or_else(|| properties.get(name)) else {
+                    return true;
+                };
+                validate_value(child, kind, &schema::child(pattern, name))
+            })
+        }),
+        Value::Array(_) => value.as_array().is_some_and(|items| items.iter().all(Value::is_string)),
+        Value::Bool(_) => value.is_boolean(),
+        Value::String(_) => value.is_string(),
+        Value::Number(_) => value.as_u64().is_some_and(|n| n <= u64::from(u32::MAX)),
+        Value::Null => value.is_null() || value.is_string(),
+    }
+}
+
+#[cfg(test)]
+fn parse(source: &str) -> Result<Settings> { parse_with_source(source, true).1 }
 
 /// Whether a whole settings document is valid, with the error a file would show.
 #[cfg(test)]
 pub(super) fn check(document: &Value) -> Result<()> { parse(&serde_json::to_string(document)?).map(drop) }
 
-fn parse_input(source: &str, file_lines: bool) -> Result<Settings> {
+fn parse_with_source(source: &str, file_lines: bool) -> (Option<Value>, Result<Settings>) {
+    let checked: CheckedValue = match serde_json::from_str(source) {
+        Ok(checked) => checked,
+        Err(error) => return (None, Err(invalid_json(&error))),
+    };
+    let source_obj = checked.value.is_object().then(|| checked.value.clone());
+    if !checked.has_duplicate_keys && validate_value(&checked.value, &TEMPLATE, "") {
+        if let Ok(mut settings) = serde_json::from_value::<Settings>(checked.value) {
+            settings.preferences.retain(|key, _| PREFERENCE_DEFAULTS.get(key).is_some());
+            return (source_obj, Ok(settings));
+        }
+    }
+    (source_obj, parse_input_slow(source, file_lines))
+}
+
+fn parse_input_slow(source: &str, file_lines: bool) -> Result<Settings> {
     let raw: &RawValue = serde_json::from_str(source).map_err(|error| invalid_json(&error))?;
     validate(source, raw, &TEMPLATE, "", "", file_lines)?;
     let mut settings: Settings = serde_json::from_str(source).map_err(|error| {
@@ -228,6 +348,16 @@ fn parse_input(source: &str, file_lines: bool) -> Result<Settings> {
     // Unknown preferences are preserved in the source, not sent to webviews.
     settings.preferences.retain(|key, _| PREFERENCE_DEFAULTS.get(key).is_some());
     Ok(settings)
+}
+
+fn validate_and_build(document: &Value, file_lines: bool) -> Result<Settings> {
+    if validate_value(document, &TEMPLATE, "") {
+        if let Ok(mut settings) = serde_json::from_value::<Settings>(document.clone()) {
+            settings.preferences.retain(|key, _| PREFERENCE_DEFAULTS.get(key).is_some());
+            return Ok(settings);
+        }
+    }
+    parse_input_slow(&serde_json::to_string(document)?, file_lines)
 }
 
 /// Recover each known field independently. One invalid leaf must not discard
@@ -258,20 +388,33 @@ fn recover(source: &str, raw: &RawValue, expected: &Value, previous: Option<&Val
     }
 }
 
+fn refresh_if_changed(path: &Path, state: &mut FileState) {
+    if let Ok(current) = crate::store::file_stamp(path) {
+        if state.stamp == Some(current) {
+            return;
+        }
+    }
+    refresh(path, state);
+}
+
 fn refresh(path: &Path, state: &mut FileState) {
+    #[cfg(test)]
+    TEST_REFRESH_READS.with(|count| count.set(count.get() + 1));
+    let stamp = crate::store::file_stamp(path).ok();
     match std::fs::read_to_string(path) {
         Ok(source) => {
-            state.source = serde_json::from_str::<Value>(&source).ok().filter(Value::is_object);
-            match parse(&source) {
-                Ok(good) => { state.good = good; state.error = None; state.problem = None; }
+            let (parsed_source, result) = parse_with_source(&source, true);
+            state.source = parsed_source;
+            match result {
+                Ok(good) => { state.good = Arc::new(good); state.error = None; state.problem = None; }
                 Err(error) => {
                     if state.source.is_some() {
-                        let previous = serde_json::to_value(&state.good).expect("settings values");
+                        let previous = serde_json::to_value(&*state.good).expect("settings values");
                         let raw = serde_json::from_str::<&RawValue>(&source).expect("parsed source");
                         let recovered = recover(&source, raw, &TEMPLATE, Some(&previous), "", "");
                         let good = serde_json::from_value(recovered);
                         debug_assert!(good.is_ok(), "validated recovery must match the Settings type");
-                        if let Ok(good) = good { state.good = good; }
+                        if let Ok(good) = good { state.good = Arc::new(good); }
                     }
                     state.problem = Some(match error.downcast_ref::<Invalid>() {
                         Some(invalid) => Problem { key: invalid.key.clone(), line: invalid.line, message: invalid.why.clone(), effect: Effect::LastGood },
@@ -280,12 +423,16 @@ fn refresh(path: &Path, state: &mut FileState) {
                     state.error = Some(error.to_string());
                 }
             }
+            state.stamp = stamp;
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => *state = FileState::default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            *state = FileState { stamp: Some(None), ..FileState::default() };
+        }
         Err(_) => {
             state.source = None;
             state.error = Some("settings, line 1: could not read the file".into());
             state.problem = Some(Problem { key: None, line: None, message: "could not read the file".into(), effect: Effect::LastGood });
+            state.stamp = None;
         }
     }
 }
@@ -341,12 +488,16 @@ fn status_at(path: &Path, state: &FileState) -> Status {
     }
 }
 
-pub(super) fn load() -> Settings {
-    let Ok(path) = super::file_path() else { return Settings::default() };
+pub(crate) fn load_arc() -> Arc<Settings> {
+    let Ok(path) = super::file_path() else { return Arc::new(Settings::default()) };
     let mut files = FILES.lock().unwrap_or_else(|e| e.into_inner());
     let state = files.entry(path.clone()).or_default();
-    refresh(&path, state);
-    state.good.clone()
+    refresh_if_changed(&path, state);
+    Arc::clone(&state.good)
+}
+
+pub(super) fn load() -> Settings {
+    (*load_arc()).clone()
 }
 
 fn write(path: &Path, state: &mut FileState, settings: &Settings) -> Result<()> {
@@ -363,12 +514,13 @@ fn write_without(path: &Path, state: &mut FileState, settings: &Settings, absent
     refuse_while_invalid(path, state)?;
     let mut next = serde_json::to_value(settings)?;
     if let Some(object) = next.as_object_mut() { for key in absent { object.remove(*key); } }
-    let good = parse_input(&serde_json::to_string(&next)?, false)?;
+    let good = validate_and_build(&next, false)?;
     if let Some(source) = &state.source { preserve_unknown(&mut next, source, &TEMPLATE, ""); }
     if let Some(object) = next.as_object_mut() { schema::add_reference(object, schema::USER_SCHEMA_REFERENCE); }
     write_document(path, &next)?;
-    state.good = good;
+    state.good = Arc::new(good);
     state.source = Some(next);
+    state.stamp = crate::store::file_stamp(path).ok();
     Ok(())
 }
 
@@ -421,7 +573,7 @@ pub fn status() -> Result<Status> {
 pub(crate) fn status_of(path: &Path) -> Status {
     let mut files = FILES.lock().unwrap_or_else(|e| e.into_inner());
     let state = files.entry(path.to_owned()).or_default();
-    refresh(path, state);
+    refresh_if_changed(path, state);
     status_at(path, state)
 }
 
@@ -443,7 +595,7 @@ fn change_preferences_locked(path: &Path, patch: BTreeMap<String, Value>, migrat
     let state = files.entry(path.to_owned()).or_default();
     refresh(path, state);
     refuse_while_invalid(path, state)?;
-    let mut next = state.good.clone();
+    let mut next = (*state.good).clone();
     if migrate && next.preferences_migrated { return Ok(status_at(path, state)); }
     // Nothing to migrate on a fresh installation: let General offer Create.
     if migrate && patch.is_empty() && !path.exists() { return Ok(status_at(path, state)); }
@@ -503,10 +655,11 @@ fn reset(path: &Path, key: &str) -> Result<Status> {
         let Some(mut document) = state.source.clone() else { return Ok(status_at(path, state)) };
         if remove(&mut document, &segments) {
             if let Some(object) = document.as_object_mut() { schema::add_reference(object, schema::USER_SCHEMA_REFERENCE); }
-            let good = parse(&serde_json::to_string(&document)?)?;
+            let good = validate_and_build(&document, true)?;
             write_document(path, &document)?;
-            state.good = good;
+            state.good = Arc::new(good);
             state.source = Some(document);
+            state.stamp = crate::store::file_stamp(path).ok();
         }
         Ok(status_at(path, state))
     })
@@ -514,6 +667,8 @@ fn reset(path: &Path, key: &str) -> Result<Status> {
 
 /// How long a changed settings file must hold still before the change is reported.
 const SETTLE: Duration = Duration::from_millis(50);
+/// Slow fallback poll interval used only if OS file watching cannot attach.
+const FALLBACK_POLL: Duration = Duration::from_secs(2);
 
 /// What a changed file settles to: `first` read again after each `wait` until two reads
 /// agree, at most ten times. `None` when `wait` says to stop.
@@ -528,30 +683,114 @@ fn settled<T: PartialEq>(first: T, mut read: impl FnMut() -> T, mut wait: impl F
     Some(current)
 }
 
-/// One small file polled every 200ms, including when absent. This also sees
-/// editor rename-over saves, deletion, and symlink-target edits on every OS.
+enum WatchMsg {
+    Event,
+    Stop,
+}
+
+fn wait_settle(rx: &mpsc::Receiver<WatchMsg>, duration: Duration) -> bool {
+    let deadline = std::time::Instant::now() + duration;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(WatchMsg::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+            Ok(WatchMsg::Event) => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) => return true,
+        }
+    }
+}
+
+/// Watches the user settings file via OS filesystem notifications (`notify`),
+/// falling back to a slow poll only if the OS watcher cannot be initialized.
 /// No event payload contains values; consumers ask for their own safe view.
 pub struct Watcher {
-    stop: mpsc::Sender<()>,
+    stop: mpsc::Sender<WatchMsg>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Watcher {
     fn at(path: PathBuf, changed: impl Fn() + Send + 'static) -> Result<Self> {
-        let (stop, done) = mpsc::channel();
+        use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher as NotifyWatcher};
+
+        let (tx, rx) = mpsc::channel::<WatchMsg>();
         let mut previous = std::fs::read(&path).map_err(|error| error.kind());
         {
             let mut files = FILES.lock().unwrap_or_else(|e| e.into_inner());
             refresh(&path, files.entry(path.clone()).or_default());
         }
+
+        let target_name = path.file_name().map(|n| n.to_os_string());
+        let tx_events = tx.clone();
+        let mut os_watcher: Option<RecommendedWatcher> = notify::recommended_watcher(move |res: notify::Result<Event>| {
+            let relevant = match res {
+                Ok(event) => {
+                    event.need_rescan()
+                        || event.paths.is_empty()
+                        || target_name.as_ref().is_none_or(|name| {
+                            event.paths.iter().any(|p| p.file_name() == Some(name.as_os_str()))
+                        })
+                }
+                Err(_) => true,
+            };
+            if relevant {
+                let _ = tx_events.send(WatchMsg::Event);
+            }
+        }).ok();
+
+        let mut watching_os = false;
+        if let Some(watcher) = os_watcher.as_mut() {
+            if let Some(parent) = path.parent() {
+                if watcher.watch(parent, RecursiveMode::NonRecursive).is_ok() {
+                    watching_os = true;
+                }
+            }
+            if let Ok(meta) = std::fs::symlink_metadata(&path) {
+                if meta.file_type().is_symlink() {
+                    if let Ok(canonical) = std::fs::canonicalize(&path) {
+                        if let Some(target_parent) = canonical.parent() {
+                            if Some(target_parent) != path.parent() {
+                                let _ = watcher.watch(target_parent, RecursiveMode::NonRecursive);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let thread = std::thread::Builder::new().name("settings-file".into()).spawn(move || {
-            while done.recv_timeout(Duration::from_millis(200)) == Err(mpsc::RecvTimeoutError::Timeout) {
+            // Keep the OS watcher alive for the lifetime of this thread.
+            let _watcher = os_watcher;
+            loop {
+                let is_symlink = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+                let wait = if watching_os && !is_symlink {
+                    match rx.recv() {
+                        Ok(WatchMsg::Event) => true,
+                        Ok(WatchMsg::Stop) | Err(_) => return,
+                    }
+                } else {
+                    match rx.recv_timeout(FALLBACK_POLL) {
+                        Ok(WatchMsg::Event) | Err(mpsc::RecvTimeoutError::Timeout) => true,
+                        Ok(WatchMsg::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                };
+                if !wait {
+                    return;
+                }
+                // Drain burst events already queued before reading.
+                while let Ok(msg) = rx.try_recv() {
+                    if matches!(msg, WatchMsg::Stop) {
+                        return;
+                    }
+                }
                 let current = std::fs::read(&path).map_err(|error| error.kind());
                 if current == previous { continue; }
                 // A save in place truncates before it writes: a read between the two sees an
                 // empty or partial file. Report the change once the file holds still.
                 let read = || std::fs::read(&path).map_err(|error| error.kind());
-                let Some(current) = settled(current, read, || done.recv_timeout(SETTLE) == Err(mpsc::RecvTimeoutError::Timeout)) else { return };
+                let Some(current) = settled(current, read, || wait_settle(&rx, SETTLE)) else { return };
                 if current == previous { continue; }
                 previous = current;
                 {
@@ -561,7 +800,7 @@ impl Watcher {
                 changed();
             }
         })?;
-        Ok(Self { stop, thread: Some(thread) })
+        Ok(Self { stop: tx, thread: Some(thread) })
     }
 
     pub fn start(sink: Arc<dyn crate::sink::EventSink>) -> Result<Self> {
@@ -576,7 +815,7 @@ impl Watcher {
 
 impl Drop for Watcher {
     fn drop(&mut self) {
-        let _ = self.stop.send(());
+        let _ = self.stop.send(WatchMsg::Stop);
         if let Some(thread) = self.thread.take() { let _ = thread.join(); }
     }
 }
@@ -692,7 +931,7 @@ mod tests {
         assert_eq!(state.good.orchestrator.for_project("/repo").budget_points, Cap::NoLimit);
 
         // Saving No limit for the window level, and reading the file again, keeps every "none".
-        let mut next = state.good.clone();
+        let mut next = (*state.good).clone();
         next.orchestrator.window_ceiling = Cap::NoLimit;
         write(&path, &mut state, &next).unwrap();
         let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -766,7 +1005,7 @@ mod tests {
         assert_eq!(state.good.preferences["theme"], "moss");
         assert!(!serde_json::to_string(&status_at(&path, &state)).unwrap().contains("preserve-me"));
 
-        let mut next = state.good.clone();
+        let mut next = (*state.good).clone();
         next.notifications = false;
         next.linear_api_key = None; // Clearing a known optional field must still work.
         next.merged_cleanup.projects.clear();
@@ -1090,5 +1329,30 @@ mod tests {
         let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved["$schema"], "https://example.test/mine.json");
         assert_eq!(saved["notifications"], false);
+    }
+
+    #[test]
+    fn load_arc_serves_cached_settings_until_file_changes() {
+        let _home = crate::store::temp_home();
+        let path = super::super::file_path().unwrap();
+        std::fs::write(&path, r#"{"notifications":false}"#).unwrap();
+
+        TEST_REFRESH_READS.with(|c| c.set(0));
+        let first = load_arc();
+        assert!(!first.notifications);
+        assert_eq!(TEST_REFRESH_READS.with(|c| c.get()), 1);
+
+        for _ in 0..50 {
+            let cached = load_arc();
+            assert!(Arc::ptr_eq(&first, &cached), "unchanged settings must return the same Arc");
+        }
+        assert_eq!(TEST_REFRESH_READS.with(|c| c.get()), 1, "cache hits must not re-read settings.json");
+
+        // Writing a new file invalidates the stamp and refreshes once.
+        crate::store::write_atomic(&path, br#"{"notifications":true}"#).unwrap();
+        let second = load_arc();
+        assert!(second.notifications);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(TEST_REFRESH_READS.with(|c| c.get()), 2);
     }
 }

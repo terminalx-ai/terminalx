@@ -7,7 +7,7 @@
 use crate::paths::Canonical;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -20,19 +20,30 @@ const MAX_FILES: usize = 60_000;
 /// ones up to this many in all. A `node_modules` alone often passes 60,000.
 const MAX_FILES_WITH_IGNORED: usize = 250_000;
 const FRESH_FOR: Duration = Duration::from_secs(20);
+const MAX_CACHED_ROOTS: usize = 16;
 
-#[derive(Clone)]
 struct Index {
     built: Instant,
     files: Vec<String>,
     truncated: bool,
 }
 
+struct CacheEntry {
+    index: Arc<Index>,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct IndexCache {
+    tick: u64,
+    entries: HashMap<(PathBuf, bool), CacheEntry>,
+}
+
 /// One index per checkout and per mode: with `include_ignored` it also holds
 /// what `.gitignore` (and the folders skipped by name) would leave out.
-fn cache() -> &'static Mutex<HashMap<(PathBuf, bool), Index>> {
-    static C: OnceLock<Mutex<HashMap<(PathBuf, bool), Index>>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+fn cache() -> &'static Mutex<IndexCache> {
+    static C: OnceLock<Mutex<IndexCache>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(IndexCache::default()))
 }
 
 /// The files of a checkout, hidden ones included, as the file tree shows
@@ -93,26 +104,49 @@ fn build(root: &Path, include_ignored: bool, caps: (usize, usize)) -> Index {
     Index { built: Instant::now(), files, truncated: plain.truncated || cut }
 }
 
-fn cached(root: &Path, include_ignored: bool) -> Option<Index> {
-    let c = cache().lock().unwrap();
-    c.get(&(root.to_path_buf(), include_ignored)).filter(|ix| ix.built.elapsed() < FRESH_FOR).cloned()
+fn cached(root: &Path, include_ignored: bool) -> Option<Arc<Index>> {
+    let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
+    let key = (root.to_path_buf(), include_ignored);
+    let fresh = c.entries.get(&key).is_some_and(|e| e.index.built.elapsed() < FRESH_FOR);
+    if !fresh {
+        c.entries.remove(&key);
+        return None;
+    }
+    c.tick = c.tick.wrapping_add(1);
+    let tick = c.tick;
+    let entry = c.entries.get_mut(&key)?;
+    entry.last_used = tick;
+    Some(Arc::clone(&entry.index))
 }
 
-fn store(root: &Path, include_ignored: bool, ix: Index) -> Index {
-    cache().lock().unwrap().insert((root.to_path_buf(), include_ignored), ix.clone());
-    ix
+fn store(root: &Path, include_ignored: bool, ix: Index) -> Arc<Index> {
+    let arc = Arc::new(ix);
+    let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
+    c.entries.retain(|_, entry| entry.index.built.elapsed() < FRESH_FOR);
+    let key = (root.to_path_buf(), include_ignored);
+    if !c.entries.contains_key(&key) {
+        while c.entries.len() >= MAX_CACHED_ROOTS {
+            let Some(lru_key) = c.entries.iter().min_by_key(|(_, e)| e.last_used).map(|(k, _)| k.clone()) else {
+                break;
+            };
+            c.entries.remove(&lru_key);
+        }
+    }
+    c.tick = c.tick.wrapping_add(1);
+    let tick = c.tick;
+    c.entries.insert(key, CacheEntry { index: Arc::clone(&arc), last_used: tick });
+    arc
 }
 
 /// The cached index, or a fresh walk. The cache lock is never held while
 /// walking: a slow walk of one checkout (or of ignored files) holds up no
 /// other search. Two searches that both miss may both walk; the last one wins.
-fn index_for(root: &Path, include_ignored: bool) -> (Vec<String>, bool) {
-    let ix = cached(root, include_ignored).unwrap_or_else(|| store(root, include_ignored, build(root, include_ignored, (MAX_FILES, MAX_FILES_WITH_IGNORED))));
-    (ix.files, ix.truncated)
+fn index_for(root: &Path, include_ignored: bool) -> Arc<Index> {
+    cached(root, include_ignored).unwrap_or_else(|| store(root, include_ignored, build(root, include_ignored, (MAX_FILES, MAX_FILES_WITH_IGNORED))))
 }
 
 pub fn invalidate(root: &Path) {
-    cache().lock().unwrap().retain(|(path, _), _| path != root);
+    cache().lock().unwrap_or_else(|e| e.into_inner()).entries.retain(|(path, _), _| path != root);
 }
 
 /// How many files a search looks through (quick open's footer).
@@ -125,8 +159,8 @@ pub struct FileCount {
 }
 
 pub fn count(root: &Path, include_ignored: bool) -> FileCount {
-    let (files, truncated) = index_for(root, include_ignored);
-    FileCount { files: files.len(), truncated }
+    let ix = index_for(root, include_ignored);
+    FileCount { files: ix.files.len(), truncated: ix.truncated }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,36 +171,67 @@ pub struct FileHit {
     pub score: u32,
 }
 
+fn cmp_case_insensitive(a: &str, b: &str) -> std::cmp::Ordering {
+    if a.is_ascii() && b.is_ascii() {
+        a.bytes()
+            .map(|b| b.to_ascii_lowercase())
+            .cmp(b.bytes().map(|b| b.to_ascii_lowercase()))
+    } else {
+        a.to_lowercase().cmp(&b.to_lowercase())
+    }
+}
+
 /// Fuzzy-search the index. An empty query lists the shallowest files first,
 /// which is what a bare `@` should open on. `include_ignored` searches the
 /// files Git ignores as well.
 pub fn search(root: &Path, query: &str, limit: usize, include_ignored: bool) -> Result<Vec<FileHit>> {
-    let (files, _) = index_for(root, include_ignored);
-    let name_of = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let ix = index_for(root, include_ignored);
+    fn name_str(p: &str) -> &str {
+        p.rsplit('/').next().unwrap_or(p)
+    }
     if query.trim().is_empty() {
-        let mut v: Vec<&String> = files.iter().collect();
-        v.sort_by_key(|p| (p.matches('/').count(), p.to_lowercase()));
-        return Ok(v.into_iter().take(limit).map(|p| FileHit { path: p.clone(), name: name_of(p), score: 0 }).collect());
+        let mut v: Vec<(usize, &str)> = ix.files.iter().map(|p| (p.matches('/').count(), p.as_str())).collect();
+        let cmp = |a: &(usize, &str), b: &(usize, &str)| {
+            a.0.cmp(&b.0).then_with(|| cmp_case_insensitive(a.1, b.1)).then_with(|| a.1.cmp(b.1))
+        };
+        if v.len() > limit {
+            v.select_nth_unstable_by(limit, cmp);
+            v.truncate(limit);
+        }
+        v.sort_unstable_by(cmp);
+        return Ok(v.into_iter().map(|(_, p)| FileHit { path: p.to_owned(), name: name_str(p).to_owned(), score: 0 }).collect());
     }
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
     let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
     let mut buf = Vec::new();
-    let mut hits: Vec<(u32, &String)> = files
+    let mut nb = Vec::new();
+    let mut hits: Vec<(u32, &str)> = ix
+        .files
         .iter()
         .filter_map(|p| {
-            let hay = Utf32Str::new(p, &mut buf);
+            let p_str = p.as_str();
+            let hay = Utf32Str::new(p_str, &mut buf);
             let mut score = pattern.score(hay, &mut matcher)?;
             // A match in the file name is worth more than one in a directory.
-            let name = name_of(p);
-            let mut nb = Vec::new();
-            if let Some(ns) = pattern.score(Utf32Str::new(&name, &mut nb), &mut matcher) {
+            let name = name_str(p_str);
+            if let Some(ns) = pattern.score(Utf32Str::new(name, &mut nb), &mut matcher) {
                 score = score.max(ns + 100);
             }
-            Some((score, p))
+            Some((score, p_str))
         })
         .collect();
-    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.len().cmp(&b.1.len())));
-    Ok(hits.into_iter().take(limit).map(|(score, p)| FileHit { path: p.clone(), name: name_of(p), score }).collect())
+    let cmp = |a: &(u32, &str), b: &(u32, &str)| {
+        b.0.cmp(&a.0).then_with(|| a.1.len().cmp(&b.1.len())).then_with(|| a.1.cmp(b.1))
+    };
+    if hits.len() > limit {
+        hits.select_nth_unstable_by(limit, cmp);
+        hits.truncate(limit);
+    }
+    hits.sort_unstable_by(cmp);
+    Ok(hits.into_iter().map(|(score, p)| FileHit { path: p.to_owned(), name: name_str(p).to_owned(), score }).collect())
 }
 
 #[cfg(test)]
@@ -282,6 +347,51 @@ mod tests {
         assert!(all.contains(&".vscode/settings.json".to_string()));
         assert!(!all.iter().any(|f| f == ".env" || f.starts_with(".git/")));
         assert_eq!(list_all(p, 50).unwrap().paths.len(), all.len(), "the same files the tree lists");
+    }
+
+    #[test]
+    fn index_cache_shares_arc_enforces_lru_cap_and_top_k_search() {
+        let dirs: Vec<_> = (0..(MAX_CACHED_ROOTS + 4)).map(|i| {
+            let dir = tempfile::tempdir().unwrap();
+            for j in 0..15 {
+                std::fs::write(dir.path().join(format!("file_{i}_{j:02}.rs")), "hello").unwrap();
+            }
+            dir
+        }).collect();
+
+        // Repeated cached() calls share the exact same Arc without deep-cloning.
+        let first = index_for(dirs[0].path(), false);
+        let second = cached(dirs[0].path(), false).unwrap();
+        assert!(Arc::ptr_eq(&first, &second), "cached() must return an O(1) Arc clone");
+        assert_eq!(count(dirs[0].path(), false), FileCount { files: 15, truncated: false });
+
+        // Top-K search returns exact top-5 results in order.
+        let top5 = search(dirs[0].path(), "", 5, false).unwrap();
+        let all = search(dirs[0].path(), "", 20, false).unwrap();
+        assert_eq!(top5.iter().map(|h| &h.path).collect::<Vec<_>>(), all.iter().take(5).map(|h| &h.path).collect::<Vec<_>>());
+        let fuzzy5 = search(dirs[0].path(), "file_0", 5, false).unwrap();
+        let fuzzy_all = search(dirs[0].path(), "file_0", 20, false).unwrap();
+        assert_eq!(fuzzy5.iter().map(|h| &h.path).collect::<Vec<_>>(), fuzzy_all.iter().take(5).map(|h| &h.path).collect::<Vec<_>>());
+
+        // Populate more than MAX_CACHED_ROOTS roots and verify LRU eviction bounds cache size.
+        for dir in &dirs {
+            let _ = index_for(dir.path(), false);
+        }
+        let len = cache().lock().unwrap().entries.len();
+        assert!(len <= MAX_CACHED_ROOTS, "cache len {len} exceeded cap {MAX_CACHED_ROOTS}");
+    }
+
+    #[test]
+    fn searchable_bytes_rejects_oversized_files_before_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("huge.txt");
+        let file = std::fs::File::create(&big).unwrap();
+        file.set_len(MAX_TEXT + 1024).unwrap();
+        assert!(searchable_bytes(&big).is_none());
+
+        let small = dir.path().join("small.txt");
+        std::fs::write(&small, "needle").unwrap();
+        assert_eq!(searchable_bytes(&small).as_deref(), Some(b"needle".as_slice()));
     }
 }
 
@@ -637,7 +747,14 @@ fn rel_of(root: &Path, path: &Path) -> String {
 
 /// The bytes of a file worth searching: small enough, and not binary.
 fn searchable_bytes(path: &Path) -> Option<Vec<u8>> {
-    let bytes = std::fs::read(path).ok()?;
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > MAX_TEXT {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity((meta.len() as usize).min(MAX_TEXT as usize));
+    file.take(MAX_TEXT + 1).read_to_end(&mut bytes).ok()?;
     if bytes.len() > MAX_TEXT as usize || bytes.iter().take(8192).any(|&b| b == 0) {
         return None;
     }

@@ -153,6 +153,9 @@ fn validate_values(values: &Values) -> Result<()> {
 /// All worktrees and subdirectories of a repository share its Git common dir.
 /// Git's inherited discovery overrides must not redirect this lookup elsewhere.
 fn repository(cwd: &Path) -> Option<String> {
+    if let Some(identity) = super::configuration::repository_identity(cwd) {
+        return Some(format!("repository:{identity}"));
+    }
     let git = crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git"));
     let output = std::process::Command::new(git)
         .current_dir(cwd)
@@ -547,30 +550,120 @@ fn refresh_cache(
     Ok(())
 }
 
+#[cfg(any(unix, test))]
+#[derive(Default)]
+struct WatchState {
+    initialized: bool,
+    last_stamp: Option<super::FileStamp>,
+    window_was_available: bool,
+}
+
+#[cfg(any(unix, test))]
+impl WatchState {
+    fn should_refresh(
+        &self,
+        current_stamp: Option<super::FileStamp>,
+        window_available: bool,
+        attempts: &BTreeMap<String, Retry>,
+        now: std::time::Instant,
+    ) -> bool {
+        if !window_available {
+            return false;
+        }
+        if !self.initialized || !self.window_was_available || current_stamp != self.last_stamp {
+            return true;
+        }
+        attempts.values().any(|retry| now >= retry.after)
+    }
+
+    fn next_wait(&self, window_available: bool, attempts: &BTreeMap<String, Retry>, now: std::time::Instant, watching_os: bool) -> Duration {
+        const IDLE_CHECK: Duration = Duration::from_secs(5);
+        const FALLBACK_POLL: Duration = Duration::from_secs(2);
+        const WAIT_WINDOW: Duration = Duration::from_secs(1);
+
+        let base = if !window_available {
+            WAIT_WINDOW
+        } else if watching_os {
+            IDLE_CHECK
+        } else {
+            FALLBACK_POLL
+        };
+        let retry_wait = attempts
+            .values()
+            .map(|retry| retry.after.saturating_duration_since(now))
+            .min();
+        match retry_wait {
+            Some(wait) => base.min(wait.max(Duration::from_millis(50))),
+            None => base,
+        }
+    }
+}
+
 /// Prefetch on a dedicated runtime worker. Only the desktop accesses Keychain;
 /// launches and metadata reads neither wait for this worker nor take its locks.
 /// The cache is intentionally absent from runtime handover; reattachment refills it.
 #[cfg(unix)]
 pub(crate) fn start(lifetime: &std::sync::Arc<crate::local_runtime::Lifetime>) -> Result<()> {
+    use notify::{Event, RecursiveMode, Watcher as NotifyWatcher};
+
     let lifetime = std::sync::Arc::downgrade(lifetime);
     std::thread::Builder::new()
         .name("environment-cache".into())
         .spawn(move || {
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            let watched_root = super::root().ok();
+            let mut os_watcher = watched_root.as_ref().and_then(|root| {
+                let tx = tx.clone();
+                let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
+                    let relevant = match res {
+                        Ok(event) => {
+                            event.need_rescan()
+                                || event.paths.is_empty()
+                                || event.paths.iter().any(|p| {
+                                    p.file_name().is_some_and(|name| name == "environment.json")
+                                })
+                        }
+                        Err(_) => true,
+                    };
+                    if relevant {
+                        let _ = tx.send(());
+                    }
+                }).ok()?;
+                watcher.watch(root, RecursiveMode::NonRecursive).ok()?;
+                Some(watcher)
+            });
+            let watching_os = os_watcher.is_some();
+
             let mut attempts = BTreeMap::new();
+            let mut watch = WatchState::default();
             while let Some(lifetime) = lifetime.upgrade() {
                 if lifetime.is_stopping() {
                     break;
                 }
-                if lifetime.window.available() {
+                let available = lifetime.window.available();
+                if available {
                     if let Ok(store) = store() {
-                        let _ = refresh_cache(cache(), &store, &mut attempts, |key, revision| {
-                            lifetime.window.environment_snapshot(key, revision)
-                        });
+                        let env_path = store.root.join("environment.json");
+                        let current_stamp = super::file_stamp(&env_path).ok().flatten();
+                        let now = std::time::Instant::now();
+                        if watch.should_refresh(current_stamp, available, &attempts, now) {
+                            let refreshed = refresh_cache(cache(), &store, &mut attempts, |key, revision| {
+                                lifetime.window.environment_snapshot(key, revision)
+                            });
+                            if refreshed.is_ok() {
+                                watch.initialized = true;
+                                watch.last_stamp = current_stamp;
+                            }
+                        }
                     }
                 }
+                watch.window_was_available = available;
+                let wait = watch.next_wait(available, &attempts, std::time::Instant::now(), watching_os);
                 drop(lifetime);
-                std::thread::sleep(Duration::from_millis(250));
+                let _ = rx.recv_timeout(wait);
+                while rx.try_recv().is_ok() {}
             }
+            drop(os_watcher.take());
         })?;
     Ok(())
 }

@@ -3,9 +3,10 @@
 //! permission to set it. No scripts are executed by this module: [`scripts`]
 //! only says which setup and archive commands a repository's hooks may run.
 use crate::paths::Canonical;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -114,6 +115,7 @@ pub struct Trust {
     pub keys: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct Repository {
     pub root: PathBuf,
     identity: String,
@@ -121,14 +123,34 @@ pub struct Repository {
     project: PathBuf,
 }
 
+const MAX_REPO_CACHE: usize = 128;
+const REPO_CACHE_TTL: Duration = Duration::from_secs(30);
+
+struct CachedRepo {
+    repo: Repository,
+    dot_git: PathBuf,
+    dot_git_stamp: Option<super::FileStamp>,
+    cached_at: Instant,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct RepoCache {
+    tick: u64,
+    entries: HashMap<PathBuf, CachedRepo>,
+}
+
+static REPO_CACHE: LazyLock<Mutex<RepoCache>> = LazyLock::new(Default::default);
+
+#[cfg(test)]
+thread_local! {
+    static TEST_REPO_GIT_SPAWNS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// No hooks, fsmonitor, inherited Git discovery variables or shell are used to
 /// discover the checkout. All workspaces inherit the primary checkout's files.
 fn git(root: &Path, args: &[&str]) -> Result<String> {
     Ok(git_output(root, args)?.trim().into())
-}
-/// A path Git printed, without only its line ending (see `git::path_line`).
-fn git_path(root: &Path, args: &[&str]) -> Result<PathBuf> {
-    Ok(PathBuf::from(crate::git::path_line(&git_output(root, args)?)))
 }
 fn git_output(root: &Path, args: &[&str]) -> Result<String> {
     let output = std::process::Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")))
@@ -139,15 +161,74 @@ fn git_output(root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?)
 }
 pub fn repository(path: &Path) -> Result<Repository> {
-    let checkout = git_path(path, &["rev-parse", "--show-toplevel"])?.canonical()?;
-    let common = git_path(&checkout, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?.canonical()?;
+    let project = path.canonical().unwrap_or_else(|_| path.to_path_buf());
+    let cached = {
+        let mut cache = REPO_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        cache.tick = cache.tick.wrapping_add(1);
+        let tick = cache.tick;
+        cache.entries.get_mut(&project).and_then(|entry| {
+            if entry.cached_at.elapsed() < REPO_CACHE_TTL {
+                entry.last_used = tick;
+                Some((entry.repo.clone(), entry.dot_git.clone(), entry.dot_git_stamp))
+            } else {
+                None
+            }
+        })
+    };
+    if let Some((repo, dot_git, saved_stamp)) = cached {
+        if saved_stamp.is_some()
+            && super::file_stamp(&dot_git).ok().flatten() == saved_stamp
+            && repo.root.exists()
+        {
+            return Ok(repo);
+        }
+    }
+
+    #[cfg(test)]
+    TEST_REPO_GIT_SPAWNS.with(|c| c.set(c.get() + 1));
+    let rev_parse = git_output(path, &["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"])?;
+    let mut lines = rev_parse.split('\n');
+    let checkout_line = lines.next().context("Cannot read repository configuration metadata.")?;
+    let common_line = lines.next().context("Cannot read repository configuration metadata.")?;
+    let checkout = PathBuf::from(crate::git::path_line(checkout_line)).canonical()?;
+    let common = PathBuf::from(crate::git::path_line(common_line)).canonical()?;
+    let dot_git = checkout.join(".git");
     // Configuration belongs to the primary checkout, including local overrides.
     // A linked workspace must not silently lose ignored local values or adopt
     // executable settings from an arbitrary branch it checks out.
-    let worktrees = git(&checkout, &["worktree", "list", "--porcelain", "-z"])?;
-    let primary = worktrees.split('\0').find_map(|line| line.strip_prefix("worktree ")).context("Repository has no primary checkout.")?;
-    let root = PathBuf::from(primary).canonical()?;
-    Ok(Repository { root, identity: common.to_string_lossy().into_owned(), project: path.canonical().unwrap_or_else(|_| path.to_path_buf()) })
+    let root = if dot_git.is_dir() && dot_git.canonical().ok().as_ref() == Some(&common) {
+        checkout
+    } else {
+        #[cfg(test)]
+        TEST_REPO_GIT_SPAWNS.with(|c| c.set(c.get() + 1));
+        let worktrees = git(&checkout, &["worktree", "list", "--porcelain", "-z"])?;
+        let primary = worktrees.split('\0').find_map(|line| line.strip_prefix("worktree ")).context("Repository has no primary checkout.")?;
+        PathBuf::from(primary).canonical()?
+    };
+    let repo = Repository { root, identity: common.to_string_lossy().into_owned(), project: project.clone() };
+    let dot_git_stamp = super::file_stamp(&dot_git).ok().flatten();
+    if dot_git_stamp.is_some() {
+        let mut cache = REPO_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        cache.tick = cache.tick.wrapping_add(1);
+        let tick = cache.tick;
+        if !cache.entries.contains_key(&project) && cache.entries.len() >= MAX_REPO_CACHE {
+            if let Some(oldest) = cache.entries.iter().min_by_key(|(_, v)| v.last_used).map(|(k, _)| k.clone()) {
+                cache.entries.remove(&oldest);
+            }
+        }
+        cache.entries.insert(project, CachedRepo {
+            repo: repo.clone(),
+            dot_git,
+            dot_git_stamp,
+            cached_at: Instant::now(),
+            last_used: tick,
+        });
+    }
+    Ok(repo)
+}
+
+pub(super) fn repository_identity(path: &Path) -> Option<String> {
+    repository(path).ok().map(|repo| repo.identity)
 }
 fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 /// What trust is bound to. A file that sets scripts gets a hash no earlier
