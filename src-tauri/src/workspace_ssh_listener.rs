@@ -698,7 +698,8 @@ mod real_sshd_tests {
             crate::workspace_ssh::LoginShell::current_account().hold_reason(),
             None
         );
-        let scratch = tempfile::tempdir().unwrap();
+        let home = std::env::var_os("HOME").expect("disposable runtime home");
+        let scratch = tempfile::tempdir_in(home).unwrap();
         let root = scratch.path();
         let host = root.join("host");
         generate_key(&host);
