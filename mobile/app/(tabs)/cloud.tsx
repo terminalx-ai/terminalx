@@ -24,6 +24,7 @@ import { workspaceActions } from "@mobile/ui/workspace-actions";
 import { usePullRefresh } from "@mobile/ui/pull-refresh";
 import { TopBar, useTopBar } from "@mobile/ui/top-bar";
 import { useTabBarInset } from "@mobile/ui/tab-bar-inset";
+import { HEADING_MAX_POINTS, HEADING_SENTENCE_MAX_POINTS, maxScaleFor } from "@mobile/ui/text-size";
 import { useTheme } from "@mobile/ui/theme";
 
 /** Rows drawn while the first list is read, with none kept from before. */
@@ -110,7 +111,7 @@ export default function CloudScreen() {
   // Signed out, the page scrolls as the signed-out Machines tab does, so Sign in is never left under the tab bar at the
   // largest text sizes; the heading has the whole width of the page, so it wraps between words there (PRO-599).
   if (!app.session) return <Screen title="Cloud" contentContainerStyle={styles.signedOut}><View testID="cloud-signed-out" style={styles.signedOutBody}>
-    <View style={styles.signedOutText}><Text accessibilityRole="header" style={[styles.signedOutTitle, { color: palette.ink }]}>Sign in for cloud workspaces</Text><Text style={[styles.signedOutDetail, { color: palette.muted }]}>Cloud workspaces belong to your TerminalX account.</Text></View>
+    <View style={styles.signedOutText}><Text accessibilityRole="header" maxFontSizeMultiplier={SIGNED_OUT_TITLE_MAX_SCALE} style={[styles.signedOutTitle, { color: palette.ink }]}>Sign in for cloud workspaces</Text><Text maxFontSizeMultiplier={SIGNED_OUT_DETAIL_MAX_SCALE} style={[styles.signedOutDetail, { color: palette.muted }]}>Cloud workspaces belong to your TerminalX account.</Text></View>
     <Button label={app.signingIn ? "Signing in…" : "Sign in"} disabled={app.signingIn} accessibilityState={{ disabled: app.signingIn, busy: app.signingIn }} icon={app.signingIn ? (color) => <Spinner size={16} color={color} /> : undefined} onPress={() => void app.signIn()} />
     {app.error ? <Text accessibilityRole="alert" style={[styles.signInError, { color: palette.danger }]}>{app.error}</Text> : null}
   </View></Screen>;
@@ -231,3 +232,7 @@ const styles = StyleSheet.create({
   bar: { height: 12, borderRadius: 6, marginTop: 2 },
   barLine: { width: "38%", marginTop: 8, opacity: 0.6 },
 });
+
+// Signed out, the heading and its sentence stop growing where the Machines tab's do (PRO-601).
+const SIGNED_OUT_TITLE_MAX_SCALE = maxScaleFor(styles.signedOutTitle.fontSize, HEADING_MAX_POINTS);
+const SIGNED_OUT_DETAIL_MAX_SCALE = maxScaleFor(styles.signedOutDetail.fontSize, HEADING_SENTENCE_MAX_POINTS);
