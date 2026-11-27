@@ -20,6 +20,9 @@ pub(super) struct Child {
 pub(super) struct Census {
     children: Vec<Child>,
     complete: bool,
+    /// Panes whose launches are already `startup_proven && phase == Phase::Running`
+    /// and were skipped during steady-state polling.
+    skipped_panes: HashSet<String>,
 }
 
 fn bsd(pid: u32) -> Option<libc::proc_bsdinfo> {
@@ -45,11 +48,31 @@ fn task(pid: u32) -> Option<libc::proc_taskinfo> {
     }
 }
 
-pub(super) fn children(terminals: &crate::pty::Terminals, state: &Snapshot) -> Census {
-    let mut census = Census { children: Vec::new(), complete: true };
+pub(super) fn children(terminals: &crate::pty::Terminals, state: &Snapshot, permissions: Option<&[String]>) -> Census {
+    let mut census = Census { children: Vec::new(), complete: true, skipped_panes: HashSet::new() };
     let mut seen = HashSet::new();
     let mut roots = Vec::new();
+    let active_incident = state.active().is_some() || state.census_incomplete;
     for pane in terminals.panes().into_iter().filter(|pane| pane.running) {
+        let has_permission = permissions.is_some_and(|list| list.contains(&pane.id));
+        let proven_running = !active_incident
+            && !has_permission
+            && state.launches.iter().any(|launch| {
+                launch.evidence == Evidence::Readiness
+                    && launch.pane == pane.id
+                    && launch.pid == pane.pid
+                    && launch.startup_proven
+                    && launch.phase == Phase::Running
+            })
+            && !state.launches.iter().any(|launch| {
+                launch.evidence == Evidence::SmallUnchangingImage
+                    && launch.pane == pane.id
+                    && matches!(launch.phase, Phase::Spawning | Phase::AwaitingReady | Phase::PermissionPrompt)
+            });
+        if proven_running {
+            census.skipped_panes.insert(pane.id);
+            continue;
+        }
         if pane.pid.and_then(identity).is_some_and(|birth| state.launches.iter().any(|launch|
             launch.evidence == Evidence::Readiness && launch.pane == pane.id && launch.pid == pane.pid && launch.pid_birth.as_deref() == Some(birth.as_str()))) {
             roots.push(pane);
@@ -92,11 +115,14 @@ pub(super) fn children(terminals: &crate::pty::Terminals, state: &Snapshot) -> C
 pub(super) fn observe(state: &mut Snapshot, census: Census, permissions: &[String], at: i64) {
     if !census.complete && !state.census_incomplete { state.observation_lost_at = Some(at); }
     state.census_incomplete = !census.complete;
+    let skipped_panes = census.skipped_panes;
     let children = census.children;
     for launch in &mut state.launches {
         if launch.phase == Phase::Running { launch.startup_proven = true; }
         if !matches!(launch.phase, Phase::Spawning | Phase::AwaitingReady | Phase::PermissionPrompt | Phase::Running) { continue; }
-        if launch.evidence == Evidence::SmallUnchangingImage && !children.iter().any(|child| child.birth == launch.generation) {
+        if launch.evidence == Evidence::SmallUnchangingImage
+            && !(launch.startup_proven && launch.phase == Phase::Running && skipped_panes.contains(&launch.pane))
+            && !children.iter().any(|child| child.birth == launch.generation) {
             // Disappearance never proves an exit. Only an unproven startup or
             // an incident's affected launch invalidates health evidence; normal
             // healthy child churn must not perpetually postpone recovery.
@@ -145,6 +171,9 @@ pub(super) fn observe(state: &mut Snapshot, census: Census, permissions: &[Strin
             });
         let phase = if permission { Phase::PermissionPrompt } else if proven { Phase::Running } else { Phase::AwaitingReady };
         if let Some(launch) = state.launches.iter_mut().find(|launch| launch.evidence == Evidence::SmallUnchangingImage && launch.generation == child.birth) {
+            if launch.startup_proven && launch.phase == Phase::Running && phase == Phase::Running {
+                continue;
+            }
             if launch.cpu_time != Some(child.cpu) || launch.resident_bytes != Some(child.rss)
                 || phase != launch.phase {
                 launch.last_progress_at = at;
@@ -180,7 +209,7 @@ mod tests {
     use super::*;
     fn child(rss: u64, cpu: u64) -> Child { Child { pane: "tab:a".into(), pid: 1, birth: "1:2:3".into(), rss, cpu, threads: 1 } }
     fn observe(state: &mut Snapshot, children: Vec<Child>, permissions: &[String], at: i64) {
-        super::observe(state, Census { children, complete: true }, permissions, at);
+        super::observe(state, Census { children, complete: true, skipped_panes: HashSet::new() }, permissions, at);
     }
     #[test]
     fn unchanged_small_images_correlate_but_progress_and_large_compiles_do_not() {
@@ -218,7 +247,7 @@ mod tests {
     fn incomplete_census_still_invalidates_health_for_proven_children() {
         let mut state = Snapshot::default();
         observe(&mut state, vec![child(40 * 1024 * 1024, 10)], &[], 0);
-        super::observe(&mut state, Census { children: vec![], complete: false }, &[], 1_000);
+        super::observe(&mut state, Census { children: vec![], complete: false, skipped_panes: HashSet::new() }, &[], 1_000);
         assert_eq!(state.observation_lost_at, Some(1_000));
         assert!(state.census_incomplete);
     }
@@ -242,7 +271,7 @@ mod tests {
         owner.pid_birth = identity(std::process::id());
         owner.recorder = Some(uuid::Uuid::new_v4().to_string());
         let state = Snapshot { launches: vec![owner], ..Snapshot::default() };
-        let observed = children(&crate::pty::Terminals::new(), &state);
+        let observed = children(&crate::pty::Terminals::new(), &state, None);
         let found = observed.children.iter().any(|observed| observed.pid == pid && Some(observed.birth.clone()) == identity(pid));
         drop(child.stdin.take());
         child.wait().unwrap();
@@ -361,7 +390,7 @@ mod tests {
             result: Some(probe::ProbeResult { finished_at: 140_000, shell: healthy.clone(), native: probe::Captured { stdout: "terminalx-startup-ready\n".into(), ..healthy } }) });
         probe::refresh(directory.path(), &mut state, 150_000).unwrap();
         assert!(state.active().is_some(), "healthy probe cannot release a still observed stall");
-        super::observe(&mut state, Census { children: vec![], complete: false }, &[], 160_000);
+        super::observe(&mut state, Census { children: vec![], complete: false, skipped_panes: HashSet::new() }, &[], 160_000);
         // Restart persistence includes both incompleteness and the recovery
         // evidence boundary; a changed in-memory enum alone is insufficient.
         let mut state: Snapshot = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
@@ -381,11 +410,22 @@ mod tests {
         health.started_at = 200_000;
         health.result.as_mut().unwrap().finished_at = 210_000;
         health.owner_exit = Some(recorder_exit(0, 210_001));
-        super::observe(&mut state, Census { children: vec![], complete: false }, &[], 195_000);
+        super::observe(&mut state, Census { children: vec![], complete: false, skipped_panes: HashSet::new() }, &[], 195_000);
         probe::refresh(directory.path(), &mut state, 215_000).unwrap();
         assert!(state.active().is_some(), "even fresh health cannot clear an incomplete census");
         observe(&mut state, vec![], &[], 220_000);
         probe::refresh(directory.path(), &mut state, 220_000).unwrap();
         assert!(state.active().is_none(), "complete observation plus new health can recover");
+    }
+
+    #[test]
+    fn proven_running_child_does_not_churn_snapshot_on_cpu_or_rss_changes() {
+        let mut state = Snapshot::default();
+        observe(&mut state, vec![child(40 * 1024 * 1024, 100)], &[], 1_000);
+        assert!(state.launches[0].startup_proven);
+        assert_eq!(state.launches[0].phase, Phase::Running);
+        let before = state.clone();
+        observe(&mut state, vec![child(42 * 1024 * 1024, 999)], &[], 6_000);
+        assert_eq!(state, before, "steady-state CPU/RSS drift must not dirty the snapshot");
     }
 }

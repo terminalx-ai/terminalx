@@ -24,13 +24,18 @@
 
 pub mod manage;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::{json, Value};
 
 use crate::events::*;
 use crate::harness::settings::Signal;
 pub use crate::harness::Action;
+
+/// Maximum prompt/retired message IDs kept across turn boundaries so late
+/// out-of-order events from an immediately preceding turn are still filtered
+/// without unbounded memory growth over long-lived sessions.
+const MAX_TRACKED_IDS: usize = 64;
 
 pub struct SpawnPlan {
     pub program: std::path::PathBuf,
@@ -97,10 +102,12 @@ pub struct OpenCode {
     reports_status: bool,
     /// The reader's own messages: their parts are the prompt, not a reply.
     prompts: HashSet<String>,
+    prompts_order: VecDeque<String>,
     /// The messages of the open turn, and of the turns before it. What still
     /// arrives for an earlier turn's message is not part of this one.
     messages: HashSet<String>,
     retired: HashSet<String>,
+    retired_order: VecDeque<String>,
     turn_started_at: Option<std::time::Instant>,
     last_usage: Option<(u64, Option<u64>)>,
 }
@@ -270,6 +277,34 @@ impl OpenCode {
         self.asks.contains_key(request_id)
     }
 
+    fn remember_prompt(&mut self, id: String) {
+        if self.prompts.insert(id.clone()) {
+            self.prompts_order.push_back(id);
+            while self.prompts.len() > MAX_TRACKED_IDS {
+                if let Some(oldest) = self.prompts_order.pop_front() {
+                    self.prompts.remove(&oldest);
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn retire_messages(&mut self) {
+        for id in self.messages.drain() {
+            if self.retired.insert(id.clone()) {
+                self.retired_order.push_back(id);
+            }
+        }
+        while self.retired.len() > MAX_TRACKED_IDS {
+            if let Some(oldest) = self.retired_order.pop_front() {
+                self.retired.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    }
+
     fn end_turn(&mut self, status: TurnStatus, final_text: Option<String>, auth_failed: bool) -> Vec<Action> {
         if !self.turn_open {
             return Vec::new();
@@ -278,10 +313,14 @@ impl OpenCode {
         // What it was asking went with it, and whatever still arrives for its messages is late.
         self.asks.clear();
         self.answers.clear();
-        self.retired.extend(self.messages.drain());
+        self.retire_messages();
         let duration_ms = self.turn_started_at.take().map(|t| t.elapsed().as_millis() as u64);
         let usage = self.last_usage.map(|(used, max)| Usage { context_used: Some(used), context_max: max, ..Default::default() });
         let mut out = self.commit_open_text();
+        // Completed turn state is no longer needed once open text has been committed.
+        self.seen.clear();
+        self.committed.clear();
+        self.tools_started.clear();
         out.push(Action::Emit(Payload::TurnCompleted { status, final_text, usage, duration_ms, head: None, auth_failed, detail: None }));
         out
     }
@@ -397,7 +436,7 @@ impl OpenCode {
                 }
                 if info["role"].as_str() == Some("user") {
                     if let Some(id) = info["id"].as_str() {
-                        self.prompts.insert(id.to_string());
+                        self.remember_prompt(id.to_string());
                     }
                     return Vec::new();
                 }
@@ -1261,5 +1300,30 @@ mod tests {
         assert_eq!(https(&o.interrupt())[0].0, "abort");
         o.handle(r#"{"raccoon_http":{"tag":"abort","status":500,"body":{"message":"no"}}}"#);
         assert_eq!(ends(&o.handle(IDLE)), [TurnStatus::Ok]);
+    }
+
+    #[test]
+    fn completed_turn_ids_are_pruned_and_bounded() {
+        let mut o = working("turn-0");
+        for i in 0..150 {
+            if i > 0 {
+                o.prompt(format!("turn-{i}"), vec![]);
+            }
+            o.handle(&json!({"type": "message.updated", "properties": {"info": {"id": format!("u-{i}"), "role": "user"}}}).to_string());
+            o.handle(&json!({
+                "type": "message.part.updated",
+                "properties": {"part": {"id": format!("p-{i}"), "messageID": format!("m-{i}"), "type": "tool", "callID": format!("call-{i}"), "tool": "bash", "state": {"status": "completed", "input": {}, "output": "ok"}}}
+            }).to_string());
+            o.handle(IDLE);
+            assert!(o.tools_started.is_empty(), "tools_started must clear on turn end");
+            assert!(o.seen.is_empty(), "seen must clear on turn end");
+            assert!(o.committed.is_empty(), "committed must clear on turn end");
+        }
+        assert!(o.prompts.len() <= MAX_TRACKED_IDS);
+        assert!(o.retired.len() <= MAX_TRACKED_IDS);
+        assert!(o.prompts.contains("u-149"));
+        assert!(o.retired.contains("m-149"));
+        assert!(!o.prompts.contains("u-0"));
+        assert!(!o.retired.contains("m-0"));
     }
 }

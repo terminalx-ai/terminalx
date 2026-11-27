@@ -1548,6 +1548,15 @@ pub struct SessionManager {
     status: Arc<crate::status::StatusState>,
     control: crate::hooks::ControlEndpoint,
     tabs: Arc<Mutex<HashMap<String, Arc<Mutex<TabRuntime>>>>>,
+    /// Per-key creation gates so `SessionManager::runtime` drops `self.tabs`
+    /// before doing disk I/O while still ensuring a single runtime per key.
+    tab_inits: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Active CLI panes by `key_of`, kept outside `TabRuntime` so `running_agents`
+    /// never blocks behind a slow CLI spawn or probe.
+    cli_panes: Arc<Mutex<HashMap<String, (CliKind, String)>>>,
+    /// Per-tab message-activity state so streaming `Delta::TextDelta` chunks
+    /// short-circuit `store::message_activity::record` once the turn is active.
+    activity_states: Arc<Mutex<HashMap<String, DeltaActivityState>>>,
     provider_states: Arc<Mutex<HashMap<String, ProviderTabState>>>,
     /// Explicit command grants for this tab's conversation. Kept across
     /// turns and CLI restarts; forgotten when the owner runtime exits.
@@ -1897,6 +1906,58 @@ fn pending_memory() -> std::time::Duration {
     PENDING_MEMORY
 }
 
+/// Per-tab message-activity fast-path state so repeated `Delta::TextDelta` chunks
+/// in the same turn/block avoid hitting `store::message_activity`'s global lock.
+#[derive(Default)]
+struct DeltaActivityState {
+    assistant_active: bool,
+    has_messages: bool,
+    last_ts: Option<String>,
+    log_path: PathBuf,
+}
+
+/// Result of running `checkpoints::observe` synchronously outside `Mutex<TabRuntime>`
+/// before persisting/emitting a turn-boundary event.
+enum ObservedCheckpoint {
+    /// Start-of-turn (`UserMessage { queued: false }` or `TurnStarted`):
+    /// `reserved_seq` was already reserved on `TabRuntime::seq` before releasing
+    /// the lock so the checkpoint record and published event share the exact seq.
+    Started { reserved_seq: u64 },
+    /// End-of-turn (`TurnCompleted`): `payload.head` was already populated, and
+    /// `completed` (if any) must be published as `TurnCheckpoint` immediately
+    /// before `TurnCompleted`.
+    Completed(Option<crate::checkpoints::Completed>),
+}
+
+fn is_checkpoint_turn_start(payload: &Payload) -> bool {
+    matches!(payload, Payload::UserMessage { queued: false, .. } | Payload::TurnStarted { .. })
+}
+
+fn is_checkpoint_boundary(payload: &Payload) -> bool {
+    is_checkpoint_turn_start(payload) || matches!(payload, Payload::TurnCompleted { .. })
+}
+
+/// Resolve a tab's log path from its already-loaded `TabEntry` metadata without
+/// re-reading and re-parsing `sessions/index.json`.
+fn log_path_for_tab(session_id: &str, tab: &TabEntry) -> Result<PathBuf> {
+    let dir = store::session_dir(session_id)?;
+    let name = match tab.unknown.get("resetLogId") {
+        Some(Value::String(id)) => {
+            anyhow::ensure!(uuid::Uuid::parse_str(id).is_ok(), "Invalid reset log id.");
+            format!("{}.reset-{id}.jsonl", tab.id)
+        }
+        None | Some(Value::Null) => format!("{}.jsonl", tab.id),
+        _ => anyhow::bail!("Invalid reset log id."),
+    };
+    Ok(dir.join(name))
+}
+
+#[cfg(test)]
+thread_local! {
+    static MESSAGE_ACTIVITY_RECORD_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static LOAD_EVENTS_READ_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 fn key_of(session_id: &str, tab_id: &str) -> String {
     format!("{session_id}/{tab_id}")
 }
@@ -1908,6 +1969,7 @@ fn key_of(session_id: &str, tab_id: &str) -> String {
 /// above all the check that stops a tab starting a second CLI — is then
 /// guarding nothing: both callers pass it and the tab spawns two agents on the
 /// same conversation, of which the second is refused and the first is lost.
+#[cfg(test)]
 fn one_per_key<V: Clone>(map: &Mutex<HashMap<String, V>>, key: &str, make: impl FnOnce() -> Result<V>) -> Result<V> {
     let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(v) = map.get(key) {
@@ -2097,6 +2159,9 @@ impl SessionManager {
             status,
             control,
             tabs: Arc::new(Mutex::new(HashMap::new())),
+            tab_inits: Arc::default(),
+            cli_panes: Arc::default(),
+            activity_states: Arc::default(),
             provider_states: Arc::default(),
             session_commands: Arc::default(),
             children: Arc::default(),
@@ -2762,65 +2827,114 @@ impl SessionManager {
     }
 
     fn runtime(&self, session_id: &str, tab_id: &str) -> Result<Arc<Mutex<TabRuntime>>> {
+        Ok(self.runtime_loading(session_id, tab_id)?.0)
+    }
+
+    /// Look up or initialize a tab's runtime without holding `self.tabs` across
+    /// disk I/O. When newly created, also returns the single-pass parsed log
+    /// events and the resulting `seq` so `load_events` can reuse them without
+    /// re-reading the JSONL file.
+    fn runtime_loading(&self, session_id: &str, tab_id: &str) -> Result<(Arc<Mutex<TabRuntime>>, Option<(Vec<AgentEvent>, u64)>)> {
         let key = key_of(session_id, tab_id);
-        one_per_key(&self.tabs, &key, || {
-            let entry = index::get(session_id)?;
-            let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
-            let log_path = store::log_path(session_id, tab_id)?;
-            let seq = store::last_seq(&log_path)?.max(tab.unknown.get("resetSeq").and_then(Value::as_u64).unwrap_or(0));
-            let rt = Arc::new(Mutex::new(TabRuntime {
-                session_id: session_id.into(),
-                tab_id: tab_id.into(),
-                acting_bot: crate::bots::chat::acting_bot(&entry),
-                bot_builtin: crate::bots::builtins::of_session(&entry),
-                harness: tab.harness.clone(),
-                seq,
-                status: TabStatus::Idle,
-                child: None,
-                child_pid: None,
-                environment: Default::default(),
-                engine: Engine::None,
-                pending: HashMap::new(),
-                queued: Vec::new(),
-                held_queue: held::Queue::restore(&log_path)?,
-                turn_open: false,
-                turn_generation: 0,
-                automation_completions_in_flight: 0,
-                turn_opener: None,
-                compact_completed: false,
-                compact_boundary_at: None,
-                source_timestamp: None,
-                message_times: HashMap::new(),
-                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, setup_failed: false, stdio_writer: None, stdio_authority: None, stdio_launch_permit: None, stdio_receipt: None, stdio_followups: Default::default(),
-                stdio_retiring: None,
-                turn_started_at: None,
-                turn_usage: Default::default(),
-                turn_by_command: false,
-                signed_out_in_turn: false,
-                last_activity: Instant::now(),
-                recovery: None,
-                incidents: Default::default(),
-                stalled_at: None,
-                last_settings_report: None,
-                collaboration_stance: None, collaboration_raw: None,
-                collaboration_prompts: HashMap::new(), collaboration_settings: HashMap::new(),
-                reported_mode_to_judge: None,
-                restart_claim: None,
-                stopping: false,
-                stop_in_flight: false,
-                stopping_pid: None,
-                background: None,
-                left_at: None,
-                prepared_baseline: None,
-                log_path,
-                me: std::sync::Weak::new(),
-            }));
-            rt.lock().unwrap().me = Arc::downgrade(&rt);
-            if codex_stdio::selected(tab) {
-                self.reconcile_codex_followups(&mut rt.lock().unwrap())?;
+        if let Some(rt) = self.tabs.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned() {
+            return Ok((rt, None));
+        }
+        let gate = {
+            let mut inits = self.tab_inits.lock().unwrap_or_else(|e| e.into_inner());
+            inits.entry(key.clone()).or_default().clone()
+        };
+        struct GateCleanup<'a> {
+            inits: &'a Mutex<HashMap<String, Arc<Mutex<()>>>>,
+            key: String,
+            gate: Arc<Mutex<()>>,
+        }
+        impl Drop for GateCleanup<'_> {
+            fn drop(&mut self) {
+                let mut inits = self.inits.lock().unwrap_or_else(|e| e.into_inner());
+                if inits.get(&self.key).is_some_and(|existing| Arc::ptr_eq(existing, &self.gate) && Arc::strong_count(existing) == 2) {
+                    inits.remove(&self.key);
+                }
             }
-            Ok(rt)
-        })
+        }
+        let _cleanup = GateCleanup { inits: &self.tab_inits, key: key.clone(), gate };
+        let _init_guard = _cleanup.gate.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(rt) = self.tabs.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned() {
+            return Ok((rt, None));
+        }
+        // All disk I/O runs outside `self.tabs` so opening a large tab never
+        // stalls unrelated tabs.
+        let entry = index::get(session_id)?;
+        let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
+        let log_path = log_path_for_tab(session_id, tab)?;
+        #[cfg(test)]
+        LOAD_EVENTS_READ_CALLS.with(|c| c.set(c.get() + 1));
+        let mut events: Vec<AgentEvent> = store::read_lines(&log_path)?;
+        let last_seq = events.iter().map(|e| e.seq).max().unwrap_or(0);
+        let seq = last_seq.max(tab.unknown.get("resetSeq").and_then(Value::as_u64).unwrap_or(0));
+        let mut held_queue = held::Queue::replay(&events);
+        let interrupted = held_queue.sending.take().is_some();
+        if held_queue.next.take().is_some() || interrupted {
+            held_queue.paused = true;
+            held_queue.error = Some("Delivery was interrupted. Check whether the agent already received this message before resuming; delete it if it did.".into());
+        }
+        let rt = Arc::new(Mutex::new(TabRuntime {
+            session_id: session_id.into(),
+            tab_id: tab_id.into(),
+            acting_bot: crate::bots::chat::acting_bot(&entry),
+            bot_builtin: crate::bots::builtins::of_session(&entry),
+            harness: tab.harness.clone(),
+            seq,
+            status: TabStatus::Idle,
+            child: None,
+            child_pid: None,
+            environment: Default::default(),
+            engine: Engine::None,
+            pending: HashMap::new(),
+            queued: Vec::new(),
+            held_queue,
+            turn_open: false,
+            turn_generation: 0,
+            automation_completions_in_flight: 0,
+            turn_opener: None,
+            compact_completed: false,
+            compact_boundary_at: None,
+            source_timestamp: None,
+            message_times: HashMap::new(),
+            compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, setup_failed: false, stdio_writer: None, stdio_authority: None, stdio_launch_permit: None, stdio_receipt: None, stdio_followups: Default::default(),
+            stdio_retiring: None,
+            turn_started_at: None,
+            turn_usage: Default::default(),
+            turn_by_command: false,
+            signed_out_in_turn: false,
+            last_activity: Instant::now(),
+            recovery: None,
+            incidents: Default::default(),
+            stalled_at: None,
+            last_settings_report: None,
+            collaboration_stance: None, collaboration_raw: None,
+            collaboration_prompts: HashMap::new(), collaboration_settings: HashMap::new(),
+            reported_mode_to_judge: None,
+            restart_claim: None,
+            stopping: false,
+            stop_in_flight: false,
+            stopping_pid: None,
+            background: None,
+            left_at: None,
+            prepared_baseline: None,
+            log_path,
+            me: std::sync::Weak::new(),
+        }));
+        let init_seq = {
+            let mut guard = rt.lock().unwrap();
+            guard.me = Arc::downgrade(&rt);
+            if codex_stdio::selected(tab) {
+                let withdrawn = self.reconcile_codex_followups_from(&mut guard, &events);
+                events.extend(withdrawn);
+            }
+            guard.seq
+        };
+        self.tabs.lock().unwrap_or_else(|e| e.into_inner()).insert(key, rt.clone());
+        Ok((rt, Some((events, init_seq))))
     }
 
     /// Stamp, persist, emit. The one path every event takes.
@@ -2832,21 +2946,114 @@ impl SessionManager {
         self.publish_event(rt, payload, None, request_id)
     }
 
-    fn publish_event(&self, rt: &mut TabRuntime, mut payload: Payload, subagent: Option<SubagentRef>, prompt_request_id: Option<uuid::Uuid>) -> AgentEvent {
+    /// Run `checkpoints::observe` synchronously OUTSIDE `Mutex<TabRuntime>`
+    /// (temporarily dropping `rt` and re-acquiring it before returning) so git
+    /// snapshot I/O never stalls `status_of`/`running_agents`/`load_events`/
+    /// `delete_session`, while preserving `&mut payload` mutations (`baseline`/
+    /// `head`), strict `TurnCheckpoint` -> `TurnCompleted` ordering, and
+    /// pre-prompt snapshot completion.
+    fn observe_checkpoint_with_guard<'a>(
+        &self,
+        rt_arc: &'a Arc<Mutex<TabRuntime>>,
+        mut rt: MutexGuard<'a, TabRuntime>,
+        payload: &mut Payload,
+        subagent: Option<&SubagentRef>,
+    ) -> (MutexGuard<'a, TabRuntime>, Option<ObservedCheckpoint>) {
+        if subagent.is_some() || !is_checkpoint_boundary(payload) {
+            return (rt, None);
+        }
+        let session_id = rt.session_id.clone();
+        let tab_id = rt.tab_id.clone();
+        let is_start = is_checkpoint_turn_start(payload);
+        let observe_seq = if is_start {
+            rt.seq += 1;
+            rt.seq
+        } else {
+            0
+        };
+        drop(rt);
+        #[cfg(test)]
+        assert!(
+            rt_arc.try_lock().is_ok(),
+            "TabRuntime mutex must be unlocked while checkpoints::observe runs"
+        );
+        let observed = match crate::checkpoints::observe(&session_id, &tab_id, observe_seq, payload) {
+            Ok(completed) => {
+                if is_start {
+                    ObservedCheckpoint::Started { reserved_seq: observe_seq }
+                } else {
+                    ObservedCheckpoint::Completed(completed)
+                }
+            }
+            Err(error) => {
+                log::warn!("capture turn checkpoint: {error:#}");
+                if is_start {
+                    ObservedCheckpoint::Started { reserved_seq: observe_seq }
+                } else {
+                    ObservedCheckpoint::Completed(None)
+                }
+            }
+        };
+        (rt_arc.lock().unwrap(), Some(observed))
+    }
+
+    fn publish_event_unlocked(
+        &self,
+        rt_arc: &Arc<Mutex<TabRuntime>>,
+        mut payload: Payload,
+        subagent: Option<SubagentRef>,
+        prompt_request_id: Option<uuid::Uuid>,
+    ) -> AgentEvent {
+        let rt = rt_arc.lock().unwrap();
+        let (mut rt, observed) = self.observe_checkpoint_with_guard(rt_arc, rt, &mut payload, subagent.as_ref());
+        self.publish_event_with_checkpoint(&mut rt, payload, subagent, prompt_request_id, observed)
+    }
+
+    fn publish_event(&self, rt: &mut TabRuntime, payload: Payload, subagent: Option<SubagentRef>, prompt_request_id: Option<uuid::Uuid>) -> AgentEvent {
+        self.publish_event_with_checkpoint(rt, payload, subagent, prompt_request_id, None)
+    }
+
+    fn publish_event_with_checkpoint(
+        &self,
+        rt: &mut TabRuntime,
+        mut payload: Payload,
+        subagent: Option<SubagentRef>,
+        prompt_request_id: Option<uuid::Uuid>,
+        observed: Option<ObservedCheckpoint>,
+    ) -> AgentEvent {
         if matches!(&payload, Payload::Error { .. } | Payload::TurnCompleted { status: TurnStatus::Error, .. } | Payload::ApiRetry { .. } | Payload::RateLimited { .. } | Payload::PermissionDenied { .. })
             || matches!(&payload, Payload::ToolCallCompleted { result, .. } if result.is_error) {
             recovery::diagnose(&rt.diagnostics_path(), &payload);
             recovery::sanitize(&mut payload);
         }
+        let mut reserved_seq: Option<u64> = None;
         if subagent.is_none() {
             rt.turn_usage.apply(&mut payload);
-            match crate::checkpoints::observe(&rt.session_id, &rt.tab_id, rt.seq + 1, &mut payload) {
-                Ok(Some(checkpoint)) => { self.publish(rt, Payload::TurnCheckpoint { seq: checkpoint.seq, base: checkpoint.base, head: checkpoint.head }, None); }
-                Err(error) => log::warn!("capture turn checkpoint: {error:#}"),
-                _ => {}
+            match observed {
+                Some(ObservedCheckpoint::Started { reserved_seq: seq }) => {
+                    reserved_seq = Some(seq);
+                }
+                Some(ObservedCheckpoint::Completed(Some(checkpoint))) => {
+                    self.publish(rt, Payload::TurnCheckpoint { seq: checkpoint.seq, base: checkpoint.base, head: checkpoint.head }, None);
+                }
+                Some(ObservedCheckpoint::Completed(None)) => {}
+                None if is_checkpoint_boundary(&payload) => {
+                    match crate::checkpoints::observe(&rt.session_id, &rt.tab_id, rt.seq + 1, &mut payload) {
+                        Ok(Some(checkpoint)) => { self.publish(rt, Payload::TurnCheckpoint { seq: checkpoint.seq, base: checkpoint.base, head: checkpoint.head }, None); }
+                        Err(error) => log::warn!("capture turn checkpoint: {error:#}"),
+                        _ => {}
+                    }
+                }
+                None => {}
             }
         }
-        rt.seq += 1;
+        let seq = match reserved_seq {
+            Some(seq) => seq,
+            None => {
+                rt.seq += 1;
+                rt.seq
+            }
+        };
         let mut ts = rt.source_timestamp.clone().unwrap_or_else(index::now);
         let block_key = |block: &BlockRef| format!("{}:{}:{}", subagent.as_ref().map_or("", |agent| agent.id.as_str()), block.message_id, block.index);
         match &payload {
@@ -2866,7 +3073,7 @@ impl SessionManager {
             session_id: rt.session_id.clone(),
             tab_id: rt.tab_id.clone(),
             harness: rt.harness.clone(),
-            seq: rt.seq,
+            seq,
             message_ts: (!ts.is_empty() && matches!(&payload,
                 Payload::UserMessage { .. } | Payload::AssistantText { .. }
                 | Payload::TurnCompleted { .. } | Payload::Delta(Delta::TextDelta { .. })
@@ -2890,17 +3097,27 @@ impl SessionManager {
                 Err(error) => log::warn!("name conversation: {error:#}"),
             }
         }
-        match store::message_activity::record(&ev) {
-            // A message to an archived session brings it back to the list
-            // (#718), whoever sent it: the window, the CLI, a phone, a guest,
-            // an automation or a pipeline. Only a new one does: a message
-            // read again from a transcript does not move its time on.
-            Ok(Some(session)) if session.archived && ev.subagent.is_none() && matches!(&ev.payload, Payload::UserMessage { .. }) => {
-                self.sink.emit("session_updated", &crate::session_archive::bring_back(session));
+        if self.should_record_message_activity(rt, &ev) {
+            #[cfg(test)]
+            MESSAGE_ACTIVITY_RECORD_CALLS.with(|c| c.set(c.get() + 1));
+            match store::message_activity::record(&ev) {
+                // A message to an archived session brings it back to the list
+                // (#718), whoever sent it: the window, the CLI, a phone, a guest,
+                // an automation or a pipeline. Only a new one does: a message
+                // read again from a transcript does not move its time on.
+                Ok(Some(session)) if session.archived && ev.subagent.is_none() && matches!(&ev.payload, Payload::UserMessage { .. }) => {
+                    self.note_message_activity_recorded(rt, &ev);
+                    self.sink.emit("session_updated", &crate::session_archive::bring_back(session));
+                }
+                Ok(Some(session)) => {
+                    self.note_message_activity_recorded(rt, &ev);
+                    self.sink.emit("session_updated", &session);
+                }
+                Ok(None) => {
+                    self.note_message_activity_recorded(rt, &ev);
+                }
+                Err(error) => log::warn!("record message activity: {error:#}"),
             }
-            Ok(Some(session)) => self.sink.emit("session_updated", &session),
-            Ok(None) => {}
-            Err(error) => log::warn!("record message activity: {error:#}"),
         }
         // The turns incidents are told against (#815), as the log has them.
         if ev.subagent.is_none() {
@@ -2933,6 +3150,74 @@ impl SessionManager {
         self.observer.agent_event(&ev);
         self.sink.emit("agent_event", &ev);
         ev
+    }
+
+    fn should_record_message_activity(&self, rt: &TabRuntime, ev: &AgentEvent) -> bool {
+        if ev.subagent.is_some() {
+            return false;
+        }
+        match &ev.payload {
+            Payload::TurnStarted { .. }
+            | Payload::UserMessage { .. }
+            | Payload::AssistantText { .. }
+            | Payload::TurnCompleted { .. } => true,
+            Payload::Delta(Delta::TextDelta { text, .. }) => {
+                if text.is_empty() {
+                    return false;
+                }
+                let states = self.activity_states.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(state) = states.get(&rt.key()) {
+                    if state.assistant_active
+                        && state.has_messages
+                        && state.log_path == rt.log_path
+                        && (ev.message_ts.is_none() || ev.message_ts == state.last_ts)
+                    {
+                        return false;
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn note_message_activity_recorded(&self, rt: &TabRuntime, ev: &AgentEvent) {
+        let mut states = self.activity_states.lock().unwrap_or_else(|e| e.into_inner());
+        let state = states.entry(rt.key()).or_default();
+        if state.log_path != rt.log_path {
+            *state = DeltaActivityState { log_path: rt.log_path.clone(), ..Default::default() };
+        }
+        match &ev.payload {
+            Payload::TurnStarted { .. } => {
+                state.assistant_active = false;
+            }
+            Payload::UserMessage { queued, .. } => {
+                if !queued {
+                    state.assistant_active = false;
+                }
+                state.has_messages = true;
+                if ev.message_ts.is_some() {
+                    state.last_ts = ev.message_ts.clone();
+                }
+            }
+            Payload::AssistantText { text, .. } | Payload::Delta(Delta::TextDelta { text, .. }) if !text.is_empty() => {
+                state.assistant_active = true;
+                state.has_messages = true;
+                if ev.message_ts.is_some() {
+                    state.last_ts = ev.message_ts.clone();
+                }
+            }
+            Payload::TurnCompleted { final_text, .. } => {
+                state.assistant_active = true;
+                if final_text.as_ref().is_some_and(|t| !t.is_empty()) {
+                    state.has_messages = true;
+                    if ev.message_ts.is_some() {
+                        state.last_ts = ev.message_ts.clone();
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     /// The agent's provider refused the sign-in it was launched with (#667).
@@ -3081,20 +3366,23 @@ impl SessionManager {
     /// retired as lapsed — only the child that asked can answer, and no child
     /// survives a restart, so a replayed card would have dead buttons.
     pub fn load_events(&self, session_id: &str, tab_id: &str) -> Result<Vec<AgentEvent>> {
-        let path = store::log_path(session_id, tab_id)?;
-        let mut events: Vec<AgentEvent> = store::read_lines(&path)?;
-        self.reconcile_lapsed_events(session_id, tab_id, &mut events)?;
-        let rt_arc = self.runtime(session_id, tab_id)?;
+        let (rt_arc, preloaded) = self.runtime_loading(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
-        // Lifecycle reads and admission share the existing per-tab ordering
-        // gate. A backend restart must not replay unresolved starts as live.
-        let mut latest: Vec<AgentEvent> = store::read_lines(&path)?;
-        let seen: std::collections::HashSet<_> = latest.iter().map(|event| event.id.clone()).collect();
-        // Preserve in-memory lapsed decisions even if their legacy append
-        // failed. This feature does not change that publication contract.
-        latest.extend(events.into_iter().filter(|event| !seen.contains(&event.id)));
-        latest.sort_by_key(|event| event.seq);
-        events = latest;
+        let path = rt.log_path.clone();
+        // Reuse the single JSONL read from cold runtime initialization whenever
+        // no newer event landed between init and acquiring `rt`; otherwise read
+        // the log once under `rt`.
+        let mut events: Vec<AgentEvent> = match preloaded {
+            Some((events, init_seq)) if rt.seq == init_seq => events,
+            _ => {
+                #[cfg(test)]
+                LOAD_EVENTS_READ_CALLS.with(|c| c.set(c.get() + 1));
+                store::read_lines(&path)?
+            }
+        };
+        // Retire permission cards the live runtime is no longer parked on,
+        // inline under `rt` so the log is never read a second time.
+        self.reconcile_lapsed_under_rt(&mut rt, &mut events);
         // A live claim can have published its prompt but not yet its final
         // snapshot. A history read must never write that item back after it.
         if rt.held_queue.sending.is_none() && held::Queue::replay(&events) != rt.held_queue {
@@ -3127,6 +3415,26 @@ impl SessionManager {
             }
         }
         Ok(events)
+    }
+
+    fn reconcile_lapsed_under_rt(&self, rt: &mut TabRuntime, events: &mut Vec<AgentEvent>) {
+        let mut open: Vec<(String, Option<String>)> = Vec::new();
+        for ev in events.iter() {
+            match &ev.payload {
+                Payload::PermissionRequested { request_id, tool_use_id, .. } | Payload::QuestionsAsked { request_id, tool_use_id, .. } => {
+                    open.push((request_id.clone(), Some(tool_use_id.clone())));
+                }
+                Payload::PermissionDecided { request_id, .. } => open.retain(|(r, _)| r != request_id),
+                _ => {}
+            }
+        }
+        if !open.is_empty() {
+            let lapsed: Vec<_> = open.into_iter().filter(|(r, _)| !rt.pending.contains_key(r)).collect();
+            for (request_id, tool_use_id) in lapsed {
+                let ev = self.publish(rt, Payload::PermissionDecided { request_id, tool_use_id, allowed: false, label: "Lapsed".into(), automatic: true }, None);
+                events.push(ev);
+            }
+        }
     }
 
     /// End the input-box waits the log leaves open that no delivery is
@@ -3178,7 +3486,8 @@ impl SessionManager {
     }
 
     pub fn status_of(&self, session_id: &str, tab_id: &str) -> TabStatus {
-        self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).map(|r| r.lock().unwrap().status).unwrap_or(TabStatus::Idle)
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
+        runtime.map(|r| r.lock().unwrap().status).unwrap_or(TabStatus::Idle)
     }
 
     /// What `terminalx wait` goes by. A tab with no runtime has nothing
@@ -3238,24 +3547,37 @@ impl SessionManager {
     }
 
     fn running_agents(&self) -> std::collections::HashSet<String> {
-        self.tabs
-            .lock()
-            .unwrap()
-            .values()
-            .filter_map(|runtime| {
-                let runtime = runtime.lock().unwrap();
-                let Engine::Cli(cli) = &runtime.engine else { return None };
-                self.terminals.is_running(&cli.pane_id).then(|| match cli.harness {
+        let mut found = std::collections::HashSet::new();
+        let tracked: Vec<(CliKind, String)> = self.cli_panes.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
+        for (harness, pane_id) in tracked {
+            if self.terminals.is_running(&pane_id) {
+                found.insert(match harness {
                     CliKind::Claude => "claude".to_string(),
                     CliKind::Codex => "codex".to_string(),
-                })
-            })
-            .collect()
+                });
+            }
+        }
+        // Fallback for hand-followed or handover-restored tabs that set `Engine::Cli`
+        // outside `start_cli_inner`: clone `Arc`s first, drop `self.tabs`, and use
+        // `try_lock` so a tab currently running a CLI launch never stalls this sweep.
+        let runtimes: Vec<Arc<Mutex<TabRuntime>>> = self.tabs.lock().unwrap().values().cloned().collect();
+        for runtime in runtimes {
+            let Ok(runtime) = runtime.try_lock() else { continue };
+            let Engine::Cli(cli) = &runtime.engine else { continue };
+            if self.terminals.is_running(&cli.pane_id) {
+                found.insert(match cli.harness {
+                    CliKind::Claude => "claude".to_string(),
+                    CliKind::Codex => "codex".to_string(),
+                });
+            }
+        }
+        found
     }
 
     /// Whether the tab has a turn open (sent and not yet settled).
     pub fn turn_open(&self, session_id: &str, tab_id: &str) -> bool {
-        self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).is_some_and(|runtime| runtime.lock().unwrap().turn_open)
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
+        runtime.is_some_and(|runtime| runtime.lock().unwrap().turn_open)
     }
 
     /// A pipeline may borrow a checkout only after all accepted or queued
@@ -3275,8 +3597,7 @@ impl SessionManager {
     /// with the runtime).
     pub fn publish_external(&self, session_id: &str, tab_id: &str, payload: Payload) -> Result<AgentEvent> {
         let rt_arc = self.runtime(session_id, tab_id)?;
-        let mut rt = rt_arc.lock().unwrap();
-        Ok(self.publish(&mut rt, payload, None))
+        Ok(self.publish_event_unlocked(&rt_arc, payload, None, None))
     }
 
     /// Whether the tab's agent has no way to sign in in this cloud workspace
@@ -3680,7 +4001,8 @@ impl SessionManager {
     }
 
     pub fn queued(&self, session_id: &str, tab_id: &str) -> Vec<QueuedMessage> {
-        self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).map(|r| r.lock().unwrap().queued.iter().map(|q| q.message.clone()).collect()).unwrap_or_default()
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
+        runtime.map(|r| r.lock().unwrap().queued.iter().map(|q| q.message.clone()).collect()).unwrap_or_default()
     }
 
     fn archive_images(session_id: &str, images: &[ImageInput]) -> Result<ArchivedImages> {
@@ -4243,9 +4565,18 @@ impl SessionManager {
         if prompt.mobile.is_some() && (rt.turn_open || !rt.pending.is_empty()) {
             return Err(crate::local_runtime::mobile::Busy.into());
         }
-        if self.codex_stdio_falls_back(&rt, &tab)? {
-            entry = index::get(session_id)?;
-            tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
+        let maybe_codex_fallback = codex_stdio::selected(&tab)
+            && tab.provider_session_id.is_none()
+            && tab.fork_from.is_none()
+            && matches!(rt.engine, Engine::None)
+            && rt.child.is_none();
+        if maybe_codex_fallback {
+            drop(rt);
+            if self.codex_stdio_falls_back_unlocked(&rt_arc, &tab)? {
+                entry = index::get(session_id)?;
+                tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
+            }
+            rt = rt_arc.lock().unwrap();
         }
         let (refs, wire_images) = Self::archive_images(session_id, &images)?;
 
@@ -4261,7 +4592,7 @@ impl SessionManager {
         }
         if pty_first(&tab.harness).is_some() {
             return self.send_to_cli(
-                &mut rt,
+                rt,
                 &rt_arc,
                 &entry,
                 prompt,
@@ -4309,17 +4640,21 @@ impl SessionManager {
         }
 
         let baseline = rt.baseline_for(&entry.cwd);
-        let events = vec![self.publish_prompt(
+        let mut message = Payload::UserMessage { author: prompt.author.clone(), bot: prompt.bot.clone(),
+            text: prompt.display,
+            images: refs,
+            files: prompt.files.clone(),
+            baseline,
+            queued: false,
+            cwd: Some(entry.cwd.clone()),
+        };
+        let (mut rt, observed) = self.observe_checkpoint_with_guard(&rt_arc, rt, &mut message, None);
+        let events = vec![self.publish_event_with_checkpoint(
             &mut rt,
-            Payload::UserMessage { author: prompt.author.clone(), bot: prompt.bot.clone(),
-                text: prompt.display,
-                images: refs,
-                files: prompt.files.clone(),
-                baseline,
-                queued: false,
-                cwd: Some(entry.cwd.clone()),
-            },
+            message,
+            None,
             prompt.request_id,
+            observed,
         )];
 
         let acp_delivery = acp::Delivery { seq: events[0].seq, privacy: crate::data_privacy::remote_ticket(),
@@ -5229,6 +5564,11 @@ impl SessionManager {
     pub(crate) fn automation_deferred_status(&self, session_id: &str, tab_id: &str, active: bool) {
         let Some(runtime) = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned() else { return };
         let mut rt = runtime.lock().unwrap();
+        if active {
+            if let Some(watch) = &rt.background {
+                watch.lock().unwrap().enable_automation_tracking();
+            }
+        }
         if rt.turn_open || rt.stopping || !rt.pending.is_empty() || rt.recovery.is_some() { return; }
         if !active && (!rt.queued.is_empty() || rt.held_queue.keeps_runtime_busy()
             || matches!(&rt.engine, Engine::Cli(cli) if cli.awaiting_delivery.is_some() || cli.resend_after_abort.is_some() || cli.echoed.iter().any(|echo| echo.queued))) { return; }
@@ -5464,10 +5804,32 @@ impl SessionManager {
             self.sink.emit("pty_closed", &pane);
         }
         crate::session_ops::close_tab_entry(session_id, tab_id).map_err(anyhow::Error::msg)?;
+        self.cleanup_tab_maps(session_id, tab_id, &pane);
         self.observer.automation_failed(session_id, tab_id, "Its tab was closed.");
         self.sink.emit("session_updated", &index::get(session_id)?);
         self.sink.emit("tab_state_changed", &index::tab_state()?);
         Ok(())
+    }
+
+    /// Release all per-tab / per-pane in-memory map entries once a tab is closed.
+    fn cleanup_tab_maps(&self, session_id: &str, tab_id: &str, pane: &str) {
+        let key = key_of(session_id, tab_id);
+        let default_pane = Self::pane_id(tab_id);
+        self.tabs.lock().unwrap().remove(&key);
+        self.tab_inits.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+        self.session_commands.lock().unwrap().remove(&key);
+        self.children.lock().unwrap().remove(&key);
+        self.cli_panes.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+        self.activity_states.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+        {
+            let mut writers = self.writers.lock().unwrap();
+            writers.remove(pane);
+            writers.remove(&default_pane);
+        }
+        self.stopping_ptys.lock().unwrap().remove(&key);
+        self.screen_prompts.lock().unwrap().remove(&key);
+        self.provider_states.lock().unwrap().remove(&key);
+        LAST_PENDING.lock().unwrap().remove(&key);
     }
 
     /// Delete only after this owner confirms the session's process groups
@@ -5482,8 +5844,25 @@ impl SessionManager {
         self.stop_session_confirmed(&entry)?;
         crate::session_ops::delete_session_blocking(self.sink.as_ref(), session_id, &|_| {})
             .map_err(anyhow::Error::msg)?;
-        self.tabs.lock().unwrap().retain(|_, tab| tab.lock().unwrap().session_id != session_id);
-        self.session_commands.lock().unwrap().retain(|key, _| !key.starts_with(&format!("{session_id}/")));
+        let prefix = format!("{session_id}/");
+        let shell_prefix = format!("{session_id}:");
+        let tab_panes: std::collections::HashSet<String> = entry
+            .tabs
+            .iter()
+            .flat_map(|tab| [tab.pane_id(), Self::pane_id(&tab.id)])
+            .collect();
+        self.tabs.lock().unwrap().retain(|key, _| !key.starts_with(&prefix));
+        self.tab_inits.lock().unwrap_or_else(|e| e.into_inner()).retain(|key, _| !key.starts_with(&prefix));
+        self.session_commands.lock().unwrap().retain(|key, _| !key.starts_with(&prefix));
+        self.children.lock().unwrap().retain(|key, _| !key.starts_with(&prefix));
+        self.cli_panes.lock().unwrap_or_else(|e| e.into_inner()).retain(|key, _| !key.starts_with(&prefix));
+        self.activity_states.lock().unwrap_or_else(|e| e.into_inner()).retain(|key, _| !key.starts_with(&prefix));
+        self.writers.lock().unwrap().retain(|pane, _| !tab_panes.contains(pane) && !pane.starts_with(&shell_prefix));
+        self.stopping_ptys.lock().unwrap().retain(|key, _| !key.starts_with(&prefix));
+        self.screen_prompts.lock().unwrap().retain(|key| !key.starts_with(&prefix));
+        self.provider_states.lock().unwrap().retain(|key, _| !key.starts_with(&prefix));
+        self.session_stop_pids.lock().unwrap().retain(|key, _| key != session_id && !key.starts_with(&shell_prefix));
+        LAST_PENDING.lock().unwrap().retain(|key, _| !key.starts_with(&prefix));
         // A bot's chat is deleted like any other session (PRO-521): a hand-off it was working on fails, and its sender is told.
         crate::bots::handoffs::chat_deleted(self, &entry);
         Ok(())
@@ -6417,7 +6796,7 @@ impl SessionManager {
             return self.shell_for(session_id, tab_id);
         }
         // Started like any Codex tab when native Codex cannot serve it.
-        if self.codex_stdio_falls_back(&rt_arc.lock().unwrap(), &tab)? {
+        if self.codex_stdio_falls_back_unlocked(&rt_arc, &tab)? {
             entry = index::get(session_id)?;
             tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
         }
@@ -6679,8 +7058,13 @@ impl SessionManager {
         let tail = Arc::new(launch.tail);
         // Kept up with the file this tab's tail follows, wherever it moves,
         // from where it stands now: what a CLI before this one left running
-        // went with it.
-        rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(claude::background::Watch::new(tail.clone()))));
+        // went with it. Attached as a tail observer so parsed JSON values are
+        // reused instead of re-reading and re-parsing the transcript.
+        rt.background = (kind == CliKind::Claude).then(|| {
+            let watch = Arc::new(Mutex::new(claude::background::Watch::for_tab(tail.clone(), entry.automation.is_some())));
+            claude::background::Watch::attach_to_tail(&watch, &tail);
+            watch
+        });
         env.retain(|(key, _)| !matches!(key.as_str(), "TERMINALX_PORT" | "TERMINALX_PORTS"));
         env.extend(index::workspace_ports::environment(&entry.cwd)?);
         // No login shell runs first on Windows to `env -u` these: the pane leaves them out itself.
@@ -6741,6 +7125,7 @@ impl SessionManager {
             by_hand: None,
         });
         rt.turn_open = false;
+        self.cli_panes.lock().unwrap_or_else(|e| e.into_inner()).insert(rt.key(), (kind, pane.clone()));
         self.announce_pane(rt);
         self.follow_transcript(rt_arc, tail, pane, generation);
         // The process is now fully owned, including its hook token and
@@ -7143,6 +7528,7 @@ impl SessionManager {
     fn let_go_of_cli(&self, rt: &mut TabRuntime) -> Option<String> {
         rt.restart_claim = None;
         rt.background = None;
+        self.cli_panes.lock().unwrap_or_else(|e| e.into_inner()).remove(&rt.key());
         let Engine::Cli(p) = &rt.engine else { return None };
         let pane = p.pane_id.clone();
         rt.left_at = Some((p.tail.path(), p.tail.offset()));
@@ -7707,12 +8093,52 @@ impl SessionManager {
         self.apply(rt, Payload::TurnCompleted { status, final_text, usage: None, duration_ms, head: None, auth_failed: false, detail: None }, None);
     }
 
+    /// Close the open turn, running `checkpoints::observe` synchronously
+    /// OUTSIDE `Mutex<TabRuntime>` so git snapshot I/O never stalls other tabs.
+    fn close_open_turn_unlocked<'a>(
+        &self,
+        rt_arc: &'a Arc<Mutex<TabRuntime>>,
+        mut rt: MutexGuard<'a, TabRuntime>,
+        status: TurnStatus,
+        final_text: Option<String>,
+    ) -> MutexGuard<'a, TabRuntime> {
+        if !rt.turn_open {
+            return rt;
+        }
+        if let Engine::Cli(p) = &mut rt.engine {
+            if !p.turn_tail.closing() {
+                return rt;
+            }
+        }
+        self.end_open_turn_unlocked(rt_arc, rt, status, final_text)
+    }
+
+    fn end_open_turn_unlocked<'a>(
+        &self,
+        rt_arc: &'a Arc<Mutex<TabRuntime>>,
+        mut rt: MutexGuard<'a, TabRuntime>,
+        status: TurnStatus,
+        final_text: Option<String>,
+    ) -> MutexGuard<'a, TabRuntime> {
+        if !rt.turn_open {
+            return rt;
+        }
+        if let Engine::Cli(p) = &mut rt.engine {
+            let _ = p.turn_tail.closing();
+        }
+        let duration_ms = rt.turn_started_at.map(|t| t.elapsed().as_millis() as u64);
+        let mut payload = Payload::TurnCompleted { status, final_text, usage: None, duration_ms, head: None, auth_failed: false, detail: None };
+        let (mut rt, observed) = self.observe_checkpoint_with_guard(rt_arc, rt, &mut payload, None);
+        self.apply_with_checkpoint(&mut rt, payload, None, observed);
+        rt
+    }
+
     /// Send a prompt to the CLI as keystrokes. A tab mid-turn writes anyway:
     /// the TUI queues typed input itself, so the message is only *shown* as
     /// queued until the CLI takes it and the transcript says so.
     fn send_to_cli(
         &self,
-        rt: &mut TabRuntime,
+        mut rt: MutexGuard<'_, TabRuntime>,
         rt_arc: &Arc<Mutex<TabRuntime>>,
         entry: &index::SessionEntry,
         prompt: PromptText,
@@ -7720,14 +8146,14 @@ impl SessionManager {
         receipt: Option<DeliveryReceipt>,
     ) -> Result<SendOutcome> {
         let tab = entry.tab(&rt.tab_id).ok_or_else(|| anyhow!("tab not found"))?;
-        self.start_cli(rt, rt_arc, entry, tab, true)?;
+        self.start_cli(&mut rt, rt_arc, entry, tab, true)?;
         let (pane, ready, stops) = match &rt.engine {
             Engine::Cli(p) => (p.pane_id.clone(), p.ready.clone(), p.input.stops),
             _ => bail!("the agent is not running"),
         };
         let paths: Vec<String> = images.iter().map(|i| i.url.clone()).collect();
         let agent = prompt.agent.clone();
-        let (ev, queued) = self.record_composer_prompt(rt, &prompt, images, &entry.cwd, receipt.clone());
+        let (mut rt, ev, queued) = self.record_composer_prompt_unlocked(rt_arc, rt, &prompt, images, &entry.cwd, receipt.clone());
         // Only a continuation waits on a receipt. It is the tab's whole
         // brief: a launch that finds the CLI never took it sends it again.
         if receipt.is_some() {
@@ -7756,10 +8182,33 @@ impl SessionManager {
         Ok(SendOutcome { queued, events: vec![ev], in_input: false })
     }
 
+    fn record_composer_prompt_unlocked<'a>(
+        &self,
+        rt_arc: &'a Arc<Mutex<TabRuntime>>,
+        mut rt: MutexGuard<'a, TabRuntime>,
+        prompt: &PromptText,
+        images: Vec<ImageRef>,
+        cwd: &str,
+        receipt: Option<DeliveryReceipt>,
+    ) -> (MutexGuard<'a, TabRuntime>, AgentEvent, bool) {
+        // Nothing is running behind a command that never ended.
+        let queued = rt.turn_open && !rt.turn_by_command;
+        let baseline = if queued { None } else { rt.baseline_for(cwd) };
+        let (mut message, mut echo) = cli_composer_message(prompt, images, baseline, queued, cwd);
+        let (mut rt, observed) = self.observe_checkpoint_with_guard(rt_arc, rt, &mut message, None);
+        let ev = self.publish_event_with_checkpoint(&mut rt, message, None, prompt.request_id, observed);
+        echo.continuation = receipt.is_some();
+        echo.receipt = receipt;
+        echo.seq = ev.seq;
+        self.await_composer_echo(&mut rt, echo, &prompt.agent);
+        (rt, ev, queued)
+    }
+
     /// The composer's half of a prompt: publish it, open the turn if none is
     /// running, and remember that the CLI's own record of it is still to
     /// come, so that record is not drawn as a second message; one queued
     /// behind a turn is held until then. Everything except the keystrokes.
+    #[cfg(test)]
     fn record_composer_prompt(&self, rt: &mut TabRuntime, prompt: &PromptText, images: Vec<ImageRef>, cwd: &str, receipt: Option<DeliveryReceipt>) -> (AgentEvent, bool) {
         // Nothing is running behind a command that never ended.
         let queued = rt.turn_open && !rt.turn_by_command;
@@ -8796,7 +9245,7 @@ impl SessionManager {
                 rt.last_activity = Instant::now();
                 if rt.turn_open {
                     let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
-                    self.close_open_turn(&mut rt, TurnStatus::Ok, final_text.clone());
+                    let rt = self.close_open_turn_unlocked(&rt_arc, rt, TurnStatus::Ok, final_text.clone());
                     self.after_turn_completed(&rt_arc, rt, final_text, completed);
                     return HookReply::default();
                 }
@@ -8819,7 +9268,7 @@ impl SessionManager {
                     }
                 }
                 self.record_activity(&rt, TabStatus::Completed, store::activity::Source::Live);
-                self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
+                let rt = self.close_open_turn_unlocked(&rt_arc, rt, TurnStatus::Aborted, None);
                 drop(rt);
                 self.observer.automation_failed(&frame.session, &frame.tab, "The automation turn was interrupted.");
             }
@@ -8828,21 +9277,22 @@ impl SessionManager {
             // that ran, not an interrupted one, and an automation that sent it
             // has completed.
             "SessionEnd" if frame.payload["reason"].as_str() == Some("clear") => {
-                let mut rt = rt_arc.lock().unwrap();
+                let rt = rt_arc.lock().unwrap();
                 if !mine(&rt) { return HookReply::default(); }
                 if rt.turn_open {
                     let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
-                    self.end_open_turn(&mut rt, TurnStatus::Ok, None);
+                    let rt = self.end_open_turn_unlocked(&rt_arc, rt, TurnStatus::Ok, None);
                     self.after_turn_completed(&rt_arc, rt, None, completed);
                     return HookReply::default();
                 }
+                let mut rt = rt;
                 self.set_status(&mut rt, TabStatus::Idle);
             }
             "SessionEnd" => {
-                let mut rt = rt_arc.lock().unwrap();
+                let rt = rt_arc.lock().unwrap();
                 if !mine(&rt) { return HookReply::default(); }
                 let turn_was_open = rt.turn_open;
-                self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
+                let mut rt = self.close_open_turn_unlocked(&rt_arc, rt, TurnStatus::Aborted, None);
                 self.set_status(&mut rt, TabStatus::Idle);
                 drop(rt);
                 if turn_was_open {
@@ -9318,6 +9768,10 @@ impl SessionManager {
     }
 
     fn apply(&self, rt: &mut TabRuntime, payload: Payload, subagent: Option<SubagentRef>) {
+        self.apply_with_checkpoint(rt, payload, subagent, None);
+    }
+
+    fn apply_with_checkpoint(&self, rt: &mut TabRuntime, payload: Payload, subagent: Option<SubagentRef>, observed: Option<ObservedCheckpoint>) {
         // A word about the provider's own settings is for the tab, not the log.
         let payload = match payload {
             Payload::ProviderSettings { signal } => {
@@ -9398,8 +9852,10 @@ impl SessionManager {
             self.record_activity(rt, TabStatus::Completed, store::activity::Source::Replay);
         }
         let payload = match payload {
-            Payload::TurnCompleted { status, final_text, usage, duration_ms, auth_failed, detail, .. } => {
-                let head = None; // The publication path captures and pins the completed tree.
+            Payload::TurnCompleted { status, final_text, usage, duration_ms, head, auth_failed, detail } => {
+                // Preserve `head` when `checkpoints::observe` already ran outside `Mutex<TabRuntime>`;
+                // otherwise `publish_event_with_checkpoint` captures and pins the completed tree.
+                let head = if observed.is_some() { head } else { None };
                 // Occupancy as the turn left it, and the tab's token and cost
                 // totals read again from its agent's transcript (PRO-273),
                 // both off this thread: a long transcript takes a moment.
@@ -9431,7 +9887,7 @@ impl SessionManager {
         let main = subagent.is_none();
         let sign_in_refused = main && matches!(&payload, Payload::TurnCompleted { auth_failed: true, .. });
         let worked = main && matches!(&payload, Payload::TurnCompleted { status: TurnStatus::Ok, auth_failed: false, .. });
-        self.publish(rt, payload, subagent);
+        self.publish_event_with_checkpoint(rt, payload, subagent, None, observed);
         if main && is_boundary {
             // Whether it moves to another account before its next prompt (#981).
             self.account_switch_after_turn(rt);
@@ -10007,6 +10463,225 @@ mod tests {
         assert!(one_per_key(&map, "s/t", || Err(anyhow!("no such tab"))).is_err());
         assert!(map.lock().unwrap().is_empty());
         assert_eq!(*one_per_key(&map, "s/t", || Ok(Arc::new(3))).unwrap(), 3);
+    }
+
+    #[test]
+    fn perf_wave1_delta_activity_short_circuits_and_load_events_reads_once_and_maps_clean_up() {
+        let _home = store::temp_home();
+        let cwd = store::root().unwrap().join("perf-checkout");
+        std::fs::create_dir(&cwd).unwrap();
+        let entry: index::SessionEntry = serde_json::from_value(json!({
+            "id": "s-perf",
+            "projectPath": cwd,
+            "cwd": cwd,
+            "title": "Perf",
+            "created": "now",
+            "modified": "now",
+            "tabs": [
+                { "id": "t1", "harness": "claude", "model": "sonnet", "created": "now" },
+                { "id": "t2", "harness": "claude", "model": "sonnet", "created": "now" }
+            ]
+        }))
+        .unwrap();
+        index::save(std::slice::from_ref(&entry)).unwrap();
+
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let terminals = Arc::new(pty::Terminals::new());
+        let manager = SessionManager::new(
+            sink,
+            Arc::new(crate::sink::NoObserver),
+            Arc::new(Host::new()),
+            terminals,
+            Arc::new(codex::models::Cache::default()),
+            Arc::new(crate::status::StatusState::default()),
+            crate::hooks::prepare_control().unwrap(),
+        );
+
+        // P-03: Cold `load_events` parses the tab JSONL log at most once.
+        LOAD_EVENTS_READ_CALLS.with(|c| c.set(0));
+        let loaded = manager.load_events("s-perf", "t1").unwrap();
+        assert!(loaded.is_empty());
+        assert_eq!(LOAD_EVENTS_READ_CALLS.with(|c| c.get()), 1, "cold load_events must read JSONL once");
+
+        // Warm `load_events` also reads the tab JSONL log once.
+        LOAD_EVENTS_READ_CALLS.with(|c| c.set(0));
+        let _ = manager.load_events("s-perf", "t1").unwrap();
+        assert_eq!(LOAD_EVENTS_READ_CALLS.with(|c| c.get()), 1, "warm load_events must read JSONL once");
+
+        // P-01: Streaming `Delta::TextDelta` short-circuits `store::message_activity::record`
+        // after the first chunk marks the turn active.
+        let rt_arc = manager.runtime("s-perf", "t1").unwrap();
+        MESSAGE_ACTIVITY_RECORD_CALLS.with(|c| c.set(0));
+        {
+            let mut rt = rt_arc.lock().unwrap();
+            let block = BlockRef { message_id: "m1".into(), index: 0 };
+            for _ in 0..50 {
+                manager.publish(&mut rt, Payload::Delta(Delta::TextDelta { block: block.clone(), text: "x".into() }), None);
+            }
+        }
+        assert_eq!(MESSAGE_ACTIVITY_RECORD_CALLS.with(|c| c.get()), 1, "50 streaming deltas should record message activity once");
+
+        // P-03: `running_agents` does not block when a tab's `TabRuntime` mutex is held.
+        let release = manager.hold_tab_for_tests("s-perf", "t1");
+        let agents = manager.running_agents();
+        assert!(agents.is_empty());
+        drop(release);
+
+        // P-23: `close_tab` and `delete_session` clean up per-tab and per-session maps.
+        let key1 = key_of("s-perf", "t1");
+        let pane1 = SessionManager::pane_id("t1");
+        manager.writers.lock().unwrap().entry(pane1.clone()).or_default();
+        manager.session_commands.lock().unwrap().entry(key1.clone()).or_default().insert("ls".into());
+        manager.screen_prompts.lock().unwrap().insert(key1.clone());
+        manager.stopping_ptys.lock().unwrap().insert(key1.clone(), Vec::new());
+
+        manager.close_tab("s-perf", "t1").unwrap();
+        assert!(!manager.tabs.lock().unwrap().contains_key(&key1));
+        assert!(!manager.writers.lock().unwrap().contains_key(&pane1));
+        assert!(!manager.session_commands.lock().unwrap().contains_key(&key1));
+        assert!(!manager.screen_prompts.lock().unwrap().contains(&key1));
+        assert!(!manager.stopping_ptys.lock().unwrap().contains_key(&key1));
+        assert!(!manager.activity_states.lock().unwrap().contains_key(&key1));
+
+        let key2 = key_of("s-perf", "t2");
+        let pane2 = SessionManager::pane_id("t2");
+        let _ = manager.runtime("s-perf", "t2").unwrap();
+        manager.writers.lock().unwrap().entry(pane2.clone()).or_default();
+        manager.writers.lock().unwrap().entry("s-perf:shell-1".into()).or_default();
+        manager.session_commands.lock().unwrap().entry(key2.clone()).or_default().insert("pwd".into());
+        manager.screen_prompts.lock().unwrap().insert(key2.clone());
+        manager.stopping_ptys.lock().unwrap().insert(key2.clone(), Vec::new());
+
+        manager.delete_session("s-perf").unwrap();
+        assert!(!manager.tabs.lock().unwrap().contains_key(&key2));
+        assert!(!manager.writers.lock().unwrap().contains_key(&pane2));
+        assert!(!manager.writers.lock().unwrap().contains_key("s-perf:shell-1"));
+        assert!(!manager.session_commands.lock().unwrap().contains_key(&key2));
+        assert!(!manager.screen_prompts.lock().unwrap().contains(&key2));
+        assert!(!manager.stopping_ptys.lock().unwrap().contains_key(&key2));
+        assert!(!manager.activity_states.lock().unwrap().contains_key(&key2));
+    }
+
+    #[test]
+    fn perf_wave1_checkpoints_observe_runs_synchronously_outside_tab_lock_preserving_order_and_mutations() {
+        let _home = store::temp_home();
+        let cwd = store::root().unwrap().join("cp-repo");
+        std::fs::create_dir(&cwd).unwrap();
+        let run_git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&cwd)
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run_git(&["init", "-b", "main"]);
+        run_git(&["config", "user.email", "test@example.com"]);
+        run_git(&["config", "user.name", "Test"]);
+        std::fs::write(cwd.join("file.txt"), "v1\n").unwrap();
+        run_git(&["add", "file.txt"]);
+        run_git(&["commit", "-m", "init"]);
+
+        let entry: index::SessionEntry = serde_json::from_value(json!({
+            "id": "s-cp",
+            "projectPath": cwd,
+            "cwd": cwd,
+            "title": "Checkpoints",
+            "created": "now",
+            "modified": "now",
+            "tabs": [
+                { "id": "t1", "harness": "claude", "model": "sonnet", "created": "now" }
+            ]
+        }))
+        .unwrap();
+        index::save(std::slice::from_ref(&entry)).unwrap();
+
+        let sink = Arc::new(crate::sink::BroadcastSink::new(64));
+        let mut rx = sink.subscribe();
+        let manager = SessionManager::new(
+            sink,
+            Arc::new(crate::sink::NoObserver),
+            Arc::new(Host::new()),
+            Arc::new(pty::Terminals::new()),
+            Arc::new(codex::models::Cache::default()),
+            Arc::new(crate::status::StatusState::default()),
+            crate::hooks::prepare_control().unwrap(),
+        );
+
+        let rt_arc = manager.runtime("s-cp", "t1").unwrap();
+        // Start turn: `observe_checkpoint_with_guard` asserts `rt_arc.try_lock().is_ok()`
+        // right before calling `checkpoints::observe`, proving the mutex is released.
+        let prompt_ev = manager.publish_event_unlocked(
+            &rt_arc,
+            Payload::UserMessage {
+                author: None,
+                bot: None,
+                text: "edit file".into(),
+                images: Vec::new(),
+                files: Vec::new(),
+                baseline: None,
+                queued: false,
+                cwd: Some(cwd.to_string_lossy().into_owned()),
+            },
+            None,
+            None,
+        );
+        let baseline = match &prompt_ev.payload {
+            Payload::UserMessage { baseline, .. } => baseline.clone().expect("UserMessage.baseline must be populated"),
+            other => panic!("expected UserMessage, got {other:?}"),
+        };
+
+        // Simulate agent editing a tracked file during the turn.
+        std::fs::write(cwd.join("file.txt"), "v2\n").unwrap();
+
+        // Complete turn synchronously outside `Mutex<TabRuntime>`.
+        let completed_ev = manager.publish_event_unlocked(
+            &rt_arc,
+            Payload::TurnCompleted {
+                status: TurnStatus::Ok,
+                final_text: Some("done".into()),
+                usage: None,
+                duration_ms: Some(10),
+                head: None,
+                auth_failed: false,
+                detail: None,
+            },
+            None,
+            None,
+        );
+        let head = match &completed_ev.payload {
+            Payload::TurnCompleted { head, .. } => head.clone().expect("TurnCompleted.head must be populated"),
+            other => panic!("expected TurnCompleted, got {other:?}"),
+        };
+        assert_ne!(baseline, head, "turn edit must advance checkpoint head");
+
+        // Verify persisted & emitted ordering: TurnCheckpoint MUST precede TurnCompleted.
+        let persisted = manager.load_events("s-cp", "t1").unwrap();
+        let cp_ev = persisted
+            .iter()
+            .find(|ev| matches!(ev.payload, Payload::TurnCheckpoint { .. }))
+            .expect("TurnCheckpoint must be persisted");
+        assert!(cp_ev.seq < completed_ev.seq, "TurnCheckpoint (seq {}) must precede TurnCompleted (seq {})", cp_ev.seq, completed_ev.seq);
+        match &cp_ev.payload {
+            Payload::TurnCheckpoint { seq, base, head: cp_head } => {
+                assert_eq!(*seq, prompt_ev.seq);
+                assert_eq!(base, &baseline);
+                assert_eq!(cp_head, &head);
+            }
+            _ => unreachable!(),
+        }
+
+        // Also check emitted broadcast order.
+        let mut emitted = Vec::new();
+        while let Ok(item) = rx.try_recv() {
+            if &*item.event == "agent_event" {
+                let ev: AgentEvent = serde_json::from_str(&item.payload).unwrap();
+                emitted.push(ev);
+            }
+        }
+        let cp_pos = emitted.iter().position(|ev| matches!(ev.payload, Payload::TurnCheckpoint { .. })).unwrap();
+        let done_pos = emitted.iter().position(|ev| matches!(ev.payload, Payload::TurnCompleted { .. })).unwrap();
+        assert!(cp_pos < done_pos, "TurnCheckpoint must be emitted before TurnCompleted");
     }
 
     #[test]
