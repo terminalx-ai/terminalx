@@ -611,7 +611,7 @@ mod tests {
         let mut raw = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
         raw.extend([9; 32]);
         let key = format!("ssh-ed25519 {}", STANDARD.encode(raw));
-        let snapshot = json!({"v":1,"members":[
+        let snapshot = serde_json::json!({"v":1,"members":[
             {"userId":"manager","role":"manager","sshPublicKeys":[key],"sshExpiresAt":1000},
             {"userId":"driver","role":"driver","canApprove":true,"sshPublicKeys":[key],"sshExpiresAt":1000},
             {"userId":"viewer","role":"viewer","canApprove":true,"sshPublicKeys":[key],"sshExpiresAt":1000},
