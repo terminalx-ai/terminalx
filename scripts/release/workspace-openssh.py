@@ -214,7 +214,14 @@ def build(args):
         if (private / "share").exists():
             shutil.rmtree(private / "share")
         bundle_libraries(tree, args.library_dir)
-        run(private / "sbin/sshd", "-V")
+        daemon = private / "sbin/sshd"
+        elf = subprocess.check_output(["readelf", "-h", daemon], text=True)
+        machine = {"x86_64": "Advanced Micro Devices X86-64", "aarch64": "AArch64"}[args.arch]
+        if not re.search(rf"^\s*Machine:\s*{re.escape(machine)}\s*$", elf, re.MULTILINE):
+            raise ValueError("Built OpenSSH binary has the wrong architecture")
+        banner = subprocess.check_output([daemon, "-V"], stderr=subprocess.STDOUT, text=True)
+        if not re.search(rf"^OpenSSH_{re.escape(portable)}(?:[,\s]|$)", banner, re.MULTILINE):
+            raise ValueError("Built OpenSSH binary does not report the pinned version")
         pack(tree, args.output / name)
 
 
