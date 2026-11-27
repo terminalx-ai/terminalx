@@ -32,7 +32,7 @@ import { WorkspaceTabStrip, stripTabId } from "./WorkspaceTabStrip";
  * composer or xterm. Both visible terminals observe their own changing boxes. */
 /**
  * The switch at the right end of a pane's tab strip (PRO-381, screen 03.14):
- * "⇧⌘T terminal view" over a chat, and over its terminal view which agent
+ * a terminal icon and the configured shortcut over a chat, and over its terminal view which agent
  * runs there ("Claude Code · same process"), which switches back. A tab that
  * is a terminal (#437) offers it only when it held a conversation.
  */
@@ -48,9 +48,8 @@ export function TerminalViewSwitch({ session, tab, onToggle }: { session: Sessio
     <button type="button" data-testid="strip-terminal-view" aria-label={label} title={label} aria-pressed={on} disabled={!!views.switching[tab.id]}
       onClick={() => (onToggle ? onToggle() : void toggleTabView(session, tab))}
       className={cn("flex h-7 items-center gap-1.5 whitespace-nowrap rounded-md px-1.5 text-[12px] text-faint outline-none hover:bg-veil-strong hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60")}>
-      {/* A narrow strip keeps its room for the tabs: the switch is then its keys, or an icon, alone. */}
       {on ? <><MessageSquare className="size-3.5 @[560px]/strip:hidden" aria-hidden /><span className="hidden @[560px]/strip:inline">{agent} · same process</span></>
-        : <>{keys.length ? <Kbd>{joinKeycaps(keys)}</Kbd> : <SquareTerminal className="size-3.5 @[560px]/strip:hidden" aria-hidden />}<span className="hidden @[560px]/strip:inline">terminal view</span></>}
+        : <>{keys.length > 0 && <Kbd>{joinKeycaps(keys)}</Kbd>}<SquareTerminal className="size-3.5" aria-hidden /></>}
     </button>
   );
 }
