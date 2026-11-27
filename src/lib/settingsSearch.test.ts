@@ -190,7 +190,7 @@ describe("settings row search", () => {
     setPrefs({ introSlides: false });
     orchestratorRuns(false);
     // Off until the switches are read, as for a section.
-    expect(SETTINGS_ROWS.filter((row) => !("requires" in row && row.requires) && !("macOnly" in row && row.macOnly) && row.section !== "orchestrator" && row.section !== "localVms" && row.section !== "machines").every((row) => settingOffered(row))).toBe(true);
+    expect(SETTINGS_ROWS.filter((row) => !("requires" in row && row.requires) && !("macOnly" in row && row.macOnly) && row.section !== "orchestrator" && row.section !== "localVms" && row.section !== "machines" && row.section !== "mcp").every((row) => settingOffered(row))).toBe(true);
   });
 
   it("finds Local VMs rows only while their Experimental switch is on", () => {
