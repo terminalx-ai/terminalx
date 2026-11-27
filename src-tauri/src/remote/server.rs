@@ -496,6 +496,14 @@ const MACHINE_CHANGE_POLL: Duration = Duration::from_secs(5);
 /// the changes it makes itself (`machine/3`).
 const UPDATE_STATUS_POLL: Duration = Duration::from_secs(2);
 
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct WorkspaceSshState {
+    grants: HashMap<String, (collab::v2::VerifiedWorkspaceSshKey, std::time::Instant)>,
+    clock_floor: Option<(u64, std::time::Instant)>,
+    runtime: Option<Arc<crate::workspace_ssh_listener::Runtime>>,
+}
+
 pub struct WorkspaceRpc {
     scope: Scope,
     /// The generation the relay host registered with; offsets and cursors
@@ -546,6 +554,8 @@ pub struct WorkspaceRpc {
     desktop: OnceLock<Arc<super::cloud_desktop::DesktopPool>>,
     #[cfg(any(target_os = "linux", all(test, unix)))]
     desktop_ready: std::sync::atomic::AtomicBool,
+    #[cfg(target_os = "linux")]
+    workspace_ssh: Mutex<WorkspaceSshState>,
     #[cfg(any(target_os = "linux", all(test, unix)))]
     desktop_epoch: AtomicU64,
     tabs_changed: Arc<tokio::sync::Notify>,
@@ -675,6 +685,8 @@ impl WorkspaceRpc {
             desktop: OnceLock::new(),
             #[cfg(any(target_os = "linux", all(test, unix)))]
             desktop_ready: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(target_os = "linux")]
+            workspace_ssh: Mutex::new(WorkspaceSshState::default()),
             #[cfg(any(target_os = "linux", all(test, unix)))]
             desktop_epoch: AtomicU64::new(0),
             tabs_changed: Arc::new(tokio::sync::Notify::new()),
@@ -1264,6 +1276,79 @@ impl WorkspaceRpc {
         self.reconcile_collaboration(diff, first);
     }
 
+    #[cfg(target_os = "linux")]
+    pub(super) fn install_workspace_ssh_refresh(
+        &self, generation: u64, refresh: Option<&super::host::WorkspaceSshRefresh>,
+    ) {
+        let _admission = self.collab.enter_admission();
+        if generation != self.generation() {
+            return;
+        }
+        let mut ssh = self.workspace_ssh.lock().unwrap();
+        let now = u64::try_from(super::host::now_ms()).unwrap_or(0);
+        let instant = std::time::Instant::now();
+        let now = ssh.clock_floor.map_or(now, |(floor, previous)| {
+            now.max(floor.saturating_add(instant.duration_since(previous).as_millis().min(u128::from(u64::MAX)) as u64))
+        });
+        ssh.clock_floor = Some((now, instant));
+        let grants = refresh.and_then(|refresh| {
+            if refresh.v2 {
+                self.collab.runtime_policy.verified_workspace_ssh_keys(
+                    Some(refresh.grants.clone()), &refresh.workspace_id, generation, true, now,
+                ).ok()
+            } else {
+                collab::v2::verified_legacy_workspace_ssh_keys(refresh.grants.clone(), now).ok()
+            }
+        }).unwrap_or_default();
+        ssh.runtime = refresh.map(|refresh| refresh.runtime.clone());
+        ssh.grants = grants.into_iter().map(|(user, grant)| {
+            let deadline = instant + std::time::Duration::from_millis(grant.expires_at - now);
+            let deadline = ssh.grants.get(&user).filter(|(old, _)| old == &grant)
+                .map_or(deadline, |(_, old)| deadline.min(*old));
+            (user, (grant, deadline))
+        }).collect();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn workspace_ssh_key(&self, peer: &Peer) -> Option<String> {
+        let user = peer.user_id.as_deref()?;
+        if self.is_machine() || peer.hung_up() || !self.may_use_ports(peer) {
+            return None;
+        }
+        let state = self.workspace_ssh.lock().unwrap();
+        let (grant, deadline) = state.grants.get(user)?;
+        let now = u64::try_from(super::host::now_ms()).ok()?;
+        (now < grant.expires_at && std::time::Instant::now() < *deadline)
+            .then(|| grant.public_key.clone())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn run_workspace_ssh(
+        self: &Arc<Self>, peer: &Arc<Peer>, method: &str, ticket: crate::data_privacy::Ticket,
+    ) -> Result<Value, RpcError> {
+        let unavailable = || RpcError::forbidden("Workspace SSH access is unavailable");
+        let _privacy = ticket.scope().map_err(|_| unavailable())?;
+        let admission = self.collab.enter_admission();
+        let key = self.workspace_ssh_key(peer).ok_or_else(unavailable)?;
+        let runtime = self.workspace_ssh.lock().unwrap().runtime.clone().ok_or_else(unavailable)?;
+        if method == "ssh.info" {
+            return Ok(json!({ "hostKey": runtime.host_key(), "user": "terminalx-runtime" }));
+        }
+        let generation = self.generation();
+        let weak_rpc = Arc::downgrade(self);
+        let weak_peer = Arc::downgrade(peer);
+        let current_key = key.clone();
+        let allowed = move || weak_rpc.upgrade().zip(weak_peer.upgrade()).is_some_and(|(rpc, peer)| {
+            rpc.generation() == generation && peer.granted(protocol::WORKSPACE_SSH)
+                && rpc.workspace_ssh_key(&peer).as_ref() == Some(&current_key)
+        });
+        let (socket, session) = runtime.open(|| allowed().then_some(key)).map_err(|_| unavailable())?;
+        drop(admission);
+        self.ports.open_ssh(peer, ticket.clone(), socket, super::ports::SshStream {
+            collaboration: self.collab.clone(), allowed: Box::new(allowed), _session: session,
+        })
+    }
+
     /// Install the existing refresh response before processing its attachments.
     /// A v2 response requires the current runtime to have requested v2.
     pub(crate) fn set_refresh_collaboration(&self, value: Option<Value>, generation: u64, negotiated_v2: bool) -> anyhow::Result<()> {
@@ -1494,6 +1579,8 @@ impl WorkspaceRpc {
         #[cfg(any(target_os = "linux", all(test, unix)))]
         if generation != self.generation.load(Ordering::SeqCst) { self.apply_desktop_readiness(false); }
         self.collab.runtime_policy.set_generation(generation);
+        #[cfg(target_os = "linux")]
+        self.workspace_ssh.lock().unwrap().grants.clear();
         self.generation.store(generation, Ordering::SeqCst);
     }
 
@@ -1854,6 +1941,10 @@ impl WorkspaceRpc {
         #[cfg(any(target_os = "linux", all(test, unix)))]
         if method.starts_with("desktop.") {
             return self.run_desktop(peer, method, params, ticket).await;
+        }
+        #[cfg(target_os = "linux")]
+        if method.starts_with("ssh.") {
+            return self.run_workspace_ssh(peer, method, ticket);
         }
         // Sockets, not blocking work: answered on the async runtime.
         if method.starts_with("ports.") {
@@ -4870,6 +4961,11 @@ impl WorkspaceRpc {
         protocol::served(self.is_machine()).into_iter().filter(|capability| match *capability {
             protocol::AGENT_COMMANDS => self.agent_commands.get().is_some(),
             protocol::CLOUD_DESKTOP => desktop,
+            #[cfg(target_os = "linux")]
+            protocol::WORKSPACE_SSH => self.workspace_ssh_key(_peer).is_some()
+                && self.workspace_ssh.lock().unwrap().runtime.is_some(),
+            #[cfg(not(target_os = "linux"))]
+            protocol::WORKSPACE_SSH => false,
             "workspace-transfer/3" => self.is_cloud_transfer_runtime(),
             _ => true,
         }).collect()

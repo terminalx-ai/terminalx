@@ -82,6 +82,11 @@ mod workspace_ssh;
 #[cfg(unix)]
 #[allow(dead_code)]
 mod workspace_ssh_payload;
+#[cfg(unix)]
+#[allow(dead_code)]
+mod workspace_ssh_listener;
+#[allow(dead_code)]
+mod workspace_ssh_updater;
 #[cfg(feature = "desktop")]
 mod mcp_servers;
 #[cfg(feature = "desktop")]
