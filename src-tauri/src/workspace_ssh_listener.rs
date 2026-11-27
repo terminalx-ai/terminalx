@@ -608,3 +608,157 @@ mod tests {
         assert!(!root.path().join("9.6p1").exists());
     }
 }
+
+#[cfg(test)]
+mod real_sshd_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+
+    fn generate_key(path: &Path) {
+        assert!(Command::new("/usr/bin/ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(path)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    fn open(
+        listener: &Listener,
+        root: &Path,
+        host_key: &str,
+    ) -> (OwnedChild, BufReader<std::process::ChildStdout>, Session) {
+        let loopback = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = loopback.local_addr().unwrap().port();
+        let known = root.join(format!("known_hosts-{port}"));
+        fs::write(&known, format!("[127.0.0.1]:{port} {host_key}\n")).unwrap();
+        let mut child = OwnedChild(
+            Command::new("/usr/bin/ssh")
+                .args(["-F", "/dev/null", "-T", "-p"])
+                .arg(port.to_string())
+                .args([
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "IdentitiesOnly=yes",
+                    "-o",
+                    "IdentityAgent=none",
+                    "-o",
+                    "StrictHostKeyChecking=yes",
+                    "-o",
+                    "GlobalKnownHostsFile=/dev/null",
+                    "-o",
+                    "UpdateHostKeys=no",
+                    "-o",
+                ])
+                .arg(format!("UserKnownHostsFile={}", known.display()))
+                .arg("-i")
+                .arg(root.join("client"))
+                .arg("terminalx-runtime@127.0.0.1")
+                .arg("while IFS= read -r line; do printf '%s:%s\\n' \"$(id -un)\" \"$line\"; done")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + DEADLINE;
+        loopback.set_nonblocking(true).unwrap();
+        let connection = loop {
+            match loopback.accept() {
+                Ok((socket, _)) => break socket,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "ssh client did not connect");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept SSH client: {error}"),
+            }
+        };
+        let session = listener.admit(connection, || true).unwrap();
+        let output = BufReader::new(child.0.stdout.take().unwrap());
+        (child, output, session)
+    }
+
+    fn exchange(
+        child: &mut OwnedChild,
+        output: &mut BufReader<std::process::ChildStdout>,
+        value: &str,
+    ) {
+        writeln!(child.0.stdin.as_mut().unwrap(), "{value}").unwrap();
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        assert_eq!(line, format!("terminalx-runtime:{value}\n"));
+    }
+
+    #[test]
+    #[ignore = "requires a disposable Linux runtime account and private OpenSSH binary"]
+    fn real_private_sshd_handover_preserves_authenticated_command() {
+        let binary = std::env::var_os("TERMINALX_TEST_SSHD").expect("supply private sshd");
+        assert_ne!(unsafe { libc::geteuid() }, 0);
+        assert_eq!(
+            crate::workspace_ssh::LoginShell::current_account().hold_reason(),
+            None
+        );
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path();
+        let host = root.join("host");
+        generate_key(&host);
+        generate_key(&root.join("client"));
+        let host_key = parse_public_key(
+            &fs::read_to_string(root.join("host.pub"))
+                .unwrap()
+                .split_whitespace()
+                .take(2)
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
+        .unwrap();
+        let keys = root.join("authorized_keys");
+        fs::copy(root.join("client.pub"), &keys).unwrap();
+        let configuration = root.join("sshd_config");
+        fs::write(&configuration, format!(
+            "HostKey {}\nAuthorizedKeysFile {}\nAllowUsers terminalx-runtime\nAuthenticationMethods publickey\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nDisableForwarding yes\nPrintMotd no\n",
+            host.display(), keys.display()
+        )).unwrap();
+        let install = InstallLock::acquire(root).unwrap();
+        let listener = Listener::default();
+        let activate = |version| {
+            let directory = root.join(version);
+            let executable = directory.join("usr/sbin/sshd");
+            fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            fs::copy(&binary, executable).unwrap();
+            listener
+                .activate(
+                    &install,
+                    Daemon {
+                        directory,
+                        configuration: configuration.clone(),
+                        uncertain_session_exit: AtomicBool::new(false),
+                        fresh_in_this_runtime: true,
+                    },
+                    &host_key,
+                    || true,
+                )
+                .unwrap();
+        };
+        activate("9.6p1");
+        let (mut old, mut old_output, mut old_session) = open(&listener, root, &host_key);
+        exchange(&mut old, &mut old_output, "before");
+        activate("9.6p1-terminalx.1");
+        let (mut new, mut new_output, new_session) = open(&listener, root, &host_key);
+        assert_ne!(old_session.daemon.directory, new_session.daemon.directory);
+        exchange(&mut new, &mut new_output, "new");
+        exchange(&mut old, &mut old_output, "after");
+        listener.cleanup(&install, || true).unwrap();
+        assert!(root.join("9.6p1").is_dir());
+        drop(old.0.stdin.take());
+        assert!(old.wait_until(Instant::now() + DEADLINE).unwrap().success());
+        assert!(old_session
+            .process
+            .wait_until(Instant::now() + DEADLINE)
+            .unwrap()
+            .success());
+        drop(old_session);
+        listener.cleanup(&install, || true).unwrap();
+        assert!(!root.join("9.6p1").exists());
+    }
+}
