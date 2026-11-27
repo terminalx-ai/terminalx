@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { KeyboardAvoidingView, Linking, ScrollView, StyleSheet, Text, View, type ScrollViewInstance } from "react-native";
 import { Stack, useRouter } from "expo-router";
-import { CalendarClock, CircleCheck, ExternalLink, TriangleAlert, WifiOff, X } from "lucide-react-native";
+import { CalendarClock, CircleCheck, ExternalLink, TriangleAlert, X } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { accountDeletionText as T, blockerRows, deleteAfterFrom, deletionDate, emailConfirmed, goneRows } from "@mobile/account/deletion";
 import { useAccountDeletion, type DeletionNotice } from "@mobile/account/useAccountDeletion";
@@ -46,7 +46,6 @@ export default function DeleteAccountScreen() {
     api: catalog?.api ?? null,
     email,
     userId: app.session?.user.userId ?? null,
-    online: app.online,
     reauthenticate: app.reauthenticate,
     forgetDeletedAccount: app.forgetDeletedAccount,
     providerName: (providerId, workspaceId) => {
@@ -162,7 +161,6 @@ function NoticeFor({ notice, email, onCheck }: { notice: DeletionNotice; email: 
     case "stale": return <Notice testID="delete-account-stale" tone="warning" text={T.failStale} />;
     case "blocked": return <Notice testID="delete-account-changed" tone="warning" text={T.failBlocked} />;
     case "unknown": return <Notice testID="delete-account-unknown" tone="warning" text={T.failUnknown} action={{ label: T.check, onPress: onCheck }} />;
-    case "offline": return <Notice testID="delete-account-offline" tone="danger" text={T.offline} icon={(color) => <WifiOff size={16} color={color} />} />;
     case "other-account": return <Notice testID="delete-account-other-account" tone="warning" text={T.otherAccount(email)} />;
     case "no-account": return <Notice testID="delete-account-no-account" tone="warning" text={T.noAccount(email)} />;
     case "sign-in-failed": return <Notice testID="delete-account-sign-in-failed" tone="danger" text={T.signInFailed} />;

@@ -8,6 +8,8 @@ import { FLOW_LABELS, FLOW_STEPS, flowOf, moveFlow, type CloudSetupTarget, type 
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { loadSetups, newSetup, saveSetup, setupFor, type OrganizationSetupRecord } from "@/lib/organizationSetup";
 import { cn } from "@/lib/cn";
+import { isMac } from "@/lib/platform";
+import { WindowControls } from "@/components/layout/WindowControls";
 import { LeaveGuardContext, type LeaveGuard } from "./FlowLayout";
 import { OrganizationStep } from "./OrganizationStep";
 import { GithubStep } from "./GithubStep";
@@ -138,8 +140,11 @@ export function CloudSetupFlow({ target, onExit, onDone }: { target: CloudSetupT
   return (
     <LeaveGuardContext.Provider value={registerGuard}>
       <main ref={root} className="relative flex h-full min-w-0 flex-1 bg-background" aria-label="Cloud setup" data-testid="cloud-setup-flow" data-step={step}>
-        <div data-tauri-drag-region="deep" className="absolute inset-x-0 top-0 h-(--titlebar-h)" />
-        <Button variant="ghost" size="sm" className="absolute top-1.5 right-3 z-10 text-[12.5px]" onClick={finishLater}>
+        <div data-tauri-drag-region="deep" className="absolute inset-x-0 top-0 flex h-(--titlebar-h)">
+          <WindowControls />
+        </div>
+        {/* Left of the window’s own buttons where the app draws them (Windows, Linux). */}
+        <Button variant="ghost" size="sm" className={cn("absolute top-1.5 z-10 text-[12.5px]", isMac ? "right-3" : "right-[144px]")} onClick={finishLater}>
           Finish later
         </Button>
         <nav aria-label="Setup steps" className="mt-[72px] ml-7 w-[220px] shrink-0">

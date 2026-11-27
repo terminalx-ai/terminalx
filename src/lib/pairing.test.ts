@@ -13,6 +13,7 @@ const base: PairingStatus = {
   pendingApproval: null,
   keepAwake: true,
   lastError: null,
+  accountListing: { state: "pending", reason: "Adding this Mac to your account." },
 };
 
 let pairing: typeof import("./pairing");

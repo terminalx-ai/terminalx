@@ -1,7 +1,7 @@
 import * as Crypto from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
-import { AUTH_CONFIG, authSessionFailure, buildAuthorizeUrl, exchangeAuthorizationCode, parseStoredSession, redeemAccessCode, refreshSession, revokeSession, type AccessHold, type CloudSession, type RedeemOutcome } from "./protocol";
+import { AUTH_CONFIG, authSessionFailure, buildAuthorizeUrl, exchangeAuthorizationCode, parseStoredSession, redeemAccessCode, refreshSession, revokeSession, type AccessHold, type CloudSession, type RedeemOutcome, type RefreshOutcome } from "./protocol";
 
 const OPTIONS: SecureStore.SecureStoreOptions = { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY };
 const SESSION_KEY = "terminalx.cloud.session.v1";
@@ -134,27 +134,39 @@ export async function readSession(): Promise<CloudSession | null> {
   return value ? parseStoredSession(value) : null;
 }
 
-export function refreshStoredSession(session: CloudSession): Promise<StoredRefreshOutcome> {
-  if (session.expiresAt > Date.now() + REFRESH_SKEW_MS) return Promise.resolve({ status: "fresh", session });
+/**
+ * The stored session, refreshed when its access token is about to run out. Only ever the stored one: a copy held
+ * elsewhere (in a screen's state) may carry a refresh token a refresh since has replaced, and the server answers a
+ * replaced refresh token, once its minute's grace is over, by ending the whole sign-in on every device (PRO-600).
+ */
+export function refreshStoredSession(): Promise<StoredRefreshOutcome> {
   if (refreshInFlight) return refreshInFlight;
   const started = generation;
-  refreshInFlight = refreshSession(AUTH_CONFIG, session).then(async (outcome): Promise<StoredRefreshOutcome> => {
-    // Signed in again (or out) while this ran: the stored session is newer than the one refreshed; leave it as it is.
-    if (generation !== started) {
-      const current = await readSession();
-      return current ? { status: "fresh", session: current } : { status: "rejected" };
-    }
-    if (outcome.status === "refreshed") {
-      await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(outcome.session), OPTIONS);
-      return outcome;
-    }
-    if (outcome.status === "rejected") {
-      await SecureStore.deleteItemAsync(SESSION_KEY, OPTIONS).catch(() => undefined);
-      return outcome;
-    }
-    return { ...outcome, session };
-  }).finally(() => { refreshInFlight = null; });
+  const run = readSession().then(async (session): Promise<StoredRefreshOutcome> => {
+    // Nothing stored: signed out, here or by a refusal elsewhere. Nothing is sent.
+    if (!session) return { status: "rejected" };
+    if (session.expiresAt > Date.now() + REFRESH_SKEW_MS) return { status: "fresh", session };
+    return settleRefresh(session, started, await refreshSession(AUTH_CONFIG, session));
+  });
+  refreshInFlight = run.finally(() => { refreshInFlight = null; });
   return refreshInFlight;
+}
+
+async function settleRefresh(session: CloudSession, started: number, outcome: RefreshOutcome): Promise<StoredRefreshOutcome> {
+  // Signed in again (or out) while this ran: the stored session is newer than the one refreshed; leave it as it is.
+  if (generation !== started) {
+    const current = await readSession();
+    return current ? { status: "fresh", session: current } : { status: "rejected" };
+  }
+  if (outcome.status === "refreshed") {
+    await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(outcome.session), OPTIONS);
+    return outcome;
+  }
+  if (outcome.status === "rejected") {
+    await SecureStore.deleteItemAsync(SESSION_KEY, OPTIONS).catch(() => undefined);
+    return outcome;
+  }
+  return { ...outcome, session };
 }
 
 export async function signOut(session: CloudSession): Promise<void> {

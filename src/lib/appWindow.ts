@@ -45,6 +45,11 @@ export function isChatWindow(): boolean {
   return appWindow().startsWith("chat-");
 }
 
+/** True inside the app's own window, not a browser preview or a test that has not set one up. */
+export function inAppWindow(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
 export function isCompactWindow(): boolean {
   return appWindow() !== "main";
 }

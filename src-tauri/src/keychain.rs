@@ -208,8 +208,147 @@ mod windows_store {
     }
 }
 
+/// Linux: the desktop's keyring, through the Secret Service (GNOME Keyring,
+/// KWallet), one item per service and account. With no keyring running, or one
+/// left locked, a call fails with what to do ([`keyring_message`]): nothing
+/// secret is ever written to a file instead.
+#[cfg(all(target_os = "linux", feature = "desktop", not(test)))]
+mod imp {
+    pub use super::linux_store::{delete, get, set};
+}
+
+/// The Linux store itself, built in tests too so CI can run it against a real keyring
+/// (`linux_store_tests`, under `dbus-run-session` with GNOME Keyring).
+#[cfg(all(target_os = "linux", feature = "desktop"))]
+mod linux_store {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    use anyhow::{anyhow, Result};
+    use secret_service::blocking::{Collection, Item, SecretService};
+    use secret_service::{EncryptionType, Error};
+
+    use super::{keyring_message, KeyringProblem};
+
+    const CONTENT_TYPE: &str = "application/octet-stream";
+
+    /// One call at a time, as on macOS: an unlock prompt is answered once.
+    fn gate() -> MutexGuard<'static, ()> {
+        static GATE: Mutex<()> = Mutex::new(());
+        GATE.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn attributes<'a>(service: &'a str, account: &'a str) -> HashMap<&'a str, &'a str> {
+        HashMap::from([("service", service), ("account", account)])
+    }
+
+    fn explain(error: Error) -> anyhow::Error {
+        let problem = match error {
+            Error::Unavailable => KeyringProblem::Missing,
+            Error::Locked | Error::Prompt | Error::PromptDisconnected => KeyringProblem::Locked,
+            _ => KeyringProblem::Failed,
+        };
+        anyhow!(keyring_message(problem, &error.to_string()))
+    }
+
+    /// No session bus or no keyring on it: either way there is no keyring to use.
+    fn connect() -> Result<SecretService<'static>> {
+        SecretService::connect(EncryptionType::Dh).map_err(|error| anyhow!(keyring_message(KeyringProblem::Missing, &error.to_string())))
+    }
+
+    fn unlocked(item: &Item<'_>) -> Result<()> {
+        if item.is_locked().map_err(explain)? {
+            item.unlock().map_err(explain)?;
+        }
+        Ok(())
+    }
+
+    /// The default collection (the login keyring), or any there is, unlocked.
+    fn collection<'a>(store: &'a SecretService<'a>) -> Result<Collection<'a>> {
+        let collection = store.get_default_collection().or_else(|_| store.get_any_collection()).map_err(explain)?;
+        if collection.is_locked().map_err(explain)? {
+            collection.unlock().map_err(explain)?;
+        }
+        Ok(collection)
+    }
+
+    fn found<'a>(store: &'a SecretService<'a>, service: &str, account: &str) -> Result<Vec<Item<'a>>> {
+        let result = store.search_items(attributes(service, account)).map_err(explain)?;
+        Ok(result.unlocked.into_iter().chain(result.locked).collect())
+    }
+
+    pub fn get(service: &str, account: &str) -> Result<Option<Vec<u8>>> {
+        let _gate = gate();
+        let store = connect()?;
+        let items = found(&store, service, account)?;
+        let Some(item) = items.first() else { return Ok(None) };
+        unlocked(item)?;
+        Ok(Some(item.get_secret().map_err(explain)?))
+    }
+
+    pub fn set(service: &str, account: &str, secret: &[u8]) -> Result<()> {
+        let _gate = gate();
+        let store = connect()?;
+        let label = format!("TerminalX: {service} ({account})");
+        collection(&store)?.create_item(&label, attributes(service, account), secret, true, CONTENT_TYPE).map_err(explain)?;
+        Ok(())
+    }
+
+    pub fn delete(service: &str, account: &str) -> Result<()> {
+        let _gate = gate();
+        let store = connect()?;
+        for item in found(&store, service, account)? {
+            unlocked(&item)?;
+            item.delete().map_err(explain)?;
+        }
+        Ok(())
+    }
+}
+
+/// A round trip through the desktop's keyring. Ignored by default: CI runs it on
+/// Linux with `--ignored` inside `dbus-run-session`, GNOME Keyring unlocked.
+#[cfg(all(target_os = "linux", feature = "desktop", test))]
+mod linux_store_tests {
+    #[test]
+    #[ignore = "needs a running, unlocked Secret Service"]
+    fn a_secret_round_trips_through_the_system_keyring() {
+        let (service, account) = ("terminalx-ci-test", "round-trip");
+        super::linux_store::delete(service, account).unwrap();
+        assert_eq!(super::linux_store::get(service, account).unwrap(), None);
+        super::linux_store::set(service, account, b"first").unwrap();
+        super::linux_store::set(service, account, b"second").unwrap();
+        assert_eq!(super::linux_store::get(service, account).unwrap().as_deref(), Some(&b"second"[..]));
+        super::linux_store::delete(service, account).unwrap();
+        assert_eq!(super::linux_store::get(service, account).unwrap(), None);
+    }
+}
+
+/// Why the Linux keyring could not be used.
+#[cfg_attr(not(all(target_os = "linux", feature = "desktop")), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyringProblem {
+    /// No Secret Service on the session bus, or no session bus.
+    Missing,
+    /// The keyring is locked and its unlock prompt was dismissed.
+    Locked,
+    /// Any other failure, with the keyring's own words.
+    Failed,
+}
+
+/// What a keyring failure says, and what to do about it.
+#[cfg_attr(not(all(target_os = "linux", feature = "desktop")), allow(dead_code))]
+fn keyring_message(problem: KeyringProblem, detail: &str) -> String {
+    match problem {
+        KeyringProblem::Missing => format!(
+            "No system keyring is running. TerminalX keeps your sign-in and keys in the desktop's keyring (the Secret Service, such as GNOME Keyring or KWallet), never in a plain file. Install or start one, sign in to the desktop again, then try again. ({detail})"
+        ),
+        KeyringProblem::Locked => "The system keyring is locked and was not unlocked. Unlock it when it asks, then try again.".to_string(),
+        KeyringProblem::Failed => format!("The system keyring could not be used: {detail}"),
+    }
+}
+
 /// Tests never reach the real login Keychain: they use an in-memory store.
-#[cfg(any(not(any(target_os = "macos", windows)), test))]
+#[cfg(any(not(any(target_os = "macos", windows, all(target_os = "linux", feature = "desktop"))), test))]
 mod imp {
     use anyhow::{anyhow, Result};
 
@@ -373,6 +512,15 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_missing_or_locked_linux_keyring_says_what_to_do_and_keeps_nothing_elsewhere() {
+        let missing = super::keyring_message(super::KeyringProblem::Missing, "no secret service provider or dbus session found");
+        assert!(missing.starts_with("No system keyring is running."), "{missing}");
+        assert!(missing.contains("GNOME Keyring or KWallet") && missing.contains("never in a plain file"), "{missing}");
+        assert!(super::keyring_message(super::KeyringProblem::Locked, "").contains("Unlock it when it asks"));
+        assert_eq!(super::keyring_message(super::KeyringProblem::Failed, "zbus error"), "The system keyring could not be used: zbus error");
+    }
+
     /// A synchronous Tauri command runs on the main thread. These reach the
     /// Keychain (or wait for something that does), so each must be `async`
     /// and do its work on a blocking thread.

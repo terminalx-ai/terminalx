@@ -17,6 +17,7 @@ import { machineSessionKey, parseMachineKey } from "@/types/target";
 import { MachineChip, MachineLocation, machineViewLabel, machineViewStatus } from "./connectionStatus";
 import { MachineHiddenFeatures } from "./MachineFeatureNotice";
 import { openMachinePage } from "@/lib/machinePage";
+import { WindowControls } from "@/components/layout/WindowControls";
 
 /**
  * A paired machine in the main slot (PRO-345, screen 21.08): the header chip
@@ -108,6 +109,7 @@ export function MachineMain({ machineKey, sidebarOpen, onToggleSidebar }: { mach
           </WithTooltip>
         )}
         <MachineChip machine={machine} name={name} state={shown} />
+        <WindowControls />
       </header>
       {machine && <MachineLocation machine={machine} name={name} state={state} />}
       {machine && <MachineHiddenFeatures machineId={machineId} view={version} />}

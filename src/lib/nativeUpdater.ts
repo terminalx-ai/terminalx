@@ -3,7 +3,11 @@ import type { DownloadEvent } from "@tauri-apps/plugin-updater";
 
 export interface Update {
   version: string;
-  downloadAndInstall(progress: (event: DownloadEvent) => void): Promise<void>;
+  /**
+   * Download, then install. `beforeInstall` runs between the two: on Windows the installer ends this process, so
+   * anything for the relaunched app is said before it starts.
+   */
+  downloadAndInstall(progress: (event: DownloadEvent) => void, beforeInstall?: () => Promise<void>): Promise<void>;
 }
 
 /** Both native calls retain privacy admission through the plugin transport. */
@@ -12,10 +16,12 @@ export async function check({ headers }: { headers: { "X-Raccoon-Channel": strin
   if (!found) return null;
   return {
     version: found.version,
-    downloadAndInstall(onmessage) {
+    async downloadAndInstall(onmessage, beforeInstall) {
       const progress = new Channel<DownloadEvent>();
       progress.onmessage = onmessage;
-      return invoke("app_update_install", { id: found.id, progress });
+      await invoke("app_update_download", { id: found.id, progress });
+      await beforeInstall?.();
+      await invoke("app_update_apply", { id: found.id });
     },
   };
 }

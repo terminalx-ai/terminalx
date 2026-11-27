@@ -27,6 +27,7 @@ import { SESSION_STATUSES } from "@terminalx/portable/sessionStatus";
 import { relativeTime } from "@/lib/time";
 import type { Cap, CommandRun, GateResult, OrchestratorLimits, PieceTry, Run, RunEvent, RunLimits, RunPiece, RunPlan, RunPlanPiece, RunReview, RunVerification, RunVerifier, Tier } from "@/types/orchestration";
 import type { SessionEntry } from "@/types/session";
+import { WindowControls } from "@/components/layout/WindowControls";
 
 export { PLAN_A_RUN_PROMPT };
 
@@ -1415,6 +1416,7 @@ function PieceDetail({ run, piece, number, editable, column, busy, cost, act, on
         {/* A plan's piece is its brief (18.02); a started one's panel needs no word for what it is. */}
         {editable && <span className="shrink-0 text-xs text-faint">brief</span>}
         <Button variant="ghost" size="icon-sm" className="ml-auto" aria-label="Close piece" onClick={onClose}><X /></Button>
+        <WindowControls />
       </header>
       {draft && editable ? (
         <BriefForm draft={draft} onChange={setDraft} piece={piece} run={run} busy={busy} onCancel={() => setDraft(null)} onSave={async (patch) => { if (await onSave(patch)) setDraft(null); }} />

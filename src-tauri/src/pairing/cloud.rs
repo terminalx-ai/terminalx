@@ -60,6 +60,37 @@ impl std::fmt::Display for RetryAfter {
 
 impl std::error::Error for RetryAfter {}
 
+/// The account service's own name for why it refused a request, from the
+/// `{"error": "…"}` it answers with (`host_binding_inactive`, …). It sits
+/// beneath the [`CloudHttpError`], beside any [`RetryAfter`]: a refused host
+/// registration is recovered by what it says (PRO-598).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudRefusal(pub String);
+
+impl std::fmt::Display for CloudRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CloudRefusal {}
+
+/// The refusal code of `error`, when the account service named one.
+pub fn refusal_code(error: &anyhow::Error) -> Option<&str> {
+    error.downcast_ref::<CloudRefusal>().map(|refusal| refusal.0.as_str())
+}
+
+/// The `error` code in a refusal's body. Only a short snake_case word is
+/// taken: the body is the service's, and the code is shown and logged.
+fn refusal_in(body: &[u8]) -> Option<CloudRefusal> {
+    let body: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let code = body.get("error")?.as_str()?;
+    let word = !code.is_empty()
+        && code.len() <= 64
+        && code.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+    word.then(|| CloudRefusal(code.to_string()))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RelayAuthorization {
@@ -89,8 +120,12 @@ struct RevocationList {
 }
 
 pub fn register_host(context: &AccountContext, payload: &HostBindingPayload) -> Result<()> {
+    register_host_at(&crate::account::api_base_url(), context, payload)
+}
+
+pub fn register_host_at(base: &str, context: &AccountContext, payload: &HostBindingPayload) -> Result<()> {
     request_unit(
-        &crate::account::api_base_url(),
+        base,
         "/v1/desktop/host-account-bindings",
         "POST",
         Some(serde_json::to_value(payload)?),
@@ -171,8 +206,12 @@ pub fn heartbeat(base: &str, context: &AccountContext, host_id: &str, generation
 }
 
 pub fn unbind(context: &AccountContext, host_id: &str, generation: u64) -> Result<()> {
+    unbind_at(&crate::account::api_base_url(), context, host_id, generation)
+}
+
+pub fn unbind_at(base: &str, context: &AccountContext, host_id: &str, generation: u64) -> Result<()> {
     request_unit(
-        &crate::account::api_base_url(),
+        base,
         &format!("/v1/desktop/host-account-bindings/{host_id}"),
         "DELETE",
         Some(json!({ "bindingGeneration": generation, "reason": "host-sign-out" })),
@@ -410,10 +449,15 @@ fn send(
         Ok(response) => Ok(response),
         Err(ureq::Error::Status(status, response)) => {
             let retry_after = retry_after(&response);
-            crate::account::discard_body(response);
-            Err(match retry_after {
-                Some(after) => anyhow::Error::new(after).context(CloudHttpError(status)),
-                None => CloudHttpError(status).into(),
+            // Read as `discard_body` drains it, so the connection is kept.
+            let mut body = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), 64 * 1024), &mut body);
+            let refusal = refusal_in(&body);
+            Err(match (retry_after, refusal) {
+                (Some(after), Some(refusal)) => anyhow::Error::new(after).context(refusal).context(CloudHttpError(status)),
+                (Some(after), None) => anyhow::Error::new(after).context(CloudHttpError(status)),
+                (None, Some(refusal)) => anyhow::Error::new(refusal).context(CloudHttpError(status)),
+                (None, None) => CloudHttpError(status).into(),
             })
         }
         Err(ureq::Error::Transport(error)) => Err(anyhow!(error).context("cloud request failed")),
@@ -577,6 +621,48 @@ pub(super) mod fixture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refusal_keeps_the_services_code_beside_its_status_and_retry_after() {
+        use super::fixture::{KeepAliveServer, Reply};
+        let server = KeepAliveServer::start(|request| match request.method.as_str() {
+            "POST" => Reply { status: 409, retry_after: None, body: r#"{"error":"host_binding_inactive"}"#.into() },
+            "DELETE" => Reply { status: 429, retry_after: Some(9), body: r#"{"error":"account_pairing_rate_limited","retryAfter":9}"#.into() },
+            _ => Reply { status: 500, retry_after: None, body: r#"{"error":"<b>not a code</b>"}"#.into() },
+        });
+        let context = AccountContext {
+            access_token: "synthetic-access-token".into(),
+            user_id: "synthetic-user".into(),
+            email: "fixture@example.invalid".into(),
+            display_name: "Fixture".into(),
+            profile_id: "synthetic-profile".into(),
+            organization_id: "synthetic-org".into(),
+            relay_entitled: true,
+            generation: 1,
+        };
+        let payload = HostBindingPayload {
+            host_id: "synthetic-host".into(),
+            host_public_key_b64: "synthetic-key".into(),
+            binding_generation: 2,
+            display_name: "Fixture Mac".into(),
+            platform: "darwin".into(),
+            environment_kind: "native".into(),
+            capabilities: vec![],
+        };
+        let refused = register_host_at(&server.base, &context, &payload).unwrap_err();
+        assert_eq!(refused.downcast_ref::<CloudHttpError>().map(|status| status.0), Some(409));
+        assert_eq!(refusal_code(&refused), Some("host_binding_inactive"));
+        assert_eq!(format!("{refused:#}"), "cloud service returned HTTP 409: host_binding_inactive");
+
+        let limited = unbind_at(&server.base, &context, "synthetic-host", 3).unwrap_err();
+        assert_eq!(refusal_code(&limited), Some("account_pairing_rate_limited"));
+        assert_eq!(limited.downcast_ref::<RetryAfter>(), Some(&RetryAfter(Duration::from_secs(9))));
+        assert_eq!(limited.downcast_ref::<CloudHttpError>().map(|status| status.0), Some(429));
+
+        let odd = pending_grants(&server.base, &context, "synthetic-host", 3, GrantScope::Mobile).unwrap_err();
+        assert_eq!(refusal_code(&odd), None, "only a snake_case word is taken from the body");
+        assert_eq!(server.connections(), 1, "a refusal's body is read, so the connection is kept");
+    }
 
     #[test]
     fn requests_share_one_kept_alive_connection_and_keep_retry_after() {

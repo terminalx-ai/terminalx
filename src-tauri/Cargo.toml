@@ -31,6 +31,9 @@ desktop = [
     "dep:tauri-plugin-global-shortcut",
     "dep:tauri-plugin-notification",
     "dep:tauri-plugin-updater",
+    # Windows and Linux: a link opened while the app runs reaches it, not a second copy.
+    "dep:tauri-plugin-single-instance",
+    "dep:secret-service",
     "dep:cpal",
     # macOS only: AppKit alerts, dictation and local transcription.
     "dep:objc2",
@@ -140,6 +143,17 @@ tauri-plugin-global-shortcut = { version = "~2.3", optional = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# A second launch on Windows and Linux (a sign-in callback or any terminalx:// link
+# opens the app again there) hands its link to the running app and exits. macOS
+# delivers links to the running app by itself.
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"], optional = true }
+
+# Linux keeps secrets in the desktop's keyring (the Secret Service: GNOME Keyring,
+# KWallet), over the D-Bus library the notifications already use (zbus on async-io).
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "5", default-features = false, features = ["rt-async-io-crypto-rust"], optional = true }
+
 # Owner-only access, process identity and lifetime, and per-user secret
 # sealing: what file modes, uids, signals and the Keychain are on Unix.
 [target.'cfg(windows)'.dependencies]
@@ -162,6 +176,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Kernel",
   "Win32_System_Pipes",
   "Win32_System_ProcessStatus",
+  "Win32_System_Registry",
   "Win32_System_RestartManager",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",

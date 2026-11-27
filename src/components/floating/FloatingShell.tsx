@@ -34,6 +34,7 @@ import { bootSessions, openTarget, selectSession, useSessionStore } from "@/lib/
 import { subscribeTabPty } from "@/lib/tabViews";
 import { getTerminalState } from "@/lib/terminal";
 import { sessionStatus, TAB_STATUS_LABEL, type SessionEntry, type TabStatus } from "@/types/session";
+import { WindowControls } from "@/components/layout/WindowControls";
 
 /** How many quick chats the switcher lists before it points at the main window for the rest. */
 const RECENT_LIMIT = 12;
@@ -180,6 +181,7 @@ export function FloatingShell() {
                 </Button>
               </WithTooltip>
             </div>
+            <WindowControls />
           </header>
           <div className="min-h-0 flex-1">
             {store.loaded ? <NewSessionView quick compact onCreated={onCreated} /> : null}

@@ -15,8 +15,14 @@ const fake = vi.hoisted(() => ({
   network: null as null | ((state: unknown) => void),
   networks: [] as unknown[],
   unwatched: 0,
+  /** What the OS says when asked again; NetInfo hands it to its listeners, as its refresh does. */
+  fresh: { type: "wifi", isConnected: true, details: { ipAddress: "192.168.0.5" } } as unknown,
+  refreshed: 0,
 }));
-vi.mock("@react-native-community/netinfo", () => ({ default: { addEventListener: (listener: (state: unknown) => void) => { fake.network = listener; return () => { fake.unwatched++; }; } } }));
+vi.mock("@react-native-community/netinfo", () => ({ default: {
+  addEventListener: (listener: (state: unknown) => void) => { fake.network = listener; return () => { fake.unwatched++; }; },
+  refresh: async () => { fake.refreshed++; fake.network?.(fake.fresh); return fake.fresh; },
+} }));
 vi.mock("@react-native-async-storage/async-storage", () => ({ default: { getItem: async (key: string) => fake.storage.get(key) ?? null, setItem: async (key: string, value: string) => void fake.storage.set(key, value), removeItem: async (key: string) => void fake.storage.delete(key) } }));
 vi.mock("expo-secure-store", () => ({ WHEN_UNLOCKED_THIS_DEVICE_ONLY: 1, getItemAsync: async (key: string) => fake.storage.get(`secure:${key}`) ?? null, setItemAsync: async (key: string, value: string) => void fake.storage.set(`secure:${key}`, value), deleteItemAsync: async (key: string) => void fake.storage.delete(`secure:${key}`) }));
 vi.mock("react-native", () => ({
@@ -68,6 +74,8 @@ beforeEach(async () => {
   fake.removed = 0;
   fake.networks = [];
   fake.unwatched = 0;
+  fake.refreshed = 0;
+  fake.fresh = { type: "wifi", isConnected: true, details: { ipAddress: "192.168.0.5" } };
   await savePairedHost(HOST, { v: 1, deviceToken: "token" });
   root = createRoot(document.createElement("div"));
   await act(async () => root.render(<AppProvider><Probe /></AppProvider>));
@@ -142,4 +150,29 @@ it("tells the connection when the phone's network changes, and stops listening o
   await act(async () => root.unmount());
   expect(fake.unwatched).toBe(1);
   root = createRoot(document.createElement("div"));
+});
+
+// PRO-603: a reading gone stale while the app was away is asked for again when it is back.
+it("reads the phone's network again when the app comes back to the front, and not when it leaves", async () => {
+  await act(async () => fake.network!({ type: "none", isConnected: false, details: null }));
+  expect(seen.current!.online).toBe(false);
+  await appState("background");
+  expect(fake.refreshed).toBe(0);
+  await appState("active");
+  expect(fake.refreshed).toBe(1);
+  expect(seen.current!.online).toBe(true);
+});
+
+it("asks for the reading again on refreshNetwork, and keeps the last one when the OS cannot say", async () => {
+  await act(async () => fake.network!({ type: "none", isConnected: false, details: null }));
+  await act(async () => seen.current!.refreshNetwork());
+  await settle();
+  expect(fake.refreshed).toBe(1);
+  expect(seen.current!.online).toBe(true);
+  fake.fresh = { type: "unknown", isConnected: null, details: null };
+  await act(async () => fake.network!({ type: "none", isConnected: false, details: null }));
+  await act(async () => seen.current!.refreshNetwork());
+  await settle();
+  expect(fake.refreshed).toBe(2);
+  expect(seen.current!.online).toBe(false);
 });
