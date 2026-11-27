@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { InNoticeColumn, NoticeColumn } from "./NoticeColumn";
 
@@ -76,17 +76,11 @@ it("keeps them in the bottom corner over the right panel, where no composer reac
   expect(columnOf("Claude Code finished")).toBe("bottom");
 });
 
-it("moves them up when a composer comes under the corner", () => {
-  vi.useFakeTimers();
-  try {
-    mount();
-    expect(columnOf("Claude Code finished")).toBe("bottom");
-    composer({ left: 494, right: 1214, top: 775, bottom: 860 });
-    act(() => { vi.advanceTimersByTime(1000); });
-    expect(columnOf("Claude Code finished")).toBe("top");
-  } finally {
-    vi.useRealTimers();
-  }
+it("moves them up when a composer comes under the corner", async () => {
+  mount();
+  expect(columnOf("Claude Code finished")).toBe("bottom");
+  composer({ left: 494, right: 1214, top: 775, bottom: 860 });
+  await waitFor(() => expect(columnOf("Claude Code finished")).toBe("top"));
 });
 
 it("takes a notice raised deep in a page in with the toasts, after them", () => {
@@ -103,4 +97,17 @@ it("takes the bottom corner on its own when the page has no notice column", () =
   const own = screen.getByRole("alert").parentElement!;
   expect(own.className).toContain("bottom-8");
   expect(own.className).toContain("right-4");
+});
+
+it("does not run forced-layout polling intervals when idle", () => {
+  vi.useFakeTimers();
+  const setIntervalSpy = vi.spyOn(window, "setInterval");
+  try {
+    render(<NoticeColumn>{null}</NoticeColumn>);
+    expect(setIntervalSpy).not.toHaveBeenCalled();
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(setIntervalSpy).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+  }
 });

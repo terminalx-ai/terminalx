@@ -93,15 +93,19 @@ export function resetUserSetting(key: string): Promise<void> {
 async function refresh() {
   let file = await invoke<SettingsFileStatus>("settings_file_status");
   if (!connected && !file.error) {
-    try {
-      file = await invoke<SettingsFileStatus>("update_user_preferences", {
-        patch: { ...legacyUserPreferences(), ...legacyThemePreferences() }, migrate: true,
-      });
-    } catch (error) {
-      // A rejected legacy choice is not a corrupt settings file. Still show
-      // its valid values and path, and keep legacy storage available to retry.
-      apply(file);
-      throw error;
+    const legacyPatch = { ...legacyUserPreferences(), ...legacyThemePreferences() };
+    // Skip redundant migration writes on every boot once legacy localStorage keys are already gone.
+    if (Object.keys(legacyPatch).length > 0) {
+      try {
+        file = await invoke<SettingsFileStatus>("update_user_preferences", {
+          patch: legacyPatch, migrate: true,
+        });
+      } catch (error) {
+        // A rejected legacy choice is not a corrupt settings file. Still show
+        // its valid values and path, and keep legacy storage available to retry.
+        apply(file);
+        throw error;
+      }
     }
     connected = true;
     connectPreferenceFile(save);
@@ -133,8 +137,10 @@ function unfoldToolCallsOnce(file: SettingsFileStatus) {
 /** Subscribe before reading so edits during startup cannot be missed. */
 export function bootSettingsFile(): Promise<void> {
   return boot ??= (async () => {
-    await listen("settings_file_changed", () => { void enqueue(refresh); });
-    await listen("local_runtime_reattached", () => { void enqueue(refresh); });
+    await Promise.all([
+      listen("settings_file_changed", () => { void enqueue(refresh); }),
+      listen("local_runtime_reattached", () => { void enqueue(refresh); }),
+    ]);
     await enqueue(refresh);
   })().catch((error: unknown) => { publish(state.file, String(error)); });
 }

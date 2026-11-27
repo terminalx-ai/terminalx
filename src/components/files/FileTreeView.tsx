@@ -1,5 +1,5 @@
 import { revealInFileManager } from "@/lib/platform";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
   AppWindow, AtSign, ChevronDown, ChevronRight, Copy, ExternalLink, Eye, FileDiff, FilePlus, FileSearch, Folder, FolderOpen, FolderSearch, FolderTree,
   ListFilter, Search, Undo2, X,
@@ -38,6 +38,11 @@ interface Row {
   open?: boolean;
 }
 
+/** Fixed height of every tree row (px), used for virtualized windowing. */
+export const FILE_TREE_ROW_HEIGHT = 26;
+const FILE_TREE_OVERSCAN = 15;
+const FALLBACK_VIEWPORT_PX = 2080;
+
 /** The most files the filter reads; past it the count says it is incomplete. */
 export const FILTER_LIMIT = 60_000;
 
@@ -59,9 +64,24 @@ export function filterRows(paths: string[], query: string): { rows: Row[]; match
   };
   for (const path of paths) {
     if (!path) continue;
+    const sizeBefore = files.size;
     files.add(path);
-    const parts = path.split("/");
-    for (let i = 0; i < parts.length; i++) add(parts.slice(0, i).join("/"), parts.slice(0, i + 1).join("/"), i < parts.length - 1);
+    if (files.size === sizeBefore) continue;
+    // Fast-path: if the full path never contains the query, neither its file name nor any ancestor folder name can match.
+    if (q && !path.toLocaleLowerCase().includes(q)) continue;
+    let parent = "";
+    let idx = 0;
+    while (true) {
+      const slash = path.indexOf("/", idx);
+      if (slash < 0) {
+        add(parent, path, false);
+        break;
+      }
+      const dir = path.slice(0, slash);
+      add(parent, dir, true);
+      parent = dir;
+      idx = slash + 1;
+    }
   }
   const nameOf = (p: string) => p.slice(p.lastIndexOf("/") + 1);
   const hit = (p: string) => nameOf(p).toLocaleLowerCase().includes(q);
@@ -167,8 +187,12 @@ function RootedFileTreeView({
   const [allFiles, setAllFiles] = useState<{ paths: string[]; truncated: boolean } | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const query = filter.trim();
+  const deferredQuery = useDeferredValue(query);
   const canFilter = !!reader.listFiles;
   const filtering = canFilter && filterOpen && query !== "";
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const [menuPath, setMenuPath] = useState<string | null>(null);
   const keymap = useKeymap();
   const searchKeys = keymap["files.search"][0];
   const quickOpenKeys = keymap["files.quickOpen"][0];
@@ -274,9 +298,18 @@ function RootedFileTreeView({
   useEffect(() => {
     if (!active || !isGit || source) return;
     setTick((t) => t + 1);
-    const id = window.setInterval(() => setTick((t) => t + 1), 5000);
-    return () => window.clearInterval(id);
-  }, [active, statusKey, isGit]);
+    const id = window.setInterval(() => {
+      if (document.visibilityState === "visible") setTick((t) => t + 1);
+    }, 5000);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") setTick((t) => t + 1);
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [active, statusKey, isGit, source]);
   const localChanges = useWorkingChanges(root, active && isGit && !source, tick);
   const cloudChanges = useSourceChanges(source, active && isGit, tick);
   const changes = source ? cloudChanges : localChanges;
@@ -311,8 +344,11 @@ function RootedFileTreeView({
     [children, load, filtering],
   );
 
-  // The visible rows, flattened, so keyboard movement is index arithmetic.
-  const filtered = useMemo(() => (filtering && allFiles ? filterRows(allFiles.paths, query) : null), [filtering, allFiles, query]);
+  // The visible rows, flattened, so keyboard movement and virtualization are O(1) index arithmetic.
+  const filtered = useMemo(
+    () => (filtering && allFiles && deferredQuery !== "" ? filterRows(allFiles.paths, deferredQuery) : null),
+    [filtering, allFiles, deferredQuery],
+  );
   const plainRows = useMemo(() => {
     const out: Row[] = [];
     const walk = (rel: string, depth: number) => {
@@ -330,6 +366,25 @@ function RootedFileTreeView({
   // filter: show nothing in their place (the state says why).
   const rows = filtered ? filtered.rows : filtering ? [] : plainRows;
   const noMatch = !!filtered && filtered.matched === 0;
+
+  useEffect(() => {
+    const el = container.current;
+    if (!el) return;
+    const sync = () => setViewportHeight(el.clientHeight);
+    sync();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const effectiveViewport = viewportHeight > 0 ? viewportHeight : FALLBACK_VIEWPORT_PX;
+  const visibleStart = Math.max(0, Math.floor(scrollTop / FILE_TREE_ROW_HEIGHT) - FILE_TREE_OVERSCAN);
+  const visibleEnd = Math.min(rows.length, Math.ceil((scrollTop + effectiveViewport) / FILE_TREE_ROW_HEIGHT) + FILE_TREE_OVERSCAN);
+  const visibleRows = useMemo(() => rows.slice(visibleStart, visibleEnd), [rows, visibleStart, visibleEnd]);
+  const topSpacer = visibleStart * FILE_TREE_ROW_HEIGHT;
+  const bottomSpacer = Math.max(0, (rows.length - visibleEnd) * FILE_TREE_ROW_HEIGHT);
+  const menuRow = useMemo(() => (menuPath ? rows.find((r) => r.path === menuPath) ?? null : null), [menuPath, rows]);
 
   const activate = useCallback(
     (row: Row) => {
@@ -407,12 +462,28 @@ function RootedFileTreeView({
     }
   };
 
-  // Keep the focused row in view as the arrows move it.
+  // Keep the focused row in view as the arrows move it (including virtualized off-screen rows).
   useEffect(() => {
     if (!focus) return;
-    const el = container.current?.querySelector<HTMLElement>(`[data-path="${CSS.escape(focus)}"]`);
+    const scroller = container.current;
+    if (scroller && scroller.clientHeight > 0) {
+      const index = rows.findIndex((r) => r.path === focus);
+      if (index >= 0) {
+        const rowTop = index * FILE_TREE_ROW_HEIGHT;
+        const rowBottom = rowTop + FILE_TREE_ROW_HEIGHT;
+        if (rowTop < scroller.scrollTop) {
+          scroller.scrollTop = rowTop;
+          setScrollTop(rowTop);
+        } else if (rowBottom > scroller.scrollTop + scroller.clientHeight) {
+          const nextTop = rowBottom - scroller.clientHeight;
+          scroller.scrollTop = nextTop;
+          setScrollTop(nextTop);
+        }
+      }
+    }
+    const el = scroller?.querySelector<HTMLElement>(`[data-path="${CSS.escape(focus)}"]`);
     el?.scrollIntoView({ block: "nearest" });
-  }, [focus]);
+  }, [focus, rows]);
 
   const mention = (rel: string) => {
     if (!mentionTabId) return;
@@ -619,6 +690,7 @@ function RootedFileTreeView({
         aria-label={`Files in ${rootName}`}
         tabIndex={0}
         onKeyDown={onKeyDown}
+        onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
         className="animate-panel-content min-h-0 flex-1 overflow-auto p-1.5 outline-none scrollbar-thin focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring/40"
       >
         {error && <div className="px-3 py-2 text-xs text-destructive">{error}</div>}
@@ -651,56 +723,78 @@ function RootedFileTreeView({
             </div>
           </div>
         )}
-        {!noMatch &&
-          rows.map((row) => {
-            const open = row.isDir && (filtered ? !!row.open : expanded.has(row.path));
-            const status = row.isDir ? undefined : fileStatus.get(row.path);
-            const dirty = row.isDir && dirsWithChanges.has(row.path);
-            const isActive = !row.isDir && activeRel === row.path;
-            const isFocused = focus === row.path;
-            const FolderGlyph = open ? FolderOpen : Folder;
-            return (
-              <ContextMenu key={row.path}>
-                <ContextMenuTrigger asChild>
-                  <div
-                    role="treeitem"
-                    aria-expanded={row.isDir ? open : undefined}
-                    aria-selected={isActive}
-                    data-path={row.path}
-                    onClick={() => activate(row)}
-                    onContextMenu={() => setFocus(row.path)}
-                    style={{ paddingLeft: row.depth * 14 + 10 }}
-                    className={cn(
-                      "flex h-[26px] w-full min-w-0 cursor-default items-center gap-1.5 rounded-md pr-3 font-mono text-[12.5px]",
-                      isActive ? "bg-veil-strong text-foreground" : "text-foreground/85 hover:bg-veil-raised hover:text-foreground",
-                      isFocused && !isActive && "bg-veil-raised",
-                    )}
-                  >
-                    {row.isDir ? (
-                      open ? (
-                        <ChevronDown className="size-3 shrink-0 text-faint" />
-                      ) : (
-                        <ChevronRight className="size-3 shrink-0 text-faint" />
-                      )
-                    ) : (
-                      <span className="w-3 shrink-0" />
-                    )}
-                    {row.isDir ? (
-                      <FolderGlyph aria-hidden data-folder-icon="" className="size-3.5 shrink-0 text-muted-foreground" />
-                    ) : (
-                      <FileTypeIcon name={row.name} isDir={false} size={14} className="shrink-0" />
-                    )}
-                    <span
-                      className={cn("min-w-0 flex-1 truncate", status && TINT[status], row.escapes && "italic text-faint")}
-                      title={row.escapes ? "A link outside the workspace. It is not followed." : undefined}
+        {!noMatch && rows.length > 0 && (
+          <ContextMenu onOpenChange={(open) => { if (!open) requestAnimationFrame(() => container.current?.focus()); }}>
+            <ContextMenuTrigger asChild>
+              <div
+                onContextMenuCapture={(e) => {
+                  const hit = (e.target as Element | null)?.closest<HTMLElement>("[data-path]")?.getAttribute("data-path") ?? null;
+                  if (hit) {
+                    setFocus(hit);
+                    setMenuPath(hit);
+                  } else {
+                    setMenuPath(null);
+                  }
+                }}
+              >
+                {topSpacer > 0 && <div aria-hidden style={{ height: topSpacer }} />}
+                {visibleRows.map((row) => {
+                  const open = row.isDir && (filtered ? !!row.open : expanded.has(row.path));
+                  const status = row.isDir ? undefined : fileStatus.get(row.path);
+                  const dirty = row.isDir && dirsWithChanges.has(row.path);
+                  const isActive = !row.isDir && activeRel === row.path;
+                  const isFocused = focus === row.path;
+                  const FolderGlyph = open ? FolderOpen : Folder;
+                  return (
+                    <div
+                      key={row.path}
+                      role="treeitem"
+                      aria-expanded={row.isDir ? open : undefined}
+                      aria-selected={isActive}
+                      data-path={row.path}
+                      onClick={() => activate(row)}
+                      style={{ paddingLeft: row.depth * 14 + 10 }}
+                      className={cn(
+                        "flex h-[26px] w-full min-w-0 cursor-default items-center gap-1.5 rounded-md pr-3 font-mono text-[12.5px]",
+                        isActive ? "bg-veil-strong text-foreground" : "text-foreground/85 hover:bg-veil-raised hover:text-foreground",
+                        isFocused && !isActive && "bg-veil-raised",
+                      )}
                     >
-                      {row.name}
-                    </span>
-                    {row.escapes && <span className="shrink-0 font-sans text-[10px] text-faint">link outside</span>}
-                    {status && <span className={cn("shrink-0 text-[11px] tabular-nums", TINT[status])}>{BADGE[status]}</span>}
-                    {dirty && <span aria-label="Contains changes" className="size-1.5 shrink-0 rounded-full bg-warning/80" />}
-                  </div>
-                </ContextMenuTrigger>
+                      {row.isDir ? (
+                        open ? (
+                          <ChevronDown className="size-3 shrink-0 text-faint" />
+                        ) : (
+                          <ChevronRight className="size-3 shrink-0 text-faint" />
+                        )
+                      ) : (
+                        <span className="w-3 shrink-0" />
+                      )}
+                      {row.isDir ? (
+                        <FolderGlyph aria-hidden data-folder-icon="" className="size-3.5 shrink-0 text-muted-foreground" />
+                      ) : (
+                        <FileTypeIcon name={row.name} isDir={false} size={14} className="shrink-0" />
+                      )}
+                      <span
+                        className={cn("min-w-0 flex-1 truncate", status && TINT[status], row.escapes && "italic text-faint")}
+                        title={row.escapes ? "A link outside the workspace. It is not followed." : undefined}
+                      >
+                        {row.name}
+                      </span>
+                      {row.escapes && <span className="shrink-0 font-sans text-[10px] text-faint">link outside</span>}
+                      {status && <span className={cn("shrink-0 text-[11px] tabular-nums", TINT[status])}>{BADGE[status]}</span>}
+                      {dirty && <span aria-label="Contains changes" className="size-1.5 shrink-0 rounded-full bg-warning/80" />}
+                    </div>
+                  );
+                })}
+                {bottomSpacer > 0 && <div aria-hidden style={{ height: bottomSpacer }} />}
+              </div>
+            </ContextMenuTrigger>
+            {menuRow && (() => {
+              const row = menuRow;
+              const open = row.isDir && (filtered ? !!row.open : expanded.has(row.path));
+              const status = row.isDir ? undefined : fileStatus.get(row.path);
+              const FolderGlyph = open ? FolderOpen : Folder;
+              return (
                 <ContextMenuContent className="w-60" data-testid="file-tree-menu">
                   {row.isDir ? (
                     !filtering && (
@@ -763,9 +857,10 @@ function RootedFileTreeView({
                     </>
                   )}
                 </ContextMenuContent>
-              </ContextMenu>
-            );
-          })}
+              );
+            })()}
+          </ContextMenu>
+        )}
         {!filtering && children[""] !== undefined && !children[""]?.length && <div className="px-3 py-2 text-xs text-faint">Empty.</div>}
       </div>
       {git && (

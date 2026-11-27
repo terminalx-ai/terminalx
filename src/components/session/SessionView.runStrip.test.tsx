@@ -86,7 +86,7 @@ describe("a session's Run strip and run pill (#1404)", () => {
   it("the strip comes with the Run view opened on a session with no run (Go → Run View), and goes with it", async () => {
     await show();
     act(() => showRunView("plain", true));
-    expect(screen.getByTestId("run-view")).toBeTruthy();
+    expect(await screen.findByTestId("run-view")).toBeTruthy();
     expect(screen.getByTestId("run-strip")).toBeTruthy();
     expect(screen.queryByTestId("run-pill")).toBeNull();
     act(() => screen.getByRole("tab", { name: "Lead chat" }).click());

@@ -1,6 +1,6 @@
 import { selectSessionTab } from "@/lib/terminal";
 import { ReviewCommentsProvider } from "@/components/changes/ReviewComments";
-import { useSessionStore } from "@/lib/sessions";
+import { useSessionSelector } from "@/lib/sessions";
 import { useEffect, useMemo, useState } from "react";
 import { Check, Copy, RefreshCw } from "@/icons";
 import { DiffPane } from "@/components/changes/DiffPane";
@@ -31,14 +31,21 @@ export function DiffEditorPane({ entry, visible }: { entry: DiffEditorEntry; vis
 /** Keep each surface mounted: mode switches preserve the diff's scroll and the editor's buffer/undo. */
 function SingleDiffPane({ entry, visible }: { entry: DiffEditorEntry; visible: boolean }) {
   const source = useMemo(() => localGitSource(entry.root), [entry.root]);
-  const session = useSessionStore().sessions.find((s) => s.id === entry.sessionId);
-  const tabId = session?.activeTab ?? session?.tabs[0]?.id;
+  const tabId = useSessionSelector((s) => {
+    const session = s.sessions.find((item) => item.id === entry.sessionId);
+    return session?.activeTab ?? session?.tabs[0]?.id;
+  });
   return <ReviewCommentsProvider chrome={false} onAdd={() => { if (tabId) selectSessionTab(entry.sessionId, { kind: "agent", id: tabId }); }} key={source.key} source={source} active={visible} tabId={tabId}><DiffEditorContent entry={entry} visible={visible} /></ReviewCommentsProvider>;
 }
 function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible: boolean }) {
   const { range, mode, scope, target, uncommitted, oldPath } = entry.diff;
   const source = useMemo(() => localGitSource(entry.root), [entry.root]);
   const files = useFileSource(undefined, entry.root);
+  const [everVisible, setEverVisible] = useState(visible);
+  useEffect(() => {
+    if (visible) setEverVisible(true);
+  }, [visible]);
+  const activated = everVisible || visible;
   // The PR's review threads, found and kept current while its diff is shown here (PRO-234).
   useSessionThreads(source, entry.sessionId.startsWith("checkout:") ? undefined : entry.sessionId, visible);
   const kind = fileKind(entry.rel);
@@ -59,16 +66,16 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
   const viewed = useViewedChanges(source.key);
   const [copied, setCopied] = useState<"done" | "failed" | null>(null);
   useEffect(() => {
-    if (!range) { setChangedFile(null); return; }
+    if (!activated || !range) { setChangedFile(null); return; }
     let cancelled = false;
     source.changesBetween(range.base, range.head, options.hideWhitespace)
       .then((list) => { if (!cancelled) setChangedFile(list.find((file) => file.path === entry.rel) ?? null); })
       .catch(() => { if (!cancelled) setChangedFile(null); });
     return () => { cancelled = true; };
-  }, [source, entry.rel, range?.base, range?.head, options.hideWhitespace]);
+  }, [activated, source, entry.rel, range?.base, range?.head, options.hideWhitespace]);
 
   useEffect(() => {
-    if (!range || media) return;
+    if (!activated || !range || media) return;
     let cancelled = false;
     setPair(null);
     setError(null);
@@ -86,7 +93,7 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
       if (!cancelled) setPair({ before: before ?? "", after: next.after ?? "", deleted: next.after === null, originalPath: previousPath, size: next.after === TOO_LARGE ? next.afterSize : previous.beforeSize });
     })().catch((e) => { if (!cancelled) setError(source.errorMessage(e)); });
     return () => { cancelled = true; };
-  }, [source, entry.rel, range?.base, range?.head, oldPath, media]);
+  }, [activated, source, entry.rel, range?.base, range?.head, oldPath, media]);
 
   // Warn as soon as a snapshot differs from the working file, and when it moves on later.
   useEffect(() => {
@@ -115,9 +122,21 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
       finally { checking = false; }
     };
     void check();
-    const timer = window.setInterval(() => void check(), 2000);
+    const timer = window.setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      void check();
+    }, 2000);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void check();
+    };
     window.addEventListener("focus", check);
-    return () => { cancelled = true; window.clearInterval(timer); window.removeEventListener("focus", check); };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", check);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [visible, files, entry.rel, pair, media]);
 
   const refresh = async () => {

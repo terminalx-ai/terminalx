@@ -1,7 +1,7 @@
 import { noteChangesCount } from "@/lib/panelMarks";
 import { ReviewCommentsProvider, useReviewComments } from "./ReviewComments";
 import { DiscardDialog, DiscardButton } from "./DiscardDialog";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { openConflict, openDiff, openFile, openReviewStack, useEditors } from "@/lib/editors";
 import { useTerminals } from "@/lib/terminal";
 import { changeRange, type ChangeRange } from "@/lib/changes";
@@ -28,7 +28,7 @@ import { useSessionThreads } from "./ReviewThreads";
  * Review the accumulated workspace by default; turn snapshots are opt-in.
  * Uncommitted is where a commit is made, and History opens past commits.
  */
-export function ChangesPanel(props: {
+export const ChangesPanel = memo(function ChangesPanel(props: {
   reviewTabId?: string | null;
   /** Supplied by the workspace host only when file access is available. */
   openFileAction?: (path: string) => (() => void) | undefined;
@@ -46,7 +46,7 @@ export function ChangesPanel(props: {
   const root = !source.cloud ? props.cwd ?? (source.key.startsWith("local:") ? source.key.slice(6) : undefined) : undefined;
   const panel = <ScopedChanges key={source.key} {...props} source={source} sessionId={props.sessionId} editor={root ? { root, sessionId: props.sessionId ?? `checkout:${root}` } : undefined} />;
   return props.reviewTabId ? <ReviewCommentsProvider key={source.key} source={source} active={props.active} tabId={props.reviewTabId}>{panel}</ReviewCommentsProvider> : panel;
-}
+});
 
 function ScopedChanges({ openFileAction: hostOpenFileAction, source, events, version, active, live, workingTree, editor, sessionId }: {
   openFileAction?: (path: string) => (() => void) | undefined;
@@ -119,11 +119,22 @@ function ScopedChanges({ openFileAction: hostOpenFileAction, source, events, ver
   }, [source, active]);
   useEffect(() => {
     if (!active || loading || !reads || choice.scope === "commit" || choice.scope === "checkpoint") return;
-    const id = window.setInterval(() => setTick((t) => t + 1), 4000);
+    const id = window.setInterval(() => {
+      if (document.visibilityState === "visible") setTick((t) => t + 1);
+    }, 4000);
     const refresh = () => setTick((t) => t + 1);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") setTick((t) => t + 1);
+    };
     window.addEventListener("focus", refresh);
     window.addEventListener("workspace-files-changed", refresh);
-    return () => { window.clearInterval(id); window.removeEventListener("focus", refresh); window.removeEventListener("workspace-files-changed", refresh); };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener("workspace-files-changed", refresh);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [active, loading, reads, choice.scope]);
   useEffect(() => {
     if (!active || !reads) return;

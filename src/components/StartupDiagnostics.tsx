@@ -32,10 +32,21 @@ export function StartupDiagnostics() {
       finally { pending = false; }
     };
     void refresh();
-    const timer = setInterval(() => void refresh(), 5_000);
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, 5_000);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
     const show = () => { setOpen(true); void refresh(); };
+    document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener(OPEN_STARTUP_DIAGNOSTICS, show);
-    return () => { cancelled = true; clearInterval(timer); window.removeEventListener(OPEN_STARTUP_DIAGNOSTICS, show); };
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener(OPEN_STARTUP_DIAGNOSTICS, show);
+    };
   }, []);
 
   const incident = state?.incidents.find((entry) => entry.recoveredAt === null);

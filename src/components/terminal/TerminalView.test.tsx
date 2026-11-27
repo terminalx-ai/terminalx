@@ -20,13 +20,14 @@ beforeEach(() => {
 });
 
 describe("a terminal view", () => {
-  it("can attach an evicted hidden terminal before switching away from Chat", async () => {
+  it("can attach a deferred or evicted hidden terminal before switching away from Chat", async () => {
     const ensureAttached = vi.fn().mockResolvedValue(undefined);
     const create = vi.fn(() => ({ ...instance(), ensureAttached }));
     const view = render(<TerminalView id="p1" visible={false} create={create} />);
+    expect(create).not.toHaveBeenCalled();
     disposeInstance("p1");
     await ensureTerminalAttached("p1");
-    expect(create).toHaveBeenCalledTimes(2);
+    expect(create).toHaveBeenCalledTimes(1);
     expect(ensureAttached).toHaveBeenCalledOnce();
     expect(peekInstance("p1")?.el.isConnected).toBe(false);
     view.unmount();
@@ -73,16 +74,18 @@ describe("a terminal view", () => {
     for (let i = 0; i < IDLE_TERMINAL_LIMIT; i++) disposeInstance(`idle-${i}`);
   });
 
-  it("keeps its terminal out of the document until it is shown, and takes it out again when hidden", () => {
+  it("defers terminal creation until first shown, and detaches it again when hidden", () => {
     const inst = instance();
-    const create = () => inst;
+    const create = vi.fn(() => inst);
     // Mounted under something else: an agent's terminal beneath its chat.
     const view = render(<TerminalView id="p1" visible={false} create={create} />);
+    expect(create).not.toHaveBeenCalled();
     expect(inst.el.isConnected).toBe(false);
     expect(webgl.showWebgl).not.toHaveBeenCalled();
-    expect(terminalCounters()).toMatchObject({ instances: 1, attached: 0, hiddenInDocument: 0 });
+    expect(terminalCounters()).toMatchObject({ instances: 0, attached: 0, hiddenInDocument: 0 });
 
     view.rerender(<TerminalView id="p1" visible create={create} />);
+    expect(create).toHaveBeenCalledTimes(1);
     expect(inst.el.isConnected).toBe(true);
     expect(webgl.showWebgl).toHaveBeenCalledWith(inst.term);
 

@@ -191,7 +191,8 @@ describe("clicking a session with no tabs (#721)", () => {
     expect(screen.getByRole("heading", { name: "No tabs open" })).toBeTruthy();
     const pageTab = within(strip()).getByRole("tab", { name: "The quick chat's page" });
     expect(pageTab.getAttribute("aria-selected")).toBe("false");
-    expect(screen.getByTestId("browser-view").closest('[role="tabpanel"]')!.getAttribute("aria-hidden")).toBe("true");
+    expect(document.getElementById(pageTab.getAttribute("aria-controls")!)!.getAttribute("aria-hidden")).toBe("true");
+    expect(screen.queryByTestId("browser-view")).toBeNull();
     // Picked, it is shown in this session.
     await click(pageTab);
     expect(store().selectedSessionId).toBe("empty");

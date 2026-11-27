@@ -322,8 +322,7 @@ export function TerminalView({
 
   useEffect(() => {
     const el = host.current;
-    if (!el) return;
-    getInstance(id, make);
+    if (!shown || !el) return;
     const refit = () => {
       if (!fitting.current) return;
       // A hidden instance may have left the idle cache since this view mounted.
@@ -346,7 +345,7 @@ export function TerminalView({
       deferred.cancel();
       trimTerminalInstances();
     };
-  }, [id]);
+  }, [id, shown]);
 
   useEffect(() => {
     const inst = peekInstance(id);

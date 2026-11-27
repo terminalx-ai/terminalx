@@ -53,12 +53,17 @@ export interface TabLog {
 }
 
 const EMPTY: TabLog = { loaded: false, events: [], stream: [], status: "idle", version: 0 };
+const EMPTY_EVENTS: { events: AgentEvent[]; version: number } = { events: EMPTY.events, version: 0 };
 // Kept across flush's shallow object replacement, retired on drop/recreation.
 // A read must match both the cache incarnation and its invalidation generation.
 interface StoredLog extends TabLog {
   readonly admission: { generation: number };
   /** A cloud tab's live feed, not a history read, says whether continuity is known. */
   fed?: boolean;
+  /** Committed-events-only version & snapshot, unchanged during 60fps streaming deltas. */
+  eventsDirty?: boolean;
+  eventsVersion: number;
+  eventsSnapshot: { events: AgentEvent[]; version: number };
 }
 const logs = new Map<string, StoredLog>();
 const historyGenerations = new Map<string, string | undefined>();
@@ -76,7 +81,15 @@ function flush() {
   dirty.clear();
   for (const k of keys) {
     const log = logs.get(k);
-    if (log) logs.set(k, { ...log, version: log.version + 1 });
+    if (log) {
+      let eventsVersion = log.eventsVersion;
+      let eventsSnapshot = log.eventsSnapshot;
+      if (log.eventsDirty) {
+        eventsVersion += 1;
+        eventsSnapshot = { events: log.events, version: eventsVersion };
+      }
+      logs.set(k, { ...log, version: log.version + 1, eventsDirty: false, eventsVersion, eventsSnapshot });
+    }
     for (const l of listeners.get(k) ?? []) l();
   }
 }
@@ -94,7 +107,8 @@ function touch(k: string, immediate = false) {
 function getLog(k: string): StoredLog {
   let l = logs.get(k);
   if (!l) {
-    l = { ...EMPTY, events: [], stream: [], admission: { generation: 0 } };
+    const events: AgentEvent[] = [];
+    l = { ...EMPTY, events, stream: [], admission: { generation: 0 }, eventsVersion: 0, eventsSnapshot: { events, version: 0 } };
     logs.set(k, l);
   }
   return l;
@@ -216,6 +230,7 @@ export function applyEvent(ev: AgentEvent) {
     while (at > 0 && events[at - 1].seq > ev.seq) at--;
     events.splice(at, 0, ev);
     log.events = events;
+    log.eventsDirty = true;
     retirePreviews(log, p, true);
     if (log.firstMessage && recordsFirstMessage(log.firstMessage, ev)) log.firstMessage = undefined;
     if (p.type === "recovery" && p.kind) setTabStatus(ev.sessionId, ev.tabId, "waiting");
@@ -224,11 +239,13 @@ export function applyEvent(ev: AgentEvent) {
   }
   if (p.type === "usage_update" || p.type === "model_request_started") {
     log.events.push(ev);
+    log.eventsDirty = true;
     touch(k);
     return;
   }
   retirePreviews(log, p);
   log.events.push(ev);
+  log.eventsDirty = true;
   if (log.firstMessage && recordsFirstMessage(log.firstMessage, ev)) log.firstMessage = undefined;
   if (p.type === "recovery" && p.kind) setTabStatus(ev.sessionId, ev.tabId, "waiting");
   // A reader's message is drawn in the frame it arrives in: the composer's own
@@ -351,6 +368,7 @@ export function mergeTabEvents(sessionId: string, tabId: string, events: AgentEv
     log.events = [...byId.values()]
       .filter((ev) => !(transient(ev) && savedSeqs.has(ev.seq)))
       .sort((a, b) => a.seq - b.seq);
+    log.eventsDirty = true;
     const last = log.events[log.events.length - 1]?.payload;
     if (last?.type === "turn_completed" || (last?.type === "user_message" && !last.queued)) log.stream = [];
   }
@@ -419,6 +437,27 @@ export function useTabLog(sessionId: string, tabId: string): TabLog {
     },
     () => logs.get(k) ?? EMPTY,
     () => EMPTY,
+  );
+}
+
+/**
+ * Subscribe only to committed tab events (ignoring 60fps streaming delta ticks),
+ * so side panels like RightPanel/ChangesPanel/BranchPanel don't re-render per frame.
+ */
+export function useTabLogEvents(sessionId: string, tabId: string): { events: AgentEvent[]; version: number } {
+  const k = key(sessionId, tabId);
+  return useSyncExternalStore(
+    (cb) => {
+      let set = listeners.get(k);
+      if (!set) listeners.set(k, (set = new Set()));
+      set.add(cb);
+      return () => {
+        set!.delete(cb);
+        if (!set!.size) listeners.delete(k);
+      };
+    },
+    () => logs.get(k)?.eventsSnapshot ?? EMPTY_EVENTS,
+    () => EMPTY_EVENTS,
   );
 }
 

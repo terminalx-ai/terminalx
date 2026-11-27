@@ -18,6 +18,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
 vi.mock("@/lib/sessions", () => ({
   useSessionStore: () => ({ sessions: [session] }),
+  useSessionSelector: (selector: (s: { sessions: (typeof session)[] }) => unknown) => selector({ sessions: [session] }),
   patchTab: vi.fn(),
 }));
 

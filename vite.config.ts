@@ -4,9 +4,70 @@ import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath, URL } from "node:url";
 import { readFile, readdir } from "node:fs/promises";
 import { defaultExclude } from "vitest/config";
+import { SHIKI_COMMON_LANGS } from "./src/lib/shikiLanguages";
+
+const PDFJS_EXCLUDED_WASM = new Set([
+  "quickjs-eval.wasm",
+  "quickjs-eval.js",
+  "openjpeg_nowasm_fallback.js",
+  "jbig2_nowasm_fallback.js",
+]);
+
+const SHIKI_THEMES = new Set(["github-light", "github-dark"]);
+
+/** Filter an exported array of `{ "id": "...", ... }` entries in Shiki's generated `langs.mjs` / `themes.mjs`. */
+function filterShikiEntries(code: string, keep: ReadonlySet<string>): string {
+  const startMarker = code.indexOf("[\n  {");
+  const endMarker = code.lastIndexOf("\n];");
+  if (startMarker < 0 || endMarker < 0) return code;
+  const body = code.slice(startMarker + 2, endMarker);
+  const kept: string[] = [];
+  for (const entry of body.split(/\n  \},\n  \{/)) {
+    const normalized = (entry.startsWith("  {") ? entry : `  {${entry}`).endsWith("\n  }")
+      ? (entry.startsWith("  {") ? entry : `  {${entry}`)
+      : `${entry.startsWith("  {") ? entry : `  {${entry}`}\n  }`;
+    const id = /"id":\s*"([^"]+)"/.exec(normalized)?.[1];
+    if (id && keep.has(id)) kept.push(normalized);
+  }
+  return `${code.slice(0, startMarker + 1)}\n${kept.join(",\n")}${code.slice(endMarker)}`;
+}
+
+/**
+ * Restrict Shiki to common developer languages and our two themes, and avoid
+ * pulling the 622 kB Oniguruma WASM engine (Streamdown uses the JS RegExp engine).
+ */
+function restrictShiki(): Plugin {
+  return {
+    name: "restrict-shiki",
+    enforce: "pre",
+    transform(code, id) {
+      const clean = id.split("?")[0].replace(/\\/g, "/");
+      if (clean.endsWith("/shiki/dist/langs.mjs")) {
+        return { code: filterShikiEntries(code, SHIKI_COMMON_LANGS), map: null };
+      }
+      if (clean.endsWith("/shiki/dist/themes.mjs")) {
+        return { code: filterShikiEntries(code, SHIKI_THEMES), map: null };
+      }
+      if (clean.endsWith("/shiki/dist/bundle-full.mjs")) {
+        const next = code
+          .replace(
+            "import { createOnigurumaEngine } from '@shikijs/engine-oniguruma';",
+            "import { createJavaScriptRegexEngine } from '@shikijs/engine-javascript';",
+          )
+          .replace(
+            "engine: () => createOnigurumaEngine(import('shiki/wasm'))",
+            "engine: () => createJavaScriptRegexEngine({ forgiving: true })",
+          );
+        return { code: next, map: null };
+      }
+      return null;
+    },
+  };
+}
 
 /** PDF.js asks for these by their original filenames; keep them local in both
- * development and packaged builds (no CDN or network access for PDF data). */
+ * development and packaged builds (no CDN or network access for PDF data).
+ * Unused QuickJS eval / no-WASM fallback / LICENSE assets are omitted. */
 function pdfAssets(): Plugin {
   const root = new URL("./node_modules/pdfjs-dist/", import.meta.url);
   const directories = ["cmaps", "standard_fonts", "wasm", "iccs"];
@@ -15,6 +76,7 @@ function pdfAssets(): Plugin {
     async generateBundle() {
       for (const directory of directories) {
         for (const name of await readdir(new URL(`${directory}/`, root))) {
+          if (directory === "wasm" && (PDFJS_EXCLUDED_WASM.has(name) || name.startsWith("LICENSE"))) continue;
           this.emitFile({ type: "asset", fileName: `pdfjs/${directory}/${name}`, source: await readFile(new URL(`${directory}/${name}`, root)) });
         }
       }
@@ -197,10 +259,31 @@ const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react(), tailwindcss(), pdfAssets()],
+  plugins: [restrictShiki(), react(), tailwindcss(), pdfAssets()],
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
+    },
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          const norm = id.replace(/\\/g, "/");
+          if (!norm.includes("/node_modules/")) return undefined;
+          if (norm.includes("/react-dom/") || norm.includes("/react/") || norm.includes("/scheduler/")) return "vendor-react";
+          if (norm.includes("/radix-ui/") || norm.includes("/@radix-ui/")) return "vendor-radix";
+          if (norm.includes("/@xterm/")) return "vendor-xterm";
+          if ((norm.includes("/@codemirror/") && !norm.includes("/@codemirror/lang-")) || norm.includes("/@lezer/highlight/") || norm.includes("/@lezer/common/") || norm.includes("/@lezer/lr/")) return "vendor-codemirror";
+          if (norm.includes("/streamdown/") || norm.includes("/remend/") || norm.includes("/remark-") || norm.includes("/unified/") || norm.includes("/mdast-") || norm.includes("/micromark") || norm.includes("/hast-") || norm.includes("/rehype-")) return "vendor-markdown";
+          if ((norm.includes("/shiki/") || norm.includes("/@shikijs/core/") || norm.includes("/@shikijs/engine-javascript/") || norm.includes("/@streamdown/code/")) && !norm.includes("/@shikijs/langs/") && !norm.includes("/@shikijs/themes/")) return "vendor-shiki";
+          if (norm.includes("/lucide-react/")) return "vendor-icons";
+          if (norm.includes("/react-material-icon-theme/")) return "vendor-material-icons";
+          if (norm.includes("/@dnd-kit/")) return "vendor-dnd";
+          if (norm.includes("/@tauri-apps/")) return "vendor-tauri";
+          return undefined;
+        },
+      },
     },
   },
   worker: { format: "es" as const },

@@ -5,7 +5,7 @@ import { isUnread } from "@/lib/dashboard";
 import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
 import { GroupHeader, LocalSidebarSections, MoveToLocalSectionItems } from "./LocalSidebarSections";
 import { groupLocalSessions, useLocalSections } from "@/lib/localSections";
-import { createContext, useContext, useId, useMemo, useState, type KeyboardEvent, type ReactElement, type ReactNode } from "react";
+import { createContext, memo, useContext, useId, useMemo, useState, type KeyboardEvent, type ReactElement, type ReactNode } from "react";
 import { Archive, ArchiveRestore, ChevronDown, CircleDot, Copy, Ellipsis, ExternalLink, Eye, EyeOff, Folder, FolderInput, FolderOpen, FolderPlus, GitBranch, GitPullRequest, GitPullRequestArrow, Github, Laptop, Link, Mail, Palette, Pencil, PictureInPicture2, Pin, Plus, Settings, Share2, SquarePen, SquareTerminal, Trash2 } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { confirmInApp } from "@/lib/confirm";
@@ -284,7 +284,7 @@ const ShowAgents = createContext(false);
  * that belong to none. Workspaces and tabs are not levels here; a row names
  * its branch, and the full tree is one click away as the detailed sidebar.
  */
-export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenHome, onNewSession, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
+export const SessionSidebar = memo(function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenHome, onNewSession, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
   const store = useSessionStore();
   const order = useSidebarOrder();
   const filter = useSidebarFilter();
@@ -293,7 +293,10 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
   // A chat on its way into a project: the dialog that chooses how its new session starts there.
   const [moving, setMoving] = useState<{ session: SessionEntry; source: TabEntry; project: Project; worktree: boolean } | null>(null);
   const chatsPath = store.chatsPath ? canon(store.chatsPath) : null;
-  const projects = store.projects.filter((project) => !project.archived && canon(project.path) !== chatsPath).sort((a, b) => a.name.localeCompare(b.name));
+  const projects = useMemo(
+    () => store.projects.filter((project) => !project.archived && canon(project.path) !== chatsPath).sort((a, b) => a.name.localeCompare(b.name)),
+    [store.projects, chatsPath],
+  );
   const showAgents = useMemo(() => mixesAgents(store.sessions.filter((session) => !session.archived)), [store.sessions]);
   const sectioned = useHasCloudOrganizations();
   // One row per session: a pipeline's reviewer that was opened as a session of its own folds under its author's
@@ -360,6 +363,13 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
     return link ? <ConversationRow key={session.id} session={session} selected={store.selectedSessionId === session.id} branch={link.branch} locationLabel={locationOf(link)} linkTo={null} inPinned={inPinned} /> : chatRow(session);
   };
   const hasSections = localSections.length > 0;
+  const sectionedGroups = useMemo(
+    () => sectionedSessions.sections.map(({ section, items }) => ({
+      section,
+      items: [...orderConversations(items, store.selectedSessionId, showArchived, sidebarSort, order), ...(showArchived ? archivedConversations(items, sidebarSort, order) : [])],
+    })),
+    [sectionedSessions.sections, store.selectedSessionId, showArchived, sidebarSort, order],
+  );
   const addProjectMenu = <AddProjectMenu run={(action) => run(async () => action.run())()} />;
 
   return (
@@ -380,7 +390,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
         <ListHeading label={hasSections ? "Sections" : "Sessions"} actions={<><ViewMenu />{!sectioned && addProjectMenu}</>} />
         <PinnedGroup sessions={pinned} selectedId={store.selectedSessionId} showArchived={showArchived}>{(session) => sectionRow(session, true)}</PinnedGroup>
         <LocalSidebarSections
-          groups={sectionedSessions.sections.map(({ section, items }) => ({ section, items: [...orderConversations(items, store.selectedSessionId, showArchived, sidebarSort, order), ...(showArchived ? archivedConversations(items, sidebarSort, order) : [])] }))}
+          groups={sectionedGroups}
           filtered={filter.active}
           renderSession={(session) => sectionRow(session)}
         />
@@ -469,7 +479,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
       </div>
     </div>
   );
-}
+});
 
 /** What the list says when the sidebar's filter leaves nothing in it, and the way back to everything. */
 export function FilteredEmpty({ text }: { text: string }) {

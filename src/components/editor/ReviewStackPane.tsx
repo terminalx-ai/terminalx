@@ -95,7 +95,13 @@ function ReviewStack({ entry, source, visible }: { entry: DiffEditorEntry; sourc
       if (written.current !== null && Math.abs(el.scrollTop - written.current) <= 1) return;
       written.current = null;
       const top = el.getBoundingClientRect().top;
-      const section = [...el.querySelectorAll<HTMLElement>("[data-review-file]")].find((s) => s.getBoundingClientRect().bottom > top + 1);
+      let section: HTMLElement | null = null;
+      for (const candidate of el.querySelectorAll<HTMLElement>("[data-review-file]")) {
+        if (candidate.getBoundingClientRect().bottom > top + 1) {
+          section = candidate;
+          break;
+        }
+      }
       anchor.current = section ? { section, offset: section.getBoundingClientRect().top - top } : null;
     };
     const keep = () => {
@@ -161,19 +167,38 @@ function StackedFile({ source, file, range, mode, hideWhitespace, viewed, onView
   const { wrap } = useDiffOptions(diffFileKey(source.key, file.path));
   const media = diffMediaKind(file.path);
   const section = useRef<HTMLElement>(null);
-  // Files far below the fold are read once they come near, so a large review opens at once.
-  const [near, setNear] = useState(() => typeof IntersectionObserver === "undefined");
+  const body = useRef<HTMLDivElement>(null);
+  const lastHeight = useRef<number>(160);
+  // Files load once near the viewport, and recycle their CodeMirror views when scrolled far off-screen
+  // while keeping a height-preserving placeholder so multi-file reviews never retain unbounded live editors.
+  const noObserver = typeof IntersectionObserver === "undefined";
+  const [everNear, setEverNear] = useState(noObserver);
+  const [inWindow, setInWindow] = useState(noObserver);
   useEffect(() => {
-    if (near || !section.current) return;
-    const observer = new IntersectionObserver((entries) => { if (entries.some((e) => e.isIntersecting)) { setNear(true); observer.disconnect(); } }, { rootMargin: "800px 0px" });
+    if (noObserver || !section.current) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const intersecting = entries.some((e) => e.isIntersecting);
+        if (intersecting) {
+          setEverNear(true);
+          setInWindow(true);
+        } else {
+          if (body.current && body.current.offsetHeight > 0) {
+            lastHeight.current = body.current.offsetHeight;
+          }
+          setInWindow(false);
+        }
+      },
+      { rootMargin: "1200px 0px" },
+    );
     observer.observe(section.current);
     return () => observer.disconnect();
-  }, [near]);
+  }, [noObserver]);
   const [pair, setPair] = useState<Pair | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
   useEffect(() => {
-    if (!near || (media && media !== "svg")) return;
+    if (!everNear || (media && media !== "svg")) return;
     let cancelled = false;
     setError(null);
     void (async () => {
@@ -182,7 +207,7 @@ function StackedFile({ source, file, range, mode, hideWhitespace, viewed, onView
       if (!cancelled) setPair({ before: previous.before ?? "", after: next.after ?? "", size: next.after === TOO_LARGE ? next.afterSize : previous.beforeSize });
     })().catch((e: unknown) => { if (!cancelled) setError(source.errorMessage(e)); });
     return () => { cancelled = true; };
-  }, [near, source, file.path, file.oldPath, range.base, range.head, media, retry]);
+  }, [everNear, source, file.path, file.oldPath, range.base, range.head, media, retry]);
   const tooLarge = pair?.before === TOO_LARGE || pair?.after === TOO_LARGE;
   const binary = !!pair && (pair.before.includes("\0") || pair.after.includes("\0"));
 
@@ -200,8 +225,9 @@ function StackedFile({ source, file, range, mode, hideWhitespace, viewed, onView
         title={!onViewed ? "Viewed marks require file identities from the workspace." : undefined} onChange={(on) => onViewed?.(on)}>Viewed</Checkbox>
     </header>
     {/* Its own stacking context: the editor's gutters must not draw over the next file's sticky header. */}
-    <div className={cn("isolate", viewed && "opacity-60")}>
-      {media && media !== "svg" ? <p className="px-4 py-3 text-xs text-muted-foreground">{media === "pdf" ? "PDF" : "Image"} changed. <Button size="xs" variant="outline" onClick={onOpen}>Open to compare</Button></p>
+    <div ref={body} className={cn("isolate", viewed && "opacity-60")}>
+      {!inWindow ? <div aria-hidden data-testid="review-file-placeholder" style={{ height: lastHeight.current }} />
+        : media && media !== "svg" ? <p className="px-4 py-3 text-xs text-muted-foreground">{media === "pdf" ? "PDF" : "Image"} changed. <Button size="xs" variant="outline" onClick={onOpen}>Open to compare</Button></p>
         : error ? <div role="alert" className="px-4 py-3 text-xs text-destructive">{error} <Button size="xs" variant="outline" onClick={() => setRetry((n) => n + 1)}>Retry</Button></div>
         : !pair ? <p role="status" className="min-h-16 px-4 py-3 text-xs text-muted-foreground">Loading file diff…</p>
         : tooLarge ? <TooLargeState path={file.path} size={pair.size} onOpenFile={onOpenFile} />
