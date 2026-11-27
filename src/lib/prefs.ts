@@ -173,6 +173,13 @@ export interface Prefs {
   sidebarFilters: Record<string, "unread" | "needs">;
   /** The folder the reader last cloned or created a project in; the next one is suggested there. */
   projectsDir: string | null;
+  /**
+   * PRO-241: the first-run intro beside sign-in, behind its key (`desktop.intro-slides.v1`, off by default; Settings →
+   * Experimental → Intro). The slide it was on, so a quit resumes there, and whether signing in or Continue ended it.
+   */
+  introSlides: boolean;
+  introStep: number;
+  introDone: boolean;
 }
 
 const CLOUD_ISSUE_PIPELINES_VERSION = 1;
@@ -248,6 +255,9 @@ const DEFAULTS: Prefs = {
   shortcutsVersion: SHORTCUTS_VERSION,
   sidebarFilters: {},
   projectsDir: null,
+  introSlides: false,
+  introStep: 0,
+  introDone: false,
 };
 
 const KEY = "raccoon.prefs";
@@ -338,6 +348,9 @@ function load(legacyOnly = false): Prefs {
     for (const key of ["sidebarFilters", "sidebarSections"] as const) {
       if (!prefs[key] || typeof prefs[key] !== "object" || Array.isArray(prefs[key])) prefs[key] = {};
     }
+    prefs.introSlides = prefs.introSlides === true;
+    prefs.introDone = prefs.introDone === true;
+    prefs.introStep = Number.isInteger(prefs.introStep) && prefs.introStep >= 0 && prefs.introStep <= 3 ? prefs.introStep : 0;
     prefs.autocorrect = prefs.autocorrect === true;
     prefs.aiEditor = prefs.aiEditor !== false;
     prefs.optionAsMeta = prefs.optionAsMeta !== false;
