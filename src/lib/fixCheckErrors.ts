@@ -120,7 +120,7 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled, mach
         const attachment = await attach(tabId, pr.url);
         // Never send after the reader changes tabs, sessions, or closes this view, and never retry a send automatically.
         if (!isCurrent()) return;
-        const outcome = await machine.send(tabId, fixErrorsPrompt(pr.url, attachment.path, actionInstructions("fixChecks")));
+        const outcome = await machine.send(tabId, fixErrorsPrompt(pr.url, attachment.path, actionInstructions("fixChecks", sessionId)));
         if (isCurrent()) setState({ key, busy: false, notice: `${outcome.queued ? "Queued" : "Sent"} failed check logs to the agent on ${machine.name}${attachment.truncated ? " (trimmed to 256 KiB)" : ""}.` });
         return;
       }
@@ -130,7 +130,7 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled, mach
       if (!isCurrent()) return;
       found = pr;
       if (!pr) throw new Error("No failing GitHub Actions checks were found for this session.");
-      const notice = await sendFailedChecks(sessionId, tabId, pr.url, actionInstructions("fixChecks"), isCurrent, authority);
+      const notice = await sendFailedChecks(sessionId, tabId, pr.url, actionInstructions("fixChecks", sessionId), isCurrent, authority);
       if (notice && isCurrent()) setState({ key, busy: false, notice });
     } catch (error) {
       if (isCurrent()) {

@@ -2848,6 +2848,21 @@ pub enum SharedSetupsOp {
 }
 
 const SHARED_PROMPT_ACTIONS: [&str; 6] = ["general", "review", "createPr", "fixChecks", "resolveConflicts", "branchNames"];
+/// The server's limits (`sharedSetups/input.ts`), in its units: UTF-16 code units after trimming.
+const SHARED_PROMPT_MAX: usize = 8000;
+const SNIPPET_NAME_MAX: usize = 80;
+const SNIPPET_KEYWORD_MAX: usize = 40;
+const SNIPPET_BODY_MAX: usize = 10_000;
+
+fn within(text: &str, max: usize) -> bool {
+    text.trim().encode_utf16().count() <= max
+}
+
+/// A snippet is refused here, before anything is sent, when a field is missing or longer than the server takes.
+fn valid_snippet(snippet: &Value) -> bool {
+    let field = |key: &str, max: usize| snippet.get(key).and_then(Value::as_str).is_some_and(|text| within(text, max));
+    snippet.is_object() && field("name", SNIPPET_NAME_MAX) && field("keyword", SNIPPET_KEYWORD_MAX) && field("body", SNIPPET_BODY_MAX)
+}
 
 impl SharedSetupsOp {
     pub(crate) fn risk(&self) -> RequestRisk {
@@ -3133,12 +3148,12 @@ impl CloudWorkspaceService {
                 ("PUT", vec!["model-slots", "mine"], Some(json!({ "slots": slots }))),
             SharedSetupsOp::StopSharingSlots => ("DELETE", vec!["model-slots", "mine"], None),
             SharedSetupsOp::ListSnippets => ("GET", vec!["snippets"], None),
-            SharedSetupsOp::CreateSnippet { snippet } if snippet.is_object() => ("POST", vec!["snippets"], Some(snippet.clone())),
-            SharedSetupsOp::UpdateSnippet { id, snippet } if snippet.is_object() && valid_following_path_id(id) =>
+            SharedSetupsOp::CreateSnippet { snippet } if valid_snippet(snippet) => ("POST", vec!["snippets"], Some(snippet.clone())),
+            SharedSetupsOp::UpdateSnippet { id, snippet } if valid_snippet(snippet) && valid_following_path_id(id) =>
                 ("PUT", vec!["snippets", id], Some(snippet.clone())),
             SharedSetupsOp::DeleteSnippet { id } if valid_following_path_id(id) => ("DELETE", vec!["snippets", id], None),
             SharedSetupsOp::ListPrompts => ("GET", vec!["action-prompts"], None),
-            SharedSetupsOp::SavePrompt { action, body, revision } if SHARED_PROMPT_ACTIONS.contains(&action.as_str()) =>
+            SharedSetupsOp::SavePrompt { action, body, revision } if SHARED_PROMPT_ACTIONS.contains(&action.as_str()) && within(body, SHARED_PROMPT_MAX) =>
                 ("PUT", vec!["action-prompts", action], Some(json!({ "body": body, "revision": revision }))),
             _ => return Err(inbox_invalid()),
         };
@@ -5752,7 +5767,12 @@ mod tests {
         service.shared_setups("org-1", op(json!({"op": "savePrompt", "action": "createPr", "body": "x", "revision": 0}))).unwrap();
         assert_eq!(service.shared_setups("org-1", op(json!({"op": "listPrompts"}))).unwrap_err().code, "cloud_workspace_invalid_response");
         for refused in [json!({"op": "savePrompt", "action": "deploy", "body": "x", "revision": 0}), json!({"op": "shareSlots", "slots": []}),
-            json!({"op": "deleteSnippet", "id": "../x"}), json!({"op": "createSnippet", "snippet": "x"})] {
+            json!({"op": "deleteSnippet", "id": "../x"}), json!({"op": "createSnippet", "snippet": "x"}),
+            // The server's limits, refused before sending: an 8000-character prompt, a 10000-character snippet body, a 40-character keyword.
+            json!({"op": "savePrompt", "action": "general", "body": "x".repeat(8001), "revision": 0}),
+            json!({"op": "createSnippet", "snippet": {"name": "n", "keyword": "k", "body": "x".repeat(10_001)}}),
+            json!({"op": "updateSnippet", "id": "snippet-1", "snippet": {"name": "n", "keyword": "k".repeat(41), "body": "b"}}),
+            json!({"op": "createSnippet", "snippet": {"name": "n", "body": "b"}})] {
             assert_eq!(service.shared_setups("org-1", op(refused)).unwrap_err().code, "cloud_workspace_request_invalid");
         }
         let requests = requests.join().unwrap();

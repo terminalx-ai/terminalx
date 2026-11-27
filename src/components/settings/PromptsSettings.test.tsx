@@ -60,6 +60,26 @@ describe("Settings › Prompts", () => {
     await waitFor(() => expect(showError).toHaveBeenCalled());
     expect(invoke).toHaveBeenCalledWith("shared_setups", { orgId: "org-a", op: { op: "savePrompt", action: "general", body: "Use bun.", revision: 3 } });
     expect(showError.mock.calls[0]![2].title).toBe("Not saved");
+    // The newer version beside the text typed here, neither lost.
+    expect(screen.getByText("Saved by someone else meanwhile")).toBeTruthy();
+    expect(screen.getByTestId("newer-prompt").textContent).toBe("Use pnpm.");
+    expect((screen.getByRole("textbox", { name: "General instructions" }) as HTMLTextAreaElement).value).toBe("Use bun.");
+  });
+
+  it("says so when the newer version cannot be loaded after a conflict, and keeps the text", async () => {
+    let lists = 0;
+    invoke.mockImplementation((_command: string, { op }: { op: { op: string } }) => {
+      if (op.op === "listPrompts") return ++lists === 1 ? Promise.resolve({ canEdit: true, prompts: { general: prompt("Use pnpm.", 3) } }) : Promise.reject(new Error("offline"));
+      return Promise.reject({ code: "action_prompt_conflict" });
+    });
+    render(<PromptsSettings />);
+    fireEvent.click(await screen.findByRole("tab", { name: "Fixture Labs · shared" }));
+    await screen.findByText("Set by Fixture Labs");
+    fireEvent.change(screen.getByRole("textbox", { name: "General instructions" }), { target: { value: "Use bun." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save for everyone" }));
+    await waitFor(() => expect(showError).toHaveBeenCalled());
+    expect(showError.mock.calls[0]![0]).toContain("couldn't be loaded");
+    expect((screen.getByRole("textbox", { name: "General instructions" }) as HTMLTextAreaElement).value).toBe("Use bun.");
   });
 
   it("shows members the organization's prompts read-only", async () => {

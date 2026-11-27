@@ -1,5 +1,4 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { withNewChatPrompts } from "@/lib/sharedSetups";
 import { AllowNewMachines } from "@/components/cloud/AllowNewMachines";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { ProvidersPaused } from "@/lib/hiddenProviders";
@@ -417,7 +416,8 @@ export function NewSessionView({
     model: modelId,
     effort,
     mode,
-    prompt: text.trim() ? withNewChatPrompts(text) : text,
+    // The person's own words: a retry compares them, and the shared prompts are added once, as the request leaves (cloudNewSession).
+    prompt: text,
     useWorktree,
     ...(pipelineLaunch.value.resolveConflicts ? { pipeline: pipelineLaunch.value, pipelineSettings: pipelineLaunch.settings } : {}),
     ...(idleMinutes !== null ? { idleSuspendMinutes: idleMinutes } : {}),

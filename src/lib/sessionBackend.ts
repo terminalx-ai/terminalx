@@ -530,7 +530,7 @@ export async function sendFirstMessage(sessionId: string, tabId: string, text: s
     throw error;
   }) : undefined;
   // PRO-154: general instructions and branch names, the organization's then the person's.
-  const sent = text.trim() ? withNewChatPrompts(text) : text;
+  const sent = withNewChatPrompts(text, sessionId);
   return agent.send(sessionId, tabId, sent, images, false, undefined, stored, promptRequestId);
 }
 

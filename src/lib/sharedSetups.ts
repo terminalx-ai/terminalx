@@ -8,6 +8,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import { getAccount, useAccount } from "@/lib/account";
 import type { AccountStatus } from "@/lib/api";
 import { phase2Ready } from "@/lib/phase2Readiness";
+import { cloudKeyOrgId } from "@/lib/multiOrg";
 import { getPrefs, type FavouriteSlot, type PersonalPromptKey } from "@/lib/prefs";
 
 export type ActionPromptKey = PersonalPromptKey | "fixChecks";
@@ -74,13 +75,23 @@ export const sharedSetupsApi = {
     call<SharedPrompt & { action: ActionPromptKey }>(orgId, { op: "savePrompt", action, body, revision }),
 };
 
+/** An organization's name short enough for a tab, a chip or a scope option: “A very long organiz…”. */
+export function orgLabel(name: string, max = 24): string {
+  const chars = [...name];
+  return chars.length > max ? `${chars.slice(0, max - 1).join("").trimEnd()}…` : name;
+}
+
+/** An organization of this person's, when it is a team one with shared setups switched on. */
+export function sharedSetupsOrgFor(status: AccountStatus, orgId: string | null | undefined): { id: string; name: string; isAdmin: boolean } | null {
+  if (!status || status.state !== "signed-in" || !orgId || !phase2Ready(status, orgId, "sharedSetups")) return null;
+  const org = status.organizations?.find((candidate) => candidate.id === orgId);
+  if (!org || org.isPersonal) return null;
+  return { id: orgId, name: org.name, isAdmin: org.role === "owner" || org.role === "admin" };
+}
+
 /** The active organization, when it is a team one with shared setups switched on. */
 export function sharedSetupsOrg(status: AccountStatus): { id: string; name: string; isAdmin: boolean } | null {
-  const id = status?.identity?.organizationId;
-  if (!status || !id || !phase2Ready(status, id, "sharedSetups")) return null;
-  const org = status.organizations?.find((candidate) => candidate.id === id);
-  if (!org || org.isPersonal) return null;
-  return { id, name: org.name, isAdmin: org.role === "owner" || org.role === "admin" };
+  return sharedSetupsOrgFor(status, status?.identity?.organizationId);
 }
 
 export function useSharedSetupsOrg() {
@@ -96,30 +107,37 @@ function useStableOrg(org: ReturnType<typeof sharedSetupsOrg>) {
   return stableOrg;
 }
 
-// ---- cached organization state: the prompts actions read as they send, and the snippets the composer offers
+// ---- cached organization state, per organization: the prompts actions read as they send, and the snippets the composer offers
 
-interface Cache {
-  orgId: string | null;
+interface Entry {
   prompts: SharedPrompts | null;
   snippets: OrganizationSnippet[];
+  /** When the server last answered; 0 before it has. */
+  at: number;
 }
 
-let cache: Cache = { orgId: null, prompts: null, snippets: [] };
+/** How old an organization's prompts may be before they are read again (review of #1674). */
+export const SHARED_SETUPS_FRESH_MS = 3 * 60_000;
+
+const cache = new Map<string, Entry>();
 const listeners = new Set<() => void>();
 const loading = new Map<string, Promise<void>>();
 
-function setCache(next: Cache) {
-  cache = next;
+function setEntry(orgId: string, entry: Entry) {
+  cache.set(orgId, entry);
   for (const listener of listeners) listener();
 }
 
-/** Read the organization's prompts and snippets again; quietly keeps what it had when the server cannot answer. */
+/**
+ * Read an organization's prompts and snippets again. When the server cannot
+ * answer, what was read before stays: the fallback while offline.
+ */
 export function refreshSharedSetups(orgId: string): Promise<void> {
   const running = loading.get(orgId);
   if (running) return running;
   const work = Promise.all([sharedSetupsApi.prompts(orgId), sharedSetupsApi.snippets(orgId)])
     .then(([prompts, snippets]) => {
-      if (sharedSetupsOrg(getAccount().status)?.id === orgId) setCache({ orgId, prompts, snippets });
+      if (sharedSetupsOrgFor(getAccount().status, orgId)) setEntry(orgId, { prompts, snippets, at: Date.now() });
     })
     .catch(() => {})
     .finally(() => loading.delete(orgId));
@@ -127,41 +145,61 @@ export function refreshSharedSetups(orgId: string): Promise<void> {
   return work;
 }
 
+/** Read again every organization already read whose copy is older than `SHARED_SETUPS_FRESH_MS`, and the active one. */
+export function refreshStaleSharedSetups(now = Date.now()): void {
+  const status = getAccount().status;
+  const active = sharedSetupsOrg(status)?.id;
+  const ids = new Set([...cache.keys(), ...(active ? [active] : [])]);
+  for (const id of ids) {
+    if (!sharedSetupsOrgFor(status, id)) { cache.delete(id); continue; }
+    if (now - (cache.get(id)?.at ?? 0) >= SHARED_SETUPS_FRESH_MS) void refreshSharedSetups(id);
+  }
+}
+
+/** Keeps the shared prompts and snippets current: on a schedule, when the window comes back, and when the organization changes. Mounted once, in the app shell. */
+export function useSharedSetupsSync(): void {
+  const org = useSharedSetupsOrg();
+  useEffect(() => {
+    if (org) void refreshSharedSetups(org.id);
+  }, [org]);
+  useEffect(() => {
+    const timer = setInterval(() => refreshStaleSharedSetups(), SHARED_SETUPS_FRESH_MS);
+    const onFocus = () => refreshStaleSharedSetups();
+    window.addEventListener("focus", onFocus);
+    return () => { clearInterval(timer); window.removeEventListener("focus", onFocus); };
+  }, []);
+}
+
 export function setCachedPrompts(orgId: string, prompts: SharedPrompts) {
-  if (cache.orgId === orgId) setCache({ ...cache, prompts });
+  const entry = cache.get(orgId);
+  setEntry(orgId, { snippets: entry?.snippets ?? [], prompts, at: entry?.at ?? 0 });
 }
 
 export function setCachedSnippets(orgId: string, snippets: OrganizationSnippet[]) {
-  if (cache.orgId === orgId) setCache({ ...cache, snippets });
+  const entry = cache.get(orgId);
+  setEntry(orgId, { prompts: entry?.prompts ?? null, snippets, at: entry?.at ?? 0 });
 }
 
-const EMPTY: Cache = { orgId: null, prompts: null, snippets: [] };
-
-function current(): Cache {
-  const org = sharedSetupsOrg(getAccount().status);
-  return org && cache.orgId === org.id ? cache : EMPTY;
-}
+const NO_SNIPPETS: OrganizationSnippet[] = [];
 
 const subscribe = (listener: () => void) => {
   listeners.add(listener);
   return () => listeners.delete(listener);
 };
 
-let lastCurrent: Cache = EMPTY;
-const snapshot = () => {
-  const next = current();
-  if (next.orgId !== lastCurrent.orgId || next.prompts !== lastCurrent.prompts || next.snippets !== lastCurrent.snippets) lastCurrent = next;
-  return lastCurrent;
+const activeSnippets = () => {
+  const org = sharedSetupsOrg(getAccount().status);
+  return (org && cache.get(org.id)?.snippets) || NO_SNIPPETS;
 };
 
 /** The active organization's snippets, loaded on first use. */
 export function useOrganizationSnippets(): OrganizationSnippet[] {
   const org = useSharedSetupsOrg();
-  const state = useSyncExternalStore(subscribe, snapshot, snapshot);
+  const snippets = useSyncExternalStore(subscribe, activeSnippets, activeSnippets);
   useEffect(() => {
     if (org) void refreshSharedSetups(org.id);
   }, [org]);
-  return org ? state.snippets : [];
+  return org ? snippets : NO_SNIPPETS;
 }
 
 /** The person's own prompt for an action, kept on this computer. */
@@ -171,26 +209,42 @@ export function personalPrompt(action: ActionPromptKey): string {
 }
 
 /**
- * The instructions an action carries: the organization's first, then the
- * person's own (owner decision, 2026-11-26). Empty when neither has any.
+ * Where a message goes: a cloud session, workspace or project key
+ * (`cloud:<orgId>:…`) names its organization; anything else (a local or
+ * machine session, a personal project) has none.
  */
-export function actionInstructions(action: ActionPromptKey): string {
-  const org = sharedSetupsOrg(getAccount().status);
-  if (org && cache.orgId !== org.id) void refreshSharedSetups(org.id);
-  const shared = current().prompts?.prompts[action]?.body.trim() ?? "";
+export type PromptTarget = string | null | undefined;
+
+/** The organization whose shared prompts a message to `target` carries: its own, never the active one. */
+export function promptOrg(target: PromptTarget): string | null {
+  const id = cloudKeyOrgId(target);
+  return id && sharedSetupsOrgFor(getAccount().status, id) ? id : null;
+}
+
+/**
+ * The instructions an action carries: the target organization's first, then
+ * the person's own (owner decision, 2026-11-26). Empty when neither has any.
+ * A copy older than a few minutes is read again for next time.
+ */
+export function actionInstructions(action: ActionPromptKey, target: PromptTarget): string {
+  const orgId = promptOrg(target);
+  const entry = orgId ? cache.get(orgId) : undefined;
+  if (orgId && Date.now() - (entry?.at ?? 0) >= SHARED_SETUPS_FRESH_MS) void refreshSharedSetups(orgId);
+  const shared = entry?.prompts?.prompts[action]?.body.trim() ?? "";
   return [shared, personalPrompt(action)].filter(Boolean).join("\n\n");
 }
 
 /** `prompt` with the action's instructions after it, or as it was when there are none. */
-export function withActionPrompt(prompt: string, action: ActionPromptKey): string {
-  const instructions = actionInstructions(action);
+export function withActionPrompt(prompt: string, action: ActionPromptKey, target: PromptTarget): string {
+  const instructions = actionInstructions(action, target);
   return instructions ? `${prompt}\n\nAdditional instructions:\n${instructions}` : prompt;
 }
 
-/** What a new chat's first message carries: general instructions, then branch names. */
-export function withNewChatPrompts(prompt: string): string {
-  const general = actionInstructions("general");
-  const branches = actionInstructions("branchNames");
+/** What a new chat's first message carries: general instructions, then branch names. Applied once, where the message is sent. */
+export function withNewChatPrompts(prompt: string, target: PromptTarget): string {
+  if (!prompt.trim()) return prompt;
+  const general = actionInstructions("general", target);
+  const branches = actionInstructions("branchNames", target);
   const parts = [general, branches && `When you name a branch:\n${branches}`].filter(Boolean);
   return parts.length ? `${prompt}\n\nAdditional instructions:\n${parts.join("\n\n")}` : prompt;
 }

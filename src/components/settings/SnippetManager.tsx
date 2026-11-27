@@ -5,7 +5,9 @@ import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { showError } from "@/lib/errorToasts";
 import { setPrefs, usePrefs, type PromptSnippet } from "@/lib/prefs";
-import { refreshSharedSetups, sharedSetupsApi, useOrganizationSnippets, useSharedSetupsOrg, type OrganizationSnippet } from "@/lib/sharedSetups";
+import { getAccount } from "@/lib/account";
+import { usePeople, userIdForEmail } from "@/lib/cloudPeople";
+import { orgLabel, refreshSharedSetups, sharedSetupsApi, useOrganizationSnippets, useSharedSetupsOrg, type OrganizationSnippet } from "@/lib/sharedSetups";
 import { RegisteredSetting } from "./settingsRegistry";
 
 /** The saved prompts offered under `/` in the composer. */
@@ -17,9 +19,14 @@ export function SnippetManager() {
   const org = useSharedSetupsOrg();
   const orgSnippets = useOrganizationSnippets();
   const [scope, setScope] = useState<"all" | "me" | "org">("all");
+  // Only the creator, owners and admins delete a shared snippet (the server's rule), and only after asking.
+  usePeople(!!org);
+  const me = userIdForEmail(getAccount().status.identity?.email);
+  const [confirming, setConfirming] = useState<string | null>(null);
   const removeShared = async (snippet: OrganizationSnippet) => {
     if (!org) return;
     try {
+      setConfirming(null);
       await sharedSetupsApi.deleteSnippet(org.id, snippet.id);
       await refreshSharedSetups(org.id);
     } catch (error) {
@@ -41,7 +48,7 @@ export function SnippetManager() {
         <Segmented<"all" | "me" | "org"> aria-label="Snippet scope" packed value={scope} onChange={setScope} options={[
           { value: "all", label: `All ${prefs.promptSnippets.length + orgSnippets.length}` },
           { value: "me", label: `Only me ${prefs.promptSnippets.length}` },
-          { value: "org", label: `Everyone at ${org.name} ${orgSnippets.length}` },
+          { value: "org", label: `Everyone at ${orgLabel(org.name)} ${orgSnippets.length}` },
         ]} />
       )}
       {(own.length > 0 || shared.length > 0) && (
@@ -50,8 +57,16 @@ export function SnippetManager() {
             <li key={snippet.id} className="flex min-w-0 items-center gap-2 py-1">
               <span className="shrink-0 font-mono text-xs">/{snippet.keyword}</span>
               <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{snippet.body.split("\n")[0]}</span>
-              <span className="shrink-0 text-[11px] text-faint">{org?.name}</span>
-              <Button variant="ghost" size="icon-xs" aria-label={`Delete /${snippet.keyword} from ${org?.name}`} onClick={() => void removeShared(snippet)}><Trash2 aria-hidden /></Button>
+              {confirming === snippet.id ? <>
+                <span className="shrink-0 text-xs">Delete for everyone?</span>
+                <Button variant="ghost" size="xs" onClick={() => setConfirming(null)}>Cancel</Button>
+                <Button variant="destructive" size="xs" onClick={() => void removeShared(snippet)}>Delete</Button>
+              </> : <>
+                <span className="max-w-[10rem] shrink-0 truncate text-[11px] text-faint" title={org?.name}>{org?.name}</span>
+                {(org?.isAdmin || (!!me && snippet.createdBy === me)) && (
+                  <Button variant="ghost" size="icon-xs" aria-label={`Delete /${snippet.keyword} from ${org?.name}`} onClick={() => setConfirming(snippet.id)}><Trash2 aria-hidden /></Button>
+                )}
+              </>}
             </li>
           ))}
           {own.map((snippet) => (

@@ -127,7 +127,7 @@ export function MergeInProgress({ source, merge, files, sessionId, onChanged, on
     setError(null);
     setSent(null);
     try {
-      const { queued } = await ask.send(withActionPrompt(resolveMergePrompt(merge), "resolveConflicts"));
+      const { queued } = await ask.send(withActionPrompt(resolveMergePrompt(merge), "resolveConflicts", sessionId));
       setSent(queued ? "Queued in the agent tab." : "Sent to the agent tab.");
     } catch (e) {
       setError(source.errorMessage(e));

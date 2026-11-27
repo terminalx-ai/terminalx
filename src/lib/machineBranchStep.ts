@@ -166,11 +166,11 @@ export function composeMachineSnapshot(input: { work: SourceStatus; remote: stri
 }
 
 /** What the agent is asked for each step it takes (the same words as `branch_step::act`). */
-export function agentPrompt(action: BranchAction, snapshot: MachineBranchSnapshot): string {
+export function agentPrompt(action: BranchAction, snapshot: MachineBranchSnapshot, target: string | null = null): string {
   const prompt = stepPrompt(action, snapshot);
-  // PRO-154: the organization's and the person's instructions for the action, after it.
-  if (action === "pull" || action === "resolveConflicts") return withActionPrompt(prompt, "resolveConflicts");
-  return action === "fixChecks" ? withActionPrompt(prompt, "fixChecks") : prompt;
+  // PRO-154: the instructions for the action, the session's organization's then the person's. A pull is not a conflict step.
+  if (action === "resolveConflicts") return withActionPrompt(prompt, "resolveConflicts", target);
+  return action === "fixChecks" ? withActionPrompt(prompt, "fixChecks", target) : prompt;
 }
 
 function stepPrompt(action: BranchAction, snapshot: MachineBranchSnapshot): string {

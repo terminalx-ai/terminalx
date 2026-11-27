@@ -300,7 +300,7 @@ export function MachineBranchButton({ branch, workspace }: { branch: MachineBran
       if (agent) {
         if (!tabId) throw new Error("Open an agent tab to send this to the agent.");
         agentRun.start(tabId);
-        await backend.send(tabId, agentPrompt(request.action, now), []);
+        await backend.send(tabId, agentPrompt(request.action, now, session.id), []);
       } else {
         const pr = now.pr?.state === "OPEN" ? now.pr : null;
         switch (request.action) {

@@ -4,7 +4,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { usePromptTextProps } from "@/lib/autocorrect";
 import { getPrefs, setPrefs, type PromptSnippet } from "@/lib/prefs";
 import { showError } from "@/lib/errorToasts";
-import { refreshSharedSetups, sharedSetupsApi, useOrganizationSnippets, useSharedSetupsOrg } from "@/lib/sharedSetups";
+import { orgLabel, refreshSharedSetups, sharedSetupsApi, useOrganizationSnippets, useSharedSetupsOrg } from "@/lib/sharedSetups";
 
 /** A snippet's name as it is typed after "/": lower case, words joined by dashes. */
 export function snippetName(text: string): string {
@@ -78,7 +78,7 @@ export function SaveSnippetDialog({ prompt, editing, onClose }: { prompt: string
             <span className="text-xs text-muted-foreground">Visible to</span>
             <select aria-label="Visible to" className="h-8 rounded-md border border-hairline bg-background px-2 text-sm" value={scope} onChange={(event) => setScope(event.target.value === "org" ? "org" : "me")}>
               <option value="me">Only me</option>
-              <option value="org">Everyone at {org.name}</option>
+              <option value="org">Everyone at {orgLabel(org.name)}</option>
             </select>
           </label>
         )}

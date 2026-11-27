@@ -16,6 +16,7 @@ function account() {
 }
 vi.mock("@/lib/account", () => ({ getAccount: account, useAccount: account }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@/lib/cloudPeople", () => ({ usePeople: () => (id: string) => id, userIdForEmail: () => "u-me" }));
 
 const { SaveSnippetDialog } = await import("@/components/chat/SaveSnippetDialog");
 const { SnippetManager } = await import("./SnippetManager");
@@ -62,5 +63,17 @@ describe("snippet scope", () => {
     fireEvent.click(screen.getByRole("radio", { name: "Everyone at Fixture Labs 1" }));
     expect(screen.getByText("/review")).toBeTruthy();
     expect(screen.queryByText("/tidy")).toBeNull();
+  });
+
+  it("lets only the creator delete a shared snippet, after asking", async () => {
+    serve([shared, { ...shared, id: "s-mine", keyword: "mine", createdBy: "u-me" }]);
+    render(<SnippetManager />);
+    await screen.findByText("/mine");
+    expect(screen.queryByRole("button", { name: "Delete /review from Fixture Labs" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Delete /mine from Fixture Labs" }));
+    expect(screen.getByText("Delete for everyone?")).toBeTruthy();
+    expect(invoke).not.toHaveBeenCalledWith("shared_setups", expect.objectContaining({ op: expect.objectContaining({ op: "deleteSnippet" }) }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("shared_setups", { orgId: "org-a", op: { op: "deleteSnippet", id: "s-mine" } }));
   });
 });

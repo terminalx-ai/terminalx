@@ -6,7 +6,7 @@ import { usePromptTextProps } from "@/lib/autocorrect";
 import { usePeople } from "@/lib/cloudPeople";
 import { showError } from "@/lib/errorToasts";
 import { getPrefs, setPrefs } from "@/lib/prefs";
-import { ACTION_PROMPTS, personalPrompt, setCachedPrompts, sharedSetupsApi, useSharedSetupsOrg, type ActionPromptKey, type SharedPrompts } from "@/lib/sharedSetups";
+import { ACTION_PROMPTS, orgLabel, personalPrompt, setCachedPrompts, sharedSetupsApi, useSharedSetupsOrg, type ActionPromptKey, type SharedPrompts } from "@/lib/sharedSetups";
 import { RegisteredSetting } from "./settingsRegistry";
 
 type Layer = "personal" | "shared";
@@ -31,10 +31,12 @@ function ago(at: string): string {
   return days === 1 ? "yesterday" : `${days} days ago`;
 }
 
-function PromptRow({ title, description, saved, open, onToggle, chips, footer, readOnly, onSave, saveLabel }: {
+function PromptRow({ title, description, saved, held, open, onToggle, chips, footer, readOnly, onSave, saveLabel }: {
   title: string;
   description: string;
   saved: string;
+  /** After a conflict: the text this person typed, kept in the editor beside the newer saved version. */
+  held?: string | null;
   open: boolean;
   onToggle: () => void;
   chips?: React.ReactNode;
@@ -43,10 +45,10 @@ function PromptRow({ title, description, saved, open, onToggle, chips, footer, r
   onSave: (text: string) => Promise<void> | void;
   saveLabel: string;
 }) {
-  const [draft, setDraft] = useState(saved);
+  const [draft, setDraft] = useState(held ?? saved);
   const [saving, setSaving] = useState(false);
   const textProps = usePromptTextProps();
-  useEffect(() => setDraft(saved), [saved]);
+  useEffect(() => setDraft(held ?? saved), [saved, held]);
   const save = async () => {
     setSaving(true);
     try { await onSave(draft); } finally { setSaving(false); }
@@ -65,6 +67,13 @@ function PromptRow({ title, description, saved, open, onToggle, chips, footer, r
         {open ? <ChevronUp className="size-4 text-muted-foreground" /> : <ChevronDown className="size-4 text-muted-foreground" />}
       </button>
       {open && (
+        <>
+        {held != null && (
+          <div className="mt-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
+            <p className="font-medium">Saved by someone else meanwhile</p>
+            <p className="mt-1 whitespace-pre-wrap text-muted-foreground" data-testid="newer-prompt">{saved.trim() || "Cleared"}</p>
+          </div>
+        )}
         <div className="mt-3 overflow-hidden rounded-lg border border-hairline-strong focus-within:border-accent/60">
           <textarea {...textProps} aria-label={title} readOnly={readOnly} maxLength={8000} rows={4}
             className="block w-full resize-y bg-transparent px-3 py-2.5 text-[13px] leading-relaxed outline-none"
@@ -74,6 +83,7 @@ function PromptRow({ title, description, saved, open, onToggle, chips, footer, r
             {!readOnly && <Button size="xs" variant="secondary" disabled={saving || draft.trim() === saved.trim()} onClick={() => void save()}>{saveLabel}</Button>}
           </div>
         </div>
+        </>
       )}
     </li>
   );
@@ -90,10 +100,13 @@ export function PromptsSettings() {
   const [open, setOpen] = useState<ActionPromptKey | null>("general");
   const [shared, setShared] = useState<SharedPrompts | null>(null);
   const [, setVersion] = useState(0);
+  // After a conflict, the text each admin typed, kept until they save again or leave.
+  const [held, setHeld] = useState<Partial<Record<ActionPromptKey, string>>>({});
   const personName = usePeople(!!org);
 
   useEffect(() => {
     setShared(null);
+    setHeld({});
     if (!org) { setLayer("personal"); return; }
     let cancelled = false;
     sharedSetupsApi.prompts(org.id)
@@ -111,19 +124,24 @@ export function PromptsSettings() {
         setCachedPrompts(org.id, next);
         return next;
       });
+      setHeld(({ [action]: _, ...rest }) => rest);
     } catch (error) {
       if ((error as { code?: string } | null)?.code === "action_prompt_conflict") {
-        // Someone else saved first: show theirs, and keep nothing silently replaced.
+        // Someone else saved first: their version beside the text typed here, so neither is lost.
+        setHeld((before) => ({ ...before, [action]: text }));
         const fresh = await sharedSetupsApi.prompts(org.id).catch(() => null);
         if (fresh) { setShared(fresh); setCachedPrompts(org.id, fresh); }
-        showError("Someone else changed this prompt while you were editing. Their version is shown now; edit it and save again.", undefined, { title: "Not saved", key: "action-prompt-conflict", tone: "warning", copy: false });
+        showError(fresh
+          ? "Someone else changed this prompt while you were editing. Their version is above yours; save again to replace it."
+          : "Someone else changed this prompt while you were editing, and their version couldn't be loaded. Your text is kept; try again.",
+        undefined, { title: "Not saved", key: "action-prompt-conflict", tone: "warning", copy: false });
         return;
       }
       showError(`Couldn't save the ${ACTION_PROMPTS.find((entry) => entry.key === action)?.title ?? ""} prompt for ${org.name}`, error);
     }
   };
 
-  const tabs: { value: Layer; label: string }[] = [{ value: "personal", label: "Personal" }, ...(org ? [{ value: "shared" as const, label: `${org.name} · shared` }] : [])];
+  const tabs: { value: Layer; label: string }[] = [{ value: "personal", label: "Personal" }, ...(org ? [{ value: "shared" as const, label: `${orgLabel(org.name)} · shared` }] : [])];
   const showShared = layer === "shared" && !!org;
 
   return (
@@ -132,7 +150,7 @@ export function PromptsSettings() {
         <div role="tablist" aria-label="Prompt layers" className="flex gap-5 border-b border-hairline">
           {tabs.map((tab) => (
             <button key={tab.value} type="button" role="tab" aria-selected={layer === tab.value} onClick={() => setLayer(tab.value)}
-              className={cn("-mb-px border-b-2 px-0.5 pb-2 text-[13px]", layer === tab.value ? "border-accent font-medium text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}>
+              title={tab.label} className={cn("-mb-px max-w-[16rem] truncate border-b-2 px-0.5 pb-2 text-[13px]", layer === tab.value ? "border-accent font-medium text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}>
               {tab.label}
             </button>
           ))}
@@ -148,9 +166,9 @@ export function PromptsSettings() {
             if (showShared) {
               const entry = shared?.prompts[action.key];
               return (
-                <PromptRow key={`shared-${action.key}`} title={action.title} description={action.shared} saved={entry?.body ?? ""}
+                <PromptRow key={`shared-${action.key}`} title={action.title} description={action.shared} saved={entry?.body ?? ""} held={held[action.key] ?? null}
                   open={open === action.key} onToggle={toggle} readOnly={!shared?.canEdit} saveLabel="Save for everyone"
-                  chips={!!entry?.body.trim() && <span className="flex items-center gap-1 rounded bg-veil-strong px-1.5 text-[10px] font-normal text-muted-foreground"><Building2 className="size-3" />Set by {org.name}</span>}
+                  chips={!!entry?.body.trim() && <span className="flex items-center gap-1 rounded bg-veil-strong px-1.5 text-[10px] font-normal text-muted-foreground"><Building2 className="size-3" />Set by {orgLabel(org.name)}</span>}
                   footer={() => entry?.updatedAt ? `Last edited${entry.updatedBy ? ` by ${personName(entry.updatedBy)}` : ""} · ${ago(entry.updatedAt)}` : ""}
                   onSave={(text) => saveShared(action.key, text)} />
               );

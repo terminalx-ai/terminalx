@@ -7,6 +7,7 @@ import { getAccount } from "@/lib/account";
 import { showError } from "@/lib/errorToasts";
 import { asSharedSlots, equipSlots, mySlots, padSlots, readSlotsLink, slotLabel, undoEquip, SLOT_COUNT } from "@/lib/favouriteSlots";
 import { modeLabel } from "@/lib/models";
+import { sharedSetupsOrg } from "@/lib/sharedSetups";
 import type { FavouriteSlot } from "@/lib/prefs";
 
 /** A teammate's set offered for equipping: from their profile, or from a link they sent. */
@@ -16,9 +17,14 @@ export interface EquipOffer {
   slots: (FavouriteSlot | null)[];
   /** The organization the set is shared in; none when it came by a link. */
   organization?: string;
-  /** The link it came from, shown at the top. */
+  /**
+   * The link it came from, shown at the top. A link's `name` is only what the
+   * link says about itself, so it is never shown as who sent it.
+   */
   link?: string;
 }
+
+const AGENT_NAMES: Record<string, string> = { claude: "Claude", codex: "Codex", opencode: "OpenCode" };
 
 const firstName = (name: string) => name.trim().split(/\s+/)[0] || name;
 
@@ -34,11 +40,15 @@ function SlotCell({ slot, theirs }: { slot: FavouriteSlot | null; theirs?: boole
   }
   const { model, effort } = slotLabel(slot);
   const Icon = slot.agent === "claude" ? Sparkles : Bot;
+  const agent = AGENT_NAMES[slot.agent] ?? slot.agent;
   return (
-    <div className={cn("flex h-9 min-w-0 items-center gap-2 rounded-md border px-2.5 text-xs", theirs ? "border-accent/60 bg-accent/5" : "border-hairline bg-veil")}>
-      <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+    <div className={cn("flex h-9 min-w-0 items-center gap-2 rounded-md border px-2.5 text-xs", theirs ? "border-accent/60 bg-accent/5" : "border-hairline bg-veil")}
+      title={[agent, model, effort, slot.fast ? "Fast" : null, slot.mode ? modeLabel(slot.mode) : null].filter(Boolean).join(" · ")}>
+      <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+      <span className="shrink-0 text-muted-foreground">{agent}</span>
       <span className="truncate font-medium">{model}</span>
       {effort && <span className="shrink-0 text-muted-foreground">{effort}</span>}
+      {slot.fast && <span className="shrink-0 rounded bg-accent/15 px-1 text-[10px] font-medium text-accent">Fast</span>}
       {slot.mode && <span className="ml-auto shrink-0 truncate text-[11px] text-faint">{modeLabel(slot.mode)}</span>}
     </div>
   );
@@ -54,7 +64,7 @@ export function equipWithUndo(offer: EquipOffer) {
   const label = first ? slotLabel(first) : null;
   const filled = slots.filter(Boolean).length;
   showError(label ? `${label.model}${label.effort ? ` ${label.effort}` : ""} in slot 1 is your default now.` : "", undefined, {
-    title: `Using ${possessive(offer.name)} favourite model slots`,
+    title: offer.link ? "Using the model slots from the link" : `Using ${possessive(offer.name)} favourite model slots`,
     key: "equip-slots",
     tone: "success",
     copy: false,
@@ -68,6 +78,7 @@ export function EquipSlotsDialog({ offer, onClose }: { offer: EquipOffer; onClos
   const mine = mySlots();
   const theirs = padSlots(offer.slots);
   const name = possessive(offer.name);
+  const fromLink = !!offer.link;
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className="max-w-[580px]">
@@ -78,15 +89,17 @@ export function EquipSlotsDialog({ offer, onClose }: { offer: EquipOffer; onClos
             <code className="truncate text-faint">{offer.link}</code>
           </p>
         )}
-        <DialogTitle className="text-sm font-semibold">Use {name} favourite model slots?</DialogTitle>
+        <DialogTitle className="text-sm font-semibold">{fromLink ? "A link wants to set your model slots" : `Use ${name} favourite model slots?`}</DialogTitle>
         <DialogDescription className="text-xs text-muted-foreground">
-          {offer.organization ? `${offer.name} shares these with ${offer.organization}.` : `${offer.name} sent you these slots.`} Slot 1 becomes your default model.
+          {fromLink
+            ? `It says it is from “${offer.name}”, which TerminalX can’t check. Slot 1 becomes your default model.`
+            : `${offer.name} shares these with ${offer.organization}. Slot 1 becomes your default model.`}
         </DialogDescription>
         <div className="mt-4 grid grid-cols-[1rem_1fr_1rem_1fr] items-center gap-x-2 gap-y-2" role="table" aria-label="Your slots and theirs">
           <span />
           <span className="text-[10px] font-medium tracking-wide text-faint">YOUR SLOTS NOW</span>
           <span />
-          <span className="text-[10px] font-medium uppercase tracking-wide text-faint">{name} slots</span>
+          <span className="truncate text-[10px] font-medium uppercase tracking-wide text-faint">{fromLink ? "From the link" : `${name} slots`}</span>
           {Array.from({ length: SLOT_COUNT }, (_, index) => (
             <div key={index} role="row" className="contents">
               <span className="text-xs text-faint">{index + 1}</span>
@@ -126,9 +139,17 @@ export function offerSlots(offer: EquipOffer) {
 
 /** Follow a `slots` link: the confirmation, or why there is nothing to equip (design 04.12). */
 export function openSlotsLink(data: string, link: string) {
-  if (getAccount().status.state !== "signed-in") {
+  const status = getAccount().status;
+  if (status.state !== "signed-in") {
     showError("Slots from teammates are tied to your organization. Sign in to TerminalX, then open the link again.", undefined, {
       title: "Sign in to use shared slots", key: "slots-link", tone: "warning", copy: false,
+    });
+    return;
+  }
+  // Shared slots are a team organization's, behind its readiness key: a link does nothing anywhere else.
+  if (!sharedSetupsOrg(status)) {
+    showError("Model slots from links work in a team organization that has shared setups on. Switch to one, then open the link again.", undefined, {
+      title: "Shared slots aren’t on here", key: "slots-link", tone: "warning", copy: false,
     });
     return;
   }

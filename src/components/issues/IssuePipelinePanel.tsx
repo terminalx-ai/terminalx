@@ -314,7 +314,7 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
                   variant="accent"
                   disabled={busy != null || !authorHere || failedRuns.length === 0}
                   title={!authorHere ? "The author session is not on this computer." : failedRuns.length === 0 ? "Only a GitHub Actions run's logs can be sent." : "Send the failed check logs to the author session"}
-                  onClick={() => void run("sendFailure", () => sendFailedChecks(pipeline.author.sessionId, pipeline.author.tabId, pipeline.pr!.url, actionInstructions("fixChecks")).then((said) => said && "Sent the failure to the author session."))}
+                  onClick={() => void run("sendFailure", () => sendFailedChecks(pipeline.author.sessionId, pipeline.author.tabId, pipeline.pr!.url, actionInstructions("fixChecks", pipeline.author.sessionId)).then((said) => said && "Sent the failure to the author session."))}
                 >
                   {busy === "sendFailure" ? <Loader2 className="animate-spin" /> : <CornerUpLeft />}
                   Send the failure to the author
