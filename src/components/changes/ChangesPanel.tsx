@@ -364,7 +364,9 @@ function ChangesBody({
   const discardAction = allowDiscard && source.discard && source.canWrite ? (file: ChangedFile) => <DiscardButton path={file.path} onClick={() => setDiscarding(file)} /> : undefined;
 
   if (!range) return unavailable ?? <div role="status" className="animate-panel-content px-3 py-4 text-xs text-muted-foreground">Loading changes…</div>;
-  if (!files.length && !error) return loading ? <div role="status" className="animate-panel-content px-3 py-4 text-xs text-muted-foreground">Loading changes…</div> : empty;
+  // A range means a read already finished for this choice (choose() clears it): a background refresh keeps
+  // the last result, the empty state included, on screen instead of flashing "Loading changes…" (#1662).
+  if (!files.length && !error) return empty;
 
   return (
     <div className="animate-panel-content flex h-full min-h-0 flex-col">

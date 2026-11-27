@@ -281,6 +281,27 @@ it("refreshes while idle without requiring a new agent turn", async () => {
   } finally { vi.useRealTimers(); }
 });
 
+it("keeps the empty state on screen while a background refresh reads (#1662)", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  try {
+    const source = fakeSource("idle-empty");
+    source.changesBetween.mockResolvedValue([]);
+    const view = render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
+    await screen.findByText("No file changes yet");
+    let finish!: (files: never[]) => void;
+    source.changesBetween.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const reads = source.changesBetween.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    await waitFor(() => expect(source.changesBetween.mock.calls.length).toBeGreaterThan(reads));
+    expect(screen.queryByText("Loading changes…")).toBeNull();
+    expect(screen.getByText("No file changes yet")).toBeTruthy();
+    await act(async () => { finish([]); });
+    expect(screen.queryByText("Loading changes…")).toBeNull();
+    expect(screen.getByText("No file changes yet")).toBeTruthy();
+    view.unmount();
+  } finally { vi.useRealTimers(); }
+});
+
 // ---- a merge left in progress (#736, PRO-293) --------------------------------
 
 const HEAD = "1111111111111111111111111111111111111111";
