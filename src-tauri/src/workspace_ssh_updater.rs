@@ -37,6 +37,30 @@ impl Decision {
     }
 }
 
+/// Run the staging closure only with a fresh gate. The caller obtains the
+/// second decision through an authenticated refresh and supplies it to the
+/// activation closure, which must check it again under its install lock.
+pub(crate) fn with_update_gate<T, U>(
+    decision: impl FnOnce() -> Option<Decision>,
+    stage: impl FnOnce() -> anyhow::Result<T>,
+    refresh_before_switch: impl FnOnce() -> Option<Decision>,
+    activate: impl FnOnce(T, Decision) -> anyhow::Result<U>,
+) -> anyhow::Result<Option<U>> {
+    let Some(initial) = decision() else {
+        return Ok(None);
+    };
+    let candidate = stage()?;
+    let Some(current) = refresh_before_switch() else {
+        return Ok(None);
+    };
+    if initial.workspace_id != current.workspace_id
+        || initial.runtime_generation != current.runtime_generation
+    {
+        return Ok(None);
+    }
+    activate(candidate, current).map(Some)
+}
+
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Outcome {
@@ -105,6 +129,46 @@ mod tests {
             invalid[field] = bad;
             assert!(read(&invalid).is_none(), "{field}");
         }
+    }
+
+    #[test]
+    fn workspace_ssh_updater_holds_staging_and_switch_on_rollout_loss() {
+        let none = with_update_gate(
+            || None,
+            || -> anyhow::Result<()> { panic!("held updater staged a payload") },
+            || panic!("held updater refreshed unnecessarily"),
+            |_, _| -> anyhow::Result<()> { panic!("held updater activated a payload") },
+        )
+        .unwrap();
+        assert!(none.is_none());
+
+        let fresh = || {
+            Decision::read(
+                Some(&json!({
+                    "v":1,"workspaceId":"workspace-a","runtimeGeneration":7,"enabled":true,"validUntil":2000
+                })),
+                CAPABILITY,
+                "workspace-a",
+                7,
+                1000,
+            )
+        };
+        let none = with_update_gate(
+            fresh,
+            || Ok("candidate"),
+            || None,
+            |_, _| -> anyhow::Result<()> { panic!("revoked updater activated a payload") },
+        )
+        .unwrap();
+        assert!(none.is_none());
+        let updated = with_update_gate(
+            fresh,
+            || Ok("candidate"),
+            fresh,
+            |candidate, _| Ok(candidate),
+        )
+        .unwrap();
+        assert_eq!(updated, Some("candidate"));
     }
 
     #[test]
