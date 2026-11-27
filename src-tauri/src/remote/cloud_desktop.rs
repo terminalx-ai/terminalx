@@ -249,6 +249,16 @@ async fn write_cookie(
     }
 }
 
+/// `DevToolsActivePort`: the port, then the browser target's path.
+fn parse_devtools(text: &str) -> Option<String> {
+    let mut lines = text.lines();
+    let port: u16 = lines.next()?.trim().parse().ok().filter(|port| *port != 0)?;
+    let path = lines.next()?.trim();
+    let id = path.strip_prefix("/devtools/browser/")?;
+    (!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+        .then(|| format!("ws://127.0.0.1:{port}{path}"))
+}
+
 fn parse_display(bytes: &[u8]) -> io::Result<u16> {
     std::str::from_utf8(bytes)
         .ok()
@@ -346,12 +356,20 @@ impl Desktop {
             app
         };
         let manager = Process::spawn(&mut launch(&tools.window_manager), Some(files.clone()))?;
+        // A private profile and a loopback DevTools port on an ephemeral
+        // number, for the cloud browser for agents (PRO-209). Chrome writes
+        // the chosen port to `DevToolsActivePort` in the profile.
+        let profile = files.path().join("chrome");
         let chrome = Process::spawn(
-            launch(&tools.chrome).args([
-                "--no-first-run",
-                "--no-default-browser-check",
-                "about:blank",
-            ]),
+            launch(&tools.chrome)
+                .arg(format!("--user-data-dir={}", profile.display()))
+                .args([
+                    "--remote-debugging-address=127.0.0.1",
+                    "--remote-debugging-port=0",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "about:blank",
+                ]),
             Some(files.clone()),
         )
         .map_err(|_| DesktopError::ChromeStartupFailed)?;
@@ -363,6 +381,19 @@ impl Desktop {
             display,
             vnc: tools.vnc,
         })
+    }
+
+    /// Chrome's DevTools browser endpoint, once Chrome has written it:
+    /// `ws://127.0.0.1:<port><path>`.
+    async fn devtools(&self) -> Result<String, DesktopError> {
+        let file = self.files.path().join("chrome").join("DevToolsActivePort");
+        for _ in 0..50 {
+            if let Some(endpoint) = tokio::fs::read_to_string(&file).await.ok().as_deref().and_then(parse_devtools) {
+                return Ok(endpoint);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Err(DesktopError::ChromeStartupFailed)
     }
 
     pub(crate) async fn connect(
@@ -442,6 +473,29 @@ pub(crate) struct DesktopLease {
     pool: Weak<DesktopPool>,
 }
 
+/// An agent's hold on the desktop (PRO-209): it keeps the desktop up with no
+/// viewer, like a stream does, and names Chrome's DevTools endpoint.
+pub(crate) struct AgentLease {
+    pub(crate) devtools: String,
+    pool: Weak<DesktopPool>,
+}
+
+impl Drop for AgentLease {
+    fn drop(&mut self) {
+        DesktopPool::disconnected(self.pool.clone());
+    }
+}
+
+static SHARED: std::sync::OnceLock<Arc<DesktopPool>> = std::sync::OnceLock::new();
+
+/// The workspace's one desktop, shared by its viewers and its agents.
+/// Must first be called on the runtime's Tokio runtime.
+pub(crate) fn shared_pool() -> Arc<DesktopPool> {
+    SHARED
+        .get_or_init(|| DesktopPool::new(vec!["/usr/bin".into(), "/bin".into()], Duration::from_secs(60)))
+        .clone()
+}
+
 impl DesktopPool {
     pub(crate) fn new(bin_dirs: Vec<String>, idle_timeout: Duration) -> Arc<Self> {
         Arc::new(Self {
@@ -501,6 +555,38 @@ impl DesktopPool {
             connection,
             pool: Arc::downgrade(self),
         })
+    }
+
+    /// Whether this image has the desktop packages at all.
+    pub(crate) fn tools_present(&self) -> bool {
+        let dirs: Vec<_> = self.bin_dirs.iter().map(String::as_str).collect();
+        Tools::discover(&dirs).is_ok()
+    }
+
+    /// Start the desktop if it is not up, and hold it for an agent.
+    pub(crate) async fn agent(self: &Arc<Self>) -> Result<AgentLease, DesktopError> {
+        let mut state = self.state.lock().await;
+        if state.desktop.as_mut().is_some_and(|desktop| !desktop.is_running()) {
+            state.desktop = None;
+        }
+        if state.desktop.is_none() {
+            let dirs: Vec<_> = self.bin_dirs.iter().map(String::as_str).collect();
+            let desktop = Desktop::start(&dirs).await?;
+            self.watch_health(desktop.files.path().to_owned());
+            state.desktop = Some(desktop);
+        }
+        let devtools = match state.desktop.as_ref().expect("desktop started").devtools().await {
+            Ok(devtools) => devtools,
+            Err(error) => {
+                if state.connected == 0 {
+                    state.desktop = None;
+                }
+                return Err(error);
+            }
+        };
+        state.connected += 1;
+        state.generation = state.generation.wrapping_add(1);
+        Ok(AgentLease { devtools, pool: Arc::downgrade(self) })
     }
 
     fn watch_health(self: &Arc<Self>, files: PathBuf) {
@@ -563,6 +649,17 @@ impl Drop for DesktopLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_only_a_loopback_browser_devtools_endpoint() {
+        assert_eq!(
+            parse_devtools("41235\n/devtools/browser/0b9e-4f1a\n").as_deref(),
+            Some("ws://127.0.0.1:41235/devtools/browser/0b9e-4f1a")
+        );
+        for invalid in ["", "0\n/devtools/browser/a", "41235\n/devtools/page/a", "41235\n/devtools/browser/", "x\n/devtools/browser/a", "1\n/devtools/browser/a?b"] {
+            assert_eq!(parse_devtools(invalid), None, "{invalid:?}");
+        }
+    }
 
     #[test]
     fn accepts_only_a_bounded_numeric_display() {

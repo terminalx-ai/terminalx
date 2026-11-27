@@ -6674,7 +6674,9 @@ impl SessionManager {
             env.push((crate::cloud_config::APPENDED_PROMPT_ENV.to_string(), value));
             unset.push(crate::cloud_config::APPENDED_PROMPT_ENV.to_string());
         }
-        let spawned = crate::cloud_grants::env_prefix(&format!("{}{}{}{}", launch.command, config.args, computer.args, prompt.args), &unset, &after_profile);
+        // The cloud desktop's browser, only while the workspace offers it (PRO-209).
+        let browser = crate::cloud_browser::launch_args(&tab.harness, &exe.to_string_lossy());
+        let spawned = crate::cloud_grants::env_prefix(&format!("{}{}{}{}{}", launch.command, config.args, computer.args, browser, prompt.args), &unset, &after_profile);
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
         // Kept up with the file this tab's tail follows, wherever it moves,
@@ -8671,6 +8673,12 @@ impl SessionManager {
                     }
                 }
             }
+            // The cloud browser for agents (PRO-209): its MCP server's calls.
+            crate::cloud_browser::HOOK_EVENT => return self.cloud_browser_hook(&rt_arc, &frame, kind),
+            // Its tools decide their own approval, once per browser session.
+            "PermissionRequest" | "PreToolUse" if frame.payload["tool_name"].as_str().is_some_and(crate::cloud_browser::is_tool) => {
+                return reply_for(kind, &frame.event, Decision::Allow);
+            }
             "PermissionRequest" => {
                 // A bot's gate (PRO-478): what it refuses is refused here too, saying why, and
                 // what it asks about is asked on a card that says why.
@@ -8931,6 +8939,64 @@ impl SessionManager {
 
     /// [`Self::ask_permission`], with `because` as why the card is up when the
     /// app itself is the one asking (a bot's outward call, PRO-478).
+    /// A cloud browser tool call from this tab's agent (PRO-209). A tab that
+    /// asks first shows one card when a browser session opens.
+    fn cloud_browser_hook(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, kind: CliKind) -> HookReply {
+        let (mode, key) = {
+            let rt = rt_arc.lock().unwrap();
+            let Engine::Cli(p) = &rt.engine else { return HookReply::default() };
+            if !p.origin.accepts(frame) { return HookReply::default(); }
+            (p.mode.clone(), format!("{}/{}", rt.session_id, rt.tab_id))
+        };
+        let tab_title = index::get(&frame.session).ok().and_then(|entry| entry.tab(&frame.tab).and_then(|tab| tab.title.clone()));
+        let agent = match kind {
+            CliKind::Claude => "Claude Code",
+            CliKind::Codex => "Codex",
+        };
+        let approve = |input: Value| self.ask_cloud_browser(rt_arc, frame, kind, input);
+        let caller = crate::cloud_browser::Caller { key, agent, tab_title, asks: !crate::cloud_browser::runs_without_asking(&mode) };
+        HookReply { output: Some(crate::cloud_browser::call(caller, &frame.payload, &approve)), refused: None }
+    }
+
+    /// The browser session's one card: allowed or not.
+    fn ask_cloud_browser(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, kind: CliKind, input: Value) -> bool {
+        let gate = "PermissionRequest";
+        let request_id = uuid::Uuid::now_v7().to_string();
+        let tool_name = crate::cloud_browser::OPEN_TOOL.to_string();
+        let (tx, rx) = std::sync::mpsc::channel::<QueuedDecision>();
+        {
+            let mut rt = rt_arc.lock().unwrap();
+            let Engine::Cli(p) = &mut rt.engine else { return false };
+            if !p.origin.accepts(frame) { return false; }
+            p.decisions.insert(request_id.clone(), DecisionSender {
+                sender: tx,
+                caller: crate::hooks::Caller::default(),
+                gate: gate.to_string(),
+                session_command: None,
+            });
+            let options = claude::mapper::build_options(&[]).into_iter().map(|option| match option.kind {
+                crate::events::PermissionOptionKind::AllowOnce => crate::events::PermissionOption { label: "Allow for this browser session".into(), ..option },
+                _ => option,
+            }).collect();
+            let payload = Payload::PermissionRequested {
+                request_id: request_id.clone(),
+                tool_use_id: String::new(),
+                title: Some("Use the browser on the cloud desktop?".into()),
+                description: input["plan"].as_str().filter(|plan| !plan.trim().is_empty()).map(String::from),
+                reason: None,
+                cwd: None,
+                options,
+                tool_name: tool_name.clone(),
+                input: input.clone(),
+            };
+            rt.pending.insert(request_id.clone(), PendingAsk { tool_use_id: String::new(), tool_name, input, suggestions: Vec::new() });
+            self.apply(&mut rt, payload, None);
+        }
+        let waiting = Waiting { kind, gate: gate.to_string(), request_id, local_owner: false };
+        let reply = self.await_decision(rt_arc, waiting, rx, |rt| matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)));
+        reply.output.as_ref().is_some_and(|output| output["hookSpecificOutput"]["decision"]["behavior"] == "allow")
+    }
+
     fn ask_permission_because(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, kind: CliKind, because: Option<String>) -> HookReply {
         let local_owner = crate::local_runtime::permissions::enabled();
         let _waiter = if local_owner {

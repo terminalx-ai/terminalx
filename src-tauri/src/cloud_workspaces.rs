@@ -1263,6 +1263,32 @@ struct CloudStartProgressEvent {
     occurred_at: u64,
 }
 
+/// The workspace's "Cloud browser for agents" switch (PRO-209).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBrowserState {
+    pub enabled: bool,
+    pub can_change: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled_by: Option<AgentBrowserEnabler>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBrowserEnabler {
+    pub user_id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentBrowserReply {
+    agent_browser: AgentBrowserState,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudWorkspaceDetailsResponse {
@@ -3210,6 +3236,29 @@ impl CloudWorkspaceService {
         })
     }
 
+    /// Reads the switch, or sets it when `enabled` is given. Only the
+    /// workspace owner and Organization admins may set it; the server checks.
+    pub fn agent_browser(&self, org: Option<&str>, workspace_id: &str, enabled: Option<bool>) -> Result<AgentBrowserState, CloudWorkspaceClientError> {
+        use crate::account::PHASE2_AGENT_BROWSER;
+        let unavailable = "cloud_workspace_agent_browser_unavailable";
+        let risk = if enabled.is_some() { RequestRisk::Mutation } else { RequestRisk::Read };
+        let target = self.phase2_target(org);
+        self.phase2_gate(PHASE2_AGENT_BROWSER, Some(&target), None, unavailable)?;
+        self.member_phase2_workspace(org, workspace_id, risk, |client, context| {
+            self.phase2_gate(PHASE2_AGENT_BROWSER, Some(&context.organization_id), Some(context), unavailable)?;
+            let tail = ["cloud-workspaces", workspace_id, "agent-browser"];
+            let reply: AgentBrowserReply = match enabled {
+                Some(enabled) => client.request_as("PUT", context, &tail, None, Some(json!({ "enabled": enabled })), None, risk)?,
+                None => client.request(context, &tail, None, None, None, risk)?,
+            };
+            let state = reply.agent_browser;
+            if enabled.is_some_and(|enabled| enabled != state.enabled) || (state.enabled_at.is_some() && !state.enabled) {
+                return Err(post_send_error(risk));
+            }
+            Ok(state)
+        })
+    }
+
     pub fn start_progress(&self, org: &str, workspace: &str, operation: &str) -> Result<CloudStartProgress, CloudWorkspaceClientError> {
         let risk = RequestRisk::Read;
         let unavailable = "cloud_workspace_start_progress_unavailable";
@@ -4955,6 +5004,8 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_last_admin"
             | "cloud_workspace_access_revision_conflict"
             | "cloud_workspace_general_access_unavailable"
+            | "cloud_workspace_agent_browser_unavailable"
+            | "cloud_workspace_agent_browser_forbidden"
             | "cloud_workspace_groups_unavailable"
             | "cloud_workspace_group_share_not_found"
             | "cloud_workspace_group_manager_unsupported"
@@ -6408,6 +6459,42 @@ mod tests {
                 assert!(serde_json::from_value::<CloudWorkspaceDetailsResponse>(bad).is_err());
             }
         }
+    }
+
+    #[test]
+    fn agent_browser_switch_reads_and_puts_the_exact_body() {
+        assert!(known_error_code("cloud_workspace_agent_browser_unavailable"));
+        assert!(known_error_code("cloud_workspace_agent_browser_forbidden"));
+        let off = json!({"agentBrowser": {"enabled": false, "canChange": true}});
+        let on = json!({"agentBrowser": {"enabled": true, "canChange": true, "enabledAt": "2026-11-27T10:28:00.000Z",
+            "enabledBy": {"userId": "user-1", "name": "Fixture Person"}}});
+        let (base, requests) = serve_each(vec![
+            response("200 OK", &off.to_string(), ""),
+            response("200 OK", &on.to_string(), ""),
+            response("403 Forbidden", &json!({"error": "cloud_workspace_agent_browser_forbidden"}).to_string(), ""),
+        ]);
+        let (_, service) = phase2_service(&base);
+        assert_eq!(service.agent_browser(None, "workspace-1", None).unwrap(), AgentBrowserState { enabled: false, can_change: true, enabled_at: None, enabled_by: None });
+        let state = service.agent_browser(None, "workspace-1", Some(true)).unwrap();
+        assert_eq!(state.enabled_by.unwrap().name.as_deref(), Some("Fixture Person"));
+        assert_eq!(service.agent_browser(None, "workspace-1", Some(false)).unwrap_err().code, "cloud_workspace_agent_browser_forbidden");
+        let requests = requests.join().unwrap();
+        assert!(requests[0].starts_with("GET /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/agent-browser HTTP/1.1"));
+        assert_eq!(requests[0].split_once("\r\n\r\n").unwrap().1, "");
+        assert!(requests[1].starts_with("PUT /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/agent-browser HTTP/1.1"));
+        let body: Value = serde_json::from_str(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body, json!({"enabled": true}));
+        for request in &requests { phase2_headers(request); }
+    }
+
+    #[test]
+    fn agent_browser_switch_is_held_without_readiness_and_rejects_a_mismatched_reply() {
+        let (_, service) = test_service("http://127.0.0.1:9");
+        assert_eq!(service.agent_browser(None, "workspace-1", None).unwrap_err().code, "cloud_workspace_agent_browser_unavailable");
+        let (base, requests) = serve_each(vec![response("200 OK", &json!({"agentBrowser": {"enabled": false, "canChange": true}}).to_string(), "")]);
+        let (_, service) = phase2_service(&base);
+        assert!(service.agent_browser(None, "workspace-1", Some(true)).is_err());
+        requests.join().unwrap();
     }
 
     #[test]

@@ -179,6 +179,7 @@ pub fn main() -> i32 {
     #[cfg(target_os = "linux")]
     if let Some(code) = crate::run_pty_supervisor() { return code; }
     if crate::startup::probe_cli() { return 0; }
+    if let Some(code) = crate::cloud_browser::run_stdio_cli() { return code; }
     #[cfg(unix)]
     if let Some(code) = crate::local_vm::attachment::run_stdio_cli() { return code; }
     #[cfg(unix)]

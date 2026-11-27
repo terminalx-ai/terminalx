@@ -436,7 +436,9 @@ pub(crate) const PHASE2_ORGANIZATION_AUTOMATIONS: &str = "cloud.automations.orga
 const PHASE2_TEAMS_PLAN: &str = "organization.teams-plan.v1";
 pub(crate) const PHASE2_NUDGES: &str = "team.nudges.v1";
 pub(crate) const PHASE2_WORKSPACE_SSH: &str = "cloud.workspaces.ssh.v1";
-const PHASE2_FEATURES: [&str; 24] = [
+/// The workspace switch for agents using Chrome on the cloud desktop (PRO-209).
+pub(crate) const PHASE2_AGENT_BROWSER: &str = "cloud.desktop.agent-browser.v1";
+const PHASE2_FEATURES: [&str; 25] = [
     PHASE2_TEAMS_PLAN,
     PHASE2_ORGANIZATION_AUTOMATIONS,
     PHASE2_NUDGES,
@@ -455,6 +457,7 @@ const PHASE2_FEATURES: [&str; 24] = [
     "cloud.workspaces.transfer-to-local.v1",
     PHASE2_PRECREATE_USAGE,
     "cloud.desktop.v1",
+    PHASE2_AGENT_BROWSER,
 ];
 
 fn phase2_organizations(session: &DesktopSession) -> Option<&serde_json::Map<String, serde_json::Value>> {

@@ -17,6 +17,7 @@ export const phase2Features = {
   agentLoginAffectedWorkspaces: "cloud.agent-logins.affected-workspaces.v1",
   webhookTrigger: "cloud.automations.webhook-trigger.v1",
   cloudDesktop: "cloud.desktop.v1",
+  agentBrowser: "cloud.desktop.agent-browser.v1",
   adminShare: "cloud.workspaces.admin-share.v1",
   generalAccess: "cloud.workspaces.general-access.v1",
 } as const;

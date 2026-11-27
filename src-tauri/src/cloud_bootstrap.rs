@@ -240,6 +240,8 @@ pub struct Session {
     /// Untrusted until checked against the installed collaboration snapshot.
     pub(crate) workspace_ssh: Option<serde_json::Value>,
     pub(crate) desktop_ready: bool,
+    /// The workspace's Cloud browser for agents switch (PRO-209).
+    pub(crate) agent_browser_ready: bool,
 }
 
 impl Session {
@@ -614,11 +616,13 @@ fn redeem(config: &Config, api: &dyn Api, key: &HostKey, stored: Option<(&str, &
                 collaboration: None,
                 workspace_ssh: None,
                 desktop_ready: read_desktop_readiness(redeemed.phase2_readiness.as_ref()),
+                agent_browser_ready: crate::cloud_browser::read_readiness(redeemed.phase2_readiness.as_ref()),
             }
         }
     };
     remove_spent_token(&config.token_path, &stored.token_sha256).map_err(Failure::Fatal)?;
     crash_point("token-removed");
+    crate::cloud_browser::set_switch(session.agent_browser_ready);
     Ok((session, Zeroizing::new(stored.runtime_credential.clone())))
 }
 
@@ -636,6 +640,8 @@ impl Bootstrapped {
         let refreshed = refreshed.and_then(|response| {
             if response.workspace_id != current.workspace_id || response.organization_id != current.organization_id {
                 current.desktop_ready = false;
+                current.agent_browser_ready = false;
+                crate::cloud_browser::set_switch(false);
                 return Err(CallError::Transient(RefreshIdentityMismatch.into()));
             }
             session_from_refresh(response, &relay_host_id).map_err(CallError::Transient)
@@ -644,6 +650,7 @@ impl Bootstrapped {
             Ok(session) => {
                 self.rejected.store(false, std::sync::atomic::Ordering::SeqCst);
                 *failures = 0;
+                crate::cloud_browser::set_switch(session.agent_browser_ready);
                 *current = session;
                 Ok(())
             }
@@ -655,6 +662,8 @@ impl Bootstrapped {
                 *failures = failures.saturating_add(1);
                 if rejected || *failures >= DESKTOP_REFRESH_FAILURE_LIMIT {
                     current.desktop_ready = false;
+                    current.agent_browser_ready = false;
+                    crate::cloud_browser::set_switch(false);
                 }
                 Err(error)
             }
@@ -828,6 +837,7 @@ fn session_from_refresh(mut refreshed: Refreshed, relay_host_id: &str) -> Result
         collaboration: refreshed.collaboration.take().filter(|value| !value.is_null()),
         workspace_ssh: refreshed.workspace_ssh.take(),
         desktop_ready: read_desktop_readiness(refreshed.phase2_readiness.as_ref()),
+        agent_browser_ready: crate::cloud_browser::read_readiness(refreshed.phase2_readiness.as_ref()),
         quiesce: refreshed.quiesce.take().filter(|value| !value.is_null()).and_then(|value| {
             match serde_json::from_value::<QuiesceRequest>(value) {
                 Ok(request) if opaque_id(&request.operation_id) => Some(request),

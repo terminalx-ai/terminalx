@@ -2114,6 +2114,7 @@ mod tests {
                 ]})),
                 workspace_ssh: None,
                 desktop_ready: false,
+                agent_browser_ready: false,
             };
             super::super::bootstrap_link::relay_session(&session, capabilities)
         };
@@ -2218,6 +2219,7 @@ mod tests {
             revocations:vec![], quiesce:None, environment:None,
             collaboration:Some(json!({"v":1, "members":[{"userId":"owner", "role":"manager", "canApprove":true}]})),
             desktop_ready: false,
+                agent_browser_ready: false,
         };
         let refresh = super::super::bootstrap_link::relay_session(&session, crate::cloud_bootstrap::CAPABILITIES);
         assert!(refresh.collaboration_v2, "the native runtime negotiates v2");

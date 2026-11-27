@@ -46,6 +46,7 @@ mod cloud_wake;
 mod cloud_mirror;
 mod mirror_rules;
 mod cloud_bootstrap;
+pub(crate) mod cloud_browser;
 mod cloud_quiesce;
 mod cloud_resources;
 mod cloud_environment;
@@ -813,6 +814,7 @@ pub fn run() {
             commands::cloud_workspace_read_marker,
             commands::cloud_workspace_restart,
             commands::cloud_workspace_details,
+            commands::cloud_workspace_agent_browser,
             commands::cloud_workspace_precreate_usage,
             commands::cloud_workspace_start_progress,
             commands::cloud_workspace_idle_suspend,

@@ -369,3 +369,25 @@ it("still takes the focus for Return when nothing else is being typed in (PRO-38
   render(<PermissionCard ask={threeWay} onAnswer={vi.fn()} takesKeys />);
   expect((document.activeElement as HTMLElement | null)?.textContent).toBe("Allow⏎");
 });
+// PRO-209: the cloud browser's one card per browser session.
+it("asks once for a cloud browser session, and can open the Desktop tab", () => {
+  const answer = vi.fn();
+  const opened = vi.fn();
+  window.addEventListener("terminalx:open-cloud-desktop", opened);
+  render(<PermissionCard ask={{ requestId: "b", toolUseId: "", seq: 1, kind: "permission", toolName: "mcp__cloud_browser__open",
+    input: { url: "http://localhost:5173/sign-in", plan: "Sign in as the fixture user and check the dashboard.", agent: "Claude Code" },
+    options: [{ id: "allow", label: "Allow for this browser session", kind: "allow_once" }, { id: "deny", label: "Deny", kind: "deny" }] }} onAnswer={answer} />);
+  expect(screen.getByTestId("permission-title").textContent).toBe("Use the browser on the cloud desktop?");
+  expect(screen.getByText("Cloud browser")).toBeTruthy();
+  expect(screen.getByText("http://localhost:5173/sign-in")).toBeTruthy();
+  expect(screen.getByTestId("cloud-browser-ask").textContent).toContain("One approval covers the whole session; a new session asks again.");
+  expect(screen.getByTestId("cloud-browser-plan").textContent).toBe("Plan: Sign in as the fixture user and check the dashboard.");
+  const labels = screen.getAllByRole("button").map((b) => (b.textContent ?? "").trim());
+  expect(labels.map((label) => ["Deny", "Open Desktop tab", "Allow for this browser session"].find((name) => label.startsWith(name)))).toEqual(["Deny", "Open Desktop tab", "Allow for this browser session"]);
+  fireEvent.click(screen.getByRole("button", { name: /Open Desktop tab/ }));
+  expect(opened).toHaveBeenCalledTimes(1);
+  expect(answer).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: /Allow for this browser session/ }));
+  expect(answer).toHaveBeenCalledWith("allow");
+  window.removeEventListener("terminalx:open-cloud-desktop", opened);
+});

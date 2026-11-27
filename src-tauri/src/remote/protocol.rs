@@ -395,6 +395,10 @@ pub const METHODS: &[Method] = &[
     method("desktop.write", "cloud-desktop/1", Participate, false),
     method("desktop.ack", "cloud-desktop/1", Participate, false),
     method("desktop.close", "cloud-desktop/1", Participate, false),
+    // PRO-209: a viewer with control stops the agent driving the cloud
+    // browser, and hands the desktop back.
+    method("desktop.takeControl", "cloud-desktop/1", Participate, false),
+    method("desktop.handBack", "cloud-desktop/1", Participate, false),
     // PRO-340: the machine and its projects, read-only. Only a runtime that
     // serves its machine has them.
     method("machine.describe", "machine/1", Participate, false),

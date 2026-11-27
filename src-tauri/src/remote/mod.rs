@@ -29,7 +29,7 @@ pub mod bootstrap_link;
 pub mod bots;
 pub mod client;
 #[cfg(any(target_os = "linux", all(test, unix)))]
-mod cloud_desktop;
+pub(crate) mod cloud_desktop;
 pub mod collab;
 pub mod environment;
 pub mod files;
