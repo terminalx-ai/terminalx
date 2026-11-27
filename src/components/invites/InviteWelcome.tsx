@@ -3,6 +3,7 @@ import { AlertCircle, Bot, Check, CreditCard, Github, Loader2, Server, Sparkles 
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
+import { suspendHotkeys } from "@/lib/hotkeys";
 import { isMac } from "@/lib/platform";
 import { WindowControls } from "@/components/layout/WindowControls";
 import { acceptInvite, agentName, decideLater, declineInvite, fetchWelcome, inviteErrorMessage, type InviteWelcome as Welcome, type MyInvite } from "@/lib/myInvites";
@@ -109,6 +110,9 @@ export function InviteWelcome({ invite, onClose }: { invite: MyInvite; onClose: 
   const primary = useRef<HTMLButtonElement>(null);
   // Opened by a click: focus goes to Accept and join, so Enter there (and only there) accepts.
   useEffect(() => primary.current?.focus({ preventScroll: true }), []);
+  // A modal layer: app shortcuts wait, and nothing outside the card (the shell, composers, portals) takes focus.
+  useEffect(() => suspendHotkeys(), []);
+  useEffect(() => (root.current ? inertOutside(root.current) : undefined), []);
 
   useEffect(() => {
     let live = true;
@@ -169,9 +173,14 @@ export function InviteWelcome({ invite, onClose }: { invite: MyInvite; onClose: 
       aria-modal="true"
       aria-labelledby="invite-welcome-title"
       data-testid="invite-welcome"
-      className="fixed inset-0 z-50 flex flex-col bg-background"
+      className="fixed inset-0 z-(--z-dialog) flex flex-col bg-background"
       onKeyDown={(event) => {
-        if (event.key !== "Escape" || event.defaultPrevented) return;
+        if (event.defaultPrevented) return;
+        if (event.key === "Tab" && root.current) {
+          trapTab(root.current, event);
+          return;
+        }
+        if (event.key !== "Escape") return;
         event.preventDefault();
         later();
       }}
@@ -294,6 +303,37 @@ export function InviteWelcome({ invite, onClose }: { invite: MyInvite; onClose: 
       </div>
     </section>
   );
+}
+
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** Tab and Shift+Tab wrap inside the card. */
+function trapTab(card: HTMLElement, event: { shiftKey: boolean; preventDefault: () => void }) {
+  const items = [...card.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((item) => !item.closest("[inert]"));
+  if (!items.length) return;
+  const first = items[0];
+  const last = items[items.length - 1];
+  const active = document.activeElement;
+  const inside = active instanceof Node && card.contains(active);
+  if (event.shiftKey ? !inside || active === first : !inside || active === last) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  }
+}
+
+/** Marks everything outside `card` inert, at every level up to the body; gives back what it changed. */
+export function inertOutside(card: HTMLElement): () => void {
+  const changed: HTMLElement[] = [];
+  for (let node: HTMLElement | null = card; node && node !== document.body; node = node.parentElement) {
+    for (const sibling of node.parentElement?.children ?? []) {
+      if (sibling === node || !(sibling instanceof HTMLElement) || sibling.inert) continue;
+      sibling.inert = true;
+      changed.push(sibling);
+    }
+  }
+  return () => {
+    for (const element of changed) element.inert = false;
+  };
 }
 
 function Note({ children }: { children: ReactNode }) {
