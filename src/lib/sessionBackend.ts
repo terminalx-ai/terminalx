@@ -1,4 +1,5 @@
 import type { AgentProcessState, AgentTabInfo, HeldFollowUpInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
+import { primeSharedPrompts, withNewChatPrompts } from "@/lib/sharedSetups";
 import { cloudComposerPeople, type ComposerPeople } from "@/lib/mentionSends";
 import { agent, attachments, errorMessage, experimental, type FileInput, type ImageInput, type SendOutcome } from "@/lib/api";
 import type { ContinuationContext } from "@terminalx/portable/continuation";
@@ -528,7 +529,10 @@ export async function sendFirstMessage(sessionId: string, tabId: string, text: s
     showError(`Couldn't attach ${files.length === 1 ? files[0].name : `${files.length} files`} to the first message`, error);
     throw error;
   }) : undefined;
-  return agent.send(sessionId, tabId, text, images, false, undefined, stored, promptRequestId);
+  // PRO-154: general instructions and branch names, the organization's then the person's.
+  if (text.trim()) await primeSharedPrompts(sessionId);
+  const sent = withNewChatPrompts(text, sessionId);
+  return agent.send(sessionId, tabId, sent, images, false, undefined, stored, promptRequestId);
 }
 
 /** Show the local Create prompt immediately, using the same send and attachment storage as before. */

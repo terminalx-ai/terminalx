@@ -21,6 +21,8 @@ import { EnvironmentsTab } from "@/components/localVm/EnvironmentsTab";
 import { ProjectTemplatesSettings } from "./ProjectTemplatesSettings";
 import { MachinesSettings } from "@/components/machines/MachinesSettings";
 import { StatsUsageView } from "@/components/stats/StatsUsageView";
+import { DefaultModelsSettings } from "./DefaultModelsSettings";
+import { PromptsSettings } from "./PromptsSettings";
 
 interface SectionContext {
   onOpenSkills?: () => void;
@@ -46,6 +48,8 @@ export const settingsSectionRenderers: Record<SettingsSection, (context: Section
   organizations: ({ organizationId, organizationPage, onOpenOrganization }) => <OrganizationsTab organizationId={organizationId} page={organizationPage} onOpenOrganization={onOpenOrganization} />,
   agents: ({ onOpenSkills }) => <AgentsTab onOpenSkills={onOpenSkills} showIntroduction={false} />,
   orchestrator: () => <OrchestratorTab />,
+  defaultModels: () => <DefaultModelsSettings />,
+  prompts: () => <PromptsSettings />,
   environment: () => <EnvironmentSettings />,
   mcp: () => <McpSettings />,
   localVms: () => <RegisteredSetting setting="localVms.tasks"><section><EnvironmentsTab /></section></RegisteredSetting>,

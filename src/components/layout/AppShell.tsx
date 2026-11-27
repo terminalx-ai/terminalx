@@ -15,6 +15,8 @@ import { phase2Ready } from "@/lib/phase2Readiness";
 import { CloudSetupFlow } from "@/components/cloudSetup/CloudSetupFlow";
 import { useUnknownSettingLink } from "@/lib/settingsDeepLink";
 import { bootDesktopLinks } from "@/lib/desktopLinks";
+import { SlotsLinkHost } from "@/components/people/EquipSlotsDialog";
+import { useSharedSetupsSync } from "@/lib/sharedSetups";
 import { bootLastView } from "@/lib/lastView";
 import { LinkSessionDialog } from "@/components/start/LinkSessionDialog";
 import type { SettingId } from "@/components/settings/settingsRegistry";
@@ -159,6 +161,8 @@ export const TITLEBAR_INSET = isMac ? 78 : 8;
  */
 export function AppShell() {
   const prefs = usePrefs();
+  // PRO-154: the organization's shared prompts and snippets, kept current.
+  useSharedSetupsSync();
   const status = useStatus();
   // A runtime the app is moving to shows in the status bar, even a hidden one (#766).
   const runtimeSwitch = useRuntimeSwitch();
@@ -455,6 +459,7 @@ export function AppShell() {
         <CloseUndoNotices />
         <ArchiveNotices />
         <Toasts />
+        <SlotsLinkHost />
         <UnknownSettingLinkToast />
         <ProjectAddedNotice />
         <InviteNotices />
