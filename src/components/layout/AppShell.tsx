@@ -118,6 +118,9 @@ import { workspaceKey, branchSessionsAsTabs } from "@/lib/tabLayouts";
 import { conversationBranch } from "@/lib/checkout";
 import { stepAttentionSession, stepVisibleSession } from "@/lib/sessionNavigation";
 import { ImageViewerHost } from "@/components/ui/ImageViewer";
+import { WindowControls } from "./WindowControls";
+import { AppMenu } from "./AppMenu";
+import { isMac } from "@/lib/platform";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const CloudWorkspaceMain = lazy(() => import("@/components/cloud/CloudWorkspaceMain").then((module) => ({ default: module.CloudWorkspaceMain })));
@@ -135,7 +138,8 @@ const viewFallback = <div className="flex min-h-0 flex-1 items-center justify-ce
  */
 const MAIN = "flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-clip";
 
-export const TITLEBAR_INSET = 78; // traffic-light clearance, px
+/** Room on the left of the top strip: the traffic lights on a Mac; elsewhere the window's buttons are the app's, at the right (`WindowControls`). */
+export const TITLEBAR_INSET = isMac ? 78 : 8;
 
 /**
  * Main content between one navigation sidebar and the optional right panel.
@@ -612,6 +616,7 @@ function UnselectedWorkspace({
           className="flex h-(--titlebar-h) shrink-0 items-center gap-1 px-2"
           style={{ paddingLeft: sidebarOpen ? 8 : TITLEBAR_INSET }}
         >
+          {!sidebarOpen && <AppMenu />}
           {!sidebarOpen && (
             <WithTooltip label="Show sidebar" shortcut="app.toggleSidebar">
               <Button variant="ghost" size="icon-sm" aria-label="Show sidebar" onClick={onToggleSidebar}>
@@ -638,6 +643,7 @@ function UnselectedWorkspace({
               </Button>
             </WithTooltip>
           )}
+          <WindowControls />
         </header>
         <section className="@container/editor-host relative flex min-h-0 flex-1">
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">

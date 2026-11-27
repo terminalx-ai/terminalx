@@ -46,6 +46,8 @@ pub fn lock() -> Admitted {
 /// [`lock`], given up on at `deadline` (`None`): for a handover, which holds
 /// every hook still while it waits and so must not wait behind whatever
 /// holds admission, a step's git work among it, for as long as that takes.
+// The handover that calls it is built for Unix only.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn lock_by(deadline: std::time::Instant) -> Option<Admitted> {
     loop {
         match ADMISSION.try_lock() {
@@ -64,6 +66,7 @@ pub fn lock_by(deadline: std::time::Instant) -> Option<Admitted> {
 }
 
 /// Whether nothing holds admission this instant: a handover picks such a moment.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn free() -> bool {
     !matches!(ADMISSION.try_lock(), Err(std::sync::TryLockError::WouldBlock))
 }

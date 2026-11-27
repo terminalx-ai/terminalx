@@ -86,7 +86,7 @@ MACOS_FILTERS = (
     "pairing::", "power::", "pty::", "quit::", "remote::environment", "remote::machine", "remote::port_listeners",
     "secret_clipboard::", "serve::", "serve_cli::", "sidebar_activity::", "skills::", "startup::", "status::",
     "store::activity", "store::environment", "store::settings", "store::managed_configuration", "stray_processes::", "transcription::",
-    "transparency::", "worktree_cleanup::",
+    "transparency::", "updater::", "worktree_cleanup::",
 )
 
 # Rust: the crates, and every path outside them that a Rust test or build

@@ -26,6 +26,7 @@ import { selectCloudSession, selectSession } from "@/lib/sessions";
 import { useAccount } from "@/lib/account";
 import { computerColorCss, computerNameOf } from "@/lib/computerIdentity";
 import { cloudSessionKey, cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
+import { WindowControls } from "@/components/layout/WindowControls";
 
 const NOT_CONNECTED: WorkspaceConnectionState = { state: "idle" };
 
@@ -224,6 +225,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
             {resuming ? <Loader2 className="animate-spin" /> : <Play />} Resume
           </Button>
         )}
+        <WindowControls />
       </header>
       {item && attention && canOpen && !locked && <CloudWorkspaceAttention item={item} input={{ agentRan, connection: state.state }} onOpenSession={inspect} />}
       {stopped && (

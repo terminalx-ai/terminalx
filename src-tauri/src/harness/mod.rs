@@ -220,6 +220,20 @@ struct Setup {
     /// A page of the provider's that answers when the network does, asked
     /// only after a failure, to tell an outage from a refusal.
     probe: &'static str,
+    /// The provider's own Windows installer, run in Windows PowerShell. `None`:
+    /// it has none, and Windows is sent to the setup guide.
+    windows: Option<WindowsSetup>,
+}
+
+/// An agent's Windows installer (a PowerShell script) and what it needs.
+#[cfg_attr(not(windows), allow(dead_code))]
+struct WindowsSetup {
+    /// The provider's official `install.ps1`.
+    installer: &'static str,
+    /// Settings for the installer, as the Unix `runner` gives them with `env`.
+    env: &'static [(&'static str, &'static str)],
+    /// Where it writes, under the home folder (`AppData\Local\…` for `%LOCALAPPDATA%`).
+    writes: &'static [&'static str],
 }
 
 struct Headless {
@@ -246,6 +260,8 @@ const REGISTRY: &[Spec] = &[
             login: &["auth", "login"],
             login_elsewhere: None,
             probe: "https://claude.ai/install.sh",
+            // The same folders under %USERPROFILE%: the launcher in .local\bin.
+            windows: Some(WindowsSetup { installer: "https://claude.ai/install.ps1", env: &[], writes: &[r".local\bin", r".local\share\claude", ".claude"] }),
         }),
         caps: Capabilities { images: true, steer: true, permission_modes: true, effort: true, slash_commands: true, at_mentions: true, fork: true, resume: true },
     },
@@ -269,6 +285,12 @@ const REGISTRY: &[Spec] = &[
             // A device code: the address and code open in any browser.
             login_elsewhere: Some(&["login", "--device-auth"]),
             probe: "https://chatgpt.com/codex/install.sh",
+            // %LOCALAPPDATA%\Programs\OpenAI\Codex\bin; non-interactive as on Unix.
+            windows: Some(WindowsSetup {
+                installer: "https://chatgpt.com/codex/install.ps1",
+                env: &[("CODEX_NON_INTERACTIVE", "1")],
+                writes: &[r"AppData\Local\Programs\OpenAI\Codex", ".codex"],
+            }),
         }),
         caps: Capabilities { images: true, steer: true, permission_modes: true, effort: true, slash_commands: false, at_mentions: false, fork: false, resume: true },
     },
@@ -312,7 +334,7 @@ pub fn catalog() -> Vec<HarnessInfo> {
                 path: path.map(|p| p.to_string_lossy().into_owned()),
                 install_hint: install_hint(spec).into(),
                 install_url: spec.install_url.into(),
-                installable: spec.setup.is_some() && cfg!(unix),
+                installable: spec.setup.as_ref().is_some_and(|setup| cfg!(unix) || setup.windows.is_some()),
                 caps: spec.caps,
             }
         })

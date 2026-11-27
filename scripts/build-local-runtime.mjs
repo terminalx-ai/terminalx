@@ -106,6 +106,16 @@ function main() {
       run('codesign', [...signing, staging], { stdio: 'inherit' })
       run('codesign', ['--verify', '--strict', staging], { stdio: 'inherit' })
     }
+    // A signed Windows release (release-desktop.yml) signs the runtime as Tauri signs the app: it is a resource,
+    // which the bundler leaves as it is. Without a certificate the runtime stays unsigned, as in every other build.
+    const thumbprint = process.env.TERMINALX_WINDOWS_CERTIFICATE_THUMBPRINT
+    if (plan.windows && thumbprint) {
+      const timestamp = process.env.TERMINALX_WINDOWS_TIMESTAMP_URL
+      if (!timestamp) throw new Error('TERMINALX_WINDOWS_TIMESTAMP_URL is required with a certificate thumbprint')
+      const signtool = process.env.TERMINALX_SIGNTOOL || 'signtool'
+      run(signtool, ['sign', '/sha1', thumbprint, '/fd', 'sha256', '/tr', timestamp, '/td', 'sha256', staging], { stdio: 'inherit' })
+      run(signtool, ['verify', '/pa', staging], { stdio: 'inherit' })
+    }
     renameSync(staging, destination)
     console.log(`Local runtime: ${destination} (${plan.targets.join(', ')}, ${plan.profile}, ${plan.macos ? (plan.production ? 'release signing' : 'development signing') : plan.windows ? 'Windows executable' : 'Linux executable'})`)
   } finally {

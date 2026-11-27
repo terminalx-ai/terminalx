@@ -367,8 +367,10 @@ fn tab_link_for(app: tauri::AppHandle, session_id: String, tab_id: String) -> Re
 }
 
 /// The desktop's log file, `desktop.log` beside the runtime's (#716), kept
-/// from setup on: the app's stderr goes nowhere once it is opened normally.
-#[cfg(all(feature = "desktop", unix))]
+/// from setup on: the app's stderr goes nowhere once it is opened normally
+/// (from the Dock, the Start menu or a desktop launcher). On Windows it is in
+/// `%LOCALAPPDATA%\<identifier>\logs`.
+#[cfg(feature = "desktop")]
 static DESKTOP_LOG: std::sync::OnceLock<std::sync::Mutex<local_runtime::log_file::Log>> = std::sync::OnceLock::new();
 
 #[cfg(all(any(target_os = "macos", windows), feature = "desktop"))]
@@ -388,7 +390,6 @@ pub fn run() {
     #[cfg(windows)]
     win::process::windowless_console();
     let mut logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
-    #[cfg(unix)]
     logger.target(env_logger::Target::Pipe(Box::new(local_runtime::log_file::Tee::new(&DESKTOP_LOG))))
         .write_style(env_logger::WriteStyle::Never);
     logger.init();
@@ -452,7 +453,13 @@ pub fn run() {
         window_endpoint: std::sync::OnceLock::new(),
     };
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // First, before any other plugin: on Windows and Linux a link the app is opened with while it runs
+    // (a sign-in callback, a join or launch link) starts a second copy. This hands the link to the running
+    // app, where the deep-link handler below takes it, brings the window forward and ends the second copy.
+    #[cfg(any(windows, target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| account::focus_main_window(app)));
+    builder
         .manage(media::MediaServer::default())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
@@ -463,7 +470,14 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(transparency::plugin())
         .plugin(platform_profile::plugin())
-        .plugin(tauri_plugin_window_state::Builder::default().with_filter(|label| !chat_windows::is_chat_window(label)).build())
+        // Size, place and maximized state, but never the frame: that is the build's (none on Windows and Linux,
+        // where the app draws its own), and a frame saved by an earlier version must not come back.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(tauri_plugin_window_state::StateFlags::all() - tauri_plugin_window_state::StateFlags::DECORATIONS)
+                .with_filter(|label| !chat_windows::is_chat_window(label))
+                .build(),
+        )
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -483,7 +497,6 @@ pub fn run() {
         .manage(machine_connections.clone())
         .manage(account_machines)
         .setup(move |app| {
-            #[cfg(unix)]
             match app.path().app_log_dir() {
                 Ok(dir) => if let Err(error) = local_runtime::log_file::keep(&DESKTOP_LOG, &dir.join("desktop.log")) {
                     log::warn!("the desktop log is not kept in a file: {error}");
@@ -524,6 +537,13 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
+                // Windows and Linux learn the terminalx:// scheme from the app itself when it was not installed
+                // by a package that registers it (a development build, an AppImage). An installed app’s own
+                // registration is pointed at this copy again, which is the same.
+                #[cfg(any(windows, target_os = "linux"))]
+                if let Err(error) = app.deep_link().register_all() {
+                    log::warn!("could not register the app’s link scheme: {error}");
+                }
                 let app_handle = app.handle().clone();
                 let links = desktop_links::DesktopLinks::for_identifier(&app.config().identifier);
                 let account = account.clone();
@@ -654,7 +674,8 @@ pub fn run() {
             data_privacy::data_privacy_status,
             data_privacy::data_privacy_set,
             updater::app_update_check,
-            updater::app_update_install,
+            updater::app_update_download,
+            updater::app_update_apply,
             commands::repository_files_preview,
             commands::repository_folders,
             commands::account_status,
@@ -1322,6 +1343,8 @@ pub fn run() {
             commands::status_codex_reset,
             commands::status_resource_overview,
             native_menu::set_native_menu,
+            native_menu::app_menu_item,
+            native_menu::posix_shell_missing,
             native_menu::native_window_action,
             native_menu::forward_menu_action,
             chat_windows::new_chat_window,

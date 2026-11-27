@@ -921,7 +921,7 @@ async fn runtime_agents_reports_each_agents_sign_in_and_the_missing_ones() {
     let missing = listed["missing"].as_array().unwrap();
     let codex = missing.iter().find(|agent| agent["id"] == "codex").expect("codex has no CLI there");
     assert_eq!(codex["name"], "Codex");
-    assert_eq!(codex["installable"], cfg!(unix));
+    assert_eq!(codex["installable"], true, "Codex has an installer TerminalX runs on every system");
     assert!(missing.iter().all(|agent| agent["id"] != "claude"), "an installed agent is not missing");
 
     // Signed out since: a kept answer is used for a minute, `refresh` asks again.
