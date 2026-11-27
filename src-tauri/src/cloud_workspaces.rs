@@ -5047,6 +5047,10 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_agent_route_credential_invalid"
             | "cloud_agent_route_credential_required"
             | "cloud_agent_route_conflict"
+            | "cloud_organization_routes_unavailable"
+            | "cloud_organization_route_repository_invalid"
+            | "cloud_organization_route_exists"
+            | "cloud_organization_route_not_found"
     )
 }
 
@@ -5319,7 +5323,7 @@ fn ensure_list(
 }
 
 mod agent_model_routes;
-pub use agent_model_routes::{AgentRouteAgent, AgentRouteSave, AgentRouteSaved};
+pub use agent_model_routes::{AgentRouteAgent, AgentRouteSave, AgentRouteSaved, OrganizationRouteAdd};
 
 #[cfg(test)]
 mod tests {
@@ -7216,6 +7220,117 @@ mod tests {
         let (_, service) = test_service(&base);
         service.remove_agent_route(None, &revision, AgentRouteAgent::Codex).unwrap();
         assert!(requests.join().unwrap()[0].starts_with("DELETE /v1/desktop/orgs/org-1/agent-model-routes/codex "));
+    }
+
+    // ---- organization routes (PRO-310)
+
+    const ORGANIZATION_ROUTE_ID: &str = "orgroute_0b6f3c1e-1d2a-4f5b-8c7d-9e0f1a2b3c4d";
+
+    fn organization_routes_body(can_manage: bool) -> String {
+        json!({
+            "canManage": can_manage,
+            "templates": [
+                { "id": "claude-gateway", "version": 1, "provider": "claude", "mode": "custom-endpoint", "label": "LLM gateway", "capabilities": { "modelList": "anthropic" } }
+            ],
+            "routes": [{ "id": ORGANIZATION_ROUTE_ID, "provider": "claude", "repository": "acme/terminalx", "templateId": "claude-gateway", "settings": { "baseUrl": "https://gateway.example.com" } }]
+        })
+        .to_string()
+    }
+
+    fn organization_route_add(revision: &str, repository: &str, template: &str) -> OrganizationRouteAdd {
+        OrganizationRouteAdd {
+            organization_id: None,
+            context_revision: revision.into(),
+            agent: AgentRouteAgent::Claude,
+            repository: repository.into(),
+            template_id: template.into(),
+            settings: json!({ "baseUrl": "https://gateway.example.com", "authScheme": "bearer" }).as_object().unwrap().clone(),
+            save_unchecked: false,
+        }
+    }
+
+    fn organization_routes_ready(account: &AccountManager) {
+        account.set_memberships_for_test(&["org-1"], true);
+        account.apply_phase2_readiness_for_test(json!({
+            "version": 1,
+            "organizations": { "org-1": { (crate::account::PHASE2_ORGANIZATION_ROUTES): true } }
+        }));
+    }
+
+    #[test]
+    fn organization_routes_are_read_only_behind_their_readiness_key() {
+        let (_, service) = test_service("http://127.0.0.1:9");
+        assert_eq!(service.organization_routes(None).unwrap_err().code, "cloud_organization_routes_unavailable");
+        let revision = AccountManager::context_revision(&context());
+        assert_eq!(service.remove_organization_route(None, &revision, ORGANIZATION_ROUTE_ID).unwrap_err().code, "cloud_organization_routes_unavailable");
+
+        let (base, requests) = serve_each(vec![response("200 OK", &organization_routes_body(false), "")]);
+        let (account, service) = test_service(&base);
+        organization_routes_ready(&account);
+        let routes = service.organization_routes(None).unwrap();
+        assert_eq!(routes["routes"][0]["repository"], "acme/terminalx");
+        assert_eq!(routes["canManage"], false);
+        assert!(requests.join().unwrap()[0].starts_with("GET /v1/desktop/orgs/org-1/organization-model-routes "));
+
+        // An answer without canManage is not trusted.
+        let (base, requests) = serve_each(vec![response("200 OK", r#"{"routes":[]}"#, "")]);
+        let (account, service) = test_service(&base);
+        organization_routes_ready(&account);
+        assert!(service.organization_routes(None).is_err());
+        requests.join().unwrap();
+    }
+
+    #[test]
+    fn an_organization_route_is_added_by_a_manager_with_its_credential_sent_once() {
+        let revision = AccountManager::context_revision(&context());
+        let (base, requests) = serve_each(vec![response("200 OK", &organization_routes_body(true), ""), response("200 OK", &organization_routes_body(true), "")]);
+        let (account, service) = test_service(&base);
+        organization_routes_ready(&account);
+        let add = organization_route_add(&revision, " Acme/TerminalX ", "claude-gateway");
+        let change = service.prepare_organization_route(&add).unwrap();
+        assert_eq!(change.host().as_deref(), Some("gateway.example.com"));
+        let routes = service.add_organization_route(&change, &add, zeroize::Zeroizing::new("sk-org-native-1".into())).unwrap();
+        let requests = requests.join().unwrap();
+        assert!(requests[1].starts_with("POST /v1/desktop/orgs/org-1/organization-model-routes "), "{}", requests[1]);
+        let body: Value = serde_json::from_str(requests[1].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body, json!({ "agent": "claude", "repository": "acme/terminalx", "templateId": "claude-gateway", "settings": { "baseUrl": "https://gateway.example.com", "authScheme": "bearer" }, "credential": "sk-org-native-1" }));
+        assert!(!routes.to_string().contains("sk-org-native-1"));
+    }
+
+    #[test]
+    fn an_organization_route_is_refused_before_a_credential_is_asked_for() {
+        let revision = AccountManager::context_revision(&context());
+        // Nothing is sent for a bad repository or a stale page.
+        let (account, service) = test_service("http://127.0.0.1:9");
+        organization_routes_ready(&account);
+        assert_eq!(service.prepare_organization_route(&organization_route_add(&revision, "not a repo", "claude-gateway")).err().unwrap().code, "cloud_organization_route_repository_invalid");
+        assert_eq!(service.prepare_organization_route(&organization_route_add("stale", "acme/x", "claude-gateway")).err().unwrap().code, "account_context_changed");
+        // A member, and a template the service does not offer for organization routes.
+        for (can_manage, template, code) in [(false, "claude-gateway", "organization_admin_required"), (true, "claude-key-helper", "cloud_agent_route_template_unknown")] {
+            let (base, requests) = serve_each(vec![response("200 OK", &organization_routes_body(can_manage), "")]);
+            let (account, service) = test_service(&base);
+            organization_routes_ready(&account);
+            assert_eq!(service.prepare_organization_route(&organization_route_add(&revision, "acme/x", template)).err().unwrap().code, code);
+            assert_eq!(requests.join().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn removing_an_organization_route_deletes_it_by_id_and_keeps_refusals() {
+        let revision = AccountManager::context_revision(&context());
+        let (base, requests) = serve_each(vec![response("200 OK", r#"{"canManage":true,"templates":[],"routes":[]}"#, "")]);
+        let (account, service) = test_service(&base);
+        organization_routes_ready(&account);
+        assert_eq!(service.remove_organization_route(None, &revision, ORGANIZATION_ROUTE_ID).unwrap()["routes"], json!([]));
+        assert!(requests.join().unwrap()[0].starts_with(&format!("DELETE /v1/desktop/orgs/org-1/organization-model-routes/{ORGANIZATION_ROUTE_ID} ")));
+        assert_eq!(service.remove_organization_route(None, &revision, "../x").unwrap_err().code, "cloud_organization_route_not_found");
+        for code in ["organization_admin_required", "cloud_organization_route_not_found"] {
+            let (base, requests) = serve_each(vec![response("403 Forbidden", &json!({ "error": code }).to_string(), "")]);
+            let (account, service) = test_service(&base);
+            organization_routes_ready(&account);
+            assert_eq!(service.remove_organization_route(None, &revision, ORGANIZATION_ROUTE_ID).unwrap_err().code, code);
+            requests.join().unwrap();
+        }
     }
 
     // ---- agent logins (PRO-79)

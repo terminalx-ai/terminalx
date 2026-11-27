@@ -473,6 +473,11 @@ export const api = {
   cloudAgentRouteSave: (save: AgentRouteSave) => invoke<AgentRouteSaved>("cloud_agent_route_save", { save }),
   cloudAgentRouteRemove: (agent: AgentRouteAgent, contextRevision: string, orgId?: string | null) =>
     invoke<AgentRoutes>("cloud_agent_route_remove", { agent, contextRevision, orgId: orgId ?? null }),
+  // Organization routes (PRO-310): set by owners and admins for everyone, per agent and repository.
+  cloudOrganizationRoutes: (orgId?: string | null) => invoke<OrganizationRoutes>("cloud_organization_routes", { orgId: orgId ?? null }),
+  cloudOrganizationRouteAdd: (add: OrganizationRouteAdd) => invoke<OrganizationRouteAdded>("cloud_organization_route_add", { add }),
+  cloudOrganizationRouteRemove: (routeId: string, contextRevision: string, orgId?: string | null) =>
+    invoke<OrganizationRoutes>("cloud_organization_route_remove", { routeId, contextRevision, orgId: orgId ?? null }),
   // "Log in with Claude" (PRO-82): the account service runs the sign-in and keeps a login it can renew.
   // The page opens in the browser; the code it shows is entered in a native dialog, never here.
   cloudAgentClaudeLoginStart: (consent: AgentLoginConsent) => invoke<ClaudeLoginStarted>("cloud_agent_claude_login_start", { consent }),
@@ -1218,6 +1223,44 @@ export interface AgentRouteSave {
   enterCredential: boolean;
   /** Save even when this Mac's check of the endpoint fails. */
   saveUnchecked: boolean;
+}
+
+/** An organization route (PRO-310): a custom provider for everyone's workspaces on one repository. */
+export interface OrganizationRoute {
+  id: string;
+  provider: AgentRouteAgent;
+  /** `owner/name`, lowercase. */
+  repository: string;
+  templateId: string;
+  templateVersion: number;
+  templateCurrent: boolean;
+  settings: AgentRouteSettings;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface OrganizationRoutes {
+  /** Owners and admins add and remove routes; everyone else reads them. */
+  canManage: boolean;
+  templates: AgentRouteTemplate[];
+  routes: OrganizationRoute[];
+}
+
+export interface OrganizationRouteAdd {
+  organizationId: string | null;
+  contextRevision: string;
+  agent: AgentRouteAgent;
+  repository: string;
+  templateId: string;
+  settings: AgentRouteSettings;
+  saveUnchecked: boolean;
+}
+
+export interface OrganizationRouteAdded {
+  saved: boolean;
+  check: AgentRouteCheckResult | null;
+  routes: OrganizationRoutes | null;
 }
 
 export interface AgentRouteSaved {

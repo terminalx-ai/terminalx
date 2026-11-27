@@ -10,6 +10,7 @@ import { isMultiOrg } from "@/lib/multiOrg";
 import { organizationName } from "@/lib/organizationVisibility";
 import { OrganizationAgentLogins } from "./OrganizationAgentLogins";
 import { OrganizationAgentRoutes } from "./OrganizationAgentRoutes";
+import { OrganizationRoutes } from "./OrganizationRoutes";
 import { OrganizationCloudCompute } from "./OrganizationCloudCompute";
 import { OrganizationCloudTeardown } from "./OrganizationCloudTeardown";
 import { OrganizationDelete } from "./OrganizationDelete";
@@ -125,7 +126,10 @@ export function OrganizationSettings({ organization, page = "general", onDeleted
           limits: <RegisteredSetting setting="organizations.compute" instance={organization.id}><div className="contents"><OrganizationCompute contextRevision={contextRevision} /></div></RegisteredSetting>,
         }} />;
       case "agentLogins":
-        return <RegisteredSetting setting="organizations.agentLogins" instance={organization.id}><div className="contents"><OrganizationAgentLogins key={organization.id} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} /></div></RegisteredSetting>;
+        return <>
+          <RegisteredSetting setting="organizations.agentLogins" instance={organization.id}><div className="contents"><OrganizationAgentLogins key={organization.id} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} /></div></RegisteredSetting>
+          <OrganizationRoutes key={`organization-routes-${organization.id}`} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} />
+        </>;
       case "modelAccess":
         return <RegisteredSetting setting="organizations.agentRoutes" instance={organization.id}><div className="contents"><OrganizationAgentRoutes key={`routes-${organization.id}`} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} /></div></RegisteredSetting>;
       case "github":
