@@ -72,5 +72,5 @@ export function privacyBlocksCommand(command: string): boolean {
   // Machines (PRO-357): neither operating nor being operated. Reading what is
   // paired and what happened stays possible; the runtime keeps the switch off.
   if (["machines_list", "machines_host_status", "machines_connections", "machines_activity", "machines_set_allow_operating", "machines_cancel_pairing", "machines_account_cancel"].includes(command)) return false;
-  return /^(account_|organization_|cloud_|pairing_|session_share|session_join|session_guest|guest_|machines_|machine_remote_)/.test(command);
+  return /^(account_|organization_|cloud_|pairing_|session_share|session_join|session_guest|guest_|machines_|machine_remote_|team_artifact)/.test(command);
 }

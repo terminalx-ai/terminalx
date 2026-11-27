@@ -28,6 +28,7 @@ import { forgetIssueViewers } from "@/lib/issueViewer";
 import { ComputerUseRows } from "./ComputerUseSettings";
 import changelog from "../../../CHANGELOG.md?raw";
 import { setStatusSettings, useStatus } from "@/lib/status";
+import { useAccount } from "@/lib/account";
 import { AgentIdleSettings } from "./AgentIdleSettings";
 import { CommandApprovalSettings } from "./CommandApprovalSettings";
 import { ArchiveIdleSettings } from "./ArchiveIdleSettings";
@@ -37,12 +38,15 @@ import { openStartupDiagnostics } from "@/lib/startupDiagnostics";
 import { QuickChatSettings } from "./FloatingWindowSettings";
 import { CopyAgentConfigsRow } from "./AgentConfigsDialog";
 import { SnippetManager } from "./SnippetManager";
+import { TeamArtifactsPublishSetting } from "@/components/teamArtifacts/PublishSetting";
+import { teamArtifactOrg } from "@/lib/teamArtifacts";
 
 export function GeneralTab() {
   const prefs = usePrefs();
   // PRO-377: the layout, sidebar and status bar rows live here; Appearance keeps the design's rows (09.08).
   const order = useSidebarOrder();
   const status = useStatus();
+  const account = useAccount().status;
   // PRO-40: the switch lives in native code (the control socket reads it itself); this shows what it says.
   const cloudControlOn = useSyncExternalStore(subscribeCloudControlSetting, cloudControlEnabled, cloudControlEnabled);
   const [cloudControlReason, setCloudControlReason] = useState<string | null>(null);
@@ -94,6 +98,8 @@ export function GeneralTab() {
           {cloudControlReason}
         </p>
       )}
+      {/* PRO-158: shown once an organization has team artifacts. */}
+      {teamArtifactOrg(account) && <TeamArtifactsPublishSetting />}
       <RegisteredSetting setting="general.commandLine"
         description={
           cli?.installed

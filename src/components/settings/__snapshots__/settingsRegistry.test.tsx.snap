@@ -80,6 +80,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "general.websiteLinks",
   "general.linkActions",
   "general.cloudControl",
+  "general.teamArtifactsPublish",
   "general.commandLine",
   "general.mentionNotifications",
   "general.sounds",
