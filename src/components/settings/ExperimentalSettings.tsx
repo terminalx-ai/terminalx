@@ -9,12 +9,15 @@ import { noteExperimentalSettings } from "@/lib/experimentalSettings";
 import { refreshModels } from "@/lib/models";
 import { refreshHarnesses } from "@/lib/sessions";
 import { familyNow } from "@/lib/platform";
+import { setPrefs, usePrefs } from "@/lib/prefs";
 
 export { NATIVE_CODEX_DESCRIPTION, ORCHESTRATOR_RUNS_DESCRIPTION } from "./settingsRegistry";
 
 /** Features that are on only when the reader turns them on. */
 export function ExperimentalTab() {
   const { revision } = useSettingsFile();
+  // The intro's switch (PRO-241, key desktop.intro-slides.v1) is this app's own preference, not the runtime's.
+  const prefs = usePrefs();
   const [nativeCodex, setNativeCodex] = useState<boolean | null>(null);
   const [sessionCost, setSessionCost] = useState<boolean | null>(null);
   const [orchestratorRuns, setOrchestratorRuns] = useState<boolean | null>(null);
@@ -193,6 +196,9 @@ export function ExperimentalTab() {
       />
       <RegisteredSetting setting="experimental.bots"
         control={<Switch aria-label="Bots" checked={!botsOff && (bots ?? false)} disabled={!!botsOff || bots === null} onCheckedChange={(on) => void changeBots(on)} />}
+      />
+      <RegisteredSetting setting="experimental.intro"
+        control={<Switch aria-label="Intro" checked={prefs.introSlides} onCheckedChange={(on) => setPrefs({ introSlides: on })} />}
       />
       <NudgePreference />
       {(vmOff || botsOff) && <p data-testid="experimental-unsupported-note" className="pb-2 text-xs text-muted-foreground">{[vmOff, botsOff].filter(Boolean).join(" ")}</p>}

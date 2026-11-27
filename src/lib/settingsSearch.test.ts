@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SETTINGS_ROWS } from "@/components/settings/settingsRegistry";
 import { noteExperimentalSettings } from "@/lib/experimentalSettings";
+import { setPrefs } from "@/lib/prefs";
 import { settingOffered } from "@/lib/settingsSections";
 import { groupSettingsByPage, searchSettings, SETTINGS_SEARCH_LIMIT, settingsSearchSummary } from "./settingsSearch";
 
@@ -172,7 +173,7 @@ describe("settings row search", () => {
 
   it("offers every row behind a switch only while that switch is on, and every other row always", () => {
     const behind = SETTINGS_ROWS.filter((row) => "requires" in row && row.requires);
-    expect(behind.map((row) => row.id)).toEqual(["agents.opencodeProviders", "repositories.orchestrator", "shortcuts.app.bots", "shortcuts.app.pauseAllBots"]);
+    expect(behind.map((row) => row.id)).toEqual(["agents.opencodeProviders", "repositories.orchestrator", "shortcuts.app.showIntro", "shortcuts.app.bots", "shortcuts.app.pauseAllBots"]);
     expect(behind.every((row) => !settingOffered(row))).toBe(true);
     orchestratorRuns(true);
     expect(behind.filter((row) => settingOffered(row)).map((row) => row.id)).toEqual(["repositories.orchestrator"]);
@@ -183,6 +184,10 @@ describe("settings row search", () => {
     expect(searchSettings("bots").map((match) => match.id)).toContain("shortcuts.app.bots");
     bots(false);
     expect(searchSettings("bots").map((match) => match.id)).not.toContain("shortcuts.app.bots");
+    // The intro's switch is this app's own preference (PRO-241), not the runtime's.
+    setPrefs({ introSlides: true });
+    expect(behind.filter((row) => settingOffered(row)).map((row) => row.id)).toEqual(["shortcuts.app.showIntro"]);
+    setPrefs({ introSlides: false });
     orchestratorRuns(false);
     // Off until the switches are read, as for a section.
     expect(SETTINGS_ROWS.filter((row) => !("requires" in row && row.requires) && !("macOnly" in row && row.macOnly) && row.section !== "orchestrator" && row.section !== "localVms" && row.section !== "machines").every((row) => settingOffered(row))).toBe(true);

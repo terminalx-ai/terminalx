@@ -4,7 +4,7 @@ import { useEffect } from "react";
 import { isCompactWindow } from "./appWindow";
 import { hotkeysSuspended, registerShortcut, runShortcut, subscribeHotkeySuspension } from "./hotkeys";
 import { buildNativeMenu } from "./nativeMenu";
-import { subscribePrefs } from "./prefs";
+import { getPrefs, subscribePrefs } from "./prefs";
 import { getSessionStore, openProjectOverview, subscribeSessionStore } from "./sessions";
 import { currentKeymap, isShortcutId, SHORTCUT_ACTIONS } from "./shortcuts";
 
@@ -26,14 +26,16 @@ export function startNativeMenu(): () => void {
   let stopped = false;
   const cleanups: (() => void)[] = [];
   let previous = "";
-  let inputs: { keymap: ReturnType<typeof currentKeymap>; projects: ReturnType<typeof getSessionStore>["projects"]; suspended: boolean } | null = null;
+  let inputs: { keymap: ReturnType<typeof currentKeymap>; projects: ReturnType<typeof getSessionStore>["projects"]; suspended: boolean; intro: boolean } | null = null;
   const sync = () => {
     const keymap = currentKeymap();
     const projects = getSessionStore().projects;
     const suspended = hotkeysSuspended();
+    // Help › Show intro comes and goes with its switch (PRO-241).
+    const intro = getPrefs().introSlides;
     // Streaming tab status changes do not change the native menu.
-    if (inputs?.keymap === keymap && inputs.projects === projects && inputs.suspended === suspended) return;
-    inputs = { keymap, projects, suspended };
+    if (inputs?.keymap === keymap && inputs.projects === projects && inputs.suspended === suspended && inputs.intro === intro) return;
+    inputs = { keymap, projects, suspended, intro };
     const groups = buildNativeMenu(keymap, projects, suspended);
     const next = JSON.stringify(groups);
     if (next === previous) return;
