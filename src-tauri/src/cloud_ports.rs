@@ -37,7 +37,9 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::net::{TcpListener, TcpSocket};
+#[cfg(test)]
+use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
@@ -657,7 +659,7 @@ impl PortForwarder {
                 }
                 let forwarder = forwarder.clone();
                 tokio::spawn(async move {
-                    forwarder.serve(socket, port, local_port).await;
+                    forwarder.serve(socket, port, Some(local_port)).await;
                     forwarder.inner.carried.fetch_sub(1, Ordering::SeqCst);
                 });
             }
@@ -700,22 +702,30 @@ impl PortForwarder {
     /// nothing at first gets its stream anyway after [`SILENT_OPEN`], so a
     /// protocol whose server speaks first works; what the client then sends
     /// is still judged before it goes anywhere.
-    async fn serve(&self, mut socket: TcpStream, port: u16, local_port: u16) {
+    async fn serve(&self, mut socket: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin, port: u16, local_port: Option<u16>) {
         if !self.ready() {
-            answer_and_close(&mut socket, &page("503 Service Unavailable", STOPPED)).await;
+            if local_port.is_some() {
+                answer_and_close(&mut socket, &page("503 Service Unavailable", STOPPED)).await;
+            }
             return;
         }
-        let foreign = page("403 Forbidden", &format!("This preview is only served at http://127.0.0.1:{local_port}. The request named another host and was refused."));
+        let foreign = local_port.map(|local_port| page("403 Forbidden", &format!("This preview is only served at http://127.0.0.1:{local_port}. The request named another host and was refused.")));
         let mut head = Vec::new();
-        let verdict = match tokio::time::timeout(SILENT_OPEN, judge(&mut socket, &mut head, local_port)).await {
-            Ok(verdict) => Some(verdict),
-            // Bytes have begun to arrive: they are judged before anything else happens.
-            Err(_) if !head.is_empty() => Some(judge(&mut socket, &mut head, local_port).await),
-            Err(_) => None,
+        let verdict = if let Some(local_port) = local_port {
+            match tokio::time::timeout(SILENT_OPEN, judge(&mut socket, &mut head, local_port)).await {
+                Ok(verdict) => Some(verdict),
+                // Bytes have begun to arrive: they are judged before anything else happens.
+                Err(_) if !head.is_empty() => Some(judge(&mut socket, &mut head, local_port).await),
+                Err(_) => None,
+            }
+        } else {
+            Some(Verdict::Carry)
         };
         match verdict {
             Some(Verdict::Refuse) => {
-                answer_and_close(&mut socket, &foreign).await;
+                if let Some(foreign) = foreign.as_ref() {
+                    answer_and_close(&mut socket, foreign).await;
+                }
                 return;
             }
             Some(Verdict::Closed) => return,
@@ -729,11 +739,17 @@ impl PortForwarder {
             state.opens.insert(request.clone(), answer);
             state.epoch
         };
-        let sent = (self.inner.send)(json!({ "id": request, "method": "ports.open", "params": { "port": port } }));
+        let frame = if local_port.is_some() {
+            json!({ "id": request, "method": "ports.open", "params": { "port": port } })
+        } else {
+            json!({ "id": request, "method": "ssh.open", "params": {} })
+        };
+        let sent = (self.inner.send)(frame);
         let opened = if sent { tokio::time::timeout(OPEN_TIMEOUT, answered).await.ok().and_then(Result::ok) } else { None };
         self.inner.state.lock().unwrap().opens.remove(&request);
         let opened = match opened {
             Some(Ok(opened)) => opened,
+            _ if local_port.is_none() => return,
             Some(Err(code)) if code != "disconnected" => {
                 let (status, message) = refusal(&code, port);
                 answer_and_close(&mut socket, &page(status, &message)).await;
@@ -758,7 +774,7 @@ impl PortForwarder {
                 // The connection was lost between the answer and here: the
                 // stream died with it, and the local side just ends.
                 None
-            } else if !state.forwards.contains_key(&port) {
+            } else if local_port.is_some() && !state.forwards.contains_key(&port) {
                 // The forward was stopped meanwhile: the stream is given back.
                 state.early.remove(&stream_id);
                 Some(false)
@@ -793,7 +809,7 @@ impl PortForwarder {
             }
             Some(true) => {}
         }
-        let (mut reader, mut writer) = socket.into_split();
+        let (mut reader, mut writer) = tokio::io::split(socket);
         let down = {
             let (forwarder, stream_id, end) = (self.clone(), stream_id.clone(), end.clone());
             async move {
@@ -825,7 +841,7 @@ impl PortForwarder {
                 let refused = async {
                     // Judged bytes not yet sent on; read from the socket only once it is empty.
                     let mut backlog = head;
-                    if !judged {
+                    if let Some(local_port) = local_port.filter(|_| !judged) {
                         let verdict = tokio::select! {
                             _ = end.cancelled() => return false,
                             verdict = judge(&mut reader, &mut backlog, local_port) => verdict,
@@ -886,13 +902,49 @@ impl PortForwarder {
         };
         let (writer, (reader, refused)) = tokio::join!(down, up);
         self.inner.state.lock().unwrap().streams.remove(&stream_id);
-        if let Ok(mut socket) = reader.reunite(writer) {
-            if refused {
-                answer_and_close(&mut socket, &foreign).await;
-            } else {
-                let _ = socket.shutdown().await;
-            }
+        let mut socket = reader.unsplit(writer);
+        if let Some(foreign) = foreign.as_ref().filter(|_| refused) {
+            answer_and_close(&mut socket, foreign).await;
+        } else {
+            let _ = socket.shutdown().await;
         }
+    }
+
+    /// Fetch the host pin on the same E2EE transport that will carry SSH.
+    #[cfg(unix)]
+    pub(crate) async fn ssh_host_key(&self) -> Result<String, String> {
+        if !self.ready() {
+            return Err("cloud_port_not_connected".into());
+        }
+        let request = self.id("ssh-info");
+        let (answer, receive) = oneshot::channel();
+        let epoch = {
+            let mut state = self.inner.state.lock().unwrap();
+            state.opens.insert(request.clone(), answer);
+            state.epoch
+        };
+        let sent = (self.inner.send)(json!({ "id": request, "method": "ssh.info", "params": {} }));
+        let result = if sent { tokio::time::timeout(OPEN_TIMEOUT, receive).await.ok().and_then(Result::ok) } else { None };
+        let mut state = self.inner.state.lock().unwrap();
+        state.opens.remove(&request);
+        if epoch != state.epoch {
+            return Err("cloud_remote_identity_changed".into());
+        }
+        let result = result.ok_or("cloud_workspace_ssh_unavailable")??;
+        result["hostKey"].as_str().and_then(crate::workspace_ssh::parse_public_key)
+            .ok_or_else(|| "cloud_workspace_ssh_unavailable".into())
+    }
+
+    /// Use the authenticated SSH-specific open, keeping raw bytes out of
+    /// the preview path and its HTTP request and response handling.
+    #[cfg(unix)]
+    pub(crate) async fn serve_ssh(&self, socket: tokio::net::UnixStream) {
+        if self.inner.carried.fetch_add(1, Ordering::SeqCst) >= MAX_LOCAL_CONNECTIONS {
+            self.inner.carried.fetch_sub(1, Ordering::SeqCst);
+            return;
+        }
+        self.serve(socket, 0, None).await;
+        self.inner.carried.fetch_sub(1, Ordering::SeqCst);
     }
 
     /// A message from the runtime. True when it was the forwarder's: an
@@ -986,7 +1038,7 @@ fn listed(state: &State) -> Vec<Forward> {
 /// Send `answer`, then close without a reset: what the client already sent
 /// is read and dropped first, because closing a socket with unread data
 /// resets it and the client would never see the answer.
-async fn answer_and_close(socket: &mut TcpStream, answer: &[u8]) {
+async fn answer_and_close(socket: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin), answer: &[u8]) {
     if socket.write_all(answer).await.is_err() {
         return;
     }
@@ -1166,6 +1218,30 @@ fn names_this_listener(head: &[u8], local_port: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_ssh_uses_the_private_open_and_carries_raw_bytes() {
+        let (forwarder, mut requests) = forwarder();
+        let (mut client, socket) = tokio::net::UnixStream::pair().unwrap();
+        let owner = forwarder.clone();
+        let relay = tokio::spawn(async move { owner.serve_ssh(socket).await });
+        let first = tokio::time::timeout(Duration::from_secs(2), requests.recv()).await.unwrap().unwrap();
+        assert_eq!(first["method"], "ssh.open");
+        assert_eq!(first["params"], json!({}));
+        assert!(forwarder.on_message(&json!({
+            "id": first["id"], "ok": true, "result": { "streamId": "port-ssh", "window": DEFAULT_WINDOW }
+        })));
+        let bytes = b"SSH-2.0-test\r\n\0\xff";
+        assert!(forwarder.on_message(&json!({
+            "event": "ports.data", "params": { "streamId": "port-ssh", "data": general_purpose::STANDARD.encode(bytes) }
+        })));
+        let mut read = vec![0u8; bytes.len()];
+        tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut read)).await.unwrap().unwrap();
+        assert_eq!(read.as_slice(), bytes);
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(2), relay).await.unwrap().unwrap();
+    }
 
     /// A forwarder whose requests land in a channel, as the runtime would see them.
     fn forwarder() -> (PortForwarder, mpsc::UnboundedReceiver<Value>) {
