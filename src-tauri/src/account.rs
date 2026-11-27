@@ -444,7 +444,7 @@ pub(crate) const PHASE2_WORKSPACE_SSH: &str = "cloud.workspaces.ssh.v1";
 pub(crate) const PHASE2_INVITES_WELCOME: &str = "organization.invites-welcome.v1";
 /// PRO-241: the sidebar's announcement card.
 pub(crate) const PHASE2_ANNOUNCEMENTS: &str = "desktop.announcements.v1";
-const PHASE2_FEATURES: [&str; 28] = [
+const PHASE2_FEATURES: [&str; 29] = [
     PHASE2_TEAMS_PLAN,
     PHASE2_INVITES_WELCOME,
     PHASE2_DESKTOP_BILLING,
