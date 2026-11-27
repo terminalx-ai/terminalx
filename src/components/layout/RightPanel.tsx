@@ -24,9 +24,15 @@ import type { WorkStatus } from "@/types/session";
 import { onPanelTab, rememberPanelTab, rememberedPanelTab, takePanelTab, type PanelTab } from "@/lib/panelTab";
 import { onPrLinksChanged } from "@/lib/prLinks";
 import { WindowControls } from "./WindowControls";
+import { ArtifactsTab } from "@/components/teamArtifacts/ArtifactsTab";
+import { useAccount } from "@/lib/account";
+import { useDataPrivacy } from "@/lib/dataPrivacy";
+import { teamArtifactOrg } from "@/lib/teamArtifacts";
 
 export type { PanelTab };
 const TABS: { id: PanelTab; label: string; shortcut?: ShortcutId }[] = [
+  // A session's team templates (PRO-158, 06.04), while the organization has team artifacts.
+  { id: "artifacts", label: "Artifacts" },
   // Changes (committing and history) and Checks (the pull request, its checks and the branch's next step) are tabs
   // of their own (PRO-394, design 05.02). Checks keeps the "branch" id, so every link and shortcut to it still lands.
   { id: "changes", label: "Changes", shortcut: "panel.changes" },
@@ -155,8 +161,15 @@ export function RightPanel({
   // The branch picture reads this computer's checkout; a cloud workspace's Branch tab is its pull request alone, and its panel opens on Changes.
   const branchPicture = !gitSource?.cloud;
   const selectedTab: PanelTab = picked ?? (branchPicture ? "branch" : "changes");
+  const { status: account } = useAccount();
+  const privacy = useDataPrivacy();
+  const artifactsOrg = privacy.enabled || readOnlyReason ? null : teamArtifactOrg(account);
   const tab: PanelTab =
-    selectedTab === "ports"
+    selectedTab === "artifacts"
+      ? artifactsOrg
+        ? "artifacts"
+        : fallback
+      : selectedTab === "ports"
       ? ports
         ? "ports"
         : fallback
@@ -251,7 +264,7 @@ export function RightPanel({
         className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-ring/30"
       />
       <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-0.5 border-b border-hairline px-2">
-        {TABS.filter((t) => (t.id === "ports" ? !!ports : t.id === "computer" ? computer : t.id === "browser" ? browser && !!sessionId : isGit || t.id === "files")).map((t) => (
+        {TABS.filter((t) => (t.id === "artifacts" ? !!artifactsOrg : t.id === "ports" ? !!ports : t.id === "computer" ? computer : t.id === "browser" ? browser && !!sessionId : isGit || t.id === "files")).map((t) => (
           <WithTooltip key={t.id} label={t.id === "branch" && checksMark === "failed" ? "Checks · failing" : t.label} shortcut={t.shortcut}>
             <button
               type="button"
@@ -365,6 +378,8 @@ export function RightPanel({
             </div>
           </>
         )}
+        {/* Only while shown: it reads the organization's templates on a timer. */}
+        {artifactsOrg && tab === "artifacts" && <ArtifactsTab orgId={artifactsOrg} tabId={mentionTabId ?? null} />}
         {/* Only while shown: it reads the workspace's ports on a timer. */}
         {ports && tab === "ports" && (
           <div className="flex h-full flex-col" data-testid="panel-ports">
