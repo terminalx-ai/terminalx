@@ -2568,10 +2568,11 @@ pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, i
     let initialized = !git::is_repo(Path::new(&input.project_path));
     if initialized {
         let project = Path::new(&input.project_path);
-        let empty = input.bundle.is_some()
-            && std::fs::read_dir(project).is_ok_and(|mut entries| entries.next().is_none());
-        if !empty {
-            return Err("Choose a local Git project, or an empty folder for a repository without a remote.".to_owned().into());
+        if !crate::workspace_transfer_bundle::is_empty_folder(project) {
+            return Err("This folder is not a Git project. Choose a local Git project, or an empty folder.".to_owned().into());
+        }
+        if input.bundle.is_none() {
+            return Err("This branch builds on commits from its remote. Choose a local clone of that repository.".to_owned().into());
         }
     }
     // An empty folder has no repository configuration to review.
@@ -2584,13 +2585,12 @@ pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, i
     github_work(move || crate::github_process::with_ticket(ticket, || -> anyhow::Result<SessionEntry> {
         anyhow::ensure!(authorized(&account, &input), "The cloud account changed.");
         anyhow::ensure!(input.transcript.len() <= 6 * 1024 * 1024, "Conversation is too large.");
-        if initialized {
-            let format = if input.commit.len() == 64 { "--object-format=sha256" } else { "--object-format=sha1" };
-            transfer::git(Path::new(&input.project_path), &["init", "-q", format])?;
-        }
         let transcript = serde_json::from_slice::<Vec<transfer::TranscriptMessage>>(&STANDARD.decode(&input.transcript)?)?;
         let pin = transfer::BranchCommit::new(&input.branch, &input.commit)?;
         let project = Path::new(&input.project_path);
+        if initialized {
+            transfer::init_empty_destination(project, &pin)?;
+        }
         transfer::check_branch_namespace(project, &pin)?;
         if let Some(encoded) = &input.bundle {
             anyhow::ensure!(encoded.len() as u64 <= transfer::MAX_BUNDLE_BYTES.div_ceil(3) * 4, "Git bundle is too large.");
@@ -2644,14 +2644,11 @@ pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, i
             }
         }
     })).await.map_err(err)?.map_err(|error| {
-        if initialized {
-            // Only the repository this transfer created, and only while it is still bare of anything else.
-            let project = Path::new(&input_path);
-            let only_git = std::fs::read_dir(project).is_ok_and(|entries| {
-                entries.filter_map(|entry| entry.ok()).all(|entry| entry.file_name() == ".git")
-            });
-            if only_git { let _ = std::fs::remove_dir_all(project.join(".git")); }
-        }
+        // A failed first move into an empty folder leaves it empty again.
+        let error = match initialized.then(|| crate::workspace_transfer_bundle::discard_empty_destination(Path::new(&input_path))) {
+            Some(Err(cleanup)) => error.context(format!("The new repository was kept: {cleanup}")),
+            _ => error,
+        };
         CloudTransferImportError::from(error)
     })
 }

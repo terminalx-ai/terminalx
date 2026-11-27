@@ -28,11 +28,13 @@ interface TransferState {
   preview: TransferPreview | null | "loading" | "unavailable";
   projectPath: string | null;
   then: Then;
+  /** Archive was chosen while something stays behind: the person confirms it first. */
+  confirming: boolean;
 }
 
 const EMPTY: TransferState = {
   opened: false, busy: false, notice: null, imported: null, archiveChosen: false,
-  preview: null, projectPath: null, then: "archive",
+  preview: null, projectPath: null, then: "keep", confirming: false,
 };
 const transfers = new Map<string, TransferState>();
 const listeners = new Set<() => void>();
@@ -163,8 +165,13 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
     }
   };
 
-  const move = async () => {
+  const move = async (confirmed = false) => {
     if (!client || !current() || transfers.get(key)?.busy) return;
+    if (needsConfirmation && !confirmed) {
+      update({ confirming: true });
+      return;
+    }
+    update({ confirming: false });
     let target = projectPath;
     if (!target) {
       await chooseProject();
@@ -221,6 +228,13 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
     },
   ];
   const sharedWith = row?.workspace.sharedWith ?? 0;
+  // What an archive deletes after 30 days because the move does not carry it.
+  const leftBehind = !shown ? null : [
+    shown.uncommittedFiles > 0 && plural(shown.uncommittedFiles, "uncommitted file"),
+    shown.otherTabs > 0 && plural(shown.otherTabs, "other agent tab"),
+    shown.notes && "the notes on this session",
+  ].filter((item): item is string => !!item);
+  const needsConfirmation = then === "archive" && (leftBehind === null || leftBehind.length > 0);
   const archiveDetail = `Stops compute now; deleted after 30 days.${sharedWith > 0 ? ` ${plural(sharedWith, "person", "people")} it is shared with lose access.` : ""}`;
   const uncommitted = shown ? shown.uncommittedFiles : null;
 
@@ -264,7 +278,7 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
             ]).map(([value, title, detail]) => (
               <label key={value} className={cn("flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5",
                 then === value ? "border-foreground/40 bg-muted/60" : "border-hairline")}>
-                <input type="radio" name={`cloud-move-then-${key}`} className="mt-1" checked={then === value} onChange={() => update({ then: value })} />
+                <input type="radio" name={`cloud-move-then-${key}`} className="mt-1" checked={then === value} onChange={() => update({ then: value, confirming: false })} />
                 <span className="flex flex-col">
                   <span className="text-sm">{title}</span>
                   <span className="text-xs text-muted-foreground">{detail}</span>
@@ -272,6 +286,13 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
               </label>
             ))}
           </fieldset>
+        )}
+        {state.confirming && !imported && (
+          <div role="alert" className="mx-5 mt-3 rounded-lg border border-destructive/50 bg-destructive/5 px-3 py-2.5 text-sm">
+            {leftBehind === null
+              ? `This runtime cannot say what the move leaves behind: uncommitted files, other agent tabs and notes stay in the cloud. Archiving ${workspaceName} deletes them after 30 days.`
+              : `The move does not carry ${leftBehind.join(", ")}. Archiving ${workspaceName} deletes them after 30 days.`}
+          </div>
         )}
         {notice && <p role="status" className="px-5 pt-3 text-sm">{notice}</p>}
         {imported && !localAvailable && <p role="status" className="px-5 pt-3 text-sm">The moved local session is no longer available.</p>}
@@ -288,7 +309,13 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
           {imported && localAvailable && (
             <Button disabled={busy} onClick={() => { update({ opened: false }); selectSession(imported.local.sessionId); }}>Open local session</Button>
           )}
-          {!imported && (
+          {!imported && state.confirming && (
+            <Button variant="outline" disabled={busy} onClick={() => update({ confirming: false })}>Back</Button>
+          )}
+          {!imported && state.confirming && (
+            <Button variant="destructive" disabled={busy} onClick={() => void move(true)}>Archive and move</Button>
+          )}
+          {!imported && !state.confirming && (
             <Button disabled={busy || preview === "loading"} onClick={() => void move()}>
               {busy ? <><Loader2 className="animate-spin" aria-hidden /> Moving…</> : <><Download aria-hidden /> Move to this Mac</>}
             </Button>

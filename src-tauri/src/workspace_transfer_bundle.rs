@@ -182,6 +182,10 @@ pub(crate) fn export(repo: &Path, expected: &BranchCommit) -> Result<Option<Tran
     git(repo, &args)?;
     check_head(repo, &path, expected)?;
     let size = std::fs::metadata(&path)?.len();
+    // The estimate bounds the work; the written file is what is sent.
+    if size > MAX_BUNDLE_BYTES {
+        return Err(TransferTooLarge.into());
+    }
     Ok(Some(TransferBundle {
         _directory: directory,
         path,
@@ -766,7 +770,11 @@ pub(crate) fn choose_local_branch(
             &expected.branch_ref,
         ],
     )?;
-    if attached.trim().is_empty() {
+    // A repository whose own HEAD is the unborn branch of this name (a fresh
+    // `git init`) holds it too, though no ref exists yet.
+    let unborn_head = git(repo, &["symbolic-ref", "--quiet", "HEAD"])
+        .is_ok_and(|head| head.trim() == expected.branch_ref);
+    if attached.trim().is_empty() && !unborn_head {
         Ok(expected.clone())
     } else {
         BranchCommit::new(worktree_name, expected.commit())
@@ -884,6 +892,76 @@ pub(crate) fn rollback_checkout(repo: &Path, path: &Path, expected: &BranchCommi
 }
 
 #[cfg(feature = "desktop")]
+/// Names macOS leaves in a folder that is otherwise empty.
+#[cfg(any(feature = "desktop", test))]
+const FOLDER_LITTER: [&str; 1] = [".DS_Store"];
+
+/// Whether `path` is a folder with nothing in it but Finder's own litter.
+#[cfg(any(feature = "desktop", test))]
+pub(crate) fn is_empty_folder(path: &Path) -> bool {
+    std::fs::read_dir(path).is_ok_and(|entries| {
+        entries.filter_map(|entry| entry.ok()).all(|entry| {
+            FOLDER_LITTER.iter().any(|name| entry.file_name() == *name)
+        })
+    })
+}
+
+/// The unborn branch a new destination repository starts on. Every real
+/// branch, the moved one included, is then free for a worktree: starting on
+/// the moved branch's own name (Git's default `main`) would leave it held by
+/// the folder itself.
+#[cfg(any(feature = "desktop", test))]
+const EMPTY_FOLDER_BRANCH: &str = "terminalx-empty";
+
+/// Make an empty folder a repository that can receive a whole-history move.
+#[cfg(any(feature = "desktop", test))]
+pub(crate) fn init_empty_destination(path: &Path, expected: &BranchCommit) -> Result<()> {
+    ensure!(is_empty_folder(path), "The folder is not empty");
+    let format = if expected.commit().len() == 64 {
+        "--object-format=sha256"
+    } else {
+        "--object-format=sha1"
+    };
+    let initial = format!("--initial-branch={EMPTY_FOLDER_BRANCH}");
+    git(path, &["init", "-q", format, &initial])?;
+    Ok(())
+}
+
+/// Undo `init_empty_destination` after a failed first move: remove the
+/// repository and the worktree folders it left (folders holding only
+/// folders), so the folder is as it was. If any file appeared meanwhile,
+/// everything is kept.
+#[cfg(any(feature = "desktop", test))]
+pub(crate) fn discard_empty_destination(path: &Path) -> Result<()> {
+    fn only_directories(path: &Path) -> bool {
+        std::fs::read_dir(path).is_ok_and(|entries| {
+            entries.filter_map(|entry| entry.ok()).all(|entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_dir()) && only_directories(&entry.path())
+            })
+        })
+    }
+    let mut created = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if FOLDER_LITTER.iter().any(|litter| name == *litter) {
+            continue;
+        }
+        let directory = entry.file_type()?.is_dir();
+        ensure!(
+            name == ".git" || (directory && only_directories(&entry.path())),
+            "The folder gained other files and was kept as a repository."
+        );
+        created.push(entry.path());
+    }
+    // The repository last, so a partial removal still reads as one.
+    created.sort_by_key(|entry| entry.file_name() == Some(std::ffi::OsStr::new(".git")));
+    for entry in created {
+        std::fs::remove_dir_all(entry)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn rollback_import_checkout(
     repo: &Path,
     path: &Path,
@@ -1232,6 +1310,124 @@ mod tests {
         // The local project's own main is untouched; only the objects arrived.
         assert_eq!(git(&local, &["rev-parse", &pin.branch_ref]).unwrap().trim(), local_head);
         assert_eq!(git(&local, &["rev-list", "--count", pin.commit()]).unwrap().trim(), "2");
+    }
+
+    /// A cloud repository without a remote on `branch`, and its whole-history bundle.
+    fn root_bundle(temp: &Path, branch: &str) -> (PathBuf, BranchCommit) {
+        let cloud = temp.join("cloud");
+        repository(&cloud);
+        if branch != "main" {
+            git(&cloud, &["switch", "-q", "-c", branch]).unwrap();
+        }
+        commit(&cloud);
+        let pin = BranchCommit::new(branch, &commit(&cloud)).unwrap();
+        let bundle = export(&cloud, &pin).unwrap().unwrap();
+        let mut bytes = Vec::new();
+        while (bytes.len() as u64) < bundle.size() {
+            bytes.extend(bundle.read_chunk(bytes.len() as u64).unwrap());
+        }
+        let path = temp.join("incoming.bundle");
+        std::fs::write(&path, bytes).unwrap();
+        (path, pin)
+    }
+
+    /// The import command's Git steps for an empty folder, up to the checkout;
+    /// `fail_after_checkout` stands for a later step (the session) failing.
+    fn move_into_empty_folder(
+        folder: &Path,
+        bundle: &Path,
+        pin: &BranchCommit,
+        fail_after_checkout: bool,
+    ) -> Result<(PathBuf, BranchCommit)> {
+        init_empty_destination(folder, pin)?;
+        let result = (|| {
+            validate_bundle(folder, bundle, pin)?.promote(folder)?;
+            let name = "transfer-test";
+            let local = choose_local_branch(folder, pin, name)?;
+            let created = ensure_local_branch(folder, &local)?;
+            let path = folder.join(".raccoon/worktrees").join(name);
+            checkout(folder, &path, &local)?;
+            if fail_after_checkout {
+                rollback_import_checkout(folder, &path, &local, true, created)?;
+                bail!("the session could not be created");
+            }
+            Ok((path, local))
+        })();
+        if result.is_err() {
+            discard_empty_destination(folder)?;
+        }
+        result
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn an_empty_folder_receives_a_branch_named_like_the_default_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let (bundle, pin) = root_bundle(temp.path(), "main");
+        let folder = temp.path().join("empty");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join(".DS_Store"), "").unwrap();
+        let (path, local) = move_into_empty_folder(&folder, &bundle, &pin, false).unwrap();
+        assert_eq!(local.branch(), "main", "the moved branch keeps its name");
+        assert_eq!(git(&path, &["rev-parse", "HEAD"]).unwrap().trim(), pin.commit());
+        assert_eq!(git(&path, &["symbolic-ref", "--short", "HEAD"]).unwrap().trim(), "main");
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn an_empty_folder_receives_a_branch_with_another_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let (bundle, pin) = root_bundle(temp.path(), "topic/one");
+        let folder = temp.path().join("empty");
+        std::fs::create_dir(&folder).unwrap();
+        let (path, local) = move_into_empty_folder(&folder, &bundle, &pin, false).unwrap();
+        assert_eq!(local.branch(), "topic/one");
+        assert_eq!(git(&path, &["rev-parse", "HEAD"]).unwrap().trim(), pin.commit());
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn a_failed_first_move_leaves_the_empty_folder_empty() {
+        for branch in ["main", "topic"] {
+            let temp = tempfile::tempdir().unwrap();
+            let (bundle, pin) = root_bundle(temp.path(), branch);
+            let folder = temp.path().join("empty");
+            std::fs::create_dir(&folder).unwrap();
+            std::fs::write(folder.join(".DS_Store"), "").unwrap();
+            assert!(move_into_empty_folder(&folder, &bundle, &pin, true).is_err());
+            let left: Vec<_> = std::fs::read_dir(&folder).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+            assert_eq!(left, [std::ffi::OsString::from(".DS_Store")], "{branch}");
+        }
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn a_folder_with_other_files_is_neither_initialized_nor_discarded() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("notes");
+        std::fs::create_dir(&folder).unwrap();
+        assert!(is_empty_folder(&folder));
+        std::fs::write(folder.join(".DS_Store"), "").unwrap();
+        assert!(is_empty_folder(&folder));
+        std::fs::write(folder.join("todo.txt"), "keep").unwrap();
+        assert!(!is_empty_folder(&folder));
+        let pin = BranchCommit::new("main", &"a".repeat(40)).unwrap();
+        assert!(init_empty_destination(&folder, &pin).is_err());
+        assert!(!folder.join(".git").exists());
+        git(&folder, &["init", "-q"]).unwrap();
+        assert!(discard_empty_destination(&folder).is_err());
+        assert!(folder.join(".git").exists() && folder.join("todo.txt").exists());
+    }
+
+    #[test]
+    fn a_fresh_repository_on_the_unborn_branch_gets_a_new_branch_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let (bundle, pin) = root_bundle(temp.path(), "main");
+        let local = temp.path().join("fresh");
+        repository(&local);
+        import_objects(&local, &bundle, &pin).unwrap();
+        let chosen = choose_local_branch(&local, &pin, "transfer-1").unwrap();
+        assert_eq!(chosen.branch(), "transfer-1");
     }
 
     #[test]

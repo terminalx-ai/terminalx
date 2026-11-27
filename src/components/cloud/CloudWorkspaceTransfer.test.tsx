@@ -71,10 +71,11 @@ it("shows the approved steps, a whole-history bundle without a remote, and the c
   expect(screen.getByText("214 messages from this conversation")).toBeTruthy();
   expect(screen.getByText("Claude Code continues with the same history")).toBeTruthy();
   expect(screen.getByText("Uncommitted files: none")).toBeTruthy();
+  // Keeping the cloud copy is the default; archiving is the person's explicit choice.
   const archive = screen.getByRole("radio", { name: /Archive widgets-desktop/ }) as HTMLInputElement;
-  expect(archive.checked).toBe(true);
+  expect(archive.checked).toBe(false);
   expect(screen.getByText(/2 people it is shared with lose access/)).toBeTruthy();
-  expect(screen.getByRole("radio", { name: /Keep it running/ })).toBeTruthy();
+  expect((screen.getByRole("radio", { name: /Keep it running/ }) as HTMLInputElement).checked).toBe(true);
 });
 
 it("keeps the cloud copy running and restores the finished move after a remount", async () => {
@@ -105,9 +106,41 @@ it("archives the cloud copy after a successful move when that was chosen", async
   render(<CloudWorkspaceTransfer cloud={model(runtime(), "workspace")} accountRevision="r" sessionId="session-archive" tabId="tab" />);
   fireEvent.click(screen.getByRole("button", { name: "Move to this Mac…" }));
   await screen.findByText("Bring topic");
+  fireEvent.click(screen.getByRole("radio", { name: /Archive widgets-desktop/ }));
   fireEvent.click(screen.getByRole("button", { name: "Move to this Mac" }));
   expect(await screen.findByText("Moved to this Mac. widgets-desktop is archived.")).toBeTruthy();
   expect(mocks.archive).toHaveBeenCalledOnce();
+});
+
+it("asks before archiving when uncommitted files, other tabs or notes stay behind", async () => {
+  mocks.invoke.mockResolvedValue({ id: "local", cwd: "/x" });
+  mocks.archive.mockResolvedValue({ workspace: { id: "workspace", orgId: "org" }, operation: { id: "op", workspaceId: "workspace", action: "archive", state: "succeeded" } });
+  const client = runtime({ preview: { branch: "topic", commits: 1, hasRemoteBase: false, uncommittedFiles: 3, messages: 4, harness: "claude", otherTabs: 1, notes: true } });
+  render(<CloudWorkspaceTransfer cloud={model(client)} accountRevision="r" sessionId="session-confirm" tabId="tab" />);
+  fireEvent.click(screen.getByRole("button", { name: "Move to this Mac…" }));
+  await screen.findByText("Bring topic");
+  fireEvent.click(screen.getByRole("radio", { name: /Archive widgets-desktop/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Move to this Mac" }));
+  expect((await screen.findByRole("alert")).textContent).toBe(
+    "The move does not carry 3 uncommitted files, 1 other agent tab, the notes on this session. Archiving widgets-desktop deletes them after 30 days.");
+  expect(mocks.invoke).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  expect(screen.queryByRole("alert")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Move to this Mac" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Archive and move" }));
+  expect(await screen.findByText("Moved to this Mac. widgets-desktop is archived.")).toBeTruthy();
+  expect(mocks.archive).toHaveBeenCalledOnce();
+});
+
+it("asks before archiving when the runtime cannot preview the move", async () => {
+  const client = runtime({ preview: new Error("method_not_found") });
+  render(<CloudWorkspaceTransfer cloud={model(client)} accountRevision="r" sessionId="session-blind" tabId="tab" />);
+  fireEvent.click(screen.getByRole("button", { name: "Move to this Mac…" }));
+  await screen.findByText("Uncommitted files stay in the cloud");
+  fireEvent.click(screen.getByRole("radio", { name: /Archive widgets-desktop/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Move to this Mac" }));
+  expect((await screen.findByRole("alert")).textContent).toMatch(/^This runtime cannot say what the move leaves behind/);
+  expect(mocks.invoke).not.toHaveBeenCalled();
 });
 
 it("offers only keeping it running to someone who cannot archive", async () => {

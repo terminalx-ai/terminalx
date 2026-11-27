@@ -798,6 +798,7 @@ async fn workspace_transfer_reauthorizes_each_replayed_chunk() {
     assert_eq!(preview["branch"], "topic");
     assert_eq!(preview["messages"], 2);
     assert_eq!(preview["harness"], "claude");
+    assert_eq!((preview["otherTabs"].as_u64(), preview["notes"].as_bool()), (Some(0), Some(false)));
     assert!(preview["commits"].as_u64().unwrap() > 0);
     let export = call(&f.rpc, &admin, "transfer.open", scope.clone()).await.unwrap();
     assert_eq!(call(&f.rpc, &admin, "transfer.open", scope.clone()).await.unwrap(), export);

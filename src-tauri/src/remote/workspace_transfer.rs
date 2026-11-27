@@ -126,6 +126,9 @@ impl WorkspaceRpc {
         session_id: &str,
         tab_id: &str,
     ) -> Result<Value, RpcError> {
+        // Same checks as an export, before any Git or log reading, and one
+        // preview or export prepared at a time.
+        self.transfer_authorize(peer)?;
         let session = self.visible_session(peer, session_id)?;
         let tab = session
             .tabs
@@ -138,6 +141,9 @@ impl WorkspaceRpc {
         {
             return Err(RpcError::invalid("The session checkout is unavailable"));
         }
+        let _preparing = self.transfer_preparing.try_lock().map_err(|_| {
+            RpcError::new("backpressure", "Another workspace export is being prepared")
+        })?;
         let branch = bundle::git(&checkout, &["symbolic-ref", "--quiet", "--short", "HEAD"])
             .map_err(RpcError::internal)?;
         let head = bundle::git(&checkout, &["rev-parse", "--verify", "HEAD"])
@@ -150,11 +156,21 @@ impl WorkspaceRpc {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Vec<Value>>(&bytes).ok())
             .map(|messages| messages.len());
+        let _admission = self.collab.enter_admission();
         self.transfer_authorize(peer)?;
+        self.visible_session(peer, session_id)?;
+        // What the move leaves behind: the session's other agent tabs and
+        // any notes on its tabs.
+        let other_tabs = session.tabs.len().saturating_sub(1);
+        let notes = session
+            .tabs
+            .iter()
+            .any(|tab| !self.collab.notes(&tab.id, None, 1).0.is_empty());
         Ok(json!({
             "branch": pin.branch(), "commit": pin.commit(), "commits": preview.commits,
             "hasRemoteBase": preview.has_remote_base, "uncommittedFiles": preview.uncommitted_files,
             "messages": messages, "harness": tab.harness, "title": session.title,
+            "otherTabs": other_tabs, "notes": notes,
         }))
     }
 
