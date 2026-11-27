@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="2 0 100 100">
+  <!-- Cut the logo.svg mark out of the tile so AppKit can tint it as a template. -->
+  <defs>
+    <mask id="tile">
+      <rect x="2" width="100" height="100" rx="22" fill="white"/>
+      <g fill="none" stroke="black" stroke-linecap="square" stroke-linejoin="miter">
+        <path d="M25 30 L45 50 L25 70 M55 70 L80 70" stroke-width="8"/>
+        <path d="M60 30 L80 50 M80 30 L60 50" stroke-width="6"/>
+      </g>
+    </mask>
+  </defs>
+  <rect x="2" width="100" height="100" fill="white" mask="url(#tile)"/>
+</svg>

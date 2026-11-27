@@ -414,7 +414,10 @@ describe("a local session's row of tabs under the title bar", () => {
     expect(toggle.textContent).not.toContain("terminal view");
     fireEvent.click(toggle);
     await waitFor(() => expect(screen.getByTestId("strip-terminal-view").getAttribute("aria-label")).toBe("Back to chat"));
-    expect(screen.getByTestId("strip-terminal-view").textContent).toBe("Claude Code · same process");
+    const backToChat = screen.getByRole("button", { name: "Back to chat" });
+    expect(backToChat.title).toBe("Back to chat");
+    expect(backToChat.textContent).toBe("");
+    expect(backToChat.querySelector("svg")).toBeTruthy();
     // The tab says it is in its terminal view.
     expect(within(screen.getByRole("tab", { name: "Investigate" })).getByLabelText("In terminal view").textContent).toBe("terminal view");
     fireEvent.click(screen.getByTestId("strip-terminal-view"));

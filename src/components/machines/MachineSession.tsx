@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { thisComputer } from "@/lib/platform";
-import { ChevronDown, ChevronUp, LoaderCircle, Plus, RotateCw, SquareTerminal, Unplug, X } from "@/icons";
+import { ChevronDown, ChevronUp, LoaderCircle, MessageSquare, Plus, RotateCw, SquareTerminal, Unplug, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
 import { Button } from "@/components/ui/button";
@@ -66,7 +66,7 @@ export function MachineSessionStrips({
 }) {
   const machine = cloud.machine!;
   const view = machineVersionView(machine.record, machine.state, cloud.client, cloud.ports.state, useThisVersion());
-  const terminalViewLabel = terminalView?.on ? "Back to chat" : "Show terminal view";
+  const viewLabel = terminalView?.on ? "Back to chat" : "Show terminal view";
   const [closeError, setCloseError] = useState<string | null>(null);
   const close = async (tabId: string) => {
     setCloseError(null);
@@ -120,18 +120,19 @@ export function MachineSessionStrips({
           <div className="flex shrink-0 items-center [&_button]:size-7">{newTab}</div>
         </div>
         {terminalView && (
-          <WithTooltip label={terminalViewLabel} shortcut="session.toggleTerminalView">
+          <WithTooltip label={viewLabel} shortcut="session.toggleTerminalView">
             <button
               type="button"
-              aria-label={terminalViewLabel}
+              aria-label={viewLabel}
               aria-pressed={terminalView.on}
               disabled={terminalView.disabled}
               onClick={terminalView.toggle}
               className={cn("flex shrink-0 items-center gap-1.5 px-3 text-[12px]", terminalView.on ? "text-foreground" : "text-muted-foreground hover:text-foreground")}
               data-testid="machine-terminal-view"
             >
-              <KbdGroup keys={shortcutKeys("session.toggleTerminalView")} />
-              {terminalView.on ? "chat view" : <SquareTerminal className="size-3.5" aria-hidden />}
+              {terminalView.on ? <MessageSquare className="size-3.5" aria-hidden /> : (
+                <><KbdGroup keys={shortcutKeys("session.toggleTerminalView")} /><SquareTerminal className="size-3.5" aria-hidden /></>
+              )}
             </button>
           </WithTooltip>
         )}
