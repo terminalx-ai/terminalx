@@ -67,9 +67,9 @@ pub fn parse_public_key(text: &str) -> Option<String> {
     }
     let blob = STANDARD.decode(encoded).ok()?;
     if blob.len() != 51
-        || &blob[..4] != [0, 0, 0, 11]
+        || blob[..4] != [0, 0, 0, 11]
         || &blob[4..15] != b"ssh-ed25519"
-        || &blob[15..19] != [0, 0, 0, 32]
+        || blob[15..19] != [0, 0, 0, 32]
         || STANDARD.encode(&blob) != encoded
     {
         return None;
@@ -204,18 +204,28 @@ pub fn scope(user: &str, org: &str, workspace: &str) -> String {
     )
 }
 
+pub struct IncludeConfig<'a> {
+    pub scope: &'a str,
+    pub org: &'a str,
+    pub workspace: &'a str,
+    pub user: &'a str,
+    pub identity: &'a Path,
+    pub executable: &'a Path,
+    pub host_key: &'a str,
+}
+
 /// One account/org/workspace Include. The caller must obtain explicit opt-in
 /// before invoking. Unrelated SSH config bytes are retained verbatim.
-pub fn install(
-    ssh_dir: &Path,
-    scope: &str,
-    org: &str,
-    workspace: &str,
-    user: &str,
-    identity: &Path,
-    executable: &Path,
-    host_key: &str,
-) -> Result<String> {
+pub fn install(ssh_dir: &Path, config: IncludeConfig<'_>) -> Result<String> {
+    let IncludeConfig {
+        scope,
+        org,
+        workspace,
+        user,
+        identity,
+        executable,
+        host_key,
+    } = config;
     if !identifier(scope)
         || !identifier(org)
         || !identifier(user)
@@ -435,13 +445,15 @@ mod tests {
         let apply = || {
             install(
                 &dir,
-                "scope",
-                "org",
-                "workspace",
-                "worker",
-                &private,
-                Path::new("/App With Space/app"),
-                &key(),
+                IncludeConfig {
+                    scope: "scope",
+                    org: "org",
+                    workspace: "workspace",
+                    user: "worker",
+                    identity: &private,
+                    executable: Path::new("/App With Space/app"),
+                    host_key: &key(),
+                },
             )
             .unwrap()
         };
@@ -495,13 +507,15 @@ mod tests {
         std::os::unix::fs::symlink(&other, temp.path().join("config")).unwrap();
         assert!(install(
             temp.path(),
-            "scope",
-            "org",
-            "workspace",
-            "worker",
-            Path::new("/key"),
-            Path::new("/app"),
-            &key()
+            IncludeConfig {
+                scope: "scope",
+                org: "org",
+                workspace: "workspace",
+                user: "worker",
+                identity: Path::new("/key"),
+                executable: Path::new("/app"),
+                host_key: &key(),
+            }
         )
         .is_err());
         assert_eq!(fs::read_to_string(other).unwrap(), "keep");
