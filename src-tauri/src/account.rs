@@ -436,11 +436,13 @@ pub(crate) const PHASE2_ORGANIZATION_AUTOMATIONS: &str = "cloud.automations.orga
 const PHASE2_TEAMS_PLAN: &str = "organization.teams-plan.v1";
 pub(crate) const PHASE2_NUDGES: &str = "team.nudges.v1";
 pub(crate) const PHASE2_SHARED_SETUPS: &str = "team.shared-setups.v1";
+pub(crate) const PHASE2_DESKTOP_BILLING: &str = "organization.desktop-billing.v1";
 pub(crate) const PHASE2_WORKSPACE_SSH: &str = "cloud.workspaces.ssh.v1";
 /// PRO-241: the sidebar's announcement card.
 pub(crate) const PHASE2_ANNOUNCEMENTS: &str = "desktop.announcements.v1";
-const PHASE2_FEATURES: [&str; 26] = [
+const PHASE2_FEATURES: [&str; 27] = [
     PHASE2_TEAMS_PLAN,
+    PHASE2_DESKTOP_BILLING,
     PHASE2_ANNOUNCEMENTS,
     PHASE2_SHARED_SETUPS,
     PHASE2_ORGANIZATION_AUTOMATIONS,

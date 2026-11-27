@@ -531,6 +531,11 @@ export const api = {
     invoke<DesktopReadMarker>("cloud_workspace_read_marker", { orgId, workspaceId, readAt, sessionId: sessionId ?? null }),
   cloudWorkspaceRestart: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshotDto>("cloud_workspace_restart", { workspaceId, orgId: orgId ?? null }),
+  /** PRO-596: an organization's plan, seats and next charge; errors when its billing readiness is off. */
+  organizationBilling: (orgId: string) => invoke<OrganizationBilling>("organization_billing", { orgId }),
+  /** A fresh Polar customer portal URL for the payer, checked native-side. */
+  organizationBillingPortal: (orgId: string, view: OrganizationBilling["billedTo"]) =>
+    invoke<string>("organization_billing_portal", { orgId, view }),
   cloudWorkspacePrecreateUsage: (orgId: string) =>
     invoke<CloudWorkspacePrecreateUsage>("cloud_workspace_precreate_usage", { orgId }),
   cloudWorkspaceStartProgress: (orgId: string, workspaceId: string, operationId: string) =>
@@ -908,6 +913,19 @@ export interface OrganizationPlan {
   };
   links?: { upgrade?: string; manage?: string };
   upgradeTarget: "plans";
+}
+
+/** The desktop Organization > Billing page (PRO-596); every value comes from the server. */
+export interface OrganizationBilling {
+  plan: "free" | "pro" | "teams";
+  /** "organization" for a paid Teams plan, or a lapsed one its owner still manages; otherwise the person pays for themselves. */
+  billedTo: "personal" | "organization";
+  seats: { used: number; limit: number } | null;
+  seatPrice: { currency: string; unitAmountMinor: number; interval: "month" } | null;
+  nextCharge: { date: string; amountMinor: number; currency: string } | null;
+  /** Shown to the paying owner only. */
+  payer: string | null;
+  canManageBilling: boolean;
 }
 
 export interface OrganizationSummary {
