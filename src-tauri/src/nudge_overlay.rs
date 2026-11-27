@@ -14,7 +14,7 @@ fn show(app: &AppHandle, permitted: impl Fn() -> bool) -> Result<(), String> {
     let window =
         WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("nudge-overlay.html".into()))
             .title("TerminalX nudge")
-            .inner_size(420.0, 160.0)
+            .inner_size(960.0, 580.0)
             .center()
             .decorations(false)
             .resizable(false)
