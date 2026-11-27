@@ -39,6 +39,10 @@ build() {
     docker run --rm -i --pull never --platform "linux/$platform" --network none       --entrypoint sh "$image" -c '
         set -eu
         version=$1 arch=$2 source=$3 digest=$4 artifact=$5
+        if [ "$(uname -m)" != "$arch" ]; then
+          echo "Local builder cannot execute Linux $arch binaries." >&2
+          exit 1
+        fi
         cd "$(mktemp -d)"
         tar -xf -
         mkdir artifacts
