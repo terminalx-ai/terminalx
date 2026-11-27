@@ -443,7 +443,7 @@ pub(crate) const PHASE2_WORKSPACE_SSH: &str = "cloud.workspaces.ssh.v1";
 pub(crate) const PHASE2_AGENT_BROWSER: &str = "cloud.desktop.agent-browser.v1";
 /// PRO-241: the sidebar's announcement card.
 pub(crate) const PHASE2_ANNOUNCEMENTS: &str = "desktop.announcements.v1";
-const PHASE2_FEATURES: [&str; 27] = [
+const PHASE2_FEATURES: [&str; 28] = [
     PHASE2_TEAMS_PLAN,
     PHASE2_DESKTOP_BILLING,
     PHASE2_ANNOUNCEMENTS,
