@@ -448,7 +448,7 @@ pub(crate) const PHASE2_AGENT_USAGE_LIMIT_CARD: &str = "cloud.agent-logins.usage
 pub(crate) const PHASE2_INVITES_WELCOME: &str = "organization.invites-welcome.v1";
 /// PRO-241: the sidebar's announcement card.
 pub(crate) const PHASE2_ANNOUNCEMENTS: &str = "desktop.announcements.v1";
-const PHASE2_FEATURES: [&str; 30] = [
+const PHASE2_FEATURES: [&str; 31] = [
     PHASE2_AGENT_LOGIN_BEDROCK,
     PHASE2_AGENT_USAGE_LIMIT_CARD,
     PHASE2_TEAMS_PLAN,
