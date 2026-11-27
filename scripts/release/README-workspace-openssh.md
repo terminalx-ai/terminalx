@@ -1,7 +1,10 @@
 # Build the private OpenSSH payloads locally
 
-**The real two-architecture OpenSSH build is unverified.** The automated
-tests exercise the release inventory, packaging and signature with fixtures.
+**The real two-architecture OpenSSH build is unverified.** The ARM64 build
+of OpenSSH 9.6p1 completed on Ubuntu 24.04, and the packaged `sshd -V` ran in
+a separate ARM64 container. The AMD64 build needs a host that can execute
+AMD64 containers. The automated tests exercise the release inventory,
+packaging and signature with fixtures.
 
 Run the two builds from a clean local output directory:
 
