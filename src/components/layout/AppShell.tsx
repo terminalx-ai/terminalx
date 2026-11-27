@@ -15,6 +15,8 @@ import { phase2Ready } from "@/lib/phase2Readiness";
 import { CloudSetupFlow } from "@/components/cloudSetup/CloudSetupFlow";
 import { useUnknownSettingLink } from "@/lib/settingsDeepLink";
 import { bootDesktopLinks } from "@/lib/desktopLinks";
+import { SlotsLinkHost } from "@/components/people/EquipSlotsDialog";
+import { useSharedSetupsSync } from "@/lib/sharedSetups";
 import { bootLastView } from "@/lib/lastView";
 import { LinkSessionDialog } from "@/components/start/LinkSessionDialog";
 import type { SettingId } from "@/components/settings/settingsRegistry";
@@ -65,6 +67,9 @@ import { MergedCleanupNotices } from "@/components/ui/MergedCleanupNotices";
 import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
 import { Toasts } from "@/components/ui/Toasts";
 import { NoticeColumn } from "@/components/ui/NoticeColumn";
+import { InviteWelcome } from "@/components/invites/InviteWelcome";
+import { InviteNotices } from "@/components/invites/InviteNotices";
+import { openInvite, registerInviteLeaveGuard, useInvites, watchInvites } from "@/lib/myInvites";
 import { ArchiveNotices } from "@/components/ui/ArchiveNotices";
 import { archiveWithUndo } from "@/lib/archiveNotices";
 import { reportError } from "@/lib/errorToasts";
@@ -156,6 +161,8 @@ export const TITLEBAR_INSET = isMac ? 78 : 8;
  */
 export function AppShell() {
   const prefs = usePrefs();
+  // PRO-154: the organization's shared prompts and snippets, kept current.
+  useSharedSetupsSync();
   const status = useStatus();
   // A runtime the app is moving to shows in the status bar, even a hidden one (#766).
   const runtimeSwitch = useRuntimeSwitch();
@@ -180,6 +187,12 @@ export function AppShell() {
   // The full-window cloud setup (PRO-370), opened from Settings → Organizations in Settings' place.
   // Any other request for Settings, or any navigation, ends it: its progress is already saved.
   const [cloudSetup, setCloudSetup] = useState<CloudSetupTarget | null>(null);
+  // PRO-175: invitations are read in the background and only ever told about in a notice; the card opens on a
+  // click, as a layer over the app, and only when what is open (unsaved Settings edits) can be left.
+  useEffect(() => watchInvites(), []);
+  useEffect(() => registerInviteLeaveGuard(canLeave), [canLeave]);
+  const invites = useInvites();
+  const welcomeInvite = invites.enabled && invites.open ? (invites.invites.find((invite) => invite.id === invites.open) ?? null) : null;
   useEffect(() => setCloudSetup(null), [settingsRequest, store.navigationVersion]);
   useEffect(() => onOpenCloudSetup((target) => {
     if (!canLeave()) return;
@@ -446,8 +459,10 @@ export function AppShell() {
         <CloseUndoNotices />
         <ArchiveNotices />
         <Toasts />
+        <SlotsLinkHost />
         <UnknownSettingLinkToast />
         <ProjectAddedNotice />
+        <InviteNotices />
         <WorktreeCopyNotices />
         <WorkspaceReassignedNotices />
         <MentionNotices />
@@ -469,6 +484,8 @@ export function AppShell() {
       <ProjectStartDialogHost />
       <PairPhoneDialogHost />
       <MachineApprovalHost />
+      {/* PRO-175: opened only by a click (the invitation notice, Settings → Review), as a layer: what is under it stays mounted. */}
+      {welcomeInvite && !intro && <InviteWelcome key={welcomeInvite.id} invite={welcomeInvite} onClose={() => openInvite(null)} />}
       <div className="flex min-h-0 flex-1">
         {intro ? (
           <IntroScreen />

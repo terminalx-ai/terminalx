@@ -12,6 +12,7 @@ import { forgetAgentLoginsRequest } from "@/lib/settingsLinks";
 import { OrganizationSettings, type OrganizationPage } from "./OrganizationSettings";
 import { openCloudSetup, unfinishedFlow } from "@/lib/cloudSetupFlow";
 import { loadSetups } from "@/lib/organizationSetup";
+import { OrganizationInvitations } from "@/components/invites/OrganizationInvitations";
 
 interface OrganizationsTabProps {
   /** The organization whose pages are open in the menu; none: the list of organizations. */
@@ -59,6 +60,8 @@ function OrganizationsTabContent({ organizationId, page, onOpenOrganization }: O
   );
   return (
     <div className="flex flex-col">
+      {/* Invitations addressed to the person lead the page (PRO-175, 12.20). */}
+      <OrganizationInvitations />
       <RegisteredSetting setting="organizations.sidebar"
         control={
           <div className="flex flex-wrap items-center justify-end gap-2">

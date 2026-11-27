@@ -30,12 +30,16 @@ export const SETTINGS_SECTIONS = {
   general: { title: "General", group: "Personal", entry: "general.websiteLinks", subtitle: "How TerminalX opens links, shows its work, and where your settings live." },
   account: { title: "Account", group: "Personal", entry: "account.identity", subtitle: `Your TerminalX account, ${thisComputer}’s name and what it shares.` },
   appearance: { title: "Appearance", group: "Personal", entry: "appearance.theme", subtitle: "Theme, text size, the sidebar and the status bar." },
+  // PRO-154, designs 04.04 and 09.19: the favourite model slots, and sharing them.
+  defaultModels: { title: "Default models", group: "Personal", entry: "defaultModels.favouriteSlots", subtitle: "Five favourite models. Slot 1 starts new chats." },
   shortcuts: { title: "Keyboard shortcuts", group: "Personal", entry: "shortcuts.systemWide", subtitle: "Keys for every action. Change one by recording a new key." },
   devices: { title: "Devices", group: "Personal", entry: "devices.pairing", subtitle: `Phones paired with ${thisComputer}.` },
   machines: { title: "Machines", group: "Personal", entry: "machines.allowOperating", subtitle: `Operate TerminalX on your other computers from ${thisComputer}, and let them operate it. Sessions, terminals and files stay on the machine that runs them.` },
   // PRO-463, design 09.44: reference information, looked at now and then, so a page of Settings rather than a view of the main window.
   stats: { title: "Stats & usage", group: "Personal", entry: "stats.activity", subtitle: "TerminalX activity plus local Claude and Codex token analytics. Cloud histories are not scanned here." },
   agents: { title: "Agents", group: "Agents & environment", entry: "agents.setup", subtitle: `The agent CLIs TerminalX runs on ${thisComputer}, their sign-ins, and how they work while you wait. Each keeps its own login; local work needs no TerminalX account.` },
+  // PRO-154, designs 10.04 and 10.05: per-action prompts, yours and the organization's.
+  prompts: { title: "Prompts", group: "Agents & environment", entry: "prompts.actions", subtitle: "Instructions TerminalX adds to the agent for each action." },
   orchestrator: { title: "Orchestrator", group: "Agents & environment", entry: "orchestrator.requireApproval", subtitle: "How a lead session splits a goal across workers." },
   environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables", subtitle: `Variables for new agent and shell tabs, kept in ${secretStoreShort}.` },
   // PRO-239, designs 10.09–10.18: offered while an organization reports organization.mcp-servers.v1.
@@ -742,6 +746,18 @@ export const SETTINGS_ROWS = [
     description: "Connect a personal API key for Linear issues.",
     searchTerms: ["integrations", "linear"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#linearApiKey" }, layout: "content",
+  }),
+  defineSetting({
+    id: "defaultModels.favouriteSlots", section: "defaultModels", title: "Favourite model slots",
+    description: "Five favourite models; slot 1 starts new chats. Share them with your organization or by a link.",
+    searchTerms: ["models", "favourite", "favorite", "slots", "default", "share", "equip", "link"], scope: "user",
+    storage: { kind: "localStorage", location: "raccoon.prefs#favouriteSlots" }, layout: "content",
+  }),
+  defineSetting({
+    id: "prompts.actions", section: "prompts", title: "Action prompts",
+    description: "Your own and your organization’s instructions for new chats, reviews, pull requests, failing checks, conflicts and branch names.",
+    searchTerms: ["prompts", "instructions", "review", "pull request", "checks", "conflicts", "branch", "organization", "shared"], scope: "user",
+    storage: { kind: "localStorage", location: "raccoon.prefs#actionPrompts, fixErrorsInstructions" }, layout: "content",
   }),
   defineSetting({
     id: "localVms.tasks", section: "localVms", title: "Local VM tasks",
