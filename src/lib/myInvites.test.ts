@@ -42,6 +42,15 @@ beforeEach(() => {
 afterEach(() => vi.clearAllMocks());
 
 describe("my invites", () => {
+  it("does not turn the surfaces on when a read fails after the account stopped being ready", async () => {
+    invoke.mockImplementationOnce(async () => {
+      account.status.phase2Readiness = { personal: [] };
+      throw { code: "organization_invites_unavailable" };
+    });
+    await loadInvites();
+    expect(getInvites().enabled).toBe(false);
+  });
+
   it("asks nothing while no organization reports the readiness key", async () => {
     account.status.phase2Readiness = { personal: ["team.events.v1"] };
     await loadInvites();

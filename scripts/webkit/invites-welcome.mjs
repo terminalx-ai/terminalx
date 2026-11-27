@@ -95,6 +95,7 @@ try {
       "2 of 4 ready": found.text.includes("2 of 4"),
       "admins and the seat": found.text.includes("Sam Rivera") && found.text.includes("Your seat is covered by Orbit Labs’ Teams plan."),
       "the app stays mounted under the card": await page.evaluate(() => Boolean(document.querySelector("[data-app-shell] nav, [data-app-shell] main"))),
+      "the shell under the card is inert": await page.evaluate(() => [...document.querySelectorAll("[data-app-shell] > *")].filter((el) => !el.contains(document.querySelector("[data-testid=invite-welcome]"))).every((el) => el.inert)),
       "focus is on Accept and join": await page.evaluate(() => /Accept and join/.test(document.activeElement?.textContent ?? "")),
       "Accept and join, Decline, Decide later": (await page.getByRole("button", { name: /Accept and join/ }).count()) === 1 && (await card.getByRole("button", { name: "Decline" }).count()) === 1 && (await page.getByRole("button", { name: "Decide later" }).count()) === 1,
     }, found);
