@@ -1,3 +1,4 @@
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { vi } from "vitest";
 
 // Liquid Glass is native-only: tests draw the fallback surface.
@@ -46,4 +47,18 @@ vi.mock("expo-constants", () => ({ default: { deviceName: undefined } }));
 vi.mock("react-native-safe-area-context", () => ({
   useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
   SafeAreaProvider: ({ children }: { children?: unknown }) => children ?? null,
+}));
+
+// Crypto is native: tests use Node's crypto unless a test says otherwise.
+vi.mock("expo-crypto", () => ({
+  CryptoDigestAlgorithm: { SHA1: "SHA-1", SHA256: "SHA-256", SHA384: "SHA-384", SHA512: "SHA-512" },
+  CryptoEncoding: { BASE64: "base64", HEX: "hex" },
+  randomUUID: () => randomUUID(),
+  getRandomBytes: (byteCount: number) => new Uint8Array(randomBytes(byteCount)),
+  getRandomBytesAsync: async (byteCount: number) => new Uint8Array(randomBytes(byteCount)),
+  digestStringAsync: async (algorithm: string, data: string, options?: { encoding?: string }) => {
+    const alg = algorithm.toLowerCase().replaceAll("-", "");
+    const encoding = options?.encoding === "base64" ? "base64" : "hex";
+    return createHash(alg).update(data).digest(encoding);
+  },
 }));
