@@ -720,6 +720,7 @@ impl Bootstrapped {
     /// Report only through the credential bound to the current workspace.
     /// The capability is supplied explicitly so a report cannot negotiate
     /// updater support on behalf of the refresh path.
+    #[cfg(target_os = "linux")]
     pub(crate) fn report_ssh_update(
         &self,
         api: &HttpApi,
