@@ -443,12 +443,15 @@ pub(crate) const PHASE2_WORKSPACE_SSH: &str = "cloud.workspaces.ssh.v1";
 pub(crate) const PHASE2_AGENT_LOGIN_BEDROCK: &str = "cloud.agent-logins.bedrock.v1";
 /// The usage-limit card over a cloud tab on an organization's login (PRO-200).
 pub(crate) const PHASE2_AGENT_USAGE_LIMIT_CARD: &str = "cloud.agent-logins.usage-limit-card.v1";
+/// Invitations in Settings and the invite-and-welcome card (PRO-175).
+pub(crate) const PHASE2_INVITES_WELCOME: &str = "organization.invites-welcome.v1";
 /// PRO-241: the sidebar's announcement card.
 pub(crate) const PHASE2_ANNOUNCEMENTS: &str = "desktop.announcements.v1";
-const PHASE2_FEATURES: [&str; 29] = [
+const PHASE2_FEATURES: [&str; 30] = [
     PHASE2_AGENT_LOGIN_BEDROCK,
     PHASE2_AGENT_USAGE_LIMIT_CARD,
     PHASE2_TEAMS_PLAN,
+    PHASE2_INVITES_WELCOME,
     PHASE2_DESKTOP_BILLING,
     PHASE2_ANNOUNCEMENTS,
     PHASE2_MCP_SERVERS,

@@ -115,6 +115,8 @@ struct Attached {
     ports: PortForwarder,
     /// None only for a paired machine's connection, which no account owns.
     identity: Option<Identity>,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    workspace_id: Option<String>,
 }
 
 pub struct CloudRemote {
@@ -324,7 +326,7 @@ impl CloudRemote {
             });
             ports
         };
-        self.connections.lock().unwrap().insert(connection_id.clone(), Attached { supervisor: supervisor.clone(), ports: ports.clone(), identity: identity.clone() });
+        self.connections.lock().unwrap().insert(connection_id.clone(), Attached { supervisor: supervisor.clone(), ports: ports.clone(), identity: identity.clone(), workspace_id: workspace_id.clone() });
         let app = app.clone();
         let id = connection_id.clone();
         let agents = self.agents.clone();
@@ -410,6 +412,21 @@ impl CloudRemote {
         let connections = self.connections.lock().unwrap();
         let attached = connections.get(connection_id).ok_or("cloud_remote_connection_unknown")?;
         if attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref())) {
+            return Err("cloud_remote_identity_changed".into());
+        }
+        Ok(attached.ports.clone())
+    }
+
+    #[cfg(unix)]
+    fn ssh_ports(&self, connection_id: &str, org: &str, workspace: &str) -> Result<PortForwarder, String> {
+        crate::data_privacy::require_network().map_err(|error| error.to_string())?;
+        let scope = self.scope();
+        let connections = self.connections.lock().unwrap();
+        let attached = connections.get(connection_id).ok_or("cloud_remote_connection_unknown")?;
+        if attached.workspace_id.as_deref() != Some(workspace)
+            || !attached.identity.as_ref().is_some_and(|identity|
+                identity.organization_id == org && identity.allowed_by(scope.as_ref()))
+        {
             return Err("cloud_remote_identity_changed".into());
         }
         Ok(attached.ports.clone())
@@ -534,6 +551,8 @@ pub struct CloudTarget {
     #[serde(default)]
     #[allow(dead_code)]
     runtime_generation: Option<u64>,
+    #[serde(default)]
+    ssh: bool,
 }
 
 #[tauri::command]
@@ -551,11 +570,15 @@ pub async fn cloud_remote_attach(
         return Err("cloud_remote_organization_mismatch".into());
     }
     let identity = Identity { user_id: scope.user_id, profile_id: scope.profile_id, organization_id: target.organization_id };
+    let mut installation = installation_id()?;
+    if target.ssh {
+        installation.push_str("-ssh");
+    }
     let source = Arc::new(ApiSource {
         service: remote.service.clone(),
         identity: identity.clone(),
         workspace_id: target.workspace_id,
-        installation_id: installation_id()?,
+        installation_id: installation,
     });
     let workspace_id = source.workspace_id.clone();
     Ok(remote.start(&app, Some(identity), Some(workspace_id), source, activation))
@@ -591,6 +614,90 @@ pub async fn cloud_remote_detach(webview: tauri::Webview, remote: tauri::State<'
     if remote.outgoing.send(Outgoing::Detach { connection_id: connection_id.clone(), holder: Some(holder.clone()), done }).is_err() || detached.await.is_err() {
         remote.detach(&connection_id, Some(&holder));
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tauri::command]
+pub async fn cloud_ssh_prepare(remote: tauri::State<'_, Arc<CloudRemote>>, org_id: String, workspace_id: String) -> Result<String, String> {
+    let service = remote.service.clone();
+    tokio::task::spawn_blocking(move || service.prepare_workspace_ssh(&org_id, &workspace_id).map_err(|error| error.code))
+        .await.map_err(|error| error.to_string())?
+}
+
+#[cfg(unix)]
+#[tauri::command]
+pub async fn cloud_ssh_finish(
+    remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String,
+    org_id: String, workspace_id: String, revision: String,
+) -> Result<String, String> {
+    let host_key = remote.ssh_ports(&connection_id, &org_id, &workspace_id)?.ssh_host_key().await?;
+    remote.ssh_ports(&connection_id, &org_id, &workspace_id)?;
+    let service = remote.service.clone();
+    tokio::task::spawn_blocking(move || service.finish_workspace_ssh(&org_id, &workspace_id, &revision, &host_key).map_err(|error| error.code))
+        .await.map_err(|error| error.to_string())?
+}
+
+#[cfg(unix)]
+#[tauri::command]
+pub async fn cloud_ssh_remove(remote: tauri::State<'_, Arc<CloudRemote>>, org_id: String, workspace_id: String) -> Result<(), String> {
+    let service = remote.service.clone();
+    tokio::task::spawn_blocking(move || service.remove_workspace_ssh(&org_id, &workspace_id).map_err(|error| error.code))
+        .await.map_err(|error| error.to_string())?
+}
+
+#[cfg(unix)]
+fn private_ssh_proxy_socket(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let invalid = || "cloud_workspace_ssh_proxy_socket_invalid".to_string();
+    let uid = unsafe { libc::geteuid() };
+    let parent = path.parent().ok_or_else(invalid)?;
+    let meta = std::fs::symlink_metadata(parent).map_err(|_| invalid())?;
+    let socket = std::fs::symlink_metadata(path).map_err(|_| invalid())?;
+    let root = std::path::Path::new("/tmp").canonicalize().map_err(|_| invalid())?;
+    if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o777 != 0o700
+        || !socket.file_type().is_socket() || socket.uid() != uid
+        || parent.canonicalize().map_err(|_| invalid())?.parent() != Some(root.as_path())
+        || !parent.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("terminalx-ssh-"))
+        || path.file_name() != Some(std::ffi::OsStr::new("stream"))
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshStreamRequest {
+    connection_id: String,
+    org_id: String,
+    workspace_id: String,
+    scope: String,
+    socket: std::path::PathBuf,
+    nonce: String,
+}
+
+#[cfg(unix)]
+#[tauri::command]
+pub async fn cloud_ssh_stream(
+    remote: tauri::State<'_, Arc<CloudRemote>>, request: SshStreamRequest,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt as _;
+    let SshStreamRequest { connection_id, org_id, workspace_id, scope, socket, nonce } = request;
+    if nonce.len() != 32 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("cloud_workspace_ssh_proxy_socket_invalid".into());
+    }
+    let ports = remote.ssh_ports(&connection_id, &org_id, &workspace_id)?;
+    let service = remote.service.clone();
+    tokio::task::spawn_blocking(move || service.check_workspace_ssh_scope(&org_id, &workspace_id, &scope).map_err(|error| error.code))
+        .await.map_err(|error| error.to_string())??;
+    private_ssh_proxy_socket(&socket)?;
+    let mut stream = tokio::time::timeout(std::time::Duration::from_secs(5), tokio::net::UnixStream::connect(socket))
+        .await.map_err(|_| "cloud_workspace_ssh_unavailable")?.map_err(|_| "cloud_workspace_ssh_unavailable")?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), stream.write_all(nonce.as_bytes()))
+        .await.map_err(|_| "cloud_workspace_ssh_unavailable")?.map_err(|_| "cloud_workspace_ssh_unavailable")?;
+    ports.serve_ssh(stream).await;
     Ok(())
 }
 
@@ -828,7 +935,7 @@ mod intercept_tests {
         ));
         let remote = CloudRemote::new(account.clone(), Arc::new(CloudWorkspaceService::new(account.clone())), agents);
         let (supervisor, mut frames) = Supervisor::connected_for_test();
-        remote.connections.lock().unwrap().insert("cloud-1".into(), Attached { supervisor: Handle::Cloud(supervisor), ports: PortForwarder::new(|_| false), identity: Some(made_in("org-a")) });
+        remote.connections.lock().unwrap().insert("cloud-1".into(), Attached { supervisor: Handle::Cloud(supervisor), ports: PortForwarder::new(|_| false), identity: Some(made_in("org-a")), workspace_id: None });
 
         store.block_writes();
         let refreshing = {
@@ -896,7 +1003,7 @@ mod intercept_tests {
         let remote = CloudRemote::new(account.clone(), Arc::new(CloudWorkspaceService::new(account.clone())), agents.clone());
         let attach = |id: &str| {
             let (supervisor, frames) = Supervisor::connected_for_test();
-            remote.connections.lock().unwrap().insert(id.into(), Attached { supervisor: Handle::Cloud(supervisor), ports: PortForwarder::new(|_| false), identity: Some(made_in("org-a")) });
+            remote.connections.lock().unwrap().insert(id.into(), Attached { supervisor: Handle::Cloud(supervisor), ports: PortForwarder::new(|_| false), identity: Some(made_in("org-a")), workspace_id: None });
             frames
         };
         let _frames = attach("cloud-1");

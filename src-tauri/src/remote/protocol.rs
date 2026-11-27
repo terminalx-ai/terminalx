@@ -115,7 +115,7 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 /// list, which every runtime of this build knows: see [`served`].
 pub const CAPABILITIES: &[&str] = &[
     "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "composer/5", "ports/1",
-    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1", "follow-ups/1", "bots/1", "cloud-desktop/1", "workspace-transfer/3", WORKSPACE_SSH,
+    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1", "follow-ups/1", "bots/1", "cloud-desktop/1", "workspace-transfer/3", "ssh/1",
 ];
 
 /// Private RFB transport for an eligible cloud workspace.
@@ -392,8 +392,8 @@ pub const METHODS: &[Method] = &[
     method("transfer.open", "workspace-transfer/3", Manage, false),
     method("transfer.read", "workspace-transfer/3", Manage, false),
     method("transfer.close", "workspace-transfer/3", Manage, false),
-    method("ssh.open", WORKSPACE_SSH, Participate, false),
-    method("ssh.info", WORKSPACE_SSH, Participate, false),
+    method("ssh.open", "ssh/1", Participate, false),
+    method("ssh.info", "ssh/1", Participate, false),
     method("desktop.open", "cloud-desktop/1", Participate, false),
     method("desktop.write", "cloud-desktop/1", Participate, false),
     method("desktop.ack", "cloud-desktop/1", Participate, false),
