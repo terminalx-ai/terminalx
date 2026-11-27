@@ -124,7 +124,10 @@ pub(crate) fn runs_without_asking(mode: &str) -> bool {
     matches!(mode, "bypassPermissions" | "bypass" | "")
 }
 
-const TOOLS: [(&str, &str, fn() -> Value); 8] = [
+/// A tool's name, description and input schema.
+type Tool = (&'static str, &'static str, fn() -> Value);
+
+const TOOLS: [Tool; 8] = [
     ("open", "Open a browser session in Chrome on this workspace's cloud desktop and go to a URL. Call this first; the session lasts until close. People watching the workspace's Desktop tab see every step.", || json!({
         "type": "object", "required": ["url"], "additionalProperties": false,
         "properties": {

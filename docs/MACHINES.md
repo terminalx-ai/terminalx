@@ -872,6 +872,8 @@ the pull request that adds it.
 | `desktop.write` | `cloud-desktop/1` | Not served | Cloud workspace display |
 | `desktop.ack` | `cloud-desktop/1` | Not served | Cloud workspace display |
 | `desktop.close` | `cloud-desktop/1` | Not served | Cloud workspace display |
+| `desktop.takeControl` | `cloud-desktop/1` | Not served | Cloud workspace display: stop an agent driving its browser (PRO-209) |
+| `desktop.handBack` | `cloud-desktop/1` | Not served | Cloud workspace display: let the agent drive again (PRO-209) |
 | `transfer.open` | `workspace-transfer/3` | Not served | Cloud workspace transfer to a local checkout without pushing Git refs |
 | `transfer.read` | `workspace-transfer/3` | Not served | Cloud workspace transfer to a local checkout |
 | `transfer.close` | `workspace-transfer/3` | Not served | Cloud workspace transfer to a local checkout |

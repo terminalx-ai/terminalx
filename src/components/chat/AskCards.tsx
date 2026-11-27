@@ -260,6 +260,18 @@ function CloudBrowserCard({ ask, onAnswer, busy, blockedReason, aside, cardRef, 
   const { url, plan, agent } = cloudBrowserAskDetail(ask);
   const blocked = !!blockedReason;
   const deny = denyOption(ask);
+  const options = barOrder(ask.options ?? []);
+  const render = ({ option: o, primary }: (typeof options)[number]) => (
+    <Button key={o.id} size="sm" variant={blocked || o.kind === "deny" ? "outline" : primary ? "accent" : "outline"}
+      disabled={busy || blocked} title={blockedReason ?? undefined} onClick={() => onAnswer(o.id)} data-primary={primary || undefined}
+      className={cn((blocked || o.kind === "deny") && "text-muted-foreground")}>
+      {o.kind === "deny" ? "Deny" : "Allow for this browser session"}
+      {primary && !blocked && <EnterKey />}
+      {o.kind === "deny" && !primary && !blocked && takesKeys && o.id === deny?.id && escKeys.length > 0 && (
+        <Kbd className="ml-1.5 h-4 min-w-4 px-1 text-[10px] lowercase text-current">{joinKeycaps(escKeys)}</Kbd>
+      )}
+    </Button>
+  );
   return (
     <AskShell
       ref={cardRef}
@@ -268,23 +280,16 @@ function CloudBrowserCard({ ask, onAnswer, busy, blockedReason, aside, cardRef, 
       tone="warning"
       heading={<>
         <span data-testid="permission-title">Use the browser on the cloud desktop?</span>
+        <span className="ml-auto flex shrink-0 items-center gap-1 rounded-md border border-hairline px-1.5 py-0.5 text-[11px] font-normal text-muted-foreground" data-testid="ask-meta">
+          <Monitor className="size-3" aria-hidden /> Cloud browser
+        </span>
       </>}
-      meta="Cloud browser"
-      aside={aside ?? <span className="text-[12px] text-muted-foreground">The agent waits until you decide.</span>}
+      // Deny stands apart on the left, as on the other side of a decision.
+      aside={aside ?? options.filter(({ option }) => option.kind === "deny").map(render)}
       note={blocked ? blockedReason : null}
       actions={<>
-        {barOrder(ask.options ?? []).map(({ option: o, primary }) => {
-          const button = (
-            <Button key={o.id} size="sm" variant={blocked || o.kind === "deny" ? "outline" : primary ? "accent" : "outline"}
-              disabled={busy || blocked} title={blockedReason ?? undefined} onClick={() => onAnswer(o.id)} data-primary={primary || undefined}
-              className={cn((blocked || o.kind === "deny") && "text-muted-foreground")}>
-              {o.kind === "deny" ? "Deny" : "Allow for this browser session"}
-              {primary && !blocked && <EnterKey />}
-              {o.kind === "deny" && !primary && !blocked && takesKeys && o.id === deny?.id && escKeys.length > 0 && (
-                <Kbd className="ml-1.5 h-4 min-w-4 px-1 text-[10px] lowercase text-current">{joinKeycaps(escKeys)}</Kbd>
-              )}
-            </Button>
-          );
+        {options.filter(({ option }) => option.kind !== "deny").map(({ option: o, primary }) => {
+          const button = render({ option: o, primary });
           // "Open Desktop tab" sits between Deny and the answer.
           return primary ? [<Button key="open-desktop" size="sm" variant="outline" onClick={openCloudDesktop}><Monitor /> Open Desktop tab</Button>, button] : button;
         })}

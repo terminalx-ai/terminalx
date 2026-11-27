@@ -597,6 +597,7 @@ impl DesktopPool {
     }
 
     /// Whether this image has the desktop packages at all.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn tools_present(&self) -> bool {
         let dirs: Vec<_> = self.bin_dirs.iter().map(String::as_str).collect();
         Tools::discover(&dirs).is_ok()

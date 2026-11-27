@@ -179,10 +179,11 @@ pub(super) fn call(caller: Caller<'_>, tool: &str, arguments: &Value, approve: &
 
 async fn wait_for_control() -> Result<(), String> {
     let mut held = ENGINE.held.subscribe();
-    match tokio::time::timeout(HELD_WAIT, held.wait_for(|held| !*held)).await {
-        Ok(Ok(_)) => Ok(()),
-        _ => Err("A person has had control of the cloud desktop for 30 minutes. Stop and ask them before trying again.".into()),
+    let released = tokio::time::timeout(HELD_WAIT, held.wait_for(|held| !*held)).await.is_ok_and(|waited| waited.is_ok());
+    if released {
+        return Ok(());
     }
+    Err("A person has had control of the cloud desktop for 30 minutes. Stop and ask them before trying again.".into())
 }
 
 async fn run(key: String, agent: String, tab_title: Option<String>, tool: &str, arguments: &Value) -> Value {
@@ -240,7 +241,9 @@ async fn start(key: &str, agent: &str, tab_title: Option<String>) -> Result<Brow
 
 fn http_url(url: Option<&str>) -> Result<String, String> {
     let url = url.map(str::trim).filter(|url| !url.is_empty()).ok_or("Give a URL.")?;
-    let parsed = url::Url::parse(url).or_else(|_| url::Url::parse(&format!("http://{url}"))).map_err(|_| format!("Not a URL: {url}"))?;
+    // "localhost:3000" parses with "localhost" as its scheme: no "://", no scheme.
+    let full = if url.contains("://") { url.to_string() } else { format!("http://{url}") };
+    let parsed = url::Url::parse(&full).map_err(|_| format!("Not a URL: {url}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("Only http and https pages can be opened.".into());
     }
@@ -371,7 +374,7 @@ mod tests {
     fn opens_only_web_pages() {
         assert_eq!(http_url(Some("localhost:3000")).unwrap(), "http://localhost:3000/");
         assert_eq!(http_url(Some("https://example.test/a")).unwrap(), "https://example.test/a");
-        for refused in ["file:///etc/passwd", "javascript:alert(1)", "chrome://settings", ""] {
+        for refused in ["file:///etc/passwd", "javascript:alert(1)", "javascript://alert(1)", "data:text/html,x", "chrome://settings", ""] {
             assert!(http_url(Some(refused)).is_err(), "{refused}");
         }
     }
@@ -385,7 +388,7 @@ mod tests {
     #[test]
     fn taking_control_marks_the_driver_as_waiting() {
         *ENGINE.driving.lock().unwrap() = Some(json!({ "agent": "Claude Code", "held": false }));
-        let mut seen = super::super::subscribe();
+        let seen = super::super::subscribe();
         set_held(true);
         assert!(seen.has_changed().unwrap());
         assert_eq!(state()["driving"]["held"], true);

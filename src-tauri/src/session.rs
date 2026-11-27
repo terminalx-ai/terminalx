@@ -8676,7 +8676,9 @@ impl SessionManager {
             // The cloud browser for agents (PRO-209): its MCP server's calls.
             crate::cloud_browser::HOOK_EVENT => return self.cloud_browser_hook(&rt_arc, &frame, kind),
             // Its tools decide their own approval, once per browser session.
-            "PermissionRequest" | "PreToolUse" if frame.payload["tool_name"].as_str().is_some_and(crate::cloud_browser::is_tool) => {
+            "PermissionRequest" | "PreToolUse"
+                if (frame.event == "PermissionRequest" || asks_every_tool)
+                    && frame.payload["tool_name"].as_str().is_some_and(crate::cloud_browser::is_tool) => {
                 return reply_for(kind, &frame.event, Decision::Allow);
             }
             "PermissionRequest" => {

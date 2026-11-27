@@ -1169,6 +1169,25 @@ mod tests {
         assert!(!session_from_refresh(response(None), "host_1").unwrap().desktop_ready);
     }
 
+    /// PRO-209: the workspace's Cloud browser for agents switch reaches the
+    /// runtime as its own readiness flag, replaced on every refresh.
+    #[test]
+    fn agent_browser_switch_is_read_from_readiness_and_replaced_on_refresh() {
+        use serde_json::json;
+        let response = |flags: serde_json::Value| serde_json::from_value::<Refreshed>(json!({
+            "v": 1, "workspaceId": WORKSPACE, "organizationId": "org_1",
+            "relayToken": "fresh-relay-token", "relayTokenExpiresAt": 1,
+            "directorUrl": "https://relay.example", "attachments": [], "revocations": [],
+            "phase2Readiness": { "version": 1, "flags": flags }
+        })).unwrap();
+        let on = session_from_refresh(response(json!({"cloud.desktop.v1": true, "cloud.desktop.agent-browser.v1": true})), "host_1").unwrap();
+        assert!(on.desktop_ready && on.agent_browser_ready);
+        let off = session_from_refresh(response(json!({"cloud.desktop.v1": true, "cloud.desktop.agent-browser.v1": false})), "host_1").unwrap();
+        assert!(off.desktop_ready && !off.agent_browser_ready);
+        let absent = session_from_refresh(response(json!({"cloud.desktop.v1": true})), "host_1").unwrap();
+        assert!(!absent.agent_browser_ready);
+    }
+
     #[test]
     fn cloud_desktop_holds_after_three_failed_refreshes_and_recovers() {
         let token = random_credential();
