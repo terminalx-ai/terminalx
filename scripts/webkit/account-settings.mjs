@@ -33,7 +33,7 @@ try {
             const answers = window.__PW_STUB__.answers;
             answers.data_privacy_status = ${JSON.stringify(privacy)};
             answers.machine_name = { name: "Alex’s MacBook Pro", chosen: false, computerName: "Alex’s MacBook Pro" };
-            answers.pairing_status = { relay: { phase: "off", message: null, attempt: 0 }, host: null, devices: [], activePairing: null, lastError: null };
+            answers.pairing_status = { relay: { phase: "off", message: null, attempt: 0 }, host: null, devices: [], activePairing: null, pendingApproval: null, keepAwake: true, lastError: null, accountListing: { state: "off" } };
             answers.work_status_settings = { shareWithTeam: true };
           })();`,
       });

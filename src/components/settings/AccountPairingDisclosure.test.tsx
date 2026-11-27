@@ -1,7 +1,7 @@
 import "@testing-library/dom";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { MachineName, PairingHostMetadata } from "@/types/pairing";
+import type { AccountListing, MachineName, PairingHostMetadata } from "@/types/pairing";
 
 const host: PairingHostMetadata = {
   hostId: "host-1",
@@ -18,6 +18,7 @@ const host: PairingHostMetadata = {
 const mocks = vi.hoisted(() => ({
   organization: null as string | null,
   host: null as PairingHostMetadata | null,
+  listing: { state: "listed" } as AccountListing,
   machineName: vi.fn(async (): Promise<MachineName> => ({ name: "Studio Mac", chosen: false, computerName: "Studio Mac" })),
   setMachineName: vi.fn(async (name: string | null): Promise<MachineName> => ({ name: name ?? "Studio Mac", chosen: name !== null, computerName: "Studio Mac" })),
 }));
@@ -49,6 +50,7 @@ vi.mock("@/lib/pairing", () => ({
   pendingApproval: null,
   keepAwake: true,
       lastError: null,
+      accountListing: mocks.listing,
     },
   }),
 }));
@@ -66,6 +68,7 @@ const { AccountTab, accountInitials } = await import("./AccountTab");
 
 beforeEach(() => {
   mocks.host = { ...host };
+  mocks.listing = { state: "listed" };
   mocks.machineName.mockClear();
   mocks.setMachineName.mockClear();
 });
@@ -131,6 +134,34 @@ describe("account binding disclosure", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("dialog")).toBeNull();
   });
+  // PRO-598: whether the account's other computers can find this one, and why not, is said on this computer.
+  it("says this computer is on the account's machine list, or why it is not", () => {
+    render(<AccountTab />);
+    expect(screen.getByTestId("account-listing").textContent).toContain("On your account’s machine listYour other computers signed in as owner@terminalx.ai find this computer under Add a machine → On your account.");
+    cleanup();
+
+    mocks.listing = { state: "refused", reason: "Another TerminalX account lists this Mac. Sign out of TerminalX on this Mac as that account, or sign in here with it." };
+    render(<AccountTab />);
+    const refused = screen.getByTestId("account-listing");
+    expect(refused.dataset.state).toBe("refused");
+    expect(within(refused).getByText("Not on your account’s machine list")).toBeTruthy();
+    const said = within(refused).getByRole("status");
+    expect(said.textContent).toBe("Your other computers signed in as owner@terminalx.ai cannot find this computer yet. Another TerminalX account lists this Mac. Sign out of TerminalX on this Mac as that account, or sign in here with it.");
+    expect(said.className).toContain("text-warning");
+    cleanup();
+
+    mocks.listing = { state: "pending", reason: "Relay has not confirmed that this Mac is connected yet. Trying again." };
+    render(<AccountTab />);
+    const pending = within(screen.getByTestId("account-listing")).getByRole("status");
+    expect(pending.textContent).toContain("Relay has not confirmed");
+    expect(pending.className).not.toContain("text-warning");
+    cleanup();
+
+    mocks.listing = { state: "off" };
+    render(<AccountTab />);
+    expect(screen.queryByTestId("account-listing")).toBeNull();
+  });
+
   it("takes initials from the first and last name, else the email", () => {
     expect(accountInitials({ name: "Alex Kim", email: "a@b.c", organization: null })).toBe("AK");
     expect(accountInitials({ name: " ada  de la mare ", email: "a@b.c", organization: null })).toBe("AM");

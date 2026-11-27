@@ -13,6 +13,7 @@ import { PasteSignInLink } from "@/components/account/PasteSignInLink";
 import { usePairing } from "@/lib/pairing";
 import { openOrganizationSettings } from "@/lib/settingsLinks";
 import type { AccountIdentity } from "@/lib/api";
+import type { AccountListing } from "@/types/pairing";
 
 /** Up to two initials from the person's name, else the first letter of their email. */
 export function accountInitials(identity: AccountIdentity): string {
@@ -37,6 +38,29 @@ function IdentityHeader({ identity }: { identity: AccountIdentity }) {
         </div>
         <div className="truncate text-xs text-muted-foreground">{identity.email}</div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Whether this computer is on the account's machine list, where the account's other computers find it in
+ * Add a machine → On your account (PRO-598). When it is not, the reason, so no one has to guess.
+ */
+function AccountListingRow({ listing, email }: { listing: AccountListing; email: string }) {
+  if (listing.state === "off") return null;
+  const listed = listing.state === "listed";
+  return (
+    <div className="py-3" data-testid="account-listing" data-state={listing.state}>
+      <div className="text-[13px] font-medium">{listed ? "On your account’s machine list" : "Not on your account’s machine list"}</div>
+      {listed ? (
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          Your other computers signed in as {email} find {thisComputer} under Add a machine → On your account.
+        </p>
+      ) : (
+        <p role="status" className={listing.state === "refused" ? "text-xs leading-relaxed text-warning" : "text-xs leading-relaxed text-muted-foreground"}>
+          Your other computers signed in as {email} cannot find {thisComputer} yet. {listing.reason}
+        </p>
+      )}
     </div>
   );
 }
@@ -77,6 +101,7 @@ export function AccountTab() {
         <RegisteredSetting setting="account.identity"><div><IdentityHeader identity={identity} /></div></RegisteredSetting>
         <div className="flex flex-col divide-y divide-hairline border-t border-hairline">
           <MachineNameSettings />
+          <AccountListingRow listing={pairing.status.accountListing} email={identity.email} />
           <WorkStatusSettings />
           {/* An organization's own settings, agent logins among them, are on its page (PRO-107); creating one is under Organizations. */}
           {identity.organization && activeId && (

@@ -352,7 +352,8 @@ export const MACHINE_APPROVAL_TTL_MS = 120_000;
  */
 export type MachineAccountDirectory =
   | { signedIn: false }
-  | { signedIn: true; installation: "ready" | "approvalRequired" | "reauthenticationRequired"; machines: AccountMachine[] };
+  /** `email` is the account whose list this is (PRO-598). */
+  | { signedIn: true; email: string; installation: "ready" | "approvalRequired" | "reauthenticationRequired"; machines: AccountMachine[] };
 
 /**
  * One computer on the account.
