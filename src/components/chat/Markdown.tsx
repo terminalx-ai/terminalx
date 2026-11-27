@@ -1,8 +1,9 @@
 import { PrivacyImage } from "@/components/ui/privacy-image";
 import { cloneElement, isValidElement, memo, useMemo, type AnchorHTMLAttributes, type ReactElement, type ReactNode } from "react";
 import { defaultRemarkPlugins, Streamdown, type ExtraProps } from "streamdown";
-import { createCodePlugin } from "@streamdown/code";
+import { createCodePlugin, type CodeHighlighterPlugin } from "@streamdown/code";
 import "streamdown/styles.css";
+import { isCommonShikiLang, normalizeShikiLang } from "@/lib/shikiLanguages";
 import { useTheme } from "@/lib/theme";
 import { chunkStream } from "@/lib/markdownChunks";
 import { ChatLink, chatLinkComponent } from "./ChatLink";
@@ -15,7 +16,25 @@ import { MarkdownTable } from "./MarkdownTable";
 import { LinkedCode } from "./LinkedCode";
 import { openImageViewer } from "@/lib/imageViewer";
 
-const codePlugin = createCodePlugin({ themes: ["github-light", "github-dark"] });
+const baseCodePlugin = createCodePlugin({ themes: ["github-light", "github-dark"] });
+const supportedCommonLanguages = baseCodePlugin.getSupportedLanguages().filter((lang) => isCommonShikiLang(lang));
+
+export const codePlugin: CodeHighlighterPlugin = {
+  ...baseCodePlugin,
+  supportsLanguage(language) {
+    return isCommonShikiLang(language) && baseCodePlugin.supportsLanguage(language);
+  },
+  getSupportedLanguages() {
+    return supportedCommonLanguages;
+  },
+  highlight(options, callback) {
+    if (!isCommonShikiLang(options.language)) {
+      return baseCodePlugin.highlight({ ...options, language: "text" as never }, callback);
+    }
+    const normalized = normalizeShikiLang(options.language) as typeof options.language;
+    return baseCodePlugin.highlight({ ...options, language: normalized }, callback);
+  },
+};
 // Codex file citations (#776) become links with or without a workspace; with one, every other link is routed too.
 const citedRemarkPlugins = [...Object.values(defaultRemarkPlugins), remarkCodexFileCitations];
 const routedRemarkPlugins = [...citedRemarkPlugins, routeMarkdownLinks];

@@ -29,17 +29,18 @@ export function patchLines(unified: string): string[] {
   return body;
 }
 
+/** Maximum edit distance explored by Myers before degrading to delete-all + add-all on the changed middle. */
+const MYERS_HARD_CAP = 2000;
+
 /**
- * Line diff by longest common subsequence, with a cap so a pathological pair
- * (two huge unrelated files) degrades to delete-all + add-all instead of an
- * O(n·m) table the size of memory.
+ * Line diff by Myers O((N + M) · D) shortest edit script after trimming common
+ * prefix/suffix lines. Pathological pairs whose edit distance exceeds `limit`
+ * (capped at `MYERS_HARD_CAP`) degrade cleanly to delete-all + add-all on the
+ * differing middle region without allocating an O(N · M) matrix.
  */
 export function diffLines(oldText: string, newText: string, limit = 4000): DiffLine[] {
   const a = oldText === "" ? [] : oldText.split("\n");
   const b = newText === "" ? [] : newText.split("\n");
-  if (a.length * b.length > limit * limit) {
-    return [...a.map((t, i) => ({ kind: "del" as const, text: t, oldNo: i + 1 })), ...b.map((t, i) => ({ kind: "add" as const, text: t, newNo: i + 1 }))];
-  }
   // Trim common prefix/suffix first; most edits touch a small middle.
   let start = 0;
   while (start < a.length && start < b.length && a[start] === b[start]) start++;
@@ -49,39 +50,120 @@ export function diffLines(oldText: string, newText: string, limit = 4000): DiffL
     endA--;
     endB--;
   }
-  const midA = a.slice(start, endA);
-  const midB = b.slice(start, endB);
-  const n = midA.length;
-  const m = midB.length;
-  const table: Uint32Array[] = [];
-  for (let i = 0; i <= n; i++) table.push(new Uint32Array(m + 1));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      table[i][j] = midA[i] === midB[j] ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1]);
-    }
-  }
+  const n = endA - start;
+  const m = endB - start;
   const out: DiffLine[] = [];
   for (let i = 0; i < start; i++) out.push({ kind: "ctx", text: a[i], oldNo: i + 1, newNo: i + 1 });
-  let i = 0;
-  let j = 0;
-  while (i < n || j < m) {
-    if (i < n && j < m && midA[i] === midB[j]) {
-      out.push({ kind: "ctx", text: midA[i], oldNo: start + i + 1, newNo: start + j + 1 });
-      i++;
-      j++;
-    } else if (j < m && (i >= n || table[i][j + 1] >= table[i + 1][j])) {
-      out.push({ kind: "add", text: midB[j], newNo: start + j + 1 });
-      j++;
+
+  if (n === 0) {
+    for (let j = 0; j < m; j++) out.push({ kind: "add", text: b[start + j], newNo: start + j + 1 });
+  } else if (m === 0) {
+    for (let i = 0; i < n; i++) out.push({ kind: "del", text: a[start + i], oldNo: start + i + 1 });
+  } else {
+    const midA = a.slice(start, endA);
+    const midB = b.slice(start, endB);
+    const maxD = Math.min(n + m, limit, MYERS_HARD_CAP);
+    const midOps = myersDiff(midA, midB, start, maxD);
+    if (midOps) {
+      for (const op of midOps) out.push(op);
     } else {
-      out.push({ kind: "del", text: midA[i], oldNo: start + i + 1 });
-      i++;
+      for (let i = 0; i < n; i++) out.push({ kind: "del", text: midA[i], oldNo: start + i + 1 });
+      for (let j = 0; j < m; j++) out.push({ kind: "add", text: midB[j], newNo: start + j + 1 });
     }
   }
+
   const tail = a.length - endA;
   for (let k = 0; k < tail; k++) {
     out.push({ kind: "ctx", text: a[endA + k], oldNo: endA + k + 1, newNo: endB + k + 1 });
   }
   return collapseContext(out);
+}
+
+/**
+ * Myers O((N + M) · D) forward search + backtrack on the trimmed middle slice.
+ * Returns null if the shortest edit distance exceeds `maxD`.
+ */
+function myersDiff(a: string[], b: string[], offsetLines: number, maxD: number): DiffLine[] | null {
+  const n = a.length;
+  const m = b.length;
+  const offset = maxD;
+  const v = new Int32Array(2 * maxD + 1);
+  // trace[d] stores the frontier for diagonals -d..d (index k + d) after edit step d.
+  const trace: Int32Array[] = [];
+  let foundD = -1;
+
+  // d = 0: follow diagonal 0 snake from (0, 0)
+  {
+    let x = 0;
+    let y = 0;
+    while (x < n && y < m && a[x] === b[y]) {
+      x++;
+      y++;
+    }
+    v[offset] = x;
+    const snap = new Int32Array(1);
+    snap[0] = x;
+    trace.push(snap);
+    if (x >= n && y >= m) foundD = 0;
+  }
+
+  for (let d = 1; foundD < 0 && d <= maxD; d++) {
+    for (let k = -d; k <= d; k += 2) {
+      let x: number;
+      if (k === -d || (k !== d && v[k - 1 + offset] < v[k + 1 + offset])) {
+        x = v[k + 1 + offset];
+      } else {
+        x = v[k - 1 + offset] + 1;
+      }
+      let y = x - k;
+      while (x < n && y < m && a[x] === b[y]) {
+        x++;
+        y++;
+      }
+      v[k + offset] = x;
+      if (x >= n && y >= m) {
+        foundD = d;
+        break;
+      }
+    }
+    if (foundD < 0 && d < maxD) {
+      trace.push(v.slice(offset - d, offset + d + 1));
+    }
+  }
+
+  if (foundD < 0) return null;
+
+  const rev: DiffLine[] = [];
+  let x = n;
+  let y = m;
+  for (let step = foundD; step > 0; step--) {
+    const prevD = step - 1;
+    const prevV = trace[prevD];
+    const k = x - y;
+    const insert = k === -step || (k !== step && prevV[k - 1 + prevD] < prevV[k + 1 + prevD]);
+    const prevK = insert ? k + 1 : k - 1;
+    const prevX = prevV[prevK + prevD];
+    const snakeStartX = insert ? prevX : prevX + 1;
+    while (x > snakeStartX) {
+      x--;
+      y--;
+      rev.push({ kind: "ctx", text: a[x], oldNo: offsetLines + x + 1, newNo: offsetLines + y + 1 });
+    }
+    if (insert) {
+      y--;
+      rev.push({ kind: "add", text: b[y], newNo: offsetLines + y + 1 });
+    } else {
+      x--;
+      rev.push({ kind: "del", text: a[x], oldNo: offsetLines + x + 1 });
+    }
+  }
+  while (x > 0 && y > 0) {
+    x--;
+    y--;
+    rev.push({ kind: "ctx", text: a[x], oldNo: offsetLines + x + 1, newNo: offsetLines + y + 1 });
+  }
+  rev.reverse();
+  return rev;
 }
 
 /** Keep 3 context lines around each change; elide the rest as a marker. */

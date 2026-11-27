@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { memo, useCallback, useEffect, useRef } from "react";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { ProjectRail } from "./ProjectRail";
 import { StarReminder } from "@/components/ui/StarReminder";
@@ -14,7 +14,7 @@ const clamp = (w: number) => Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Math.ro
  * between launches; the width is applied as a CSS variable so the main slot
  * follows it without a re-render per pixel.
  */
-export function Sidebar({
+export const Sidebar = memo(function Sidebar({
   onToggle,
   onOpenSettings,
   onOpenAccount,
@@ -97,4 +97,4 @@ export function Sidebar({
       />
     </aside>
   );
-}
+});

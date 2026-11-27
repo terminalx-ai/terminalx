@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PanelRightClose, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -33,21 +33,7 @@ import { tabPanelId } from "@/lib/sessionTabIds";
 
 const MIN_W = 320;
 
-/**
- * The file shortcuts of a session whose files are tabs: Toggle Preview acts
- * on the file tab on screen (`shown`), Close All Files closes the session's
- * file tabs and leaves its chats, diffs and pull requests.
- */
-export function useFileTabShortcuts(sessionId: string, shown: string | null, enabled: boolean) {
-  useShortcut(
-    "files.togglePreview",
-    () => {
-      if (shown) toggleViewMode(shown);
-    },
-    { enabled: enabled && !!shown },
-  );
-  useShortcut("files.closeAll", () => void closeAllEditors(sessionId, true), { enabled });
-}
+export { useFileTabShortcuts } from "./useFileTabShortcuts";
 
 /**
  * The editor pane, where files are not tabs of a session: a cloud
@@ -62,7 +48,7 @@ export function useFileTabShortcuts(sessionId: string, shown: string | null, ena
  * them. Where a session has no panes (the floating window), its file and
  * review tabs are drawn here, one at a time, as the tab strip selects them.
  */
-export function EditorSplit({ sessionId, active, fill = false, selectedTab }: {
+export const EditorSplit = memo(function EditorSplit({ sessionId, active, fill = false, selectedTab }: {
   sessionId: string;
   active: boolean;
   fill?: boolean;
@@ -220,13 +206,33 @@ export function EditorSplit({ sessionId, active, fill = false, selectedTab }: {
       </div>
       <div className="relative min-h-0 flex-1">
         {editors.map((e) => (
-          <div key={e.id} className={cn("absolute inset-0 flex flex-col", e.id !== activeId && "hidden")}>
-            {e.kind === "diff" ? <DiffEditorPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : e.kind === "conflict" ? <ConflictView entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : e.kind === "pr" ? <PrPanel cwd={e.root} sessionId={e.sessionId.startsWith("checkout:") ? undefined : e.sessionId} branch={e.pr.head} selectedPr={e.pr} active={e.id === activeId && active && !collapsed && !reviewShown} busy={false} /> : e.kind === "attachment" ? <AttachmentPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} embedded={false} /> : e.kind === "checkLog" ? <CheckLogTab entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : e.kind === "text" ? <EditorPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : <MediaPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} />}
-          </div>
+          <LazyEditorSlot key={e.id} entry={e} isActive={e.id === activeId} visible={e.id === activeId && active && !collapsed && !reviewShown} />
         ))}
       </div>
     </div>}
   </>;
+});
+
+/** Defer mounting heavy inactive editor/diff/media/PR tabs until first shown, and unmount read-only live panels when hidden. */
+function LazyEditorSlot({ entry: e, isActive, visible }: { entry: ReturnType<typeof useEditors>["editors"][number]; isActive: boolean; visible: boolean }) {
+  const [everVisible, setEverVisible] = useState(visible);
+  useEffect(() => {
+    if (visible) setEverVisible(true);
+  }, [visible]);
+  const mounted = e.kind === "pr" || e.kind === "checkLog" ? visible : everVisible || visible;
+  return (
+    <div className={cn("absolute inset-0 flex flex-col", !isActive && "hidden")}>
+      {mounted && (
+        e.kind === "diff" ? <DiffEditorPane entry={e} visible={visible} />
+          : e.kind === "conflict" ? <ConflictView entry={e} visible={visible} />
+          : e.kind === "pr" ? <PrPanel cwd={e.root} sessionId={e.sessionId.startsWith("checkout:") ? undefined : e.sessionId} branch={e.pr.head} selectedPr={e.pr} active={visible} busy={false} />
+          : e.kind === "attachment" ? <AttachmentPane entry={e} visible={visible} embedded={false} />
+          : e.kind === "checkLog" ? <CheckLogTab entry={e} visible={visible} />
+          : e.kind === "text" ? <EditorPane entry={e} visible={visible} />
+          : <MediaPane entry={e} visible={visible} />
+      )}
+    </div>
+  );
 }
 
 /**
@@ -237,20 +243,27 @@ export function EditorSplit({ sessionId, active, fill = false, selectedTab }: {
  */
 export function ReviewTab({ entry, visible, focused = visible, embedded = false }: { entry: TabEditorEntry; visible: boolean; focused?: boolean; embedded?: boolean }) {
   const root = useRef<HTMLDivElement>(null);
+  const [everVisible, setEverVisible] = useState(visible);
+  useEffect(() => {
+    if (visible) setEverVisible(true);
+  }, [visible]);
   useEffect(() => {
     if (visible && focused) root.current?.focus({ preventScroll: true });
   }, [visible, focused]);
+  const mounted = entry.kind === "pr" || entry.kind === "checkLog" ? visible : everVisible || visible;
   return <div ref={root} role={embedded ? undefined : "tabpanel"} id={embedded ? undefined : tabPanelId({ kind: "review", id: entry.id })}
     aria-label={embedded ? undefined : entry.name} aria-hidden={embedded ? undefined : !visible} tabIndex={-1}
     className={cn("absolute inset-0 z-10 flex min-h-0 flex-col bg-background outline-none", !visible && "hidden")}
     onPointerDownCapture={() => setLastFocused("editor")} onFocusCapture={() => setLastFocused("editor")}>
-    {entry.kind === "diff" ? <DiffEditorPane entry={entry} visible={visible} />
-      : entry.kind === "conflict" ? <ConflictView entry={entry} visible={visible} />
-      : entry.kind === "attachment" ? <AttachmentPane entry={entry} visible={visible} embedded={embedded} />
-      : entry.kind === "pr" ? <PrPanel cwd={entry.root} sessionId={entry.sessionId} branch={entry.pr.head} selectedPr={entry.pr} active={visible} busy={false} />
-      : entry.kind === "checkLog" ? <CheckLogTab entry={entry} visible={visible} />
-      : entry.kind === "text" ? <EditorPane entry={entry} visible={visible} />
-      : <MediaPane entry={entry} visible={visible} />}
+    {mounted && (
+      entry.kind === "diff" ? <DiffEditorPane entry={entry} visible={visible} />
+        : entry.kind === "conflict" ? <ConflictView entry={entry} visible={visible} />
+        : entry.kind === "attachment" ? <AttachmentPane entry={entry} visible={visible} embedded={embedded} />
+        : entry.kind === "pr" ? <PrPanel cwd={entry.root} sessionId={entry.sessionId} branch={entry.pr.head} selectedPr={entry.pr} active={visible} busy={false} />
+        : entry.kind === "checkLog" ? <CheckLogTab entry={entry} visible={visible} />
+        : entry.kind === "text" ? <EditorPane entry={entry} visible={visible} />
+        : <MediaPane entry={entry} visible={visible} />
+    )}
   </div>;
 }
 

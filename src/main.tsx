@@ -21,10 +21,10 @@ window.addEventListener("unhandledrejection", (e) => {
 keepShellUnscrolled();
 followReduceTransparency();
 installAppContextMenu();
-// Finish the migration before controls can save a new choice, so its reply
-// cannot replace a choice made while the old localStorage copy was in flight.
+// Run independent native boot reads in parallel before mounting, so startup
+// does not serialize data privacy behind settings file listeners/status.
 const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
-void bootDataPrivacy().then(() => bootSettingsFile()).then(() => {
+void Promise.all([bootDataPrivacy(), bootSettingsFile()]).then(() => {
   void startDraftPersistence();
   root.render(
     <React.StrictMode>

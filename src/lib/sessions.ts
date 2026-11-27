@@ -24,7 +24,7 @@ import type {
  * module store so every component reads one copy. Mutations go through the
  * backend first and the store second; the backend is the source of truth.
  */
-interface State {
+export interface SessionStoreState {
   loaded: boolean;
   projects: Project[];
   lastProject: string | null;
@@ -62,7 +62,7 @@ interface State {
    * The session the new-session form was opened over: it stays drawn behind
    * the form, which is a dialog, and closing the form goes back to it.
    */
-  newSessionReturn: { sessionId: string | null; view: State["view"] } | null;
+  newSessionReturn: { sessionId: string | null; view: SessionStoreState["view"] } | null;
   /** A new-session form pre-filled from a workspace row. */
   newSessionPreset: { projectPath: string; cwd: string | null; fromBranch?: string } | null;
   /** An ordinary chat in the shared Chats directory, composed before its first send. */
@@ -87,8 +87,41 @@ interface State {
   machineSessionPreset: { machineId: string; projectId: string | null } | null;
   /** The cloud project the reader last clicked (`cloud:<orgId>:<identity>`); any local project focus clears it. */
   selectedCloudProject: string | null;
-  /** Pre-normalized command-palette documents, rebuilt only when source data changes. */
-  paletteIndex: PaletteIndex;
+}
+
+type State = SessionStoreState;
+
+const EMPTY_PALETTE_INDEX: PaletteIndex = { sessions: [], workspaces: [], projects: [] };
+let cachedPaletteInput: {
+  sessions: SessionEntry[];
+  projects: Project[];
+  workspaces: Record<string, Workspace[]>;
+  harnesses: HarnessInfo[];
+  index: PaletteIndex;
+} | null = null;
+
+/** Lazily build and cache the normalized palette index only when the Command Palette is open. */
+export function getPaletteIndex(current: Pick<State, "sessions" | "projects" | "workspaces" | "harnesses"> = state): PaletteIndex {
+  if (
+    cachedPaletteInput &&
+    cachedPaletteInput.sessions === current.sessions &&
+    cachedPaletteInput.projects === current.projects &&
+    cachedPaletteInput.workspaces === current.workspaces &&
+    cachedPaletteInput.harnesses === current.harnesses
+  ) {
+    return cachedPaletteInput.index;
+  }
+  const index = !current.sessions.length && !current.projects.length
+    ? EMPTY_PALETTE_INDEX
+    : buildPaletteIndex(current.sessions, current.projects, current.workspaces, current.harnesses);
+  cachedPaletteInput = {
+    sessions: current.sessions,
+    projects: current.projects,
+    workspaces: current.workspaces,
+    harnesses: current.harnesses,
+    index,
+  };
+  return index;
 }
 
 let state: State = {
@@ -119,7 +152,6 @@ let state: State = {
   cloudSessionPreset: null,
   machineSessionPreset: null,
   selectedCloudProject: null,
-  paletteIndex: buildPaletteIndex([], [], {}, []),
 };
 
 const listeners = new Set<() => void>();
@@ -154,14 +186,6 @@ function set(patch: Partial<State>) {
   if ("selectedProject" in patch && !("selectedCloudProject" in patch)) next.selectedCloudProject = null;
   // Selecting a session or another view leaves the cloud workspace.
   if (!("selectedCloudWorkspace" in patch) && ("selectedSessionId" in patch || "view" in patch)) next.selectedCloudWorkspace = null;
-  if (
-    next.projects !== state.projects ||
-    next.sessions !== state.sessions ||
-    next.workspaces !== state.workspaces ||
-    next.harnesses !== state.harnesses
-  ) {
-    next.paletteIndex = buildPaletteIndex(next.sessions, next.projects, next.workspaces, next.harnesses);
-  }
   const activeTabs = patch.sessions ? new Set(next.sessions.flatMap((session) => session.tabs.map((tab) => tab.id))) : null;
   const removedTabs = activeTabs ? state.sessions.flatMap((session) =>
     session.tabs.filter((tab) => !activeTabs.has(tab.id)).map((tab) => tab.id),
@@ -182,6 +206,18 @@ export function useSessionStore(): State {
     },
     () => state,
     () => state,
+  );
+}
+
+/** Narrow selector subscription: skips re-renders when unrelated session store fields change. */
+export function useSessionSelector<T>(selector: (store: State) => T): T {
+  return useSyncExternalStore(
+    (cb) => {
+      listeners.add(cb);
+      return () => listeners.delete(cb);
+    },
+    () => selector(state),
+    () => selector(state),
   );
 }
 

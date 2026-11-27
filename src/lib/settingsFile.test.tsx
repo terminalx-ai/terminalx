@@ -255,4 +255,12 @@ describe("user preference files", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: "Create settings file" })).toBeNull());
     expect(screen.getByText("Reloads when edited")).toBeTruthy();
   });
+
+  it("skips redundant update_user_preferences migration IPC on boot when no legacy storage exists", async () => {
+    file.exists = true;
+    file.preferences = { sounds: true };
+    const settings = await import("./settingsFile");
+    await settings.bootSettingsFile();
+    expect(mocks.invoke.mock.calls.filter(([command, args]) => command === "update_user_preferences" && args?.migrate)).toHaveLength(0);
+  });
 });

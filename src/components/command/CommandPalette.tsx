@@ -113,6 +113,7 @@ import { START_ACTIONS, type StartAction } from "@/lib/projectStart";
 import { useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { visiblePaletteSessions } from "@/lib/organizationSessions";
 import {
+  getPaletteIndex,
   openNewIssue,
   openWorkspace,
   refreshWorkspaces,
@@ -131,7 +132,7 @@ import { useAccount } from "@/lib/account";
 import { defaultOrgId, lastActivity, liveCloudOrgIds } from "@/lib/cloudCatalog";
 import { useCloudProjectChoices } from "@/components/session/CloudNewSession";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
-import { setStatusSettings, useStatus } from "@/lib/status";
+import { setStatusSettings, useStatusSelector } from "@/lib/status";
 import { THEMES, setMode, setTheme, useTheme } from "@/lib/theme";
 import { relativeTime } from "@/lib/time";
 import type { SettingsTab } from "@/components/settings/SettingsPage";
@@ -412,7 +413,7 @@ export function CommandPalette({
   onCreated: (sessionId: string, tabId: string, text: string) => void;
 }) {
   const store = useSessionStore();
-  const status = useStatus();
+  const statusSettings = useStatusSelector((s) => s.settings);
   const theme = useTheme();
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<PaletteScope>("all");
@@ -633,16 +634,16 @@ export function CommandPalette({
         id: "command:status-toggle",
         group: "commands" as const,
         primary: "Toggle status bar",
-        secondary: status.settings.visible ? "Currently shown" : "Currently hidden",
+        secondary: statusSettings.visible ? "Currently shown" : "Currently hidden",
         recentAt: 20,
         icon: Gauge,
-        run: () => void setStatusSettings({ visible: !status.settings.visible }),
+        run: () => void setStatusSettings({ visible: !statusSettings.visible }),
       }),
       indexPaletteItem({
         id: "command:usage-used",
         group: "commands" as const,
         primary: "Show usage as Used",
-        secondary: status.settings.percent === "used" ? "Current percentage display" : "Status bar percentage display",
+        secondary: statusSettings.percent === "used" ? "Current percentage display" : "Status bar percentage display",
         recentAt: 19,
         icon: BarChart3,
         run: () => void setStatusSettings({ percent: "used" }),
@@ -651,7 +652,7 @@ export function CommandPalette({
         id: "command:usage-remaining",
         group: "commands" as const,
         primary: "Show usage as Remaining",
-        secondary: status.settings.percent === "remaining" ? "Current percentage display" : "Status bar percentage display",
+        secondary: statusSettings.percent === "remaining" ? "Current percentage display" : "Status bar percentage display",
         recentAt: 18,
         icon: BarChart3,
         run: () => void setStatusSettings({ percent: "remaining" }),
@@ -717,7 +718,7 @@ export function CommandPalette({
         ]
       : [];
     return [...runEntries, ...shortcutEntries, ...extras];
-  }, [sections, store.projects, selectedSession, statusTarget, store.selectedCloudWorkspace, cloud.live, cloud.mayCreate, cloud.orgName, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme, switches]);
+  }, [sections, store.projects, selectedSession, statusTarget, store.selectedCloudWorkspace, cloud.live, cloud.mayCreate, cloud.orgName, runAction, keymap, statusSettings.percent, statusSettings.visible, theme.mode, theme.theme, switches]);
 
   const fileEntries = useMemo<FileEntry[]>(
     () => fileHits.map((hit, index) => indexPaletteItem({
@@ -804,15 +805,20 @@ export function CommandPalette({
   const { visibleIds } = useOrganizationVisibility();
   // And their projects among the projects, each named with its organization (a hidden organization's only when searched for, like its sessions).
   const cloudProjects = useCloudProjectChoices();
+  const basePaletteIndex = useMemo(
+    () => (open ? getPaletteIndex(store) : { sessions: [], workspaces: [], projects: [] }),
+    [open, store.sessions, store.projects, store.workspaces, store.harnesses],
+  );
   const paletteIndex = useMemo(() => {
+    if (!open) return basePaletteIndex;
     const projects = cloudProjects
       .filter((org) => deferredQuery.trim() || visibleIds.has(org.orgId))
       .flatMap((org) => org.projects.map((project) => ({ ...project, orgName: org.orgName, workspaces: project.workspaces.map((node) => ({ name: node.item.workspace.name, lastActivity: lastActivity(node.item.workspace) })) })));
     return withCloudProjects(
-      withCloudSessions(store.paletteIndex, buildCloudPaletteSessions(visiblePaletteSessions(cloudSessions, visibleIds, deferredQuery), store.harnesses)),
+      withCloudSessions(basePaletteIndex, buildCloudPaletteSessions(visiblePaletteSessions(cloudSessions, visibleIds, deferredQuery), store.harnesses)),
       buildCloudPaletteProjects(projects),
     );
-  }, [store.paletteIndex, cloudSessions, cloudProjects, store.harnesses, visibleIds, deferredQuery]);
+  }, [open, basePaletteIndex, cloudSessions, cloudProjects, store.harnesses, visibleIds, deferredQuery]);
 
   // The open session's title: what "This session" is, and what Move to section moves.
   const sessionTitle = selectedSession ? conversationTitle(selectedSession) : (statusTarget?.title ?? null);
@@ -989,7 +995,7 @@ export function CommandPalette({
 
     if (smartInput?.kind === "path") {
       const path = cleanPath(smartInput.path);
-      const match = store.paletteIndex.workspaces
+      const match = basePaletteIndex.workspaces
         .filter((item) => path === cleanPath(item.workspace.path) || path.startsWith(`${cleanPath(item.workspace.path)}/`))
         .sort((a, b) => b.workspace.path.length - a.workspace.path.length)[0];
       if (match) {
@@ -1080,7 +1086,7 @@ export function CommandPalette({
       { id: "files", label: activeProject ? `Files · ${activeProject.name}` : "Files", rows: fileRows },
       ...(settingsFirst ? [settingsGroup, ...commandGroups] : [...commandGroups, settingsGroup]),
     ].filter((group) => paletteScopeShows(scope, group.id));
-  }, [moveIds, movedSession, moveTitle, moveTo, sections, query, sessionTitle, statusSessionId, statusTarget, settingStatus, setOpen, scope, onOpenSettings, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading, orchestratorRuns, localVmTasks]);
+  }, [moveIds, movedSession, moveTitle, moveTo, sections, query, sessionTitle, statusSessionId, statusTarget, settingStatus, setOpen, scope, onOpenSettings, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, basePaletteIndex, store.projects, store.sessions, workItemLoading, orchestratorRuns, localVmTasks]);
 
   const renderedGroups = useMemo(() => {
     let offset = 0;

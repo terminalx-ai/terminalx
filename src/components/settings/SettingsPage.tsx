@@ -7,7 +7,7 @@ import { SettingsFileError } from "./SettingsFile";
 import { BadgeLegend, CantSaveToast, OpenSettingsFileButton } from "./SettingSources";
 import { useSettingsFile } from "@/lib/settingsFile";
 import type { SourceBadgeKind } from "@/lib/settingSources";
-import { useCallback, useContext, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { ArrowLeft, BarChart3, Bot, Wrench, Building2, ChevronDown, ChevronRight, FlaskConical, FolderPlus, Folders, HardDrive, Info, Keyboard, KeyRound, Laptop, Mic, Monitor, Network, Palette, Plug, Plus, Return, Search, Settings, Smartphone, UserRound, X } from "@/icons";
 import type { LucideIcon } from "lucide-react";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";
@@ -627,11 +627,13 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
             {leaveWarning && <p role="alert" className="mb-3 text-sm text-destructive">Save your changes before leaving Settings. If a save is in progress, wait for it to finish.</p>}
             <SettingsHeaderSlotProvider value={headerSlot}>
               <SettingControlSlots.Provider value={searching ? slots : null}>
-                {settingsSectionRenderers[section]({
-                  onOpenSkills, projectPath: project?.path, projectPage: page, row: target, openRequest,
-                  onSelectRow: (row) => choose(section, { path: project?.path, row, organization: organization?.id }),
-                  organizationId: organization?.id, organizationPage: organizationPageShown, onOpenOrganization: (id) => chooseOrganization(id),
-                })}
+                <Suspense fallback={<div className="py-6 text-xs text-faint">Loading section…</div>}>
+                  {settingsSectionRenderers[section]({
+                    onOpenSkills, projectPath: project?.path, projectPage: page, row: target, openRequest,
+                    onSelectRow: (row) => choose(section, { path: project?.path, row, organization: organization?.id }),
+                    organizationId: organization?.id, organizationPage: organizationPageShown, onOpenOrganization: (id) => chooseOrganization(id),
+                  })}
+                </Suspense>
               </SettingControlSlots.Provider>
             </SettingsHeaderSlotProvider>
             <SectionBadgeLegend section={section} />

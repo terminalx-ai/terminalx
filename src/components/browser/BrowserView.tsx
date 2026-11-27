@@ -62,6 +62,7 @@ export function BrowserView({ page, active, compact }: { session: Pick<SessionEn
   }, [live, cast?.state, page.id]);
 
   useEffect(() => {
+    if (!live) return;
     return subscribeFrames(page.id, (frame) => {
       const img = imgRef.current;
       if (!img) return;
@@ -69,7 +70,7 @@ export function BrowserView({ page, active, compact }: { session: Pick<SessionEn
       if (frame.width && frame.height) pageSize.current = { width: frame.width, height: frame.height };
       setHasFrame(true);
     });
-  }, [page.id]);
+  }, [live, page.id]);
 
   // Input goes out once a frame: moves and wheel turns between two frames merge into one.
   const queue = useRef<PageInputEvent[]>([]);
@@ -165,24 +166,26 @@ export function BrowserView({ page, active, compact }: { session: Pick<SessionEn
   };
 
   // The wheel scrolls the page, not the panel: a listener that may prevent the default.
+  const wheelHandlerRef = useRef<(e: WheelEvent) => void>(() => {});
+  wheelHandlerRef.current = (e: WheelEvent) => {
+    const point = pointAt(e.clientX, e.clientY);
+    if (!interactive || !point) return;
+    e.preventDefault();
+    const height = pageSize.current.height;
+    const wheel = (pendingWheel.current ??= { ...point, dx: 0, dy: 0, modifiers: modifiersOf(e) });
+    wheel.x = point.x;
+    wheel.y = point.y;
+    wheel.dx += wheelPixels(e.deltaX, e.deltaMode, height);
+    wheel.dy += wheelPixels(e.deltaY, e.deltaMode, height);
+    schedule();
+  };
   useEffect(() => {
     const el = surfaceRef.current;
     if (!el) return;
-    const onWheel = (e: WheelEvent) => {
-      const point = pointAt(e.clientX, e.clientY);
-      if (!interactive || !point) return;
-      e.preventDefault();
-      const height = pageSize.current.height;
-      const wheel = (pendingWheel.current ??= { ...point, dx: 0, dy: 0, modifiers: modifiersOf(e) });
-      wheel.x = point.x;
-      wheel.y = point.y;
-      wheel.dx += wheelPixels(e.deltaX, e.deltaMode, height);
-      wheel.dy += wheelPixels(e.deltaY, e.deltaMode, height);
-      schedule();
-    };
+    const onWheel = (e: WheelEvent) => wheelHandlerRef.current(e);
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  });
+  }, []);
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (!interactive || e.nativeEvent.isComposing || !keyForPage(e, isMac)) return;

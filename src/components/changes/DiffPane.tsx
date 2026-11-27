@@ -9,11 +9,11 @@ import type { ReviewAnchor, ReviewComment } from "@/lib/reviewComments";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { EditorState } from "@codemirror/state";
+import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView, lineNumbers } from "@codemirror/view";
 import { MergeView, unifiedMergeView } from "@codemirror/merge";
 import { whitespaceDiff } from "@/lib/diffOptions";
-import { diffPhrases, languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
+import { diffPhrases, languageFor, loadLanguageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
 
 /**
  * A whole-file diff. Unified draws one column with deletions inline; split
@@ -79,9 +79,12 @@ export function DiffPane({ path, before, after, mode, base, originalPath, worksp
       }),
     });
     controller.current = comments;
-    const common = [raccoonTheme, diffPhrases, raccoonHighlight, languageFor(path), EditorView.editable.of(false), EditorState.readOnly.of(true), lineNumbers(), ...(wrap ? [EditorView.lineWrapping] : [])];
+    const langSlot = new Compartment();
+    const initialLang = languageFor(path);
+    const common = [raccoonTheme, diffPhrases, raccoonHighlight, langSlot.of(initialLang), EditorView.editable.of(false), EditorState.readOnly.of(true), lineNumbers(), ...(wrap ? [EditorView.lineWrapping] : [])];
     let dispose: () => void;
     let scroller: HTMLElement;
+    const views: EditorView[] = [];
     if (mode === "split") {
       const a = comments?.extensions("before"), b = comments?.extensions("after");
       const mv = new MergeView({
@@ -94,6 +97,7 @@ export function DiffPane({ path, before, after, mode, base, originalPath, worksp
         gutter: true,
       });
       a?.attach(mv.a); b?.attach(mv.b);
+      views.push(mv.a, mv.b);
       scroller = mv.b.scrollDOM;
       dispose = () => mv.destroy();
     } else {
@@ -109,8 +113,15 @@ export function DiffPane({ path, before, after, mode, base, originalPath, worksp
         }),
       });
       b?.attach(view);
+      views.push(view);
       scroller = view.scrollDOM;
       dispose = () => view.destroy();
+    }
+    if (Array.isArray(initialLang) && initialLang.length === 0) {
+      void loadLanguageFor(path).then((ext) => {
+        if (!alive || (Array.isArray(ext) && ext.length === 0)) return;
+        for (const v of views) v.dispatch({ effects: langSlot.reconfigure(ext) });
+      }).catch(() => {});
     }
     comments?.update(); setSelection(null);
     const frame = requestAnimationFrame(() => {

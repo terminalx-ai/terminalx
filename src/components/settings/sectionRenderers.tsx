@@ -1,25 +1,26 @@
+import { lazy, type ReactNode } from "react";
 import { OrchestratorTab } from "./OrchestratorSettings";
-import type { ReactNode } from "react";
 import type { SettingId, SettingsSection } from "./settingsRegistry";
 import { AccountTab } from "./AccountTab";
-import { DevicesTab } from "./DevicesTab";
 import { OrganizationsTab } from "./OrganizationsTab";
 import type { OrganizationPage } from "./OrganizationSettings";
 import { GeneralTab, AppearanceTab, AgentsTab, IntegrationsTab, AboutTab } from "./SettingsSections";
-import { TranscriptionTab } from "./TranscriptionTab";
-import { MergedCleanupSettings } from "./MergedCleanupSettings";
 import { RepositoriesTab, type ProjectPage } from "./RepositoriesTab";
-import { StorageTab } from "./StorageTab";
-import { RecoveryIncidentSettings } from "./RecoveryIncidentSettings";
-import { ShortcutsTab } from "./ShortcutsTab";
 import { ExperimentalTab } from "./ExperimentalSettings";
-import { AdvancedTab } from "./AdvancedSettings";
-import { EnvironmentSettings } from "./EnvironmentSettings";
 import { RegisteredSetting } from "./settingsRegistry";
-import { EnvironmentsTab } from "@/components/localVm/EnvironmentsTab";
-import { ProjectTemplatesSettings } from "./ProjectTemplatesSettings";
-import { MachinesSettings } from "@/components/machines/MachinesSettings";
-import { StatsUsageView } from "@/components/stats/StatsUsageView";
+
+const DevicesTab = lazy(() => import("./DevicesTab").then((m) => ({ default: m.DevicesTab })));
+const TranscriptionTab = lazy(() => import("./TranscriptionTab").then((m) => ({ default: m.TranscriptionTab })));
+const MergedCleanupSettings = lazy(() => import("./MergedCleanupSettings").then((m) => ({ default: m.MergedCleanupSettings })));
+const StorageTab = lazy(() => import("./StorageTab").then((m) => ({ default: m.StorageTab })));
+const RecoveryIncidentSettings = lazy(() => import("./RecoveryIncidentSettings").then((m) => ({ default: m.RecoveryIncidentSettings })));
+const ShortcutsTab = lazy(() => import("./ShortcutsTab").then((m) => ({ default: m.ShortcutsTab })));
+const AdvancedTab = lazy(() => import("./AdvancedSettings").then((m) => ({ default: m.AdvancedTab })));
+const EnvironmentSettings = lazy(() => import("./EnvironmentSettings").then((m) => ({ default: m.EnvironmentSettings })));
+const EnvironmentsTab = lazy(() => import("@/components/localVm/EnvironmentsTab").then((m) => ({ default: m.EnvironmentsTab })));
+const ProjectTemplatesSettings = lazy(() => import("./ProjectTemplatesSettings").then((m) => ({ default: m.ProjectTemplatesSettings })));
+const MachinesSettings = lazy(() => import("@/components/machines/MachinesSettings").then((m) => ({ default: m.MachinesSettings })));
+const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((m) => ({ default: m.StatsUsageView })));
 
 interface SectionContext {
   onOpenSkills?: () => void;

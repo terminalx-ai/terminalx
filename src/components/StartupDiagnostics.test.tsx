@@ -139,3 +139,22 @@ it("states what is held even while the banner is showing", async () => {
   await open();
   expect(screen.getByRole("note", { name: "Still held" }).textContent).toBe(`Still held until this incident recovers: new heavy local validation on ${thisComputer}, and the checks of 1 pipeline.`);
 });
+
+it("pauses background 5s polling while hidden and resumes on visibilitychange", async () => {
+  vi.useFakeTimers();
+  const visibility = vi.spyOn(document, "visibilityState", "get");
+  try {
+    visibility.mockReturnValue("hidden");
+    render(<StartupDiagnostics />);
+    await act(async () => { await Promise.resolve(); });
+    expect(mocks.status).toHaveBeenCalledTimes(1);
+    await act(async () => { vi.advanceTimersByTime(15_000); await Promise.resolve(); });
+    expect(mocks.status).toHaveBeenCalledTimes(1);
+    visibility.mockReturnValue("visible");
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); await Promise.resolve(); });
+    expect(mocks.status).toHaveBeenCalledTimes(2);
+  } finally {
+    visibility.mockRestore();
+    vi.useRealTimers();
+  }
+});

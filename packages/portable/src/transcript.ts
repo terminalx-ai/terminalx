@@ -1149,14 +1149,31 @@ export function callTarget(call: ToolCall): string | undefined {
   return undefined;
 }
 
+const messageTimeFormatters = new Map<string, { short: Intl.DateTimeFormat; full: Intl.DateTimeFormat }>();
+
+function getMessageTimeFormatters(locales?: string, timeZone?: string) {
+  const key = `${locales ?? ""}\0${timeZone ?? ""}`;
+  let pair = messageTimeFormatters.get(key);
+  if (!pair) {
+    if (messageTimeFormatters.size >= 32) messageTimeFormatters.clear();
+    pair = {
+      short: new Intl.DateTimeFormat(locales, { timeStyle: "short", timeZone }),
+      full: new Intl.DateTimeFormat(locales, { dateStyle: "full", timeStyle: "long", timeZone }),
+    };
+    messageTimeFormatters.set(key, pair);
+  }
+  return pair;
+}
+
 /** Local display of an authoritative event time. Unzoned/invalid legacy values are unknown. */
 export function messageTime(ts?: string, locales?: string, timeZone?: string): { short: string; full: string; iso: string } | undefined {
   if (!ts || !/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/i.test(ts)) return undefined;
   const date = new Date(ts);
   if (!Number.isFinite(date.getTime())) return undefined;
+  const formatters = getMessageTimeFormatters(locales, timeZone);
   return {
-    short: new Intl.DateTimeFormat(locales, { timeStyle: "short", timeZone }).format(date),
-    full: new Intl.DateTimeFormat(locales, { dateStyle: "full", timeStyle: "long", timeZone }).format(date),
+    short: formatters.short.format(date),
+    full: formatters.full.format(date),
     iso: date.toISOString(),
   };
 }

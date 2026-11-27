@@ -285,5 +285,19 @@ describe("FileTreeView", () => {
       expect(within(menu).getByRole("menuitem", { name: "View diff" }).getAttribute("aria-disabled")).toBe("true");
       expect(within(menu).getByRole("menuitem", { name: "Discard changes" }).getAttribute("aria-disabled")).toBe("true");
     });
+
+    it("virtualizes large trees so only a viewport slice is rendered in the DOM (P-41)", async () => {
+      const many = Array.from({ length: 500 }, (_, i) => ({
+        path: `file-${String(i).padStart(4, "0")}.ts`,
+        name: `file-${String(i).padStart(4, "0")}.ts`,
+        isDir: false,
+      }));
+      mocks.listDir.mockResolvedValue(many);
+      render(<FileTreeView sessionId="f" root="/repos/large" rootName="large" active />);
+      await screen.findByText("file-0000.ts");
+      const mounted = screen.getAllByRole("treeitem");
+      expect(mounted.length).toBeLessThan(150);
+      expect(mounted.length).toBeGreaterThan(10);
+    });
   });
 });

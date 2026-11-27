@@ -1,5 +1,5 @@
 import { useCallback, useLayoutEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import { createPortal, flushSync } from "react-dom";
+import { createPortal } from "react-dom";
 import { cn } from "@/lib/cn";
 
 /**
@@ -65,54 +65,154 @@ export function NoticeColumn({ waiting, children, window: kind = "main" }: { wai
   );
 }
 
+function nodeAffectsAvoid(node: Node): boolean {
+  if (!(node instanceof Element)) return false;
+  return node.matches(AVOID) || node.querySelector(AVOID) !== null;
+}
+
 /**
  * Up top, the toasts stop above the composer (and the cards over it) and scroll within themselves, never
  * over Send (#1499 review). Only they do: the notices that wait above them are never cut short, however
- * high an approval card reaches in a short window. Fitted again every second as those notices come and go.
+ * high an approval card reaches in a short window. Driven by ResizeObserver/MutationObserver rather than
+ * permanent polling.
  */
 function useFitAbove(toasts: HTMLElement | null, floor: number | null) {
   useLayoutEffect(() => {
     if (!toasts) return;
+    if (floor === null) {
+      toasts.style.maxHeight = "";
+      return;
+    }
     const fit = () => {
-      toasts.style.maxHeight = floor === null ? "" : `${Math.max(Math.round(floor - toasts.getBoundingClientRect().top - CLEARANCE), MIN_STACK)}px`;
+      toasts.style.maxHeight = `${Math.max(Math.round(floor - toasts.getBoundingClientRect().top - CLEARANCE), MIN_STACK)}px`;
     };
     fit();
-    const timer = window.setInterval(fit, 1000);
-    return () => window.clearInterval(timer);
+    let frame = 0;
+    const schedule = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        fit();
+      });
+    };
+    const column = toasts.parentElement;
+    const ro = column && typeof ResizeObserver !== "undefined" ? new ResizeObserver(schedule) : null;
+    if (column && ro) {
+      ro.observe(column);
+      for (const child of column.children) {
+        if (child !== toasts) ro.observe(child);
+      }
+    }
+    const mo = column && typeof MutationObserver !== "undefined"
+      ? new MutationObserver(() => {
+          if (ro && column) {
+            ro.disconnect();
+            ro.observe(column);
+            for (const child of column.children) {
+              if (child !== toasts) ro.observe(child);
+            }
+          }
+          schedule();
+        })
+      : null;
+    if (column) mo?.observe(column, { childList: true });
+    window.addEventListener("resize", schedule);
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      ro?.disconnect();
+      mo?.disconnect();
+      window.removeEventListener("resize", schedule);
+    };
   }, [toasts, floor]);
 }
 
 /**
  * The top of whatever composer (or card that answers to it) reaches under the bottom-right corner, or
- * null when nothing does. Read when
- * the window opens and resizes, every second as views and panels open and close, and whenever a toast
- * comes or goes, before it is painted: one that comes just after a chat opened goes straight up.
+ * null when nothing does. Observers stay inactive while no notices are mounted so idle windows do zero
+ * layout reads.
  */
 function useComposerInCorner(place: Place, toasts: HTMLElement | null): number | null {
   const [floor, setFloor] = useState<number | null>(null);
+  const [hasNotices, setHasNotices] = useState(false);
   const { right, bottomInset, widthPx } = place;
+
+  // Watch only direct notice presence on the toast stack; do nothing until at least one notice mounts.
   useLayoutEffect(() => {
+    if (!toasts) {
+      setHasNotices(false);
+      return;
+    }
+    const update = () => setHasNotices(toasts.childElementCount > 0);
+    update();
+    if (typeof MutationObserver === "undefined") return;
+    let frame = 0;
+    const observer = new MutationObserver(() => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        update();
+      });
+    });
+    observer.observe(toasts, { childList: true });
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [toasts]);
+
+  useLayoutEffect(() => {
+    if (!hasNotices) {
+      setFloor(null);
+      return;
+    }
     const measure = () => {
       const columnWidth = Math.min(widthPx, window.innerWidth - 2 * right);
       const corner = { left: window.innerWidth - right - columnWidth, right: window.innerWidth - right, bottom: window.innerHeight - bottomInset, top: window.innerHeight - bottomInset - BAND };
       const under = [...document.querySelectorAll<HTMLElement>(AVOID)]
         .map((box) => box.getBoundingClientRect())
         .filter((box) => box.width > 0 && box.height > 0 && box.right > corner.left && box.left < corner.right && box.bottom > corner.top && box.top < corner.bottom);
-      setFloor(under.length ? Math.round(Math.min(...under.map((box) => box.top))) : null);
+      const next = under.length ? Math.round(Math.min(...under.map((box) => box.top))) : null;
+      setFloor((prev) => (prev === next ? prev : next));
     };
     measure();
-    const timer = window.setInterval(measure, 1000);
-    window.addEventListener("resize", measure);
-    // A toast's arrival is seen right after React commits it, before the frame is painted, and flushSync moves the
-    // stack in that same frame. (A ResizeObserver here moved what it observed inside its own callback: a loop error.)
-    const observer = toasts && typeof MutationObserver !== "undefined" ? new MutationObserver(() => flushSync(measure)) : null;
-    if (toasts) observer?.observe(toasts, { childList: true, subtree: true });
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener("resize", measure);
-      observer?.disconnect();
+    let frame = 0;
+    const schedule = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        measure();
+      });
     };
-  }, [right, bottomInset, widthPx, toasts]);
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(schedule) : null;
+    const syncAvoidObservers = () => {
+      if (!ro) return;
+      ro.disconnect();
+      for (const box of document.querySelectorAll<HTMLElement>(AVOID)) ro.observe(box);
+    };
+    syncAvoidObservers();
+    const bodyObserver = typeof MutationObserver !== "undefined"
+      ? new MutationObserver((records) => {
+          let relevant = false;
+          for (const record of records) {
+            for (const node of record.addedNodes) if (nodeAffectsAvoid(node)) { relevant = true; break; }
+            if (relevant) break;
+            for (const node of record.removedNodes) if (nodeAffectsAvoid(node)) { relevant = true; break; }
+            if (relevant) break;
+          }
+          if (!relevant) return;
+          syncAvoidObservers();
+          schedule();
+        })
+      : null;
+    if (document.body) bodyObserver?.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener("resize", schedule);
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      window.removeEventListener("resize", schedule);
+      ro?.disconnect();
+      bodyObserver?.disconnect();
+    };
+  }, [right, bottomInset, widthPx, hasNotices]);
   return floor;
 }
 

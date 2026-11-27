@@ -1,5 +1,5 @@
 import type { TurnCheckpointApi } from "@/lib/turnCheckpoints";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ArrowDown, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -87,7 +87,7 @@ export function visibleTurns(tops: number[], top: number, viewport: number, tail
  * opened or folded in a turn is kept by the chat, not the turn, and a link to
  * a place in a turn not drawn draws every turn once to find it.
  */
-export function Chat({
+export const Chat = memo(function Chat({
   sessionId,
   tabId,
   checkpointTabId,
@@ -308,11 +308,10 @@ export function Chat({
     return changed;
   }, []);
 
-  // After every commit, before paint: what was drawn is measured, and the
-  // band worked out again on the heights it really has.
+  // After commits that can change turn layout, measure drawn turns and refresh the band.
   useLayoutEffect(() => {
     if (measure()) readView();
-  });
+  }, [turns, start, end, stream, sending, pending, transcript.pendingAsks.length, footerHeight, measure, readView]);
 
   // Wheel up unpins before the scroll lands, and so do the keys that scroll
   // up and a link that jumps within the transcript. A scroll only unpins while
@@ -394,7 +393,7 @@ export function Chat({
   // New content while pinned keeps the bottom in view.
   useLayoutEffect(() => {
     if (pinned.current) pinToBottom();
-  });
+  }, [turns, stream, sending, pending, firstMessage, transcript.pendingAsks.length, transcript.compacting, footerHeight, pinToBottom]);
 
   useLayoutEffect(() => {
     if (followedPrompt.current === lastPrompt) return;
@@ -476,6 +475,12 @@ export function Chat({
 
   const working = progressing && !!transcript.workingSince && (transcript.modelRequestOpen || !stream.length);
   const streamingTool = stream.find((s) => s.kind === "tool_use" && !s.done);
+  const handleResetAt = useCallback(
+    (endSeq: number, turnIndex: number) => {
+      onReset?.(endSeq, resetTarget(turnList.current, turnIndex));
+    },
+    [onReset],
+  );
 
   return (
     <div ref={root} data-find-scope="chat" tabIndex={-1} className="relative flex min-h-0 flex-1 flex-col outline-none"
@@ -530,7 +535,8 @@ export function Chat({
                 onFork={onFork}
                 onSaveSnippet={onSaveSnippet}
                 turnFallback={turnFallback}
-                onReset={!isLast && !live && !sending && onReset ? (endSeq) => onReset(endSeq, resetTarget(turns, start + i)) : undefined}
+                onResetAt={!isLast && !live && !sending && onReset ? handleResetAt : undefined}
+                turnIndex={start + i}
                 workingSince={isLast ? transcript.workingSince : undefined}
                 // A failed last turn can go again: its prompt, sent as a new message.
                 onRetry={isLast && !t.live && !sending ? onRetry : undefined}
@@ -610,7 +616,7 @@ export function Chat({
       </div>
     </div>
   );
-}
+});
 
 /** What a reset to the end of a turn does, in the reader's terms: its number, the later turns' numbers, the files they changed. */
 /** Why each turn action a session cannot take here is off; absent ones are offered or simply not shown. */

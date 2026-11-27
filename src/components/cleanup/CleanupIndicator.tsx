@@ -30,13 +30,16 @@ export function liftClearOf(own: Box, controls: Box[]): number {
   return lift;
 }
 
+const COMPOSER_SELECTOR = "[data-composer-box]";
+function nodeAffectsComposer(node: Node): boolean {
+  if (!(node instanceof Element)) return false;
+  return node.matches(COMPOSER_SELECTOR) || node.querySelector(COMPOSER_SELECTOR) !== null;
+}
+
 /**
  * The lift that keeps `element` off a composer (`data-composer-box`): its
- * send controls, and the text being typed. An indicator stays for as long as
- * a clean-up runs, and a message must be writable and sendable all that
- * time. The composer comes and goes with the session and moves with the
- * panels, so while the indicator is up this is read again twice a second
- * instead of being hooked into each of those.
+ * send controls, and the text being typed. Driven by ResizeObserver and
+ * MutationObserver only while an indicator is mounted, with zero polling.
  */
 function useLiftOffComposer(element: React.RefObject<HTMLElement | null>, active: boolean): number {
   const [lift, setLift] = useState(0);
@@ -53,15 +56,48 @@ function useLiftOffComposer(element: React.RefObject<HTMLElement | null>, active
       const now = node.getBoundingClientRect();
       // Where it rests: what is measured already includes the lift in force.
       const rest = { left: now.left, right: now.right, top: now.top + applied.current, bottom: now.bottom + applied.current };
-      const composers = [...document.querySelectorAll<HTMLElement>("[data-composer-box]")].map((composer) => composer.getBoundingClientRect()).filter((rect) => rect.width > 0 && rect.height > 0);
-      setLift(Math.round(liftClearOf(rest, composers)));
+      const composers = [...document.querySelectorAll<HTMLElement>(COMPOSER_SELECTOR)].map((composer) => composer.getBoundingClientRect()).filter((rect) => rect.width > 0 && rect.height > 0);
+      const next = Math.round(liftClearOf(rest, composers));
+      setLift((prev) => (prev === next ? prev : next));
     };
     measure();
-    const timer = window.setInterval(measure, 500);
-    window.addEventListener("resize", measure);
+    let frame = 0;
+    const schedule = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        measure();
+      });
+    };
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(schedule) : null;
+    const syncObservers = () => {
+      if (!ro) return;
+      ro.disconnect();
+      if (element.current) ro.observe(element.current);
+      for (const box of document.querySelectorAll<HTMLElement>(COMPOSER_SELECTOR)) ro.observe(box);
+    };
+    syncObservers();
+    const mo = typeof MutationObserver !== "undefined"
+      ? new MutationObserver((records) => {
+          let relevant = false;
+          for (const record of records) {
+            for (const node of record.addedNodes) if (nodeAffectsComposer(node)) { relevant = true; break; }
+            if (relevant) break;
+            for (const node of record.removedNodes) if (nodeAffectsComposer(node)) { relevant = true; break; }
+            if (relevant) break;
+          }
+          if (!relevant) return;
+          syncObservers();
+          schedule();
+        })
+      : null;
+    if (document.body) mo?.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener("resize", schedule);
     return () => {
-      window.clearInterval(timer);
-      window.removeEventListener("resize", measure);
+      if (frame) cancelAnimationFrame(frame);
+      ro?.disconnect();
+      mo?.disconnect();
+      window.removeEventListener("resize", schedule);
     };
   }, [element, active]);
   return lift;

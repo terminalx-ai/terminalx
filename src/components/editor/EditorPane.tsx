@@ -1,7 +1,7 @@
 import { revealInFileManager } from "@/lib/platform";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Compartment, EditorState, StateEffect, StateField, type Extension } from "@codemirror/state";
+import { Compartment, EditorState, StateEffect, StateField, type Extension, type Text } from "@codemirror/state";
 import {
   EditorView,
   GutterMarker,
@@ -25,7 +25,7 @@ import { api, fs } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { getPrefs, usePrefs } from "@/lib/prefs";
 import { registerLiveEditor } from "@/lib/editorViews";
-import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
+import { languageFor, loadLanguageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
 import { diffLines } from "@/lib/diff";
 import { clearJump, editorLinkContext, getEditors, isMarkdown, setEditorDirty, setViewMode, type FileEditorEntry } from "@/lib/editors";
 import { changedSince, fileErrorText, isConflict, stashBuffer, takeStashedBuffer, useFileSource, type FileState } from "@/lib/workspaceFiles";
@@ -108,6 +108,25 @@ function gitMarks(head: string, now: string): Map<number, Mark> {
 const wrapExtension = (on: boolean): Extension => (on ? EditorView.lineWrapping : []);
 const whitespaceExtension = (on: boolean): Extension => (on ? highlightWhitespace() : []);
 
+/**
+ * Compare a CodeMirror `Text` rope against a saved string without flattening
+ * the rope with `doc.toString()` on every keystroke: length mismatch exits in
+ * O(1), and equal-length docs stream existing rope chunks via `doc.iter()`.
+ */
+export function docEqualsString(doc: Text, target: string): boolean {
+  if (doc.length !== target.length) return false;
+  let offset = 0;
+  const iter = doc.iter();
+  while (!iter.next().done) {
+    const chunk = iter.value;
+    if (chunk.length > 0) {
+      if (!target.startsWith(chunk, offset)) return false;
+      offset += chunk.length;
+    }
+  }
+  return offset === target.length;
+}
+
 /** The file name a download suggests: the file's own. */
 const downloadName = (rel: string) => rel.slice(rel.lastIndexOf("/") + 1) || "file";
 
@@ -155,6 +174,10 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
   const abs = `${entry.root}/${entry.rel}`;
   const markdown = isMarkdown(entry.rel);
   const preview = markdown && entry.viewMode === "preview";
+  const previewRef = useRef(preview);
+  previewRef.current = preview;
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
   const linkContext = useMemo(() => editorLinkContext(entry), [entry]);
   // A local checkout's file says how it differs from HEAD; a cloud file and a sent attachment have no badge.
   const change = useFileChange(!entry.source && !attachment ? entry.root : undefined, entry.rel, visible, revision);
@@ -170,6 +193,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
     (text: string, state: FileState) => {
       fileState.current = state;
       savedDoc.current = text;
+      dirtyRef.current = false;
       setRevision((n) => n + 1);
       setDirty(false);
       setEditorDirty(entry.id, false);
@@ -250,7 +274,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
     const to = await saveDialog({ title: `Download ${downloadName(entry.rel)}`, defaultPath: downloadName(entry.rel) }).catch(() => null);
     if (!to) return;
     try {
-      const unsaved = view.state.doc.toString() !== savedDoc.current;
+      const unsaved = !docEqualsString(view.state.doc, savedDoc.current);
       await fs.exportFile(to, source.kind === "local" && (!unsaved || truncated) ? { from: abs } : { content: view.state.doc.toString() });
       setError(null);
       flash(`Saved a copy to ${to}`);
@@ -295,7 +319,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
     try {
       const f = await source.readText(entry.rel);
       view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: f.content } });
-      setDocText(f.content);
+      if (previewRef.current) setDocText(f.content);
       markSaved(f.content, { version: f.version, etag: f.etag });
       updateMarks();
     } catch (e) {
@@ -336,10 +360,13 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
           fileState.current = { version: f.version, etag: f.etag };
           setTruncated(f.truncated);
         }
-        setDocText(doc);
+        if (previewRef.current) setDocText(doc);
         const restoredDirty = doc !== savedDoc.current;
+        dirtyRef.current = restoredDirty;
         setDirty(restoredDirty);
         setEditorDirty(entry.id, restoredDirty);
+        const langSlot = new Compartment();
+        const initialLang = languageFor(entry.rel);
         const extensions: Extension[] = [
           raccoonTheme,
           raccoonHighlight,
@@ -354,7 +381,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
           closeBrackets(),
           highlightSelectionMatches(),
           findPanel(setFind),
-          languageFor(entry.rel),
+          langSlot.of(initialLang),
           wrapSlot.of(wrapExtension(getPrefs().editorWrap)),
           whitespaceSlot.of(whitespaceExtension(getPrefs().editorShowWhitespace)),
           EditorState.readOnly.of(source.readOnly || !!attachment),
@@ -369,18 +396,32 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
           ]),
           EditorView.updateListener.of((u) => {
             if (!u.docChanged) return;
-            const d = u.state.doc.toString() !== savedDoc.current;
-            setDirty(d);
-            setEditorDirty(entry.id, d);
+            const d = !docEqualsString(u.state.doc, savedDoc.current);
+            if (d !== dirtyRef.current) {
+              dirtyRef.current = d;
+              setDirty(d);
+              setEditorDirty(entry.id, d);
+            }
             window.clearTimeout(markTimer);
             markTimer = window.setTimeout(updateMarks, 250);
-            window.clearTimeout(textTimer);
-            textTimer = window.setTimeout(() => setDocText(u.state.doc.toString()), 150);
+            if (previewRef.current) {
+              window.clearTimeout(textTimer);
+              textTimer = window.setTimeout(() => {
+                if (previewRef.current) setDocText(u.state.doc.toString());
+              }, 150);
+            }
           }),
         ];
         const view = new EditorView({ parent: el, state: EditorState.create({ doc, extensions }) });
         viewRef.current = view;
-        unregister = registerLiveEditor(abs, { view, isDirty: () => view.state.doc.toString() !== savedDoc.current, save });
+        if (Array.isArray(initialLang) && initialLang.length === 0) {
+          void loadLanguageFor(entry.rel).then((ext) => {
+            if (!cancelled && (!Array.isArray(ext) || ext.length > 0)) {
+              view.dispatch({ effects: langSlot.reconfigure(ext) });
+            }
+          }).catch(() => {});
+        }
+        unregister = registerLiveEditor(abs, { view, isDirty: () => !docEqualsString(view.state.doc, savedDoc.current), save });
         setStatus("ready");
         if (stash) {
           // Restored after being away: the file may have moved on meanwhile.
@@ -413,7 +454,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
       const view = viewRef.current;
       // A review can switch to another session through the workspace strip.
       // Like cloud buffers, its unsaved text must outlive that unmounted view.
-      if (view && (source.kind === "cloud" || embedded) && view.state.doc.toString() !== savedDoc.current && getEditors().editors.some((e) => e.id === entry.id)) {
+      if (view && (source.kind === "cloud" || embedded) && !docEqualsString(view.state.doc, savedDoc.current) && getEditors().editors.some((e) => e.id === entry.id)) {
         stashBuffer(entry.id, { text: view.state.doc.toString(), saved: savedDoc.current, state: fileState.current });
       }
       view?.destroy();
@@ -435,14 +476,19 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
     clearJump(entry.id);
   }, [entry.jump, entry.id, status]);
 
+  // Sync Markdown preview text only when Preview mode becomes active.
+  useEffect(() => {
+    if (preview && status === "ready" && viewRef.current) {
+      setDocText(viewRef.current.state.doc.toString());
+    }
+  }, [preview, status]);
+
   // Focus when shown.
   useEffect(() => {
     if (visible && status === "ready" && !preview) requestAnimationFrame(() => viewRef.current?.focus());
   }, [visible, status, preview]);
 
   // Follow the file: a clean buffer reloads, a dirty one asks.
-  const dirtyRef = useRef(dirty);
-  dirtyRef.current = dirty;
   const checkForChange = useCallback(async () => {
     if (!source) return;
     const now = await source.stat(entry.rel).catch(() => undefined);
@@ -458,7 +504,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
     else setChangedOnDisk(true);
   }, [source, entry.rel, reloadFromDisk]);
 
-  // A local file is polled while visible; a cloud one is re-checked when the
+  // A local file is polled while visible and foregrounded; a cloud one is re-checked when the
   // runtime says it changed, or after a reconnect (`null`: changes missed).
   useEffect(() => {
     if (status !== "ready" || !source) return;
@@ -472,9 +518,18 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
       return stop;
     }
     if (!visible) return;
-    void checkForChange();
-    const t = window.setInterval(() => void checkForChange(), 2000);
-    return () => window.clearInterval(t);
+    if (document.visibilityState === "visible") void checkForChange();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void checkForChange();
+    };
+    const t = window.setInterval(() => {
+      if (document.visibilityState === "visible") void checkForChange();
+    }, 2000);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [visible, status, source, entry.rel, checkForChange]);
 
   return (
