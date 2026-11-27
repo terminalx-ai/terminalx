@@ -1,4 +1,4 @@
-import { setupWorkspaceSsh, removeWorkspaceSsh } from "@/lib/cloudSsh";
+import { openWorkspaceInEditor, setupWorkspaceSsh, removeWorkspaceSsh, SSH_EDITORS } from "@/lib/cloudSsh";
 import { phase2Ready } from "@/lib/phase2Readiness";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { isWindows } from "@/lib/platform";
@@ -149,6 +149,12 @@ export function WorkspaceActionItems({
           Set up SSH and copy command
         </DropdownMenuItem>
       )}
+      {/* Design 14.06: the workspace in an editor over SSH. The same setup runs first, so the same people may. */}
+      {sshAvailable && present && canSetUpSsh && SSH_EDITORS.map(({ id, label }) => (
+        <DropdownMenuItem key={id} data-testid={`cloud-open-in-${id}`} onSelect={() => run(() => openWorkspaceInEditor(sshTarget, id))}>
+          Open in {label}
+        </DropdownMenuItem>
+      ))}
       {sshAvailable && present && (
         <DropdownMenuItem onSelect={() => run(() => removeWorkspaceSsh(sshTarget))}>
           Remove SSH setup

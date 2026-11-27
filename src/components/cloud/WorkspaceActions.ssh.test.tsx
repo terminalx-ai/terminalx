@@ -10,6 +10,7 @@ const m = vi.hoisted(() => ({
   setup: vi.fn(),
   remove: vi.fn(),
   copy: vi.fn(),
+  openEditor: vi.fn(),
 }));
 vi.mock("@/lib/account", () => ({ useAccount: () => ({ status: {
   state: "signed-in", phase2Readiness: { org: m.ready ? ["cloud.workspaces.ssh.v1"] : [] },
@@ -30,7 +31,10 @@ vi.mock("./WorkspaceFollowing", () => ({ useWorkspacePreferencesAvailable: () =>
 vi.mock("@/lib/cloudSchedules", () => ({ useSchedulesOffer: () => "held" }));
 vi.mock("@/components/cloud/CloudSchedulesDialog", () => ({ openSchedulesDialog: vi.fn() }));
 vi.mock("@/components/cloud/CloudShareDialog", () => ({ openShareDialog: vi.fn() }));
-vi.mock("@/lib/cloudSsh", () => ({ setupWorkspaceSsh: m.setup, removeWorkspaceSsh: m.remove }));
+vi.mock("@/lib/cloudSsh", () => ({
+  setupWorkspaceSsh: m.setup, removeWorkspaceSsh: m.remove, openWorkspaceInEditor: m.openEditor,
+  SSH_EDITORS: [{ id: "vscode", label: "VS Code" }, { id: "cursor", label: "Cursor" }, { id: "zed", label: "Zed" }],
+}));
 vi.mock("@/lib/clipboard", () => ({ copyText: m.copy }));
 vi.mock("@/lib/platform", async (original) => ({ ...(await original<typeof import("@/lib/platform")>()), isWindows: false }));
 vi.mock("@/components/ui/menu", () => ({
@@ -84,4 +88,29 @@ it("holds SSH in privacy mode and hides setup for viewers", () => {
   view.rerender(<WorkspaceActionItems item={viewer} onLifecycle={onLifecycle} run={run} />);
   expect(screen.queryByText("Set up SSH and copy command")).toBeNull();
   expect(screen.getByText("Remove SSH setup")).toBeTruthy();
+});
+
+it("offers the editors to whoever may set up SSH, and opens one only on its own click", async () => {
+  m.openEditor.mockResolvedValue(undefined);
+  const view = render(<WorkspaceActionItems item={item} onLifecycle={onLifecycle} run={run} />);
+  expect(screen.queryByText("Open in VS Code")).toBeNull();
+  m.ready = true;
+  view.rerender(<WorkspaceActionItems item={item} onLifecycle={onLifecycle} run={run} />);
+  expect(["Open in VS Code", "Open in Cursor", "Open in Zed"].every((label) => screen.getByText(label))).toBe(true);
+  expect(m.openEditor).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByText("Open in Zed"));
+  expect(m.openEditor).toHaveBeenCalledExactlyOnceWith({ orgId: "org", workspaceId: "ws" }, "zed");
+
+  const driver = { ...item, workspace: { ...item.workspace, you: { role: "driver" as const, canApprove: false } } };
+  m.rows = [driver];
+  view.rerender(<WorkspaceActionItems item={driver} onLifecycle={onLifecycle} run={run} />);
+  expect(screen.queryByText("Open in VS Code")).toBeNull();
+  const stopped = { ...item, workspace: { ...item.workspace, state: "suspended" } } as CloudWorkspaceListItem;
+  m.rows = [stopped];
+  view.rerender(<WorkspaceActionItems item={stopped} onLifecycle={onLifecycle} run={run} />);
+  expect(screen.queryByText("Open in Cursor")).toBeNull();
+  m.rows = [item];
+  m.privateMode = true;
+  view.rerender(<WorkspaceActionItems item={item} onLifecycle={onLifecycle} run={run} />);
+  expect(screen.queryByText("Open in Zed")).toBeNull();
 });

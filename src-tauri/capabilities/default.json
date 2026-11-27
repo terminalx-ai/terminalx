@@ -23,6 +23,15 @@
       "allow": [
         {
           "url": "x-apple.systempreferences:*"
+        },
+        {
+          "url": "vscode://vscode-remote/ssh-remote+*"
+        },
+        {
+          "url": "cursor://vscode-remote/ssh-remote+*"
+        },
+        {
+          "url": "zed://ssh/*"
         }
       ]
     },
