@@ -176,7 +176,7 @@ fn a_bearer_token_goes_to_the_keychain_and_the_agents_name_its_variable() {
     let listing = save_in(&rig.deps, docs).unwrap();
     let row = &listing.servers[0];
     assert!(row.has_secret && row.shared_by.is_none());
-    let var = token_var(&row.key);
+    let var = token_var(&row.key, &row.target);
     assert_eq!(rig.vars.values().unwrap().get(&var).map(String::as_str), Some("tok-123-secret"));
 
     let claude = rig.claude();
@@ -197,7 +197,7 @@ fn removing_a_server_removes_it_from_both_agents_and_forgets_its_secrets() {
     headers.header_names = vec!["X-Api-Key".into()];
     headers.secret.header_values = Some(vec!["k-1".into()]);
     let key = save_in(&rig.deps, headers).unwrap().servers[0].key.clone();
-    assert_eq!(rig.codex()["mcp_servers"]["search"]["env_http_headers"]["X-Api-Key"].as_str(), Some(header_var(&key, 0).as_str()));
+    assert_eq!(rig.codex()["mcp_servers"]["search"]["env_http_headers"]["X-Api-Key"].as_str(), Some(header_var(&key, "https://search.example.com/mcp", 0).as_str()));
     assert!(rig.claude()["mcpServers"]["search"]["headers"]["X-Api-Key"].as_str().unwrap().starts_with("${TERMINALX_MCP_"));
 
     let listing = remove_in(&rig.deps, &key).unwrap();
@@ -237,11 +237,40 @@ fn names_are_unique_and_a_rename_keeps_the_token() {
     let listing = save_in(&rig.deps, renamed).unwrap();
     assert!(listing.servers[0].has_secret);
     assert!(rig.claude()["mcpServers"].get("a").is_none() && rig.claude()["mcpServers"].get("b").is_some());
-    assert_eq!(rig.vars.values().unwrap().get(&token_var(&key)).map(String::as_str), Some("t"));
+    assert_eq!(rig.vars.values().unwrap().get(&token_var(&key, "https://a.example/mcp")).map(String::as_str), Some("t"));
+}
+
+#[test]
+fn changing_a_servers_url_drops_its_secrets_and_never_names_them_for_the_new_one() {
+    let rig = rig();
+    let mut a = input("a", "https://a.example/mcp", Auth::Bearer);
+    a.secret.token = Some("for-a".into());
+    let key = save_in(&rig.deps, a.clone()).unwrap().servers[0].key.clone();
+    let old = token_var(&key, "https://a.example/mcp");
+    assert_ne!(old, token_var(&key, "https://b.example/mcp"), "a variable is named for its URL");
+    let mut moved = a;
+    moved.key = Some(key.clone());
+    moved.target = "https://b.example/mcp".into();
+    moved.secret = SecretInput::default();
+    let listing = save_in(&rig.deps, moved).unwrap();
+    assert!(!listing.servers[0].has_secret);
+    assert!(rig.vars.values().unwrap().is_empty());
+    assert!(rig.claude()["mcpServers"]["a"].get("headers").is_none(), "the new URL is written without the old token");
 }
 
 fn shared(id: &str, name: &str, target: &str) -> Shared {
     Shared { id: id.into(), name: name.into(), target: target.into(), auth_kind: Auth::None, header_names: Vec::new(), agents: Agents { claude_code: true, codex: true } }
+}
+
+fn shared_bearer(target: &str) -> Shared {
+    Shared { auth_kind: Auth::Bearer, ..shared("s1", "docs", target) }
+}
+
+fn set_member_token(rig: &Rig, target: &str, token: &str) {
+    let mut mine = input("docs", target, Auth::Bearer);
+    mine.key = Some("org-1/s1".into());
+    mine.secret.token = Some(token.into());
+    save_in(&rig.deps, mine).unwrap();
 }
 
 #[test]
@@ -256,13 +285,20 @@ fn shared_servers_are_urls_only_and_each_person_can_turn_one_off() {
     assert_eq!(listing.servers.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["docs"], "no command, query string or fragment is taken from an organization");
     assert!(!rig.all_text().contains("api_key") && !rig.all_text().contains("token=abc"));
     assert_eq!(listing.servers[0].shared_by.as_deref(), Some("org-1"));
+    // Offered, not installed: it reaches the agents once this person adds it.
+    assert_eq!(listing.servers[0].offer, Some(Offer::New));
+    assert!(rig.claude().get("mcpServers").is_none() && rig.codex().get("mcp_servers").is_none());
+    assert_eq!(check_in(&rig.deps, "org-1/s1", &Script::new(|_, _, _, _| panic!("not checked before it is added"))).unwrap(), Status::Off);
+    let listing = add_shared_in(&rig.deps, "org-1/s1").unwrap();
+    assert_eq!(listing.servers[0].offer, None);
     assert!(rig.claude()["mcpServers"]["docs"].is_object());
+    assert!(rig.codex()["mcp_servers"]["docs"].is_table());
     assert!(remove_in(&rig.deps, "org-1/s1").is_err(), "a member cannot remove it");
 
     let listing = set_off_in(&rig.deps, "org-1/s1", true).unwrap();
     assert!(listing.servers[0].off);
     assert!(rig.claude()["mcpServers"].get("docs").is_none());
-    assert!(rig.codex()["mcp_servers"].get("docs").is_none());
+    assert!(rig.codex().get("mcp_servers").and_then(|t| t.get("docs")).is_none());
     set_off_in(&rig.deps, "org-1/s1", false).unwrap();
     assert!(rig.claude()["mcpServers"]["docs"].is_object());
 
@@ -270,6 +306,108 @@ fn shared_servers_are_urls_only_and_each_person_can_turn_one_off() {
     let listing = set_shared_in(&rig.deps, "org-1", None).unwrap();
     assert!(listing.servers.is_empty());
     assert!(rig.claude()["mcpServers"].get("docs").is_none());
+}
+
+#[test]
+fn shared_records_are_public_https_with_safe_ids() {
+    for target in ["https://docs.example.com/mcp", "https://203.0.113.9/mcp", "https://[2001:db8::1]/mcp"] {
+        assert!(shareable_url(target), "{target}");
+    }
+    for target in [
+        "http://docs.example.com/mcp", "http://127.0.0.1:3000/mcp", "https://localhost/mcp", "https://x.localhost/mcp", "https://printer.local/mcp",
+        "https://intranet/mcp", "https://10.0.0.5/mcp", "https://172.16.1.1/mcp", "https://192.168.1.1/mcp", "https://169.254.169.254/latest",
+        "https://100.64.0.1/mcp", "https://0.0.0.0/mcp", "https://[::1]/mcp", "https://[fd00::1]/mcp", "https://[fe80::1]/mcp", "https://[::ffff:10.0.0.1]/mcp",
+    ] {
+        assert!(!shareable_url(target), "{target}");
+    }
+    let rig = rig();
+    let listing = set_shared_in(&rig.deps, "org-1", Some(vec![
+        shared("..", "dots", "https://a.example.com/mcp"),
+        shared("a/b", "slash", "https://b.example.com/mcp"),
+        shared("", "empty", "https://c.example.com/mcp"),
+        shared("ok-1", "fine", "https://d.example.com/mcp"),
+        shared("ok-1", "again", "https://e.example.com/mcp"),
+        shared("ok-2", "inside", "https://192.168.0.10/mcp"),
+    ])).unwrap();
+    assert_eq!(listing.servers.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["fine"]);
+    assert!(set_shared_in(&rig.deps, "../org", None).is_err());
+}
+
+/// The organisation keeps the record's id but points it elsewhere: the
+/// member's token never goes to the new host, and they are asked again.
+#[test]
+fn a_shared_server_that_changes_url_loses_the_members_secrets_and_asks_again() {
+    let rig = rig();
+    set_shared_in(&rig.deps, "org-1", Some(vec![shared_bearer("https://docs.example.com/mcp")])).unwrap();
+    add_shared_in(&rig.deps, "org-1/s1").unwrap();
+    set_member_token(&rig, "https://docs.example.com/mcp", "member-token");
+    let var = token_var("org-1/s1", "https://docs.example.com/mcp");
+    assert_eq!(rig.codex()["mcp_servers"]["docs"]["bearer_token_env_var"].as_str(), Some(var.as_str()));
+
+    let listing = set_shared_in(&rig.deps, "org-1", Some(vec![shared_bearer("https://evil.example.net/mcp")])).unwrap();
+    let row = &listing.servers[0];
+    assert_eq!((row.offer, row.has_secret), (Some(Offer::Changed), false));
+    assert!(rig.vars.values().unwrap().is_empty(), "the token is gone");
+    assert!(rig.claude()["mcpServers"].get("docs").is_none() && rig.codex().get("mcp_servers").and_then(|t| t.get("docs")).is_none(), "nothing names the new URL until added");
+    let http = Script::new(|_, _, headers, _| {
+        assert!(!headers.iter().any(|(k, _)| k == "Authorization"), "no token to the new host");
+        answer(401, "")
+    });
+    assert_eq!(check_in(&rig.deps, "org-1/s1", &http).unwrap(), Status::Off);
+    add_shared_in(&rig.deps, "org-1/s1").unwrap();
+    assert_eq!(check_in(&rig.deps, "org-1/s1", &http).unwrap(), Status::NeedsSignIn);
+    assert!(rig.claude()["mcpServers"]["docs"].get("headers").is_none(), "added again, still without a token");
+
+    // A change of auth kind or header names drops it too.
+    set_member_token(&rig, "https://evil.example.net/mcp", "second");
+    let mut headers = shared("s1", "docs", "https://evil.example.net/mcp");
+    headers.auth_kind = Auth::Headers;
+    headers.header_names = vec!["X-Key".into()];
+    let listing = set_shared_in(&rig.deps, "org-1", Some(vec![headers])).unwrap();
+    assert!(!listing.servers[0].has_secret && rig.vars.values().unwrap().is_empty());
+}
+
+#[test]
+fn an_oauth_sign_in_is_used_only_for_the_url_it_was_made_for() {
+    let rig = rig();
+    let mut oauth = shared("s1", "docs", "https://docs.example.com/mcp");
+    oauth.auth_kind = Auth::Oauth;
+    set_shared_in(&rig.deps, "org-1", Some(vec![oauth.clone()])).unwrap();
+    add_shared_in(&rig.deps, "org-1/s1").unwrap();
+    let grant = |resource: &str| Grant { token_endpoint: "https://auth.example.com/token".into(), client_id: "c".into(), expires_at: Some(0), resource: resource.into(), serial: 0 };
+    let tokens = || oauth::Tokens { access_token: "acc".into(), refresh_token: Some("ref".into()), expires_in: Some(3600) };
+    assert!(store_tokens(&rig.deps, "org-1/s1", grant("https://other.example.com/mcp"), tokens(), None).is_err(), "a grant for another URL is refused");
+    store_tokens(&rig.deps, "org-1/s1", grant("https://docs.example.com/mcp"), tokens(), None).unwrap();
+    assert!(rig.claude()["mcpServers"]["docs"]["headers"]["Authorization"].is_string());
+
+    oauth.target = "https://docs.example.com/v2/mcp".into();
+    set_shared_in(&rig.deps, "org-1", Some(vec![oauth])).unwrap();
+    let state = read_state(&rig.deps).unwrap();
+    assert!(state.grants.is_empty() && state.secrets.is_empty() && state.bound.is_empty());
+    assert!(rig.secrets.stored(SERVICE, &refresh_account("org-1/s1")).is_none(), "the refresh token went with it");
+    // Nothing left to refresh, and nothing sent.
+    refresh_in(&rig.deps, "org-1/s1", &Script::new(|_, _, _, _| panic!("no refresh"))).unwrap();
+}
+
+#[test]
+fn an_entry_the_person_added_themselves_wins_a_name_clash_and_is_never_removed() {
+    let rig = rig();
+    fs::write(&rig.deps.homes.claude_json, r#"{"mcpServers":{"docs":{"type":"stdio","command":"my-docs"}}}"#).unwrap();
+    set_shared_in(&rig.deps, "org-1", Some(vec![shared("s1", "docs", "https://docs.example.com/mcp")])).unwrap();
+    let listing = add_shared_in(&rig.deps, "org-1/s1").unwrap();
+    assert!(listing.servers[0].clash);
+    assert_eq!(rig.claude()["mcpServers"]["docs"]["command"], "my-docs", "theirs stays");
+    assert!(rig.codex()["mcp_servers"]["docs"].is_table(), "the other agent has no clash");
+    set_off_in(&rig.deps, "org-1/s1", true).unwrap();
+    set_shared_in(&rig.deps, "org-1", None).unwrap();
+    assert_eq!(rig.claude()["mcpServers"]["docs"]["command"], "my-docs", "turning off or losing the shared one never deletes theirs");
+    assert!(rig.codex().get("mcp_servers").and_then(|t| t.get("docs")).is_none());
+    // The same for a server of this person's own made here.
+    let listing = save_in(&rig.deps, input("docs", "https://mine.example.com/mcp", Auth::None)).unwrap();
+    assert!(listing.servers[0].clash);
+    let key = listing.servers[0].key.clone();
+    remove_in(&rig.deps, &key).unwrap();
+    assert_eq!(rig.claude()["mcpServers"]["docs"]["command"], "my-docs");
 }
 
 #[test]
@@ -346,7 +484,7 @@ fn a_url_is_connected_when_it_answers_initialize_and_needs_sign_in_on_401() {
         if headers.iter().any(|(k, v)| k == "Authorization" && v == "Bearer good") { answer(200, &format!("event: message\ndata: {INIT_OK}\n\n")) } else { answer(401, "") }
     });
     assert_eq!(check_in(&rig.deps, &key, &http).unwrap(), Status::Connected);
-    rig.vars.replace(&[(token_var(&key), "bad".into())], &BTreeSet::new()).unwrap();
+    rig.vars.replace(&[(token_var(&key, "https://docs.example.com/mcp"), "bad".into())], &BTreeSet::new()).unwrap();
     assert_eq!(check_in(&rig.deps, &key, &http).unwrap(), Status::NeedsSignIn);
     let html = Script::new(|_, _, _, _| answer(200, "<html>"));
     assert_eq!(check_in(&rig.deps, &key, &html).unwrap(), Status::Unreachable { detail: "Not an MCP server".into() });
@@ -368,10 +506,16 @@ fn a_command_is_connected_when_it_answers_and_exited_when_it_stops() {
 #[test]
 fn the_browser_callback_must_carry_the_sign_ins_state() {
     use super::oauth::{parse_callback, Callback};
-    assert_eq!(parse_callback("GET /mcp/oauth/callback?code=c1&state=s1 HTTP/1.1", "s1"), Callback::Code("c1".into()));
-    assert_eq!(parse_callback("GET /mcp/oauth/callback?code=c1&state=other HTTP/1.1", "s1"), Callback::Other);
-    assert_eq!(parse_callback("GET /mcp/oauth/callback?error=access_denied&state=s1 HTTP/1.1", "s1"), Callback::Refused);
-    assert_eq!(parse_callback("GET /favicon.ico HTTP/1.1", "s1"), Callback::Other);
+    let issuer = "https://auth.example.com";
+    assert_eq!(parse_callback("GET /mcp/oauth/callback?code=c1&state=s1 HTTP/1.1", "s1", issuer, false), Callback::Code("c1".into()));
+    assert_eq!(parse_callback("GET /mcp/oauth/callback?code=c1&state=other HTTP/1.1", "s1", issuer, false), Callback::Other);
+    assert_eq!(parse_callback("GET /mcp/oauth/callback?error=access_denied&state=s1 HTTP/1.1", "s1", issuer, false), Callback::Refused);
+    assert_eq!(parse_callback("GET /favicon.ico HTTP/1.1", "s1", issuer, false), Callback::Other);
+    // RFC 9207: `iss`, when sent, names the issuer signed in with; when promised, it must come.
+    let with_iss = |iss: &str| format!("GET /mcp/oauth/callback?code=c1&state=s1&iss={} HTTP/1.1", url::form_urlencoded::byte_serialize(iss.as_bytes()).collect::<String>());
+    assert_eq!(parse_callback(&with_iss("https://auth.example.com"), "s1", issuer, true), Callback::Code("c1".into()));
+    assert_eq!(parse_callback(&with_iss("https://evil.example.com"), "s1", issuer, false), Callback::Refused);
+    assert_eq!(parse_callback("GET /mcp/oauth/callback?code=c1&state=s1 HTTP/1.1", "s1", issuer, true), Callback::Refused);
 }
 
 /// A server with metadata, registration and a token endpoint, as the MCP
@@ -411,6 +555,17 @@ fn discovery_follows_the_servers_metadata_to_its_authorization_server() {
     assert_eq!(endpoints.token, "https://auth.example.com/token");
     assert_eq!(endpoints.registration.as_deref(), Some("https://auth.example.com/register"));
     assert_eq!(endpoints.scope.as_deref(), Some("read write"));
+    assert_eq!(endpoints.issuer, "https://auth.example.com");
+}
+
+#[test]
+fn discovery_refuses_metadata_for_another_issuer() {
+    let mixed = Script::new(|method, url, _, _| match (method, url) {
+        ("GET", "https://mcp.example.com/.well-known/oauth-protected-resource/mcp") => answer(200, r#"{"authorization_servers":["https://auth.example.com"]}"#),
+        ("GET", "https://auth.example.com/.well-known/oauth-authorization-server") => answer(200, r#"{"issuer":"https://evil.example.com","authorization_endpoint":"https://evil.example.com/a","token_endpoint":"https://evil.example.com/t"}"#),
+        _ => answer(404, ""),
+    });
+    assert!(oauth::discover(&mixed, "https://mcp.example.com/mcp").unwrap_err().to_string().contains("someone else"));
 }
 
 /// The whole sign-in, the browser played by a GET to the loopback callback.
@@ -443,16 +598,17 @@ fn oauth_sign_in_keeps_tokens_in_the_keychain_and_refreshes_them() {
     let listing = sign_in_in(&rig.deps, &key, &oauth_server(true), &open).unwrap();
     assert!(opened.lock().unwrap().starts_with("https://auth.example.com/authorize?"));
     assert!(listing.servers[0].has_secret);
-    assert_eq!(rig.vars.values().unwrap().get(&token_var(&key)).map(String::as_str), Some("access-1"));
+    let var = token_var(&key, "https://mcp.example.com/mcp");
+    assert_eq!(rig.vars.values().unwrap().get(&var).map(String::as_str), Some("access-1"));
     assert_eq!(rig.secrets.stored(SERVICE, &refresh_account(&key)).as_deref(), Some(&b"refresh-1"[..]));
-    assert_eq!(rig.claude()["mcpServers"]["linear"]["headers"]["Authorization"], format!("Bearer ${{{}}}", token_var(&key)));
+    assert_eq!(rig.claude()["mcpServers"]["linear"]["headers"]["Authorization"], format!("Bearer ${{{var}}}"));
     let text = rig.all_text();
     assert!(!text.contains("access-1") && !text.contains("refresh-1"), "no token in any file");
 
     // Expires within the refresh window: refreshed before the check.
     let http = oauth_server(true);
     let _ = check_in(&rig.deps, &key, &http);
-    assert_eq!(rig.vars.values().unwrap().get(&token_var(&key)).map(String::as_str), Some("access-2"));
+    assert_eq!(rig.vars.values().unwrap().get(&var).map(String::as_str), Some("access-2"));
     assert!(http.calls().iter().any(|(_, url)| url == "https://auth.example.com/token"));
 
     // A refused refresh forgets the sign-in: the next check says Needs sign-in.
@@ -462,4 +618,109 @@ fn oauth_sign_in_keeps_tokens_in_the_keychain_and_refreshes_them() {
     assert_eq!(check_in(&rig.deps, &key, &oauth_server(false)).unwrap(), Status::NeedsSignIn);
     assert!(rig.secrets.stored(SERVICE, &refresh_account(&key)).is_none());
     assert!(!read_state(&rig.deps).unwrap().secrets.contains(&key));
+}
+
+/// A second Deps on the same folder, homes, Keychain and variables: what
+/// another thread of the app sees.
+fn twin(rig: &Rig) -> Deps {
+    Deps { root: rig.deps.root.clone(), homes: rig.deps.homes.clone(), secrets: rig.deps.secrets.clone(), vars: rig.deps.vars.clone() }
+}
+
+fn signed_in_rig() -> (Rig, String) {
+    let rig = rig();
+    let key = save_in(&rig.deps, input("linear", "https://mcp.example.com/mcp", Auth::Oauth)).unwrap().servers[0].key.clone();
+    let grant = Grant { token_endpoint: "https://auth.example.com/token".into(), client_id: "c".into(), expires_at: Some(0), resource: "https://mcp.example.com/mcp".into(), serial: 0 };
+    store_tokens(&rig.deps, &key, grant, oauth::Tokens { access_token: "access-1".into(), refresh_token: Some("refresh-1".into()), expires_in: Some(0) }, None).unwrap();
+    (rig, key)
+}
+
+#[test]
+fn a_refresh_finishing_after_sign_out_does_not_sign_back_in() {
+    let (rig, key) = signed_in_rig();
+    let other = twin(&rig);
+    let signing_out = key.clone();
+    let http = Script::new(move |_, _, _, _| {
+        sign_out_in(&other, &signing_out).unwrap();
+        answer(200, r#"{"access_token":"access-2","refresh_token":"refresh-2","expires_in":3600}"#)
+    });
+    refresh_in(&rig.deps, &key, &http).unwrap();
+    let state = read_state(&rig.deps).unwrap();
+    assert!(!state.grants.contains_key(&key) && !state.secrets.contains(&key));
+    assert!(rig.vars.values().unwrap().is_empty() && rig.secrets.stored(SERVICE, &refresh_account(&key)).is_none());
+}
+
+#[test]
+fn a_refused_refresh_does_not_sign_out_a_newer_sign_in() {
+    let (rig, key) = signed_in_rig();
+    let other = twin(&rig);
+    let newer = key.clone();
+    let http = Script::new(move |_, _, _, _| {
+        // Meanwhile the person signed in again.
+        let grant = Grant { token_endpoint: "https://auth.example.com/token".into(), client_id: "c".into(), expires_at: None, resource: "https://mcp.example.com/mcp".into(), serial: 0 };
+        store_tokens(&other, &newer, grant, oauth::Tokens { access_token: "fresh".into(), refresh_token: Some("fresh-r".into()), expires_in: None }, None).unwrap();
+        answer(400, r#"{"error":"invalid_grant"}"#)
+    });
+    refresh_in(&rig.deps, &key, &http).unwrap();
+    assert_eq!(rig.vars.values().unwrap().get(&token_var(&key, "https://mcp.example.com/mcp")).map(String::as_str), Some("fresh"));
+    assert_eq!(rig.secrets.stored(SERVICE, &refresh_account(&key)).as_deref(), Some(&b"fresh-r"[..]));
+}
+
+#[test]
+fn one_refresh_at_a_time_per_server() {
+    let (rig, key) = signed_in_rig();
+    let held = Flight::start(&key).unwrap();
+    assert!(Flight::start(&key).is_none());
+    refresh_in(&rig.deps, &key, &Script::new(|_, _, _, _| panic!("a second refresh waits its turn"))).unwrap();
+    drop(held);
+    assert!(Flight::start(&key).is_some());
+}
+
+/// Variables kept in a file, for the live check: the shell reads it to give
+/// the real agent CLIs what TerminalX's runtime would put in their environment.
+struct FileVars(std::path::PathBuf);
+
+impl Vars for FileVars {
+    fn replace(&self, set: &[(String, String)], remove: &BTreeSet<String>) -> Result<()> {
+        let mut vars = self.values()?;
+        vars.retain(|name, _| !remove.contains(name));
+        vars.extend(set.iter().cloned());
+        fs::write(&self.0, serde_json::to_vec(&vars)?)?;
+        Ok(())
+    }
+    fn values(&self) -> Result<BTreeMap<String, String>> {
+        Ok(fs::read(&self.0).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default())
+    }
+}
+
+/// The live check in a fake home (PRO-239 review): `MCP_LIVE_DIR` holds
+/// `home/` (the fake HOME), and `MCP_LIVE_STEP` is `add <url> <token>` or
+/// `remove`. The Keychain is in memory and the variables are a file in the
+/// directory: no real Keychain item or agent file is touched.
+///
+///   MCP_LIVE_DIR=… MCP_LIVE_STEP="add https://… tok" cargo test --lib live_check_in_a_fake_home -- --ignored
+#[test]
+#[ignore = "live check; needs MCP_LIVE_DIR and MCP_LIVE_STEP"]
+fn live_check_in_a_fake_home() {
+    let dir = std::path::PathBuf::from(std::env::var("MCP_LIVE_DIR").unwrap());
+    let home = dir.join("home");
+    let homes = Homes { home: home.clone(), claude_json: home.join(".claude.json"), claude_dir: home.join(".claude"), codex_dir: home.join(".codex"), backups: dir.join("backups") };
+    let deps = Deps { root: dir.join("terminalx"), homes, secrets: Arc::new(MemorySecrets::default()), vars: Arc::new(FileVars(dir.join("vars.json"))) };
+    let step = std::env::var("MCP_LIVE_STEP").unwrap();
+    let words: Vec<&str> = step.split(' ').collect();
+    match words.as_slice() {
+        ["add", url, token] => {
+            let mut standin = input("standin", url, Auth::Bearer);
+            standin.secret.token = Some(token.to_string());
+            let listing = save_in(&deps, standin).unwrap();
+            assert!(listing.problems.is_empty(), "{:?}", listing.problems);
+            println!("LIVE added {} has_secret={}", listing.servers[0].key, listing.servers[0].has_secret);
+            println!("LIVE check {:?}", check_in(&deps, &listing.servers[0].key, &probe::Ureq::new()).unwrap());
+        }
+        ["remove"] => {
+            let key = list_in(&deps).unwrap().servers[0].key.clone();
+            let listing = remove_in(&deps, &key).unwrap();
+            println!("LIVE removed, {} left, vars {:?}", listing.servers.len(), deps.vars.values().unwrap());
+        }
+        _ => panic!("MCP_LIVE_STEP: add <url> <token> | remove"),
+    }
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AccountStatus } from "@/lib/api";
-import { RECOMMENDED, agentsLabel, isUrlTarget, matchesServer, mcpSettingsOffered, nameError, parseHeaders, recommendedAdded, sharingOrganizations, type McpServerRow } from "./mcpServers";
+import { RECOMMENDED, agentsLabel, checkedOnOpen, isUrlTarget, matchesServer, mcpSettingsOffered, nameError, parseHeaders, recommendedAdded, sharingOrganizations, type McpServerRow } from "./mcpServers";
 
 const KEY = "organization.mcp-servers.v1";
 
@@ -8,7 +8,7 @@ function status(readiness: Record<string, string[]>, organizations: { id: string
   return { state: "signed-in", phase2Readiness: readiness, organizations: organizations.map((org) => ({ name: `Org ${org.id}`, ...org })) } as unknown as AccountStatus;
 }
 
-const row = (name: string, target: string): McpServerRow => ({ key: `local/${name}`, name, target, auth: "none", headerNames: [], agents: { claudeCode: true, codex: false }, sharedBy: null, off: false, shadowed: false, hasSecret: false, clientId: null });
+const row = (name: string, target: string): McpServerRow => ({ key: `local/${name}`, name, target, auth: "none", headerNames: [], agents: { claudeCode: true, codex: false }, sharedBy: null, off: false, shadowed: false, offer: null, clash: false, hasSecret: false, clientId: null });
 
 describe("Settings › MCP readiness", () => {
   it("is offered only while an organization reports the key, and off when signed out", () => {
@@ -52,6 +52,13 @@ describe("the Add MCP server form", () => {
 });
 
 describe("search and Recommended", () => {
+  it("checks only URLs in use when the page opens, never a local command", () => {
+    expect(checkedOnOpen(row("linear", "https://mcp.linear.app/mcp"))).toBe(true);
+    expect(checkedOnOpen(row("pw", "npx @playwright/mcp@latest"))).toBe(false);
+    expect(checkedOnOpen({ ...row("wiki", "https://wiki.example.com/mcp"), offer: "new" })).toBe(false);
+    expect(checkedOnOpen({ ...row("docs", "https://docs.example.com/mcp"), clash: true })).toBe(false);
+  });
+
   it("searches names, URLs and commands", () => {
     expect(matchesServer(row("postgres-dev", "uvx mcp-server-postgres"), "UVX")).toBe(true);
     expect(matchesServer(row("linear", "https://mcp.linear.app/mcp"), "linear.app")).toBe(true);

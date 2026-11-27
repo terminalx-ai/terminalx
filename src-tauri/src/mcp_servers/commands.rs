@@ -20,6 +20,7 @@ fn ready(account: &AccountManager) -> CmdResult<()> {
 fn cloud_error(error: CloudWorkspaceClientError) -> String {
     match error.code.as_str() {
         "mcp_server_name_taken" => "Your organization already shares a server with this name.".into(),
+        "mcp_server_target_private" => "A shared server must be a public https URL.".into(),
         "mcp_server_target_query" => "A shared URL can't carry a query string or fragment; put keys under Authentication.".into(),
         "mcp_server_invalid" => "Your organization would not take this server. Check its name and URL.".into(),
         "mcp_server_limit_reached" => "Your organization shares as many servers as it can.".into(),
@@ -99,9 +100,9 @@ pub async fn mcp_server_save(input: Input, state: tauri::State<'_, crate::AppSta
             let listing = refresh_shared(&account, &cloud)?;
             // The admin's own token or header values for it, kept on this Mac.
             input.key = listing.servers.iter().find(|row| row.shared_by.as_deref() == Some(org.as_str()) && row.key.ends_with(&format!("/{}", created.id))).map(|row| row.key.clone());
-            if input.key.is_none() {
-                return Ok(listing);
-            }
+            let Some(key) = input.key.clone() else { return Ok(listing) };
+            // Whoever shares it has added it for themselves.
+            text(super::add_shared_in(&deps, &key))?;
             input.organization = None;
             input.client_id = None;
         }
@@ -132,6 +133,17 @@ pub async fn mcp_server_set_off(key: String, off: bool, state: tauri::State<'_, 
     blocking(move || {
         ready(&account)?;
         text(super::set_off_in(&text(deps())?, &key, off))
+    })
+    .await
+}
+
+/// Add a shared server for this person (it reaches the agents only then).
+#[tauri::command]
+pub async fn mcp_server_add_shared(key: String, state: tauri::State<'_, crate::AppState>) -> CmdResult<Listing> {
+    let account = state.account.clone();
+    blocking(move || {
+        ready(&account)?;
+        text(super::add_shared_in(&text(deps())?, &key))
     })
     .await
 }

@@ -810,6 +810,7 @@ pub fn run() {
             mcp_servers::commands::mcp_server_save,
             mcp_servers::commands::mcp_server_remove,
             mcp_servers::commands::mcp_server_set_off,
+            mcp_servers::commands::mcp_server_add_shared,
             mcp_servers::commands::mcp_server_check,
             mcp_servers::commands::mcp_server_sign_in,
             mcp_servers::commands::mcp_server_sign_out,

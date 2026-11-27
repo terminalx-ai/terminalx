@@ -14,9 +14,16 @@
 //!   agents' files name the variable (`Bearer ${TERMINALX_MCP_…}`,
 //!   `bearer_token_env_var`). An OAuth refresh token and an own client's
 //!   secret are Keychain items of their own and never reach an agent.
+//! - Every stored secret is bound to the exact target, auth kind and header
+//!   names it was given for ([`Binding`]), and its variables' names hash the
+//!   target too: when a server changes how it is reached (an organisation
+//!   editing a shared record included), its secrets and sign-in are dropped
+//!   before the agents' files name the new URL, and it asks again.
+//! - A shared server reaches the agents only after this person adds it, and
+//!   again after its URL changes.
 //! - What TerminalX wrote into each agent's file is remembered, so a server
 //!   removed here is removed there, and a server the person added to an
-//!   agent themselves is never touched.
+//!   agent themselves is never touched: on a name clash their entry wins.
 
 pub(crate) mod commands;
 mod oauth;
@@ -72,6 +79,27 @@ struct Grant {
     expires_at: Option<i64>,
     /// The URL signed in to; a grant for another URL is not used.
     resource: String,
+    /// Which sign-in this is: a refresh stores its answer only while the
+    /// grant it started from is still the current one.
+    #[serde(default)]
+    serial: u64,
+}
+
+/// How a server was reached when its secrets were given. They are used only
+/// while it is still reached exactly this way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Binding {
+    target: String,
+    auth: Auth,
+    #[serde(default)]
+    header_names: Vec<String>,
+}
+
+impl Binding {
+    fn of(row: &Installed) -> Self {
+        Binding { target: row.target.clone(), auth: row.auth, header_names: row.header_names.clone() }
+    }
 }
 
 /// One server of this person's own list.
@@ -97,7 +125,7 @@ struct Local {
 /// An organisation's shared server, as the organisation lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct Shared {
+pub struct Shared {
     pub id: String,
     pub name: String,
     pub target: String,
@@ -133,8 +161,28 @@ struct State {
     secrets: BTreeSet<String>,
     #[serde(default)]
     grants: BTreeMap<String, Grant>,
+    /// What each key's secrets were given for.
+    #[serde(default)]
+    bound: BTreeMap<String, Binding>,
+    /// Shared servers this person added, with the URL they agreed to.
+    #[serde(default)]
+    added: BTreeMap<String, String>,
+    /// Keys whose name an agent's file already uses for an entry of the person's own.
+    #[serde(default)]
+    clashing: BTreeSet<String>,
+    /// The last sign-in's serial.
+    #[serde(default)]
+    serial: u64,
     #[serde(default)]
     written: Written,
+}
+
+/// Why a shared server is not installed yet: new, or its URL changed since it was added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Offer {
+    New,
+    Changed,
 }
 
 /// Where a server is reached: a URL, or a command and its arguments.
@@ -161,6 +209,10 @@ pub struct Row {
     pub off: bool,
     /// Shared, but one of this person's own servers has its name: not installed.
     pub shadowed: bool,
+    /// Shared and waiting for this person to add it (again).
+    pub offer: Option<Offer>,
+    /// An agent's file has an entry of this name that the person added themselves; theirs is kept.
+    pub clash: bool,
     /// Its token or header values are in the Keychain, or it is signed in.
     pub has_secret: bool,
     pub client_id: Option<String>,
@@ -329,8 +381,35 @@ pub(crate) fn parse_target(target: &str) -> Result<Target> {
 
 /// A URL an organization may share: every member receives it as it is, so it
 /// carries no query string or fragment (where a key would sit, `?api_key=…`).
+/// It is https on a public host: never this Mac or its network.
 pub(crate) fn shareable_url(target: &str) -> bool {
-    matches!(parse_target(target), Ok(Target::Url(_))) && !target.contains(['?', '#'])
+    let target = target.trim();
+    matches!(parse_target(target), Ok(Target::Url(_)))
+        && !target.contains(['?', '#'])
+        && url::Url::parse(target).is_ok_and(|url| url.scheme() == "https" && url.host().is_some_and(|host| public_host(&host)))
+}
+
+fn public_host(host: &url::Host<&str>) -> bool {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    let v4 = |ip: Ipv4Addr| {
+        let [a, b, ..] = ip.octets();
+        !(ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified() || ip.is_broadcast() || a == 0 || a == 100 && (64..128).contains(&b))
+    };
+    let v6 = |ip: Ipv6Addr| {
+        let first = ip.segments()[0];
+        match ip.to_ipv4_mapped() {
+            Some(mapped) => v4(mapped),
+            None => !(ip.is_loopback() || ip.is_unspecified() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80),
+        }
+    };
+    match host {
+        url::Host::Domain(name) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            name.contains('.') && !(name == "localhost" || name.ends_with(".localhost") || name.ends_with(".local"))
+        }
+        url::Host::Ipv4(ip) => v4(*ip),
+        url::Host::Ipv6(ip) => v6(*ip),
+    }
 }
 
 // ------------------------------------------------------------------ keys and variables
@@ -343,24 +422,25 @@ fn shared_key(org: &str, id: &str) -> String {
     format!("{org}/{id}")
 }
 
-/// The variables of one server: `TERMINALX_MCP_<hash of its key>_…`, so a
-/// rename keeps them and no name says what they are for.
-fn var_base(key: &str) -> String {
-    let digest = Sha256::digest(key.as_bytes());
+/// The variables of one server: `TERMINALX_MCP_<hash of its key and target>_…`,
+/// so a rename keeps them, a variable given for one URL is never named for
+/// another, and no name says what it is for.
+fn var_base(key: &str, target: &str) -> String {
+    let digest = Sha256::digest(format!("{key}\n{target}").as_bytes());
     let hex: String = digest[..6].iter().map(|b| format!("{b:02X}")).collect();
     format!("{}{hex}", crate::store::environment::MCP_PREFIX)
 }
 
-fn token_var(key: &str) -> String {
-    format!("{}_TOKEN", var_base(key))
+fn token_var(key: &str, target: &str) -> String {
+    format!("{}_TOKEN", var_base(key, target))
 }
 
-fn header_var(key: &str, index: usize) -> String {
-    format!("{}_H{index}", var_base(key))
+fn header_var(key: &str, target: &str, index: usize) -> String {
+    format!("{}_H{index}", var_base(key, target))
 }
 
-fn all_vars(key: &str) -> BTreeSet<String> {
-    std::iter::once(token_var(key)).chain((0..MAX_HEADERS).map(|i| header_var(key, i))).collect()
+fn all_vars(key: &str, target: &str) -> BTreeSet<String> {
+    std::iter::once(token_var(key, target)).chain((0..MAX_HEADERS).map(|i| header_var(key, target, i))).collect()
 }
 
 fn refresh_account(key: &str) -> String {
@@ -447,6 +527,14 @@ struct Installed {
     shared_by: Option<String>,
     off: bool,
     shadowed: bool,
+    offer: Option<Offer>,
+}
+
+impl Installed {
+    /// Wanted in the agents' files (a name clash is settled by [`sync`]).
+    fn live(&self) -> bool {
+        !self.off && !self.shadowed && self.offer.is_none()
+    }
 }
 
 fn installed(state: &State) -> Vec<Installed> {
@@ -465,6 +553,7 @@ fn installed(state: &State) -> Vec<Installed> {
             shared_by: None,
             off: false,
             shadowed: false,
+            offer: None,
         })
         .collect();
     let mut seen = BTreeSet::new();
@@ -483,6 +572,11 @@ fn installed(state: &State) -> Vec<Installed> {
                 agents: s.agents,
                 env: BTreeMap::new(),
                 shared_by: Some(org.clone()),
+                offer: match state.added.get(&shared_key(org, &s.id)) {
+                    None => Some(Offer::New),
+                    Some(agreed) if *agreed != s.target => Some(Offer::Changed),
+                    Some(_) => None,
+                },
             });
         }
     }
@@ -494,36 +588,88 @@ fn find<'a>(rows: &'a [Installed], key: &str) -> Result<&'a Installed> {
     rows.iter().find(|row| row.key == key).context("This server is no longer installed.")
 }
 
-/// How each agent reaches a server, naming its variables.
-fn managed(server: &Installed, signed_in: bool) -> Result<Managed> {
+/// Whether `row`'s stored secrets were given for it as it is reached now:
+/// the same target, auth kind and header names, and a sign-in for this URL.
+fn usable(state: &State, row: &Installed) -> bool {
+    state.secrets.contains(&row.key)
+        && state.bound.get(&row.key) == Some(&Binding::of(row))
+        && state.grants.get(&row.key).is_none_or(|grant| grant.resource == row.target)
+}
+
+/// How each agent reaches a server, naming its variables. With no usable
+/// secret, a Bearer or Custom headers server is written without them.
+fn managed(server: &Installed, usable: bool) -> Result<Managed> {
     Ok(match parse_target(&server.target)? {
         Target::Command { command, args } => Managed::Command { command, args, env: server.env.clone() },
         Target::Url(url) => Managed::Url {
-            url,
-            bearer: (server.auth == Auth::Bearer || server.auth == Auth::Oauth && signed_in).then(|| token_var(&server.key)),
-            headers: if server.auth == Auth::Headers {
-                server.header_names.iter().enumerate().map(|(i, name)| (name.clone(), header_var(&server.key, i))).collect()
+            bearer: (usable && matches!(server.auth, Auth::Bearer | Auth::Oauth)).then(|| token_var(&server.key, &server.target)),
+            headers: if usable && server.auth == Auth::Headers {
+                server.header_names.iter().enumerate().map(|(i, name)| (name.clone(), header_var(&server.key, &server.target, i))).collect()
             } else {
                 BTreeMap::new()
             },
+            url,
         },
     })
 }
 
-/// Bring both agents' files to the installed list. A file that cannot be
-/// written is reported, and the list is still saved: the next sync retries.
-fn sync(deps: &Deps, state: &mut State) -> Vec<String> {
-    let mut claude = Vec::new();
-    let mut codex = Vec::new();
-    for server in installed(state).iter().filter(|s| !s.off && !s.shadowed) {
-        let Ok(how) = managed(server, state.secrets.contains(&server.key)) else { continue };
-        if server.agents.claude_code {
-            claude.push((server.name.clone(), how.clone()));
-        }
-        if server.agents.codex {
-            codex.push((server.name.clone(), how));
+/// Drop every secret and sign-in no longer given for how its server is
+/// reached now (its target, auth kind or header names changed, or it is gone).
+fn reconcile(deps: &Deps, state: &mut State) -> Result<()> {
+    let rows = installed(state);
+    let keys: BTreeSet<String> = state.secrets.iter().chain(state.grants.keys()).chain(state.bound.keys()).cloned().collect();
+    for key in keys {
+        let keep = rows.iter().find(|row| row.key == key).is_some_and(|row| {
+            state.bound.get(&key) == Some(&Binding::of(row)) && state.grants.get(&key).is_none_or(|grant| grant.resource == row.target)
+        });
+        if !keep {
+            forget_secrets(deps, state, &key)?;
         }
     }
+    Ok(())
+}
+
+const FILES_PROBLEM: &str = "Claude Code's or Codex's settings file could not be updated. Check that ~/.claude.json and ~/.codex/config.toml are valid, then reopen this page.";
+
+/// Bring both agents' files to the installed list. A file that cannot be
+/// written is reported, and the list is still saved: the next sync retries.
+/// An entry the person added to an agent themselves keeps its name: a server
+/// of the same name is left out of that agent and shown as clashing.
+fn sync(deps: &Deps, state: &mut State) -> Vec<String> {
+    if let Err(error) = reconcile(deps, state) {
+        log::warn!("mcp: secrets could not be brought up to date: {error:#}");
+        return vec!["The Keychain could not be reached. Try again.".into()];
+    }
+    let (in_claude, in_codex) = match agent_configs::managed_names(&deps.homes) {
+        Ok(names) => names,
+        Err(error) => {
+            log::warn!("mcp: the agents' files could not be read: {error:#}");
+            return vec![FILES_PROBLEM.into()];
+        }
+    };
+    let theirs_claude: BTreeSet<&String> = in_claude.iter().filter(|name| !state.written.claude.contains(*name)).collect();
+    let theirs_codex: BTreeSet<&String> = in_codex.iter().filter(|name| !state.written.codex.contains(*name)).collect();
+    let mut claude = Vec::new();
+    let mut codex = Vec::new();
+    let mut clashing = BTreeSet::new();
+    for server in installed(state).iter().filter(|s| s.live()) {
+        let Ok(how) = managed(server, usable(state, server)) else { continue };
+        if server.agents.claude_code {
+            if theirs_claude.contains(&server.name) {
+                clashing.insert(server.key.clone());
+            } else {
+                claude.push((server.name.clone(), how.clone()));
+            }
+        }
+        if server.agents.codex {
+            if theirs_codex.contains(&server.name) {
+                clashing.insert(server.key.clone());
+            } else {
+                codex.push((server.name.clone(), how));
+            }
+        }
+    }
+    state.clashing = clashing;
     let names = |servers: &[(String, Managed)]| servers.iter().map(|(n, _)| n.clone()).collect::<BTreeSet<_>>();
     let (want_claude, want_codex) = (names(&claude), names(&codex));
     let drop_claude = state.written.claude.difference(&want_claude).cloned().collect();
@@ -535,7 +681,7 @@ fn sync(deps: &Deps, state: &mut State) -> Vec<String> {
         }
         Err(error) => {
             log::warn!("mcp: the agents' files could not be brought up to date: {error:#}");
-            vec!["Claude Code's or Codex's settings file could not be updated. Check that ~/.claude.json and ~/.codex/config.toml are valid, then reopen this page.".into()]
+            vec![FILES_PROBLEM.into()]
         }
     }
 }
@@ -546,7 +692,9 @@ fn listing(state: &State, problems: Vec<String>) -> Listing {
         servers: installed(state)
             .into_iter()
             .map(|s| Row {
-                has_secret: state.secrets.contains(&s.key),
+                has_secret: usable(state, &s),
+                clash: s.live() && state.clashing.contains(&s.key),
+                offer: s.offer,
                 client_id: clients.get(&s.key).cloned().flatten(),
                 key: s.key,
                 name: s.name,
@@ -580,11 +728,15 @@ pub(crate) fn list_in(deps: &Deps) -> Result<Listing> {
 /// when it is no longer ready). Records that are not https URLs are dropped:
 /// a shared server never makes this Mac run a command.
 pub(crate) fn set_shared_in(deps: &Deps, org: &str, servers: Option<Vec<Shared>>) -> Result<Listing> {
+    ensure!(crate::cloud_workspaces::valid_following_path_id(org), "This organization cannot be used.");
     let _lock = lock();
     let mut state = read_state(deps)?;
+    let mut ids = BTreeSet::new();
     let servers: Vec<Shared> = servers
         .unwrap_or_default()
         .into_iter()
+        // Its id names its Keychain items and variables: the same rule as a path segment, and once.
+        .filter(|s| crate::cloud_workspaces::valid_following_path_id(&s.id) && ids.insert(s.id.clone()))
         .filter(|s| valid_name(&s.name) && shareable_url(&s.target) && (s.agents.claude_code || s.agents.codex))
         .filter(|s| s.auth_kind != Auth::Headers || (!s.header_names.is_empty() && s.header_names.len() <= MAX_HEADERS && s.header_names.iter().all(|h| valid_header_name(h))))
         .collect();
@@ -604,6 +756,7 @@ pub(crate) fn set_shared_in(deps: &Deps, org: &str, servers: Option<Vec<Shared>>
     for key in &gone {
         forget_secrets(deps, &mut state, key)?;
         state.off.remove(key);
+        state.added.remove(key);
     }
     let problems = sync(deps, &mut state);
     write_state(deps, &state)?;
@@ -615,12 +768,32 @@ pub(crate) fn shared_orgs_in(deps: &Deps) -> Result<Vec<String>> {
     Ok(read_state(deps)?.shared.keys().cloned().collect())
 }
 
+/// The targets `key`'s variables may be named for: what its secrets were
+/// given for, and how it is reached now.
+fn targets_of(state: &State, key: &str) -> BTreeSet<String> {
+    let now = installed(state).into_iter().find(|row| row.key == key).map(|row| row.target);
+    state.bound.get(key).map(|b| b.target.clone()).into_iter().chain(state.grants.get(key).map(|g| g.resource.clone())).chain(now).collect()
+}
+
 fn forget_secrets(deps: &Deps, state: &mut State, key: &str) -> Result<()> {
-    deps.vars.replace(&[], &all_vars(key))?;
+    let names: BTreeSet<String> = targets_of(state, key).iter().flat_map(|target| all_vars(key, target)).collect();
+    deps.vars.replace(&[], &names)?;
     deps.secrets.delete(SERVICE, &refresh_account(key))?;
     deps.secrets.delete(SERVICE, &client_secret_account(key))?;
     state.secrets.remove(key);
     state.grants.remove(key);
+    state.bound.remove(key);
+    Ok(())
+}
+
+/// Forget an OAuth sign-in only (an own client's secret stays).
+fn forget_sign_in(deps: &Deps, state: &mut State, key: &str) -> Result<()> {
+    let names: BTreeSet<String> = targets_of(state, key).iter().map(|target| token_var(key, target)).collect();
+    deps.vars.replace(&[], &names)?;
+    deps.secrets.delete(SERVICE, &refresh_account(key))?;
+    state.grants.remove(key);
+    state.secrets.remove(key);
+    state.bound.remove(key);
     Ok(())
 }
 
@@ -656,29 +829,28 @@ pub(crate) fn validate(input: &Input) -> Result<Target> {
     Ok(target)
 }
 
-/// Store the form's secrets for `key`. `previous` is how it was reached
-/// before (auth, target, header names); a change of any of them drops what
-/// was stored for the old one, an OAuth sign-in included.
-fn store_secrets(deps: &Deps, state: &mut State, key: &str, input: &Input, target: &str, previous: Option<(Auth, String, Vec<String>)>) -> Result<()> {
-    let same = previous.is_some_and(|(auth, old_target, headers)| auth == input.auth && old_target == target && headers == input.header_names);
+/// Store the form's secrets for `key`, now reached as `binding`. `previous`
+/// is how it was reached before; a change of target, auth kind or header
+/// names drops everything stored for the old one, an OAuth sign-in and an
+/// own client's secret included.
+fn store_secrets(deps: &Deps, state: &mut State, key: &str, input: &Input, binding: &Binding, previous: Option<Binding>) -> Result<()> {
+    let same = previous.as_ref() == Some(binding);
     let mut set = Vec::new();
     let mut remove = BTreeSet::new();
     if !same {
-        remove.extend(all_vars(key));
-        deps.secrets.delete(SERVICE, &refresh_account(key))?;
-        state.grants.remove(key);
-        state.secrets.remove(key);
+        forget_secrets(deps, state, key)?;
+        remove.extend(all_vars(key, &binding.target));
     }
     match input.auth {
         Auth::Bearer => {
             if let Some(token) = input.secret.token.as_deref().map(|t| t.trim().trim_start_matches("Bearer ").trim()).filter(|t| !t.is_empty()) {
-                set.push((token_var(key), token.to_string()));
+                set.push((token_var(key, &binding.target), token.to_string()));
             }
         }
         Auth::Headers => match &input.secret.header_values {
             Some(values) => {
                 for (i, value) in values.iter().enumerate() {
-                    set.push((header_var(key, i), value.trim().to_string()));
+                    set.push((header_var(key, &binding.target, i), value.trim().to_string()));
                 }
             }
             None => ensure!(same, "Enter each header as Name: value."),
@@ -700,8 +872,10 @@ fn store_secrets(deps: &Deps, state: &mut State, key: &str, input: &Input, targe
     };
     if has {
         state.secrets.insert(key.to_string());
+        state.bound.insert(key.to_string(), binding.clone());
     } else {
         state.secrets.remove(key);
+        state.bound.remove(key);
     }
     Ok(())
 }
@@ -752,8 +926,9 @@ pub(crate) fn save_in(deps: &Deps, input: Input) -> Result<Listing> {
             None => state.servers.push(record),
         }
     }
-    let previous = rows.iter().find(|row| row.key == key).map(|row| (row.auth, row.target.clone(), row.header_names.clone()));
-    store_secrets(deps, &mut state, &key, &input, &target_text, previous)?;
+    let previous = rows.iter().find(|row| row.key == key).map(Binding::of);
+    let binding = Binding::of(find(&installed(&state), &key)?);
+    store_secrets(deps, &mut state, &key, &input, &binding, previous)?;
     let problems = sync(deps, &mut state);
     write_state(deps, &state)?;
     Ok(listing(&state, problems))
@@ -788,15 +963,28 @@ pub(crate) fn set_off_in(deps: &Deps, key: &str, off: bool) -> Result<Listing> {
     Ok(listing(&state, problems))
 }
 
+/// Add a shared server for this person, at the URL it has now: only then
+/// does it reach the agents, and a later change of URL asks again.
+pub(crate) fn add_shared_in(deps: &Deps, key: &str) -> Result<Listing> {
+    let _lock = lock();
+    let mut state = read_state(deps)?;
+    let rows = installed(&state);
+    let row = find(&rows, key)?;
+    ensure!(row.shared_by.is_some(), "Only a shared server is added this way.");
+    ensure!(!row.shadowed, "One of your own servers already has the name {}.", row.name);
+    state.added.insert(key.to_string(), row.target.clone());
+    state.off.remove(key);
+    let problems = sync(deps, &mut state);
+    write_state(deps, &state)?;
+    Ok(listing(&state, problems))
+}
+
 /// Forget an OAuth sign-in.
 pub(crate) fn sign_out_in(deps: &Deps, key: &str) -> Result<Listing> {
     let _lock = lock();
     let mut state = read_state(deps)?;
     find(&installed(&state), key)?;
-    deps.vars.replace(&[], &BTreeSet::from([token_var(key)]))?;
-    deps.secrets.delete(SERVICE, &refresh_account(key))?;
-    state.grants.remove(key);
-    state.secrets.remove(key);
+    forget_sign_in(deps, &mut state, key)?;
     let problems = sync(deps, &mut state);
     write_state(deps, &state)?;
     Ok(listing(&state, problems))
@@ -927,6 +1115,10 @@ pub(crate) fn import_scan_in(deps: &Deps) -> Result<ImportScan> {
     })
 }
 
+fn adopt(state: &mut State, name: &str, codex: bool) {
+    if codex { state.written.codex.insert(name.to_string()) } else { state.written.claude.insert(name.to_string()) };
+}
+
 /// Bring every server of one agent's files that is not installed here yet
 /// into this person's list. A server installed here under that name already
 /// gains the agent when it is reached the same way; otherwise it is skipped.
@@ -948,6 +1140,7 @@ pub(crate) fn import_in(deps: &Deps, from_codex: bool) -> Result<Imported> {
         if let Some(existing) = state.servers.iter_mut().find(|s| s.name == candidate.name) {
             if existing.target == candidate.target {
                 if from_codex { existing.agents.codex = true } else { existing.agents.claude_code = true }
+                adopt(&mut state, &candidate.name, from_codex);
             } else {
                 skipped.push((candidate.name.clone(), "a server of that name is already installed".into()));
             }
@@ -965,15 +1158,18 @@ pub(crate) fn import_in(deps: &Deps, from_codex: bool) -> Result<Imported> {
         let key = local_key(&id);
         let mut set = Vec::new();
         if let Some(token) = &candidate.token {
-            set.push((token_var(&key), token.clone()));
+            set.push((token_var(&key, &candidate.target), token.clone()));
         }
         for (i, value) in candidate.header_values.iter().enumerate() {
-            set.push((header_var(&key, i), value.clone()));
+            set.push((header_var(&key, &candidate.target, i), value.clone()));
         }
         if !set.is_empty() {
             deps.vars.replace(&set, &BTreeSet::new())?;
             state.secrets.insert(key.clone());
+            state.bound.insert(key.clone(), Binding { target: candidate.target.clone(), auth: candidate.auth, header_names: candidate.header_names.clone() });
         }
+        // Imported on purpose: TerminalX now keeps the agent's entry of this name.
+        adopt(&mut state, &candidate.name, from_codex);
         state.servers.push(Local {
             id,
             name: candidate.name.clone(),
@@ -1006,30 +1202,37 @@ pub enum Status {
 }
 
 /// Check one server answers, refreshing an OAuth sign-in on the way when it
-/// is about to run out.
+/// is about to run out. A secret goes only to the target it was given for.
 pub(crate) fn check_in(deps: &Deps, key: &str, http: &dyn probe::Http) -> Result<Status> {
-    let (server, grant) = {
+    let (server, due) = {
         let _lock = lock();
         let state = read_state(deps)?;
-        (find(&installed(&state), key)?.clone(), state.grants.get(key).cloned())
+        let server = find(&installed(&state), key)?.clone();
+        let due = state.grants.get(key).is_some_and(|g| oauth::due(g, chrono::Utc::now().timestamp()));
+        (server, due)
     };
-    if server.off || server.shadowed {
+    if !server.live() {
         return Ok(Status::Off);
     }
-    if let Some(grant) = grant.filter(|g| oauth::due(g, chrono::Utc::now().timestamp())) {
-        let _ = refresh_in(deps, key, &grant, http);
+    if due {
+        let _ = refresh_in(deps, key, http);
     }
-    let values = deps.vars.values()?;
+    let usable = {
+        let _lock = lock();
+        let state = read_state(deps)?;
+        find(&installed(&state), key)?.target == server.target && usable(&state, &server)
+    };
+    let values = if usable { deps.vars.values()? } else { BTreeMap::new() };
     match parse_target(&server.target)? {
         Target::Command { command, args } => Ok(probe::command(&command, &args, &server.env)),
         Target::Url(url) => {
             let mut headers = Vec::new();
-            if let Some(token) = values.get(&token_var(key)).filter(|_| matches!(server.auth, Auth::Bearer | Auth::Oauth)) {
+            if let Some(token) = values.get(&token_var(key, &server.target)).filter(|_| matches!(server.auth, Auth::Bearer | Auth::Oauth)) {
                 headers.push(("Authorization".to_string(), format!("Bearer {token}")));
             }
             if server.auth == Auth::Headers {
                 for (i, name) in server.header_names.iter().enumerate() {
-                    if let Some(value) = values.get(&header_var(key, i)) {
+                    if let Some(value) = values.get(&header_var(key, &server.target, i)) {
                         headers.push((name.clone(), value.clone()));
                     }
                 }
@@ -1039,32 +1242,79 @@ pub(crate) fn check_in(deps: &Deps, key: &str, http: &dyn probe::Http) -> Result
     }
 }
 
-/// Swap a refresh token for a new access token. A refusal forgets the sign-in.
-fn refresh_in(deps: &Deps, key: &str, grant: &Grant, http: &dyn probe::Http) -> Result<()> {
+/// One refresh at a time per server: a second asks while the first runs are skipped.
+struct Flight(String);
+
+static FLIGHTS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+impl Flight {
+    fn start(key: &str) -> Option<Self> {
+        FLIGHTS.lock().unwrap_or_else(PoisonError::into_inner).insert(key.to_string()).then(|| Flight(key.to_string()))
+    }
+}
+
+impl Drop for Flight {
+    fn drop(&mut self) {
+        FLIGHTS.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.0);
+    }
+}
+
+/// Swap a refresh token for a new access token. Its answer is kept, and a
+/// refusal signs out, only while the sign-in it started from is still the
+/// current one: a sign-out or a newer sign-in meanwhile wins.
+fn refresh_in(deps: &Deps, key: &str, http: &dyn probe::Http) -> Result<()> {
+    let Some(_flight) = Flight::start(key) else { return Ok(()) };
+    let grant = {
+        let _lock = lock();
+        let state = read_state(deps)?;
+        let rows = installed(&state);
+        let Some(row) = rows.iter().find(|row| row.key == key) else { return Ok(()) };
+        match state.grants.get(key) {
+            Some(grant) if usable(&state, row) && grant.resource == row.target => grant.clone(),
+            _ => return Ok(()),
+        }
+    };
     let Some(refresh) = deps.secrets.get(SERVICE, &refresh_account(key))? else { return Ok(()) };
     let refresh = String::from_utf8(refresh).context("refresh token")?;
     let client_secret = deps.secrets.get(SERVICE, &client_secret_account(key))?.and_then(|s| String::from_utf8(s).ok());
-    match oauth::refresh(http, grant, &refresh, client_secret.as_deref()) {
-        Ok(tokens) => store_tokens(deps, key, grant.clone(), tokens),
+    match oauth::refresh(http, &grant, &refresh, client_secret.as_deref()) {
+        Ok(tokens) => store_tokens(deps, key, grant.clone(), tokens, Some(grant.serial)),
         Err(oauth::Refused::Rejected) => {
-            sign_out_in(deps, key)?;
+            let _lock = lock();
+            let mut state = read_state(deps)?;
+            if state.grants.get(key).map(|g| g.serial) == Some(grant.serial) {
+                forget_sign_in(deps, &mut state, key)?;
+                sync(deps, &mut state);
+                write_state(deps, &state)?;
+            }
             Ok(())
         }
         Err(oauth::Refused::Failed(error)) => Err(error),
     }
 }
 
-fn store_tokens(deps: &Deps, key: &str, mut grant: Grant, tokens: oauth::Tokens) -> Result<()> {
+/// Keep a sign-in's tokens. `expect`: the serial of the grant a refresh
+/// started from; when another is current now (or none), the answer is dropped.
+fn store_tokens(deps: &Deps, key: &str, mut grant: Grant, tokens: oauth::Tokens, expect: Option<u64>) -> Result<()> {
     let _lock = lock();
     let mut state = read_state(deps)?;
-    find(&installed(&state), key)?;
-    deps.vars.replace(&[(token_var(key), tokens.access_token.clone())], &BTreeSet::new())?;
+    let row = find(&installed(&state), key)?.clone();
+    ensure!(row.auth == Auth::Oauth && grant.resource == row.target, "This server changed while you signed in. Sign in again.");
+    if let Some(serial) = expect {
+        if state.grants.get(key).map(|g| g.serial) != Some(serial) {
+            return Ok(());
+        }
+    }
+    deps.vars.replace(&[(token_var(key, &row.target), tokens.access_token.clone())], &BTreeSet::new())?;
     if let Some(refresh) = &tokens.refresh_token {
         deps.secrets.set(SERVICE, &refresh_account(key), refresh.as_bytes())?;
     }
+    state.serial += 1;
+    grant.serial = state.serial;
     grant.expires_at = tokens.expires_in.map(|s| chrono::Utc::now().timestamp() + s);
     state.grants.insert(key.to_string(), grant);
     state.secrets.insert(key.to_string());
+    state.bound.insert(key.to_string(), Binding::of(&row));
     sync(deps, &mut state);
     write_state(deps, &state)
 }
@@ -1089,8 +1339,9 @@ pub(crate) fn sign_in_in(deps: &Deps, key: &str, http: &dyn probe::Http, open: &
     store_tokens(
         deps,
         key,
-        Grant { token_endpoint: grant.token_endpoint, client_id: grant.client_id, expires_at: None, resource: url },
+        Grant { token_endpoint: grant.token_endpoint, client_id: grant.client_id, expires_at: None, resource: server.target.clone(), serial: 0 },
         tokens,
+        None,
     )?;
     list_in(deps)
 }
@@ -1099,8 +1350,8 @@ pub(crate) fn sign_in_in(deps: &Deps, key: &str, http: &dyn probe::Http, open: &
 pub(crate) fn refresh_due_in(deps: &Deps, http: &dyn probe::Http) {
     let Ok(state) = read_state(deps) else { return };
     let now = chrono::Utc::now().timestamp();
-    for (key, grant) in state.grants.iter().filter(|(_, g)| oauth::due(g, now)) {
-        if let Err(error) = refresh_in(deps, key, grant, http) {
+    for key in state.grants.iter().filter(|(_, g)| oauth::due(g, now)).map(|(key, _)| key) {
+        if let Err(error) = refresh_in(deps, key, http) {
             log::info!("mcp: a sign-in could not be refreshed: {error:#}");
         }
     }

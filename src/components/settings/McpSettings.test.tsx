@@ -20,7 +20,7 @@ vi.mock("@/lib/errorToasts", () => ({ showError: vi.fn() }));
 vi.mock("@/lib/api", () => ({ errorMessage: (e: unknown) => String(e) }));
 
 const server = (name: string, target: string, extra: Partial<McpServerRow> = {}): McpServerRow => ({
-  key: `local/${name}`, name, target, auth: "none", headerNames: [], agents: { claudeCode: true, codex: true }, sharedBy: null, off: false, shadowed: false, hasSecret: false, clientId: null, ...extra,
+  key: `local/${name}`, name, target, auth: "none", headerNames: [], agents: { claudeCode: true, codex: true }, sharedBy: null, off: false, shadowed: false, offer: null, clash: false, hasSecret: false, clientId: null, ...extra,
 });
 
 const INSTALLED: McpServerRow[] = [
@@ -73,6 +73,14 @@ describe("Installed (design 10.09)", () => {
   it("lists each server with its auth, agents and status, and the shared note", async () => {
     render(<McpPage />);
     const table = await screen.findByRole("table", { name: "Installed MCP servers" });
+    await waitFor(() => expect(within(table).getByText("Needs sign-in")).toBeTruthy());
+    // Opening the page starts no local command: those wait for Check.
+    const checked = () => calls.filter(([command]) => command === "mcp_server_check").map(([, args]) => (args as { key: string }).key);
+    expect(checked()).not.toContain("local/playwright");
+    expect(checked()).not.toContain("local/postgres-dev");
+    const postgres = within(table).getByText("postgres-dev").closest("tr")!;
+    expect(within(postgres).getByText("Not checked")).toBeTruthy();
+    fireEvent.click(within(postgres).getByRole("button", { name: "Check" }));
     await waitFor(() => expect(within(table).getByText("Exited (1)")).toBeTruthy());
     expect(screen.getByRole("tab", { name: "Installed · 5" }).getAttribute("aria-selected")).toBe("true");
     const sentry = within(table).getByText("sentry").closest("tr")!;
@@ -82,12 +90,29 @@ describe("Installed (design 10.09)", () => {
     expect(within(docs).getByText("Shared")).toBeTruthy();
     expect(within(docs).getByText("Bearer token")).toBeTruthy();
     expect(within(table).getByText("playwright").closest("tr")!.textContent).toContain("Claude Code");
-    expect(screen.getByText(/A shared server is installed for everyone in Procyon Labs\. You can turn it off for yourself, not remove it\./)).toBeTruthy();
+    expect(screen.getByText(/A shared server is offered to everyone in Procyon Labs\. Add it to use it; you can turn it off for yourself, not remove it\./)).toBeTruthy();
 
     fireEvent.click(within(sentry).getByRole("button", { name: "Sign in" }));
     await waitFor(() => expect(calls.some(([command, args]) => command === "mcp_server_sign_in" && (args as { key: string }).key === "local/sentry")).toBe(true));
     fireEvent.click(within(within(table).getByText("postgres-dev").closest("tr")!).getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(calls.filter(([command, args]) => command === "mcp_server_check" && (args as { key: string }).key === "local/postgres-dev").length).toBe(2));
+  });
+
+  it("offers a shared server until it is added, asks again when its URL changes, and shows a name clash", async () => {
+    listing = { ...listing, servers: [
+      server("team-wiki", "https://wiki.example.com/mcp", { key: "org-p/s2", sharedBy: "org-p", offer: "new" }),
+      server("moved", "https://new.example.com/mcp", { key: "org-p/s3", sharedBy: "org-p", offer: "changed", auth: "bearer" }),
+      server("docs", "https://docs.example.com/mcp", { clash: true }),
+    ] };
+    render(<McpPage />);
+    const table = await screen.findByRole("table", { name: "Installed MCP servers" });
+    const wiki = within(table).getByText("team-wiki").closest("tr")!;
+    expect(within(wiki).getByText("Not added")).toBeTruthy();
+    expect(within(within(table).getByText("moved").closest("tr")!).getByText("URL changed")).toBeTruthy();
+    expect(within(within(table).getByText("docs").closest("tr")!).getByText("Name already used on this Mac")).toBeTruthy();
+    expect(calls.filter(([command]) => command === "mcp_server_check")).toEqual([]);
+    fireEvent.click(within(wiki).getByRole("button", { name: "Add" }));
+    await waitFor(() => expect(calls).toContainEqual(["mcp_server_add_shared", { key: "org-p/s2" }]));
   });
 
   it("says when a search matches nothing, and points to Recommended (design 10.17)", async () => {

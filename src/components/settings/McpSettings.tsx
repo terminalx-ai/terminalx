@@ -7,7 +7,7 @@ import { useAccount } from "@/lib/account";
 import { errorMessage } from "@/lib/api";
 import { showError } from "@/lib/errorToasts";
 import { cn } from "@/lib/cn";
-import { AUTH_LABELS, RECOMMENDED, agentsLabel, matchesServer, mcp, recommendedAdded, sharingOrganizations, type McpImportScan, type McpListing, type McpServerRow, type McpStatus, type RecommendedServer } from "@/lib/mcpServers";
+import { AUTH_LABELS, RECOMMENDED, agentsLabel, checkedOnOpen, isUrlTarget, matchesServer, mcp, recommendedAdded, sharingOrganizations, type McpImportScan, type McpListing, type McpServerRow, type McpStatus, type RecommendedServer } from "@/lib/mcpServers";
 import { RegisteredSetting } from "./settingsRegistry";
 import { McpServerDialog, type McpDialogRequest } from "./McpServerDialog";
 
@@ -41,7 +41,7 @@ export function McpPage() {
   }, []);
   const install = useCallback((next: McpListing, recheck?: string[]) => {
     setListing(next);
-    for (const server of next.servers) if (!recheck || recheck.includes(server.key)) check(server.key);
+    for (const server of next.servers) if (checkedOnOpen(server) && (!recheck || recheck.includes(server.key))) check(server.key);
   }, [check]);
   useEffect(() => {
     let live = true;
@@ -84,12 +84,13 @@ export function McpPage() {
             onEdit={(row) => setDialog({ kind: "edit", row })}
             onSignOut={(row) => void run(() => mcp.signOut(row.key), `Couldn't sign out of ${row.name}`, [row.key])}
             onSetOff={(row, off) => void run(() => mcp.setOff(row.key, off), `Couldn't change ${row.name}`, [row.key])}
+            onAddShared={(row) => void run(() => mcp.addShared(row.key), `Couldn't add ${row.name}`, [row.key])}
             onRemove={(row) => void run(() => mcp.remove(row.key), `Couldn't remove ${row.name}`, [])} />
         : <Recommended servers={servers} busy={busy} onAdd={(recommended) => setDialog({ kind: "add", recommended })}
             onImported={(next, text) => { install(next); setNotice(text); setTab("installed"); }} />}
     {tab === "installed" && sharedOrgs.length > 0 && <p className="flex items-center gap-2 text-xs text-muted-foreground">
       <Info aria-hidden className="size-3.5 shrink-0" />
-      A shared server is installed for everyone in {sharedOrgs.map(orgName).join(" and ")}. You can turn it off for yourself, not remove it.
+      A shared server is offered to everyone in {sharedOrgs.map(orgName).join(" and ")}. Add it to use it; you can turn it off for yourself, not remove it.
     </p>}
     {dialog && listing && <McpServerDialog request={dialog} callbackUrl={listing.callbackUrl} organizations={sharing} orgName={orgName}
       onClose={() => setDialog(null)} onSaved={saved} />}
@@ -111,11 +112,11 @@ function SearchField({ value, onChange, placeholder }: { value: string; onChange
   </label>;
 }
 
-function Installed({ servers, statuses, busy, manages, orgName, onAdd, onImport, onCheck, onSignIn, onEdit, onSignOut, onSetOff, onRemove }: {
+function Installed({ servers, statuses, busy, manages, orgName, onAdd, onImport, onCheck, onSignIn, onEdit, onSignOut, onSetOff, onAddShared, onRemove }: {
   servers: McpServerRow[]; statuses: Record<string, McpStatus | "checking">; busy: boolean;
   manages: (org: string) => boolean; orgName: (org: string) => string;
   onAdd: (recommended?: RecommendedServer) => void; onImport: () => void; onCheck: (key: string) => void; onSignIn: (row: McpServerRow) => void;
-  onEdit: (row: McpServerRow) => void; onSignOut: (row: McpServerRow) => void; onSetOff: (row: McpServerRow, off: boolean) => void; onRemove: (row: McpServerRow) => void;
+  onEdit: (row: McpServerRow) => void; onSignOut: (row: McpServerRow) => void; onSetOff: (row: McpServerRow, off: boolean) => void; onAddShared: (row: McpServerRow) => void; onRemove: (row: McpServerRow) => void;
 }) {
   const [query, setQuery] = useState("");
   const shown = servers.filter((server) => matchesServer(server, query));
@@ -134,7 +135,7 @@ function Installed({ servers, statuses, busy, manages, orgName, onAdd, onImport,
         </tr></thead>
         <tbody>
           {shown.map((row) => <ServerRow key={row.key} row={row} status={statuses[row.key]} busy={busy} canRemove={!row.sharedBy || manages(row.sharedBy)} orgName={orgName}
-            onCheck={() => onCheck(row.key)} onSignIn={() => onSignIn(row)} onEdit={() => onEdit(row)} onSignOut={() => onSignOut(row)} onSetOff={(off) => onSetOff(row, off)} onRemove={() => onRemove(row)} />)}
+            onCheck={() => onCheck(row.key)} onSignIn={() => onSignIn(row)} onEdit={() => onEdit(row)} onSignOut={() => onSignOut(row)} onSetOff={(off) => onSetOff(row, off)} onAddShared={() => onAddShared(row)} onRemove={() => onRemove(row)} />)}
           {shown.length === 0 && <tr><td colSpan={5} className="px-3 py-10">
             {servers.length === 0
               ? <EmptyState icon={Server} title="No MCP servers yet" text="Add one by URL or command, or bring over the ones Claude Code and Codex already use." />
@@ -174,15 +175,21 @@ function AgentsCell({ agents }: { agents: McpServerRow["agents"] }) {
   </span>;
 }
 
-function StatusCell(props: { row: McpServerRow; status: McpStatus | "checking" | undefined; onCheck: () => void; onSignIn: () => void }) {
+type StatusProps = { row: McpServerRow; status: McpStatus | "checking" | undefined; onCheck: () => void; onSignIn: () => void; onAddShared: () => void };
+
+function StatusCell(props: StatusProps) {
   return <div className="whitespace-nowrap">{statusContent(props)}</div>;
 }
 
-function statusContent({ row, status, onCheck, onSignIn }: { row: McpServerRow; status: McpStatus | "checking" | undefined; onCheck: () => void; onSignIn: () => void }) {
+function statusContent({ row, status, onCheck, onSignIn, onAddShared }: StatusProps) {
   const dot = (color: string) => <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", color)} />;
   const action = (label: string, onClick: () => void) => <button type="button" onClick={onClick} className="shrink-0 font-medium text-accent hover:underline">{label}</button>;
   if (row.shadowed) return <span className="flex items-center gap-2 text-muted-foreground" title="One of your own servers has this name.">{dot("bg-faint")}Name in use</span>;
+  if (row.offer === "new") return <span className="flex items-center gap-2 text-muted-foreground">{dot("bg-faint")}Not added{action("Add", onAddShared)}</span>;
+  if (row.offer === "changed") return <span className="flex items-center gap-2 text-muted-foreground" title="Its organization changed its URL. Your token or sign-in for the old one was removed.">{dot("bg-warning")}URL changed{action("Add again", onAddShared)}</span>;
   if (row.off) return <span className="flex items-center gap-2 text-muted-foreground">{dot("bg-faint")}Off</span>;
+  if (row.clash) return <span className="flex min-w-0 items-center gap-2 whitespace-normal leading-tight text-muted-foreground" title="Claude Code or Codex already has a server of this name that you added yourself. Yours is kept; rename this one to use both.">{dot("bg-warning")}<span>Name already used on this Mac</span></span>;
+  if (!status && !isUrlTarget(row.target)) return <span className="flex items-center gap-2 text-muted-foreground">{dot("bg-faint")}Not checked{action("Check", onCheck)}</span>;
   if (!status || status === "checking") return <span className="flex items-center gap-2 text-muted-foreground">{dot("bg-faint")}Checking…</span>;
   switch (status.state) {
     case "connected": return <span className="flex items-center gap-2">{dot("bg-add")}Connected</span>;
@@ -193,10 +200,11 @@ function statusContent({ row, status, onCheck, onSignIn }: { row: McpServerRow; 
   }
 }
 
-function ServerRow({ row, status, busy, canRemove, orgName, onCheck, onSignIn, onEdit, onSignOut, onSetOff, onRemove }: {
+function ServerRow({ row, status, busy, canRemove, orgName, onCheck, onSignIn, onEdit, onSignOut, onSetOff, onAddShared, onRemove }: {
   row: McpServerRow; status: McpStatus | "checking" | undefined; busy: boolean; canRemove: boolean; orgName: (org: string) => string;
-  onCheck: () => void; onSignIn: () => void; onEdit: () => void; onSignOut: () => void; onSetOff: (off: boolean) => void; onRemove: () => void;
+  onCheck: () => void; onSignIn: () => void; onEdit: () => void; onSignOut: () => void; onSetOff: (off: boolean) => void; onAddShared: () => void; onRemove: () => void;
 }) {
+  const pending = row.offer !== null;
   const shared = row.sharedBy !== null;
   return <tr className="border-b border-hairline last:border-b-0">
     <td className="px-3 py-2.5">
@@ -213,16 +221,17 @@ function ServerRow({ row, status, busy, canRemove, orgName, onCheck, onSignIn, o
     </td>
     <td className="truncate px-2 py-2.5">{AUTH_LABELS[row.auth]}</td>
     <td className="px-2 py-2.5"><AgentsCell agents={row.agents} /></td>
-    <td className="px-2 py-2.5"><StatusCell row={row} status={status} onCheck={onCheck} onSignIn={onSignIn} /></td>
+    <td className="px-2 py-2.5"><StatusCell row={row} status={status} onCheck={onCheck} onSignIn={onSignIn} onAddShared={onAddShared} /></td>
     <td className="py-2.5 pr-2">
       <DropdownMenu>
         <DropdownMenuTrigger asChild><Button size="icon-xs" variant="ghost" disabled={busy} aria-label={`${row.name} actions`}><Ellipsis aria-hidden /></Button></DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          {row.auth === "oauth" && !row.off && <DropdownMenuItem onSelect={onSignIn}>{row.hasSecret ? "Sign in again" : "Sign in"}</DropdownMenuItem>}
+          {pending && <DropdownMenuItem onSelect={onAddShared}>{row.offer === "changed" ? "Add again at the new URL" : "Add for me"}</DropdownMenuItem>}
+          {row.auth === "oauth" && !row.off && !pending && <DropdownMenuItem onSelect={onSignIn}>{row.hasSecret ? "Sign in again" : "Sign in"}</DropdownMenuItem>}
           {row.auth === "oauth" && row.hasSecret && <DropdownMenuItem onSelect={onSignOut}>Sign out</DropdownMenuItem>}
           {(!shared || row.auth === "bearer" || row.auth === "headers") && <DropdownMenuItem onSelect={onEdit}>{shared ? (row.auth === "bearer" ? "Set your token" : "Set your headers") : "Edit"}</DropdownMenuItem>}
-          <DropdownMenuItem onSelect={onCheck}>Check again</DropdownMenuItem>
-          {shared && <DropdownMenuItem onSelect={() => onSetOff(!row.off)}>{row.off ? "Turn on for me" : "Turn off for me"}</DropdownMenuItem>}
+          {!pending && <DropdownMenuItem onSelect={onCheck}>{status ? "Check again" : "Check"}</DropdownMenuItem>}
+          {shared && !pending && <DropdownMenuItem onSelect={() => onSetOff(!row.off)}>{row.off ? "Turn on for me" : "Turn off for me"}</DropdownMenuItem>}
           {canRemove && <><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive" onSelect={onRemove}>{shared ? "Remove for everyone" : "Remove"}</DropdownMenuItem></>}
         </DropdownMenuContent>
       </DropdownMenu>

@@ -16,13 +16,19 @@ import { launch, open, report, serve } from "./harness.mjs";
 const shots = process.env.MCP_SETTINGS_SHOTS;
 if (shots) await mkdir(shots, { recursive: true });
 
-const row = (name, target, extra = {}) => ({ key: `local/${name}`, name, target, auth: "none", headerNames: [], agents: { claudeCode: true, codex: true }, sharedBy: null, off: false, shadowed: false, hasSecret: false, clientId: null, ...extra });
+const row = (name, target, extra = {}) => ({ key: `local/${name}`, name, target, auth: "none", headerNames: [], agents: { claudeCode: true, codex: true }, sharedBy: null, off: false, shadowed: false, offer: null, clash: false, hasSecret: false, clientId: null, ...extra });
 const servers = [
   row("linear", "https://mcp.linear.app/mcp", { auth: "oauth", hasSecret: true }),
   row("sentry", "https://mcp.sentry.dev/mcp", { auth: "oauth" }),
   row("playwright", "npx @playwright/mcp@latest", { agents: { claudeCode: true, codex: false } }),
   row("procyon-docs", "https://docs-mcp.procyonlabs.example", { key: "org-p/s1", auth: "bearer", sharedBy: "org-p", hasSecret: true }),
   row("postgres-dev", "uvx mcp-server-postgres $DATABASE_URL", { agents: { claudeCode: true, codex: false } }),
+];
+const offers = [
+  row("team-wiki", "https://wiki.procyonlabs.example/mcp", { key: "org-p/s2", sharedBy: "org-p", offer: "new" }),
+  row("tickets", "https://tickets.procyonlabs.example/v2/mcp", { key: "org-p/s3", sharedBy: "org-p", auth: "bearer", offer: "changed" }),
+  row("docs", "https://docs.example.com/mcp", { clash: true }),
+  row("fetch", "uvx mcp-server-fetch"),
 ];
 const statuses = {
   "local/linear": { state: "connected" },
@@ -47,6 +53,7 @@ const cases = [
   { name: "import-found-nothing", installed: [], scan: nothing, ready: true, tab: "Recommended" },
   { name: "add-bearer", installed: servers, scan: found, ready: true, dialog: "bearer" },
   { name: "add-oauth-advanced", installed: servers, scan: found, ready: true, dialog: "oauth" },
+  { name: "shared-offers", installed: offers, scan: found, ready: true },
   { name: "not-ready", installed: servers, scan: found, ready: false },
 ];
 
@@ -84,7 +91,13 @@ try {
       }
       await nav.getByRole("button", { name: "MCP", exact: true }).click();
       await settings.getByRole("heading", { name: "MCP", exact: true }).waitFor();
-      if (installed.length) await settings.getByText(installed.some((s) => s.name === "postgres-dev") ? "Exited (1)" : installed[0].name).waitFor();
+      if (installed.length) await settings.getByText(installed[0].name, { exact: true }).waitFor();
+      // A local command is checked only when asked: ask, as the design shows it checked.
+      if (installed.some((s) => s.name === "postgres-dev") && !dialog && !tab) {
+        await settings.getByRole("row").filter({ hasText: "postgres-dev" }).getByRole("button", { name: "Check" }).click();
+        await settings.getByRole("row").filter({ hasText: "playwright" }).getByRole("button", { name: "Check" }).click();
+        await settings.getByText("Exited (1)").waitFor();
+      }
       if (tab) await settings.getByRole("tab", { name: tab }).click();
       if (search) await settings.getByRole("searchbox", { name: "Search installed servers" }).fill(search);
       if (dialog === "bearer") {
@@ -133,8 +146,9 @@ try {
       };
       if (name === "installed") {
         checks["the five statuses of 10.09"] = ["Connected", "Needs sign-in", "Sign in", "Exited (1)", "Retry", "Shared"].every((text) => layout.text.includes(text));
-        checks["the shared note"] = layout.text.includes("A shared server is installed for everyone in Procyon Labs. You can turn it off for yourself, not remove it.");
+        checks["the shared note"] = layout.text.includes("A shared server is offered to everyone in Procyon Labs. Add it to use it; you can turn it off for yourself, not remove it.");
       }
+      if (name === "shared-offers") checks["offers, a clash and an unchecked command (review of #1667)"] = ["Not added", "Add", "URL changed", "Add again", "Name already used on this Mac", "Not checked", "Check"].every((text) => layout.text.includes(text));
       if (name === "search-no-match") checks["no match and the Recommended hint (10.17)"] = layout.text.includes("No installed servers match “datadog”") && layout.text.includes("Datadog is in Recommended");
       if (name === "recommended") checks["import cards (10.10)"] = layout.text.includes("Import from Claude Code") && layout.text.includes("4 servers in ~/.claude.json") && layout.text.includes("2 servers in ~/.codex/config.toml");
       if (name === "import-found-nothing") checks["nothing found, file by file (10.18)"] = layout.text.includes("No MCP servers found in ~/.claude.json or ~/.codex/config.toml") && layout.text.includes("~/.claude/settings.json") && layout.text.includes("Look again");

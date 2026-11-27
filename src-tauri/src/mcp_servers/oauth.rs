@@ -55,6 +55,10 @@ pub(crate) enum Refused {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Endpoints {
+    /// The authorization server's identifier, as its metadata states it.
+    pub issuer: String,
+    /// It sends `iss` back with the code (RFC 9207), so a return without it is refused.
+    pub iss_required: bool,
     pub authorization: String,
     pub token: String,
     pub registration: Option<String>,
@@ -111,6 +115,10 @@ pub(crate) fn discover(http: &dyn Http, resource: &str) -> Result<Endpoints> {
     candidates.push(format!("{}/.well-known/openid-configuration", issuer.trim_end_matches('/')));
     let server = candidates.iter().find_map(|u| get_json(http, u)).context("The server does not say where to sign in.")?;
     let field = |name: &str| server.get(name).and_then(Value::as_str).map(String::from);
+    // RFC 8414 §3.3: the metadata is for the issuer it was fetched for, or it is not used.
+    let stated = field("issuer").context("The sign-in server does not say who it is.")?;
+    ensure!(same_issuer(&stated, &issuer), "The sign-in server says it is someone else ({stated}). Not signing in.");
+    let iss_required = server.get("authorization_response_iss_parameter_supported").and_then(Value::as_bool).unwrap_or(false);
     let authorization = field("authorization_endpoint").context("The server does not say where to sign in.")?;
     let token = field("token_endpoint").context("The server does not say where to sign in.")?;
     secure(&authorization)?;
@@ -121,7 +129,12 @@ pub(crate) fn discover(http: &dyn Http, resource: &str) -> Result<Endpoints> {
         .and_then(|m| m.get("scopes_supported")?.as_array().cloned())
         .map(|scopes| scopes.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" "))
         .filter(|s| !s.is_empty());
-    Ok(Endpoints { authorization, token, registration, scope })
+    Ok(Endpoints { issuer: stated, iss_required, authorization, token, registration, scope })
+}
+
+/// Identifiers compare as strings; only a trailing slash is let go.
+fn same_issuer(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/') == b.trim_end_matches('/')
 }
 
 /// `resource_metadata="…"` of a `WWW-Authenticate: Bearer …` header.
@@ -209,7 +222,9 @@ pub(crate) enum Callback {
     Other,
 }
 
-pub(crate) fn parse_callback(request_line: &str, state: &str) -> Callback {
+/// The browser's return. `iss`, when the server sends it (or must), names
+/// the issuer signed in with (RFC 9207); another is refused.
+pub(crate) fn parse_callback(request_line: &str, state: &str, issuer: &str, iss_required: bool) -> Callback {
     let Some(target) = request_line.strip_prefix("GET ").and_then(|rest| rest.split(' ').next()) else { return Callback::Other };
     let Ok(url) = Url::parse(&format!("http://127.0.0.1{target}")) else { return Callback::Other };
     if url.path() != CALLBACK_PATH {
@@ -218,6 +233,11 @@ pub(crate) fn parse_callback(request_line: &str, state: &str) -> Callback {
     let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
     if query.get("state").map(String::as_str) != Some(state) {
         return Callback::Other;
+    }
+    match query.get("iss") {
+        Some(iss) if !same_issuer(iss, issuer) => return Callback::Refused,
+        None if iss_required => return Callback::Refused,
+        _ => {}
     }
     match query.get("code") {
         Some(code) if !code.is_empty() => Callback::Code(code.clone()),
@@ -247,14 +267,14 @@ fn read_request_line(stream: &mut TcpStream) -> Option<String> {
 }
 
 /// Wait for the browser's return with this sign-in's `state`.
-fn wait_for_code(listener: &TcpListener, state: &str, deadline: Instant) -> Result<String> {
+fn wait_for_code(listener: &TcpListener, state: &str, endpoints: &Endpoints, deadline: Instant) -> Result<String> {
     listener.set_nonblocking(true)?;
     while Instant::now() < deadline {
         match listener.accept() {
             Ok((mut stream, _)) => {
                 let _ = stream.set_nonblocking(false);
                 let line = read_request_line(&mut stream).unwrap_or_default();
-                match parse_callback(&line, state) {
+                match parse_callback(&line, state, &endpoints.issuer, endpoints.iss_required) {
                     Callback::Code(code) => {
                         reply(stream, "200 OK", "Signed in. You can close this tab and go back to TerminalX.");
                         return Ok(code);
@@ -302,7 +322,7 @@ pub(crate) fn sign_in(http: &dyn Http, resource: &str, own_client: Option<&str>,
         }
     }
     open(url.as_str())?;
-    let code = wait_for_code(&listener, &state, Instant::now() + SIGN_IN_WAIT)?;
+    let code = wait_for_code(&listener, &state, &endpoints, Instant::now() + SIGN_IN_WAIT)?;
     drop(listener);
     let callback = callback_url();
     let mut pairs = vec![

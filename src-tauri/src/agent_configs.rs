@@ -1803,11 +1803,23 @@ fn sync_file(path: &Path, servers: &[(String, Transport)], drop: &BTreeSet<Strin
     Ok(true)
 }
 
+/// The server names in the two files Settings › MCP writes (`~/.claude.json`,
+/// Codex's `config.toml`), whoever added them; a file not there has none.
+pub(crate) fn managed_names(homes: &Homes) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+    let names = |path: &Path, parse: fn(&str) -> Result<BTreeMap<String, Server>>| -> Result<BTreeSet<String>> {
+        Ok(match read_optional(path)? {
+            Some(text) if !text.trim().is_empty() => parse(&text)?.into_keys().collect(),
+            _ => BTreeSet::new(),
+        })
+    };
+    Ok((names(&homes.claude_json, claude_servers_of)?, names(&homes.codex_toml(), codex_servers_of)?))
+}
+
 /// Bring Claude Code's and Codex's own files to the servers Settings › MCP
 /// manages: `claude` and `codex` are what each should hold, and `drop` the
 /// names it wrote before and no longer wants in that agent. Servers the
-/// person added themselves are never touched, unless TerminalX now manages
-/// one of the same name. Returns the files that changed, as shown.
+/// person added themselves are never touched: the caller leaves their names
+/// out ([`managed_names`]). Returns the files that changed, as shown.
 pub(crate) fn sync_managed(homes: &Homes, claude: &[(String, Managed)], codex: &[(String, Managed)], drop_claude: &BTreeSet<String>, drop_codex: &BTreeSet<String>) -> Result<Vec<String>> {
     let as_transports = |servers: &[(String, Managed)]| servers.iter().map(|(n, m)| (n.clone(), m.transport())).collect::<Vec<_>>();
     let mut changed = Vec::new();

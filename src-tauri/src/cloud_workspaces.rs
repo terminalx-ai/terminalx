@@ -2377,7 +2377,7 @@ fn valid_following_id(value: &str) -> bool {
         byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'@' | b'-'))
 }
 
-fn valid_following_path_id(value: &str) -> bool {
+pub(crate) fn valid_following_path_id(value: &str) -> bool {
     // URL parsers normalize standalone dot segments; never address a different route.
     valid_following_id(value) && !matches!(value, "." | "..")
 }
@@ -5016,6 +5016,7 @@ fn known_error_code(code: &str) -> bool {
             | "mcp_servers_unavailable"
             | "mcp_server_invalid"
             | "mcp_server_target_query"
+            | "mcp_server_target_private"
             | "mcp_server_name_taken"
             | "mcp_server_not_found"
             | "mcp_server_limit_reached"

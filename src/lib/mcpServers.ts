@@ -19,6 +19,10 @@ export interface McpServerRow {
   off: boolean;
   /** Shared, but one of your own servers has its name. */
   shadowed: boolean;
+  /** Shared and not added by this person yet ("new"), or its URL changed since ("changed"). */
+  offer: "new" | "changed" | null;
+  /** An agent's file has an entry of this name the person added themselves; theirs is kept. */
+  clash: boolean;
   hasSecret: boolean;
   clientId: string | null;
 }
@@ -55,6 +59,7 @@ export const mcp = {
   save: (input: McpServerInput) => invoke<McpListing>("mcp_server_save", { input }),
   remove: (key: string) => invoke<McpListing>("mcp_server_remove", { key }),
   setOff: (key: string, off: boolean) => invoke<McpListing>("mcp_server_set_off", { key, off }),
+  addShared: (key: string) => invoke<McpListing>("mcp_server_add_shared", { key }),
   check: (key: string) => invoke<McpStatus>("mcp_server_check", { key }),
   signIn: (key: string) => invoke<McpListing>("mcp_server_sign_in", { key }),
   signOut: (key: string) => invoke<McpListing>("mcp_server_sign_out", { key }),
@@ -151,4 +156,13 @@ export const RECOMMENDED: readonly RecommendedServer[] = [
 export function recommendedAdded(server: RecommendedServer, installed: readonly McpServerRow[]): boolean {
   const norm = (target: string) => target.trim().replace(/\/+$/, "").toLowerCase();
   return installed.some((row) => norm(row.target) === norm(server.target));
+}
+
+/**
+ * Whether opening the page checks this server by itself: a URL in use only.
+ * A local command is started only when the person asks (Check), never by
+ * opening Settings.
+ */
+export function checkedOnOpen(row: McpServerRow): boolean {
+  return isUrlTarget(row.target) && !row.off && !row.shadowed && row.offer === null && !row.clash;
 }
