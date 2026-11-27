@@ -239,6 +239,7 @@ pub struct Session {
     pub collaboration: Option<serde_json::Value>,
     /// Untrusted until checked against the installed collaboration snapshot.
     pub(crate) workspace_ssh: Option<serde_json::Value>,
+    pub(crate) ssh_updater: Option<serde_json::Value>,
     pub(crate) desktop_ready: bool,
 }
 
@@ -307,6 +308,8 @@ pub struct Refreshed {
     collaboration: Option<serde_json::Value>,
     #[serde(default)]
     workspace_ssh: Option<serde_json::Value>,
+    #[serde(default)]
+    ssh_updater: Option<serde_json::Value>,
     #[serde(default)]
     phase2_readiness: Option<serde_json::Value>,
 }
@@ -628,6 +631,7 @@ fn redeem(config: &Config, api: &dyn Api, key: &HostKey, stored: Option<(&str, &
                 environment: None,
                 collaboration: None,
                 workspace_ssh: None,
+                ssh_updater: None,
                 desktop_ready: read_desktop_readiness(redeemed.phase2_readiness.as_ref()),
             }
         }
@@ -685,6 +689,7 @@ impl Bootstrapped {
             }
             Err(error) => {
                 current.workspace_ssh = None;
+                current.ssh_updater = None;
                 let rejected = matches!(error, CallError::Rejected);
                 if rejected {
                     self.rejected.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -696,6 +701,38 @@ impl Bootstrapped {
                 Err(error)
             }
         }
+    }
+
+    /// Report only through the credential bound to the current workspace.
+    /// The capability is supplied explicitly so a report cannot negotiate
+    /// updater support on behalf of the refresh path.
+    #[allow(dead_code)]
+    pub(crate) fn report_ssh_update(
+        &self,
+        api: &HttpApi,
+        decision: &crate::workspace_ssh_updater::Decision,
+        requested_capabilities: &str,
+        status: &crate::workspace_ssh_updater::Status,
+        now_ms: u64,
+    ) -> Result<(), CallError> {
+        use crate::workspace_ssh_updater::{self as updater, CAPABILITY};
+        let current = self.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let generation = crate::remote::host::token_identity(&current.relay_token)
+            .map(|identity| identity.runtime_generation).unwrap_or(0);
+        let still_allowed = updater::Decision::read(
+            current.ssh_updater.as_ref(), requested_capabilities, &current.workspace_id, generation, now_ms,
+        ).is_some_and(|current| current == *decision);
+        if self.is_rejected() || !still_allowed {
+            return Err(CallError::Rejected);
+        }
+        drop(current);
+        let _: serde_json::Value = api.post(
+            "/v1/cloud-workspace-bootstrap/ssh-updater-status",
+            &self.credential,
+            serde_json::to_value(status).map_err(|error| CallError::Transient(error.into()))?,
+            Some((CAPABILITIES_HEADER, CAPABILITY)),
+        )?;
+        Ok(())
     }
 
     /// The runtime credential, for calls made outside this module
@@ -864,6 +901,7 @@ fn session_from_refresh(mut refreshed: Refreshed, relay_host_id: &str) -> Result
         revocations: std::mem::take(&mut refreshed.revocations),
         collaboration: refreshed.collaboration.take().filter(|value| !value.is_null()),
         workspace_ssh: refreshed.workspace_ssh.take(),
+        ssh_updater: refreshed.ssh_updater.take(),
         desktop_ready: read_desktop_readiness(refreshed.phase2_readiness.as_ref()),
         quiesce: refreshed.quiesce.take().filter(|value| !value.is_null()).and_then(|value| {
             match serde_json::from_value::<QuiesceRequest>(value) {
@@ -1296,6 +1334,7 @@ mod tests {
                 quiesce: None,
                 collaboration: None,
                 workspace_ssh: None,
+                ssh_updater: None,
                 phase2_readiness: self.refresh_desktop_ready.then(|| serde_json::json!({
                     "version": 1, "flags": { "cloud.desktop.v1": true }
                 })),

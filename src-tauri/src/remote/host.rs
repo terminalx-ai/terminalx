@@ -2129,6 +2129,7 @@ mod tests {
                     {"userId":"driver","role":"driver","canApprove":true,"approvalSource":"explicit", "writeSource":source}
                 ]})),
                 workspace_ssh: None,
+                ssh_updater: None,
                 desktop_ready: false,
             };
             super::super::bootstrap_link::relay_session(&session, capabilities)
