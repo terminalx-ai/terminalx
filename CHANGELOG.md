@@ -1,5 +1,42 @@
 # TerminalX changelog
 
+## 0.2.42
+
+- Runtime updates: the runtime picks its own moment to hand over. It waits,
+  holding nothing still, for an instant with nothing under way; if none comes
+  within 15 s it holds new control commands back (not refused) for up to 30 s
+  at a stretch, while hooks and the desktop's own requests are still
+  answered. The handover now starts as soon as an update installs, before the
+  relaunch. A runtime refused as busy is asked again after 15 s, then 30, 60,
+  120, up to 5 minutes, instead of every few seconds. Nothing sits over the
+  composer while a runtime is handed over: the status bar chip says so.
+  Updates from 0.2.41 or earlier still depend on the old runtime's own
+  handover, so they get the backoff and the quiet UI, not the convergence
+  (#1636, #1639).
+- Windows and Linux: TerminalX can be installed, signed in to and updated.
+  Windows gets a per-user installer with no admin prompt; Linux gets
+  AppImage, deb and rpm packages and keeps sign-ins in the system keyring.
+  `terminalx://` links reach the running window, the window has its own
+  controls, and Claude Code and Codex install on Windows with their official
+  installers. Each system has its own update feed, so the macOS feed is
+  unchanged (#1645).
+- Machines: a computer signed out and back in as the same person shows up
+  again under "On your account" in Add a machine. Registration refusals are
+  retried when they are transient, logged, and shown in Settings → Account,
+  and the empty state names the account's address (PRO-598, #1640).
+- Phone app: **Delete account** in Account opens a page that lists what will
+  be deleted, what is kept for a while and anything that has to be done first,
+  stops running cloud workspaces, and schedules the deletion after 14 days
+  (PRO-584, #1634). The access code page and account deletion no longer
+  refuse to send because of a stale "offline" reading (PRO-603, #1647).
+  Cancel on the GitHub sign-in prompt no longer signs the phone out
+  (PRO-600, #1644). At the largest text sizes, signed-out headings stop
+  growing and Sign in stays reachable, including on the Cloud tab on an
+  iPhone SE, and a text size change shows without a relaunch (PRO-599,
+  PRO-601, #1643, #1646).
+- Tests: the GitHub transport privacy test hands frames read during a
+  handover to the replacement, as #1630 intended (PRO-589, #1635).
+
 ## 0.2.41
 
 - Phone app: works on Android. Every tab shows its icon and label; with six
