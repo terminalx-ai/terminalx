@@ -715,6 +715,7 @@ mod real_sshd_tests {
         listener: &Listener,
         root: &Path,
         host_key: &str,
+        identity: &str,
     ) -> (OwnedChild, BufReader<std::process::ChildStdout>, Session) {
         let loopback = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = loopback.local_addr().unwrap().port();
@@ -741,7 +742,7 @@ mod real_sshd_tests {
                 ])
                 .arg(format!("UserKnownHostsFile={}", known.display()))
                 .arg("-i")
-                .arg(root.join("client"))
+                .arg(root.join(identity))
                 .arg("terminalx-runtime@127.0.0.1")
                 .arg("while IFS= read -r line; do printf '%s:%s\\n' \"$(id -un)\" \"$line\"; done")
                 .stdin(Stdio::piped())
@@ -798,6 +799,7 @@ mod real_sshd_tests {
         let host = root.join("host");
         generate_key(&host);
         generate_key(&root.join("client"));
+        generate_key(&root.join("other-client"));
         let host_key = parse_public_key(
             &fs::read_to_string(root.join("host.pub"))
                 .unwrap()
@@ -834,11 +836,18 @@ mod real_sshd_tests {
                 .unwrap();
         };
         activate("9.6p1");
-        let (mut old, mut old_output, mut old_session) = open(&listener, root, &host_key);
+        let (mut old, mut old_output, mut old_session) = open(&listener, root, &host_key, "client");
         exchange(&mut old, &mut old_output, "before");
         activate("9.6p1-terminalx.1");
-        let (mut new, mut new_output, new_session) = open(&listener, root, &host_key);
+        let (mut new, mut new_output, new_session) = open(&listener, root, &host_key, "client");
         assert_ne!(old_session.daemon.directory, new_session.daemon.directory);
+        let (mut wrong, _, wrong_session) = open(&listener, root, &host_key, "other-client");
+        drop(wrong.0.stdin.take());
+        assert_eq!(
+            wrong.wait_until(Instant::now() + DEADLINE).unwrap().code(),
+            Some(255)
+        );
+        drop(wrong_session);
         exchange(&mut new, &mut new_output, "new");
         exchange(&mut old, &mut old_output, "after");
         listener.cleanup(&install, || true).unwrap();
