@@ -19,6 +19,7 @@ import {
   Trash2,
 } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
+import { OrganizationAutomationsList } from "./OrganizationAutomationsList";
 import { AutomationEditor } from "@/components/automations/AutomationEditor";
 import { shownOnAutomations } from "@/lib/botDuties";
 import { useBotStore } from "@/lib/bots";
@@ -100,7 +101,7 @@ function issueTriggerSentence(automation: Automation): string | null {
 }
 
 /** One full workspace surface at a time: list, selected automation, or editor. */
-export function AutomationsView({ initialAutomationId = null }: { initialAutomationId?: string | null }) {
+export function AutomationsView({ initialAutomationId = null, organizationId }: { initialAutomationId?: string | null; organizationId?: string }) {
   const store = useAutomationStore();
   const botStore = useBotStore();
   // A bot's duties are listed on its bot's Duties tab (PRO-471); one whose bot was deleted is listed here.
@@ -111,6 +112,7 @@ export function AutomationsView({ initialAutomationId = null }: { initialAutomat
   const [editing, setEditing] = useState<Automation | null | undefined>(undefined);
   const [expandedRun, setExpandedRun] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [listVersion, setListVersion] = useState(0);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -136,6 +138,7 @@ export function AutomationsView({ initialAutomationId = null }: { initialAutomat
 
   const refresh = async () => {
     setRefreshing(true);
+    setListVersion((version) => version + 1);
     setError(null);
     try {
       await refreshAutomations();
@@ -303,7 +306,20 @@ export function AutomationsView({ initialAutomationId = null }: { initialAutomat
       </header>
 
       {error && <div className="mx-4 mt-3 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 scrollbar-thin">
+      {organizationId ? (
+        <OrganizationAutomationsList
+          organizationId={organizationId}
+          listVersion={listVersion}
+          locals={owned.map((automation) => ({
+            id: automation.id,
+            name: automation.name,
+            trigger: issueTriggerSentence(automation) ?? describeSchedule(automation.schedule),
+            paused: !automation.enabled,
+          }))}
+          localLoading={!automationStore.loaded}
+          onSelectLocal={setSelectedId}
+        />
+      ) : <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 scrollbar-thin">
         {!automationStore.loaded ? (
           <div className="flex items-center gap-2 px-2 py-6 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Reading automations…</div>
         ) : automationStore.automations.length === 0 ? (
@@ -352,7 +368,7 @@ export function AutomationsView({ initialAutomationId = null }: { initialAutomat
             </div>
           </section>
         ))}
-      </div>
+      </div>}
     </div>
   );
 }

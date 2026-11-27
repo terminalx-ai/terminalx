@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   openRun: vi.fn(),
   estimate: vi.fn(),
   create: vi.fn(),
+  patch: vi.fn(),
   rotate: vi.fn(),
   toast: vi.fn(),
   copy: vi.fn(),
@@ -25,6 +26,7 @@ vi.mock("@/lib/api", () => ({
     cloudWorkspaceRepositories: mocks.repositories,
     cloudAutomationEstimate: mocks.estimate,
     cloudAutomationCreate: mocks.create,
+    cloudAutomationPatch: mocks.patch,
     cloudAutomationRotateWebhookSecret: mocks.rotate,
     cloudAutomationSetActive: mocks.setActive,
     cloudScheduleDelete: mocks.remove,
@@ -64,7 +66,7 @@ vi.mock("@/lib/cloudCatalog", async (original) => ({
 
 vi.mock("@/lib/models", async (original) => ({ ...(await original<typeof import("@/lib/models")>()), useModels: () => [] }));
 
-import { CloudSchedulesDialog, CloudSchedulesDialogHost, ESTIMATE_DELAY_MS, openSchedulesDialog } from "./CloudSchedulesDialog";
+import { CloudSchedulesDialog, CloudSchedulesDialogHost, ESTIMATE_DELAY_MS, openSchedulesDialog, OrganizationAutomationEditor } from "./CloudSchedulesDialog";
 
 const ID = "schedule_0b9d6b1e-3f5a-4c1d-9f2e-7a1b2c3d4e5f";
 const schedule = (fields: Partial<CloudSchedule> = {}): CloudSchedule => ({
@@ -134,6 +136,44 @@ beforeEach(() => {
   mocks.pauseAll.mockResolvedValue({ paused: 3 });
 });
 afterEach(() => { cleanup(); openSchedulesDialog(null); vi.restoreAllMocks(); vi.useRealTimers(); });
+
+it.each(["edit", "duplicate"] as const)("requires spend consent before saving an automation %s", async (kind) => {
+  scope.status.phase2Readiness = { "org-1": ["cloud.automations.organization.v1"] };
+  const row = { ...schedule(), updatedAt: 1_785_000_000_123 };
+  const configuration = {
+    workspaceId: row.workspaceId,
+    name: row.name,
+    prompt: "Review repository changes.",
+    agent: row.agent,
+    mode: row.mode!,
+    schedule: row.schedule,
+    maxRunMinutes: row.maxRunMinutes,
+    completionPolicy: "suspend" as const,
+    missedRunPolicy: "skip" as const,
+  };
+  mocks.patch.mockResolvedValue(row);
+  const onSaved = vi.fn();
+  render(<OrganizationAutomationEditor
+    orgId="org-1"
+    draft={{ kind, schedule: row, configuration }}
+    onClose={vi.fn()}
+    onSaved={onSaved}
+  />);
+  expect(screen.getByLabelText("Prompt")).toHaveProperty("value", configuration.prompt);
+  const submit = screen.getByRole("button", { name: kind === "edit" ? "Save changes" : "Create scheduled task" });
+  await rest();
+  expect(submit).toHaveProperty("disabled", true);
+  fireEvent.click(screen.getByRole("checkbox", { name: /billed compute/ }));
+  fireEvent.click(submit);
+  await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+  if (kind === "edit") {
+    expect(mocks.patch).toHaveBeenCalledWith("org-1", ID, expect.objectContaining(configuration), row.updatedAt);
+    expect(mocks.create).not.toHaveBeenCalled();
+  } else {
+    expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ ...configuration, name: "Nightly triage copy" }), "org-1");
+    expect(mocks.patch).not.toHaveBeenCalled();
+  }
+});
 
 describe("a workspace's scheduled tasks", () => {
   it("lists a task with when it runs, how its last run went and what it costs", async () => {

@@ -1960,6 +1960,19 @@ pub struct CloudScheduleRun {
     pub finished_at: Option<i64>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CloudScheduleRunNow {
+    pub run: CloudScheduleRun,
+    pub duplicate: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudScheduleCreator {
+    pub user_id: String,
+    pub display_name: Option<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceNudgeInput {
@@ -1987,10 +2000,16 @@ pub struct NudgeReceipt {
 #[serde(rename_all = "camelCase")]
 pub struct CloudSchedule {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub console_url: Option<String>,
     pub workspace_id: String,
     pub name: String,
     #[serde(default)]
     pub created_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<CloudScheduleCreator>,
     pub agent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -2039,6 +2058,12 @@ pub struct CloudScheduleDetail {
     /// The newest runs first, at most 50.
     #[serde(default)]
     pub runs: Vec<CloudScheduleRun>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct CloudScheduleEdit {
+    schedule: CloudSchedule,
+    configuration: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -2308,6 +2333,10 @@ fn automation_body(
     if let Some(days) = archive_days { body["archiveAfterDays"] = json!(days); }
     if let Some(merge) = archive_merge { body["archiveOnPrMerge"] = json!(merge); }
     Some(body)
+}
+
+fn valid_schedule_revision(value: u64) -> bool {
+    value < (1u64 << 53)
 }
 
 fn valid_schedule_id(value: &str) -> bool {
@@ -4541,7 +4570,7 @@ impl CloudWorkspaceService {
     /// Make a scheduled task. It starts billed compute by itself, which the
     /// person confirmed before this was called; the request says so. A mode
     /// is always sent and is never bypass permissions.
-    pub fn schedule_create(&self, org: Option<&str>, input: &CloudScheduleCreateInput) -> Result<CloudScheduleWriteResult, CloudWorkspaceClientError> {
+    fn schedule_configuration(input: &CloudScheduleCreateInput) -> Result<Value, CloudWorkspaceClientError> {
         let invalid = |code: &str| Err(CloudWorkspaceClientError::local(code, false));
         let name = input.name.trim();
         let Some(trigger_body) = automation_body(input.schedule.as_ref(), input.github_trigger.as_ref(), input.webhook_trigger.is_some(), input.workspace_mode.as_deref(), input.archive_after_days, input.archive_on_pr_merge) else { return invalid("cloud_workspace_request_invalid") };
@@ -4563,8 +4592,6 @@ impl CloudWorkspaceService {
         if input.prompt.trim().is_empty() || input.prompt.len() > MAX_PROMPT_BYTES || input.prompt.contains('\0') {
             return invalid("cloud_workspace_prompt_too_long");
         }
-        let target = self.phase2_target(org);
-        self.schedule_readiness(Some(&target), None, input.workspace_mode.as_deref(), input.github_trigger.is_some(), input.webhook_trigger.is_some())?;
         let mut body = json!({
             "workspaceId": input.workspace_id,
             "name": name,
@@ -4574,7 +4601,6 @@ impl CloudWorkspaceService {
             "missedRunPolicy": input.missed_run_policy,
             "completionPolicy": input.completion_policy,
             "maxRunMinutes": input.max_run_minutes,
-            "confirmProviderSpend": true,
         });
         body.as_object_mut().unwrap().extend(trigger_body.as_object().unwrap().clone());
         if let Some(model) = input.model.as_deref() {
@@ -4583,6 +4609,14 @@ impl CloudWorkspaceService {
         if let Some(effort) = input.effort.as_deref() {
             body["effort"] = json!(effort);
         }
+        Ok(body)
+    }
+
+    pub fn schedule_create(&self, org: Option<&str>, input: &CloudScheduleCreateInput) -> Result<CloudScheduleWriteResult, CloudWorkspaceClientError> {
+        let mut body = Self::schedule_configuration(input)?;
+        body["confirmProviderSpend"] = json!(true);
+        let target = self.phase2_target(org);
+        self.schedule_readiness(Some(&target), None, input.workspace_mode.as_deref(), input.github_trigger.is_some(), input.webhook_trigger.is_some())?;
         self.run_in(org, RequestRisk::Mutation, |client, context| {
             self.schedule_readiness(Some(&context.organization_id), Some(context), input.workspace_mode.as_deref(), input.github_trigger.is_some(), input.webhook_trigger.is_some())?;
             let result: CloudScheduleSecretAnswer = client.request(context, &["cloud-schedules"], None, Some(body), None, RequestRisk::Mutation)?;
@@ -4653,6 +4687,73 @@ impl CloudWorkspaceService {
             return Err(context_changed_error(RequestRisk::Mutation));
         }
         result
+    }
+
+    /// Read the editable configuration using the server’s edit authorization.
+    pub fn schedule_edit(&self, org: &str, schedule_id: &str) -> Result<CloudScheduleEdit, CloudWorkspaceClientError> {
+        use crate::account::PHASE2_ORGANIZATION_AUTOMATIONS;
+        if !valid_schedule_id(schedule_id) {
+            return Err(inbox_invalid());
+        }
+        self.phase2_member_in(PHASE2_ORGANIZATION_AUTOMATIONS, "cloud_workspace_runtime_not_ready", org, RequestRisk::Read, |client, context| {
+            let mut result: CloudScheduleEdit = client.request_as(
+                "GET", context, &["cloud-schedules", schedule_id, "edit"], None, None, None, RequestRisk::Read,
+            )?;
+            if result.schedule.id != schedule_id || !result.schedule.updated_at.is_some_and(valid_schedule_revision) {
+                return Err(post_send_error(RequestRisk::Read));
+            }
+            if result.configuration.get("webhookTrigger") == Some(&Value::Bool(true)) {
+                result.configuration["webhookTrigger"] = json!({});
+            }
+            let input: CloudScheduleCreateInput = serde_json::from_value(result.configuration)
+                .map_err(|_| post_send_error(RequestRisk::Read))?;
+            if input.workspace_id != result.schedule.workspace_id {
+                return Err(post_send_error(RequestRisk::Read));
+            }
+            self.schedule_readiness(Some(org), Some(context), input.workspace_mode.as_deref(), input.github_trigger.is_some(), input.webhook_trigger.is_some())?;
+            result.configuration = Self::schedule_configuration(&input).map_err(|_| post_send_error(RequestRisk::Read))?;
+            // The editor consumes a full timing DTO. The create/PATCH wire
+            // format omits fields that do not apply to the chosen preset.
+            if let Some(timing) = input.schedule {
+                result.configuration["schedule"] = json!(timing);
+            }
+            client.normalize_schedule(&mut result.schedule, &mut [], RequestRisk::Read)?;
+            Ok(result)
+        })
+    }
+
+    pub fn schedule_patch(&self, org: &str, schedule_id: &str, expected_updated_at: u64, confirm_provider_spend: bool, input: &CloudScheduleCreateInput) -> Result<CloudSchedule, CloudWorkspaceClientError> {
+        use crate::account::PHASE2_ORGANIZATION_AUTOMATIONS;
+        if !valid_schedule_id(schedule_id) || !valid_schedule_revision(expected_updated_at) || !confirm_provider_spend {
+            return Err(inbox_invalid());
+        }
+        let mut body = Self::schedule_configuration(input)?;
+        body["expectedUpdatedAt"] = json!(expected_updated_at);
+        body["confirmProviderSpend"] = json!(true);
+        self.phase2_member_in(PHASE2_ORGANIZATION_AUTOMATIONS, "cloud_workspace_runtime_not_ready", org, RequestRisk::Mutation, |client, context| {
+            self.schedule_readiness(Some(org), Some(context), input.workspace_mode.as_deref(), input.github_trigger.is_some(), input.webhook_trigger.is_some())?;
+            let mut result: CloudScheduleAnswer = client.request_as(
+                "PATCH", context, &["cloud-schedules", schedule_id], None, Some(body), None, RequestRisk::Mutation,
+            )?;
+            if result.schedule.id != schedule_id || result.schedule.workspace_id != input.workspace_id
+                || !result.schedule.updated_at.is_some_and(valid_schedule_revision)
+            {
+                return Err(post_send_error(RequestRisk::Mutation));
+            }
+            client.normalize_schedule(&mut result.schedule, &mut [], RequestRisk::Mutation)?;
+            Ok(result.schedule)
+        })
+    }
+
+    pub fn schedule_run_now(&self, org: &str, schedule_id: &str, confirm_provider_spend: bool, idempotency_key: &str) -> Result<CloudScheduleRunNow, CloudWorkspaceClientError> {
+        use crate::account::PHASE2_ORGANIZATION_AUTOMATIONS;
+        if !confirm_provider_spend || !valid_schedule_id(schedule_id) || !valid_idempotency_key(idempotency_key) {
+            return Err(inbox_invalid());
+        }
+        self.phase2_member_in(PHASE2_ORGANIZATION_AUTOMATIONS, "cloud_workspace_runtime_not_ready", org, RequestRisk::Mutation, |client, context| {
+            client.request(context, &["cloud-schedules", schedule_id, "run-now"], None,
+                Some(json!({ "confirmProviderSpend": true })), Some(idempotency_key), RequestRisk::Mutation)
+        })
     }
 
     /// Delete a scheduled task, its prompt and its runs.
@@ -4893,6 +4994,8 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_quota_exceeded"
             | "cloud_schedule_runtime_unsupported"
             | "cloud_schedule_cleanup_pending"
+            | "cloud_schedule_revision_conflict"
+            | "cloud_schedule_run_active"
             | "cloud_schedule_prompt_shell_command"
             | "cloud_schedule_prompt_slash_command"
             | "cloud_schedule_prompt_file_mention"
@@ -10368,6 +10471,97 @@ mod tests {
     }
 
     #[test]
+    fn phase2_organization_automations_run_now_requires_readiness_and_spend_confirmation() {
+        let (_, held) = test_service("http://127.0.0.1:1");
+        assert_eq!(held.schedule_run_now("org-1", SCHEDULE, true, "run-1").unwrap_err().code, "cloud_workspace_runtime_not_ready");
+        assert_eq!(held.schedule_run_now("org-1", SCHEDULE, false, "run-1").unwrap_err().code, "cloud_workspace_request_invalid");
+        let body = json!({ "run": { "id": "run-1", "scheduledFor": 10, "state": "queued" }, "duplicate": false });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, ready) = phase2_service(&base);
+        let result = ready.schedule_run_now("org-1", SCHEDULE, true, "run-1").unwrap();
+        assert_eq!(result.run.id, "run-1");
+        assert!(!result.duplicate);
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/run-now HTTP/1.1")));
+        assert!(captured.text.to_ascii_lowercase().contains("idempotency-key: run-1"));
+        assert_eq!(sent_body(&captured), json!({ "confirmProviderSpend": true }));
+    }
+
+    #[test]
+    fn phase2_organization_automations_edit_and_patch_use_the_exact_revision_and_routes() {
+        let (_, held) = test_service("http://127.0.0.1:1");
+        assert_eq!(held.schedule_edit("org-1", SCHEDULE).err().unwrap().code, "cloud_workspace_runtime_not_ready");
+        assert_eq!(held.schedule_patch("org-1", SCHEDULE, 10, false, &schedule_input()).unwrap_err().code, "cloud_workspace_request_invalid");
+        let mut input = schedule_input();
+        let timing = input.schedule.as_mut().unwrap();
+        timing.preset = "hourly".into();
+        timing.hour = 0;
+        timing.weekdays.clear();
+        let configuration = CloudWorkspaceService::schedule_configuration(&input).unwrap();
+        let mut schedule = schedule_json(SCHEDULE, &input.workspace_id);
+        schedule["updatedAt"] = json!(1_785_000_000_123u64);
+        schedule["consoleUrl"] = json!(format!("https://console.terminalx.ai/organizations/org-1/automations/{SCHEDULE}"));
+        schedule["webhookSecret"] = json!("must not reach the UI");
+        let mut projected_configuration = configuration.clone();
+        projected_configuration["schedule"] = json!(input.schedule);
+        let body = json!({ "schedule": schedule, "configuration": projected_configuration });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, reader) = phase2_service(&base);
+        let editable = reader.schedule_edit("org-1", SCHEDULE).unwrap();
+        assert!(request.join().unwrap().text.starts_with(&format!("GET /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/edit HTTP/1.1")));
+        let projected = serde_json::to_value(&editable).unwrap();
+        assert_eq!(projected["configuration"], projected_configuration);
+        assert_eq!(projected["schedule"]["consoleUrl"], schedule["consoleUrl"]);
+        assert!(projected["schedule"].get("webhookSecret").is_none());
+
+        let revision = editable.schedule.updated_at.unwrap();
+        schedule["updatedAt"] = json!(revision + 1);
+        let body = json!({ "schedule": schedule });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, writer) = phase2_service(&base);
+        let updated = writer.schedule_patch("org-1", SCHEDULE, revision, true, &input).unwrap();
+        assert_eq!(updated.updated_at, Some(revision + 1));
+        let request = request.join().unwrap();
+        assert!(request.text.starts_with(&format!("PATCH /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE} HTTP/1.1")));
+        let mut expected = configuration;
+        assert!(expected["schedule"].get("hour").is_none());
+        assert!(expected["schedule"].get("weekdays").is_none());
+        expected["expectedUpdatedAt"] = json!(revision);
+        expected["confirmProviderSpend"] = json!(true);
+        assert_eq!(sent_body(&request), expected);
+    }
+
+    #[test]
+    fn phase2_organization_automations_patch_preserves_active_run_refusal() {
+        let (base, _, request) = serve_once(
+            response("409 Conflict", r#"{"error":"cloud_schedule_run_active"}"#, ""),
+            Duration::ZERO,
+        );
+        let (_, service) = phase2_service(&base);
+        let error = service.schedule_patch("org-1", SCHEDULE, 10, true, &schedule_input()).unwrap_err();
+        assert_eq!(error.code, "cloud_schedule_run_active");
+        assert!(request.join().unwrap().text.starts_with("PATCH "));
+    }
+
+    #[test]
+    fn phase2_organization_automations_project_creator_without_prompt_or_webhook_secret() {
+        let mut schedule = schedule_json(SCHEDULE, "workspace-1");
+        schedule["creator"] = json!({ "userId": "user-1", "displayName": "Sam" });
+        schedule["prompt"] = json!("not part of the list view");
+        schedule["webhookSecret"] = json!("not part of the list view");
+        let body = json!({ "schedules": [schedule] });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let listed = service.schedules(Some("org-1"), None).unwrap();
+        assert!(request.join().unwrap().text.starts_with("GET /v1/desktop/orgs/org-1/cloud-schedules HTTP/1.1"));
+        let value = serde_json::to_value(&listed).unwrap();
+        let row = &value["schedules"][0];
+        assert_eq!(row["creator"], schedule["creator"]);
+        assert!(row.get("prompt").is_none());
+        assert!(row.get("webhookSecret").is_none());
+    }
+
+    #[test]
     fn phase2_automation_contract_schedules_are_listed_for_one_workspace_and_an_answer_about_another_is_refused() {
         let body = json!({ "schedules": [schedule_json(SCHEDULE, "workspace-1")] });
         let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
@@ -10566,7 +10760,7 @@ mod tests {
 
     #[test]
     fn phase2_automation_contract_a_refused_schedule_keeps_the_servers_reason() {
-        for code in ["cloud_schedule_runtime_unsupported", "cloud_schedule_cleanup_pending", "cloud_schedule_prompt_shell_command", "cloud_schedule_prompt_slash_command", "cloud_schedule_prompt_file_mention"] {
+        for code in ["cloud_schedule_revision_conflict", "cloud_schedule_runtime_unsupported", "cloud_schedule_cleanup_pending", "cloud_schedule_prompt_shell_command", "cloud_schedule_prompt_slash_command", "cloud_schedule_prompt_file_mention"] {
             let (base, _, request) = serve_once(response("409 Conflict", &json!({ "error": code }).to_string(), ""), Duration::ZERO);
             let (_, service) = test_service(&base);
             let error = service.schedule_create(None, &schedule_input()).unwrap_err();

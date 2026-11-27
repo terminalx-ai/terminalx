@@ -13,6 +13,7 @@ import {
   blankAutomationForm,
   AUTOMATION_HOLD,
   automationFormErrors,
+  automationFormFromConfiguration,
   automationInput,
   automationEstimateInput,
   automationCostLines,
@@ -49,9 +50,6 @@ import { usePromptTextProps } from "@/lib/autocorrect";
  * Everything that starts billed compute by itself is said to do so and is
  * confirmed where it is asked for: creating a task, resuming one. Opening
  * the dialog and asking for an estimate wake nothing.
- *
- * There is no edit: the server has no route for it. A task is changed by
- * deleting it and making it again.
  *
  * "Pause all" is the emergency stop: it stays reachable while the list
  * cannot be read and while the form is open.
@@ -417,9 +415,58 @@ function CloudAutomationRuns({ schedule, orgId, webhookAvailable }: { schedule: 
   })}</ul>;
 }
 
-function NewScheduleForm({ orgId, workspaceId, freshAvailable, githubAvailable, webhookAvailable, onCancel, onCreated }: { orgId: string; workspaceId: string; freshAvailable: boolean; githubAvailable: boolean; webhookAvailable: boolean; onCancel: () => void; onCreated: (secret?: string) => void }) {
+export interface OrganizationAutomationDraft {
+  kind: "edit" | "duplicate";
+  schedule: CloudAutomationDto & { updatedAt: number };
+  configuration: Parameters<typeof automationFormFromConfiguration>[0];
+}
+
+export function OrganizationAutomationEditor({ orgId, draft, onClose, onSaved }: {
+  orgId: string;
+  draft: OrganizationAutomationDraft;
+  onClose: () => void;
+  onSaved: (schedule: CloudAutomationDto, secret?: string) => void;
+}) {
+  const status = useSyncExternalStore(subscribeAccount, () => getAccount().status);
+  const flagEnabled = useFeatureFlag(featureFlags.organizationSetup, orgId);
+  const title = draft.kind === "edit" ? "Edit automation" : "Duplicate automation";
+  if (!phase2Ready(status, orgId, "organizationAutomations")) return null;
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-h-[90vh] overflow-auto">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>Review the settings and confirm provider spend before saving.</DialogDescription>
+        </DialogHeader>
+        <NewScheduleForm
+          orgId={orgId}
+          workspaceId={draft.configuration.workspaceId}
+          freshAvailable={phase2Ready(status, orgId, "freshWorkspace")}
+          githubAvailable={phase2Ready(status, orgId, "githubTrigger")}
+          webhookAvailable={phase2Ready(status, orgId, "webhookTrigger") && flagEnabled && managesOrganization(status, orgId) === true}
+          initialDraft={draft}
+          onCancel={onClose}
+          onCreated={(secret, schedule) => onSaved(schedule, secret)}
+        />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function NewScheduleForm({ orgId, workspaceId, freshAvailable, githubAvailable, webhookAvailable, initialDraft, onCancel, onCreated }: {
+  orgId: string;
+  workspaceId: string;
+  freshAvailable: boolean;
+  githubAvailable: boolean;
+  webhookAvailable: boolean;
+  initialDraft?: OrganizationAutomationDraft;
+  onCancel: () => void;
+  onCreated: (secret: string | undefined, schedule: CloudAutomationDto) => void;
+}) {
   const capture = useAutomationFence();
-  const [form, setForm] = useState<AutomationForm>(blankAutomationForm);
+  const [form, setForm] = useState<AutomationForm>(() => initialDraft
+    ? automationFormFromConfiguration(initialDraft.configuration, initialDraft.kind === "duplicate")
+    : blankAutomationForm());
   const [repositories, setRepositories] = useState<CloudSelectedRepository[]>([]);
   const [repositoryError, setRepositoryError] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
@@ -511,8 +558,14 @@ function NewScheduleForm({ orgId, workspaceId, freshAvailable, githubAvailable, 
     setSaving(true);
     setError(null);
     try {
-      const result = await api.cloudAutomationCreate(input, orgId);
-      if (current()) onCreated(input.webhookTrigger ? result.webhookSecret : undefined);
+      if (initialDraft?.kind === "edit") {
+        const { id, updatedAt } = initialDraft.schedule;
+        const result = await api.cloudAutomationPatch(orgId, id, input, updatedAt);
+        if (current()) onCreated(undefined, result);
+      } else {
+        const result = await api.cloudAutomationCreate(input, orgId);
+        if (current()) onCreated(input.webhookTrigger ? result.webhookSecret : undefined, result);
+      }
     } catch (e) {
       if (current()) setError(scheduleErrorMessage(errorCode(e)));
     } finally {
@@ -530,7 +583,7 @@ function NewScheduleForm({ orgId, workspaceId, freshAvailable, githubAvailable, 
         void save();
       }}
     >
-      <p className="font-medium">New scheduled task</p>
+      {!initialDraft && <p className="font-medium">New scheduled task</p>}
       <label className="flex flex-col gap-1">
         <span className="font-medium">Name</span>
         <input aria-label="Name" className={inputClass} maxLength={SCHEDULE_LIMITS.nameChars} placeholder="Nightly triage" value={form.name} onChange={(event) => update("name", event.target.value)} />
@@ -563,6 +616,7 @@ function NewScheduleForm({ orgId, workspaceId, freshAvailable, githubAvailable, 
           <span className="font-medium">Model</span>
           <select aria-label="Model" className={inputClass} value={form.model} onChange={(event) => setForm((current) => ({ ...current, model: event.target.value, effort: "" }))}>
             <option value="">Default</option>
+            {form.model && !model && <option value={form.model}>{form.model}</option>}
             {models.map((item) => (
               <option key={item.id} value={item.id}>
                 {modelOptionText(item, models, false)}
@@ -732,7 +786,7 @@ function NewScheduleForm({ orgId, workspaceId, freshAvailable, githubAvailable, 
       )}
       <div className="flex items-center gap-2">
         <Button type="submit" size="sm" disabled={saving || !confirmed || !agreeable}>
-          {saving ? <Loader2 className="animate-spin" /> : <CalendarClock />} Create scheduled task
+          {saving ? <Loader2 className="animate-spin" /> : <CalendarClock />} {initialDraft?.kind === "edit" ? "Save changes" : "Create scheduled task"}
         </Button>
         <Button type="button" size="sm" variant="ghost" onClick={onCancel} disabled={saving}>
           Cancel
