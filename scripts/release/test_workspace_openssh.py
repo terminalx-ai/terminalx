@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tarfile
@@ -65,6 +66,48 @@ class PayloadTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 tool.pack(tree, out / "unsafe.tar.gz")
             self.assertFalse((out / "unsafe.tar.gz").exists())
+
+
+    def test_local_runner_streams_two_offline_builds(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            directory = Path(scratch)
+            source = directory / "openssh-9.6p1.tar.gz"
+            source.write_bytes(b"local fixture")
+            out = directory / "out"
+            out.mkdir()
+            trace = directory / "trace"
+            docker = directory / "docker"
+            docker.write_text("""#!/usr/bin/env python3
+import os
+import sys
+import tarfile
+args = sys.argv[1:]
+assert args[:2] == ["run", "--rm"]
+assert args[args.index("--pull") + 1] == "never"
+assert args[args.index("--network") + 1] == "none"
+assert "--mount" not in args
+with tarfile.open(fileobj=sys.stdin.buffer, mode="r|*") as archive:
+    assert sorted(member.name for member in archive) == [
+        "openssh-9.6p1.tar.gz", "workspace-openssh.py"
+    ]
+platform = args[args.index("--platform") + 1]
+with open(os.environ["DOCKER_TRACE"], "a") as log:
+    print(platform, file=log)
+sys.stdout.write(platform)
+""")
+            docker.chmod(0o700)
+            env = dict(os.environ, PATH=f"{directory}:{os.environ['PATH']}", DOCKER_TRACE=str(trace))
+            runner = SOURCE.with_name("build-workspace-openssh-local.sh")
+            subprocess.run([
+                "bash", runner, "9.6p1", source, tool.sha256(source), out,
+                "local-amd64-builder", "local-arm64-builder",
+            ], env=env, check=True)
+            self.assertEqual(trace.read_text().splitlines(), ["linux/amd64", "linux/arm64"])
+            manifest = json.loads((out / "manifest.json").read_bytes())
+            self.assertEqual({row["arch"] for row in manifest["artifacts"]}, {"x86_64", "aarch64"})
+            for artifact in manifest["artifacts"]:
+                self.assertEqual(artifact["sha256"], tool.sha256(out / artifact["locator"]))
+            self.assertFalse((out / "manifest.json.sig").exists())
 
 
 if __name__ == "__main__":

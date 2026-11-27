@@ -62,3 +62,6 @@ Collect the per-architecture payloads in one local directory and run
 Add `--signing-key PATH` with a locally generated throwaway key to exercise
 signing. The tool has no default signing key and does not upload anything.
 Review the runtime integration separately with the installed private daemon.
+
+See the [local builder README](../scripts/release/README-workspace-openssh.md)
+for the two-architecture container runner and verification status.
