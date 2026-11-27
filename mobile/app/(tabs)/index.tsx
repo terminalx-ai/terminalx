@@ -12,6 +12,7 @@ import { usePullRefresh } from "@mobile/ui/pull-refresh";
 import { Button, Card, EmptyState, Screen, SectionTitle } from "@mobile/ui/primitives";
 import { Spinner } from "@mobile/ui/Spinner";
 import { TerminalXMark } from "@mobile/ui/TerminalXMark";
+import { HEADING_MAX_POINTS, HEADING_SENTENCE_MAX_POINTS, maxScaleFor } from "@mobile/ui/text-size";
 import { GlassIconButton } from "@mobile/ui/glass";
 import { useTheme, type Palette } from "@mobile/ui/theme";
 import { PairingScanner } from "@mobile/ui/PairingScanner";
@@ -59,8 +60,8 @@ export default function MachinesScreen() {
   if (!session && !paired.length) {
     return <>
       <Screen title="Machines" titleActions={add} aboveTitle={<View style={styles.logo}><TerminalXMark testID="terminalx-mark" /></View>} contentContainerStyle={styles.signedOut}>
-        <Text style={[styles.heroTitle, { color: palette.ink }]}>Your work, away from your desk</Text>
-        <Text style={[styles.heroDetail, { color: palette.muted }]}>Sign in to see the machines on your TerminalX account, or tap + to pair with a QR code.</Text>
+        <Text maxFontSizeMultiplier={HERO_TITLE_MAX_SCALE} style={[styles.heroTitle, { color: palette.ink }]}>Your work, away from your desk</Text>
+        <Text maxFontSizeMultiplier={HERO_DETAIL_MAX_SCALE} style={[styles.heroDetail, { color: palette.muted }]}>Sign in to see the machines on your TerminalX account, or tap + to pair with a QR code.</Text>
         <Button label={app.signingIn ? "Signing in…" : "Sign in"} disabled={app.signingIn} accessibilityState={{ disabled: app.signingIn, busy: app.signingIn }} icon={app.signingIn ? (color) => <Spinner size={16} color={color} /> : undefined} onPress={() => void app.signIn()} />
         {errorCard}
       </Screen>
@@ -262,3 +263,7 @@ const styles = StyleSheet.create({
   fingerprint: { fontSize: 30, lineHeight: 38, fontWeight: "700", letterSpacing: 2, fontVariant: ["tabular-nums"] },
   codeInput: { minHeight: 120, borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, padding: 14, textAlignVertical: "top", fontSize: 15 },
 });
+
+// Signed out, the heading and its sentence stop growing at a set size, so Sign in stays in sight on an SE (PRO-601).
+const HERO_TITLE_MAX_SCALE = maxScaleFor(styles.heroTitle.fontSize, HEADING_MAX_POINTS);
+const HERO_DETAIL_MAX_SCALE = maxScaleFor(styles.heroDetail.fontSize, HEADING_SENTENCE_MAX_POINTS);

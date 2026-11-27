@@ -3,6 +3,7 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View, type 
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LargeTitle } from "./glass";
 import { useInTabs, useTabBarInset } from "./tab-bar-inset";
+import { HEADING_MAX_POINTS, HEADING_SENTENCE_MAX_POINTS, maxScaleFor } from "./text-size";
 import { TopBar, useTopBar } from "./top-bar";
 import { useTheme } from "./theme";
 
@@ -48,7 +49,7 @@ export function Button({ label, kind = "primary", size = "regular", icon, disabl
 export function EmptyState({ title, detail, busy, icon }: { title: string; detail: string; busy?: boolean; /** Drawn above the title, in the faint colour. */ icon?: (color: string) => ReactNode }) {
   const { palette } = useTheme();
   const mark = busy ? <ActivityIndicator color={palette.accent} /> : icon ? icon(palette.faint) : null;
-  return <View style={styles.empty}>{mark ? <View style={styles.emptyMark}>{mark}</View> : null}<Text style={[styles.emptyTitle, { color: palette.ink }]}>{title}</Text><Text style={[styles.emptyDetail, { color: palette.muted }]}>{detail}</Text></View>;
+  return <View style={styles.empty}>{mark ? <View style={styles.emptyMark}>{mark}</View> : null}<Text maxFontSizeMultiplier={EMPTY_TITLE_MAX_SCALE} style={[styles.emptyTitle, { color: palette.ink }]}>{title}</Text><Text maxFontSizeMultiplier={EMPTY_DETAIL_MAX_SCALE} style={[styles.emptyDetail, { color: palette.muted }]}>{detail}</Text></View>;
 }
 
 export function SectionTitle({ children }: { children: string }) {
@@ -74,3 +75,8 @@ const styles = StyleSheet.create({
   emptyDetail: { fontSize: 14, lineHeight: 20, textAlign: "center" },
   sectionTitle: { fontSize: 12, fontWeight: "600", letterSpacing: 0.7, marginLeft: 4, marginTop: 8 },
 });
+
+// An empty state's title and line stop growing where the signed-out tabs' do (PRO-601): at the largest
+// text sizes they filled the page, and the button under them (Sessions' Open Machines) went under the tab bar.
+const EMPTY_TITLE_MAX_SCALE = maxScaleFor(styles.emptyTitle.fontSize, HEADING_MAX_POINTS);
+const EMPTY_DETAIL_MAX_SCALE = maxScaleFor(styles.emptyDetail.fontSize, HEADING_SENTENCE_MAX_POINTS);
