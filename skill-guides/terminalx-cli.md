@@ -1803,9 +1803,10 @@ terminalx artifact show <slug> [--org <org>] --json
 ```
 
 `artifact publish` publishes a page or note (up to 1 MB) for everyone in the organization: every
-member sees it on their overview within a minute. Run it from a terminal in the session whose file
-it is. The app reads the file itself, and only from that session's folder: a path outside it
-(links are followed), a hidden file or folder (`.env`, `.git/…`) or a file named for secrets
+member sees it on their overview within a minute. Run it from a terminal or agent in the session whose file
+it is: the app works out that session from the process itself (or the tab's own launch secret), never
+from `RACCOON_SESSION_ID`, and refuses when it cannot. The app reads the file itself, and only from that session's folder: a path outside it
+(links to folders are followed and judged by where they lead; a link as the file itself is refused), a hidden file or folder (`.env`, `.git/…`) or a file named for secrets
 (keys, tokens, credentials) is refused with `artifact_path_outside` or `artifact_path_refused`.
 
 - Without `--slug` or `--template`, it is always a new artifact.

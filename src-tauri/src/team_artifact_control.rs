@@ -291,10 +291,6 @@ mod tests {
         open_publishable(root, path).map(|(inside, _)| inside)
     }
 
-    fn code(result: Result<PathBuf, ControlError>) -> String {
-        result.unwrap_err().code
-    }
-
     #[test]
     fn a_file_of_the_sessions_own_is_publishable() {
         let (_dir, root) = folder();
@@ -360,11 +356,12 @@ mod tests {
         assert_eq!(code(opened(&root, &root.join("missing.md"))), "invalid_arguments");
     }
 
-    /// A session of this Mac's whose second tab runs without asking.
+    /// A session of this Mac's whose first tab asks and whose second runs without asking.
     fn session_with_tabs(root: &Path) -> crate::store::index::SessionEntry {
         let mut session = crate::session_ops::create_session_entry(
             serde_json::from_value(json!({"projectPath": root, "useWorktree": false, "tab": {"harness": "codex"}})).unwrap(),
         ).unwrap();
+        session.tabs[0].permission_mode = "default".into();
         let mut free = session.tabs[0].clone();
         free.id = uuid::Uuid::now_v7().to_string();
         free.permission_mode = RUNS_WITHOUT_ASKING.into();
