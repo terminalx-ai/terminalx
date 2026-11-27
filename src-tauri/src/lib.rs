@@ -116,6 +116,8 @@ mod files;
 mod workspace_file;
 mod foreground;
 #[cfg(feature = "desktop")]
+mod nudge_overlay;
+#[cfg(feature = "desktop")]
 mod floating;
 #[cfg(feature = "desktop")]
 mod media;
@@ -770,6 +772,10 @@ pub fn run() {
             commands::cloud_workspace_follow_delete,
             commands::cloud_workspace_reassign,
             commands::cloud_workspace_mentions,
+            commands::nudge_preference,
+            commands::nudge_preference_set,
+            commands::nudge_send,
+            nudge_overlay::nudge_overlay_show,
             commands::desktop_presence_put,
             commands::desktop_presence_read,
             commands::desktop_inbox,

@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use url::Url;
 
 use crate::account::{
-    AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN, PHASE2_MENTIONS,
+    AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN, PHASE2_MENTIONS, PHASE2_NUDGES,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_PRESENCE, PHASE2_RESTART_DETAILS,
     PHASE2_ADMIN_SHARE, PHASE2_AFFECTED_WORKSPACES, PHASE2_GENERAL_ACCESS, PHASE2_PRECREATE_USAGE, PHASE2_WEBHOOK_TRIGGER, PHASE2_WORKSPACE_GROUPS,
 };
@@ -1960,6 +1960,27 @@ pub struct CloudScheduleRun {
     pub finished_at: Option<i64>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceNudgeInput {
+    target_user_id: String,
+    workspace_id: String,
+    session_id: String,
+    text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NudgePreference {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NudgeReceipt {
+    pub delivered: bool,
+}
+
 /// A scheduled task as the API shows it. The prompt is never returned:
 /// `prompt_bytes` says how long it is.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -2850,7 +2871,7 @@ impl CloudWorkspaceService {
         if !crate::desktop_inbox::valid_cursor(after) || wait_ms > 25_000 { return Err(inbox_invalid()); }
         self.inbox_account(RequestRisk::Read, |client, context| {
             let mut url = client.inbox_url(&[])?;
-            url.query_pairs_mut().append_pair("after", after).append_pair("waitMs", &wait_ms.to_string()).append_pair("presence", "1").append_pair("mentions", "1");
+            url.query_pairs_mut().append_pair("after", after).append_pair("waitMs", &wait_ms.to_string()).append_pair("presence", "1").append_pair("mentions", "1").append_pair("nudges", "1");
             let page: crate::desktop_inbox::InboxPage = client.send_url("GET", context, url, None, None, RequestRisk::Read, CATALOG_RESPONSE_LIMIT_BYTES)?;
             if page.v != 1 || page.events.len() > 100 || page.cursor.parse::<i64>().unwrap() < after.parse::<i64>().unwrap()
                 || page.events.iter().any(|event| event.id().parse::<i64>().unwrap() > page.cursor.parse::<i64>().unwrap()) { return Err(post_send_error(RequestRisk::Read)); }
@@ -2863,7 +2884,7 @@ impl CloudWorkspaceService {
         if !crate::desktop_inbox::valid_cursor(after) || last_event_id.is_some_and(|id| !crate::desktop_inbox::valid_cursor(id)) { return Err(inbox_invalid()); }
         self.inbox_account(RequestRisk::Read, |client, context| {
             let mut url = client.inbox_url(&["stream"])?;
-            url.query_pairs_mut().append_pair("after", after).append_pair("presence", "1").append_pair("mentions", "1");
+            url.query_pairs_mut().append_pair("after", after).append_pair("presence", "1").append_pair("mentions", "1").append_pair("nudges", "1");
             let mut request = client.authorized_request("GET", context, &url).set("accept", "text/event-stream");
             if let Some(id) = last_event_id { request = request.set("Last-Event-ID", id); }
             let response = match request.call() {
@@ -2985,6 +3006,34 @@ impl CloudWorkspaceService {
                 return Err(post_send_error(RequestRisk::Mutation));
             }
             Ok(value)
+        })
+    }
+
+    pub fn nudge_preference(&self, org: &str) -> Result<NudgePreference, CloudWorkspaceClientError> {
+        self.phase2_member_in(PHASE2_NUDGES, "nudges_unavailable", org, RequestRisk::Read, |client, context| {
+            client.request(context, &["nudges", "preference"], None, None, None, RequestRisk::Read)
+        })
+    }
+
+    pub fn set_nudge_preference(&self, org: &str, enabled: bool) -> Result<NudgePreference, CloudWorkspaceClientError> {
+        self.phase2_member_in(PHASE2_NUDGES, "nudges_unavailable", org, RequestRisk::Mutation, |client, context| {
+            let saved: NudgePreference = client.request_as("PUT", context, &["nudges", "preference"],
+                None, Some(json!({ "enabled": enabled })), None, RequestRisk::Mutation)?;
+            if saved.enabled != enabled { return Err(post_send_error(RequestRisk::Mutation)); }
+            Ok(saved)
+        })
+    }
+
+    pub fn send_nudge(&self, org: &str, mut input: WorkspaceNudgeInput) -> Result<NudgeReceipt, CloudWorkspaceClientError> {
+        if ![&input.target_user_id, &input.workspace_id, &input.session_id].into_iter().all(|id| valid_following_path_id(id))
+            || input.text.chars().any(char::is_control) {
+            return Err(inbox_invalid());
+        }
+        let text = input.text.trim();
+        if !(1..=240).contains(&text.chars().count()) { return Err(inbox_invalid()); }
+        input.text = text.to_owned();
+        self.phase2_member_in(PHASE2_NUDGES, "nudges_unavailable", org, RequestRisk::Mutation, |client, context| {
+            client.request(context, &["nudges"], None, Some(json!(input)), None, RequestRisk::Mutation)
         })
     }
 
@@ -4792,6 +4841,8 @@ fn known_error_code(code: &str) -> bool {
             | "organization_group_not_found"
             | "workspace_following_unavailable"
             | "workspace_mentions_unavailable"
+            | "nudge_rate_limited"
+            | "nudges_unavailable"
             | "presence_rate_limited"
             | "presence_device_limit"
             | "presence_capacity_exceeded"
@@ -5400,6 +5451,46 @@ mod tests {
             assert!(!request.to_ascii_lowercase().contains("idempotency-key:"));
             assert!(!request.contains("presence=1"));
             assert_eq!(serde_json::from_str::<Value>(request.split_once("\r\n\r\n").unwrap().1).unwrap(), expected);
+        }
+    }
+
+    fn nudge_input(text: &str) -> WorkspaceNudgeInput {
+        WorkspaceNudgeInput {
+            target_user_id: "teammate".into(),
+            workspace_id: "workspace-1".into(),
+            session_id: "session-1".into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn phase2_team_nudges_use_exact_paths_and_receipts() {
+        let (base, requests) = serve_each(vec![
+            response("200 OK", r#"{"enabled":false}"#, ""),
+            response("200 OK", r#"{"enabled":true}"#, ""),
+            response("200 OK", r#"{"delivered":false}"#, ""),
+        ]);
+        let (_, service) = phase2_service(&base);
+        assert!(!service.nudge_preference("org-1").unwrap().enabled);
+        assert!(service.set_nudge_preference("org-1", true).unwrap().enabled);
+        assert!(!service.send_nudge("org-1", nudge_input("  Look at the changes 🔎  ")).unwrap().delivered);
+        let requests = requests.join().unwrap();
+        assert!(requests[0].starts_with("GET /v1/desktop/orgs/org-1/nudges/preference HTTP/1.1"));
+        assert!(requests[1].starts_with("PUT /v1/desktop/orgs/org-1/nudges/preference HTTP/1.1"));
+        assert!(requests[2].starts_with("POST /v1/desktop/orgs/org-1/nudges HTTP/1.1"));
+        for request in &requests { phase2_headers(request); }
+        let body: Value = serde_json::from_str(requests[2].split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body, json!({
+            "targetUserId": "teammate", "workspaceId": "workspace-1", "sessionId": "session-1", "text": "Look at the changes 🔎"
+        }));
+    }
+
+    #[test]
+    fn phase2_team_nudges_refuse_bad_input_and_hold_on_missing_readiness() {
+        let (_, gated) = test_service("http://127.0.0.1:1");
+        assert_eq!(gated.send_nudge("org-1", nudge_input("Hello")).unwrap_err().code, "nudges_unavailable");
+        for text in [" ", "Line 1\nLine 2", &"🦝".repeat(241)] {
+            assert_eq!(gated.send_nudge("org-1", nudge_input(text)).unwrap_err().code, "cloud_workspace_request_invalid");
         }
     }
 
@@ -6225,7 +6316,7 @@ mod tests {
         let filtered = service.inbox(id, 0).unwrap();
         assert!(filtered.has_more && filtered.events.is_empty());
         let requests = requests.join().unwrap();
-        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox?after=0&waitMs=25000&presence=1&mentions=1 HTTP/1.1"));
+        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox?after=0&waitMs=25000&presence=1&mentions=1&nudges=1 HTTP/1.1"));
         assert!(requests[1].starts_with("POST /v1/desktop/organization-inbox/receipts HTTP/1.1"));
         assert_eq!(serde_json::from_str::<Value>(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap(), json!({"eventIds":[id]}));
         for request in requests { phase2_headers(&request); assert!(!request.contains("userId")); }
@@ -6258,7 +6349,7 @@ mod tests {
         assert!(service.inbox_stream(&page.cursor, None).is_err());
         assert_eq!(service.inbox(&page.cursor, 0).unwrap().cursor, page.cursor);
         let requests = requests.join().unwrap();
-        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox/stream?after=0&presence=1&mentions=1 HTTP/1.1"));
+        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox/stream?after=0&presence=1&mentions=1&nudges=1 HTTP/1.1"));
         assert!(requests[0].to_ascii_lowercase().contains("last-event-id: 9007199254740992"));
         assert!(requests[2].contains("after=9007199254740994"));
         for request in requests { phase2_headers(&request); }

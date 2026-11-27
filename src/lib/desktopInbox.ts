@@ -1,4 +1,6 @@
 import { phase2Ready } from "@/lib/phase2Readiness";
+import { openCloudSession } from "@/lib/cloudDashboard";
+import { showError } from "@/lib/errorToasts";
 import { cloudSessionKey } from "@/types/target";
 import { useSyncExternalStore } from "react";
 import { cloudPresence } from "@/lib/cloudPresence";
@@ -53,6 +55,8 @@ export function applyDesktopInboxEvent(event: DesktopInboxEvent) {
     case "workspace.mentioned":
       invalidateCloudInboxWorkspace(event.workspaceId, event.organizationId);
       break;
+    case "workspace.nudged":
+      break;
     case "workspace.read-marker-changed":
       reconcileCloudReadMarker(event.organizationId, event.workspaceId, event.payload);
       // Hints are coalesced/budgeted; the payload need not be the latest PUT.
@@ -64,9 +68,9 @@ export interface ReassignedNotice { id: string; organizationId: string; workspac
 let notices: ReassignedNotice[] = [];
 const noticeListeners = new Set<() => void>();
 function publishNotices(next: ReassignedNotice[]) { notices = next; for (const listener of noticeListeners) listener(); }
-type NoticeEvent = DesktopInboxEvent & { type: "workspace.share-added" | "workspace.reassigned" | "workspace.mentioned" };
+type NoticeEvent = DesktopInboxEvent & { type: "workspace.share-added" | "workspace.reassigned" | "workspace.mentioned" | "workspace.nudged" };
 function isNoticeEvent(event: DesktopInboxEvent): event is NoticeEvent {
-  return event.type === "workspace.share-added" || event.type === "workspace.reassigned" || event.type === "workspace.mentioned";
+  return event.type === "workspace.share-added" || event.type === "workspace.reassigned" || event.type === "workspace.mentioned" || event.type === "workspace.nudged";
 }
 const ID = /^[A-Za-z0-9._:@-]{1,128}$/;
 function validMention(event: NoticeEvent): boolean {
@@ -181,6 +185,25 @@ function flushInboxNotices() {
       });
       continue;
     }
+    if (event.type === "workspace.nudged") {
+      pendingNotices.delete(id);
+      if (pending.banner && event.payload.text && event.payload.sessionId) {
+        const contextRevision = getAccount().status.context?.revision;
+        if (contextRevision) {
+          void invoke("nudge_overlay_show", { orgId: event.organizationId, contextRevision }).catch(() => undefined);
+        }
+        const { actorId, sessionId } = event.payload;
+        const key = cloudSessionKey(event.organizationId, event.workspaceId, sessionId);
+        const target = { ...pending, event: { ...event, payload: { actorId, sessionId } } };
+        showError("A teammate asked you to look at a cloud session", undefined, {
+          title: "Nudged", tone: "success", key: "team-nudge", copy: false,
+          actions: [{ label: "Open session", run: () => {
+            if (confirmedWorkspace(target)) openCloudSession(key);
+          } }],
+        });
+      }
+      continue;
+    }
     if (!pending.banner) {
       pendingNotices.delete(id);
       continue;
@@ -259,16 +282,18 @@ export function bootDesktopInbox() {
     applyDesktopInboxEvent(event);
     if (!account || !isNoticeEvent(event)) return;
     const banner = replay === null;
-    if (!banner && event.type === "workspace.share-added") return;
+    if (!banner && (event.type === "workspace.share-added" || event.type === "workspace.nudged")) return;
     if (event.type === "workspace.reassigned" && (!event.payload.actorId || !event.payload.previousOwnerId)) return;
     if (!validMention(event)) return;
+    const { organizationId, type } = event;
     const current = () => {
       const status = getAccount().status;
       return token === generation && !privacyEnabled() && status.context?.account === account
-        && status.context.revision === revisionAtEvent && liveCloudOrgIds(status).includes(event.organizationId)
-        && phase2Ready(status, event.organizationId, "events")
-        && (event.type !== "workspace.reassigned" || phase2Ready(status, event.organizationId, "followReassign"))
-        && (event.type !== "workspace.mentioned" || phase2Ready(status, event.organizationId, "mentions"));
+        && status.context.revision === revisionAtEvent && liveCloudOrgIds(status).includes(organizationId)
+        && phase2Ready(status, organizationId, "events")
+        && (type !== "workspace.reassigned" || phase2Ready(status, organizationId, "followReassign"))
+        && (type !== "workspace.mentioned" || phase2Ready(status, organizationId, "mentions"))
+        && (type !== "workspace.nudged" || phase2Ready(status, organizationId, "nudges"));
     };
     if (!current()) return;
     if (pendingNotices.size >= 100) pendingNotices.delete(pendingNotices.keys().next().value!);

@@ -92,6 +92,18 @@ pub enum InboxEvent {
         #[serde(rename = "createdAt")]
         created_at: String,
     },
+    #[serde(rename = "workspace.nudged")]
+    Nudged {
+        #[serde(deserialize_with = "cursor")]
+        id: String,
+        #[serde(rename = "workspaceId")]
+        workspace_id: String,
+        #[serde(rename = "organizationId")]
+        organization_id: String,
+        payload: NudgedPayload,
+        #[serde(rename = "createdAt")]
+        created_at: String,
+    },
 }
 impl InboxEvent {
     pub fn id(&self) -> &str {
@@ -101,7 +113,8 @@ impl InboxEvent {
             | Self::ReadMarkerChanged { id, .. }
             | Self::PresenceChanged { id, .. }
             | Self::Reassigned { id, .. }
-            | Self::Mentioned { id, .. } => id,
+            | Self::Mentioned { id, .. }
+            | Self::Nudged { id, .. } => id,
         }
     }
 }
@@ -126,6 +139,26 @@ pub struct MentionedPayload {
     pub session_id: String,
     pub tab_id: String,
     pub message_id: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NudgedPayload {
+    pub actor_id: String,
+    pub session_id: String,
+    #[serde(default, deserialize_with = "nudge_text", skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+impl std::fmt::Debug for NudgedPayload {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("NudgedPayload").finish_non_exhaustive()
+    }
+}
+
+fn nudge_text<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    let text = Option::<String>::deserialize(deserializer)?;
+    Ok(text.filter(|text| (1..=240).contains(&text.chars().count()) && !text.chars().any(char::is_control)))
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -213,6 +246,26 @@ pub fn read_stream(reader: impl Read) -> Result<InboxStreamPage, ()> {
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn phase2_team_nudges_decode_live_and_redacted_events_without_logging_text() {
+    use serde_json::{json, to_value};
+    let event = |text: Option<&str>| {
+        let mut payload = json!({"actorId":"actor", "sessionId":"session"});
+        if let Some(text) = text { payload["text"] = json!(text); }
+        serde_json::from_value::<InboxEvent>(json!({
+            "id":"21", "type":"workspace.nudged", "organizationId":"org",
+            "workspaceId":"workspace", "createdAt":"2026-11-25T10:00:00Z", "payload":payload
+        })).unwrap()
+    };
+    let live = event(Some("private text"));
+    assert!(!format!("{live:?}").contains("private text"));
+    assert_eq!(to_value(live).unwrap()["payload"]["text"], "private text");
+    for event in [event(None), event(Some("invalid\ntext"))] {
+        assert!(to_value(event).unwrap()["payload"].get("text").is_none());
     }
 }
 
