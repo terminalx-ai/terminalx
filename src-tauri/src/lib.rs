@@ -79,6 +79,9 @@ mod codex_device_login;
 mod cloud_workspaces;
 #[allow(dead_code)]
 mod workspace_ssh;
+#[cfg(unix)]
+#[allow(dead_code)]
+mod workspace_ssh_payload;
 #[cfg(feature = "desktop")]
 mod desktop_inbox;
 #[cfg(feature = "desktop")]
