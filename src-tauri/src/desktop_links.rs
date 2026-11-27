@@ -210,10 +210,17 @@ pub enum DesktopLink {
     },
     /// `browser?url=<http(s) url>`: the page in a Browser tab.
     Browser { url: String },
+    /// `slots?d=<base64url>`: a teammate's favourite model slots (PRO-154),
+    /// equipped only after the person says yes. The webview decodes `data`;
+    /// an empty one is a link that lost its slots on the way.
+    Slots { data: String },
     /// A link of this build's scheme that cannot be followed. `link` is the
     /// link as it came, cut short, for the toast to show and copy.
     Invalid { link: String, problem: LinkProblem },
 }
+
+/// Five slots, base64url-encoded, fit well within this.
+const MAX_LINK_SLOTS_LEN: usize = 4096;
 
 /// Routes handled natively, outside the router: never `Invalid`, whatever their shape,
 /// so an auth callback's code is never handed on.
@@ -386,6 +393,18 @@ impl DesktopLinks {
                     return malformed();
                 }
                 Some(DesktopLink::Browser { url: page.into() })
+            }
+            "slots" => {
+                if !plain || !matches!(url.path(), "" | "/") {
+                    return malformed();
+                }
+                let data = match single_pairs(url).as_deref() {
+                    Some([]) => String::new(),
+                    Some([(name, data)]) if name == "d" && data.len() <= MAX_LINK_SLOTS_LEN
+                        && data.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'=')) => data.to_owned(),
+                    _ => return malformed(),
+                };
+                Some(DesktopLink::Slots { data })
             }
             _ => invalid(LinkProblem::UnknownRoute { route: cut(host, MAX_SHOWN_ROUTE_LEN) }),
         }
@@ -607,6 +626,11 @@ mod tests {
     #[test]
     fn settings_and_tab_links_go_through_the_one_router() {
         assert_eq!(route("terminalx://settings/general.sounds?enable=1"), Some(DesktopLink::Settings(SettingsLink { id: "general.sounds".into(), enable: true })));
+        assert_eq!(route("terminalx://slots?d=eyJ2IjoxfQ"), Some(DesktopLink::Slots { data: "eyJ2IjoxfQ".into() }));
+        assert_eq!(route("terminalx://slots"), Some(DesktopLink::Slots { data: String::new() }));
+        for bad in ["terminalx://slots?d=a%20b", "terminalx://slots?d=a&d=b", "terminalx://slots?x=1", "terminalx://slots/path?d=a"] {
+            assert!(matches!(route(bad), Some(DesktopLink::Invalid { problem: LinkProblem::Malformed { .. }, .. })), "{bad}");
+        }
         assert_eq!(route("terminalx://tab/s1/t1"), Some(DesktopLink::Tab(TabLink { session_id: "s1".into(), tab_id: "t1".into() })));
         // A known route in the wrong shape is refused as such, not dropped.
         assert_eq!(problem("terminalx://settings/general.sounds?enable=0"), LinkProblem::Malformed { route: "settings".into() });

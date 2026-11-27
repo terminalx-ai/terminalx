@@ -18,6 +18,17 @@ export interface PromptSnippet {
   text: string;
 }
 
+/** One favourite model slot: what a new chat starts with when it is picked. */
+export interface FavouriteSlot {
+  agent: string;
+  model: string;
+  effort: string | null;
+  mode: string | null;
+  fast: boolean;
+}
+
+export type PersonalPromptKey = "general" | "review" | "createPr" | "resolveConflicts" | "branchNames";
+
 export interface Prefs {
   dashboard: DashboardPreferences;
   linkBrowser: "terminalx" | "system" | "ask";
@@ -74,6 +85,10 @@ export interface Prefs {
   fixErrorsInstructions: string;
   /** Prompts saved from a turn's menu (PRO-379), offered by name under / in the composer. */
   promptSnippets: PromptSnippet[];
+  /** Favourite model slots (PRO-154): five places, slot 1 the default for new chats. */
+  favouriteSlots: (FavouriteSlot | null)[];
+  /** Personal per-action prompts (PRO-154), sent after the organization's. Fix failing checks is `fixErrorsInstructions`. */
+  actionPrompts: Partial<Record<PersonalPromptKey, string>>;
   /**
    * The system's spelling correction, smart quotes and dashes, and text
    * replacements in the fields where the reader writes to an agent, and in the
@@ -214,6 +229,8 @@ const DEFAULTS: Prefs = {
   resetFiles: false,
   fixErrorsInstructions: "",
   promptSnippets: [],
+  favouriteSlots: [],
+  actionPrompts: {},
   autocorrect: false,
   aiEditor: true,
   optionAsMeta: true,
@@ -361,6 +378,13 @@ function load(legacyOnly = false): Prefs {
     prefs.fixErrorsInstructions = prefs.fixErrorsInstructions.slice(0, 8000);
     prefs.promptSnippets = Array.isArray(prefs.promptSnippets) ? prefs.promptSnippets.filter((snippet: Partial<PromptSnippet> | null): snippet is PromptSnippet =>
       !!snippet && typeof snippet.id === "string" && typeof snippet.name === "string" && typeof snippet.text === "string") : [];
+    prefs.favouriteSlots = Array.isArray(prefs.favouriteSlots) ? prefs.favouriteSlots.slice(0, 5).map((slot: Partial<FavouriteSlot> | null) =>
+      slot && typeof slot.agent === "string" && typeof slot.model === "string"
+        ? { agent: slot.agent, model: slot.model, effort: typeof slot.effort === "string" ? slot.effort : null, mode: typeof slot.mode === "string" ? slot.mode : null, fast: slot.fast === true }
+        : null) : [];
+    prefs.actionPrompts = prefs.actionPrompts && typeof prefs.actionPrompts === "object" && !Array.isArray(prefs.actionPrompts)
+      ? Object.fromEntries(Object.entries(prefs.actionPrompts).filter(([, value]) => typeof value === "string").map(([key, value]) => [key, (value as string).slice(0, 8000)]))
+      : {};
     let migrated = false;
     // Older versions saved the whole object, including the TerminalX default,
     // without recording whether it was chosen. Migrate unmarked values once;

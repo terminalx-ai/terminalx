@@ -101,6 +101,8 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "general.quitBehavior",
   "integrations.github",
   "integrations.linear",
+  "defaultModels.favouriteSlots",
+  "prompts.actions",
   "localVms.tasks",
   "organizations.sidebar",
   "organizations.organization",

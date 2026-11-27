@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use url::Url;
 
 use crate::account::{
-    AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN, PHASE2_MENTIONS, PHASE2_NUDGES,
+    AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN, PHASE2_MENTIONS, PHASE2_NUDGES, PHASE2_SHARED_SETUPS,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_PRESENCE, PHASE2_RESTART_DETAILS,
     PHASE2_ADMIN_SHARE, PHASE2_AFFECTED_WORKSPACES, PHASE2_GENERAL_ACCESS, PHASE2_PRECREATE_USAGE, PHASE2_WEBHOOK_TRIGGER, PHASE2_WORKSPACE_GROUPS,
 };
@@ -2814,6 +2814,32 @@ pub struct CloudWorkspaceService {
     force_phase2_for_test: bool,
 }
 
+/// One shared-setups call (PRO-154), as the web view names it.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SharedSetupsOp {
+    ListSlots,
+    ShareSlots { slots: Value },
+    StopSharingSlots,
+    ListSnippets,
+    CreateSnippet { snippet: Value },
+    UpdateSnippet { id: String, snippet: Value },
+    DeleteSnippet { id: String },
+    ListPrompts,
+    SavePrompt { action: String, body: String, revision: u32 },
+}
+
+const SHARED_PROMPT_ACTIONS: [&str; 6] = ["general", "review", "createPr", "fixChecks", "resolveConflicts", "branchNames"];
+
+impl SharedSetupsOp {
+    pub(crate) fn risk(&self) -> RequestRisk {
+        match self {
+            Self::ListSlots | Self::ListSnippets | Self::ListPrompts => RequestRisk::Read,
+            _ => RequestRisk::Mutation,
+        }
+    }
+}
+
 impl CloudWorkspaceService {
     pub fn new(account: Arc<AccountManager>) -> Self {
         Self {
@@ -3063,6 +3089,32 @@ impl CloudWorkspaceService {
         input.text = text.to_owned();
         self.phase2_member_in(PHASE2_NUDGES, "nudges_unavailable", org, RequestRisk::Mutation, |client, context| {
             client.request(context, &["nudges"], None, Some(json!(input)), None, RequestRisk::Mutation)
+        })
+    }
+
+    /// PRO-154: shared model slots, organization snippets and action prompts.
+    /// Paths are fixed here; the server checks membership and who may edit.
+    pub fn shared_setups(&self, org: &str, op: SharedSetupsOp) -> Result<Value, CloudWorkspaceClientError> {
+        let risk = op.risk();
+        let (method, tail, body): (&str, Vec<&str>, Option<Value>) = match &op {
+            SharedSetupsOp::ListSlots => ("GET", vec!["model-slots"], None),
+            SharedSetupsOp::ShareSlots { slots } if slots.as_array().is_some_and(|slots| slots.len() == 5) =>
+                ("PUT", vec!["model-slots", "mine"], Some(json!({ "slots": slots }))),
+            SharedSetupsOp::StopSharingSlots => ("DELETE", vec!["model-slots", "mine"], None),
+            SharedSetupsOp::ListSnippets => ("GET", vec!["snippets"], None),
+            SharedSetupsOp::CreateSnippet { snippet } if snippet.is_object() => ("POST", vec!["snippets"], Some(snippet.clone())),
+            SharedSetupsOp::UpdateSnippet { id, snippet } if snippet.is_object() && valid_following_path_id(id) =>
+                ("PUT", vec!["snippets", id], Some(snippet.clone())),
+            SharedSetupsOp::DeleteSnippet { id } if valid_following_path_id(id) => ("DELETE", vec!["snippets", id], None),
+            SharedSetupsOp::ListPrompts => ("GET", vec!["action-prompts"], None),
+            SharedSetupsOp::SavePrompt { action, body, revision } if SHARED_PROMPT_ACTIONS.contains(&action.as_str()) =>
+                ("PUT", vec!["action-prompts", action], Some(json!({ "body": body, "revision": revision }))),
+            _ => return Err(inbox_invalid()),
+        };
+        self.phase2_member_in(PHASE2_SHARED_SETUPS, "shared_setups_unavailable", org, risk, |client, context| {
+            let answer: Value = client.request_as(method, context, &tail, None, body, None, risk)?;
+            if !answer.is_object() { return Err(post_send_error(risk)); }
+            Ok(answer)
         })
     }
 
@@ -4963,6 +5015,9 @@ fn known_error_code(code: &str) -> bool {
             | "workspace_mentions_unavailable"
             | "nudge_rate_limited"
             | "nudges_unavailable"
+            | "shared_setups_unavailable"
+            | "snippet_keyword_taken"
+            | "action_prompt_conflict"
             | "presence_rate_limited"
             | "presence_device_limit"
             | "presence_capacity_exceeded"
@@ -5614,6 +5669,37 @@ mod tests {
         for text in [" ", "Line 1\nLine 2", &"🦝".repeat(241)] {
             assert_eq!(gated.send_nudge("org-1", nudge_input(text)).unwrap_err().code, "cloud_workspace_request_invalid");
         }
+    }
+
+    #[test]
+    fn phase2_shared_setups_use_fixed_paths_and_hold_without_readiness() {
+        let (_, gated) = test_service("http://127.0.0.1:1");
+        assert_eq!(gated.shared_setups("org-1", SharedSetupsOp::ListSnippets).unwrap_err().code, "shared_setups_unavailable");
+        let (base, requests) = serve_each(vec![
+            response("200 OK", r#"{"sets":[]}"#, ""),
+            response("200 OK", r#"{"userId":"u","slots":[]}"#, ""),
+            response("200 OK", r#"{"deleted":true}"#, ""),
+            response("200 OK", r#"{"action":"createPr","body":"x"}"#, ""),
+            response("200 OK", r#"[]"#, ""),
+        ]);
+        let (_, service) = phase2_service(&base);
+        let op = |value: Value| serde_json::from_value::<SharedSetupsOp>(value).unwrap();
+        service.shared_setups("org-1", op(json!({"op": "listSlots"}))).unwrap();
+        service.shared_setups("org-1", op(json!({"op": "shareSlots", "slots": [null, null, null, null, {"agent": "claude", "model": "m"}]}))).unwrap();
+        service.shared_setups("org-1", op(json!({"op": "deleteSnippet", "id": "snippet-1"}))).unwrap();
+        service.shared_setups("org-1", op(json!({"op": "savePrompt", "action": "createPr", "body": "x", "revision": 0}))).unwrap();
+        assert_eq!(service.shared_setups("org-1", op(json!({"op": "listPrompts"}))).unwrap_err().code, "cloud_workspace_invalid_response");
+        for refused in [json!({"op": "savePrompt", "action": "deploy", "body": "x", "revision": 0}), json!({"op": "shareSlots", "slots": []}),
+            json!({"op": "deleteSnippet", "id": "../x"}), json!({"op": "createSnippet", "snippet": "x"})] {
+            assert_eq!(service.shared_setups("org-1", op(refused)).unwrap_err().code, "cloud_workspace_request_invalid");
+        }
+        let requests = requests.join().unwrap();
+        assert!(requests[0].starts_with("GET /v1/desktop/orgs/org-1/model-slots HTTP/1.1"));
+        assert!(requests[1].starts_with("PUT /v1/desktop/orgs/org-1/model-slots/mine HTTP/1.1"));
+        assert!(requests[2].starts_with("DELETE /v1/desktop/orgs/org-1/snippets/snippet-1 HTTP/1.1"));
+        assert!(requests[3].starts_with("PUT /v1/desktop/orgs/org-1/action-prompts/createPr HTTP/1.1"));
+        assert!(requests[4].starts_with("GET /v1/desktop/orgs/org-1/action-prompts HTTP/1.1"));
+        for request in &requests { phase2_headers(request); }
     }
 
     fn mention_body() -> Value {

@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import { actionInstructions } from "@/lib/sharedSetups";
 import { agent, errorMessage, gh, type CheckAuthority, type PullRequest } from "./api";
 import { mergeTabEvents } from "./agentEvents";
 import { actionsRuns } from "./checks";
 import { localGitSource, type GitSource } from "./gitSource";
 import { useShortcut } from "./hotkeys";
-import { usePrefs } from "./prefs";
 import { prIdentity, sessionPrs, type SessionPr } from "./sessionPrs";
 import type { SendResult } from "./sessionBackend";
 import { dismissErrorKey } from "./errorToasts";
@@ -79,7 +79,6 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled, mach
   sessionId: string; tabId?: string; cwd: string; branch?: string | null; enabled: boolean;
   machine?: MachineCheckFix;
 }) {
-  const prefs = usePrefs();
   const key = `${sessionId}\0${tabId ?? ""}\0${cwd}\0${branch ?? ""}\0${enabled}\0${machine?.source?.key ?? ""}\0${machine?.generation ?? ""}`;
   const current = useRef({ key, generation: 0 });
   if (current.current.key !== key) current.current = { key, generation: current.current.generation + 1 };
@@ -121,7 +120,7 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled, mach
         const attachment = await attach(tabId, pr.url);
         // Never send after the reader changes tabs, sessions, or closes this view, and never retry a send automatically.
         if (!isCurrent()) return;
-        const outcome = await machine.send(tabId, fixErrorsPrompt(pr.url, attachment.path, prefs.fixErrorsInstructions));
+        const outcome = await machine.send(tabId, fixErrorsPrompt(pr.url, attachment.path, actionInstructions("fixChecks")));
         if (isCurrent()) setState({ key, busy: false, notice: `${outcome.queued ? "Queued" : "Sent"} failed check logs to the agent on ${machine.name}${attachment.truncated ? " (trimmed to 256 KiB)" : ""}.` });
         return;
       }
@@ -131,7 +130,7 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled, mach
       if (!isCurrent()) return;
       found = pr;
       if (!pr) throw new Error("No failing GitHub Actions checks were found for this session.");
-      const notice = await sendFailedChecks(sessionId, tabId, pr.url, prefs.fixErrorsInstructions, isCurrent, authority);
+      const notice = await sendFailedChecks(sessionId, tabId, pr.url, actionInstructions("fixChecks"), isCurrent, authority);
       if (notice && isCurrent()) setState({ key, busy: false, notice });
     } catch (error) {
       if (isCurrent()) {

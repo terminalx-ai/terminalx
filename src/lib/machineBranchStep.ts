@@ -1,4 +1,5 @@
 import type { PullRequest } from "@/lib/api";
+import { withActionPrompt } from "@/lib/sharedSetups";
 import { FAILING_CHECKS } from "@/lib/checks";
 import type { SourceStatus } from "@/lib/gitSource";
 import type { BranchAction, BranchState } from "@/lib/branchStep";
@@ -166,6 +167,13 @@ export function composeMachineSnapshot(input: { work: SourceStatus; remote: stri
 
 /** What the agent is asked for each step it takes (the same words as `branch_step::act`). */
 export function agentPrompt(action: BranchAction, snapshot: MachineBranchSnapshot): string {
+  const prompt = stepPrompt(action, snapshot);
+  // PRO-154: the organization's and the person's instructions for the action, after it.
+  if (action === "pull" || action === "resolveConflicts") return withActionPrompt(prompt, "resolveConflicts");
+  return action === "fixChecks" ? withActionPrompt(prompt, "fixChecks") : prompt;
+}
+
+function stepPrompt(action: BranchAction, snapshot: MachineBranchSnapshot): string {
   const branch = JSON.stringify(snapshot.branch);
   const base = JSON.stringify(snapshot.base);
   if (action === "pull") {

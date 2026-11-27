@@ -1,4 +1,5 @@
 import { localCommands } from "@/lib/localCommands";
+import { withActionPrompt } from "@/lib/sharedSetups";
 import { useTabRead } from "@/lib/useTabRead";
 import { HeldQueueTray } from "@/components/chat/HeldQueueTray";
 import { followUpRoute, heldQueueFrom, heldQueueFromFollowUps, type HeldQueueChange } from "@/lib/heldQueue";
@@ -114,7 +115,7 @@ export function handoffsFor(t: Transcript, changed: boolean, deleteWorkspace?: (
     last?.completed?.status === "ok" && changed && t.turns.length >= HANDOFF_AFTER_PROMPTS
       ? [
           { label: "Commit", prompt: "Commit the current changes with a clear, conventional message. Do not push." },
-          ...(github ? [{ label: "Create PR", prompt: "Push this branch and open a pull request with a title and a short description of the changes." }] : []),
+          ...(github ? [{ label: "Create PR", prompt: withActionPrompt("Push this branch and open a pull request with a title and a short description of the changes.", "createPr") }] : []),
           { label: "Run it", prompt: "Run the project's dev server or test suite in the background and report the first errors, if any." },
         ]
       : [];
@@ -1027,8 +1028,8 @@ export function TabView({
         } : undefined}
       onSendAgain={backend.resendMessage && !gate?.blocked ? sendAgain : undefined}
       onRetry={backend.resendMessage && !gate?.blocked && !readOnly ? sendAgain : undefined}
-      onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, secondOpinionPrompt(turn))
-        : handOffTo ? (turn) => handOffTo({ kind: "review", prompt: secondOpinionPrompt(turn) }) : undefined}
+      onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, withActionPrompt(secondOpinionPrompt(turn), "review"))
+        : handOffTo ? (turn) => handOffTo({ kind: "review", prompt: withActionPrompt(secondOpinionPrompt(turn), "review") }) : undefined}
       secondOpinionAgent={(counterpart ?? remoteCounterpart)?.name}
       onFork={canFork && turnActions ? (endSeq, into) => void turnActions.fork(tab.id, endSeq, into).then(
         (forked) => { if (forked.note) showError(forked.note, undefined, { title: into === "tab" ? "Forked to a new tab" : "Forked to a new session" }); },

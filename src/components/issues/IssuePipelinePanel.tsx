@@ -1,4 +1,5 @@
 import { setCloudPipelineResolveConflicts } from "@/lib/cloudPipelines";
+import { actionInstructions } from "@/lib/sharedSetups";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { Check, ChevronRight, CircleAlert, Cloud, CornerUpLeft, ExternalLink, GitMerge, GitPullRequest, Loader2, MessageSquare, Pause, RotateCw } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -12,7 +13,6 @@ import { openCloudSession } from "@/lib/cloudDashboard";
 import { lookAtCloudPipeline } from "@/lib/cloudPipelines";
 import { sendFailedChecks } from "@/lib/fixCheckErrors";
 import { actOnAnyPipeline, actOnPipeline, countOf, pipelineActions, pipelineChecksView, pipelineHeadline, pipelineSettings, pipelineSteps, requiredChecksLine, reviewChecksLine, setPipelineAutoMerge, setPipelineResolveConflicts, type PipelineChecksView, type PipelineStep, type PipelineTone } from "@/lib/issuePipeline";
-import { usePrefs } from "@/lib/prefs";
 import { selectSession, useSessionStore } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
 import type { FindingSeverity, IssuePipeline, PipelineAction, PipelineFinding } from "@/types/issuePipeline";
@@ -147,7 +147,6 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
   const [busy, setBusy] = useState<PipelineAction | "autoMerge" | "resolveConflicts" | "sendFailure" | "rerun" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const prefs = usePrefs();
   const [recordOpen, setRecordOpen] = useState(false);
 
   const place = pipeline.place ?? null;
@@ -315,7 +314,7 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
                   variant="accent"
                   disabled={busy != null || !authorHere || failedRuns.length === 0}
                   title={!authorHere ? "The author session is not on this computer." : failedRuns.length === 0 ? "Only a GitHub Actions run's logs can be sent." : "Send the failed check logs to the author session"}
-                  onClick={() => void run("sendFailure", () => sendFailedChecks(pipeline.author.sessionId, pipeline.author.tabId, pipeline.pr!.url, prefs.fixErrorsInstructions).then((said) => said && "Sent the failure to the author session."))}
+                  onClick={() => void run("sendFailure", () => sendFailedChecks(pipeline.author.sessionId, pipeline.author.tabId, pipeline.pr!.url, actionInstructions("fixChecks")).then((said) => said && "Sent the failure to the author session."))}
                 >
                   {busy === "sendFailure" ? <Loader2 className="animate-spin" /> : <CornerUpLeft />}
                   Send the failure to the author

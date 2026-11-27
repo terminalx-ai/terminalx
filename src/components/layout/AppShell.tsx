@@ -15,6 +15,7 @@ import { phase2Ready } from "@/lib/phase2Readiness";
 import { CloudSetupFlow } from "@/components/cloudSetup/CloudSetupFlow";
 import { useUnknownSettingLink } from "@/lib/settingsDeepLink";
 import { bootDesktopLinks } from "@/lib/desktopLinks";
+import { SlotsLinkHost } from "@/components/people/EquipSlotsDialog";
 import { bootLastView } from "@/lib/lastView";
 import { LinkSessionDialog } from "@/components/start/LinkSessionDialog";
 import type { SettingId } from "@/components/settings/settingsRegistry";
@@ -440,6 +441,7 @@ export function AppShell() {
         <CloseUndoNotices />
         <ArchiveNotices />
         <Toasts />
+        <SlotsLinkHost />
         <UnknownSettingLinkToast />
         <ProjectAddedNotice />
         <WorktreeCopyNotices />

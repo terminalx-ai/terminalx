@@ -1569,6 +1569,13 @@ pub async fn cloud_workspace_mentions(org_id: String, workspace_id: String, inpu
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.workspace_mentions(&org_id, &workspace_id, input))
 }
 
+/// PRO-154: shared model slots, organization snippets and action prompts.
+#[tauri::command]
+pub async fn shared_setups(org_id: String, op: crate::cloud_workspaces::SharedSetupsOp, state: tauri::State<'_, crate::AppState>) -> Result<serde_json::Value, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    let risk = op.risk();
+    cloud_command!(state, risk, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.shared_setups(&org_id, op))
+}
+
 #[tauri::command]
 pub async fn nudge_preference(org_id: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::NudgePreference, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.nudge_preference(&org_id))

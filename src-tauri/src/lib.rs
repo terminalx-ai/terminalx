@@ -802,6 +802,7 @@ pub fn run() {
             commands::cloud_workspace_reassign,
             commands::cloud_workspace_mentions,
             commands::nudge_preference,
+            commands::shared_setups,
             commands::nudge_preference_set,
             commands::nudge_send,
             nudge_overlay::nudge_overlay_show,
