@@ -222,6 +222,9 @@ fn help_text() -> String {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Action {
+    #[cfg(all(feature = "desktop", unix))]
+    SshProxy { organization: String, workspace: String, scope: String },
+
     Rpc {
         command: String,
         params: Value,
@@ -314,6 +317,11 @@ fn execute(args: &[String], out: &mut Output) -> (i32, io::Result<()>) {
         Err(error) => return (2, print_error(out, error, wants_json)),
     };
     match parsed.action {
+        #[cfg(all(feature = "desktop", unix))]
+        Action::SshProxy { organization, workspace, scope } => match crate::ssh_proxy::run(&organization, &workspace, &scope, out.stdout) {
+            Ok(()) => (0, Ok(())),
+            Err(error) => (1, emit(out.stderr, &format!("terminalx ssh-proxy: {error}"))),
+        },
         Action::Help => {
             let help = help_text();
             let written = if parsed.json {
@@ -564,6 +572,15 @@ fn parse_with_stdin(
             expect_word(&mut tokens, "show", "config")?;
             let project = tokens.option("--project")?;
             rpc("config.show", json!({"project": project}), &mut tokens)
+        }
+        #[cfg(all(feature = "desktop", unix))]
+        "ssh-proxy" => {
+            if json { return Err(invalid("ssh-proxy carries raw bytes; --json is not supported")); }
+            let organization = tokens.option("--organization")?.ok_or_else(|| invalid("--organization is required"))?;
+            let workspace = tokens.option("--workspace")?.ok_or_else(|| invalid("--workspace is required"))?;
+            let scope = tokens.option("--scope")?.ok_or_else(|| invalid("--scope is required"))?;
+            tokens.finish()?;
+            Ok(Action::SshProxy { organization, workspace, scope })
         }
         "cloud" => parse_cloud(&mut tokens),
         "artifact" | "artifacts" => parse_artifact(&mut tokens),

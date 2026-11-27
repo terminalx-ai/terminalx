@@ -89,7 +89,7 @@ export const WORKSPACE_DETAILS_RESOURCE_INTERVAL_MS = 10_000;
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "composer/5", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1", "follow-ups/1", "bots/1", "cloud-desktop/1", "workspace-transfer/3"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "composer/5", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1", "follow-ups/1", "bots/1", "cloud-desktop/1", "workspace-transfer/3", "ssh/1"] as const;
 /**
  * Offered only by a runtime that serves every project of its machine (docs/MACHINES.md).
  * `machine/3` (PRO-354): `machine.updateStatus`, `machine.update` and the
@@ -163,6 +163,8 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "transfer.open": "workspace-transfer/3",
   "transfer.read": "workspace-transfer/3",
   "transfer.close": "workspace-transfer/3",
+  "ssh.info": "ssh/1",
+  "ssh.open": "ssh/1",
   "desktop.open": "cloud-desktop/1",
   "desktop.write": "cloud-desktop/1",
   "desktop.ack": "cloud-desktop/1",
