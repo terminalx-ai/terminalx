@@ -168,6 +168,8 @@ const RUN_STATE: Record<string, string> = {
   provisioning: "Starting the workspace",
   working: "Running",
   completed: "Completed",
+  succeeded: "Succeeded",
+  running: "Running",
   failed: "Failed",
   skipped: "Skipped",
   canceled: "Canceled",
@@ -202,8 +204,14 @@ const WEBHOOK_RUN_CATEGORY: Record<string, string> = {
 };
 
 /** "Failed: it ran past its time limit and was stopped". */
+/** An unknown state from the server in sentence case: "cancel-requested" → "Cancel requested". */
+function sentenceCase(word: string): string {
+  const words = word.replace(/[-_]+/g, " ").trim().toLowerCase();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
 export function runText(run: Pick<CloudScheduleRun, "state" | "category">, webhookAvailable = false): string {
-  const state = RUN_STATE[run.state] ?? run.state;
+  const state = RUN_STATE[run.state] ?? sentenceCase(run.state);
   if (!run.category || run.state === "completed") return state;
   const webhookReason = webhookAvailable ? WEBHOOK_RUN_CATEGORY[run.category] : undefined;
   return `${state}: ${webhookReason ?? RUN_CATEGORY[run.category] ?? run.category}`;

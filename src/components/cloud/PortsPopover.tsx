@@ -1,6 +1,7 @@
 import { useId, useState } from "react";
 import { thisComputer } from "@/lib/platform";
-import { ChevronsRight, PlugZap, Plus } from "@/icons";
+import { ChevronsRight, Plug, PlugZap, Plus } from "@/icons";
+import { InlineError, SurfaceState } from "@/components/ui/SurfaceState";
 import { Switch } from "@/components/ui/controls";
 import { Button } from "@/components/ui/button";
 import { AUTO_FORWARD_SKIPPED } from "@/lib/api";
@@ -62,20 +63,16 @@ export function PortsPopover(props: PortsInputs & { shortcut?: boolean; forwardi
           >
             {empty ? "No ports detected" : "Ports detected"}
           </PortSection>
-          {props.forwardingError && <p className="px-3.5 pt-1 text-xs text-destructive" role="alert">The forwarding switch could not be changed. Try again.</p>}
-          {model.error && (
-            <p className="px-3.5 pt-1 text-xs text-destructive" role="alert">
-              {model.error}
-            </p>
-          )}
+          {props.forwardingError && <InlineError className="mx-3.5 mt-1">The forwarding switch could not be changed. Try again.</InlineError>}
+          {model.error && <InlineError className="mx-3.5 mt-1">{model.error}</InlineError>}
           {adding && model.usable && !props.phase2 && <PortInput model={model} autoFocus className="mx-3.5 my-1.5" onDone={() => setAdding(false)} />}
           <div className="max-h-72 overflow-y-auto">
             <PortRows model={model} rows={rows} forwardingOff={forwardingOff} />
           </div>
           {model.usable && !rows.length && (empty
-            ? <p className="px-3.5 py-2 text-xs text-muted-foreground" data-testid="cloud-ports-empty">
-                Nothing is listening in the workspace yet.{!forwardingOff && " Start your app there, or enter its port."}
-              </p>
+            ? <div data-testid="cloud-ports-empty">
+                <SurfaceState status="empty" icon={Plug} className="py-4" title="" description={`Nothing is listening in the workspace yet.${forwardingOff ? "" : " Start your app there, or enter its port."}`} />
+              </div>
             : <PortsEmpty model={model} />)}
           {props.phase2 && model.usable && (adding || empty) && (
             <WorkspacePortInput model={model} expanded={adding} disabled={forwardingOff} close={() => setAdding(false)} />
