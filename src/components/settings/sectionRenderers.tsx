@@ -15,6 +15,7 @@ import { ShortcutsTab } from "./ShortcutsTab";
 import { ExperimentalTab } from "./ExperimentalSettings";
 import { AdvancedTab } from "./AdvancedSettings";
 import { EnvironmentSettings } from "./EnvironmentSettings";
+import { McpSettings } from "./McpSettings";
 import { RegisteredSetting } from "./settingsRegistry";
 import { EnvironmentsTab } from "@/components/localVm/EnvironmentsTab";
 import { ProjectTemplatesSettings } from "./ProjectTemplatesSettings";
@@ -46,6 +47,7 @@ export const settingsSectionRenderers: Record<SettingsSection, (context: Section
   agents: ({ onOpenSkills }) => <AgentsTab onOpenSkills={onOpenSkills} showIntroduction={false} />,
   orchestrator: () => <OrchestratorTab />,
   environment: () => <EnvironmentSettings />,
+  mcp: () => <McpSettings />,
   localVms: () => <RegisteredSetting setting="localVms.tasks"><section><EnvironmentsTab /></section></RegisteredSetting>,
   transcription: () => <TranscriptionTab />,
   integrations: () => <IntegrationsTab />,

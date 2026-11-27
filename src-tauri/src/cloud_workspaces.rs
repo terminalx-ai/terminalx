@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use url::Url;
 
 use crate::account::{
-    AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN, PHASE2_ANNOUNCEMENTS, PHASE2_MENTIONS, PHASE2_NUDGES,
+    AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN, PHASE2_MENTIONS, PHASE2_NUDGES, PHASE2_MCP_SERVERS, PHASE2_ANNOUNCEMENTS,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_PRESENCE, PHASE2_RESTART_DETAILS,
     PHASE2_ADMIN_SHARE, PHASE2_AFFECTED_WORKSPACES, PHASE2_DESKTOP_BILLING, PHASE2_GENERAL_ACCESS, PHASE2_PRECREATE_USAGE, PHASE2_WEBHOOK_TRIGGER, PHASE2_WORKSPACE_GROUPS,
 };
@@ -2073,6 +2073,29 @@ pub struct WorkspaceNudgeInput {
     text: String,
 }
 
+/// PRO-239: an organization's shared MCP server; its record only, never a secret.
+pub type SharedMcpServer = crate::mcp_servers::Shared;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SharedMcpServers {
+    pub servers: Vec<SharedMcpServer>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SharedMcpServerCreated {
+    server: SharedMcpServer,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SharedMcpServerInput {
+    pub name: String,
+    pub target: String,
+    pub auth_kind: crate::mcp_servers::Auth,
+    pub header_names: Vec<String>,
+    pub agents: crate::mcp_servers::Agents,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NudgePreference {
@@ -2463,7 +2486,7 @@ fn valid_following_id(value: &str) -> bool {
         byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'@' | b'-'))
 }
 
-fn valid_following_path_id(value: &str) -> bool {
+pub(crate) fn valid_following_path_id(value: &str) -> bool {
     // URL parsers normalize standalone dot segments; never address a different route.
     valid_following_id(value) && !matches!(value, "." | "..")
 }
@@ -3172,6 +3195,30 @@ impl CloudWorkspaceService {
                 None, Some(json!({ "enabled": enabled })), None, RequestRisk::Mutation)?;
             if saved.enabled != enabled { return Err(post_send_error(RequestRisk::Mutation)); }
             Ok(saved)
+        })
+    }
+
+    /// PRO-239: the organization's shared MCP servers. No secret is ever sent or received.
+    pub fn mcp_servers(&self, org: &str) -> Result<SharedMcpServers, CloudWorkspaceClientError> {
+        self.phase2_member_in(PHASE2_MCP_SERVERS, "mcp_servers_unavailable", org, RequestRisk::Read, |client, context| {
+            client.request(context, &["mcp-servers"], None, None, None, RequestRisk::Read)
+        })
+    }
+
+    pub fn mcp_server_create(&self, org: &str, input: SharedMcpServerInput) -> Result<SharedMcpServer, CloudWorkspaceClientError> {
+        self.phase2_member_in(PHASE2_MCP_SERVERS, "mcp_servers_unavailable", org, RequestRisk::Mutation, |client, context| {
+            let created: SharedMcpServerCreated = client.request_as("POST", context, &["mcp-servers"],
+                None, Some(json!(input)), None, RequestRisk::Mutation)?;
+            if created.server.name != input.name || created.server.target != input.target { return Err(post_send_error(RequestRisk::Mutation)); }
+            Ok(created.server)
+        })
+    }
+
+    pub fn mcp_server_delete(&self, org: &str, server: &str) -> Result<(), CloudWorkspaceClientError> {
+        if !valid_following_path_id(server) { return Err(inbox_invalid()); }
+        self.phase2_member_in(PHASE2_MCP_SERVERS, "mcp_servers_unavailable", org, RequestRisk::Mutation, |client, context| {
+            let _: Value = client.request_as("DELETE", context, &["mcp-servers", server], None, None, None, RequestRisk::Mutation)?;
+            Ok(())
         })
     }
 
@@ -5042,7 +5089,10 @@ fn decode_response<T: DeserializeOwned>(
     risk: RequestRisk,
     limit: u64,
 ) -> Result<T, CloudWorkspaceClientError> {
+    let no_content = response.status() == 204;
     let bytes = bounded_body_limited(response, risk, limit)?;
+    // A 204 (PRO-239's DELETE) has no body: it reads as JSON null, which only `()` and `Value` accept.
+    let bytes = if no_content && bytes.iter().all(u8::is_ascii_whitespace) { b"null".to_vec() } else { bytes.to_vec() };
     serde_json::from_slice(&bytes).map_err(|_| post_send_error(risk))
 }
 
@@ -5143,6 +5193,13 @@ fn known_error_code(code: &str) -> bool {
             | "workspace_mentions_unavailable"
             | "nudge_rate_limited"
             | "nudges_unavailable"
+            | "mcp_servers_unavailable"
+            | "mcp_server_invalid"
+            | "mcp_server_target_query"
+            | "mcp_server_target_private"
+            | "mcp_server_name_taken"
+            | "mcp_server_not_found"
+            | "mcp_server_limit_reached"
             | "announcements_unavailable"
             | "presence_rate_limited"
             | "presence_device_limit"
@@ -5826,6 +5883,40 @@ mod tests {
         for text in [" ", "Line 1\nLine 2", &"🦝".repeat(241)] {
             assert_eq!(gated.send_nudge("org-1", nudge_input(text)).unwrap_err().code, "cloud_workspace_request_invalid");
         }
+    }
+
+    #[test]
+    fn phase2_mcp_servers_use_exact_paths_send_no_secret_and_read_204() {
+        let server = r#"{"id":"srv-1","name":"docs","target":"https://docs.example.com/mcp","authKind":"bearer","headerNames":[],"agents":{"claudeCode":true,"codex":false}}"#;
+        let (base, requests) = serve_each(vec![
+            response("200 OK", &format!(r#"{{"servers":[{server}]}}"#), ""),
+            response("201 Created", &format!(r#"{{"server":{server}}}"#), ""),
+            response("204 No Content", "", ""),
+            // An echo naming another server is not a receipt.
+            response("201 Created", &format!(r#"{{"server":{}}}"#, server.replace("\"docs\"", "\"other\"")), ""),
+        ]);
+        let (_, service) = phase2_service(&base);
+        let listed = service.mcp_servers("org-1").unwrap();
+        assert_eq!(listed.servers.len(), 1);
+        assert_eq!(listed.servers[0].auth_kind, crate::mcp_servers::Auth::Bearer);
+        let input = || SharedMcpServerInput {
+            name: "docs".into(), target: "https://docs.example.com/mcp".into(), auth_kind: crate::mcp_servers::Auth::Bearer,
+            header_names: vec![], agents: crate::mcp_servers::Agents { claude_code: true, codex: false },
+        };
+        assert_eq!(service.mcp_server_create("org-1", input()).unwrap().id, "srv-1");
+        service.mcp_server_delete("org-1", "srv-1").unwrap();
+        assert!(service.mcp_server_create("org-1", input()).is_err());
+        let requests = requests.join().unwrap();
+        assert!(requests[0].starts_with("GET /v1/desktop/orgs/org-1/mcp-servers HTTP/1.1"));
+        assert!(requests[1].starts_with("POST /v1/desktop/orgs/org-1/mcp-servers HTTP/1.1"));
+        assert!(requests[2].starts_with("DELETE /v1/desktop/orgs/org-1/mcp-servers/srv-1 HTTP/1.1"));
+        for request in &requests { phase2_headers(request); }
+        assert_eq!(serde_json::from_str::<Value>(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap(), json!({
+            "name": "docs", "target": "https://docs.example.com/mcp", "authKind": "bearer", "headerNames": [], "agents": {"claudeCode": true, "codex": false}
+        }));
+        let (_, gated) = test_service("http://127.0.0.1:1");
+        assert_eq!(gated.mcp_servers("org-1").unwrap_err().code, "mcp_servers_unavailable");
+        assert!(service.mcp_server_delete("org-1", "../x").is_err());
     }
 
     fn mention_body() -> Value {
