@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::{context_changed_error, invalid_response, CloudWorkspaceClientError, CloudWorkspaceService, RequestRisk};
-use crate::account::AccountContext;
+use crate::account::{AccountContext, PHASE2_ORGANIZATION_ROUTES};
 use crate::agent_route_check::{self, Checked, CredentialHeader, ModelList, Probe};
 
 /// The agents a route can be for: Cursor's CLI has none.
@@ -70,6 +70,40 @@ pub struct AgentRouteSave {
     /// check labels the route either way.
     pub save_unchecked: bool,
 }
+
+/// What an owner or admin asks to add as an organization route (PRO-310):
+/// a custom provider for everyone's workspaces on `repository`. The
+/// credential is never in it: the app asks for it in its own dialog.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationRouteAdd {
+    pub organization_id: Option<String>,
+    pub context_revision: String,
+    pub agent: AgentRouteAgent,
+    /// `owner/name` of a GitHub repository.
+    pub repository: String,
+    pub template_id: String,
+    pub settings: Map<String, Value>,
+    /// Save even when this Mac's check fails.
+    pub save_unchecked: bool,
+}
+
+/// `owner/name`, as the service stores it, or None.
+fn route_repository(value: &str) -> Option<String> {
+    let value = value.trim().to_ascii_lowercase();
+    let value = value.strip_suffix(".git").unwrap_or(&value).to_string();
+    let (owner, name) = value.split_once('/')?;
+    let owner_ok = !owner.is_empty() && owner.len() <= 39 && !owner.starts_with('-') && owner.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    let name_ok = !name.is_empty() && name.len() <= 100 && name != "." && name != ".." && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    (owner_ok && name_ok).then_some(value)
+}
+
+fn organization_route_id_ok(id: &str) -> bool {
+    id.strip_prefix("orgroute_").is_some_and(|rest| rest.len() == 36 && rest.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-'))
+}
+
+const ORGANIZATION_ROUTES: &str = "organization-model-routes";
+const ORGANIZATION_ROUTES_OFF: &str = "cloud_organization_routes_unavailable";
 
 /// The answer to a save: whether it was saved, what this Mac's check found,
 /// and the routes as the service holds them now.
@@ -245,6 +279,105 @@ impl CloudWorkspaceService {
         }
         Ok(routes)
     }
+
+    // ---- organization routes (PRO-310)
+
+    /// The organization's routes, which every member reads, with whether the
+    /// caller may add and remove them. Behind its readiness key.
+    pub fn organization_routes(&self, organization: Option<&str>) -> Result<Value, CloudWorkspaceClientError> {
+        let (context, access) = self.context_in(organization)?;
+        let org = Some(context.organization_id.as_str());
+        self.phase2_gate(PHASE2_ORGANIZATION_ROUTES, org, Some(&context), ORGANIZATION_ROUTES_OFF)?;
+        let routes = Self::read_organization_routes(&self.client, &context)?;
+        if !self.account.is_current_in(&context, access) {
+            return Err(context_changed_error(RequestRisk::Read));
+        }
+        Ok(routes)
+    }
+
+    fn read_organization_routes(client: &super::Client, context: &AccountContext) -> Result<Value, CloudWorkspaceClientError> {
+        let routes: Value = client.request(context, &[ORGANIZATION_ROUTES], None, None, None, RequestRisk::Read)?;
+        if !routes.get("routes").is_some_and(Value::is_array) || !routes.get("canManage").is_some_and(Value::is_boolean) {
+            return Err(invalid_response());
+        }
+        Ok(routes)
+    }
+
+    /// Before a credential is asked for: the key is on, the caller may
+    /// manage routes, the repository is `owner/name`, and the service offers
+    /// the template (a custom endpoint) for the agent.
+    pub(crate) fn prepare_organization_route(&self, add: &OrganizationRouteAdd) -> Result<RouteChange, CloudWorkspaceClientError> {
+        if !template_id_ok(&add.template_id) {
+            return Err(CloudWorkspaceClientError::local("cloud_agent_route_template_unknown", false));
+        }
+        if route_repository(&add.repository).is_none() {
+            return Err(CloudWorkspaceClientError::local("cloud_organization_route_repository_invalid", false));
+        }
+        let settings = plain_settings(&add.settings)?;
+        // An organization route is always a custom endpoint: refuse an
+        // address the check would refuse before any dialog opens.
+        if !settings.get("baseUrl").and_then(Value::as_str).is_some_and(crate::agent_route_check::valid_base_url) {
+            return Err(CloudWorkspaceClientError::local("cloud_agent_route_invalid", false));
+        }
+        let (context, access) = self.agent_login_context(add.organization_id.as_deref(), &add.context_revision, RequestRisk::Read)?;
+        let org = Some(context.organization_id.as_str());
+        self.phase2_gate(PHASE2_ORGANIZATION_ROUTES, org, Some(&context), ORGANIZATION_ROUTES_OFF)?;
+        let routes = Self::read_organization_routes(&self.client, &context)?;
+        if !self.account.is_current_in(&context, access) {
+            return Err(context_changed_error(RequestRisk::Read));
+        }
+        if routes.get("canManage").and_then(Value::as_bool) != Some(true) {
+            return Err(CloudWorkspaceClientError::local("organization_admin_required", false));
+        }
+        let template = template_in(&routes, add.agent, &add.template_id)
+            .filter(|template| template.custom_endpoint)
+            .ok_or_else(|| CloudWorkspaceClientError::local("cloud_agent_route_template_unknown", false))?;
+        let organization_id = context.organization_id.clone();
+        Ok(RouteChange { context, access, template, settings, organization_id })
+    }
+
+    /// Add the route with its credential: sent once, from one zeroized
+    /// buffer, and cleared.
+    pub(crate) fn add_organization_route(&self, change: &RouteChange, add: &OrganizationRouteAdd, credential: zeroize::Zeroizing<String>) -> Result<Value, CloudWorkspaceClientError> {
+        if !self.account.is_current_in(&change.context, change.access) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        let invalid = |_| CloudWorkspaceClientError::local("cloud_agent_route_invalid", false);
+        let repository = route_repository(&add.repository).ok_or_else(|| CloudWorkspaceClientError::local("cloud_organization_route_repository_invalid", false))?;
+        let head = serde_json::json!({ "agent": add.agent.as_str(), "repository": repository, "templateId": add.template_id, "settings": change.settings });
+        let head = serde_json::to_string(&head).map_err(invalid)?;
+        let escaped = zeroize::Zeroizing::new(serde_json::to_string(credential.as_str()).map_err(invalid)?);
+        drop(credential);
+        let body = zeroize::Zeroizing::new(format!(r#"{},"credential":{}}}"#, &head[..head.len() - 1], escaped.as_str()));
+        drop(escaped);
+        let routes: Value = self.client.send_secret("POST", &change.context, &[ORGANIZATION_ROUTES], body)?;
+        if !self.account.is_current_in(&change.context, change.access) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        if !routes.get("routes").is_some_and(Value::is_array) {
+            return Err(invalid_response());
+        }
+        Ok(routes)
+    }
+
+    /// Remove an organization route and its credential. New sessions on its
+    /// repository go back to each member's own login.
+    pub fn remove_organization_route(&self, organization: Option<&str>, context_revision: &str, route_id: &str) -> Result<Value, CloudWorkspaceClientError> {
+        if !organization_route_id_ok(route_id) {
+            return Err(CloudWorkspaceClientError::local("cloud_organization_route_not_found", false));
+        }
+        let (context, access) = self.agent_login_context(organization, context_revision, RequestRisk::Mutation)?;
+        let org = Some(context.organization_id.as_str());
+        self.phase2_gate(PHASE2_ORGANIZATION_ROUTES, org, Some(&context), ORGANIZATION_ROUTES_OFF)?;
+        let routes: Value = self.client.request_as("DELETE", &context, &[ORGANIZATION_ROUTES, route_id], None, None, None, RequestRisk::Mutation)?;
+        if !self.account.is_current_in(&context, access) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        if !routes.get("routes").is_some_and(Value::is_array) {
+            return Err(invalid_response());
+        }
+        Ok(routes)
+    }
 }
 
 #[cfg(test)]
@@ -262,6 +395,19 @@ mod tests {
         }
         assert!(template_id_ok("claude-gateway"));
         assert!(!template_id_ok("../x") && !template_id_ok("") && !template_id_ok("Claude"));
+    }
+
+    #[test]
+    fn an_organization_route_names_one_github_repository_and_its_own_id() {
+        assert_eq!(route_repository(" Acme/TerminalX.git ").as_deref(), Some("acme/terminalx"));
+        assert_eq!(route_repository("acme/terminal.x").as_deref(), Some("acme/terminal.x"));
+        for bad in ["acme", "acme/", "/x", "a/b/c", "acme/..", "https://github.com/acme/x", "acme/has space", "-acme/x"] {
+            assert!(route_repository(bad).is_none(), "{bad}");
+        }
+        assert!(organization_route_id_ok("orgroute_0b6f3c1e-1d2a-4f5b-8c7d-9e0f1a2b3c4d"));
+        for bad in ["orgroute_../x", "route_0b6f3c1e-1d2a-4f5b-8c7d-9e0f1a2b3c4d", "orgroute_", ""] {
+            assert!(!organization_route_id_ok(bad), "{bad}");
+        }
     }
 
     #[test]

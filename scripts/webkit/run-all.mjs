@@ -79,6 +79,7 @@ export const checks = [
   "dictation-hold-to-talk",
   "intro-slides",
   "organization-billing",
+  "organization-routes",
 ];
 
 /**
