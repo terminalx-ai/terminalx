@@ -79,6 +79,8 @@ mod codex_device_login;
 mod cloud_workspaces;
 #[allow(dead_code)]
 mod workspace_ssh;
+#[cfg(all(feature = "desktop", unix))]
+mod ssh_proxy;
 #[cfg(unix)]
 #[allow(dead_code)]
 mod workspace_ssh_payload;
@@ -836,6 +838,14 @@ pub fn run() {
             cloud_remote::cloud_remote_send,
             cloud_remote::cloud_remote_activate,
             cloud_remote::cloud_remote_detach,
+            #[cfg(unix)]
+            cloud_remote::cloud_ssh_prepare,
+            #[cfg(unix)]
+            cloud_remote::cloud_ssh_finish,
+            #[cfg(unix)]
+            cloud_remote::cloud_ssh_remove,
+            #[cfg(unix)]
+            cloud_remote::cloud_ssh_stream,
             cloud_remote::cloud_port_forward,
             cloud_remote::cloud_port_unforward,
             cloud_remote::cloud_port_forwards,

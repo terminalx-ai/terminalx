@@ -1,3 +1,8 @@
+import { setupWorkspaceSsh, removeWorkspaceSsh } from "@/lib/cloudSsh";
+import { phase2Ready } from "@/lib/phase2Readiness";
+import { useDataPrivacy } from "@/lib/dataPrivacy";
+import { isWindows } from "@/lib/platform";
+import { copyText } from "@/lib/clipboard";
 import { mayReassign, useWorkspacePreferencesAvailable, WorkspaceReassignDialog } from "./WorkspaceFollowing";
 import { useAccount } from "@/lib/account";
 import { useCloudCatalog } from "@/lib/cloudCatalog";
@@ -76,6 +81,12 @@ export function WorkspaceActionItems({
   // admins and the creator change that. Nobody is offered an action that
   // would only be refused.
   const authority = workspaceAuthority(workspace);
+  const privateMode = useDataPrivacy().enabled;
+  const sshAvailable = !isWindows && !privateMode && phase2Ready(status, workspace.orgId, "workspaceSsh");
+  const sshRole = current?.workspace.you;
+  const canSetUpSsh = current?.workspace.state === "ready"
+    && (sshRole?.role === "manager" || (sshRole?.role === "driver" && sshRole.canApprove));
+  const sshTarget = { orgId: workspace.orgId, workspaceId: workspace.id };
   const present = !archived && workspace.state !== "destroyed" && !workspace.deletedAt;
   // A private workspace is shared from here too: the dialog makes it visible
   // to the organization with the first person added. Someone who cannot
@@ -131,6 +142,16 @@ export function WorkspaceActionItems({
         >
           <Users /> {authority.manageShares ? "Share…" : "Who has access…"}
           {sharedWith > 0 && <span className="ml-auto text-[10px] text-faint">{sharedWith}</span>}
+        </DropdownMenuItem>
+      )}
+      {sshAvailable && present && canSetUpSsh && (
+        <DropdownMenuItem onSelect={() => run(async () => copyText(await setupWorkspaceSsh(sshTarget)))}>
+          Set up SSH and copy command
+        </DropdownMenuItem>
+      )}
+      {sshAvailable && present && (
+        <DropdownMenuItem onSelect={() => run(() => removeWorkspaceSsh(sshTarget))}>
+          Remove SSH setup
         </DropdownMenuItem>
       )}
       {schedules && (

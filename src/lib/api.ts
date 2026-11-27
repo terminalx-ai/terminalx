@@ -4016,6 +4016,16 @@ export async function workspaceConnection(target: WorkspaceTarget, activation: A
   return pending;
 }
 
+/** A short-lived SSH attach uses a separate installation identity so
+ * waiting for a fresh SSH grant does not reconnect the workspace's tabs. */
+export async function workspaceSshConnection(target: CloudWorkspaceTarget): Promise<CloudWorkspaceConnection> {
+  const key = `ssh:${crypto.randomUUID()}`;
+  return adopt(key, target, (transport) => invoke<string>("cloud_remote_attach", {
+    target: { organizationId: target.organizationId, workspaceId: target.workspaceId, ssh: true },
+    activation: "connect",
+  }).then((id) => (transport.bind(id), id)));
+}
+
 async function adopt(
   key: string,
   target: WorkspaceTarget,

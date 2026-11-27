@@ -1,3 +1,4 @@
+import { startWorkspaceSshProxy } from "@/lib/cloudSsh";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { sessionStatus } from "@terminalx/portable/sessionStatus";
@@ -1167,6 +1168,8 @@ export async function handleCloudControl(action: string, params: Params = {}): P
   if (action === "status") return status();
   assertAllowed();
   switch (action) {
+    case "ssh-stream":
+      return startWorkspaceSshProxy(params);
     case "projects.list":
       return projectsList(params);
     case "sessions.list":

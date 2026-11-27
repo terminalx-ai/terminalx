@@ -4653,6 +4653,89 @@ impl CloudWorkspaceService {
         })
     }
 
+    #[cfg(all(feature = "desktop", unix))]
+    pub(crate) fn check_workspace_ssh_scope(
+        &self, org: &str, workspace: &str, scope: &str,
+    ) -> Result<(), CloudWorkspaceClientError> {
+        if !valid_resource_id(workspace) { return Err(inbox_invalid()); }
+        self.phase2_member_in(crate::account::PHASE2_WORKSPACE_SSH, "cloud_workspace_ssh_unavailable", org, RequestRisk::Read, |_, context| {
+            if crate::workspace_ssh::scope(&context.user_id, org, workspace) != scope {
+                return Err(context_changed_error(RequestRisk::Read));
+            }
+            Ok(())
+        })
+    }
+
+    /// Begin explicit SSH setup by registering the scoped public key.
+    /// The runtime offers the host pin only after it sees that registration.
+    #[cfg(all(feature = "desktop", unix))]
+    pub(crate) fn prepare_workspace_ssh(
+        &self, org: &str, workspace: &str,
+    ) -> Result<String, CloudWorkspaceClientError> {
+        use crate::account::PHASE2_WORKSPACE_SSH;
+
+        if !valid_resource_id(workspace) { return Err(inbox_invalid()); }
+        self.phase2_member_in(PHASE2_WORKSPACE_SSH, "cloud_workspace_ssh_unavailable", org, RequestRisk::Mutation, |client, context| {
+            let scope = crate::workspace_ssh::scope(&context.user_id, org, workspace);
+            let local = |_| CloudWorkspaceClientError::local("ssh_configuration_failed", false);
+            let identity = crate::store::root().map_err(local)?.join("ssh").join(&scope).join("id_ed25519");
+            let public_key = crate::workspace_ssh::public_key(&identity, true).map_err(local)?;
+            let _: Value = client.request_as("PUT", context, &["cloud-workspaces", workspace, "ssh-key"], None,
+                Some(json!({ "publicKey": public_key })), None, RequestRisk::Mutation)?;
+            Ok(AccountManager::context_revision(context))
+        })
+    }
+
+    /// Finish the same explicit setup action using the authenticated runtime
+    /// pin. Refresh and connection paths never write the personal Include.
+    #[cfg(all(feature = "desktop", unix))]
+    pub(crate) fn finish_workspace_ssh(
+        &self, org: &str, workspace: &str, revision: &str, host_key: &str,
+    ) -> Result<String, CloudWorkspaceClientError> {
+        use crate::account::PHASE2_WORKSPACE_SSH;
+        use crate::workspace_ssh::{self as ssh, IncludeConfig};
+
+        if !valid_resource_id(workspace) || ssh::parse_public_key(host_key).is_none() {
+            return Err(inbox_invalid());
+        }
+        self.phase2_member_in(PHASE2_WORKSPACE_SSH, "cloud_workspace_ssh_unavailable", org, RequestRisk::Mutation, |_, context| {
+            if revision != AccountManager::context_revision(context) || !self.account.inbox_member_is_current(context, org) {
+                return Err(context_changed_error(RequestRisk::Mutation));
+            }
+            let scope = ssh::scope(&context.user_id, org, workspace);
+            let local = |_| CloudWorkspaceClientError::local("ssh_configuration_failed", false);
+            let identity = crate::store::root().map_err(local)?.join("ssh").join(&scope).join("id_ed25519");
+            ssh::public_key(&identity, false).map_err(local)?;
+            let home = dirs::home_dir().ok_or_else(|| CloudWorkspaceClientError::local("ssh_home_unavailable", false))?;
+            let executable = std::env::current_exe().map_err(|_| CloudWorkspaceClientError::local("ssh_configuration_failed", false))?;
+            if !self.account.inbox_member_is_current(context, org) {
+                return Err(context_changed_error(RequestRisk::Mutation));
+            }
+            ssh::install(&home.join(".ssh"), IncludeConfig {
+                scope: &scope, org, workspace, user: "terminalx-runtime",
+                identity: &identity, executable: &executable, host_key,
+            }).map_err(local)
+        })
+    }
+
+    /// Explicit removal cleans the local Include even when revocation fails.
+    #[cfg(all(feature = "desktop", unix))]
+    pub(crate) fn remove_workspace_ssh(&self, org: &str, workspace: &str) -> Result<(), CloudWorkspaceClientError> {
+        use crate::account::PHASE2_WORKSPACE_SSH;
+
+        if !valid_resource_id(workspace) {
+            return Err(inbox_invalid());
+        }
+        self.phase2_member_in(PHASE2_WORKSPACE_SSH, "cloud_workspace_ssh_unavailable", org, RequestRisk::Mutation, |client, context| {
+            let home = dirs::home_dir().ok_or_else(|| CloudWorkspaceClientError::local("ssh_home_unavailable", false))?;
+            let scope = crate::workspace_ssh::scope(&context.user_id, org, workspace);
+            crate::workspace_ssh::remove(&home.join(".ssh"), &scope)
+                .map_err(|_| CloudWorkspaceClientError::local("ssh_configuration_failed", false))?;
+            let _: Value = client.request_as("DELETE", context, &["cloud-workspaces", workspace, "ssh-key"], None, None, None, RequestRisk::Mutation)?;
+            Ok(())
+        })
+    }
+
     /// The organization's scheduled tasks, or one workspace's (saas contract
     /// §24.2). For owners and admins; a server with the feature off answers
     /// `cloud_workspace_unavailable` with status 404.
@@ -6443,6 +6526,23 @@ mod tests {
             value["operation"]["errorCode"] = Value::String(error_code.into());
         }
         value.to_string()
+    }
+
+    #[cfg(all(feature = "desktop", unix))]
+    #[test]
+    fn phase2_workspace_ssh_explicit_configuration_is_held_by_default() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+        let (_, held) = test_service("http://127.0.0.1:1");
+        let mut raw = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
+        raw.extend([9; 32]);
+        let key = format!("ssh-ed25519 {}", STANDARD.encode(raw));
+        let prepare = held.prepare_workspace_ssh("org-1", "workspace-1").unwrap_err();
+        let finish = held.finish_workspace_ssh("org-1", "workspace-1", "revision", &key).unwrap_err();
+        let remove = held.remove_workspace_ssh("org-1", "workspace-1").unwrap_err();
+        for error in [prepare, finish, remove] {
+            assert_eq!(error.code, "cloud_workspace_ssh_unavailable");
+        }
     }
 
     #[test]
