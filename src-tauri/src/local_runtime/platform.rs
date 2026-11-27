@@ -5,11 +5,11 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{bail, Context, Result};
-use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSString, NSTimer, NSPoint};
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSApplicationTerminateReply, NSStatusBar, NSStatusItem, NSMenu, NSMenuItem, NSAlert, NSEvent, NSEventType, NSEventModifierFlags};
+use objc2_foundation::{MainThreadMarker, NSData, NSObject, NSObjectProtocol, NSString, NSTimer, NSPoint};
+use objc2_app_kit::{NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSApplicationTerminateReply, NSStatusBar, NSStatusItem, NSCellImagePosition, NSImage, NSMenu, NSMenuItem, NSAlert, NSEvent, NSEventType, NSEventModifierFlags};
 use serde_json::json;
 use crate::session::SessionManager;
 use crate::sink::EventSink;
@@ -195,6 +195,18 @@ impl Controller {
     fn install(&self) {
         let mtm = self.mtm();
         let item = NSStatusBar::systemStatusBar().statusItemWithLength(-1.0);
+        if let Some(button) = item.button(mtm) {
+            let data = NSData::with_bytes(include_bytes!("../../../resources/icon-source/menu-bar-template.svg"));
+            let name = NSString::from_str("TerminalX");
+            if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
+                image.setTemplate(true);
+                button.setImage(Some(&image));
+                button.setImagePosition(NSCellImagePosition::ImageOnly);
+            } else {
+                button.setTitle(&name);
+            }
+            button.setAccessibilityLabel(Some(&name));
+        }
         let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
         for (title,action) in [("Quick Chat",sel!(quick:)),("Open TerminalX",sel!(open:)),("Stop all",sel!(stop:)),("Quit TerminalX",sel!(quit:))] {
@@ -235,13 +247,12 @@ impl Controller {
             if ready { self.install(); }
             return;
         }
-        let (title,available)=match *shared.counts.lock().unwrap() {
-            Some((sampled,working,shells,available)) if sampled.elapsed() < std::time::Duration::from_secs(2) => (format!("TX {working} · {shells}"),available),
-            _ => ("TX unavailable".into(),false),
+        let (tooltip,available)=match *shared.counts.lock().unwrap() {
+            Some((sampled,working,shells,available)) if sampled.elapsed() < std::time::Duration::from_secs(2) => (format!("TerminalX — Working agents: {working} · Open terminals: {shells}"),available),
+            _ => ("TerminalX: status unavailable".into(),false),
         };
         if let Some(button)=self.ivars().item.get().and_then(|item|item.button(self.mtm())) {
-            button.setTitle(&NSString::from_str(&title));
-            button.setToolTip(Some(&NSString::from_str("TerminalX: working agents · open terminals")));
+            button.setToolTip(Some(&NSString::from_str(&tooltip)));
         }
         if let Some(quit)=self.ivars().quit.get() { quit.setHidden(!available); }
         if let Some(stop)=self.ivars().stop.get() { stop.setTitle(&NSString::from_str(if available {"Stop all and quit"} else {"Stop all"})); }
