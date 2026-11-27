@@ -219,7 +219,7 @@ pub struct PairingStatus {
 
 /// This Mac on its account's machine list, as Settings → Account says it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
-#[serde(tag = "state", rename_all = "camelCase")]
+#[serde(tag = "state", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum AccountListing {
     /// No account to be listed on: signed out, or data privacy mode is on
     /// (Settings → Account says that itself).

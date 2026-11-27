@@ -11,9 +11,11 @@ vi.mock("@/lib/account", () => ({
   signOut: vi.fn(),
   useAccount: () => ({ ready: true, busy: false, status: mocks.status }),
 }));
-vi.mock("@/lib/pairing", () => ({
-  usePairing: () => ({ ready: true, busy: false, status: { host: null, devices: [] } }),
-}));
+vi.mock("@/lib/pairing", async () => {
+  // The whole status the Mac sends: the Account tab reads its account listing (PRO-598).
+  const { emptyStatus } = await import("@/components/pairing/pairingFixtures.test-utils");
+  return { usePairing: () => ({ ready: true, busy: false, status: emptyStatus }) };
+});
 vi.mock("@/lib/api", () => ({ api: mocks.api, errorMessage: String }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn() }));
 vi.mock("./MachineNameSettings", () => ({ MachineNameSettings: () => null }));

@@ -29,12 +29,13 @@ for (const mode of ["light", "dark"]) {
   for (const { name, fixture, account } of cases) {
     const page = await browser.newPage({ viewport: { width: 1100, height: 600 } });
     await page.addInitScript(`localStorage.setItem("raccoon.mode", ${JSON.stringify(mode)});\nwindow.__PW_FIXTURE__ = ${JSON.stringify(fixture)};\n${stub}
-      const pairing = { relay: { phase: "offline", message: ${JSON.stringify(REASON)}, attempt: 12 }, host: null, devices: [], activePairing: null, lastError: null };
+      const pairing = { relay: { phase: "offline", message: ${JSON.stringify(REASON)}, attempt: 12 }, host: null, devices: [], activePairing: null, pendingApproval: null, keepAwake: true, lastError: null,
+        accountListing: { state: "pending", reason: ${JSON.stringify(`Relay is unavailable: ${REASON}`)} } };
       window.__PW_RETRIES__ = 0;
       window.__PW_STUB__.answers.pairing_status = pairing;
       window.__PW_STUB__.answers.pairing_retry_relay = () => {
         window.__PW_RETRIES__++;
-        return { ...pairing, relay: { phase: "connected", message: "Connected", attempt: 0 } };
+        return { ...pairing, relay: { phase: "connected", message: "Connected", attempt: 0 }, accountListing: { state: "pending", reason: "Adding this Mac to your account." } };
       };
     `);
     await page.goto(server.url);

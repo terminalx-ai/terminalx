@@ -2335,8 +2335,12 @@ mod tests {
             (RelayPhase::Offline, None, "Relay is unavailable."),
             (RelayPhase::Connected, None, "Adding this Mac to your account"),
         ] {
+            // The wording names this computer as its platform does: Linux CI reads "this computer".
+            let says = crate::platform_profile::localize(says);
             let AccountListing::Pending { reason } = account_listing(false, false, None, &relay(phase, message)) else { panic!("{says}") };
-            assert!(reason.contains(says), "{reason}");
+            // The message names what was expected, not the reason itself: CodeQL counts an
+            // account listing written to a panic as logging it.
+            assert!(reason.contains(&says), "the pending reason should say {says:?}");
         }
     }
 

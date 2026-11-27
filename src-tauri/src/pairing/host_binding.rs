@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(bind.calls, calls(&[("POST", 1)]));
         assert_eq!((bind.bound, bind.saved_fence), (None, 1));
         let Some(AccountListing::Refused { reason }) = &bind.listing else { panic!("{:?}", bind.listing) };
-        assert!(reason.contains("Another TerminalX account lists this Mac"), "{reason}");
+        assert!(reason.contains(&crate::platform_profile::localize("Another TerminalX account lists this Mac")), "{reason}");
         assert!(bind.last_error.as_deref().is_some_and(|error| error.contains(reason.as_str())));
     }
 
