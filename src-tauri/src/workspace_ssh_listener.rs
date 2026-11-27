@@ -411,11 +411,12 @@ impl Listener {
 pub(crate) struct Runtime {
     listener: Listener,
     host_key: String,
+    configuration: PathBuf,
 }
 
 impl Runtime {
     pub(crate) fn restore(root: &Path) -> Result<Self> {
-        use crate::workspace_ssh::{atomic_write, private_directory, public_key, LoginShell};
+        use crate::workspace_ssh::LoginShell;
 
         ensure!(
             LoginShell::current_account() == LoginShell::Usable,
@@ -423,7 +424,19 @@ impl Runtime {
         );
         let install = InstallLock::acquire(root)?;
         install.active_daemon()?;
-        let state = root.join("listener");
+        let runtime = Self::prepare(&install)?;
+        runtime.listener.restore(
+            &install,
+            runtime.configuration.clone(),
+            &runtime.host_key,
+            || true,
+        )?;
+        Ok(runtime)
+    }
+
+    pub(crate) fn prepare(install: &InstallLock) -> Result<Self> {
+        use crate::workspace_ssh::{atomic_write, private_directory, public_key};
+        let state = install.root.join("listener");
         private_directory(&state)?;
         let host = state.join("host");
         let host_key = public_key(&host, true)?;
@@ -438,9 +451,30 @@ impl Runtime {
         atomic_write(&configuration, format!(
             "HostKey \"{path}\"\nAuthorizedKeysFile none\nAllowUsers terminalx-runtime\nAuthenticationMethods publickey\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nDisableForwarding yes\nPermitUserRC no\nPermitUserEnvironment no\nPrintMotd no\n"
         ).as_bytes())?;
-        let listener = Listener::default();
-        listener.restore(&install, configuration, &host_key, || true)?;
-        Ok(Self { listener, host_key })
+        Ok(Self {
+            listener: Listener::default(),
+            host_key,
+            configuration,
+        })
+    }
+
+    pub(crate) fn activate(
+        &self,
+        install: &InstallLock,
+        staged: StagedVersion,
+        ready: impl Fn() -> bool,
+    ) -> Result<()> {
+        let candidate = Daemon::staged(staged, self.configuration.clone());
+        self.listener
+            .activate(install, candidate, &self.host_key, &ready)?;
+        if self.listener.cleanup(install, ready).is_err() {
+            log::warn!("workspace SSH could not clean up a retired version");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.listener.routing.lock().unwrap().active.is_some()
     }
 
     pub(crate) fn host_key(&self) -> &str {
@@ -453,11 +487,22 @@ impl Runtime {
     ) -> Result<(tokio::net::TcpStream, Session)> {
         let pair = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let client = TcpStream::connect(pair.local_addr()?)?;
-        let (socket, _) = pair.accept()?;
+        let socket = accept_bridge_peer(&pair, &client)?;
         client.set_nonblocking(true)?;
         let session = self.listener.admit_key(socket, verified_key)?;
         Ok((tokio::net::TcpStream::from_std(client)?, session))
     }
+}
+
+/// Fail closed if a different local process reaches the temporary listener
+/// first. Only the socket for our own client may reach SSH admission.
+fn accept_bridge_peer(listener: &TcpListener, client: &TcpStream) -> Result<TcpStream> {
+    let (socket, peer) = listener.accept()?;
+    ensure!(
+        peer == client.local_addr()?,
+        "unexpected private SSH bridge peer"
+    );
+    Ok(socket)
 }
 
 fn version_name(root: &Path, directory: &Path) -> Result<String> {
@@ -485,6 +530,29 @@ fn name_str(path: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn workspace_ssh_bridge_refuses_a_connection_queued_before_its_client() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let mut other = TcpStream::connect(endpoint).unwrap();
+        let client = TcpStream::connect(endpoint).unwrap();
+        assert_ne!(other.local_addr().unwrap(), client.local_addr().unwrap());
+
+        let refused = accept_bridge_peer(&listener, &client).unwrap_err();
+        assert_eq!(refused.to_string(), "unexpected private SSH bridge peer");
+        other
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(
+            other.read(&mut [0]).unwrap(),
+            0,
+            "the foreign socket closes"
+        );
+
+        let accepted = accept_bridge_peer(&listener, &client).unwrap();
+        assert_eq!(accepted.peer_addr().unwrap(), client.local_addr().unwrap());
+    }
 
     fn candidate(root: &Path, version: &str) -> Daemon {
         let directory = root.join(version);

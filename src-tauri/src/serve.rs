@@ -397,6 +397,10 @@ fn run(options: Options) -> Result<()> {
         (None, Some((cloud, origin))) => Some(Arc::new(crate::remote::bootstrap_link::BootstrapLink::new(cloud.clone(), origin))),
         (None, None) => None,
     };
+    #[cfg(target_os = "linux")]
+    if let (None, Some((cloud, origin)), false) = (&options.relay_link, &cloud, options.self_test) {
+        crate::workspace_ssh_updater::start(cloud.clone(), origin);
+    }
     // A local runtime hosts operating computers while the switch is on
     // (PRO-341): it opens nothing until then.
     if options.runtime_kind == RuntimeKind::Local && !options.self_test {
