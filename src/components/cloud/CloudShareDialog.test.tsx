@@ -121,7 +121,7 @@ const dialog = () => render(<CloudShareDialog orgId="org-1" workspaceId="ws-1" n
 
 describe("per-person Admin grants", () => {
   const feature = "cloud.workspaces.admin-share.v1";
-  const label = "Admin — Manages the workspace and who it’s shared with";
+  const label = "Admin";
   const enable = (org = "org-1") => {
     account.status = { ...account.status, phase2Readiness: { [org]: [feature] } };
   };
@@ -894,8 +894,8 @@ describe("organization workspace-group readiness", () => {
         request.changes.map(({ id }) => ({ id, status: "applied" }))));
     renderEditor();
     const alice = await screen.findByRole("combobox", { name: "Role for Alice" });
-    expect(within(alice).getByRole("option", { name: /Admin — Manages/ })).toBeTruthy();
-    expect(within(role(group.name)).queryByRole("option", { name: /Admin — Manages/ })).toBeNull();
+    expect(within(alice).getByRole("option", { name: "Admin" })).toBeTruthy();
+    expect(within(role(group.name)).queryByRole("option", { name: "Admin" })).toBeNull();
     fireEvent.change(alice, { target: { value: "manager" } });
     fireEvent.click(save());
     await waitFor(() => expect(mocks.apply).toHaveBeenCalledWith("ws-1", "org-1", expect.objectContaining({

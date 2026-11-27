@@ -411,9 +411,9 @@ function LegacyCloudShareDialog({
           <DialogTitle>{manages ? `Share ${name}` : "Who has access"}</DialogTitle>
           <DialogDescription>
             {manages
-              ? "People you share with see this workspace's agent tabs, terminals, files and Git. Drivers can also send to agents, and type in terminals if they can approve permissions."
-              : `People with access to ${name} see its agent tabs, terminals, files and Git. Drivers can also send to agents, and type in terminals if they can approve permissions.`}
-            {offerAdmin && " Admin grants include permission approval."}
+              ? "People with access see agent tabs, terminals, files and Git. Drivers can also send to agents."
+              : `People with access to ${name} see its agent tabs, terminals, files and Git. Drivers can also send to agents.`}
+            {offerAdmin && " Admins also manage who has access."}
           </DialogDescription>
         </DialogHeader>
         {!listed && !loadError && <Loader2 className="size-4 animate-spin" />}
@@ -493,7 +493,7 @@ function LegacyCloudShareDialog({
                           {offerAdmin ? <option value="manager">{ADMIN_SHARE_LABEL}</option>
                             : share.role === "manager" && <option value="manager" disabled>Admin</option>}
                         </select>
-                        <label className="flex items-center gap-1.5 text-muted-foreground">
+                        <label className="flex items-center gap-1.5 text-muted-foreground" title="Approves permission requests and types in terminals">
                           <Switch
                             size="sm"
                             aria-label={`Can approve permissions: ${share.name || share.email}`}
@@ -503,7 +503,7 @@ function LegacyCloudShareDialog({
                             aria-description={share.role === "manager" && share.canApprove ? MANAGER_APPROVAL_REASON : undefined}
                             onCheckedChange={(checked) => void put({ ...share, canApprove: checked })}
                           />
-                          Can approve permissions
+                          Can approve
                         </label>
                         <Button
                           size="icon-xs"
@@ -565,7 +565,7 @@ function LegacyCloudShareDialog({
                   <option value="driver">Driver</option>
                   {offerAdmin && <option value="manager">{ADMIN_SHARE_LABEL}</option>}
                 </select>
-                <label className="flex items-center gap-1.5 text-muted-foreground">
+                <label className="flex items-center gap-1.5 text-muted-foreground" title="Approves permission requests and types in terminals">
                   <Switch
                     size="sm"
                     aria-label="New person can approve permissions"
@@ -574,7 +574,7 @@ function LegacyCloudShareDialog({
                     title={adding.role === "manager" ? MANAGER_APPROVAL_REASON : undefined}
                     onCheckedChange={(checked) => setAdding((current) => ({ ...current, canApprove: checked }))}
                   />
-                  Can approve permissions
+                  Can approve
                 </label>
                 <Button
                   size="sm"

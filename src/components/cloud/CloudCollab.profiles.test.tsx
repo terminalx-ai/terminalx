@@ -18,7 +18,7 @@ it.each([ParticipantsBar, PresenceAvatars])("opens an organization profile from 
   fireEvent.click(await screen.findByRole("button", { name: "View profile: Alice" }));
   const profile = await screen.findByRole("dialog", { name: "Profile of Alice" });
   expect(within(profile).getByText("alice@example.com")).toBeTruthy();
-  expect(within(profile).getByText("Admin")).toBeTruthy();
+  expect(within(profile).getByText(/^Admin( · Joined .*)?$/)).toBeTruthy();
   expect(within(profile).getByLabelText("Online")).toBeTruthy();
   expect(mocks.listIn).toHaveBeenCalledWith("org-b");
 });
