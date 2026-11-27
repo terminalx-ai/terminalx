@@ -82,6 +82,9 @@ mod workspace_ssh;
 #[cfg(unix)]
 #[allow(dead_code)]
 mod workspace_ssh_payload;
+#[cfg(unix)]
+#[allow(dead_code)]
+mod workspace_ssh_listener;
 #[cfg(feature = "desktop")]
 mod desktop_inbox;
 #[cfg(feature = "desktop")]
@@ -804,6 +807,7 @@ pub fn run() {
             commands::cloud_workspace_follow_delete,
             commands::cloud_workspace_reassign,
             commands::cloud_workspace_mentions,
+            commands::announcements_current,
             commands::nudge_preference,
             commands::nudge_preference_set,
             commands::nudge_send,
