@@ -8,6 +8,7 @@ export const phase2Features = {
   mentions: "team.mentions.v1",
   restartDetails: "cloud.workspaces.restart-details.v1",
   workspaceGroups: "cloud.workspace-groups.v1",
+  organizationAutomations: "cloud.automations.organization.v1",
   freshWorkspace: "cloud.automations.fresh-workspace.v1",
   githubTrigger: "cloud.automations.github-trigger.v1",
   precreateUsage: "cloud.workspaces.precreate-usage.v1",

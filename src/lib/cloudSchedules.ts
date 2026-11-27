@@ -221,6 +221,7 @@ const ERRORS: Record<string, string> = {
   cloud_provider_connection_required: "The organization's compute provider is not connected, so nothing could be started.",
   cloud_schedule_runtime_unsupported: "This workspace's runtime cannot run scheduled tasks yet. Resume the workspace once so it updates, then try again.",
   cloud_schedule_cleanup_pending: "A run of this task is still starting or stopping its workspace. Pause the task, then delete it when the workspace has stopped.",
+  cloud_schedule_run_active: "This automation has a queued or running task. Wait for it to finish, then save again.",
   cloud_schedule_prompt_shell_command: "The prompt starts with “!”, which the agent's CLI would run as a shell command with nobody watching. Write it as a request instead.",
   cloud_schedule_prompt_slash_command: "The prompt starts with a slash command, which changes what the agent may do. Write it as a request instead.",
   cloud_schedule_prompt_file_mention: "The prompt mentions a file outside the project with “@”. Mention only files inside the project.",
@@ -234,6 +235,7 @@ const ERRORS: Record<string, string> = {
 };
 
 export function scheduleErrorMessage(code: string): string {
+  if (code === "cloud_schedule_revision_conflict") return "Someone changed this automation. Close the form and reopen Edit to load the latest version.";
   return ERRORS[code] ?? `That did not work (${code}).`;
 }
 
@@ -444,6 +446,34 @@ export function blankAutomationForm(): AutomationForm {
   return { ...blankScheduleForm(), triggerKind: "timer", workspaceMode: "existing", archiveAfterDays: "", archiveOnPrMerge: false,
     githubTrigger: { repositoryId: "", event: "opened", filters: [], allowForkPullRequests: false } };
 }
+export function automationFormFromConfiguration(input: CloudAutomationCreateInput, duplicate: boolean): AutomationForm {
+  const defaults = blankAutomationForm();
+  const { schedule, githubTrigger, webhookTrigger } = input;
+  return {
+    ...defaults,
+    name: duplicate ? `${Array.from(input.name).slice(0, SCHEDULE_LIMITS.nameChars - 5).join("")} copy` : input.name,
+    prompt: input.prompt,
+    agent: input.agent,
+    model: input.model ?? "",
+    effort: input.effort ?? "",
+    mode: input.mode,
+    maxRunMinutes: input.maxRunMinutes,
+    completionPolicy: input.completionPolicy,
+    missedRunPolicy: input.missedRunPolicy,
+    triggerKind: githubTrigger ? "github" : webhookTrigger ? "webhook" : "timer",
+    githubTrigger: githubTrigger ?? defaults.githubTrigger,
+    workspaceMode: input.workspaceMode ?? "existing",
+    archiveAfterDays: input.archiveAfterDays?.toString() ?? "",
+    archiveOnPrMerge: input.archiveOnPrMerge ?? false,
+    ...(schedule ? {
+      preset: schedule.preset,
+      time: [schedule.hour, schedule.minute].map((value) => String(value).padStart(2, "0")).join(":"),
+      weekdays: schedule.weekdays,
+      timezone: schedule.timezone,
+    } : {}),
+  };
+}
+
 export function validGithubValue(value: string): boolean {
   return value.trim().length > 0 && value.length <= 255 && !/[\x00-\x1f\x7f]/.test(value);
 }

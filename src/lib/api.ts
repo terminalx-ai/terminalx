@@ -582,6 +582,12 @@ export const api = {
     invoke<CloudAutomationMutationDto>("cloud_schedule_webhook_rotate", { scheduleId, orgId }),
   cloudAutomationSetActive: (scheduleId: string, active: boolean, orgId?: string | null) =>
     invoke<CloudAutomationDto>("cloud_schedule_set_active", { scheduleId, active, orgId: orgId ?? null }),
+  cloudAutomationEdit: (orgId: string, scheduleId: string) =>
+    invoke<{ schedule: CloudAutomationDto & { updatedAt: number }; configuration: CloudAutomationCreateInput }>("cloud_schedule_edit", { orgId, scheduleId }),
+  cloudAutomationPatch: (orgId: string, scheduleId: string, input: CloudAutomationCreateInput, expectedUpdatedAt: number) =>
+    invoke<CloudAutomationDto>("cloud_schedule_patch", { orgId, scheduleId, input, expectedUpdatedAt, confirmProviderSpend: true }),
+  cloudAutomationRunNow: (orgId: string, scheduleId: string, idempotencyKey: string, confirmProviderSpend: boolean) =>
+    invoke<{ run: CloudScheduleRun; duplicate: boolean }>("cloud_schedule_run_now", { orgId, scheduleId, idempotencyKey, confirmProviderSpend }),
   cloudScheduleDelete: (scheduleId: string, orgId?: string | null) => invoke<void>("cloud_schedule_delete", { scheduleId, orgId: orgId ?? null }),
   /** Pause every active scheduled task of the organization. */
   cloudSchedulesPauseAll: (orgId?: string | null) => invoke<{ paused: number }>("cloud_schedules_pause_all", { orgId: orgId ?? null }),
@@ -1664,6 +1670,9 @@ export interface CloudScheduleWebhookTrigger {
 
 /** Raw native response. Event-based automations have no timer. */
 export interface CloudAutomationDto extends Omit<CloudSchedule, "schedule" | "nextRunAt" | "lastRun"> {
+  creator?: { userId: string; displayName: string | null };
+  updatedAt?: number;
+  consoleUrl?: string;
   schedule?: CloudScheduleTiming | null;
   githubTrigger?: CloudScheduleGithubTrigger | null;
   webhookTrigger?: CloudScheduleWebhookTrigger | null;
