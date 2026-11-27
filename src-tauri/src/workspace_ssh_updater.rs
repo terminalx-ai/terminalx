@@ -4,6 +4,37 @@ use serde_json::Value;
 
 pub(crate) const CAPABILITY: &str = "workspace-ssh-updater-v1";
 const MAX_WINDOW_MS: u64 = 5 * 60 * 1000;
+const UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+const MAX_JITTER_SECS: u64 = 90 * 60;
+
+/// Runs inside the workspace service. Attempts are serial and sleep between
+/// completions, so a slow update cannot queue concurrent installs.
+pub(crate) fn spawn_periodic(
+    attempt: impl Fn() + Send + Sync + 'static,
+) -> tokio::task::JoinHandle<()> {
+    use rand_core::{OsRng, RngCore};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let attempt = Arc::new(attempt);
+    tokio::spawn(async move {
+        let mut initial = true;
+        loop {
+            let delay = Duration::from_secs(OsRng.next_u64() % (MAX_JITTER_SECS + 1));
+            tokio::time::sleep(if initial {
+                delay
+            } else {
+                UPDATE_INTERVAL + delay
+            })
+            .await;
+            initial = false;
+            let run = Arc::clone(&attempt);
+            if tokio::task::spawn_blocking(move || run()).await.is_err() {
+                log::warn!("workspace SSH updater attempt failed unexpectedly");
+            }
+        }
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
