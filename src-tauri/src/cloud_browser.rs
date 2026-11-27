@@ -83,7 +83,7 @@ pub(crate) fn offer() -> &'static str {
         return "off";
     }
     #[cfg(target_os = "linux")]
-    if !crate::remote::cloud_desktop::shared_pool().tools_present() {
+    if !crate::remote::cloud_desktop::shared_pool().is_some_and(|pool| pool.tools_present()) {
         return "packages-missing";
     }
     #[cfg(not(target_os = "linux"))]

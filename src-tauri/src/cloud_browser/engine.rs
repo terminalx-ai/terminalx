@@ -223,7 +223,8 @@ async fn run(key: String, agent: String, tab_title: Option<String>, tool: &str, 
 }
 
 async fn start(key: &str, agent: &str, tab_title: Option<String>) -> Result<Browser, String> {
-    let lease = shared_pool().agent().await.map_err(|error| format!("The cloud desktop could not start: {error}."))?;
+    let pool = shared_pool().ok_or("The cloud desktop is not set up in this runtime.")?;
+    let lease = pool.agent().await.map_err(|error| format!("The cloud desktop could not start: {error}."))?;
     let cdp = Cdp::connect(&lease.devtools).await?;
     let targets = cdp.call("Target.getTargets", json!({}), None).await?;
     let page = targets["targetInfos"].as_array().and_then(|targets| targets.iter().find(|target| target["type"] == "page")).and_then(|target| target["targetId"].as_str()).map(str::to_string);

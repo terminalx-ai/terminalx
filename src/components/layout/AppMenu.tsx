@@ -9,6 +9,7 @@ import { keycaps } from "@/lib/hotkeys";
 import { buildNativeMenu, type NativeMenuItem } from "@/lib/nativeMenu";
 import { dispatchNativeMenu } from "@/lib/nativeMenuBridge";
 import { isMac } from "@/lib/platform";
+import { usePrefs } from "@/lib/prefs";
 import { useSessionStore } from "@/lib/sessions";
 import { useKeymap, type Keymap, type NativeMenuSection } from "@/lib/shortcuts";
 
@@ -22,7 +23,8 @@ const TITLES: Record<NativeMenuSection, string> = { app: "TerminalX", file: "Fil
 export function AppMenu({ mac = isMac }: { mac?: boolean }) {
   const keymap = useKeymap();
   const { projects } = useSessionStore();
-  const groups = useMemo(() => buildNativeMenu(keymap, projects, false, false), [keymap, projects]);
+  const intro = usePrefs().introSlides;
+  const groups = useMemo(() => buildNativeMenu(keymap, projects, false, false), [keymap, projects, intro]);
   if (mac || !inAppWindow() || isCompactWindow()) return null;
   return (
     <DropdownMenu>

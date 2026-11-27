@@ -6,7 +6,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "./popover";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { contrast, rgb } from "@/styles/tokenContrast";
-import { SurfaceState } from "./SurfaceState";
+import { InlineError, NoAccessNote, OfflineBand, SkeletonRows, SurfaceState } from "./SurfaceState";
 
 afterEach(cleanup);
 
@@ -111,6 +111,24 @@ describe("shared surface states", () => {
     view.rerender(<SurfaceState status="no-access" title="Access ended" description="Ask an admin." />);
     expect(screen.queryByRole("button")).toBeNull();
     expect(screen.queryByText("Could not load people")).toBeNull();
+  });
+});
+
+describe("inline state pieces", () => {
+  it("draws an inline error with one retry, a no-access line, an offline band and hidden skeletons", () => {
+    const retry = vi.fn();
+    render(<>
+      <InlineError retry={{ label: "Retry", onAction: retry }}>Couldn’t load automations.</InlineError>
+      <NoAccessNote>Only admins can change this.</NoAccessNote>
+      <OfflineBand>Offline · showing the last list</OfflineBand>
+      <SkeletonRows rows={2} />
+    </>);
+    expect(screen.getByRole("alert").textContent).toContain("Couldn’t load automations.");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retry).toHaveBeenCalledOnce();
+    expect(screen.getByText("Only admins can change this.")).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toBe("Offline · showing the last list");
+    expect(screen.getByTestId("skeleton-rows").getAttribute("aria-hidden")).toBe("true");
   });
 });
 

@@ -1764,6 +1764,11 @@ impl WorkspaceRpc {
     /// for agents changes: offered or not, who drives, its latest action.
     #[cfg(any(target_os = "linux", all(test, unix)))]
     fn watch_desktop_agent(self: &Arc<Self>) {
+        // The agents' desktop is the viewers': set it up here, in its folder.
+        #[cfg(not(test))]
+        if !self.is_machine() {
+            let _ = self.desktop.get_or_init(|| super::cloud_desktop::shared_pool_in(self.desktop_workdir()));
+        }
         #[cfg(target_os = "linux")]
         crate::cloud_browser::install_runtime(tokio::runtime::Handle::current());
         let weak = Arc::downgrade(self);
@@ -1776,6 +1781,12 @@ impl WorkspaceRpc {
                 }
             }
         });
+    }
+
+    /// The folder the desktop's terminal opens in: the workspace's project.
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    fn desktop_workdir(&self) -> Option<std::path::PathBuf> {
+        match &self.scope { Scope::Workspace { project, .. } => Some(project.root.clone()), _ => None }
     }
 
     #[cfg(any(target_os = "linux", all(test, unix)))]
@@ -1834,7 +1845,7 @@ impl WorkspaceRpc {
                 return Err(RpcError::forbidden("Cloud desktop access changed before open"));
             }
             // One desktop per workspace, shared with its agents (PRO-209).
-            let pool = self.desktop.get_or_init(super::cloud_desktop::shared_pool);
+            let pool = self.desktop.get_or_init(|| super::cloud_desktop::shared_pool_in(self.desktop_workdir()));
             let lease = pool.connect(access, &allowed).await.map_err(|error| {
                 if error == DesktopError::AccessChanged { return RpcError::forbidden(error.to_string()); }
                 RpcError::new(match error {
