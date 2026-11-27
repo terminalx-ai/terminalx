@@ -1610,6 +1610,216 @@ fn copy_dir(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+// ------------------------------------------------------------------ managed servers (PRO-239)
+
+/// How a server that Settings › MCP manages is reached. A secret is never
+/// written here: each is named by the variable TerminalX puts in the
+/// environment of the agents it starts, and the agents read it from there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Managed {
+    Command { command: String, args: Vec<String>, env: BTreeMap<String, String> },
+    /// `bearer`: the variable holding the token sent as `Authorization: Bearer`.
+    /// `headers`: header name → the variable holding its value.
+    Url { url: String, bearer: Option<String>, headers: BTreeMap<String, String> },
+}
+
+impl Managed {
+    fn transport(&self) -> Transport {
+        match self {
+            Managed::Command { command, args, env } => Transport::Stdio {
+                command: command.clone(),
+                args: args.clone(),
+                env: env.iter().map(|(k, v)| (k.clone(), Val::Literal(v.clone()))).collect(),
+            },
+            Managed::Url { url, bearer, headers } => {
+                let mut map: BTreeMap<String, Val> = headers.iter().map(|(k, var)| (k.clone(), Val::Env(var.clone()))).collect();
+                if let Some(var) = bearer {
+                    map.insert("Authorization".into(), Val::Bearer(var.clone()));
+                }
+                Transport::Http { url: url.clone(), headers: map }
+            }
+        }
+    }
+}
+
+/// A server found in an agent's own file, for Settings › MCP's import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Found {
+    pub name: String,
+    pub target: FoundTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FoundTarget {
+    Command { command: String, args: Vec<String>, env: BTreeMap<String, String> },
+    /// Header values as written: a literal, or `${VAR}` / `Bearer ${VAR}` as text.
+    Url { url: String, headers: BTreeMap<String, String> },
+}
+
+fn found_of(name: &str, server: &Server) -> Option<Found> {
+    let render = |val: &Val| match val {
+        Val::Literal(s) => s.clone(),
+        Val::Env(var) => format!("${{{var}}}"),
+        Val::Bearer(var) => format!("Bearer ${{{var}}}"),
+    };
+    let target = match server.transport.as_ref().ok()? {
+        Transport::Stdio { command, args, env } => FoundTarget::Command { command: command.clone(), args: args.clone(), env: env.iter().map(|(k, v)| (k.clone(), render(v))).collect() },
+        Transport::Http { url, headers } => FoundTarget::Url { url: url.clone(), headers: headers.iter().map(|(k, v)| (k.clone(), render(v))).collect() },
+        // Settings › MCP writes streamable HTTP only; an SSE server stays as the person set it up.
+        Transport::Sse { .. } => return None,
+    };
+    Some(Found { name: name.to_string(), target })
+}
+
+/// What import reads, per file: the file as shown (`~/.claude.json`), and its
+/// servers, or `None` when the file is not there.
+pub(crate) struct FoundFile {
+    pub shown: String,
+    pub servers: Option<Vec<Found>>,
+}
+
+/// The servers in Claude Code's `~/.claude.json` and `~/.claude/settings.json`,
+/// then Codex's `~/.codex/config.toml`. A file that cannot be read is an error
+/// of its own; the others are still read.
+pub(crate) fn found_servers(homes: &Homes) -> [(Direction, FoundFile, Option<String>); 3] {
+    let read = |path: &Path, parse: fn(&str) -> Result<BTreeMap<String, Server>>| -> (FoundFile, Option<String>) {
+        let shown = homes.pretty(path);
+        match read_optional(path).and_then(|text| text.map(|text| parse(&text)).transpose()) {
+            Ok(servers) => (FoundFile { shown, servers: servers.map(|servers| servers.iter().filter_map(|(name, server)| found_of(name, server)).collect()) }, None),
+            // Never the parser's text: the file may hold a server's secret.
+            Err(_) => (FoundFile { shown: shown.clone(), servers: None }, Some(format!("{shown} could not be read"))),
+        }
+    };
+    let (claude, claude_error) = read(&homes.claude_json, claude_servers_of);
+    let (settings, settings_error) = read(&homes.claude_dir.join("settings.json"), claude_servers_of);
+    let (codex, codex_error) = read(&homes.codex_toml(), codex_servers_of);
+    [(Direction::ToClaude, claude, claude_error), (Direction::ToClaude, settings, settings_error), (Direction::ToCodex, codex, codex_error)]
+}
+
+/// `~/.claude.json` without these servers; everything else as it was.
+fn claude_without(text: &str, names: &BTreeSet<String>) -> Result<String> {
+    let mut root: IndexMap<String, Box<RawValue>> = serde_json::from_str(text).context("~/.claude.json is not a JSON object")?;
+    let Some(raw) = root.get("mcpServers") else { return Ok(text.to_string()) };
+    let mut entries: IndexMap<String, Box<RawValue>> = serde_json::from_str(raw.get()).context("`mcpServers` in ~/.claude.json is not an object")?;
+    if !names.iter().any(|name| entries.contains_key(name)) {
+        return Ok(text.to_string());
+    }
+    entries.retain(|name, _| !names.contains(name));
+    let servers_text = if entries.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{\n{}\n  }}", entries.iter().map(|(k, v)| format!("    {}: {}", Value::String(k.clone()), v.get())).collect::<Vec<_>>().join(",\n"))
+    };
+    root.insert("mcpServers".into(), RawValue::from_string(servers_text)?);
+    let body = root.iter().map(|(k, v)| format!("  {}: {}", Value::String(k.clone()), v.get())).collect::<Vec<_>>().join(",\n");
+    let mut written = format!("{{\n{body}\n}}");
+    if text.ends_with('\n') {
+        written.push('\n');
+    }
+    let before: Value = serde_json::from_str(text)?;
+    let after: Value = serde_json::from_str(&written).context("the new ~/.claude.json would not parse")?;
+    for (key, value) in before.as_object().into_iter().flatten() {
+        if key != "mcpServers" && after.get(key) != Some(value) {
+            bail!("writing ~/.claude.json would change `{key}`");
+        }
+    }
+    for (key, value) in before.get("mcpServers").and_then(Value::as_object).into_iter().flatten() {
+        if !names.contains(key) && after["mcpServers"].get(key) != Some(value) {
+            bail!("writing ~/.claude.json would change MCP server `{key}`");
+        }
+    }
+    Ok(written)
+}
+
+/// `config.toml` without these servers; everything else, comments included, as it was.
+fn codex_without(text: &str, names: &BTreeSet<String>) -> Result<String> {
+    let mut doc: toml_edit::DocumentMut = text.parse().context("~/.codex/config.toml is not valid TOML")?;
+    let Some(parent) = doc.as_table_mut().get_mut("mcp_servers").and_then(|i| i.as_table_like_mut()) else { return Ok(text.to_string()) };
+    let mut removed = false;
+    for name in names {
+        removed |= parent.remove(name).is_some();
+    }
+    if !removed {
+        return Ok(text.to_string());
+    }
+    let written = doc.to_string();
+    let before: toml::Table = toml::from_str(text)?;
+    let after: toml::Table = toml::from_str(&written)?;
+    for (key, value) in &before {
+        if key != "mcp_servers" && after.get(key) != Some(value) {
+            bail!("writing config.toml would change `{key}`");
+        }
+    }
+    Ok(written)
+}
+
+/// Whether the file already holds each server exactly as wanted.
+fn holds(current: &BTreeMap<String, Server>, servers: &[(String, Transport)]) -> bool {
+    servers.iter().all(|(name, transport)| matches!(current.get(name).map(|s| &s.transport), Some(Ok(t)) if same_transport(t, transport)))
+}
+
+/// One agent's file brought to `servers` among the names TerminalX manages:
+/// each added or replaced, each of `drop` removed. Untouched when it already
+/// says that, so an agent's own writes to the file are not raced for nothing.
+/// The file as it was is kept once beside it (`.bak-terminalx-mcp`).
+fn sync_file(path: &Path, servers: &[(String, Transport)], drop: &BTreeSet<String>, codex: bool) -> Result<bool> {
+    let before = read_optional(path)?;
+    let text = before.clone().unwrap_or_default();
+    let current = if text.trim().is_empty() {
+        BTreeMap::new()
+    } else if codex {
+        codex_servers_of(&text)?
+    } else {
+        claude_servers_of(&text)?
+    };
+    let present: BTreeSet<String> = drop.iter().filter(|name| current.contains_key(*name)).cloned().collect();
+    if holds(&current, servers) && present.is_empty() {
+        return Ok(false);
+    }
+    let added = if servers.is_empty() {
+        text.clone()
+    } else if codex {
+        codex_with(&text, servers)?.0
+    } else {
+        claude_with(&text, servers)?.0
+    };
+    let written = if present.is_empty() {
+        added
+    } else if codex {
+        codex_without(&added, &present)?
+    } else {
+        claude_without(&added, &present)?
+    };
+    if before.as_deref() == Some(written.as_str()) {
+        return Ok(false);
+    }
+    if let Some(before) = &before {
+        let real = through_link(path)?;
+        let name = real.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        // Owner-only, as the file itself may hold another server's secret.
+        crate::store::write_atomic(&real.with_file_name(format!("{name}.bak-terminalx-mcp")), before.as_bytes())?;
+    }
+    write_file(path, written.as_bytes(), &mut Vec::new())?;
+    Ok(true)
+}
+
+/// Bring Claude Code's and Codex's own files to the servers Settings › MCP
+/// manages: `claude` and `codex` are what each should hold, and `drop` the
+/// names it wrote before and no longer wants in that agent. Servers the
+/// person added themselves are never touched, unless TerminalX now manages
+/// one of the same name. Returns the files that changed, as shown.
+pub(crate) fn sync_managed(homes: &Homes, claude: &[(String, Managed)], codex: &[(String, Managed)], drop_claude: &BTreeSet<String>, drop_codex: &BTreeSet<String>) -> Result<Vec<String>> {
+    let as_transports = |servers: &[(String, Managed)]| servers.iter().map(|(n, m)| (n.clone(), m.transport())).collect::<Vec<_>>();
+    let mut changed = Vec::new();
+    if sync_file(&homes.claude_json, &as_transports(claude), drop_claude, false)? {
+        changed.push(homes.pretty(&homes.claude_json));
+    }
+    if sync_file(&homes.codex_toml(), &as_transports(codex), drop_codex, true)? {
+        changed.push(homes.pretty(&homes.codex_toml()));
+    }
+    Ok(changed)
+}
+
 #[cfg(test)]
 #[path = "agent_configs_tests.rs"]
 mod tests;
