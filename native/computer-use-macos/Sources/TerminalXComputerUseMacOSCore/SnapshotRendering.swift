@@ -148,22 +148,100 @@ public enum SnapshotRenderHeuristics {
         shouldSuppressChildren(SnapshotRenderNode(role: role, title: name))
     }
 
+    public static let tabStripCompactionMinimumChildren = 10
+    public static let maxVisibleRows = 20
+
+    public static func shouldInspectTabStripCompaction(
+        parent: SnapshotRenderNode,
+        childCount: Int
+    ) -> Bool {
+        childCount >= tabStripCompactionMinimumChildren && isBrowserTabStripContainer(parent)
+    }
+
     public static func tabStripCompaction(
         parent: SnapshotRenderNode,
         children: [SnapshotRenderNode]
     ) -> SnapshotTabStripCompaction? {
-        guard isBrowserTabStripContainer(parent) else { return nil }
-        let tabIndexes = Set(children.indices.filter { isBrowserTabLike(children[$0]) })
-        guard tabIndexes.count >= 10 else { return nil }
+        tabStripCompaction(
+            parent: parent,
+            childCount: children.count,
+            childRole: { index in
+                let child = children[index]
+                return (role: child.role, roleDescription: child.roleDescription)
+            },
+            isChildSelected: { index in
+                isSelectedBrowserTab(children[index])
+            }
+        )
+    }
 
-        let selectedTabIndexes = Set(tabIndexes.filter { isSelectedBrowserTab(children[$0]) })
+    /// Evaluates tab-strip compaction lazily so callers avoid fetching child AX
+    /// attributes unless the parent is a tab-strip container with enough children.
+    public static func tabStripCompaction(
+        parent: SnapshotRenderNode,
+        childCount: Int,
+        childRole: (Int) -> (role: String, roleDescription: String?),
+        isChildSelected: (Int) -> Bool
+    ) -> SnapshotTabStripCompaction? {
+        guard shouldInspectTabStripCompaction(parent: parent, childCount: childCount) else {
+            return nil
+        }
+        var tabIndexes = Set<Int>()
+        var nonTabIndexes = Set<Int>()
+        for index in 0..<childCount {
+            if tabIndexes.count + (childCount - index) < tabStripCompactionMinimumChildren {
+                return nil
+            }
+            let info = childRole(index)
+            if isBrowserTabLike(role: info.role, roleDescription: info.roleDescription) {
+                tabIndexes.insert(index)
+            } else {
+                nonTabIndexes.insert(index)
+            }
+        }
+        guard tabIndexes.count >= tabStripCompactionMinimumChildren else { return nil }
+
+        var selectedTabIndexes = Set<Int>()
+        for index in tabIndexes where isChildSelected(index) {
+            selectedTabIndexes.insert(index)
+        }
         guard !selectedTabIndexes.isEmpty else { return nil }
 
-        let nonTabIndexes = Set(children.indices.filter { !tabIndexes.contains($0) })
         let retainedIndexes = nonTabIndexes.union(selectedTabIndexes)
         let omittedCount = tabIndexes.count - selectedTabIndexes.count
         guard omittedCount > 0 else { return nil }
         return SnapshotTabStripCompaction(retainedIndexes: retainedIndexes, omittedCount: omittedCount)
+    }
+
+    /// Prefers `kAXVisibleRowsAttribute` directly and only falls back to full row
+    /// enumeration + bounded frame filtering when `directVisibleRows` is unsupported/absent.
+    public static func selectVisibleRows<Row>(
+        directVisibleRows: () -> [Row]?,
+        allRows: () -> [Row]?,
+        hasParentFrame: () -> Bool,
+        isRowVisible: (Row) -> Bool,
+        limit: Int = maxVisibleRows
+    ) -> [Row]? {
+        if let visible = directVisibleRows() {
+            return Array(visible.prefix(limit))
+        }
+        guard let rows = allRows(), !rows.isEmpty else {
+            return nil
+        }
+        guard hasParentFrame() else {
+            return Array(rows.prefix(limit))
+        }
+        var visible: [Row] = []
+        visible.reserveCapacity(min(rows.count, limit))
+        for row in rows {
+            if isRowVisible(row) {
+                visible.append(row)
+                if visible.count >= limit {
+                    break
+                }
+            }
+        }
+        return visible.isEmpty ? Array(rows.prefix(limit)) : visible
     }
 
     public static func line(index: Int, node: SnapshotRenderNode) -> String {
@@ -252,7 +330,7 @@ public enum SnapshotRenderHeuristics {
             .replacingOccurrences(of: "]", with: "\\]")
     }
 
-    private static func isBrowserTabStripContainer(_ node: SnapshotRenderNode) -> Bool {
+    public static func isBrowserTabStripContainer(_ node: SnapshotRenderNode) -> Bool {
         let roleText = roleText(node)
         let title = clean(node.title)?.lowercased() ?? ""
         let label = clean(node.label)?.lowercased() ?? ""
@@ -263,13 +341,21 @@ public enum SnapshotRenderHeuristics {
             label == "tab bar"
     }
 
+    public static func isBrowserTabLike(role: String, roleDescription: String?) -> Bool {
+        let normalizedRoleDescription = clean(roleDescription)?.lowercased() ?? ""
+        return role == "AXTab" || normalizedRoleDescription == "tab"
+    }
+
     private static func isBrowserTabLike(_ node: SnapshotRenderNode) -> Bool {
-        let roleDescription = clean(node.roleDescription)?.lowercased() ?? ""
-        return node.role == "AXTab" || roleDescription == "tab"
+        isBrowserTabLike(role: node.role, roleDescription: node.roleDescription)
+    }
+
+    public static func isSelectedBrowserTab(isSelected: Bool, value: String?) -> Bool {
+        isSelected || clean(value) == "1"
     }
 
     private static func isSelectedBrowserTab(_ node: SnapshotRenderNode) -> Bool {
-        node.traits.contains("selected") || clean(node.value) == "1"
+        isSelectedBrowserTab(isSelected: node.traits.contains("selected"), value: node.value)
     }
 
     private static func splitCamelCase(_ value: String) -> String {

@@ -14,7 +14,7 @@ Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 
-Add-Type -TypeDefinition @"
+$script:TerminalXWin32TypeSource = @"
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -140,6 +140,112 @@ public static class TerminalXDesktopWin32 {
     }
 }
 "@
+
+function Get-TerminalXWin32CacheKey([string]$Source = $script:TerminalXWin32TypeSource) {
+    $framework = try {
+        [System.Runtime.InteropServices.RuntimeInformation]::FrameworkDescription
+    } catch {
+        [System.Environment]::Version.ToString()
+    }
+    $psEdition = if ($null -ne $PSVersionTable.PSEdition) { [string]$PSVersionTable.PSEdition } else { "Desktop" }
+    $psVersion = [string]$PSVersionTable.PSVersion
+    $bitness = [string][IntPtr]::Size
+    $material = "$framework|$psEdition|$psVersion|$bitness|$Source"
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($material))
+        return (([BitConverter]::ToString($hashBytes) -replace "-", "").ToLowerInvariant().Substring(0, 32))
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+function Get-TerminalXWin32CacheDirectory {
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        return (Join-Path (Join-Path $env:LOCALAPPDATA "TerminalX") "computer-use-cache")
+    }
+    Join-Path ([System.IO.Path]::GetTempPath()) "terminalx-computer-use-cache"
+}
+
+function Get-TerminalXWin32CachePath([string]$CacheDirectory = "", [string]$Source = $script:TerminalXWin32TypeSource) {
+    $directory = if ([string]::IsNullOrWhiteSpace($CacheDirectory)) { Get-TerminalXWin32CacheDirectory } else { $CacheDirectory }
+    $key = Get-TerminalXWin32CacheKey $Source
+    Join-Path $directory "TerminalXDesktopWin32-$key.dll"
+}
+
+function Initialize-TerminalXWin32Type([string]$CacheDirectory = "", [string]$Source = $script:TerminalXWin32TypeSource) {
+    if ($null -ne ("TerminalXDesktopWin32" -as [type])) { return }
+
+    $key = Get-TerminalXWin32CacheKey $Source
+    $dllPath = Get-TerminalXWin32CachePath $CacheDirectory $Source
+    $cacheDir = [System.IO.Path]::GetDirectoryName($dllPath)
+
+    if ([System.IO.File]::Exists($dllPath)) {
+        try {
+            Add-Type -Path $dllPath
+            if ($null -ne ("TerminalXDesktopWin32" -as [type])) { return }
+        } catch {
+            # Rebuild below if the cached assembly cannot be loaded by this runtime.
+        }
+    }
+
+    $mutex = $null
+    $hasLock = $false
+    $tempDllPath = $null
+    try {
+        [void][System.IO.Directory]::CreateDirectory($cacheDir)
+        try {
+            $mutex = New-Object System.Threading.Mutex($false, "Local\TerminalXDesktopWin32-$key")
+            try {
+                $hasLock = $mutex.WaitOne(15000)
+            } catch [System.Threading.AbandonedMutexException] {
+                $hasLock = $true
+            }
+        } catch {
+            $mutex = $null
+            $hasLock = $false
+        }
+
+        if ([System.IO.File]::Exists($dllPath)) {
+            try {
+                Add-Type -Path $dllPath
+                if ($null -ne ("TerminalXDesktopWin32" -as [type])) { return }
+            } catch {
+                try { [System.IO.File]::Delete($dllPath) } catch {}
+            }
+        }
+
+        $tempDllPath = Join-Path $cacheDir ("TerminalXDesktopWin32-$key-" + [Guid]::NewGuid().ToString("N") + ".tmp.dll")
+        Add-Type -TypeDefinition $Source -OutputAssembly $tempDllPath -OutputType Library
+        if (-not [System.IO.File]::Exists($dllPath)) {
+            try {
+                [System.IO.File]::Move($tempDllPath, $dllPath)
+            } catch {
+                if (-not [System.IO.File]::Exists($dllPath)) { throw }
+            }
+        }
+        Add-Type -Path $dllPath
+        if ($null -ne ("TerminalXDesktopWin32" -as [type])) { return }
+    } catch {
+        # Fall back to in-memory compilation if the disk cache is unavailable.
+    } finally {
+        if ($null -ne $tempDllPath -and [System.IO.File]::Exists($tempDllPath)) {
+            try { [System.IO.File]::Delete($tempDllPath) } catch {}
+        }
+        if ($hasLock -and $null -ne $mutex) {
+            try { $mutex.ReleaseMutex() } catch {}
+        }
+        if ($null -ne $mutex) {
+            try { $mutex.Dispose() } catch {}
+        }
+    }
+
+    if ($null -eq ("TerminalXDesktopWin32" -as [type])) {
+        Add-Type -TypeDefinition $Source
+    }
+}
+
+Initialize-TerminalXWin32Type
 
 $MaxNodes = 1200
 $MaxDepth = 64
@@ -372,17 +478,28 @@ function Get-TerminalXRuntimeId($Element) {
     try { @($Element.GetRuntimeId()) } catch { @() }
 }
 
-function Test-TerminalXSensitiveElement($Element) {
+function Test-TerminalXSensitiveElement(
+    $Element,
+    $LocalizedControlType = $null,
+    $ControlType = $null,
+    $Name = $null,
+    $AutomationId = $null,
+    $ClassName = $null
+) {
     try {
         if ($Element.Current.IsPassword) { return $true }
     } catch {}
-    $controlType = try { [string]$Element.Current.ControlType.ProgrammaticName } catch { "" }
+    $resolvedControlType = if ($null -ne $ControlType) {
+        [string]$ControlType
+    } else {
+        try { [string]$Element.Current.ControlType.ProgrammaticName } catch { "" }
+    }
     $parts = @(
-        (Get-TerminalXProperty $Element "LocalizedControlType"),
-        $controlType,
-        (Get-TerminalXProperty $Element "Name"),
-        (Get-TerminalXProperty $Element "AutomationId"),
-        (Get-TerminalXProperty $Element "ClassName")
+        $(if ($null -ne $LocalizedControlType) { [string]$LocalizedControlType } else { Get-TerminalXProperty $Element "LocalizedControlType" }),
+        $resolvedControlType,
+        $(if ($null -ne $Name) { [string]$Name } else { Get-TerminalXProperty $Element "Name" }),
+        $(if ($null -ne $AutomationId) { [string]$AutomationId } else { Get-TerminalXProperty $Element "AutomationId" }),
+        $(if ($null -ne $ClassName) { [string]$ClassName } else { Get-TerminalXProperty $Element "ClassName" })
     )
     $haystack = (($parts -join " ") -replace "\s+", " ").ToLowerInvariant()
     foreach ($term in @("password", "passcode", "secret", "one-time code", "verification code")) {
@@ -391,9 +508,16 @@ function Test-TerminalXSensitiveElement($Element) {
     $haystack -match "(^|[^a-z0-9])pin([^a-z0-9]|$)"
 }
 
-function Get-TerminalXValueText($Element) {
+function Get-TerminalXValueText(
+    $Element,
+    $LocalizedControlType = $null,
+    $ControlType = $null,
+    $Name = $null,
+    $AutomationId = $null,
+    $ClassName = $null
+) {
     try {
-        if (Test-TerminalXSensitiveElement $Element) { return "[redacted]" }
+        if (Test-TerminalXSensitiveElement $Element $LocalizedControlType $ControlType $Name $AutomationId $ClassName) { return "[redacted]" }
         $pattern = $Element.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
         $rawValue = $pattern.Current.Value
         $text = if ($null -eq $rawValue) { "" } else { [string]$rawValue }
@@ -452,71 +576,53 @@ function Test-TerminalXSuppressChildren([string]$RoleKey, [string]$Title, [strin
     )
 }
 
-function Get-TerminalXTextSnippets($Element, [int]$Limit = 6, [int]$MaxDepth = 3) {
-    $values = New-Object System.Collections.Generic.List[string]
-    $seen = New-Object System.Collections.Generic.HashSet[string]
+function Get-TerminalXDirectChildren($Node, $Walker = $null, [int]$Limit = 0) {
+    $result = New-Object System.Collections.Generic.List[object]
+    if ($null -eq $Node) { return ,$result.ToArray() }
 
-    function Visit-TerminalXText($Node, [int]$Depth) {
-        if ($values.Count -ge $Limit -or $Depth -gt $MaxDepth) { return }
-        $role = try { [string]$Node.Current.LocalizedControlType } catch { "" }
-        if ($role -match "text|link|label") {
-            foreach ($raw in @((Get-TerminalXProperty $Node "Name"), (Get-TerminalXValueText $Node))) {
-                $value = (($raw -replace "\s+", " ").Trim())
-                if (-not [string]::IsNullOrWhiteSpace($value) -and $seen.Add($value)) {
-                    if ($value.Length -gt 80) { $value = $value.Substring(0, 80) + "..." }
-                    $values.Add($value)
-                    if ($values.Count -ge $Limit) { return }
-                }
+    $activeWalker = $Walker
+    if ($null -eq $activeWalker -and ($Node -is [Windows.Automation.AutomationElement])) {
+        $activeWalker = [Windows.Automation.TreeWalker]::RawViewWalker
+    }
+    if ($null -ne $activeWalker) {
+        try {
+            $child = $activeWalker.GetFirstChild($Node)
+            while ($null -ne $child) {
+                $result.Add($child)
+                if ($Limit -gt 0 -and $result.Count -ge $Limit) { break }
+                $child = $activeWalker.GetNextSibling($child)
             }
+        } catch {}
+        return ,$result.ToArray()
+    }
+
+    try {
+        $collection = $Node.FindAll([Windows.Automation.TreeScope]::Children, [Windows.Automation.Condition]::TrueCondition)
+        $count = $collection.Count
+        if ($Limit -gt 0 -and $count -gt $Limit) { $count = $Limit }
+        for ($i = 0; $i -lt $count; $i++) {
+            $result.Add($collection.Item($i))
         }
-        try {
-            $children = $Node.FindAll([Windows.Automation.TreeScope]::Children, [Windows.Automation.Condition]::TrueCondition)
-            for ($i = 0; $i -lt $children.Count; $i++) {
-                Visit-TerminalXText $children.Item($i) ($Depth + 1)
-                if ($values.Count -ge $Limit) { return }
-            }
-        } catch {}
-    }
-
-    Visit-TerminalXText $Element 0
-    @($values.ToArray())
-}
-
-function Test-TerminalXPlainTextSubtree($Element, [int]$MaxDepth = 4) {
-    $script:sawTerminalXText = $false
-    $allowed = @("pane", "group", "custom", "unknown", "text", "link", "image")
-
-    function Visit-TerminalXPlainText($Node, [int]$Depth) {
-        if ($Depth -gt $MaxDepth) { return $false }
-        $role = try { [string]$Node.Current.LocalizedControlType } catch { "" }
-        $roleKey = $role.ToLowerInvariant()
-        if ($allowed -notcontains $roleKey) { return $false }
-        if ($roleKey -match "text|link") { $script:sawTerminalXText = $true }
-        if (@(Get-TerminalXMeaningfulActions @(Get-TerminalXActions $Node)).Count -gt 0) { return $false }
-        try {
-            $children = $Node.FindAll([Windows.Automation.TreeScope]::Children, [Windows.Automation.Condition]::TrueCondition)
-            for ($i = 0; $i -lt $children.Count; $i++) {
-                if (-not (Visit-TerminalXPlainText $children.Item($i) ($Depth + 1))) { return $false }
-            }
-        } catch {}
-        return $true
-    }
-
-    (Visit-TerminalXPlainText $Element 0) -and $script:sawTerminalXText
+    } catch {}
+    return ,$result.ToArray()
 }
 
 function New-TerminalXElementRecord($Element, [int]$Index, $WindowFrame) {
     $controlType = try { [string]$Element.Current.ControlType.ProgrammaticName } catch { "" }
+    $localizedControlType = Get-TerminalXProperty $Element "LocalizedControlType"
+    $automationId = Get-TerminalXProperty $Element "AutomationId"
+    $name = Get-TerminalXProperty $Element "Name"
+    $className = Get-TerminalXProperty $Element "ClassName"
     $nativeWindowHandle = try { [int64]$Element.Current.NativeWindowHandle } catch { 0 }
     [pscustomobject]@{
         index = $Index
         runtimeId = @(Get-TerminalXRuntimeId $Element)
-        automationId = Get-TerminalXProperty $Element "AutomationId"
-        name = Get-TerminalXProperty $Element "Name"
+        automationId = $automationId
+        name = $name
         controlType = $controlType
-        localizedControlType = Get-TerminalXProperty $Element "LocalizedControlType"
-        className = Get-TerminalXProperty $Element "ClassName"
-        value = Get-TerminalXValueText $Element
+        localizedControlType = $localizedControlType
+        className = $className
+        value = Get-TerminalXValueText $Element $localizedControlType $controlType $name $automationId $className
         isSelected = Test-TerminalXElementSelected $Element
         nativeWindowHandle = $nativeWindowHandle
         frame = Get-TerminalXElementFrame $Element $WindowFrame
@@ -533,15 +639,136 @@ function Test-TerminalXElementSelected($Element) {
     }
 }
 
-function Render-TerminalXTree($RootElement, $WindowFrame, [bool]$CompactBrowserTabs = $false) {
+function Render-TerminalXTree($RootElement, $WindowFrame, [bool]$CompactBrowserTabs = $false, $Walker = $null) {
     $records = New-Object System.Collections.Generic.List[object]
     $lines = New-Object System.Collections.Generic.List[string]
     $seen = New-Object System.Collections.Generic.HashSet[string]
+    $nodeCache = @{}
+    $plainTextRejected = New-Object System.Collections.Generic.HashSet[string]
     $truncation = [pscustomobject]@{
         truncated = $false
         maxNodes = $MaxNodes
         maxDepth = $MaxDepth
         maxDepthReached = $false
+    }
+
+    function Get-TerminalXNodeCacheKey($Node) {
+        $runtimeId = @(Get-TerminalXRuntimeId $Node)
+        if ($runtimeId.Count -gt 0) {
+            return ($runtimeId -join ".")
+        }
+        "obj:" + [System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Node)
+    }
+
+    function Get-TerminalXCachedNode($Node) {
+        $key = Get-TerminalXNodeCacheKey $Node
+        if ($nodeCache.ContainsKey($key)) {
+            return $nodeCache[$key]
+        }
+        $entry = [pscustomobject]@{
+            key = $key
+            node = $Node
+            record = $null
+            meaningfulActions = $null
+            children = $null
+            childrenLoaded = $false
+        }
+        $nodeCache[$key] = $entry
+        $entry
+    }
+
+    function Get-TerminalXCachedRecord($Entry) {
+        if ($null -eq $Entry.record) {
+            $Entry.record = New-TerminalXElementRecord $Entry.node 0 $WindowFrame
+            $Entry.meaningfulActions = @(Get-TerminalXMeaningfulActions $Entry.record.actions)
+        }
+        $Entry.record
+    }
+
+    function Get-TerminalXCachedChildren($Entry) {
+        if (-not $Entry.childrenLoaded) {
+            $Entry.childrenLoaded = $true
+            $Entry.children = Get-TerminalXDirectChildren $Entry.node $Walker
+        }
+        return ,$Entry.children
+    }
+
+    function Get-TerminalXCachedTextSnippets($Entry, [int]$Limit = 6, [int]$MaxDepth = 3) {
+        $values = New-Object System.Collections.Generic.List[string]
+        $seenText = New-Object System.Collections.Generic.HashSet[string]
+
+        function Collect-TerminalXCachedText($CandidateEntry, [int]$Depth) {
+            if ($values.Count -ge $Limit -or $Depth -gt $MaxDepth) { return }
+            $rec = Get-TerminalXCachedRecord $CandidateEntry
+            $role = [string]$rec.localizedControlType
+            if ($role -match "text|link|label") {
+                foreach ($raw in @($rec.name, $rec.value)) {
+                    $value = (($raw -replace "\s+", " ").Trim())
+                    if (-not [string]::IsNullOrWhiteSpace($value) -and $seenText.Add($value)) {
+                        if ($value.Length -gt 80) { $value = $value.Substring(0, 80) + "..." }
+                        $values.Add($value)
+                        if ($values.Count -ge $Limit) { return }
+                    }
+                }
+            }
+            $childNodes = Get-TerminalXCachedChildren $CandidateEntry
+            for ($i = 0; $i -lt $childNodes.Count; $i++) {
+                $childEntry = Get-TerminalXCachedNode $childNodes[$i]
+                Collect-TerminalXCachedText $childEntry ($Depth + 1)
+                if ($values.Count -ge $Limit) { return }
+            }
+        }
+
+        Collect-TerminalXCachedText $Entry 0
+        @($values.ToArray())
+    }
+
+    function Get-TerminalXCachedPlainTextSummary($Entry, [int]$Limit = 8, [int]$MaxDepth = 4) {
+        if ($plainTextRejected.Contains($Entry.key)) { return $null }
+        $allowed = @("pane", "group", "custom", "unknown", "text", "link", "image")
+        $values = New-Object System.Collections.Generic.List[string]
+        $seenText = New-Object System.Collections.Generic.HashSet[string]
+        $state = [pscustomobject]@{ sawText = $false }
+
+        function Visit-TerminalXCachedPlainText($CandidateEntry, [int]$Depth) {
+            if ($Depth -gt $MaxDepth -or $plainTextRejected.Contains($CandidateEntry.key)) { return $false }
+            $rec = Get-TerminalXCachedRecord $CandidateEntry
+            $roleKey = ([string]$rec.localizedControlType).ToLowerInvariant()
+            if ($allowed -notcontains $roleKey) {
+                [void]$plainTextRejected.Add($CandidateEntry.key)
+                return $false
+            }
+            if ($CandidateEntry.meaningfulActions.Count -gt 0) {
+                [void]$plainTextRejected.Add($CandidateEntry.key)
+                return $false
+            }
+            if ($roleKey -match "text|link") {
+                $state.sawText = $true
+            }
+            if ($roleKey -match "text|link|label" -and $values.Count -lt $Limit) {
+                foreach ($raw in @($rec.name, $rec.value)) {
+                    $value = (($raw -replace "\s+", " ").Trim())
+                    if (-not [string]::IsNullOrWhiteSpace($value) -and $seenText.Add($value)) {
+                        if ($value.Length -gt 80) { $value = $value.Substring(0, 80) + "..." }
+                        $values.Add($value)
+                        if ($values.Count -ge $Limit) { break }
+                    }
+                }
+            }
+            $childNodes = Get-TerminalXCachedChildren $CandidateEntry
+            for ($i = 0; $i -lt $childNodes.Count; $i++) {
+                $childEntry = Get-TerminalXCachedNode $childNodes[$i]
+                if (-not (Visit-TerminalXCachedPlainText $childEntry ($Depth + 1))) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        if (-not (Visit-TerminalXCachedPlainText $Entry 0) -or -not $state.sawText -or $values.Count -lt 2) {
+            return $null
+        }
+        ($values.ToArray() -join " ")
     }
 
     function Visit-TerminalXNode($Node, [int]$Depth) {
@@ -550,32 +777,32 @@ function Render-TerminalXTree($RootElement, $WindowFrame, [bool]$CompactBrowserT
             if ($Depth -gt $MaxDepth) { $truncation.maxDepthReached = $true }
             return
         }
-        $identity = try { (@($Node.GetRuntimeId()) -join ".") } catch { [Guid]::NewGuid().ToString() }
-        if (-not $seen.Add($identity)) { return }
+        $entry = Get-TerminalXCachedNode $Node
+        if (-not $seen.Add($entry.key)) { return }
 
-        $record = New-TerminalXElementRecord $Node $records.Count $WindowFrame
-        $children = @()
-        try {
-            $children = @($Node.FindAll([Windows.Automation.TreeScope]::Children, [Windows.Automation.Condition]::TrueCondition))
-        } catch {}
-        $meaningfulActions = @(Get-TerminalXMeaningfulActions $record.actions)
+        $record = Get-TerminalXCachedRecord $entry
+        $meaningfulActions = $entry.meaningfulActions
         $title = if ([string]::IsNullOrWhiteSpace($record.name)) { $record.automationId } else { $record.name }
         $role = if ([string]::IsNullOrWhiteSpace($record.localizedControlType)) { $record.controlType } else { $record.localizedControlType }
         $roleKey = $role.ToLowerInvariant()
         $genericSummary = $null
+        $children = $null
         if (($roleKey -in @("pane", "group", "custom", "unknown")) -and [string]::IsNullOrWhiteSpace($title) -and [string]::IsNullOrWhiteSpace($record.value)) {
-            $snippets = @(Get-TerminalXTextSnippets $Node 8 4)
-            if ($snippets.Count -ge 2 -and (Test-TerminalXPlainTextSubtree $Node)) {
-                $genericSummary = ($snippets -join " ")
+            if ($meaningfulActions.Count -eq 0) {
+                $genericSummary = Get-TerminalXCachedPlainTextSummary $entry 8 4
+                if ($null -eq $genericSummary) {
+                    $children = Get-TerminalXCachedChildren $entry
+                    if ($children.Count -le 1) {
+                        for ($i = 0; $i -lt $children.Count; $i++) {
+                            Visit-TerminalXNode $children[$i] $Depth
+                        }
+                        return
+                    }
+                }
             }
-        }
-        if (($roleKey -in @("pane", "group", "custom", "unknown")) -and [string]::IsNullOrWhiteSpace($title) -and [string]::IsNullOrWhiteSpace($record.value) -and $meaningfulActions.Count -eq 0 -and $null -eq $genericSummary -and $children.Count -le 1) {
-            for ($i = 0; $i -lt $children.Count; $i++) {
-                Visit-TerminalXNode $children.Item($i) $Depth
-            }
-            return
         }
 
+        $record.index = $records.Count
         $records.Add($record)
 
         $line = "$($record.index) $role $(Format-TerminalXSnapshotText $title)".TrimEnd()
@@ -583,7 +810,7 @@ function Render-TerminalXTree($RootElement, $WindowFrame, [bool]$CompactBrowserT
         if (-not [string]::IsNullOrWhiteSpace($genericSummary) -and $genericSummary -ne $title) {
             $line += ", Text: " + (Format-TerminalXSnapshotText $genericSummary)
         } elseif ($roleKey -in @("row", "data item", "list item")) {
-            $rowSummary = @((Get-TerminalXTextSnippets $Node 6 3)) -join " "
+            $rowSummary = @((Get-TerminalXCachedTextSnippets $entry 6 3)) -join " "
             if (-not [string]::IsNullOrWhiteSpace($rowSummary) -and $rowSummary -ne $title) {
                 $line += ", Text: " + (Format-TerminalXSnapshotText $rowSummary)
             }
@@ -594,9 +821,12 @@ function Render-TerminalXTree($RootElement, $WindowFrame, [bool]$CompactBrowserT
         $lines.Add(("`t" * $Depth) + $line)
 
         if (-not [string]::IsNullOrWhiteSpace($genericSummary) -or (Test-TerminalXSuppressChildren $roleKey $title $record.value $genericSummary)) { return }
+        if ($null -eq $children) {
+            $children = Get-TerminalXCachedChildren $entry
+        }
         $childLineStart = $lines.Count
         for ($i = 0; $i -lt $children.Count; $i++) {
-            Visit-TerminalXNode $children.Item($i) ($Depth + 1)
+            Visit-TerminalXNode $children[$i] ($Depth + 1)
         }
         if ($CompactBrowserTabs) {
             Compress-TerminalXRenderedBrowserTabs $records $lines $childLineStart ($Depth + 1)
@@ -873,19 +1103,73 @@ function Test-TerminalXSameRuntimeId($Left, $Right) {
     $true
 }
 
-function Find-TerminalXElement($RootElement, $Record) {
-    if ($null -eq $Record) { return $null }
+function Find-TerminalXElement($RootElement, $Record, $Walker = $null) {
+    if ($null -eq $RootElement -or $null -eq $Record) { return $null }
     if ($Record.index -eq 0) { return $RootElement }
+    $targetRuntimeId = @($Record.runtimeId)
+    if ($targetRuntimeId.Count -eq 0) { return $null }
+    $rootRuntimeId = @(Get-TerminalXRuntimeId $RootElement)
+    if (Test-TerminalXSameRuntimeId $rootRuntimeId $targetRuntimeId) {
+        return $RootElement
+    }
 
-    try {
-        $descendants = $RootElement.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
-        for ($i = 0; $i -lt $descendants.Count; $i++) {
-            $candidate = $descendants.Item($i)
-            if (Test-TerminalXSameRuntimeId @($candidate.GetRuntimeId()) @($Record.runtimeId)) {
-                return $candidate
+    $activeWalker = $Walker
+    if ($null -eq $activeWalker -and ($RootElement -is [Windows.Automation.AutomationElement])) {
+        $activeWalker = [Windows.Automation.TreeWalker]::RawViewWalker
+    }
+
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    $rootKey = ($rootRuntimeId -join ".")
+    if (-not [string]::IsNullOrEmpty($rootKey)) { [void]$seen.Add($rootKey) }
+
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push([pscustomobject]@{ node = $RootElement; depth = 0 })
+    $visited = 1
+
+    while ($stack.Count -gt 0 -and $visited -lt $MaxNodes) {
+        $entry = $stack.Pop()
+        $node = $entry.node
+        $depth = [int]$entry.depth
+        if ($depth -ge $MaxDepth) { continue }
+
+        $toPush = New-Object System.Collections.Generic.List[object]
+        if ($null -ne $activeWalker) {
+            try {
+                $child = $activeWalker.GetFirstChild($node)
+                while ($null -ne $child -and $visited -lt $MaxNodes) {
+                    $childRuntimeId = @(Get-TerminalXRuntimeId $child)
+                    $visited++
+                    if (Test-TerminalXSameRuntimeId $childRuntimeId $targetRuntimeId) {
+                        return $child
+                    }
+                    $childKey = ($childRuntimeId -join ".")
+                    if ([string]::IsNullOrEmpty($childKey) -or $seen.Add($childKey)) {
+                        $toPush.Add($child)
+                    }
+                    $child = $activeWalker.GetNextSibling($child)
+                }
+            } catch {}
+        } else {
+            $remaining = $MaxNodes - $visited
+            $children = Get-TerminalXDirectChildren $node $null $remaining
+            for ($i = 0; $i -lt $children.Count -and $visited -lt $MaxNodes; $i++) {
+                $child = $children[$i]
+                $childRuntimeId = @(Get-TerminalXRuntimeId $child)
+                $visited++
+                if (Test-TerminalXSameRuntimeId $childRuntimeId $targetRuntimeId) {
+                    return $child
+                }
+                $childKey = ($childRuntimeId -join ".")
+                if ([string]::IsNullOrEmpty($childKey) -or $seen.Add($childKey)) {
+                    $toPush.Add($child)
+                }
             }
         }
-    } catch {}
+
+        for ($i = $toPush.Count - 1; $i -ge 0; $i--) {
+            $stack.Push([pscustomobject]@{ node = $toPush[$i]; depth = ($depth + 1) })
+        }
+    }
     $null
 }
 

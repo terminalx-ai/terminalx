@@ -103,9 +103,12 @@ def pid_of(node):
     return int(attempt(node.get_process_id, 0) or 0)
 
 
+def state_set_contains(state_set, state):
+    return bool(state_set is not None and state is not None and attempt(lambda: state_set.contains(state), False))
+
+
 def has_state(node, state):
-    state_set = attempt(node.get_state_set)
-    return bool(state_set is not None and attempt(lambda: state_set.contains(state), False))
+    return state_set_contains(attempt(node.get_state_set), state)
 
 
 def screen_rect(node):
@@ -293,10 +296,14 @@ def is_text_node(node):
     return bool(result) if result is not None else text_iface(node) is not None
 
 
-def string_value(node):
-    if is_secure_node(node):
+def string_value(node, *, is_secure=None, is_text=None):
+    if is_secure is None:
+        is_secure = is_secure_node(node)
+    if is_secure:
         return "[redacted]"
-    if is_text_node(node):
+    if is_text is None:
+        is_text = is_text_node(node)
+    if is_text:
         iface = text_iface(node)
         count = int(attempt(lambda: Atspi.Text.get_character_count(iface), 0) or 0)
         if iface is not None and count > 0:
@@ -310,17 +317,19 @@ def string_value(node):
     return ""
 
 
-def is_secure_node(node):
-    role = role_of(node).lower()
-    label = " ".join([role, name_of(node).lower(), accessible_id(node).lower()])
+def is_secure_metadata(role, name, acc_id, state_set):
+    label = " ".join([role.lower(), name.lower(), acc_id.lower()])
     sensitive_terms = ("password", "passcode", "secret", "one-time code", "verification code")
     if any(term in label for term in sensitive_terms) or re.search(r"(^|[^a-z0-9])pin([^a-z0-9]|$)", label):
         return True
-    state_set = attempt(node.get_state_set)
     protected_state = getattr(Atspi.StateType, "PROTECTED", None)
-    if state_set is not None and protected_state is not None and attempt(lambda: state_set.contains(protected_state), False):
+    if state_set_contains(state_set, protected_state):
         return True
     return False
+
+
+def is_secure_node(node):
+    return is_secure_metadata(role_of(node), name_of(node), accessible_id(node), attempt(node.get_state_set))
 
 
 def accessible_id(node):
@@ -329,45 +338,162 @@ def accessible_id(node):
 
 def record(node, index, path, window_rect):
     role = role_of(node)
+    name = name_of(node)
+    acc_id = accessible_id(node)
+    state_set = attempt(node.get_state_set)
     rect = relative_rect(node, window_rect)
     return {
         "index": index,
         "runtimeId": path,
-        "automationId": accessible_id(node),
-        "name": name_of(node),
+        "automationId": acc_id,
+        "name": name,
         "controlType": role,
         "localizedControlType": role,
         "className": str(attempt(node.get_toolkit_name, "") or ""),
-        "value": string_value(node),
-        "isSelected": has_state(node, Atspi.StateType.SELECTED),
+        "value": string_value(node, is_secure=is_secure_metadata(role, name, acc_id, state_set)),
+        "isSelected": state_set_contains(state_set, getattr(Atspi.StateType, "SELECTED", None)),
         "nativeWindowHandle": 0,
         "frame": rect.to_json() if rect else None,
         "actions": action_labels(node),
     }
 
 
-def render_accessibility_tree(root, window_rect, root_path, compact_browser_tabs=False):
+def selected_text_from_node(node):
+    iface = text_iface(node) if node is not None else None
+    if iface is None:
+        return None
+    selections = attempt(lambda: Atspi.Text.get_text_selections(iface), [])
+    if not selections:
+        return None
+    selection = selections[0]
+    return attempt(lambda: Atspi.Text.get_text(iface, selection.start_offset, selection.end_offset))
+
+
+def render_accessibility_tree_with_focus(root, window_rect, root_path, compact_browser_tabs=False):
     records = []
     lines = []
     truncation = {"truncated": False, "maxNodes": MAX_NODES, "maxDepth": MAX_DEPTH, "maxDepthReached": False}
 
-    def text_snippets(node, limit=6, max_depth=3):
+    # Per-walk cache avoids repeated D-Bus IPC for children, state sets, and
+    # attributes across summary extraction, elision, and main tree rendering.
+    node_cache = {}
+    plain_text_rejected = set()
+    focused_state = getattr(Atspi.StateType, "FOCUSED", None)
+    selected_state = getattr(Atspi.StateType, "SELECTED", None)
+    focused_entry = None
+    focused_text_node = None
+
+    def get_entry(node):
+        key = id(node)
+        entry = node_cache.get(key)
+        if entry is None:
+            entry = {"node": node}
+            node_cache[key] = entry
+        return entry
+
+    def cached_role(node):
+        entry = get_entry(node)
+        if "role" not in entry:
+            entry["role"] = role_of(node)
+        return entry["role"]
+
+    def cached_name(node):
+        entry = get_entry(node)
+        if "name" not in entry:
+            entry["name"] = name_of(node)
+        return entry["name"]
+
+    def cached_accessible_id(node):
+        entry = get_entry(node)
+        if "accessible_id" not in entry:
+            entry["accessible_id"] = accessible_id(node)
+        return entry["accessible_id"]
+
+    def cached_state_set(node):
+        entry = get_entry(node)
+        if "state_set" not in entry:
+            entry["state_set"] = attempt(node.get_state_set)
+        return entry["state_set"]
+
+    def cached_is_text(node):
+        entry = get_entry(node)
+        if "is_text" not in entry:
+            entry["is_text"] = is_text_node(node)
+        return entry["is_text"]
+
+    def cached_value(node):
+        entry = get_entry(node)
+        if "value" not in entry:
+            secure = is_secure_metadata(
+                cached_role(node),
+                cached_name(node),
+                cached_accessible_id(node),
+                cached_state_set(node),
+            )
+            entry["value"] = string_value(node, is_secure=secure, is_text=cached_is_text(node))
+        return entry["value"]
+
+    def cached_actions(node):
+        entry = get_entry(node)
+        if "actions" not in entry:
+            entry["actions"] = action_labels(node)
+        return entry["actions"]
+
+    def cached_children(node):
+        entry = get_entry(node)
+        if "children" not in entry:
+            entry["children"] = list(children(node))
+        return entry["children"]
+
+    def observe_focus(node):
+        nonlocal focused_entry, focused_text_node
+        if focused_state is None or (focused_entry is not None and focused_text_node is not None):
+            return
+        if state_set_contains(cached_state_set(node), focused_state):
+            if focused_entry is None:
+                focused_entry = get_entry(node)
+            if focused_text_node is None and cached_is_text(node):
+                focused_text_node = node
+
+    def cached_record(node, index, path):
+        role = cached_role(node)
+        name = cached_name(node)
+        acc_id = cached_accessible_id(node)
+        state_set = cached_state_set(node)
+        rect = relative_rect(node, window_rect)
+        return {
+            "index": index,
+            "runtimeId": path,
+            "automationId": acc_id,
+            "name": name,
+            "controlType": role,
+            "localizedControlType": role,
+            "className": str(attempt(node.get_toolkit_name, "") or ""),
+            "value": cached_value(node),
+            "isSelected": state_set_contains(state_set, selected_state),
+            "nativeWindowHandle": 0,
+            "frame": rect.to_json() if rect else None,
+            "actions": cached_actions(node),
+        }
+
+    def collect_text_snippets(node, limit=6, max_depth=3):
         values = []
         seen = set()
 
         def collect(candidate, depth):
             if len(values) >= limit or depth > max_depth:
                 return
-            role = role_of(candidate).lower()
+            observe_focus(candidate)
+            role = cached_role(candidate).lower()
             if role in {"label", "static", "static text", "text", "link"}:
-                for raw in (name_of(candidate), string_value(candidate)):
+                for raw in (cached_name(candidate), cached_value(candidate)):
                     value = " ".join(str(raw or "").split())
                     if value and value not in seen:
                         seen.add(value)
                         values.append(value[:80])
                         if len(values) >= limit:
                             return
-            for _, child in children(candidate):
+            for _, child in cached_children(candidate):
                 collect(child, depth + 1)
                 if len(values) >= limit:
                     return
@@ -375,24 +501,44 @@ def render_accessibility_tree(root, window_rect, root_path, compact_browser_tabs
         collect(node, 0)
         return values
 
-    def is_plain_text_subtree(node, max_depth=4):
-        saw_text = False
+    def collect_plain_text_summary(node, limit=8, max_depth=4):
+        if id(node) in plain_text_rejected:
+            return None
         allowed = {"panel", "filler", "unknown", "section", "label", "static", "static text", "text", "link", "image"}
+        values = []
+        seen = set()
+        saw_text = False
 
         def visit(candidate, depth):
             nonlocal saw_text
-            if depth > max_depth:
+            if depth > max_depth or id(candidate) in plain_text_rejected:
                 return False
-            role = role_of(candidate).lower()
+            observe_focus(candidate)
+            role = cached_role(candidate).lower()
             if role not in allowed:
+                plain_text_rejected.add(id(candidate))
+                return False
+            if meaningful_actions(cached_actions(candidate)):
+                plain_text_rejected.add(id(candidate))
                 return False
             if role in {"label", "static", "static text", "text", "link"}:
                 saw_text = True
-            if meaningful_actions(action_labels(candidate)):
-                return False
-            return all(visit(child, depth + 1) for _, child in children(candidate))
+                if len(values) < limit:
+                    for raw in (cached_name(candidate), cached_value(candidate)):
+                        value = " ".join(str(raw or "").split())
+                        if value and value not in seen:
+                            seen.add(value)
+                            values.append(value[:80])
+                            if len(values) >= limit:
+                                break
+            for _, child in cached_children(candidate):
+                if not visit(child, depth + 1):
+                    return False
+            return True
 
-        return visit(node, 0) and saw_text
+        if not visit(node, 0) or not saw_text or len(values) < 2:
+            return None
+        return " ".join(values)
 
     def should_elide(item, child_count, summary):
         role = (item["controlType"] or "").lower()
@@ -405,18 +551,21 @@ def render_accessibility_tree(root, window_rect, root_path, compact_browser_tabs
             if depth > MAX_DEPTH:
                 truncation["maxDepthReached"] = True
             return
-        item = record(node, len(records), path, window_rect)
-        child_items = list(children(node))
+        observe_focus(node)
+        item = cached_record(node, len(records), path)
         role_key = (item["controlType"] or "").lower()
+        filtered_actions = meaningful_actions(item["actions"])
         generic_summary = None
+        child_items = None
         if role_key in {"panel", "filler", "unknown", "section"} and not item["name"] and not item["value"]:
-            summary_values = text_snippets(node, limit=8, max_depth=4)
-            if len(summary_values) >= 2 and is_plain_text_subtree(node):
-                generic_summary = " ".join(summary_values)
-        if should_elide(item, len(child_items), generic_summary):
-            for child_index, child in child_items:
-                walk(child, depth, path + [child_index])
-            return
+            if not filtered_actions:
+                generic_summary = collect_plain_text_summary(node, limit=8, max_depth=4)
+            if generic_summary is None and not item["automationId"] and not filtered_actions:
+                child_items = cached_children(node)
+                if should_elide(item, len(child_items), generic_summary):
+                    for child_index, child in child_items:
+                        walk(child, depth, path + [child_index])
+                    return
         records.append(item)
         title = item["name"] or item["automationId"] or ""
         role_label = item["localizedControlType"] or item["controlType"]
@@ -425,15 +574,16 @@ def render_accessibility_tree(root, window_rect, root_path, compact_browser_tabs
         if generic_summary and generic_summary != title:
             line += ", Text: " + sanitize_text(generic_summary)
         elif role_key in {"row", "table row", "list item"}:
-            row_summary = " ".join(text_snippets(node))
+            row_summary = " ".join(collect_text_snippets(node))
             if row_summary and row_summary != title:
                 line += ", Text: " + sanitize_text(row_summary)
-        filtered_actions = meaningful_actions(item["actions"])
         if filtered_actions:
             line += ", Secondary Actions: " + ", ".join(display_action(action) for action in filtered_actions)
         lines.append(("\t" * depth) + line)
         if generic_summary or suppress_children(role_key, title, item["value"], generic_summary):
             return
+        if child_items is None:
+            child_items = cached_children(node)
         child_line_start = len(lines)
         for child_index, child in child_items:
             walk(child, depth + 1, path + [child_index])
@@ -441,6 +591,24 @@ def render_accessibility_tree(root, window_rect, root_path, compact_browser_tabs
             compact_rendered_browser_tabs(records, lines, child_line_start, depth + 1)
 
     walk(root, 0, root_path)
+    focused_summary_text = None
+    if focused_entry is not None:
+        focused_node = focused_entry["node"]
+        focused_summary_text = (cached_role(focused_node) + " " + cached_name(focused_node)).strip()
+    focus_info = {
+        "focusedSummary": focused_summary_text,
+        "selectedText": selected_text_from_node(focused_text_node) if focused_text_node is not None else None,
+    }
+    return records, lines, truncation, focus_info
+
+
+def render_accessibility_tree(root, window_rect, root_path, compact_browser_tabs=False):
+    records, lines, truncation, _ = render_accessibility_tree_with_focus(
+        root,
+        window_rect,
+        root_path,
+        compact_browser_tabs=compact_browser_tabs,
+    )
     return records, lines, truncation
 
 
@@ -618,12 +786,7 @@ def focused_summary(window):
 
 def selected_text(window):
     node = first_descendant(window, lambda candidate: has_state(candidate, Atspi.StateType.FOCUSED) and is_text_node(candidate))
-    iface = text_iface(node) if node is not None else None
-    selections = attempt(lambda: Atspi.Text.get_text_selections(iface), [])
-    if not selections:
-        return None
-    selection = selections[0]
-    return Atspi.Text.get_text(iface, selection.start_offset, selection.end_offset)
+    return selected_text_from_node(node)
 
 
 def app_json(app):
@@ -656,7 +819,7 @@ def make_snapshot(query, include_screenshot, window_id=None, window_index=None, 
         restore_window(app, window)
         window_index, window = choose_window(app, window_id, window_index)
     bounds = screen_rect(window)
-    records, lines, truncation = render_accessibility_tree(
+    records, lines, truncation, focus_info = render_accessibility_tree_with_focus(
         window,
         bounds,
         [window_index],
@@ -678,8 +841,8 @@ def make_snapshot(query, include_screenshot, window_id=None, window_index=None, 
         "coordinateSpace": "window",
         "truncation": truncation,
         "treeLines": lines,
-        "focusedSummary": focused_summary(window),
-        "selectedText": selected_text(window),
+        "focusedSummary": focus_info["focusedSummary"],
+        "selectedText": focus_info["selectedText"],
         "elements": records,
     }
 
@@ -729,8 +892,17 @@ def handshake_response():
 
 def find_by_path(app, path):
     node = app
-    for index in path or []:
-        node = dict(children(node)).get(int(index))
+    for raw_index in path or []:
+        try:
+            index = int(raw_index)
+        except (TypeError, ValueError):
+            return None
+        if index < 0:
+            return None
+        count = int(attempt(node.get_child_count, 0) or 0)
+        if index >= count:
+            return None
+        node = attempt(lambda n=node, i=index: n.get_child_at_index(i))
         if node is None:
             return None
     return node

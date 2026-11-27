@@ -8,6 +8,23 @@ from pathlib import Path
 class FakeStateType:
     PROTECTED = 1
     SELECTED = 2
+    FOCUSED = 3
+    ACTIVE = 4
+    SHOWING = 5
+
+
+class FakeStateSet:
+    def __init__(self, states):
+        self.states = set(states)
+
+    def contains(self, state):
+        return state in self.states
+
+
+class FakeSelection:
+    def __init__(self, start_offset, end_offset):
+        self.start_offset = start_offset
+        self.end_offset = end_offset
 
 
 class FakeText:
@@ -18,6 +35,10 @@ class FakeText:
     @staticmethod
     def get_text(node, start, end):
         return node.value[start:end]
+
+    @staticmethod
+    def get_text_selections(node):
+        return list(node.selections)
 
 
 def load_runtime():
@@ -43,12 +64,16 @@ runtime = load_runtime()
 
 
 class FakeAccessible:
-    def __init__(self, role, name="", value="", children=(), counter=None):
+    def __init__(self, role, name="", value="", children=(), counter=None, states=(), selections=()):
         self.role = role
         self.name = name
         self.value = value
         self.children = list(children)
-        self.counter = counter or {"child_reads": 0}
+        self.states = set(states)
+        self.selections = list(selections)
+        self.child_count_calls = 0
+        self.child_at_calls = 0
+        self.counter = counter or {"child_reads": 0, "state_reads": 0, "child_at_reads": 0}
         for child in self.children:
             child.use_counter(self.counter)
 
@@ -58,11 +83,14 @@ class FakeAccessible:
             child.use_counter(counter)
 
     def get_child_count(self):
+        self.child_count_calls += 1
         self.counter["child_reads"] += 1
         return len(self.children)
 
     def get_child_at_index(self, index):
+        self.child_at_calls += 1
         self.counter["child_reads"] += 1
+        self.counter["child_at_reads"] += 1
         return self.children[index]
 
     def get_role_name(self):
@@ -77,20 +105,24 @@ class FakeAccessible:
     def get_toolkit_name(self):
         return "fake"
 
+    def get_process_id(self):
+        return 1234
+
     def get_component_iface(self):
         return None
 
     def get_state_set(self):
-        return None
+        self.counter["state_reads"] += 1
+        return FakeStateSet(self.states) if self.states else None
 
     def get_n_actions(self):
         return 0
 
     def is_text(self):
-        return bool(self.value)
+        return bool(self.value or self.selections)
 
     def get_text_iface(self):
-        return self if self.value else None
+        return self if (self.value or self.selections) else None
 
     def get_value_iface(self):
         return None
@@ -113,7 +145,7 @@ class RuntimeRenderTest(unittest.TestCase):
 
         self.assertEqual([record["name"] for record in records], ["Save"])
         self.assertEqual(lines, ["0 button Save"])
-        self.assertEqual(root.counter["child_reads"], 2)
+        self.assertEqual(root.counter["child_reads"], 0)
         self.assertFalse(truncation["truncated"])
 
     def test_named_generic_node_skips_unused_summary_walk(self):
@@ -135,7 +167,8 @@ class RuntimeRenderTest(unittest.TestCase):
 
         self.assertEqual(len(records), 1)
         self.assertEqual(lines, ["0 section, Text: Alpha Beta"])
-        self.assertEqual(root.counter["child_reads"], 13)
+        # Single-pass cached read: root (1 count + 2 child lookups) + 2 leaves (1 count each) = 5.
+        self.assertEqual(root.counter["child_reads"], 5)
 
     def test_row_keeps_its_specific_summary_walk(self):
         root = FakeAccessible(
@@ -148,7 +181,75 @@ class RuntimeRenderTest(unittest.TestCase):
 
         self.assertEqual([record["name"] for record in records], ["Invoice", "Alpha", "Beta"])
         self.assertEqual(lines, ["0 row Invoice, Text: Alpha Beta", "\t1 text Alpha", "\t2 text Beta"])
-        self.assertEqual(root.counter["child_reads"], 10)
+        # Single-pass cached read: row children read once and reused during tree rendering.
+        self.assertEqual(root.counter["child_reads"], 5)
+
+    def test_nested_generic_containers_do_not_rewalk_depth_four_subtrees(self):
+        leaf_button = FakeAccessible("button", "Submit")
+        leaf_text = FakeAccessible("text", "Hint")
+        inner = FakeAccessible("panel", children=[leaf_button, leaf_text])
+        level3 = FakeAccessible("section", children=[inner])
+        level2 = FakeAccessible("section", children=[level3])
+        level1 = FakeAccessible("section", children=[level2])
+        root = FakeAccessible("panel", children=[level1])
+
+        records, lines, _ = render(root)
+
+        self.assertEqual([record["name"] for record in records], ["", "Submit", "Hint"])
+        self.assertEqual(lines, ["0 panel", "\t1 button Submit", "\t2 text Hint"])
+        for node in (root, level1, level2, level3, inner, leaf_button, leaf_text):
+            self.assertLessEqual(node.child_count_calls, 1)
+
+    def test_make_snapshot_captures_focus_and_selection_in_single_pass(self):
+        focused_input = FakeAccessible(
+            "entry",
+            "Search",
+            value="hello world",
+            states={FakeStateType.FOCUSED},
+            selections=[FakeSelection(6, 11)],
+        )
+        other_button = FakeAccessible("button", "Cancel")
+        window = FakeAccessible(
+            "frame",
+            "Demo Window",
+            children=[other_button, focused_input],
+            states={FakeStateType.ACTIVE, FakeStateType.SHOWING},
+        )
+        app = FakeAccessible("application", "DemoApp", children=[window])
+
+        original_find_app = runtime.find_app
+        original_choose_window = runtime.choose_window
+        try:
+            runtime.find_app = lambda query: app
+            runtime.choose_window = lambda a, wid, widx: (0, window)
+            snapshot = runtime.make_snapshot("DemoApp", include_screenshot=False)
+        finally:
+            runtime.find_app = original_find_app
+            runtime.choose_window = original_choose_window
+
+        self.assertEqual(snapshot["focusedSummary"], "entry Search")
+        self.assertEqual(snapshot["selectedText"], "world")
+        # Each node in the window is traversed only once (no separate focused_summary/selected_text walks).
+        self.assertEqual(window.child_count_calls, 1)
+        self.assertEqual(window.child_at_calls, 2)
+        self.assertEqual(focused_input.child_count_calls, 1)
+        self.assertEqual(other_button.child_count_calls, 0)
+
+    def test_find_by_path_indexes_directly_without_scanning_siblings(self):
+        target_leaf = FakeAccessible("button", "Target")
+        siblings = [FakeAccessible("panel", f"Item {i}") for i in range(100)]
+        siblings[73] = FakeAccessible("panel", "Holder", children=[target_leaf])
+        root = FakeAccessible("application", "App", children=siblings)
+
+        found = runtime.find_by_path(root, [73, 0])
+
+        self.assertIs(found, target_leaf)
+        # Only 2 direct get_child_at_index calls along path [73, 0], never scanning all 100 siblings.
+        self.assertEqual(root.counter["child_at_reads"], 2)
+        self.assertIsNone(runtime.find_by_path(root, [-1]))
+        self.assertIsNone(runtime.find_by_path(root, [100]))
+        self.assertIsNone(runtime.find_by_path(root, ["not-an-int"]))
+        self.assertIsNone(runtime.find_by_path(FailingChildrenAccessible("application", "Broken"), [0]))
 
     def test_empty_generic_wrapper_keeps_elision_path_and_depth(self):
         root = FakeAccessible("section", children=[FakeAccessible("button", "Continue")])

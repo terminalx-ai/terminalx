@@ -34,6 +34,42 @@ final class AgentEntrypointSourceSafetyTests: XCTestCase {
         XCTAssertTrue(source.contains("event.flags = flags\n        event.postToPid(pid)"))
     }
 
+    func testSocketWorkerAndPngResizeUseAutoreleasepools() throws {
+        let source = try agentEntrypointSource()
+        let handleConnectionStart = try XCTUnwrap(source.range(of: "private func handleConnection("))
+        let handleConnectionEnd = try XCTUnwrap(
+            source.range(of: "private func disconnectSession(", range: handleConnectionStart.upperBound..<source.endIndex)
+        )
+        let handleConnection = source[handleConnectionStart.lowerBound..<handleConnectionEnd.lowerBound]
+        XCTAssertTrue(handleConnection.contains("while let line = readLine(from: fd) {\n            let loopAction: ConnectionLoopAction = autoreleasepool {"))
+
+        let boundedStart = try XCTUnwrap(source.range(of: "private func boundedPngData("))
+        let boundedEnd = try XCTUnwrap(
+            source.range(of: "private func resizePng(", range: boundedStart.upperBound..<source.endIndex)
+        )
+        let boundedPng = source[boundedStart.lowerBound..<boundedEnd.lowerBound]
+        XCTAssertGreaterThanOrEqual(boundedPng.components(separatedBy: "autoreleasepool {").count - 1, 2)
+    }
+
+    func testMacOSPerfOptimizationsAreWiredInEntrypoint() throws {
+        let source = try agentEntrypointSource()
+        // P-15: no unconditional 400ms sleep; adaptive settling unlocks providerLock.
+        XCTAssertFalse(source.contains("Thread.sleep(forTimeInterval: 0.4)"))
+        XCTAssertTrue(source.contains("WindowActivationSettling.settle("))
+        XCTAssertTrue(source.contains("externalLock.unlock()\n            defer { externalLock.lock() }"))
+        // P-15: tab-strip compaction gated before child AX IPCs; direct kAXVisibleRowsAttribute query.
+        XCTAssertTrue(source.contains("SnapshotRenderHeuristics.shouldInspectTabStripCompaction(parent: parent, childCount: children.count)"))
+        XCTAssertTrue(source.contains("copyArray(parent, kAXVisibleRowsAttribute as String)"))
+        // P-15: action pre-flight avoids full TreeRenderer crawl.
+        let actionSnapshotStart = try XCTUnwrap(source.range(of: "private func buildActionSnapshot("))
+        let actionSnapshotEnd = try XCTUnwrap(
+            source.range(of: "private func buildSnapshot(", range: actionSnapshotStart.upperBound..<source.endIndex)
+        )
+        let actionSnapshot = source[actionSnapshotStart.lowerBound..<actionSnapshotEnd.lowerBound]
+        XCTAssertFalse(actionSnapshot.contains("TreeRenderer("))
+        XCTAssertTrue(actionSnapshot.contains("revalidatedElementRecord("))
+    }
+
     private func agentEntrypointSource() throws -> String {
         let testFile = URL(fileURLWithPath: #filePath)
         let packageRoot = testFile
