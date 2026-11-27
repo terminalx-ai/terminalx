@@ -346,6 +346,15 @@ impl Desktop {
         if !desktop.xvfb.is_running() || !desktop.manager.is_running() {
             return Err(DesktopError::StartupFailed);
         }
+        if !desktop.chrome.is_running() && debugging {
+            // Chrome would not start with the pipe: the desktop keeps a
+            // Chrome without it, and the tool says it is unavailable.
+            log::warn!("cloud desktop: Chrome did not start with the DevTools pipe; starting it without");
+            desktop.respawn_chrome(false).await?;
+            crate::cloud_browser::set_pipe_failed(true);
+        } else if debugging {
+            crate::cloud_browser::set_pipe_failed(false);
+        }
         if !desktop.chrome.is_running() {
             return Err(DesktopError::ChromeStartupFailed);
         }
@@ -434,9 +443,24 @@ impl Desktop {
     }
 
     /// Start Chrome again, with or without the runtime's DevTools pipe. Its
-    /// open tabs close; the rest of the desktop stays.
+    /// open tabs close; the rest of the desktop stays. A Chrome that will not
+    /// start with the pipe is started without it: `Ok(false)`, and the tool
+    /// reports itself unavailable. `Err` only when no Chrome starts at all.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    async fn relaunch_chrome(&mut self, debugging: bool) -> Result<(), DesktopError> {
+    async fn relaunch_chrome(&mut self, debugging: bool) -> Result<bool, DesktopError> {
+        let started = self.respawn_chrome(debugging).await;
+        if !debugging {
+            return started.map(|()| false);
+        }
+        crate::cloud_browser::set_pipe_failed(started.is_err());
+        if started.is_ok() {
+            return Ok(true);
+        }
+        log::warn!("cloud desktop: Chrome did not start with the DevTools pipe; starting it without");
+        self.respawn_chrome(false).await.map(|()| false)
+    }
+
+    async fn respawn_chrome(&mut self, debugging: bool) -> Result<(), DesktopError> {
         // The old Chrome and its pipe go first: a second Chrome on the same
         // profile would hand its window to the first and exit.
         self.devtools = None;
@@ -656,8 +680,13 @@ impl DesktopPool {
             state.desktop = Some(desktop);
         }
         let desktop = state.desktop.as_mut().expect("desktop started");
-        if desktop.devtools.as_ref().is_none_or(|cdp| cdp.is_closed()) {
-            desktop.relaunch_chrome(true).await?;
+        // Chrome already failed to start with the pipe on this desktop: not
+        // again (it would close the person's tabs each time) until it restarts.
+        if desktop.devtools.is_none() && crate::cloud_browser::pipe_failed() {
+            return Err(DesktopError::ChromeStartupFailed);
+        }
+        if desktop.devtools.as_ref().is_none_or(|cdp| cdp.is_closed()) && !desktop.relaunch_chrome(true).await? {
+            return Err(DesktopError::ChromeStartupFailed);
         }
         let devtools = desktop.devtools.clone().ok_or(DesktopError::ChromeStartupFailed)?;
         state.connected += 1;
@@ -1196,6 +1225,34 @@ mod tests {
             assert!(process.is_running());
             std::fs::remove_file(&args).unwrap();
         }
+    }
+
+    /// Review: a Chrome that will not start with the pipe is started without
+    /// it, so the desktop stays, and the tool reports itself unavailable.
+    #[tokio::test]
+    async fn chrome_that_fails_with_the_pipe_runs_without_it_and_the_tool_says_unavailable() {
+        let files = tempfile::tempdir().unwrap();
+        let chrome = files.path().join("chrome-fixture");
+        std::fs::write(&chrome, b"#!/bin/sh\ncase \"$*\" in *--remote-debugging-pipe*) exit 1;; esac\nexec /bin/sleep 15\n").unwrap();
+        std::fs::set_permissions(&chrome, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let idle = || Process::spawn(command(Path::new("/bin/sleep")).arg("15"), None).unwrap();
+        let mut desktop = Desktop {
+            chrome: idle(),
+            devtools: None,
+            _terminal: None,
+            manager: idle(),
+            xvfb: idle(),
+            authority: files.path().join("Xauthority"),
+            chrome_path: chrome,
+            vnc: files.path().join("rfb"),
+            files: Arc::new(files),
+            display: ":42".into(),
+        };
+        assert!(!desktop.relaunch_chrome(true).await.unwrap(), "no pipe");
+        assert!(crate::cloud_browser::pipe_failed());
+        assert!(desktop.devtools.is_none());
+        assert!(desktop.chrome.is_running(), "the desktop keeps a Chrome");
+        crate::cloud_browser::set_pipe_failed(false);
     }
 
     #[tokio::test]

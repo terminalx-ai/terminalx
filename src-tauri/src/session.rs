@@ -6683,7 +6683,7 @@ impl SessionManager {
             unset.push(crate::cloud_config::APPENDED_PROMPT_ENV.to_string());
         }
         // The cloud desktop's browser, only while the workspace offers it (PRO-209).
-        let browser = crate::cloud_browser::launch_args(&tab.harness, &exe.to_string_lossy(), &token);
+        let browser = crate::cloud_browser::launch_args(&tab.harness, &exe.to_string_lossy(), &token, &rt.session_id, &rt.tab_id);
         let spawned = crate::cloud_grants::env_prefix(&format!("{}{}{}{}{}", launch.command, config.args, computer.args, browser, prompt.args), &unset, &after_profile);
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);

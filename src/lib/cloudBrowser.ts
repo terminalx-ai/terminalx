@@ -40,15 +40,18 @@ export interface CloudDesktopAgent {
   held: boolean;
 }
 
-/** Whether the runtime offers the tool: off, on, or on but missing the desktop packages. */
-export type CloudBrowserOffer = "off" | "on" | "packages-missing";
+/**
+ * Whether the runtime offers the tool: off, on, on but missing the desktop
+ * packages, or on while Chrome could not start with the runtime's pipe.
+ */
+export type CloudBrowserOffer = "off" | "on" | "packages-missing" | "unavailable";
 
 export interface CloudDesktopAgentState {
   browser: CloudBrowserOffer;
   driving: CloudDesktopAgent | null;
 }
 
-const OFFERS: readonly CloudBrowserOffer[] = ["off", "on", "packages-missing"];
+const OFFERS: readonly CloudBrowserOffer[] = ["off", "on", "packages-missing", "unavailable"];
 
 /** Read a `desktop.agent` notification. Anything malformed is ignored. */
 export function parseDesktopAgent(event: WorkspaceNotification): CloudDesktopAgentState | null {

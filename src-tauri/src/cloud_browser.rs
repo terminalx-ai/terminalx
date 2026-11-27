@@ -83,11 +83,26 @@ fn set(flag: &AtomicBool, value: bool) {
     let was = ready();
     flag.store(value, Ordering::SeqCst);
     if was != ready() {
-        // Off: the session ends and Chrome starts again without the pipe.
+        // Chrome has the pipe exactly while the tool is on, so an agent's
+        // first session never restarts it. Off also ends the session.
         #[cfg(target_os = "linux")]
-        if was {
-            engine::withdraw(true);
-        }
+        engine::switched(!was);
+        changed();
+    }
+}
+
+/// Chrome could not start with the DevTools pipe and runs without it: the
+/// desktop stays up and the tool says it is unavailable.
+static PIPE_FAILED: AtomicBool = AtomicBool::new(false);
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn pipe_failed() -> bool {
+    PIPE_FAILED.load(Ordering::SeqCst)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn set_pipe_failed(failed: bool) {
+    if PIPE_FAILED.swap(failed, Ordering::SeqCst) != failed {
         changed();
     }
 }
@@ -115,14 +130,26 @@ pub(crate) fn offering(offer: Option<&'static str>) {
     TEST_OFFER.with(|cell| cell.set(offer));
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    /// The test's `offering`, carried onto the engine's own threads.
+    pub(crate) static TASK_OFFER: Option<&'static str>;
+}
+
+#[cfg(test)]
+pub(crate) fn test_offer() -> Option<&'static str> {
+    TEST_OFFER.with(std::cell::Cell::get).or_else(|| TASK_OFFER.try_with(|offer| *offer).ok().flatten())
+}
+
 /// Tests that touch the engine's process-wide state take this first.
 #[cfg(test)]
 pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// What the runtime says of the tool: off, on, or on without the packages.
+/// What the runtime says of the tool: off, on, on without the packages, or
+/// on while Chrome could not start with the runtime's pipe.
 pub(crate) fn offer() -> &'static str {
     #[cfg(test)]
-    if let Some(offer) = TEST_OFFER.with(std::cell::Cell::get) {
+    if let Some(offer) = test_offer() {
         return offer;
     }
     if !ready() {
@@ -132,6 +159,10 @@ pub(crate) fn offer() -> &'static str {
     if !crate::remote::cloud_desktop::shared_pool().is_some_and(|pool| pool.tools_present()) {
         return "packages-missing";
     }
+    #[cfg(target_os = "linux")]
+    if PIPE_FAILED.load(Ordering::SeqCst) {
+        return "unavailable";
+    }
     #[cfg(not(target_os = "linux"))]
     return "off";
     #[cfg(target_os = "linux")]
@@ -140,11 +171,18 @@ pub(crate) fn offer() -> &'static str {
 
 /// The MCP server this launch was given, by launch token, so the CLI gates
 /// pass exactly that server's tools and no other.
-static LAUNCHED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = std::sync::LazyLock::new(Default::default);
+struct Launched {
+    server: String,
+    session: String,
+    tab: String,
+}
+
+static LAUNCHED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Launched>>> = std::sync::LazyLock::new(Default::default);
+const LAUNCHED_LIMIT: usize = 256;
 
 /// The tool for one CLI launch, only while it is offered: `--mcp-config` or
 /// `-c mcp_servers`, under a server name of this launch's own.
-pub(crate) fn launch_args(harness: &str, exe: &str, token: &str) -> String {
+pub(crate) fn launch_args(harness: &str, exe: &str, token: &str, session: &str, tab: &str) -> String {
     if offer() != "on" || !matches!(harness, "claude" | "codex") {
         return String::new();
     }
@@ -164,11 +202,13 @@ pub(crate) fn launch_args(harness: &str, exe: &str, token: &str) -> String {
         }
     };
     let mut launched = LAUNCHED.lock().unwrap();
-    // Launches that are gone leave with the reaper's next pass; bounded anyway.
-    if launched.len() > 256 {
-        launched.clear();
+    // Bounded by dropping launches that have ended, never running ones.
+    if launched.len() >= LAUNCHED_LIMIT {
+        if let Some(alive) = LIVENESS.get() {
+            launched.retain(|token, launch| alive(&launch.session, &launch.tab, token));
+        }
     }
-    launched.insert(token.to_string(), server);
+    launched.insert(token.to_string(), Launched { server, session: session.into(), tab: tab.into() });
     args
 }
 
@@ -184,7 +224,7 @@ pub(crate) fn is_tool_of_launch(token: &str, name: &str) -> bool {
         return false;
     }
     let launched = LAUNCHED.lock().unwrap();
-    let Some(server) = launched.get(token) else { return false };
+    let Some(server) = launched.get(token).map(|launch| &launch.server) else { return false };
     name.strip_prefix("mcp__")
         .and_then(|rest| rest.strip_prefix(server.as_str()))
         .and_then(|rest| rest.strip_prefix("__"))
@@ -352,6 +392,7 @@ pub(crate) fn call(caller: Caller<'_>, payload: &Value, approve: &dyn Fn(Value) 
     match offer() {
         "on" => {}
         "packages-missing" => return text_result("The cloud browser is not offered here: this workspace's environment has no Linux desktop and Chrome.", true),
+        "unavailable" => return text_result("Chrome on the cloud desktop could not start with agent access, so the cloud browser is unavailable until the desktop restarts.", true),
         _ => return text_result("The cloud browser is off for this workspace. The workspace owner or an admin can turn on Cloud browser for agents in the workspace details.", true),
     }
     #[cfg(any(target_os = "linux", all(test, unix)))]
@@ -449,11 +490,11 @@ mod tests {
 
     #[test]
     fn not_offered_and_not_launched_while_off_or_without_the_packages() {
-        for state in ["off", "packages-missing"] {
+        for state in ["off", "packages-missing", "unavailable"] {
             offering(Some(state));
             assert_eq!(offer(), state);
-            assert_eq!(launch_args("claude", "/opt/terminalx", "t-off"), "");
-            assert_eq!(launch_args("codex", "/opt/terminalx", "t-off"), "");
+            assert_eq!(launch_args("claude", "/opt/terminalx", "t-off", "s", "t"), "");
+            assert_eq!(launch_args("codex", "/opt/terminalx", "t-off", "s", "t"), "");
             assert!(!launched_with_tool("t-off"));
             let result = call(Caller { key: "s/t/t-off".into(), agent: "Claude Code", tab_title: None, asks: true }, &json!({"tool": "open", "arguments": {"url": "http://localhost:3000"}}), &|_| panic!("never asks while off"));
             assert_eq!(result["isError"], true);
@@ -464,7 +505,7 @@ mod tests {
     #[test]
     fn the_cli_gates_pass_only_this_launchs_server_while_on() {
         offering(Some("on"));
-        let args = launch_args("claude", "/opt/terminalx", "t-gate");
+        let args = launch_args("claude", "/opt/terminalx", "t-gate", "s", "t");
         let config: Value = serde_json::from_str(args.trim().strip_prefix("--mcp-config ").unwrap().trim_matches('\'')).unwrap();
         let server = config["mcpServers"].as_object().unwrap().keys().next().unwrap().clone();
         assert!(server.starts_with("cloud_browser_") && server.len() > "cloud_browser_".len());
@@ -478,9 +519,25 @@ mod tests {
         offering(Some("off"));
         assert!(!is_tool_of_launch("t-gate", &format!("mcp__{server}__click")));
         offering(Some("on"));
-        let codex = launch_args("codex", "/opt/terminalx", "t-codex");
+        let codex = launch_args("codex", "/opt/terminalx", "t-codex", "s", "t");
         assert!(codex.contains("mcp_servers.cloud_browser_") && codex.contains("env_vars") && codex.contains("RACCOON_HOOK_TOKEN"));
         assert!(!codex.contains("RACCOON_HOOK_TOKEN="), "the token itself is never on the command line");
+        offering(None);
+    }
+
+    #[test]
+    fn a_full_launch_map_drops_ended_launches_and_keeps_running_ones() {
+        // Only tokens named "ended-…" count as ended, so other tests' launches stay.
+        set_liveness(|_, _, token| !token.starts_with("ended-"));
+        offering(Some("on"));
+        launch_args("claude", "/opt/terminalx", "live-keep", "s", "t");
+        for n in 0..LAUNCHED_LIMIT {
+            launch_args("claude", "/opt/terminalx", &format!("ended-{n}"), "s", "t");
+        }
+        launch_args("claude", "/opt/terminalx", "live-new", "s", "t");
+        assert!(launched_with_tool("live-keep"), "a running launch keeps its tool");
+        assert!(launched_with_tool("live-new"));
+        assert!(LAUNCHED.lock().unwrap().len() <= LAUNCHED_LIMIT);
         offering(None);
     }
 

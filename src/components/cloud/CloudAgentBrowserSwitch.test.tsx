@@ -69,3 +69,29 @@ it("names another enabler only by name, and never by time", () => {
   expect(enabledLine({ enabled: true, canChange: true, enabledBy: { userId: "other", name: "Fixture Admin" }, enabledAt: "2026-11-27T10:28:00Z" }, "me")).toBe("On · turned on by Fixture Admin");
   expect(enabledLine({ enabled: true, canChange: false }, "me")).toBe("On");
 });
+
+it("asks before turning off, saying the desktop's Chrome restarts, and says what the card is not", async () => {
+  m.get.mockResolvedValueOnce({ enabled: true, canChange: true });
+  m.get.mockResolvedValueOnce({ enabled: false, canChange: true });
+  render(<CloudAgentBrowserSwitch item={item} />);
+  await screen.findByText("On");
+  expect(screen.getByTestId("agent-browser-limits").textContent).toContain("it is not a boundary against other programs the workspace runs");
+  expect(screen.getByTestId("agent-browser-limits").textContent).toContain("restarts Chrome on a running desktop");
+  fireEvent.click(screen.getByRole("switch", { name: "Cloud browser for agents" }));
+  expect(m.get).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("dialog").textContent).toContain("Chrome on the cloud desktop restarts if it is running, which closes its open tabs.");
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(m.get).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole("switch", { name: "Cloud browser for agents" }));
+  fireEvent.click(screen.getByRole("button", { name: "Turn off" }));
+  await screen.findByText("Off · agents here can’t use the desktop’s browser");
+  expect(m.get).toHaveBeenLastCalledWith("ws", "org", false);
+});
+
+it("says the tool is unavailable when Chrome could not start with agent access", async () => {
+  m.get.mockResolvedValue({ enabled: true, canChange: true });
+  rememberCloudBrowserOffer(KEY, "unavailable");
+  render(<CloudAgentBrowserSwitch item={item} />);
+  await screen.findByText(/^On · unavailable/);
+  state("On · unavailable: Chrome on the desktop could not start with agent access. Restart the desktop.");
+});

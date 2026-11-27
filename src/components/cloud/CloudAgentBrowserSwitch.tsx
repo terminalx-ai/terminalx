@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ExternalLink, Globe, TriangleAlert } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Switch } from "@/components/ui/controls";
 import { api, type CloudWorkspaceAgentBrowser, type CloudWorkspaceListItem } from "@/lib/api";
 import { useAccount } from "@/lib/account";
@@ -13,6 +14,9 @@ import { cloudWorkspaceKey } from "@/types/target";
 const ABOUT = "Agents in this workspace’s tabs can open pages, click and type in Chrome on the cloud desktop. Tabs that ask show one approval per browser session.";
 /** The one thing a person must know before turning it on (PRO-209 review). */
 const SIGNED_IN = "It uses the desktop’s Chrome, with any sites signed in there.";
+/** What the approval card is not (PRO-209 review). */
+const NOT_A_BOUNDARY = "The approval card governs this tool; it is not a boundary against other programs the workspace runs, which can already reach the desktop.";
+const RESTARTS = "Turning it on or off restarts Chrome on a running desktop, which closes its open tabs.";
 
 function errorCode(error: unknown): string | null {
   return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : null;
@@ -45,6 +49,7 @@ export function CloudAgentBrowserSwitch({ item }: { item: CloudWorkspaceListItem
   const [failure, setFailure] = useState<string | null>(null);
   // The server holds it while the workspace's desktop rollout is held.
   const [held, setHeld] = useState(false);
+  const [confirmOff, setConfirmOff] = useState(false);
   useEffect(() => {
     let live = true;
     setState(null); setFailure(null); setHeld(false);
@@ -70,9 +75,11 @@ export function CloudAgentBrowserSwitch({ item }: { item: CloudWorkspaceListItem
     } finally { setBusy(false); }
   };
   const on = !!state?.enabled && !missing;
+  const unavailable = on && offer === "unavailable";
   const line = !state ? (failure ?? "Loading…")
     : missing ? "Not offered · this environment has no desktop packages"
-      : state.enabled ? enabledLine(state, viewerUserId) : "Off · agents here can’t use the desktop’s browser";
+      : unavailable ? "On · unavailable: Chrome on the desktop could not start with agent access. Restart the desktop."
+        : state.enabled ? enabledLine(state, viewerUserId) : "Off · agents here can’t use the desktop’s browser";
 
   return <section aria-label="Agent tools" className="space-y-2 border-t border-hairline pt-3" data-testid="agent-tools">
     <h4 className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Agent tools</h4>
@@ -81,22 +88,33 @@ export function CloudAgentBrowserSwitch({ item }: { item: CloudWorkspaceListItem
       <div className="min-w-0 flex-1">
         <p id={`agent-browser-${w.id}`} className="font-medium text-foreground">Cloud browser for agents</p>
         <p role="status" data-testid="agent-browser-state"
-          className={missing ? "flex items-start gap-1 text-warning" : on ? "flex items-center gap-1.5 text-success" : "text-muted-foreground"}>
-          {missing && <TriangleAlert className="mt-0.5 size-3 shrink-0" aria-hidden />}
-          {on && <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-success" />}
+          className={missing || unavailable ? "flex items-start gap-1 text-warning" : on ? "flex items-center gap-1.5 text-success" : "text-muted-foreground"}>
+          {(missing || unavailable) && <TriangleAlert className="mt-0.5 size-3 shrink-0" aria-hidden />}
+          {on && !unavailable && <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-success" />}
           <span>{line}</span>
         </p>
       </div>
       <Switch size="md" aria-labelledby={`agent-browser-${w.id}`} checked={on}
-        disabled={!state || busy || missing || !state.canChange} onCheckedChange={(next) => void set(next)} />
+        disabled={!state || busy || missing || !state.canChange} onCheckedChange={(next) => { if (next) void set(true); else setConfirmOff(true); }} />
     </div>
     <p className="text-muted-foreground">{ABOUT}</p>
     <p className="text-muted-foreground" data-testid="agent-browser-signed-in">{SIGNED_IN}</p>
+    <p className="text-muted-foreground" data-testid="agent-browser-limits">{NOT_A_BOUNDARY} {RESTARTS}</p>
     {missing && <div className="space-y-2 rounded-md border border-warning/40 bg-warning/5 px-3 py-2" data-testid="agent-browser-missing">
       <p>This environment was built without the Linux desktop and Chrome. Add them in Cloud compute › Environment, then restart the workspace.</p>
       <Button size="xs" variant="outline" onClick={() => openOrganizationSettings(w.orgId)}><ExternalLink /> Open Cloud compute</Button>
     </div>}
     {state && !state.canChange && <p className="text-muted-foreground">Only the workspace owner and admins can change this.</p>}
     {state && failure && <p role="alert" className="text-destructive">{failure}</p>}
+    <ConfirmDialog
+      open={confirmOff}
+      title="Turn off the cloud browser for agents?"
+      action="Turn off"
+      busy={busy}
+      onAction={() => { setConfirmOff(false); void set(false); }}
+      onCancel={() => setConfirmOff(false)}
+    >
+      Chrome on the cloud desktop restarts if it is running, which closes its open tabs. Sites stay signed in. An agent’s open browser session ends.
+    </ConfirmDialog>
   </section>;
 }

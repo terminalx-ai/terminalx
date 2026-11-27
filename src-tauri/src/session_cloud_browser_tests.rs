@@ -21,7 +21,7 @@ fn started() -> Rig {
 fn this_launchs_tools_pass_the_cli_gate_and_its_calls_are_answered() {
     let rig = started();
     crate::cloud_browser::offering(Some("on"));
-    let args = crate::cloud_browser::launch_args("claude", "/opt/terminalx", &token(&rig));
+    let args = crate::cloud_browser::launch_args("claude", "/opt/terminalx", &token(&rig), SESSION, TAB);
     let server = args.split("\"mcpServers\":{\"").nth(1).unwrap().split('"').next().unwrap().to_string();
     let gate = hook(&rig, "PermissionRequest", json!({"tool_name": format!("mcp__{server}__click"), "tool_input": {"text": "Sign in"}}));
     assert_eq!(gate.output.unwrap()["hookSpecificOutput"]["decision"]["behavior"], "allow");

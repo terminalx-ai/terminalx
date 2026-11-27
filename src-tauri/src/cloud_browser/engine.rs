@@ -125,6 +125,7 @@ async fn end(slot: &mut Option<Browser>, why: &str) {
     let Some(browser) = slot.take() else { return };
     log::info!("cloud browser: the session for {} ended: {why}", browser.key);
     let _ = browser.cdp.call("Target.closeTarget", json!({ "targetId": browser.target }), None).await;
+    let _ = browser.cdp.call("Browser.setDownloadBehavior", json!({ "behavior": "default" }), None).await;
     *ENGINE.holder.lock().unwrap() = None;
     ENGINE.held.send_replace(false);
     publish(None);
@@ -157,6 +158,25 @@ pub(super) fn end_where(prefix: &str) {
     });
 }
 
+/// The switch changed. On: a running desktop's Chrome starts again with the
+/// pipe now, so the first agent session needs no restart. Off: the session
+/// ends and Chrome starts again without it. Either restart closes the
+/// desktop browser's tabs; the switch's confirmation says so.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(super) fn switched(on: bool) {
+    if !on {
+        return withdraw(true);
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(handle) = runtime() {
+        handle.spawn(async {
+            if let Some(pool) = crate::remote::cloud_desktop::shared_pool() {
+                pool.set_debugging(true).await;
+            }
+        });
+    }
+}
+
 /// The switch went off: end the session now and, with `restart`, start
 /// Chrome again without the DevTools pipe.
 pub(super) fn withdraw(restart: bool) {
@@ -176,10 +196,22 @@ pub(super) fn withdraw(restart: bool) {
     });
 }
 
+/// What `run` decided under the session lock.
+enum Run {
+    Done(Value),
+    /// No session is open for this launch and none was approved in this
+    /// call: ask on the hook thread, then run again.
+    Ask,
+}
+
 pub(super) fn call(caller: Caller<'_>, tool: &str, arguments: &Value, approve: &dyn Fn(Value) -> bool) -> Value {
     let Some(handle) = runtime() else {
         return text_result("The cloud desktop is not running in this runtime.", true);
     };
+    let ask = || approve(json!({ "url": arguments["url"], "plan": arguments["plan"], "agent": caller.agent }));
+    let denied = || text_result("The person denied the browser session. Do not open it again unless they ask.", true);
+    // A tab that runs without asking needs no card.
+    let mut approved = !caller.asks;
     if tool == "open" {
         let other = ENGINE.owner.lock().unwrap().as_ref().map(|owner| *owner != caller.key);
         if other == Some(true) {
@@ -190,22 +222,40 @@ pub(super) fn call(caller: Caller<'_>, tool: &str, arguments: &Value, approve: &
         if let Err(error) = http_url(arguments["url"].as_str()) {
             return text_result(error, true);
         }
-        // One card when a session opens, in a tab that asks first.
-        if other.is_none() && caller.asks && !approve(json!({
-            "url": arguments["url"], "plan": arguments["plan"], "agent": caller.agent,
-        })) {
-            return text_result("The person denied the browser session. Do not open it again unless they ask.", true);
+        // One card when a session opens. Asked before the lock when no
+        // session is open, so the card never holds it.
+        if other.is_none() && !approved {
+            if !ask() {
+                return denied();
+            }
+            approved = true;
         }
     }
-    let tool = tool.to_string();
-    let arguments = arguments.clone();
-    let (key, agent, tab_title) = (caller.key, caller.agent.to_string(), caller.tab_title);
-    // Run on the runtime's own threads; this hook thread only waits.
-    let (answer, wait) = std::sync::mpsc::channel();
-    handle.spawn(async move {
-        let _ = answer.send(run(key, agent, tab_title, &tool, &arguments).await);
-    });
-    wait.recv().unwrap_or_else(|_| text_result("The cloud browser stopped.", true))
+    loop {
+        let tool = tool.to_string();
+        let arguments = arguments.clone();
+        let (key, agent, tab_title) = (caller.key.clone(), caller.agent.to_string(), caller.tab_title.clone());
+        // Run on the runtime's own threads; this hook thread only waits.
+        let (answer, wait) = std::sync::mpsc::channel();
+        let running = async move {
+            let _ = answer.send(run(key, agent, tab_title, &tool, &arguments, approved).await);
+        };
+        #[cfg(test)]
+        let running = super::TASK_OFFER.scope(super::test_offer(), running);
+        handle.spawn(running);
+        match wait.recv() {
+            Ok(Run::Done(result)) => return result,
+            // The session this launch held ended (idle, its time limit)
+            // between the check above and the lock: a new one is asked for.
+            Ok(Run::Ask) if !approved => {
+                if !ask() {
+                    return denied();
+                }
+                approved = true;
+            }
+            Ok(Run::Ask) | Err(_) => return text_result("The cloud browser stopped.", true),
+        }
+    }
 }
 
 /// Wait while a person has control, giving it back if they leave.
@@ -227,29 +277,45 @@ async fn wait_for_control() -> Result<(), String> {
     }
 }
 
-async fn run(key: String, agent: String, tab_title: Option<String>, tool: &str, arguments: &Value) -> Value {
+async fn run(key: String, agent: String, tab_title: Option<String>, tool: &str, arguments: &Value, approved: bool) -> Run {
     let mut slot = ENGINE.browser.lock().await;
     // Again under the lock: the switch may have gone off while a card waited.
-    if offer() != "on" {
-        end(&mut slot, "the cloud browser was turned off").await;
-        return text_result("The cloud browser is off for this workspace.", true);
+    match offer() {
+        "on" => {}
+        "unavailable" => {
+            end(&mut slot, "Chrome could not start with agent access").await;
+            return Run::Done(text_result("Chrome on the cloud desktop could not start with agent access, so the cloud browser is unavailable until the desktop restarts.", true));
+        }
+        _ => {
+            end(&mut slot, "the cloud browser was turned off").await;
+            return Run::Done(text_result("The cloud browser is off for this workspace.", true));
+        }
     }
     if slot.as_ref().is_some_and(|browser| browser.key == key && browser.cdp.is_closed()) {
         end(&mut slot, "Chrome or the cloud desktop restarted").await;
-        return text_result("Chrome on the cloud desktop restarted, which ended this browser session. Open a new one.", true);
+        return Run::Done(text_result("Chrome on the cloud desktop restarted, which ended this browser session. Open a new one.", true));
+    }
+    if slot.as_ref().is_some_and(|browser| browser.key != key) {
+        let error = if tool == "open" { "Another tab's agent is using the cloud browser. Try again when it closes its session." } else { "No browser session is open for this agent. Call open first." };
+        return Run::Done(text_result(error, true));
     }
     if tool == "open" && slot.is_none() {
+        // A new session, decided here under the lock: only with an approval
+        // given in this call (or in a tab that does not ask).
+        if !approved {
+            return Run::Ask;
+        }
         match start(&key, &agent, tab_title).await {
             Ok(browser) => *slot = Some(browser),
-            Err(error) => return text_result(error, true),
+            Err(error) => return Run::Done(text_result(error, true)),
         }
     }
-    let Some(browser) = slot.as_mut().filter(|browser| browser.key == key) else {
-        return text_result("No browser session is open for this agent. Call open first; it asks again in tabs that ask first.", true);
+    let Some(browser) = slot.as_mut() else {
+        return Run::Done(text_result("No browser session is open for this agent. Call open first; it asks again in tabs that ask first.", true));
     };
     if tool == "close" {
         end(&mut slot, "its agent closed it").await;
-        return text_result("Closed the browser session.", false);
+        return Run::Done(text_result("Closed the browser session.", false));
     }
     browser.actions += 1;
     browser.last = Instant::now();
@@ -259,16 +325,16 @@ async fn run(key: String, agent: String, tab_title: Option<String>, tool: &str, 
     // A person who took control is not raced: the agent waits, unlocked,
     // so the session can still end meanwhile.
     if let Err(error) = wait_for_control().await {
-        return text_result(error, true);
+        return Run::Done(text_result(error, true));
     }
     let slot = ENGINE.browser.lock().await;
     let Some(browser) = slot.as_ref().filter(|browser| browser.key == key) else {
-        return text_result("The browser session ended.", true);
+        return Run::Done(text_result("The browser session ended.", true));
     };
-    match act(browser, tool, arguments).await {
+    Run::Done(match act(browser, tool, arguments).await {
         Ok(result) => result,
         Err(error) => text_result(error, true),
-    }
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -293,6 +359,9 @@ async fn start(key: &str, agent: &str, tab_title: Option<String>) -> Result<Brow
     let attached = cdp.call("Target.attachToTarget", json!({ "targetId": target, "flatten": true }), None).await?;
     let page = attached["sessionId"].as_str().ok_or("Chrome did not attach to its tab.")?.to_string();
     cdp.call("Page.enable", json!({}), Some(&page)).await?;
+    // No downloads while an agent drives: a page cannot drop files into the
+    // workspace through it. Back to Chrome's own behaviour when it ends.
+    cdp.call("Browser.setDownloadBehavior", json!({ "behavior": "deny" }), None).await?;
     let now = Instant::now();
     Ok(Browser { key: key.into(), agent: agent.into(), tab_title, cdp, target, page, actions: 0, action: None, opened: now, last: now, _lease: lease })
 }
@@ -602,7 +671,29 @@ mod tests {
         assert_eq!(sent.matches("Target.createTarget").count(), 2, "{sent}");
         assert_eq!(sent.matches("Target.closeTarget").count(), 2, "only the tabs it opened: {sent}");
         assert!(!sent.contains("Target.getTargets"), "never attaches to a person's page: {sent}");
+        assert_eq!(sent.matches("Browser.setDownloadBehavior").count(), 4, "downloads refused per session, then restored: {sent}");
         *TEST_CDP.lock().unwrap() = None;
+    }
+
+    /// Review: the launch that held a session sees no card, but if the idle
+    /// sweep or the time limit ended it before the lock, it is asked again.
+    #[test]
+    fn a_session_that_ended_before_the_lock_is_asked_for_again() {
+        let _lock = super::super::TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let _rt = runtime_for_tests();
+        offering(Some("on"));
+        // As the engine looked when `call` checked: this launch owned the session.
+        *ENGINE.owner.lock().unwrap() = Some("s/t/launch-5".into());
+        let asked = std::cell::Cell::new(0);
+        let result = call(caller("s/t/launch-5", true), "open", &json!({"url": "http://localhost:3000"}), &|_| {
+            asked.set(asked.get() + 1);
+            false
+        });
+        assert_eq!(asked.get(), 1, "asked under the lock, once");
+        assert!(result["content"][0]["text"].as_str().unwrap().contains("denied"));
+        assert!(ENGINE.browser.try_lock().unwrap().is_none(), "no session started without approval");
+        *ENGINE.owner.lock().unwrap() = None;
+        offering(None);
     }
 
     #[test]
