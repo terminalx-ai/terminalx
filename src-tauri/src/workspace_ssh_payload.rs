@@ -93,27 +93,63 @@ impl VerifiedManifest {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("verification_failed")]
+struct VerificationFailed;
+
 pub(super) fn verify_manifest(
     bytes: &[u8],
     signature: &[u8],
     architecture: Architecture,
     active: Option<&Version>,
 ) -> Result<VerifiedManifest> {
-    verify_with_key(
+    verify_with_program(
         bytes,
         signature,
         architecture,
         active,
         crate::serve_cli::RUNTIME_SIGNING_KEY,
+        Path::new("/usr/bin/ssh-keygen"),
     )
 }
 
+#[cfg(test)]
 fn verify_with_key(
     bytes: &[u8],
     signature: &[u8],
     architecture: Architecture,
     active: Option<&Version>,
     key: &str,
+) -> Result<VerifiedManifest> {
+    verify_with_program(
+        bytes,
+        signature,
+        architecture,
+        active,
+        key,
+        Path::new("/usr/bin/ssh-keygen"),
+    )
+}
+
+fn verify_with_program(
+    bytes: &[u8],
+    signature: &[u8],
+    architecture: Architecture,
+    active: Option<&Version>,
+    key: &str,
+    verifier: &Path,
+) -> Result<VerifiedManifest> {
+    verify_inner(bytes, signature, architecture, active, key, verifier)
+        .map_err(|_| VerificationFailed.into())
+}
+
+fn verify_inner(
+    bytes: &[u8],
+    signature: &[u8],
+    architecture: Architecture,
+    active: Option<&Version>,
+    key: &str,
+    verifier: &Path,
 ) -> Result<VerifiedManifest> {
     ensure!(
         !bytes.is_empty() && bytes.len() <= MAX_MANIFEST,
@@ -131,7 +167,7 @@ fn verify_with_key(
         format!("{} {key}\n", crate::serve_cli::SIGNER_PRINCIPAL),
     )?;
     fs::write(&signed, signature)?;
-    let mut child = Command::new("/usr/bin/ssh-keygen")
+    let mut child = Command::new(verifier)
         .args(["-Y", "verify", "-f"])
         .arg(signers)
         .args([
@@ -203,8 +239,16 @@ fn verify_with_key(
 
 /// A guard for the private install directory. Keep it alive across staging
 /// and the later listener transaction.
+pub(super) struct StagedVersion(PathBuf);
+
+impl StagedVersion {
+    pub(super) fn directory(&self) -> &Path {
+        &self.0
+    }
+}
+
 pub(super) struct InstallLock {
-    root: PathBuf,
+    pub(super) root: PathBuf,
     _guard: File,
 }
 
@@ -257,7 +301,11 @@ impl InstallLock {
         Ok(daemon)
     }
 
-    pub(super) fn stage(&self, manifest: &VerifiedManifest, payload: &[u8]) -> Result<PathBuf> {
+    pub(super) fn stage(
+        &self,
+        manifest: &VerifiedManifest,
+        payload: &[u8],
+    ) -> Result<StagedVersion> {
         // Verify the actual bytes before either decompressing or writing them.
         ensure!(
             !payload.is_empty() && payload.len() <= MAX_PAYLOAD,
@@ -287,16 +335,51 @@ impl InstallLock {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+        self.commit_stage(&target, |path| unpack(payload, path))?;
+        Ok(StagedVersion(target))
+    }
+
+    fn commit_stage(
+        &self,
+        target: &Path,
+        materialize: impl FnOnce(&Path) -> Result<()>,
+    ) -> Result<()> {
         let scratch = tempfile::Builder::new()
             .prefix(".staging-")
             .tempdir_in(&self.root)?;
-        unpack(payload, scratch.path())?;
-        // Rename only after every entry passed validation. Keep the temporary
-        // guard until the rename succeeds so partial errors are cleaned up.
-        fs::rename(scratch.path(), &target)?;
-        File::open(&self.root)?.sync_all()?;
-        Ok(target)
+        let committed = materialize(scratch.path()).and_then(|()| {
+            fs::rename(scratch.path(), target).context("publish the staged OpenSSH directory")
+        });
+        if let Err(error) = committed {
+            remove_private_tree(scratch.path()).context("remove the failed OpenSSH stage")?;
+            return Err(error);
+        }
+        if let Err(error) = File::open(&self.root).and_then(|root| root.sync_all()) {
+            remove_private_tree(target).context("remove the unsynced OpenSSH stage")?;
+            return Err(error.into());
+        }
+        Ok(())
     }
+}
+
+pub(super) fn remove_private_tree(directory: &Path) -> Result<()> {
+    fn restore(directory: &Path) -> Result<()> {
+        ensure!(
+            fs::symlink_metadata(directory)?.is_dir(),
+            "unsafe OpenSSH cleanup directory"
+        );
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+        for item in fs::read_dir(directory)? {
+            let item = item?;
+            if item.file_type()?.is_dir() {
+                restore(&item.path())?;
+            }
+        }
+        Ok(())
+    }
+    restore(directory)?;
+    fs::remove_dir_all(directory)?;
+    Ok(())
 }
 
 fn unpack(payload: &[u8], directory: &Path) -> Result<()> {

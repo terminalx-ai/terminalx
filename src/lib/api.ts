@@ -514,6 +514,8 @@ export const api = {
   cloudWorkspaceUnfollow: (orgId: string, workspaceId: string) => invoke<WorkspaceFollowingResponse>("cloud_workspace_follow_delete", { orgId, workspaceId, input: {} }),
   cloudWorkspaceReassign: (orgId: string, workspaceId: string, input: WorkspaceReassignInput) => invoke<WorkspaceReassignResponse>("cloud_workspace_reassign", { orgId, workspaceId, input }),
   /** PRO-141: who could be mentioned (`check`), or record a sent message's mentions. Ids only. */
+  /** PRO-241: the organization's current announcement for this build; the runtime sends the app's version. */
+  announcementsCurrent: (orgId: string) => invoke<{ announcement: DesktopAnnouncement | null }>("announcements_current", { orgId }),
   nudgePreference: (orgId: string) => invoke<{ enabled: boolean }>("nudge_preference", { orgId }),
   nudgePreferenceSet: (orgId: string, enabled: boolean) => invoke<{ enabled: boolean }>("nudge_preference_set", { orgId, enabled }),
   nudgeSend: (orgId: string, input: { targetUserId: string; workspaceId: string; sessionId: string; text: string }) =>
@@ -930,6 +932,16 @@ export interface AccountIdentity {
   organizationId?: string | null;
   /** The person's picture from the sign-in service, an https: URL; absent when it sends none. */
   picture?: string | null;
+}
+
+/** PRO-241: the sidebar card's announcement. `link` is https or absent. */
+export interface DesktopAnnouncement {
+  id: string;
+  title: string;
+  body: string;
+  link: string | null;
+  isNew: boolean;
+  publishedAt: string;
 }
 
 export interface AccountStatus {

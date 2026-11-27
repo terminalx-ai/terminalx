@@ -82,6 +82,9 @@ mod workspace_ssh;
 #[cfg(unix)]
 #[allow(dead_code)]
 mod workspace_ssh_payload;
+#[cfg(unix)]
+#[allow(dead_code)]
+mod workspace_ssh_listener;
 #[cfg(feature = "desktop")]
 mod desktop_inbox;
 #[cfg(feature = "desktop")]
@@ -808,6 +811,7 @@ pub fn run() {
             commands::team_artifact_delete,
             commands::team_artifact_version_delete,
             commands::team_artifact_pick_file,
+            commands::announcements_current,
             commands::nudge_preference,
             commands::nudge_preference_set,
             commands::nudge_send,

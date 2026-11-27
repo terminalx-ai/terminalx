@@ -261,6 +261,8 @@ fn relay_session(grant: &RelaySessionGrant) -> RelaySession {
         // An account link never requests `collaboration-v2`; only the cloud bootstrap does.
         collaboration_v2: false,
         desktop_ready: false,
+        #[cfg(target_os = "linux")]
+        workspace_ssh: None,
     }
 }
 

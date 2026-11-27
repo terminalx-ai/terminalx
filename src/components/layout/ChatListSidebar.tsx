@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { UpdateButton } from "./UpdateNotice";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
+import { AnnouncementCard } from "./AnnouncementCard";
 import { SidebarTitlebar, ViewMenu } from "./SidebarTitlebar";
 import { errorMessage } from "@/lib/api";
 import { usePrefs } from "@/lib/prefs";
@@ -149,6 +150,7 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
         <CloudOrganizations onOpenOrganizations={() => onOpenSettings("organizations")} />
       </nav>
 
+      <AnnouncementCard />
       <SidebarBulkBar sessions={store.sessions} />
       <div className="flex shrink-0 items-center gap-1 border-t border-hairline px-2 pb-2 pt-1" data-testid="sidebar-account-row">
         {/* The account; Settings keeps the far end. */}
