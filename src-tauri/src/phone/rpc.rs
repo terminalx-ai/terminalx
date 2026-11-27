@@ -404,23 +404,27 @@ impl MobileRuntime {
 
     /// `notifications.event` to each connection whose subscription's filter
     /// admits it; to every connection that named none, as before filters.
-    /// Returns how many live mobile connections accepted the notification.
+    /// Returns how many live mobile connections remain attached after pruning
+    /// closed/overflowed clients (so a connected phone whose filter muted this
+    /// notice is not bypassed by a remote APNs/FCM push).
     fn broadcast_notification(&self, notification: &MobileNotification) -> usize {
         let value = json!({ "method": "notifications.event", "params": notification });
-        let mut delivered = 0usize;
-        self.clients.lock().unwrap().retain(|_, client| {
+        let mut clients = self.clients.lock().unwrap();
+        clients.retain(|_, client| {
+            if client.sender.is_closed() {
+                return false;
+            }
             if !admitted(client.filter.lock().unwrap().as_ref().map(|(_, filter)| filter), notification) {
                 return true;
             }
             if client.sender.try_send(value.clone()).is_ok() {
-                delivered += 1;
                 true
             } else {
                 client.overflowed.store(true, std::sync::atomic::Ordering::SeqCst);
                 false
             }
         });
-        delivered
+        clients.len()
     }
 
     /// Every connection is told once, however many come before it reads it (#1282).

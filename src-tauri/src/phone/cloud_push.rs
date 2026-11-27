@@ -91,17 +91,23 @@ pub(crate) fn build_push_payload(
     host_label: Option<&str>,
     event: &CloudPushEvent,
 ) -> CloudPushNotifyPayload {
-    let session_id = match event.session_id.as_deref().map(str::trim) {
-        Some(id) if is_safe_opaque_id(id) => id.to_string(),
-        Some(id) if !id.is_empty() => hash_opaque_id(id),
-        _ => "desktop-session".to_string(),
+    let (session_id, routable_session) = match event.session_id.as_deref().map(str::trim) {
+        Some(id) if is_safe_opaque_id(id) => (id.to_string(), true),
+        Some(id) if !id.is_empty() => (hash_opaque_id(id), false),
+        _ => ("desktop-session".to_string(), false),
     };
-    let pane_key = event
-        .tab_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| is_safe_opaque_id(id))
-        .map(str::to_string);
+    // Only attach `pane_key` when `session_id` is a real routable session id;
+    // otherwise mobile falls back cleanly to `openHost`.
+    let pane_key = if routable_session {
+        event
+            .tab_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| is_safe_opaque_id(id))
+            .map(str::to_string)
+    } else {
+        None
+    };
 
     CloudPushNotifyPayload {
         host_id: relay_host_id.to_string(),
@@ -165,21 +171,39 @@ mod tests {
         assert_eq!(payload.event_kind, CloudPushEventKind::Approval);
         assert_eq!(payload.host_label.as_deref(), Some("MacBook Pro 16"));
 
+        // Hashed session_id clears pane_key even when tab_id is opaque so mobile
+        // falls back to `openHost` rather than routing to `/session/sess_...`.
         let hashed = build_push_payload(
             "host_1234567890ab",
-            None,
+            Some("   \n\t  "),
             &CloudPushEvent {
                 kind: CloudPushEventKind::Question,
                 session_id: Some("repo::/Users/alice/secret-project".into()),
-                tab_id: Some("/bad/path".into()),
+                tab_id: Some("tab-1".into()),
             },
         );
         assert!(hashed.session_id.starts_with("sess_"));
         assert_eq!(hashed.session_id.len(), 29);
         assert!(hashed.pane_key.is_none());
+        assert!(hashed.host_label.is_none());
         let json = serde_json::to_string(&hashed).unwrap();
         assert!(!json.contains("alice"));
         assert!(!json.contains("secret-project"));
+
+        // Empty session_id falls back to desktop-session and omits pane_key;
+        // UTF-8 host_label truncates safely at 40 chars.
+        let fallback = build_push_payload(
+            "host_1234567890ab",
+            Some(&"é".repeat(60)),
+            &CloudPushEvent {
+                kind: CloudPushEventKind::Alert,
+                session_id: None,
+                tab_id: Some("tab-2".into()),
+            },
+        );
+        assert_eq!(fallback.session_id, "desktop-session");
+        assert!(fallback.pane_key.is_none());
+        assert_eq!(fallback.host_label.as_deref().map(|s| s.chars().count()), Some(40));
     }
 
     #[test]
@@ -215,5 +239,31 @@ mod tests {
         assert!(captured.contains("\"eventKind\":\"question\""));
         assert!(captured.contains("\"sessionId\":\"sess-99\""));
         assert!(captured.contains("\"paneKey\":\"tab-3\""));
+    }
+
+    #[test]
+    fn returns_false_on_non_2xx_push_notify_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            stream
+                .write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+
+        let payload = build_push_payload(
+            "host_1234567890ab",
+            None,
+            &CloudPushEvent {
+                kind: CloudPushEventKind::Alert,
+                session_id: Some("sess-1".into()),
+                tab_id: None,
+            },
+        );
+        assert!(!send_push_notify(&format!("http://{addr}"), "tok", &payload));
+        server.join().unwrap();
     }
 }

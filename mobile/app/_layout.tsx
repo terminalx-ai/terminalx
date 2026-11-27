@@ -63,6 +63,7 @@ function Navigation() {
     const hostParam = resolvedHostId ? { hostId: resolvedHostId } : {};
     if (intent.type === "openHost") {
       if (matchedHost && app.activeHost?.id !== matchedHost.id) void app.connectHost(matchedHost);
+      router.navigate("/");
       return;
     }
     // A bot's question (PRO-479): over the chat it came from, its home chat; on the bot's page when that is not known.

@@ -12,6 +12,7 @@ const PUSH_REQUEST_TIMEOUT_MS = 10_000;
 
 let lastRegisteredKey: string | null = null;
 let syncEpoch = 0;
+let pendingUnregister: Promise<unknown> | null = null;
 const activeSyncPromises = new Set<Promise<unknown>>();
 const activeSyncControllers = new Set<AbortController>();
 
@@ -134,6 +135,11 @@ export async function syncCloudPushRegistration(options: {
   activeSyncControllers.add(controller);
 
   const run = (async (): Promise<boolean> => {
+    if (pendingUnregister) {
+      await pendingUnregister.catch(() => undefined);
+      if (epoch !== syncEpoch) return false;
+    }
+
     const platform = options.platform !== undefined ? options.platform : resolveCloudPushPlatform();
     if (!platform) return false;
 
@@ -214,33 +220,42 @@ export async function unregisterCloudPushRegistration(options: {
   fetchImpl?: typeof fetch;
   readInstallationId?: (userId: string) => Promise<string | null>;
 }): Promise<boolean> {
-  syncEpoch += 1;
-  lastRegisteredKey = null;
-  for (const controller of activeSyncControllers) controller.abort();
-  if (activeSyncPromises.size > 0) await Promise.allSettled(Array.from(activeSyncPromises));
+  const run = (async (): Promise<boolean> => {
+    syncEpoch += 1;
+    lastRegisteredKey = null;
+    for (const controller of activeSyncControllers) controller.abort();
+    if (activeSyncPromises.size > 0) await Promise.allSettled(Array.from(activeSyncPromises));
 
-  if (options.remote === false) return true;
+    if (options.remote === false) return true;
 
-  const platform = options.platform !== undefined ? options.platform : resolveCloudPushPlatform();
-  const origin = resolveCloudPushOrigin(options.sessionEndpoint);
-  if (!origin) return false;
+    const platform = options.platform !== undefined ? options.platform : resolveCloudPushPlatform();
+    const origin = resolveCloudPushOrigin(options.sessionEndpoint);
+    if (!origin) return false;
 
-  const relayDeviceId = await (
-    options.readInstallationId ??
-    (async (userId: string) => {
-      const existing = await readInstallation();
-      return existing?.userId === userId ? existing.clientInstallationId : null;
-    })
-  )(options.session.user.userId).catch(() => null);
-  if (!relayDeviceId) return false;
+    const relayDeviceId = await (
+      options.readInstallationId ??
+      (async (userId: string) => {
+        const existing = await readInstallation();
+        return existing?.userId === userId ? existing.clientInstallationId : null;
+      })
+    )(options.session.user.userId).catch(() => null);
+    if (!relayDeviceId) return false;
 
-  return unregisterCloudPushToken({
-    origin,
-    accessToken: options.session.accessToken,
-    relayDeviceId,
-    ...(platform ? { platform } : {}),
-    fetchImpl: options.fetchImpl,
-  });
+    return unregisterCloudPushToken({
+      origin,
+      accessToken: options.session.accessToken,
+      relayDeviceId,
+      ...(platform ? { platform } : {}),
+      fetchImpl: options.fetchImpl,
+    });
+  })();
+
+  pendingUnregister = run;
+  try {
+    return await run;
+  } finally {
+    if (pendingUnregister === run) pendingUnregister = null;
+  }
 }
 
 export function subscribeCloudPushTokenRotation(onToken: (token: string) => void): () => void {
@@ -267,6 +282,7 @@ export function subscribeCloudPushTokenRotation(onToken: (token: string) => void
 export function resetCloudPushRegistrationForTests(): void {
   syncEpoch += 1;
   lastRegisteredKey = null;
+  pendingUnregister = null;
   for (const controller of activeSyncControllers) controller.abort();
   activeSyncControllers.clear();
   activeSyncPromises.clear();

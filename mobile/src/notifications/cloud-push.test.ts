@@ -214,4 +214,54 @@ describe("cloud push registration", () => {
     expect(unregisterResult).toBe(true);
     expect(methods).toEqual(["DELETE"]);
   });
+
+  it("supports remote:false local-only unregister and serializes DELETE before a subsequent POST", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })) as unknown as typeof fetch;
+
+    const localOnly = await unregisterCloudPushRegistration({
+      session: SESSION,
+      remote: false,
+      fetchImpl,
+    });
+    expect(localOnly).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    let releaseDelete: (() => void) | null = null;
+    const order: string[] = [];
+    const orderedFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const method = String(init?.method ?? "GET");
+      order.push(`${method}:start`);
+      if (method === "DELETE") {
+        await new Promise<void>((resolve) => {
+          releaseDelete = resolve;
+        });
+      }
+      order.push(`${method}:end`);
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const delPromise = unregisterCloudPushRegistration({
+      session: SESSION,
+      sessionEndpoint: "https://login.terminalx.ai/v1/auth/session",
+      platform: "ios",
+      fetchImpl: orderedFetch,
+      readInstallationId: async () => "inst-uuid-1",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const postPromise = syncCloudPushRegistration({
+      session: SESSION,
+      sessionEndpoint: "https://login.terminalx.ai/v1/auth/session",
+      platform: "ios",
+      fetchImpl: orderedFetch,
+      isAllowed: async () => true,
+      getPermission: async () => "granted",
+      getDevicePushToken: async () => TOKEN_A,
+      getInstallationId: async () => "inst-uuid-1",
+    });
+
+    releaseDelete!();
+    await Promise.all([delPromise, postPromise]);
+    expect(order).toEqual(["DELETE:start", "DELETE:end", "POST:start", "POST:end"]);
+  });
 });
