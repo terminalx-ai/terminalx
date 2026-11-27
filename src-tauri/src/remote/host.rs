@@ -1582,6 +1582,7 @@ impl RelayHost {
 /// comes from the authenticated native link, never RPC parameters.
 pub(crate) fn install_session_collaboration(rpc: &WorkspaceRpc, session: &RelaySession, generation: u64) -> Result<()> {
     anyhow::ensure!(token_identity(&session.relay_token)?.runtime_generation == generation, "refresh token generation mismatch");
+    let _admission = rpc.collab.enter_admission();
     let policy = rpc.set_refresh_collaboration(session.collaboration.clone(), generation, session.collaboration_v2);
     #[cfg(any(target_os = "linux", all(test, unix)))]
     rpc.set_desktop_readiness(generation, policy.is_ok() && session.desktop_ready);
