@@ -5122,6 +5122,8 @@ fn known_error_code(code: &str) -> bool {
     matches!(
         code,
         "invalid_access_token"
+            // PRO-175: the invite welcome route while its readiness key is off.
+            | "invites_welcome_unavailable"
             | "workspace_owner_changed"
             | "workspace_reassign_same_owner"
             | "workspace_reassign_private_confirmation_required"
