@@ -6,6 +6,8 @@ import { api, type CloudAutomationDto } from "@/lib/api";
 import { describeTiming, runText, scheduleErrorMessage, whenText } from "@/lib/cloudSchedules";
 
 import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/menu";
+import { Cloud, Monitor, MoreHorizontal } from "@/icons";
 import { confirmInApp } from "@/lib/confirm";
 import { WebhookSecretDialog } from "@/components/cloud/WebhookDetails";
 import { copyText } from "@/lib/clipboard";
@@ -182,32 +184,48 @@ function ScopedList({ organizationId, listVersion, locals, localLoading, onSelec
       {rows.length > 0 && (
         <table className="mt-3 w-full table-fixed text-left text-xs">
           <thead>
-            <tr className="border-b border-hairline text-muted-foreground">
-              <th scope="col" className="w-1/2 px-2 py-2 font-medium">Automation</th>
+            <tr className="border-b border-hairline text-[11px] uppercase tracking-wide text-faint">
+              <th scope="col" className="w-[38%] px-2 py-2 font-medium">Automation</th>
               <th scope="col" className="px-2 py-2 font-medium">Trigger</th>
-              <th scope="col" className="px-2 py-2 font-medium">By</th>
+              <th scope="col" className="px-2 py-2 font-medium">Last run</th>
+              <th scope="col" className="w-[14%] px-2 py-2 font-medium">By</th>
+              <th scope="col" className="w-10 px-2 py-2"><span className="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
-              <tr key={row.key} className="border-b border-hairline">
-                <td className="px-2 py-2">
-                  <button type="button" className="block max-w-full truncate text-left font-medium hover:underline" onClick={row.open}>{row.name}</button>
-                  <span className="text-muted-foreground">{row.source}{row.paused && " · Paused"}</span>
-                  {row.latestRun && (
-                    <div className="mt-0.5 text-muted-foreground">
-                      Latest run · {row.latestRun.label}{row.latestRun.at && ` · ${row.latestRun.at}`}
-                    </div>
-                  )}
-                  {row.run && <Button variant="ghost" size="xs" disabled={running !== null} aria-label={`Run ${row.name} now`} onClick={row.run}>Run now</Button>}
-                  {row.edit && <Button variant="ghost" size="xs" disabled={opening || running !== null} aria-label={`Edit ${row.name}`} onClick={row.edit}>Edit</Button>}
-                  {row.duplicate && <Button variant="ghost" size="xs" disabled={opening || running !== null} aria-label={`Duplicate ${row.name}`} onClick={row.duplicate}>Duplicate</Button>}
-                  {row.link && <Button variant="ghost" size="xs" aria-label={`Copy link to ${row.name}`} onClick={row.link}>Copy link</Button>}
-                </td>
-                <td className="truncate px-2 py-2">{row.trigger}</td>
-                <td className="truncate px-2 py-2">{row.by}</td>
-              </tr>
-            ))}
+            {rows.map((row) => {
+              const Where = row.source === "Cloud" ? Cloud : Monitor;
+              const actions = row.run || row.edit || row.duplicate || row.link;
+              return (
+                <tr key={row.key} className={`border-b border-hairline ${row.paused ? "text-muted-foreground" : ""}`}>
+                  <td className="px-2 py-2.5">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <button type="button" className="min-w-0 truncate text-left font-medium hover:underline" onClick={row.open}>{row.name}</button>
+                      <Where className="size-3 shrink-0 text-faint" aria-label={row.source} />
+                      {row.paused && <span className="shrink-0 rounded bg-veil-raised px-1.5 py-0.5 text-[10px] text-faint">Paused</span>}
+                    </span>
+                  </td>
+                  <td className="truncate px-2 py-2.5 text-muted-foreground">{row.trigger}</td>
+                  <td className="truncate px-2 py-2.5 text-muted-foreground">
+                    {row.latestRun ? <>{row.latestRun.label}{row.latestRun.at && ` · ${row.latestRun.at}`}</> : "—"}
+                  </td>
+                  <td className="truncate px-2 py-2.5 text-muted-foreground">{row.by}</td>
+                  <td className="px-2 py-2.5 text-right">
+                    {actions && <DropdownMenu modal={false}>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="icon-xs" aria-label={`Actions for ${row.name}`}><MoreHorizontal /></Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        {row.run && <DropdownMenuItem disabled={running !== null} onSelect={row.run}>Run now</DropdownMenuItem>}
+                        {row.edit && <DropdownMenuItem disabled={opening || running !== null} onSelect={row.edit}>Edit</DropdownMenuItem>}
+                        {row.duplicate && <DropdownMenuItem disabled={opening || running !== null} onSelect={row.duplicate}>Duplicate</DropdownMenuItem>}
+                        {row.link && <DropdownMenuItem onSelect={row.link}>Copy link</DropdownMenuItem>}
+                      </DropdownMenuContent>
+                    </DropdownMenu>}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       )}
