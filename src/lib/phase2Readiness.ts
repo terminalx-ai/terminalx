@@ -20,6 +20,7 @@ export const phase2Features = {
   adminShare: "cloud.workspaces.admin-share.v1",
   generalAccess: "cloud.workspaces.general-access.v1",
   mcpServers: "organization.mcp-servers.v1",
+  announcements: "desktop.announcements.v1",
 } as const;
 
 export function phase2Ready(status: AccountStatus, orgId: string, feature: keyof typeof phase2Features): boolean {

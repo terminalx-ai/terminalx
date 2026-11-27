@@ -87,7 +87,7 @@ interface SettingDefinition {
    * (lib/settingsSections.ts `settingOffered`). A whole section behind a
    * switch is `settingsSectionOffered`'s.
    */
-  requires?: "orchestratorRuns" | "localVmTasks" | "opencode" | "bots";
+  requires?: "orchestratorRuns" | "localVmTasks" | "opencode" | "bots" | "intro";
   /** Only a Mac has it, so elsewhere neither its page nor Settings search offers it. */
   macOnly?: boolean;
 }
@@ -459,6 +459,12 @@ export const SETTINGS_ROWS = [
     description: BOTS_DESCRIPTION,
     searchTerms: ["experimental", "bots", "bot", "employees", "roles", "cto", "watcher", "hire"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.bots" },
+  }),
+  defineSetting({
+    id: "experimental.intro", section: "experimental", title: "Intro",
+    description: "A short tour beside sign-in on a first run, and Help › Show intro.",
+    searchTerms: ["experimental", "intro", "tour", "slides", "welcome", "first run", "onboarding"], scope: "user",
+    storage: { kind: "localStorage", location: "raccoon.prefs#introSlides" },
   }),
   defineSetting({
     id: "orchestrator.requireApproval", section: "orchestrator", title: "Ask before a run starts",

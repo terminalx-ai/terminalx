@@ -1,5 +1,5 @@
 {
-  "source": "node scripts/webkit/run-all.mjs --times over 24 part logs (45588208775-part-1.log, 45588208775-part-2.log, 45588208775-part-3.log, 45588208775-part-4.log, 45595771005-part-1.log, 45595771005-part-2.log, 45595771005-part-3.log, 45595771005-part-4.log, 45597409917-part-1.log, 45597409917-part-2.log, 45597409917-part-3.log, 45597409917-part-4.log, 45598717792-part-1.log, 45598717792-part-2.log, 45598717792-part-3.log, 45598717792-part-4.log, 45598884694-part-1.log, 45598884694-part-2.log, 45598884694-part-3.log, 45598884694-part-4.log, 45604228203-part-1.log, 45604228203-part-2.log, 45604228203-part-3.log, 45604228203-part-4.log), seconds per check, median of the runs it passed in. chat-mentions (PRO-141, new): one local run of 13 s until the next rebuild from CI logs. mcp-settings (PRO-239, new): one local run of 24 s, likewise.",
+  "source": "node scripts/webkit/run-all.mjs --times over 24 part logs (45588208775-part-1.log, 45588208775-part-2.log, 45588208775-part-3.log, 45588208775-part-4.log, 45595771005-part-1.log, 45595771005-part-2.log, 45595771005-part-3.log, 45595771005-part-4.log, 45597409917-part-1.log, 45597409917-part-2.log, 45597409917-part-3.log, 45597409917-part-4.log, 45598717792-part-1.log, 45598717792-part-2.log, 45598717792-part-3.log, 45598717792-part-4.log, 45598884694-part-1.log, 45598884694-part-2.log, 45598884694-part-3.log, 45598884694-part-4.log, 45604228203-part-1.log, 45604228203-part-2.log, 45604228203-part-3.log, 45604228203-part-4.log), seconds per check, median of the runs it passed in. chat-mentions (PRO-141, new): one local run of 13 s until the next rebuild from CI logs. intro-slides (PRO-241, new): one local run of 12 s until the next rebuild from CI logs. mcp-settings (PRO-239, new): one local run of 24 s, likewise.",
   "seconds": {
     "account-row": 22.7,
     "account-settings": 26.4,
@@ -60,6 +60,7 @@
     "first-run": 20.9,
     "held-followups": 19.2,
     "helper-titles": 10.9,
+    "intro-slides": 12,
     "issue-session": 104,
     "issue-work": 26.5,
     "layered-configuration": 14,
@@ -188,6 +189,7 @@
     "first-run": 6,
     "held-followups": 6,
     "helper-titles": 6,
+    "intro-slides": 1,
     "issue-session": 6,
     "issue-work": 6,
     "layered-configuration": 6,

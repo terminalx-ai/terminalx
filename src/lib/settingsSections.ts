@@ -2,6 +2,7 @@ import { getExperimentalSettings } from "@/lib/experimentalSettings";
 import { getAccount } from "@/lib/account";
 import { mcpSettingsOffered } from "@/lib/mcpServers";
 import { isMac, thisComputer } from "@/lib/platform";
+import { getPrefs } from "@/lib/prefs";
 import type { SettingRegistration } from "@/components/settings/settingsRegistry";
 
 // The pages ⌘K lists; searching goes by row (settingsSearch.ts), whose metadata lives in settingsRegistry.
@@ -48,5 +49,5 @@ export function settingsSectionOffered(tab: SettingsTab): boolean {
  * the switches are read, as everywhere else. A Mac-only row is on a Mac only.
  */
 export function settingOffered(row: Pick<SettingRegistration, "section" | "requires" | "macOnly">, mac = isMac): boolean {
-  return settingsSectionOffered(row.section) && (!row.requires || getExperimentalSettings()?.[row.requires] === true) && (!row.macOnly || mac);
+  return settingsSectionOffered(row.section) && (!row.requires || (row.requires === "intro" ? getPrefs().introSlides : getExperimentalSettings()?.[row.requires] === true)) && (!row.macOnly || mac);
 }

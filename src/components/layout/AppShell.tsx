@@ -31,6 +31,8 @@ import { NewSessionView } from "@/components/session/NewSessionView";
 import { WelcomeTabActions } from "@/components/start/WelcomeTabActions";
 import { WelcomeScreen } from "@/components/start/WelcomeScreen";
 import { StartScreen } from "@/components/start/StartScreen";
+import { IntroScreen } from "@/components/start/IntroScreen";
+import { introDue, showIntro, useIntroOpen } from "@/lib/intro";
 import { ProjectStartDialogHost } from "@/components/start/ProjectStartDialogs";
 import { IssuesView } from "@/components/issues/IssuesView";
 import { ProjectOverview } from "@/components/project/ProjectOverview";
@@ -163,6 +165,9 @@ export function AppShell() {
   const automationOrgId = activeOrgId && phase2Ready(account.status, activeOrgId, "organizationAutomations") ? activeOrgId : undefined;
   const settingsBoundary = useSettingsLeaveBoundary();
   const { canLeave } = settingsBoundary;
+  // PRO-241: the first-run intro beside sign-in takes the whole window, behind its switch.
+  const introOpen = useIntroOpen();
+  const intro = prefs.introSlides && (introOpen || introDue(prefs, account));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(GENERAL_SETTINGS_TAB);
   // The repository Settings opens on, for a request that names one; every other way in names none.
@@ -315,6 +320,7 @@ export function AppShell() {
   useShortcut("app.about", () => openSettings("about"));
   useShortcut("app.checkUpdates", () => { openSettings("about"); void checkForUpdate(); });
   useShortcut("app.shortcuts", () => openSettings("shortcuts"));
+  useShortcut("app.showIntro", showIntro, { enabled: prefs.introSlides });
   useShortcut("app.addProject", () => { if (!canLeave()) return; setSettingsOpen(false); void openLocalProject().catch((error) => console.error("add project", error)); });
   useShortcut("app.openRecent", () => setPaletteOpen(true));
   useShortcut("app.nextSession", () => { if (!canLeave()) return; setSettingsOpen(false); stepVisibleSession(1); });
@@ -464,7 +470,9 @@ export function AppShell() {
       <PairPhoneDialogHost />
       <MachineApprovalHost />
       <div className="flex min-h-0 flex-1">
-        {settingsOpen && cloudSetup ? (
+        {intro ? (
+          <IntroScreen />
+        ) : settingsOpen && cloudSetup ? (
           <CloudSetupFlow
             key={`${account.status.identity?.email ?? ""}:${cloudSetup.kind === "resume" ? cloudSetup.organizationId : "create"}`}
             target={cloudSetup}
