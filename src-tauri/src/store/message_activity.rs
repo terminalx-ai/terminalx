@@ -415,21 +415,22 @@ pub fn record(event: &AgentEvent) -> Result<Option<SessionEntry>> {
     let log = super::log_path_in(&root, &event.session_id, &event.tab_id)?;
 
     // Ensure the session's activity is warm in memory (never holding CACHE across disk I/O).
-    let needs_load = {
-        let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        match cache.entries.get(&sidecar) {
-            Some(entry) if entry.dirty => None,
-            Some(entry) => Some(Some(entry.disk_stamp)),
-            None => Some(None),
-        }
-    };
-    let loaded = match needs_load {
-        None => None,
-        Some(Some(saved_stamp)) if super::file_stamp(&sidecar)? == saved_stamp => None,
-        Some(_) => Some(read_disk_activity(&sidecar)?),
-    };
+    // Retry if a clean entry is evicted by another thread between the stamp check and re-lock.
+    let (publish, should_flush) = loop {
+        let needs_load = {
+            let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            match cache.entries.get(&sidecar) {
+                Some(entry) if entry.dirty => None,
+                Some(entry) => Some(Some(entry.disk_stamp)),
+                None => Some(None),
+            }
+        };
+        let loaded = match needs_load {
+            None => None,
+            Some(Some(saved_stamp)) if super::file_stamp(&sidecar)? == saved_stamp => None,
+            Some(_) => Some(read_disk_activity(&sidecar)?),
+        };
 
-    let (publish, should_flush) = {
         let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
         let tick = cache.next_tick();
         if let Some((disk_activity, disk_stamp)) = loaded {
@@ -455,7 +456,9 @@ pub fn record(event: &AgentEvent) -> Result<Option<SessionEntry>> {
                 }
             }
         }
-        let entry = cache.entries.get_mut(&sidecar).expect("activity entry loaded");
+        let Some(entry) = cache.entries.get_mut(&sidecar) else {
+            continue;
+        };
         entry.last_used = tick;
         let tab = entry.activity.tabs.entry(event.tab_id.clone()).or_default();
         select_log(tab, &log);
@@ -475,7 +478,7 @@ pub fn record(event: &AgentEvent) -> Result<Option<SessionEntry>> {
             entry.dirty_since.get_or_insert_with(Instant::now);
             entry.generation = entry.generation.wrapping_add(1);
         }
-        (changed || tab_changed, mutated)
+        break (changed || tab_changed, mutated);
     };
     if should_flush {
         notify_flusher();
@@ -1097,5 +1100,42 @@ mod tests {
         assert_eq!(index::get("s1").unwrap().unknown[FIELD], at(6));
         flush();
         assert_eq!(read("s1").unwrap().last_message_at, Some(at(6)));
+    }
+
+    #[test]
+    fn record_handles_eviction_under_cache_pressure_without_panicking() {
+        let _home = super::super::temp_home();
+        seed();
+        assert!(record(&prompt(1, 2)).unwrap().is_some());
+        flush();
+
+        // Populate more than MAX_CACHE_ENTRIES clean sessions so "synthetic" is evicted,
+        // and race concurrent cache evictions against repeated record() calls.
+        let root = super::super::root().unwrap();
+        let pressure_root = root.clone();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_evictor = Arc::clone(&stop);
+        let evictor = std::thread::spawn(move || {
+            let mut i = 0usize;
+            while !stop_evictor.load(std::sync::atomic::Ordering::Relaxed) {
+                let sidecar = activity_path(&pressure_root, &format!("evict-{i}"));
+                let _ = read_cached(&sidecar);
+                i = (i + 1) % (MAX_CACHE_ENTRIES + 64);
+            }
+        });
+
+        for i in 0..(MAX_CACHE_ENTRIES + 32) {
+            let _ = read_cached(&activity_path(&root, &format!("fill-{i}")));
+        }
+        for seq in 2..40 {
+            let _ = record(&reply(seq, 3 + (seq as u32 % 5))).unwrap();
+            flush();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        evictor.join().unwrap();
+
+        flush();
+        assert_eq!(index::get("synthetic").unwrap().unknown[FIELD], at(7));
+        assert_eq!(read("synthetic").unwrap().last_message_at, Some(at(7)));
     }
 }
