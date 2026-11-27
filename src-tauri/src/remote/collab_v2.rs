@@ -219,6 +219,55 @@ struct WorkspaceSshGrant {
     ssh_expires_at: u64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct VerifiedWorkspaceSshKey {
+    pub(crate) public_key: String,
+    pub(crate) expires_at: u64,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn verified_legacy_workspace_ssh_keys(
+    snapshot: serde_json::Value, now_ms: u64,
+) -> Result<HashMap<String, VerifiedWorkspaceSshKey>> {
+    #[derive(Deserialize)]
+    struct LegacySnapshot {
+        v: u8,
+        members: Vec<LegacySshMember>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LegacySshMember {
+        #[serde(flatten)]
+        member: super::Member,
+        ssh_public_keys: Option<Vec<String>>,
+        ssh_expires_at: Option<u64>,
+    }
+
+    let snapshot: LegacySnapshot = serde_json::from_value(snapshot)?;
+    ensure!(snapshot.v == 1 && snapshot.members.len() <= MAX_MEMBERS, "invalid legacy SSH snapshot");
+    let mut users = HashSet::new();
+    let mut keys = HashMap::new();
+    for entry in snapshot.members {
+        let member = entry.member;
+        ensure!(!member.user_id.is_empty() && users.insert(member.user_id.clone()), "invalid legacy SSH member");
+        if member.role != Role::Manager && (member.role != Role::Driver || !member.can_approve) {
+            continue;
+        }
+        let (Some(keys_for_member), Some(expires_at)) = (entry.ssh_public_keys, entry.ssh_expires_at) else {
+            continue;
+        };
+        let [key] = keys_for_member.as_slice() else {
+            anyhow::bail!("invalid legacy SSH grant cardinality");
+        };
+        if expires_at <= now_ms || expires_at - now_ms > 60_000 {
+            continue;
+        }
+        let public_key = crate::workspace_ssh::parse_public_key(key).context("invalid legacy SSH grant key")?;
+        keys.insert(member.user_id, VerifiedWorkspaceSshKey { public_key, expires_at });
+    }
+    Ok(keys)
+}
+
 impl RuntimePolicy {
     /// Bind only to the existing native authenticated runtime identity. A
     /// persisted record is a revision floor, never startup authorization.
@@ -329,12 +378,13 @@ impl RuntimePolicy {
     }
 
     /// Validate the authenticated refresh extension against the installed
-    /// snapshot. The caller supplies its locally negotiated capability.
+    /// snapshot. Keep each key under its authenticated user ID so the
+    /// attachment cannot try another member's SSH identity.
     #[allow(dead_code)]
     pub(crate) fn verified_workspace_ssh_keys(
         &self, extension: Option<serde_json::Value>, workspace_id: &str,
         generation: u64, requested_ssh_v2: bool, now_ms: u64,
-    ) -> Result<HashMap<String, u64>> {
+    ) -> Result<HashMap<String, VerifiedWorkspaceSshKey>> {
         let Some(extension) = extension.filter(|_| requested_ssh_v2) else {
             return Ok(HashMap::new());
         };
@@ -357,9 +407,12 @@ impl RuntimePolicy {
                 && (member.role == Role::Manager
                     || (member.role == Role::Driver && member.can_approve && member.write_source == Some(WriteSource::Explicit))));
             if !allowed { continue; }
-            let key = crate::workspace_ssh::parse_public_key(&grant.ssh_public_keys[0]).context("invalid SSH grant key")?;
-            keys.entry(key).and_modify(|until: &mut u64| *until = (*until).min(grant.ssh_expires_at))
-                .or_insert(grant.ssh_expires_at);
+            let public_key = crate::workspace_ssh::parse_public_key(&grant.ssh_public_keys[0])
+                .context("invalid SSH grant key")?;
+            keys.insert(grant.user_id, VerifiedWorkspaceSshKey {
+                public_key,
+                expires_at: grant.ssh_expires_at,
+            });
         }
         Ok(keys)
     }
@@ -537,7 +590,10 @@ mod tests {
         ).collect();
         let batch = json!({"v":1,"workspaceId":"ws","runtimeGeneration":3,"revision":"7","grants":grants});
         let accepted = policy.verified_workspace_ssh_keys(Some(batch.clone()), "ws", 3, true, 100).unwrap();
-        assert_eq!(accepted, HashMap::from([(key(0), 60_100), (key(1), 60_100)]));
+        assert_eq!(accepted, HashMap::from([
+            ("manager".into(), VerifiedWorkspaceSshKey { public_key: key(0), expires_at: 60_100 }),
+            ("driver".into(), VerifiedWorkspaceSshKey { public_key: key(1), expires_at: 60_100 }),
+        ]));
         assert!(policy.verified_workspace_ssh_keys(Some(batch.clone()), "ws", 3, false, 100).unwrap().is_empty());
         assert!(policy.verified_workspace_ssh_keys(Some(batch.clone()), "other", 3, true, 100).is_err());
         assert!(policy.verified_workspace_ssh_keys(Some(batch.clone()), "ws", 4, true, 100).is_err());
@@ -546,6 +602,25 @@ mod tests {
         assert!(policy.verified_workspace_ssh_keys(Some(stale), "ws", 3, true, 100).is_err());
         policy.set_generation(4);
         assert!(policy.verified_workspace_ssh_keys(Some(batch), "ws", 3, true, 100).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn workspace_ssh_legacy_grants_require_current_explicit_drive() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let mut raw = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
+        raw.extend([9; 32]);
+        let key = format!("ssh-ed25519 {}", STANDARD.encode(raw));
+        let snapshot = serde_json::json!({"v":1,"members":[
+            {"userId":"manager","role":"manager","sshPublicKeys":[key],"sshExpiresAt":1000},
+            {"userId":"driver","role":"driver","canApprove":true,"sshPublicKeys":[key],"sshExpiresAt":1000},
+            {"userId":"viewer","role":"viewer","canApprove":true,"sshPublicKeys":[key],"sshExpiresAt":1000},
+            {"userId":"expired","role":"manager","sshPublicKeys":[key],"sshExpiresAt":10},
+        ]});
+        let result = verified_legacy_workspace_ssh_keys(snapshot, 100).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result["manager"].public_key, key);
+        assert_eq!(result["driver"].expires_at, 1000);
     }
 
     #[test]

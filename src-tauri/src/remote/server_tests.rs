@@ -4272,3 +4272,16 @@ async fn cloud_desktop_requires_readiness_and_watchers_cannot_open_control_or_ge
     assert_eq!(closed["params"]["reason"], "revoked");
     assert_eq!(code(call(&f.rpc, &viewer, "desktop.write", json!({"streamId":stream, "data":"eA=="})).await), "forbidden");
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn workspace_ssh_does_not_offer_an_uninitialized_listener() {
+    let f = fixture();
+    let (peer, _) = Peer::for_user("ssh-device".into(), Authority::Manage, Some("owner".into()));
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "owner", "role": "manager", "canApprove": true }
+    ])));
+    let hello = json!({ "protocol": PROTOCOL, "want": ["ports/1", protocol::WORKSPACE_SSH] });
+    assert_eq!(call(&f.rpc, &peer, "rpc.hello", hello).await.unwrap()["capabilities"], json!(["ports/1"]));
+    assert_eq!(code(call(&f.rpc, &peer, "ssh.open", json!({})).await), "capability_not_granted");
+}

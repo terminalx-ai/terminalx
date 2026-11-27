@@ -82,6 +82,11 @@ mod workspace_ssh;
 #[cfg(unix)]
 #[allow(dead_code)]
 mod workspace_ssh_payload;
+#[cfg(unix)]
+#[allow(dead_code)]
+mod workspace_ssh_listener;
+#[allow(dead_code)]
+mod workspace_ssh_updater;
 #[cfg(feature = "desktop")]
 mod desktop_inbox;
 #[cfg(feature = "desktop")]
@@ -816,6 +821,8 @@ pub fn run() {
             commands::cloud_workspace_restart,
             commands::cloud_workspace_details,
             commands::cloud_workspace_precreate_usage,
+            commands::organization_billing,
+            commands::organization_billing_portal,
             commands::cloud_workspace_start_progress,
             commands::cloud_workspace_idle_suspend,
             commands::cloud_workspace_set_idle_suspend,
