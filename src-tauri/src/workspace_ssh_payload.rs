@@ -219,6 +219,7 @@ impl InstallLock {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(root.join(".install.lock"))?;
@@ -228,6 +229,32 @@ impl InstallLock {
             root: root.to_path_buf(),
             _guard: guard,
         })
+    }
+
+    /// Derive a version-pinned executable from the private current link.
+    /// The caller keeps the install lock until this version has a session pin.
+    pub(super) fn active_daemon(&self) -> Result<PathBuf> {
+        let link = fs::read_link(self.root.join("current"))?;
+        Version::parse(link.to_str().context("invalid OpenSSH current link")?)?;
+        let version = self.root.join(link);
+        ensure!(
+            fs::symlink_metadata(&version)?.is_dir(),
+            "OpenSSH version directory is not a real directory"
+        );
+        let sbin = version.join("usr/sbin");
+        for path in [version.join("usr"), sbin.clone()] {
+            ensure!(
+                fs::symlink_metadata(path)?.is_dir(),
+                "OpenSSH executable directory is not a real directory"
+            );
+        }
+        let daemon = sbin.join("sshd");
+        let metadata = fs::symlink_metadata(&daemon)?;
+        ensure!(
+            metadata.is_file() && metadata.mode() & 0o111 != 0,
+            "invalid private OpenSSH executable"
+        );
+        Ok(daemon)
     }
 
     pub(super) fn stage(&self, manifest: &VerifiedManifest, payload: &[u8]) -> Result<PathBuf> {

@@ -8,7 +8,9 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
-pub(crate) const PRIVATE_SSHD: &str = "/opt/terminalx/openssh/usr/sbin/sshd";
+/// Locate the active installation. Session processes must use the resolved
+/// version's directory so a later activation cannot change their helper paths.
+pub(crate) const PRIVATE_SSHD: &str = "/opt/terminalx/openssh/current/usr/sbin/sshd";
 
 /// OpenSSH portable versions use a patch suffix, such as OpenSSH_9.6p1.
 /// Reject versions we cannot identify and bound the accepted version report.

@@ -214,3 +214,37 @@ fn workspace_ssh_payload_rejects_unsafe_archives_without_publishing_partial_vers
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
     }
 }
+
+#[test]
+fn workspace_ssh_payload_resolves_current_to_a_version_pinned_daemon() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let guard = InstallLock::acquire(root).unwrap();
+    let current = root.join("current");
+    let link = |target: &str| {
+        if fs::symlink_metadata(&current).is_ok() {
+            fs::remove_file(&current).unwrap();
+        }
+        std::os::unix::fs::symlink(target, &current).unwrap();
+    };
+    for version in ["9.6p1", "9.7p1"] {
+        let bin = root.join(version).join("usr/sbin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("sshd"), version).unwrap();
+        fs::set_permissions(bin.join("sshd"), fs::Permissions::from_mode(0o555)).unwrap();
+    }
+    link("9.6p1");
+    let original = guard.active_daemon().unwrap();
+    assert_eq!(original, root.join("9.6p1/usr/sbin/sshd"));
+    link("9.7p1");
+    assert_eq!(
+        guard.active_daemon().unwrap(),
+        root.join("9.7p1/usr/sbin/sshd")
+    );
+    assert_eq!(fs::read_to_string(original).unwrap(), "9.6p1");
+    link("../9.6p1");
+    assert!(guard.active_daemon().is_err());
+    link("9.8p1");
+    std::os::unix::fs::symlink("9.7p1", root.join("9.8p1")).unwrap();
+    assert!(guard.active_daemon().is_err());
+}
