@@ -201,6 +201,24 @@ impl Default for RuntimePolicy {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceSshGrantBatch {
+    v: u8,
+    workspace_id: String,
+    runtime_generation: u64,
+    revision: String,
+    grants: Vec<WorkspaceSshGrant>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceSshGrant {
+    user_id: String,
+    ssh_public_keys: Vec<String>,
+    ssh_expires_at: u64,
+}
+
 impl RuntimePolicy {
     /// Bind only to the existing native authenticated runtime identity. A
     /// persisted record is a revision floor, never startup authorization.
@@ -308,6 +326,42 @@ impl RuntimePolicy {
             "collaboration lease revision or generation mismatch");
         ensure!(snapshot.members.iter().any(|current| current == &member), "collaboration lease member or source mismatch");
         Ok(Stamp { revision: revision.into(), generation: state.generation, epoch: state.epoch.clone(), member, attachment: None })
+    }
+
+    /// Validate the authenticated refresh extension against the installed
+    /// snapshot. The caller supplies its locally negotiated capability.
+    #[allow(dead_code)]
+    pub(crate) fn verified_workspace_ssh_keys(
+        &self, extension: Option<serde_json::Value>, workspace_id: &str,
+        generation: u64, requested_ssh_v2: bool, now_ms: u64,
+    ) -> Result<HashMap<String, u64>> {
+        let Some(extension) = extension.filter(|_| requested_ssh_v2) else {
+            return Ok(HashMap::new());
+        };
+        let batch: WorkspaceSshGrantBatch = serde_json::from_value(extension)?;
+        ensure!(batch.v == 1 && batch.workspace_id == workspace_id && batch.runtime_generation == generation,
+            "SSH grant scope mismatch");
+        ensure!(batch.grants.len() <= MAX_MEMBERS, "too many SSH grants");
+        let state = self.0.lock().unwrap();
+        let snapshot = state.active.as_ref().context("SSH requires installed collaboration authority")?;
+        ensure!(generation == state.generation && batch.revision == snapshot.revision, "SSH grant policy mismatch");
+        let mut authorities = HashSet::new();
+        let mut keys = HashMap::new();
+        for grant in batch.grants {
+            ensure!(authorities.insert(grant.user_id.clone()) && grant.ssh_public_keys.len() == 1,
+                "invalid SSH grant cardinality");
+            if grant.ssh_expires_at <= now_ms || grant.ssh_expires_at - now_ms > 60_000 {
+                continue;
+            }
+            let allowed = snapshot.members.iter().any(|member| member.user_id == grant.user_id
+                && (member.role == Role::Manager
+                    || (member.role == Role::Driver && member.can_approve && member.write_source == Some(WriteSource::Explicit))));
+            if !allowed { continue; }
+            let key = crate::workspace_ssh::parse_public_key(&grant.ssh_public_keys[0]).context("invalid SSH grant key")?;
+            keys.entry(key).and_modify(|until: &mut u64| *until = (*until).min(grant.ssh_expires_at))
+                .or_insert(grant.ssh_expires_at);
+        }
+        Ok(keys)
     }
 
     pub fn stamp(&self, actor: &str) -> Option<Stamp> {
@@ -451,6 +505,48 @@ impl Permit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_ssh_grants_require_current_scope_and_explicit_drive_authority() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().unwrap();
+        let policy = RuntimePolicy::default();
+        policy.bind(dir.path(), 3).unwrap();
+        let members = [
+            ("manager", "manager", "implicit", false),
+            ("driver", "driver", "explicit", true),
+            ("no-approval", "driver", "explicit", false),
+            ("everyone", "driver", "everyone", true),
+            ("expired", "driver", "explicit", true),
+        ];
+        let snapshot: Snapshot = serde_json::from_value(json!({
+            "v": 2, "revision": "7", "members": members.map(|(id, role, source, approval)|
+                member_fixture(json!({"userId":id,"role":role,"writeSource":source,"canApprove":approval})))
+        })).unwrap();
+        policy.install(snapshot).unwrap();
+
+        let key = |byte| {
+            let mut raw = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
+            raw.extend([byte; 32]);
+            format!("ssh-ed25519 {}", STANDARD.encode(raw))
+        };
+        let grants: Vec<_> = members.iter().enumerate().map(|(index, (id, ..))|
+            json!({"userId":id, "sshPublicKeys":[key(index as u8)], "sshExpiresAt": if *id == "expired" { 100 } else { 60_100 }})
+        ).collect();
+        let batch = json!({"v":1,"workspaceId":"ws","runtimeGeneration":3,"revision":"7","grants":grants});
+        let accepted = policy.verified_workspace_ssh_keys(Some(batch.clone()), "ws", 3, true, 100).unwrap();
+        assert_eq!(accepted, HashMap::from([(key(0), 60_100), (key(1), 60_100)]));
+        assert!(policy.verified_workspace_ssh_keys(Some(batch.clone()), "ws", 3, false, 100).unwrap().is_empty());
+        assert!(policy.verified_workspace_ssh_keys(Some(batch.clone()), "other", 3, true, 100).is_err());
+        assert!(policy.verified_workspace_ssh_keys(Some(batch.clone()), "ws", 4, true, 100).is_err());
+        let mut stale = batch.clone();
+        stale["revision"] = json!("6");
+        assert!(policy.verified_workspace_ssh_keys(Some(stale), "ws", 3, true, 100).is_err());
+        policy.set_generation(4);
+        assert!(policy.verified_workspace_ssh_keys(Some(batch), "ws", 3, true, 100).is_err());
+    }
 
     #[test]
     fn phase2_collaboration_v2_revision_matches_canonical_nonnegative_postgres_bigint() {

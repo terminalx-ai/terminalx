@@ -2107,6 +2107,7 @@ mod tests {
                 collaboration:Some(json!({"v":2,"revision":revision,"members":[
                     {"userId":"driver","role":"driver","canApprove":true,"approvalSource":"explicit", "writeSource":source}
                 ]})),
+                workspace_ssh: None,
                 desktop_ready: false,
             };
             super::super::bootstrap_link::relay_session(&session, capabilities)

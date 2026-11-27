@@ -435,10 +435,12 @@ pub(crate) const PHASE2_ADMIN_SHARE: &str = "cloud.workspaces.admin-share.v1";
 pub(crate) const PHASE2_ORGANIZATION_AUTOMATIONS: &str = "cloud.automations.organization.v1";
 const PHASE2_TEAMS_PLAN: &str = "organization.teams-plan.v1";
 pub(crate) const PHASE2_NUDGES: &str = "team.nudges.v1";
-const PHASE2_FEATURES: [&str; 23] = [
+pub(crate) const PHASE2_WORKSPACE_SSH: &str = "cloud.workspaces.ssh.v1";
+const PHASE2_FEATURES: [&str; 24] = [
     PHASE2_TEAMS_PLAN,
     PHASE2_ORGANIZATION_AUTOMATIONS,
     PHASE2_NUDGES,
+    PHASE2_WORKSPACE_SSH,
     PHASE2_EVENTS, PHASE2_PRESENCE, PHASE2_FOLLOW_REASSIGN, PHASE2_MENTIONS, PHASE2_RESTART_DETAILS,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_WEBHOOK_TRIGGER,
     "cloud.environment-info.v1",

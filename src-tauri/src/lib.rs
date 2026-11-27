@@ -77,6 +77,11 @@ mod agent_local_login;
 mod codex_device_login;
 #[cfg(feature = "desktop")]
 mod cloud_workspaces;
+#[allow(dead_code)]
+mod workspace_ssh;
+#[cfg(unix)]
+#[allow(dead_code)]
+mod workspace_ssh_payload;
 #[cfg(feature = "desktop")]
 mod desktop_inbox;
 #[cfg(feature = "desktop")]

@@ -62,6 +62,7 @@ serde_json = { version = "1", optional = true }
 tempfile = "3"
 aes-gcm = "0.10.3"
 flate2 = "1"
+tar = "0.4.46"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 http-range = "0.1"
 tokio-util = { version = "0.7", features = ["io", "rt"] }
