@@ -384,7 +384,7 @@ impl Api for HttpApi {
     }
     #[cfg(target_os = "linux")]
     fn refresh_workspace_ssh(&self, credential: &str) -> Result<Refreshed, CallError> {
-        let capabilities = format!("{CAPABILITIES},workspace-ssh-v2");
+        let capabilities = format!("{CAPABILITIES},workspace-ssh-v1,workspace-ssh-v2");
         self.post("/v1/cloud-workspace-bootstrap/refresh", credential, serde_json::json!({}), Some((CAPABILITIES_HEADER, &capabilities)))
     }
 }
@@ -669,9 +669,15 @@ impl Bootstrapped {
         });
         match refreshed {
             Ok(mut session) => {
-                if !requested_ssh {
-                    session.workspace_ssh = None;
-                }
+                session.workspace_ssh = if requested_ssh {
+                    match session.collaboration.as_ref().and_then(|snapshot| snapshot["v"].as_u64()) {
+                        Some(1) => session.collaboration.clone(),
+                        Some(2) => session.workspace_ssh.take(),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
                 self.rejected.store(false, std::sync::atomic::Ordering::SeqCst);
                 *failures = 0;
                 *current = session;

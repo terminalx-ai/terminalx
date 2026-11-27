@@ -225,6 +225,49 @@ pub(crate) struct VerifiedWorkspaceSshKey {
     pub(crate) expires_at: u64,
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn verified_legacy_workspace_ssh_keys(
+    snapshot: serde_json::Value, now_ms: u64,
+) -> Result<HashMap<String, VerifiedWorkspaceSshKey>> {
+    #[derive(Deserialize)]
+    struct LegacySnapshot {
+        v: u8,
+        members: Vec<LegacySshMember>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LegacySshMember {
+        #[serde(flatten)]
+        member: super::Member,
+        ssh_public_keys: Option<Vec<String>>,
+        ssh_expires_at: Option<u64>,
+    }
+
+    let snapshot: LegacySnapshot = serde_json::from_value(snapshot)?;
+    ensure!(snapshot.v == 1 && snapshot.members.len() <= MAX_MEMBERS, "invalid legacy SSH snapshot");
+    let mut users = HashSet::new();
+    let mut keys = HashMap::new();
+    for entry in snapshot.members {
+        let member = entry.member;
+        ensure!(!member.user_id.is_empty() && users.insert(member.user_id.clone()), "invalid legacy SSH member");
+        if member.role != Role::Manager && (member.role != Role::Driver || !member.can_approve) {
+            continue;
+        }
+        let (Some(keys_for_member), Some(expires_at)) = (entry.ssh_public_keys, entry.ssh_expires_at) else {
+            continue;
+        };
+        let [key] = keys_for_member.as_slice() else {
+            anyhow::bail!("invalid legacy SSH grant cardinality");
+        };
+        if expires_at <= now_ms || expires_at - now_ms > 60_000 {
+            continue;
+        }
+        let public_key = crate::workspace_ssh::parse_public_key(key).context("invalid legacy SSH grant key")?;
+        keys.insert(member.user_id, VerifiedWorkspaceSshKey { public_key, expires_at });
+    }
+    Ok(keys)
+}
+
 impl RuntimePolicy {
     /// Bind only to the existing native authenticated runtime identity. A
     /// persisted record is a revision floor, never startup authorization.
@@ -559,6 +602,25 @@ mod tests {
         assert!(policy.verified_workspace_ssh_keys(Some(stale), "ws", 3, true, 100).is_err());
         policy.set_generation(4);
         assert!(policy.verified_workspace_ssh_keys(Some(batch), "ws", 3, true, 100).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn workspace_ssh_legacy_grants_require_current_explicit_drive() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let mut raw = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
+        raw.extend([9; 32]);
+        let key = format!("ssh-ed25519 {}", STANDARD.encode(raw));
+        let snapshot = json!({"v":1,"members":[
+            {"userId":"manager","role":"manager","sshPublicKeys":[key],"sshExpiresAt":1000},
+            {"userId":"driver","role":"driver","canApprove":true,"sshPublicKeys":[key],"sshExpiresAt":1000},
+            {"userId":"viewer","role":"viewer","canApprove":true,"sshPublicKeys":[key],"sshExpiresAt":1000},
+            {"userId":"expired","role":"manager","sshPublicKeys":[key],"sshExpiresAt":10},
+        ]});
+        let result = verified_legacy_workspace_ssh_keys(snapshot, 100).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result["manager"].public_key, key);
+        assert_eq!(result["driver"].expires_at, 1000);
     }
 
     #[test]

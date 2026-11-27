@@ -1291,9 +1291,15 @@ impl WorkspaceRpc {
             now.max(floor.saturating_add(instant.duration_since(previous).as_millis().min(u128::from(u64::MAX)) as u64))
         });
         ssh.clock_floor = Some((now, instant));
-        let grants = refresh.and_then(|refresh| self.collab.runtime_policy.verified_workspace_ssh_keys(
-            Some(refresh.grants.clone()), &refresh.workspace_id, generation, true, now,
-        ).ok()).unwrap_or_default();
+        let grants = refresh.and_then(|refresh| {
+            if refresh.v2 {
+                self.collab.runtime_policy.verified_workspace_ssh_keys(
+                    Some(refresh.grants.clone()), &refresh.workspace_id, generation, true, now,
+                ).ok()
+            } else {
+                collab::v2::verified_legacy_workspace_ssh_keys(refresh.grants.clone(), now).ok()
+            }
+        }).unwrap_or_default();
         ssh.runtime = refresh.map(|refresh| refresh.runtime.clone());
         ssh.grants = grants.into_iter().map(|(user, grant)| {
             let deadline = instant + std::time::Duration::from_millis(grant.expires_at - now);

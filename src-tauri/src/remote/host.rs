@@ -162,6 +162,7 @@ pub struct RelaySession {
 pub(crate) struct WorkspaceSshRefresh {
     pub workspace_id: String,
     pub grants: Value,
+    pub v2: bool,
     pub runtime: Arc<crate::workspace_ssh_listener::Runtime>,
 }
 

@@ -47,6 +47,7 @@ impl RuntimeLink for BootstrapLink {
             relay.workspace_ssh = session.workspace_ssh.as_ref().map(|grants| super::host::WorkspaceSshRefresh {
                 workspace_id: session.workspace_id.clone(),
                 grants: grants.clone(),
+                v2: session.collaboration.as_ref().is_some_and(|snapshot| snapshot["v"] == 2),
                 runtime: runtime.clone(),
             });
         }
