@@ -21,6 +21,7 @@ export const phase2Features = {
   generalAccess: "cloud.workspaces.general-access.v1",
   agentLoginBedrock: "cloud.agent-logins.bedrock.v1",
   usageLimitCard: "cloud.agent-logins.usage-limit-card.v1",
+  announcements: "desktop.announcements.v1",
 } as const;
 
 export function phase2Ready(status: AccountStatus, orgId: string, feature: keyof typeof phase2Features): boolean {
