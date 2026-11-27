@@ -481,7 +481,9 @@ pub fn establish(config: &Config, api: &dyn Api, policy: &Policy) -> Result<Boot
     let started = Instant::now();
     loop {
         let (error, rejected) = match attempt(config, api, &key) {
-            Ok((session, credential)) => {
+            Ok((mut session, credential)) => {
+                // Establishment does not request SSH grants.
+                session.workspace_ssh = None;
                 return Ok(Bootstrapped {
                     key,
                     session: Mutex::new(session),
