@@ -758,7 +758,23 @@ enum Material {
     CodexApiKey(Zeroizing<String>),
     CodexChatgpt { access_token: Zeroizing<String>, id_token: Zeroizing<String>, account_id: Option<String>, expires_at: Option<u64> },
     CursorApiKey(Zeroizing<String>),
+    /// Claude Code through the organization's Amazon Bedrock (PRO-200).
+    ClaudeBedrock(Bedrock),
     Route(Route),
+}
+
+/// The organization's Amazon Bedrock login for Claude Code (PRO-200),
+/// as granted: tested by the account service with one call before it was
+/// stored. Holds a secret: never logged.
+struct Bedrock {
+    region: String,
+    model: String,
+    auth: BedrockAuth,
+}
+
+enum BedrockAuth {
+    Keys { access_key_id: String, secret_access_key: Zeroizing<String> },
+    ApiKey(Zeroizing<String>),
 }
 
 /// The templates this runtime applies (terminalx-saas
@@ -853,6 +869,7 @@ impl Material {
         match self {
             Self::ClaudeApiKey(_) | Self::CodexApiKey(_) | Self::CursorApiKey(_) => "api-key",
             Self::ClaudeOauth { .. } => "oauth-access-token",
+            Self::ClaudeBedrock(_) => "bedrock",
             Self::CodexChatgpt { .. } => "chatgpt-tokens",
             Self::Route(_) => "route",
         }
@@ -897,6 +914,17 @@ struct Plaintext {
     /// A custom endpoint's stored credential, in a route.
     #[serde(default)]
     credential: Option<String>,
+    /// Amazon Bedrock (`mode: bedrock`): `aws-keys` or `api-key`.
+    #[serde(default)]
+    auth: Option<String>,
+    #[serde(default)]
+    region: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    access_key_id: Option<String>,
+    #[serde(default)]
+    secret_access_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -924,7 +952,7 @@ struct RouteSettingsPlain {
 
 impl Drop for Plaintext {
     fn drop(&mut self) {
-        for secret in [&mut self.api_key, &mut self.access_token, &mut self.id_token, &mut self.credential].into_iter().flatten() {
+        for secret in [&mut self.api_key, &mut self.access_token, &mut self.id_token, &mut self.credential, &mut self.secret_access_key].into_iter().flatten() {
             secret.zeroize();
         }
     }
@@ -961,6 +989,20 @@ fn parse_plaintext(bytes: &[u8]) -> Result<Option<(Material, u64, String)>> {
             expires_at: plain.expires_at,
         },
         (Some(Provider::Cursor), "api-key") => Material::CursorApiKey(take(&mut plain.api_key, "apiKey")?),
+        (Some(Provider::Claude), "bedrock") => {
+            let region = plain.region.take().filter(|region| crate::cloud_workspaces::valid_bedrock_region(region));
+            let model = plain.model.take().filter(|model| crate::cloud_workspaces::valid_bedrock_model(model));
+            let (Some(region), Some(model)) = (region, model) else { bail!("the Bedrock grant lacks a valid region or model") };
+            let auth = match plain.auth.as_deref() {
+                Some("aws-keys") => BedrockAuth::Keys {
+                    access_key_id: take(&mut plain.access_key_id, "accessKeyId")?.to_string(),
+                    secret_access_key: take(&mut plain.secret_access_key, "secretAccessKey")?,
+                },
+                Some("api-key") => BedrockAuth::ApiKey(take(&mut plain.api_key, "apiKey")?),
+                _ => bail!("the Bedrock grant names no way to sign in"),
+            };
+            Material::ClaudeBedrock(Bedrock { region, model, auth })
+        }
         (Some(provider), "route") => {
             let Some(route) = plain.route.take() else { bail!("the route grant lacks its route") };
             let credential = plain.credential.take().filter(|credential| !credential.is_empty()).map(Zeroizing::new);
@@ -1874,8 +1916,42 @@ fn env_for(provider: Provider, grant: &ActiveGrant) -> Vec<(String, Option<Strin
         Material::CodexChatgpt { .. } => Vec::new(),
         Material::CursorApiKey(key) => vec![set(CURSOR_API_KEY_ENV, key)],
         Material::CodexApiKey(_) => Vec::new(),
+        Material::ClaudeBedrock(bedrock) => bedrock_env(bedrock),
         Material::Route(route) => route_env(provider, route),
     }
+}
+
+/// Claude Code's AWS variables that a Bedrock grant sets or clears.
+const BEDROCK_AWS_ENV: [&str; 5] = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_BEARER_TOKEN_BEDROCK", "AWS_PROFILE"];
+
+/// The environment Claude Code runs on Amazon Bedrock with (PRO-200):
+/// Bedrock switched on in the grant's region, on its tested model, signed
+/// in with its keys or Bedrock API key, and every other way to sign in or
+/// send requests elsewhere unset, so a profile or app-managed variable
+/// cannot put it on another account or provider.
+fn bedrock_env(bedrock: &Bedrock) -> Vec<(String, Option<String>)> {
+    let set = |name: &str, value: &str| (name.to_string(), Some(value.to_string()));
+    let unset = |name: &str| (name.to_string(), None);
+    let mut env: Vec<(String, Option<String>)> = [CLAUDE_API_KEY_ENV, CLAUDE_AUTH_TOKEN_ENV, CLAUDE_OAUTH_ENV, CLAUDE_BASE_URL_ENV, "ANTHROPIC_BEDROCK_BASE_URL", "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"]
+        .into_iter()
+        .chain(BEDROCK_AWS_ENV)
+        .map(unset)
+        .collect();
+    let mut put = |name: &str, value: &str| {
+        env.retain(|(set_name, _)| set_name != name);
+        env.push(set(name, value));
+    };
+    put("CLAUDE_CODE_USE_BEDROCK", "1");
+    put("AWS_REGION", &bedrock.region);
+    put("ANTHROPIC_MODEL", &bedrock.model);
+    match &bedrock.auth {
+        BedrockAuth::Keys { access_key_id, secret_access_key } => {
+            put("AWS_ACCESS_KEY_ID", access_key_id);
+            put("AWS_SECRET_ACCESS_KEY", secret_access_key);
+        }
+        BedrockAuth::ApiKey(key) => put("AWS_BEARER_TOKEN_BEDROCK", key),
+    }
+    env
 }
 
 /// What a new session takes from the grants ([`GrantStore::launch_grant`]).
@@ -2072,6 +2148,15 @@ pub fn run_route_check(job: &RouteCheckJob) -> crate::agent_route_check::Checked
 fn route_launch_in(state: &State, provider: Provider, cwd: &Path, now: Instant) -> Option<RouteLaunch> {
     {
         let grant = state.active.get(&provider).filter(|grant| grant.usable(now))?;
+        if let Material::ClaudeBedrock(bedrock) = &grant.material {
+            // The tab's model is a first-party id Bedrock may not serve: start on the one the
+            // organization tested. Bedrock and its region are pinned above a checkout's settings.
+            return Some(RouteLaunch {
+                model: Some(bedrock.model.clone()),
+                claude_settings_env: vec![("CLAUDE_CODE_USE_BEDROCK".into(), "1".into()), ("AWS_REGION".into(), bedrock.region.clone())],
+                ..RouteLaunch::default()
+            });
+        }
         let route = grant.material.route()?;
         let agent = provider.label();
         let Some(kind) = route.kind else {
@@ -2856,6 +2941,52 @@ mod tests {
         assert_eq!(status["credentials"][0]["provider"], "claude");
         assert_eq!(status["credentials"][0]["injecting"], true);
         assert!(!status.to_string().contains("fake-oauth-1"), "the status carries no secret");
+    }
+
+    #[test]
+    fn a_bedrock_grant_runs_claude_code_on_bedrock() {
+        let server = FakeServer::new();
+        server.credential("claude", "cred_b", "connected", 1, 1);
+        server.grant("claude", "cred_b", 1, json!({"v": 1, "provider": "claude", "mode": "bedrock", "auth": "aws-keys", "region": "eu-central-1",
+            "model": "eu.anthropic.claude-opus-5-5", "accessKeyId": "AKIAFAKEFAKEFAKE0000", "secretAccessKey": "fake-secret-access-key", "version": 1}));
+        let store = store(None);
+        let t0 = Instant::now();
+        store.sync(&server, t0, NOW).unwrap();
+        let env = store.agent_env(Provider::Claude, t0);
+        assert_eq!(value_of(&env, "CLAUDE_CODE_USE_BEDROCK"), Some(&Some("1".to_string())));
+        assert_eq!(value_of(&env, "AWS_REGION"), Some(&Some("eu-central-1".to_string())));
+        assert_eq!(value_of(&env, "ANTHROPIC_MODEL"), Some(&Some("eu.anthropic.claude-opus-5-5".to_string())));
+        assert_eq!(value_of(&env, "AWS_ACCESS_KEY_ID"), Some(&Some("AKIAFAKEFAKEFAKE0000".to_string())));
+        assert_eq!(value_of(&env, "AWS_SECRET_ACCESS_KEY"), Some(&Some("fake-secret-access-key".to_string())));
+        for cleared in ["AWS_SESSION_TOKEN", "AWS_BEARER_TOKEN_BEDROCK", "AWS_PROFILE", CLAUDE_API_KEY_ENV, CLAUDE_AUTH_TOKEN_ENV, CLAUDE_OAUTH_ENV, CLAUDE_BASE_URL_ENV, "CLAUDE_CODE_USE_VERTEX"] {
+            assert_eq!(value_of(&env, cleared), Some(&None), "{cleared} is unset");
+        }
+        let launch = store.route_launch(Provider::Claude, Path::new("/work"), t0).expect("the launch starts on the tested model");
+        assert_eq!(launch.model.as_deref(), Some("eu.anthropic.claude-opus-5-5"));
+        assert!(launch.claude_settings_env.contains(&("CLAUDE_CODE_USE_BEDROCK".into(), "1".into())));
+        assert!(!format!("{:?}", launch.claude_settings_env).contains("fake-secret"), "no secret on the command line");
+        assert!(!store.status(t0).to_string().contains("fake-secret"), "the status carries no secret");
+    }
+
+    #[test]
+    fn a_bedrock_api_key_grant_uses_the_bearer_token_and_a_bad_one_is_refused() {
+        let server = FakeServer::new();
+        server.credential("claude", "cred_b", "connected", 1, 1);
+        server.grant("claude", "cred_b", 1, json!({"v": 1, "provider": "claude", "mode": "bedrock", "auth": "api-key", "region": "us-east-1",
+            "model": "us.anthropic.claude-sonnet-5-5", "apiKey": "fake-bedrock-key", "version": 1}));
+        let store = store(None);
+        let t0 = Instant::now();
+        store.sync(&server, t0, NOW).unwrap();
+        let env = store.agent_env(Provider::Claude, t0);
+        assert_eq!(value_of(&env, "AWS_BEARER_TOKEN_BEDROCK"), Some(&Some("fake-bedrock-key".to_string())));
+        assert_eq!(value_of(&env, "AWS_ACCESS_KEY_ID"), Some(&None));
+        for bad in [
+            json!({"v": 1, "provider": "claude", "mode": "bedrock", "auth": "api-key", "region": "eu central", "model": "m", "apiKey": "k", "version": 1}),
+            json!({"v": 1, "provider": "claude", "mode": "bedrock", "auth": "aws-keys", "region": "eu-central-1", "model": "m", "accessKeyId": "AKIA", "version": 1}),
+            json!({"v": 1, "provider": "claude", "mode": "bedrock", "region": "eu-central-1", "model": "m", "apiKey": "k", "version": 1}),
+        ] {
+            assert!(parse_plaintext(bad.to_string().as_bytes()).is_err(), "{bad}");
+        }
     }
 
     #[test]

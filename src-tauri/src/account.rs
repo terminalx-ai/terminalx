@@ -436,7 +436,13 @@ pub(crate) const PHASE2_ORGANIZATION_AUTOMATIONS: &str = "cloud.automations.orga
 const PHASE2_TEAMS_PLAN: &str = "organization.teams-plan.v1";
 pub(crate) const PHASE2_NUDGES: &str = "team.nudges.v1";
 pub(crate) const PHASE2_WORKSPACE_SSH: &str = "cloud.workspaces.ssh.v1";
-const PHASE2_FEATURES: [&str; 24] = [
+/// Amazon Bedrock as an organization's Claude Code login (PRO-200).
+pub(crate) const PHASE2_AGENT_LOGIN_BEDROCK: &str = "cloud.agent-logins.bedrock.v1";
+/// The usage-limit card over a cloud tab on an organization's login (PRO-200).
+pub(crate) const PHASE2_AGENT_USAGE_LIMIT_CARD: &str = "cloud.agent-logins.usage-limit-card.v1";
+const PHASE2_FEATURES: [&str; 26] = [
+    PHASE2_AGENT_LOGIN_BEDROCK,
+    PHASE2_AGENT_USAGE_LIMIT_CARD,
     PHASE2_TEAMS_PLAN,
     PHASE2_ORGANIZATION_AUTOMATIONS,
     PHASE2_NUDGES,

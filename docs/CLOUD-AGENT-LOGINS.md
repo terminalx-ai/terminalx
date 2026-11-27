@@ -89,6 +89,42 @@ is refused locally with `cloud_organization_unavailable`.
 ChatGPT" are the lasting ways to connect a subscription; lending this Mac's
 sign-in is the secondary, temporary one. Cursor connects with an API key.
 
+## Amazon Bedrock for Claude Code (PRO-200)
+
+Behind the readiness key `cloud.agent-logins.bedrock.v1` (off by default,
+per organization, the account service and the desktop agreeing), Claude
+Code's row offers **Amazon Bedrock**: the organization's Claude Code login
+becomes its AWS account. It is organization-wide and takes precedence over
+members' own Claude Code routes (owner decision, 2026-11-26): the service
+delivers it to every workspace instead of a creator's personal route.
+
+- The form (design 12.22) holds what is not a secret: AWS access keys or a
+  Bedrock API key, the access key ID, the region and a test model (Claude
+  Opus/Sonnet/Haiku 5.5 as the region's cross-region inference profile,
+  `eu.anthropic.claude-opus-5-5`, or any model or profile ID). The secret
+  access key or Bedrock API key is asked for by the app in a native secure
+  dialog on **Test and save**, as every other login (`cloud_agent_bedrock_connect`).
+- The account service sends Bedrock one short Converse call with it and
+  stores it only if Bedrock answers. A refusal answers
+  `cloud_agent_bedrock_test_failed` with Bedrock's own error type and
+  message, which the form shows (design 12.23) with Copy error and Open AWS
+  console. Nothing is saved.
+- In the workspace the grant (`mode: bedrock`) sets `CLAUDE_CODE_USE_BEDROCK=1`,
+  `AWS_REGION`, `ANTHROPIC_MODEL` and the keys (`AWS_ACCESS_KEY_ID` and
+  `AWS_SECRET_ACCESS_KEY`, or `AWS_BEARER_TOKEN_BEDROCK`), unsets every other
+  Anthropic or AWS sign-in variable, starts the tab on the tested model, and
+  pins Bedrock and its region in the launch's `--settings`.
+- **Disconnect** asks "Disconnect Amazon Bedrock?" (design 12.19).
+
+## Usage-limit card (PRO-200)
+
+Behind `cloud.agent-logins.usage-limit-card.v1`: a cloud tab whose agent hit
+its provider's usage limit shows "<Agent> usage limit reached" instead of
+the generic recovery banner (design 17.13). It says the organization's login
+ran out (whose, when the reader may list the logins), **Copy request** puts a
+ready message for an admin on the clipboard, and **Switch to <other agent>**
+opens the continuation dialog on Codex (from Claude Code) or Claude Code.
+
 ## A login the provider no longer accepts (#667)
 
 The service marks a stored login whose provider refuses it (a revoked or

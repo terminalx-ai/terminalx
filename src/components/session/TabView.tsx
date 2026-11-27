@@ -51,6 +51,9 @@ import { classifyRecovery, CONTINUE_PROMPT, requestRefusalNotice, RECOVERY_MESSA
 import { actionReports, inputOf, RecoveryReports, reporterFor, useExposure, type RecoveryAction, type Surface } from "@/lib/recoveryReports";
 import type { RecoveryKind } from "@/types/events";
 import { RecoveryBanner } from "./RecoveryBanner";
+import { OrgUsageLimitCard } from "./OrgUsageLimitCard";
+import { useAccount } from "@/lib/account";
+import { phase2Ready } from "@/lib/phase2Readiness";
 import { useNoticeDeferral } from "@/lib/noticeDeferral";
 import { ResetChatDialog } from "./ResetChatDialog";
 import { RemoteHandoffDialog, type RemoteHandoffPurpose } from "./RemoteHandoffDialog";
@@ -401,6 +404,9 @@ export function TabView({
   const noticeShown = useExposure({ reporter, surface: "composer_notice", present: !!notice && !terminalMode, reason: busyNotice || !error ? null : classifyRecovery(error) });
   // The warning the dialog was opened for, which Stop has taken down by the time it shows.
   const [continueFor, setContinueFor] = useState<RecoveryKind | null>(null);
+  // The agent a usage-limit card's "Switch to" continues in (PRO-200); null continues as the dialog chooses.
+  const [continueHarness, setContinueHarness] = useState<string | null>(null);
+  const { status: accountStatus } = useAccount();
   const dialogShown = useExposure({ reporter, surface: "dialog", present: continueOpen, reason: continueFor });
   const continueDone = useRef<ReturnType<ReturnType<typeof actionReports>["start"]> | null>(null);
   const pressedState = useRef({ recovery, status: tab.status });
@@ -932,7 +938,47 @@ export function TabView({
   // A question the agent's CLI drew in its own terminal and is stopped on (PRO-460). A request or a recovery says
   // more; over the terminal the reader is looking at the question itself.
   const terminalPrompt = !recovery && tab.status === "waiting" && transcript.pendingAsks.length === 0 ? transcript.terminalPrompt : undefined;
-  const banner = (placement: "top" | "composer") => terminalPrompt ? (placement === "top" ? null :
+  /** Stop the tab and open the continuation dialog: in `harness` when a usage-limit card's Switch asked for one. */
+  const continueInNewSession = (harness: string | null) => {
+    if (recoveryLock.current) {
+      actions.rejected("continue_new", "in_progress");
+      return;
+    }
+    // A dialog is tentative: suspend automatic retry until dismissal,
+    // and revoke it only when the handoff is actually delivered.
+    if (recovery === "signed_out") {
+      loginIncident.paused = true;
+      continuationLogin.current = loginIncident;
+    }
+    recoveryLock.current = true;
+    setRecovering(true);
+    // Told once the dialog ends: delivered (with where to), cancelled, or the stop before it failed.
+    const done = actions.start("continue_new");
+    const shownFor = recovery;
+    void backend.stop(tab.id).then(() => {
+      continueDone.current = done;
+      setContinueFor(shownFor);
+      setContinueHarness(harness);
+      setContinueOpen(true);
+    }).catch(e => {
+      setError(safeError(e));
+      restoreContinuationLogin();
+      done("failed", failure(e));
+    }).finally(() => {
+      recoveryLock.current = false;
+      setRecovering(false);
+    });
+  };
+
+  // A cloud tab on its organization's login at the provider's usage limit: an admin has to act (PRO-200, design 17.13).
+  const cloudOrg = local ? null : parseCloudWorkspaceKey(backend.key)?.orgId ?? null;
+  const orgUsageLimit = recovery === "usage_limit" && !!cloudOrg && phase2Ready(accountStatus, cloudOrg, "usageLimitCard") && !transcript.pendingAsks.length;
+  const banner = (placement: "top" | "composer") => orgUsageLimit && cloudOrg ? (placement === "top" ? null :
+    <OrgUsageLimitCard harness={tab.harness} organizationId={cloudOrg}
+      organization={accountStatus.organizations?.find((org) => org.id === cloudOrg)?.name ?? "the organization"}
+      resetsAt={transcript.rateLimit?.resetsAt ?? null} busy={recovering || !backend.caps.write}
+      onSwitch={backend.caps.write && !readOnly ? (harness) => continueInNewSession(harness) : undefined} />
+  ) : terminalPrompt ? (placement === "top" ? null :
     <div className="mx-auto w-full max-w-3xl shrink-0 bg-chat px-6 pb-2">
       <TerminalPromptCard prompt={terminalPrompt} agent={cloudAgentLabel(tab.harness)}
         busy={recovering || answering || !backend.caps.write} blockedReason={backend.approveBlockedReason ?? null}
@@ -948,35 +994,7 @@ export function TabView({
         onRetry={(model) => void retry(model)} onStop={() => stop("banner")} onSendContinue={() => void sendContinue()} onResend={backend.resendUnsent && !gate?.blocked ? () => void resend() : undefined}
         signInPending={loginPending === loginIncident && !loginIncident.cancelled}
         onSignIn={signInAgent ? () => void requestSignIn() : undefined}
-        onContinue={() => {
-          if (recoveryLock.current) {
-            actions.rejected("continue_new", "in_progress");
-            return;
-          }
-          // A dialog is tentative: suspend automatic retry until dismissal,
-          // and revoke it only when the handoff is actually delivered.
-          if (recovery === "signed_out") {
-            loginIncident.paused = true;
-            continuationLogin.current = loginIncident;
-          }
-          recoveryLock.current = true;
-          setRecovering(true);
-          // Told once the dialog ends: delivered (with where to), cancelled, or the stop before it failed.
-          const done = actions.start("continue_new");
-          const shownFor = recovery;
-          void backend.stop(tab.id).then(() => {
-            continueDone.current = done;
-            setContinueFor(shownFor);
-            setContinueOpen(true);
-          }).catch(e => {
-            setError(safeError(e));
-            restoreContinuationLogin();
-            done("failed", failure(e));
-          }).finally(() => {
-            recoveryLock.current = false;
-            setRecovering(false);
-          });
-        }} />
+        onContinue={() => continueInNewSession(null)} />
   );
 
   // What the worktree's branch changes, over the composer: a local chat on its own branch.
@@ -1332,7 +1350,7 @@ export function TabView({
     )}
     {resetTarget && turnActions && <ResetChatDialog reset={(endSeq, resetFiles, confirm) => turnActions.reset(tab.id, endSeq, resetFiles, confirm)} endSeq={resetTarget.endSeq} target={resetTarget.target} agent={agentLabel}
       filesRestored={resetTarget.endSeq === null ? (tab as ResetTab).resetFilesRestored : undefined} onClose={() => setResetTarget(null)} onWarning={setError} />}
-    {continueOpen && <ContinuationDialog session={session} source={tab}
+    {continueOpen && <ContinuationDialog session={session} source={tab} initialHarness={continueHarness ?? undefined}
       onDelivered={(to) => {
         if (continuationLogin.current === currentLogin.current) cancelLogin();
         continuationLogin.current = null;
@@ -1345,6 +1363,7 @@ export function TabView({
         continueDone.current?.("cancelled");
         continueDone.current = null;
         setContinueOpen(false);
+        setContinueHarness(null);
         restoreContinuationLogin();
       }} />}
     {collabLive && notesOpen && shared?.client ? (

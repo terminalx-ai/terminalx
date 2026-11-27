@@ -453,6 +453,8 @@ pub enum AgentLoginKind {
     ApiKey,
     /// The agent's own login document (a subscription sign-in).
     LoginDocument,
+    /// Claude Code through the organization's Amazon Bedrock (PRO-200).
+    Bedrock,
 }
 
 impl AgentLoginKind {
@@ -460,8 +462,108 @@ impl AgentLoginKind {
         match self {
             Self::ApiKey => "api-key",
             Self::LoginDocument => "oauth-credentials-json",
+            Self::Bedrock => "bedrock",
         }
     }
+
+    /// The kind the service names in its list.
+    fn of_stored(kind: &str) -> Self {
+        match kind {
+            "api-key" => Self::ApiKey,
+            "bedrock" => Self::Bedrock,
+            _ => Self::LoginDocument,
+        }
+    }
+}
+
+/// How Claude Code reaches Amazon Bedrock (PRO-200): what the page sends.
+/// Never a secret: the secret access key or Bedrock API key is collected
+/// by the app in a native secure dialog.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BedrockSettings {
+    pub auth: BedrockAuth,
+    pub region: String,
+    pub model: String,
+    /// AWS access keys only: the access key ID, which is not a secret.
+    #[serde(default)]
+    pub access_key_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BedrockAuth {
+    AwsKeys,
+    ApiKey,
+}
+
+impl BedrockSettings {
+    /// The same shapes the account service accepts.
+    pub(crate) fn valid(&self) -> bool {
+        valid_bedrock_region(&self.region)
+            && valid_bedrock_model(&self.model)
+            && match self.auth {
+                BedrockAuth::AwsKeys => self.access_key_id.as_deref().is_some_and(valid_access_key_id),
+                BedrockAuth::ApiKey => self.access_key_id.is_none(),
+            }
+    }
+}
+
+/// `eu-central-1`, `us-gov-west-1`.
+pub(crate) fn valid_bedrock_region(region: &str) -> bool {
+    let parts: Vec<&str> = region.split('-').collect();
+    let (geo, rest) = match parts.as_slice() {
+        [geo, "gov", area, number] => (*geo, [*area, *number]),
+        [geo, area, number] => (*geo, [*area, *number]),
+        _ => return false,
+    };
+    geo.len() == 2 && geo.bytes().all(|byte| byte.is_ascii_lowercase())
+        && !rest[0].is_empty() && rest[0].bytes().all(|byte| byte.is_ascii_lowercase())
+        && (1..=2).contains(&rest[1].len()) && rest[1].bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// A model or inference profile id, or an inference profile ARN.
+pub(crate) fn valid_bedrock_model(model: &str) -> bool {
+    (1..=200).contains(&model.len()) && model.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._:/-".contains(&byte))
+}
+
+fn valid_access_key_id(id: &str) -> bool {
+    id.len() == 20 && id.starts_with("AKIA") && id.bytes().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+}
+
+/// What Bedrock answered to the test call when it refused it: its error
+/// type and message, as the account service relays them. Never a key.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BedrockTestFailure {
+    #[serde(default)]
+    pub status: Option<u16>,
+    #[serde(rename = "type", default)]
+    pub error_type: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+/// A failed Bedrock save: the usual error, and Bedrock's own answer when
+/// the test call was refused.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BedrockConnectError {
+    #[serde(flatten)]
+    pub error: CloudWorkspaceClientError,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bedrock: Option<BedrockTestFailure>,
+}
+
+impl From<CloudWorkspaceClientError> for BedrockConnectError {
+    fn from(error: CloudWorkspaceClientError) -> Self {
+        Self { error, bedrock: None }
+    }
+}
+
+/// Text from the service shown as it is, made safe for one line.
+fn bounded_text(text: &str, limit: usize) -> String {
+    text.chars().filter(|c| !c.is_control()).take(limit).collect()
 }
 
 /// What the service says about a stored login. There is no field for the
@@ -645,7 +747,7 @@ impl AgentLoginAuthorization {
 
     #[cfg(test)]
     pub(crate) fn for_test(context: AccountContext, stored: Option<(&str, Option<&str>)>) -> Self {
-        let replaces = stored.map(|(kind, _)| if kind == "api-key" { AgentLoginKind::ApiKey } else { AgentLoginKind::LoginDocument });
+        let replaces = stored.map(|(kind, _)| AgentLoginKind::of_stored(kind));
         Self { context, access: OrgAccess::Active, replaces, stored: stored.map(|(kind, scope)| (kind.to_owned(), scope.map(str::to_owned))) }
     }
 }
@@ -3600,7 +3702,7 @@ impl CloudWorkspaceService {
             .into_iter()
             .find(|login| login.provider == provider.as_str() && login.state.as_deref() != Some("disconnected"))
             .map(|login| (login.auth_kind, login.shared_use));
-        let replaces = stored.as_ref().map(|(kind, _)| if kind == "api-key" { AgentLoginKind::ApiKey } else { AgentLoginKind::LoginDocument });
+        let replaces = stored.as_ref().map(|(kind, _)| AgentLoginKind::of_stored(kind));
         if replaces.is_some() && !consent.replace_existing {
             return Err(CloudWorkspaceClientError::local("cloud_agent_login_replace_unconfirmed", false));
         }
@@ -3645,6 +3747,74 @@ impl CloudWorkspaceService {
         }
         if login.provider != provider.as_str() {
             return Err(invalid_response());
+        }
+        Ok(login)
+    }
+
+    /// Store Claude Code's Amazon Bedrock login (PRO-200). The account
+    /// service makes one short test call to Bedrock with it and stores it
+    /// only if Bedrock answers; a refusal comes back with Bedrock's own
+    /// error type and message. `secret` is the secret access key or the
+    /// Bedrock API key, sent once inside the login document and cleared.
+    pub(crate) fn save_bedrock_login(
+        &self,
+        authorization: AgentLoginAuthorization,
+        settings: &BedrockSettings,
+        secret: zeroize::Zeroizing<String>,
+    ) -> Result<AgentLogin, BedrockConnectError> {
+        let invalid = || CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false);
+        let secret_shape = (1..=8192).contains(&secret.len()) && secret.bytes().all(|byte| byte.is_ascii_graphic());
+        if !settings.valid() || !secret_shape || (settings.auth == BedrockAuth::AwsKeys && !(16..=128).contains(&secret.len())) {
+            return Err(invalid().into());
+        }
+        if !self.account.is_current_in(&authorization.context, authorization.access) {
+            return Err(context_changed_error(RequestRisk::Mutation).into());
+        }
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Document<'a> {
+            v: u8,
+            auth: BedrockAuth,
+            region: &'a str,
+            model: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            access_key_id: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            secret_access_key: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            api_key: Option<&'a str>,
+        }
+        let keys = settings.auth == BedrockAuth::AwsKeys;
+        let document = zeroize::Zeroizing::new(serde_json::to_string(&Document {
+            v: 1,
+            auth: settings.auth,
+            region: &settings.region,
+            model: &settings.model,
+            access_key_id: settings.access_key_id.as_deref().filter(|_| keys),
+            secret_access_key: keys.then_some(secret.as_str()),
+            api_key: (!keys).then_some(secret.as_str()),
+        }).map_err(|_| invalid())?);
+        drop(secret);
+        let escaped = zeroize::Zeroizing::new(serde_json::to_string(document.as_str()).map_err(|_| invalid())?);
+        drop(document);
+        let body = zeroize::Zeroizing::new(format!(
+            r#"{{"authKind":"bedrock","secret":{},"confirmOrganizationSharing":true,"confirmMachineInstallation":true}}"#,
+            escaped.as_str()
+        ));
+        drop(escaped);
+        let url = self.client.organization_url(&authorization.context, &["cloud-workspace-credentials", AgentLoginProvider::Claude.as_str()])?;
+        let request = self.client.authorized_request("PUT", &authorization.context, &url);
+        let login: AgentLogin = match request.send_string(&body) {
+            Ok(response) => decode_response(response, RequestRisk::Mutation, RESPONSE_LIMIT_BYTES)?,
+            Err(ureq::Error::Status(status, response)) => return Err(bedrock_http_error(status, response)),
+            Err(ureq::Error::Transport(_)) => return Err(transport_error(RequestRisk::Mutation).into()),
+        };
+        drop(body);
+        if !self.account.is_current_in(&authorization.context, authorization.access) {
+            return Err(context_changed_error(RequestRisk::Mutation).into());
+        }
+        if login.provider != AgentLoginProvider::Claude.as_str() {
+            return Err(invalid_response().into());
         }
         Ok(login)
     }
@@ -4919,6 +5089,36 @@ fn http_error(
     }
 }
 
+/// A refused Bedrock save: the code as for any request, and with
+/// `cloud_agent_bedrock_test_failed` what Bedrock answered to the test call.
+fn bedrock_http_error(status: u16, response: ureq::Response) -> BedrockConnectError {
+    #[derive(Deserialize)]
+    struct Envelope {
+        error: String,
+        #[serde(default)]
+        bedrock: Option<BedrockTestFailure>,
+    }
+    let retry_after_seconds = parse_retry_after(response.header("Retry-After"));
+    let envelope = bounded_body(response, RequestRisk::Mutation).ok().and_then(|body| serde_json::from_slice::<Envelope>(&body).ok());
+    let code = envelope.as_ref().map(|envelope| envelope.error.clone()).filter(|code| known_error_code(code)).unwrap_or_else(|| "cloud_workspace_unavailable".into());
+    let bedrock = envelope
+        .and_then(|envelope| envelope.bedrock)
+        .filter(|_| code == "cloud_agent_bedrock_test_failed")
+        .map(|failure| BedrockTestFailure { status: failure.status, error_type: bounded_text(&failure.error_type, 100), message: bounded_text(&failure.message, 500) });
+    let uncertain = status == 429 || status >= 500;
+    BedrockConnectError {
+        error: CloudWorkspaceClientError {
+            code,
+            status: Some(status),
+            retryable: false,
+            retry_after_seconds,
+            retry_with_same_idempotency_key: false,
+            requires_original_account_context: uncertain,
+        },
+        bedrock,
+    }
+}
+
 fn transport_error(risk: RequestRisk) -> CloudWorkspaceClientError {
     match risk {
         RequestRisk::Read => CloudWorkspaceClientError::local("cloud_workspace_unavailable", true),
@@ -4943,6 +5143,8 @@ fn known_error_code(code: &str) -> bool {
     matches!(
         code,
         "invalid_access_token"
+            | "cloud_agent_bedrock_test_failed"
+            | "cloud_agent_bedrock_unavailable"
             | "workspace_owner_changed"
             | "workspace_reassign_same_owner"
             | "workspace_reassign_private_confirmation_required"
@@ -7550,6 +7752,58 @@ mod tests {
         assert_eq!(empty.err().unwrap().code, "cloud_workspace_request_invalid");
         let other = service.save_agent_login(AgentLoginAuthorization::for_test(context(), None), AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("sk-1".to_string()), None);
         assert!(other.is_err());
+    }
+
+    // PRO-200: Amazon Bedrock as Claude Code's organization login.
+    #[test]
+    fn a_bedrock_login_is_sent_as_one_document_and_a_refusal_carries_bedrocks_error() {
+        let body_of = |text: &str| serde_json::from_str::<Value>(text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        let keys = BedrockSettings { auth: BedrockAuth::AwsKeys, region: "eu-central-1".into(), model: "eu.anthropic.claude-opus-5-5".into(), access_key_id: Some("AKIAFAKEFAKEFAKE0000".into()) };
+        let stored = r#"{"id":"c1","provider":"claude","authKind":"bedrock","fingerprint":"sha256:ab","displayIdentity":"eu-central-1 · eu.anthropic.claude-opus-5-5","version":1,"updatedAt":9,"state":"connected"}"#;
+        let (base, _, request) = serve_once(response("200 OK", stored, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let login = service.save_bedrock_login(AgentLoginAuthorization::for_test(context(), None), &keys, zeroize::Zeroizing::new("fake/secret+access+key0".to_string())).unwrap();
+        assert_eq!(login.auth_kind, "bedrock");
+        let request = request.join().unwrap().text;
+        assert!(request.starts_with("PUT ") && request.contains("/cloud-workspace-credentials/claude "), "{request}");
+        let sent = body_of(&request);
+        assert_eq!(sent["authKind"], "bedrock");
+        assert!(sent.get("displayIdentity").is_none() && sent.get("sharedUse").is_none());
+        let document: Value = serde_json::from_str(sent["secret"].as_str().unwrap()).unwrap();
+        assert_eq!(document, json!({"v": 1, "auth": "aws-keys", "region": "eu-central-1", "model": "eu.anthropic.claude-opus-5-5",
+            "accessKeyId": "AKIAFAKEFAKEFAKE0000", "secretAccessKey": "fake/secret+access+key0"}));
+
+        let refused = r#"{"error":"cloud_agent_bedrock_test_failed","bedrock":{"status":403,"type":"AccessDeniedException","message":"You don't have access to the model with the specified model ID.\u0007"}}"#;
+        let (base, _, _request) = serve_once(response("422 Unprocessable Entity", refused, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let failed = service.save_bedrock_login(AgentLoginAuthorization::for_test(context(), None), &keys, zeroize::Zeroizing::new("fake/secret+access+key0".to_string())).unwrap_err();
+        assert_eq!(failed.error.code, "cloud_agent_bedrock_test_failed");
+        assert_eq!(failed.bedrock, Some(BedrockTestFailure { status: Some(403), error_type: "AccessDeniedException".into(), message: "You don't have access to the model with the specified model ID.".into() }));
+        let shown = serde_json::to_value(&failed).unwrap();
+        assert_eq!(shown["code"], "cloud_agent_bedrock_test_failed");
+        assert_eq!(shown["bedrock"]["type"], "AccessDeniedException");
+
+        // Another refusal never carries a Bedrock answer, and an unknown code is not passed on.
+        let other = r#"{"error":"cloud_agent_bedrock_unavailable","bedrock":{"type":"X","message":"y"}}"#;
+        let (base, _, _request) = serve_once(response("404 Not Found", other, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let failed = service.save_bedrock_login(AgentLoginAuthorization::for_test(context(), None), &keys, zeroize::Zeroizing::new("fake/secret+access+key0".to_string())).unwrap_err();
+        assert_eq!((failed.error.code.as_str(), failed.bedrock), ("cloud_agent_bedrock_unavailable", None));
+    }
+
+    #[test]
+    fn bedrock_settings_take_only_the_shapes_the_service_accepts() {
+        let api = |region: &str, model: &str| BedrockSettings { auth: BedrockAuth::ApiKey, region: region.into(), model: model.into(), access_key_id: None };
+        assert!(api("eu-central-1", "eu.anthropic.claude-opus-5-5").valid());
+        assert!(api("us-gov-west-1", "arn:aws:bedrock:us-gov-west-1:123456789012:inference-profile/us-gov.anthropic.claude-sonnet-5-5").valid());
+        for (region, model) in [("eu-central", "m"), ("EU-central-1", "m"), ("eu-central-123", "m"), ("eu-central-1", ""), ("eu-central-1", "a b"), ("eu-central-1", "m?x")] {
+            assert!(!api(region, model).valid(), "{region} {model}");
+        }
+        let keys = |id: Option<&str>| BedrockSettings { auth: BedrockAuth::AwsKeys, region: "eu-central-1".into(), model: "m".into(), access_key_id: id.map(str::to_owned) };
+        assert!(keys(Some("AKIAFAKEFAKEFAKE0000")).valid());
+        assert!(!keys(None).valid() && !keys(Some("ASIAFAKEFAKEFAKE0000")).valid() && !keys(Some("AKIA123")).valid());
+        assert!(!BedrockSettings { access_key_id: Some("AKIAFAKEFAKEFAKE0000".into()), ..api("eu-central-1", "m") }.valid(), "an API key names no access key ID");
+        assert!(serde_json::from_value::<BedrockSettings>(json!({"auth": "api-key", "region": "eu-central-1", "model": "m", "apiKey": "k"})).is_err(), "no secret field is taken from the page");
     }
 
     // Review of #429: the desktop sent `sharedUse: organization` with every sign-in, which widened a
