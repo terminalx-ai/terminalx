@@ -49,6 +49,8 @@ struct Tools {
     window_manager: PathBuf,
     vnc: PathBuf,
     chrome: PathBuf,
+    /// Optional: a desktop without one still serves Chrome.
+    terminal: Option<PathBuf>,
 }
 
 fn executable(dirs: &[&str], names: &[&str]) -> Result<PathBuf, DesktopError> {
@@ -70,6 +72,7 @@ impl Tools {
             window_manager: executable(dirs, &["openbox", "fluxbox"])?,
             vnc: executable(dirs, &["x11vnc"])?,
             chrome: executable(dirs, &["google-chrome", "chromium", "chromium-browser"])?,
+            terminal: executable(dirs, &["x-terminal-emulator", "xterm"]).ok(),
         })
     }
 }
@@ -261,6 +264,8 @@ fn parse_display(bytes: &[u8]) -> io::Result<u16> {
 pub(crate) struct Desktop {
     // Drop graphics clients before the server, and all processes before their private files.
     chrome: Process,
+    // Not watched: closing the terminal window must not restart the desktop.
+    _terminal: Option<Process>,
     manager: Process,
     xvfb: Process,
     files: Arc<tempfile::TempDir>,
@@ -274,9 +279,15 @@ pub(crate) struct DesktopConnection {
 }
 
 impl Desktop {
+    #[cfg(test)]
     pub(crate) async fn start(dirs: &[&str]) -> Result<Self, DesktopError> {
+        Self::start_in(dirs, None).await
+    }
+
+    /// `workdir` is where the terminal opens (the workspace checkout).
+    pub(crate) async fn start_in(dirs: &[&str], workdir: Option<&Path>) -> Result<Self, DesktopError> {
         let tools = Tools::discover(dirs)?;
-        let mut desktop = tokio::time::timeout(START_TIMEOUT, Self::launch(tools))
+        let mut desktop = tokio::time::timeout(START_TIMEOUT, Self::launch(tools, workdir))
             .await
             .map_err(|_| DesktopError::StartupFailed)??;
         tokio::time::sleep(STARTUP_GRACE).await;
@@ -293,7 +304,7 @@ impl Desktop {
         self.xvfb.is_running() && self.manager.is_running() && self.chrome.is_running()
     }
 
-    async fn launch(tools: Tools) -> Result<Self, DesktopError> {
+    async fn launch(tools: Tools, workdir: Option<&Path>) -> Result<Self, DesktopError> {
         let files = Arc::new(
             tempfile::Builder::new()
                 .prefix("terminalx-desktop-")
@@ -355,8 +366,18 @@ impl Desktop {
             Some(files.clone()),
         )
         .map_err(|_| DesktopError::ChromeStartupFailed)?;
+        let terminal = tools.terminal.as_deref().and_then(|path| {
+            let mut terminal = launch(path);
+            if let Some(dir) = workdir.filter(|dir| dir.is_dir()) {
+                terminal.current_dir(dir);
+            }
+            Process::spawn(&mut terminal, Some(files.clone()))
+                .map_err(|error| log::warn!("cloud desktop: the terminal did not start: {error}"))
+                .ok()
+        });
         Ok(Self {
             chrome,
+            _terminal: terminal,
             manager,
             xvfb,
             files,
@@ -426,6 +447,7 @@ impl Desktop {
 pub(crate) struct DesktopPool {
     state: Mutex<PoolState>,
     bin_dirs: Vec<String>,
+    workdir: Option<PathBuf>,
     idle_timeout: Duration,
     runtime: tokio::runtime::Handle,
 }
@@ -443,10 +465,17 @@ pub(crate) struct DesktopLease {
 }
 
 impl DesktopPool {
+    #[cfg(test)]
     pub(crate) fn new(bin_dirs: Vec<String>, idle_timeout: Duration) -> Arc<Self> {
+        Self::new_in(bin_dirs, None, idle_timeout)
+    }
+
+    /// `workdir`: the folder the desktop's terminal opens in.
+    pub(crate) fn new_in(bin_dirs: Vec<String>, workdir: Option<PathBuf>, idle_timeout: Duration) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::default(),
             bin_dirs,
+            workdir,
             idle_timeout,
             runtime: tokio::runtime::Handle::current(),
         })
@@ -470,7 +499,7 @@ impl DesktopPool {
         }
         if state.desktop.is_none() {
             let dirs: Vec<_> = self.bin_dirs.iter().map(String::as_str).collect();
-            let desktop = Desktop::start(&dirs).await?;
+            let desktop = Desktop::start_in(&dirs, self.workdir.as_deref()).await?;
             self.watch_health(desktop.files.path().to_owned());
             state.desktop = Some(desktop);
         }
@@ -622,6 +651,29 @@ mod tests {
         })
         .await
         .expect("desktop files are removed after the processes exit");
+    }
+
+    #[tokio::test]
+    async fn opens_a_terminal_in_the_workspace_and_survives_it_closing() {
+        let tools = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let dirs = [tools.path().to_str().unwrap()];
+        let opened = tools.path().join("opened");
+        fixture(tools.path(), "xauth", "umask 077; cat > \"$3\"");
+        fixture(tools.path(), "Xvfb", "printf '42\\n'; exec /bin/sleep 15");
+        fixture(tools.path(), "openbox", "exec /bin/sleep 15");
+        fixture(tools.path(), "x11vnc", "exit 0");
+        fixture(tools.path(), "chromium", "exec /bin/sleep 15");
+        // Without a terminal in the image the desktop still starts.
+        drop(Desktop::start_in(&dirs, Some(workspace.path())).await.unwrap());
+        // The terminal records where it opened, then its window is closed.
+        fixture(tools.path(), "xterm", &format!("pwd > '{}'; echo \"$DISPLAY\" >> '{}'", opened.display(), opened.display()));
+        let mut desktop = Desktop::start_in(&dirs, Some(workspace.path())).await.unwrap();
+        let recorded = std::fs::read_to_string(&opened).unwrap();
+        let mut lines = recorded.lines();
+        assert_eq!(Path::new(lines.next().unwrap()).canonicalize().unwrap(), workspace.path().canonicalize().unwrap());
+        assert_eq!(lines.next(), Some(":42"));
+        assert!(desktop.is_running(), "a closed terminal does not restart the desktop");
     }
 
     #[tokio::test]
@@ -979,6 +1031,7 @@ mod tests {
         let idle = || Process::spawn(command(Path::new("/bin/sleep")).arg("15"), None).unwrap();
         let desktop = Desktop {
             chrome: idle(),
+            _terminal: None,
             manager: idle(),
             xvfb: idle(),
             files: Arc::new(files),
