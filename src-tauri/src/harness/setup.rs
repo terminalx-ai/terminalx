@@ -342,7 +342,9 @@ try {
 }
 $final = $response.BaseResponse.ResponseUri
 $text = Get-Content -LiteralPath $script -Raw
-if (($final -and $final.Scheme -ne 'https') -or -not $text -or $text.TrimStart().StartsWith('<')) {
+$start = "$text".TrimStart()
+# A page of markup is not an installer; a script may still open with a <# ... #> help block.
+if (($final -and $final.Scheme -ne 'https') -or -not $text -or ($start.StartsWith('<') -and -not $start.StartsWith('<#'))) {
   Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
   [Console]::Error.WriteLine("What came back from $url is not an installer.")
   exit @DOWNLOAD@
@@ -389,9 +391,20 @@ exit @LOGIN@
         text
     }
 
-    /// A PowerShell string that is only text: single quotes, a quote in it doubled.
+    /// A PowerShell string that is only text: single quotes, a quote in it doubled. PowerShell takes the typographic
+    /// single quotes (U+2018, U+2019, U+201A, U+201B) as quotes too, so those are doubled as well: a home folder
+    /// named with a curly apostrophe stays text.
     pub(super) fn literal(value: &str) -> String {
-        format!("'{}'", value.replace('\'', "''"))
+        let mut text = String::with_capacity(value.len() + 2);
+        text.push('\'');
+        for character in value.chars() {
+            if matches!(character, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+                text.push(character);
+            }
+            text.push(character);
+        }
+        text.push('\'');
+        text
     }
 
     fn list<'a>(items: impl Iterator<Item = Cow<'a, str>>) -> String {
@@ -706,6 +719,9 @@ mod windows_tests {
     #[test]
     fn a_value_with_a_quote_stays_text_in_the_windows_script() {
         assert_eq!(windows::literal("it's"), "'it''s'");
+        // PowerShell ends a string at a typographic quote too: each is doubled the same way.
+        assert_eq!(windows::literal("O\u{2019}Brien"), "'O\u{2019}\u{2019}Brien'");
+        assert_eq!(windows::literal("\u{2018}a\u{201A}b\u{201B}"), "'\u{2018}\u{2018}a\u{201A}\u{201A}b\u{201B}\u{201B}'");
         let line = windows::install_line("A'; Remove-Item x; '", "https://example.com/install.ps1", &[], &[]);
         let script = windows::decode(&line);
         assert!(script.contains("$name = 'A''; Remove-Item x; '''\n"), "{script}");

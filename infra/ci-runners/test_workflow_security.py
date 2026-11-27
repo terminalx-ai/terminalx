@@ -1129,9 +1129,6 @@ class NextestProfile(unittest.TestCase):
         self.rejects(lambda c: c["profile"]["ci"].update({"final-status-level": "fail"}))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 RELEASE_DESKTOP = ROOT / ".github/workflows/release-desktop.yml"
 # The steps that may read a secret, by job: whether each signing can run, the
@@ -1174,6 +1171,8 @@ def validate_release_desktop(workflow):
     builds = [step for step in build["steps"] if "tauri build" in step.get("run", "")]
     assert builds and all('"createUpdaterArtifacts":false' in step["run"] for step in builds), "the build makes updater artifacts it cannot sign"
     assert "TAURI_SIGNING_PRIVATE_KEY" not in str(build), "the updater key reaches the build"
+    # An updater signature makes an installer every installed app accepts: only a tagged release build gets one.
+    assert "needs.plan.outputs.tag != ''" in workflow["jobs"]["sign-updater"]["if"], "the updater key signs an untagged build"
 
 
 class ReleaseDesktop(unittest.TestCase):
@@ -1205,6 +1204,9 @@ class ReleaseDesktop(unittest.TestCase):
         self.rejects(lambda w: self.step(w, "build", "Build the installers").update(env={"GH_TOKEN": "${{ github.token }}"}))
         self.rejects(lambda w: self.step(w, "sign-updater", "Write the update feeds").update(env={"KEY": "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"}))
 
+    def test_signing_an_untagged_build_is_rejected(self):
+        self.rejects(lambda w: w["jobs"]["sign-updater"].update({"if": "needs.plan.outputs.sign_updater == 'true'"}))
+
     def test_updater_artifacts_in_the_build_are_rejected(self):
         def unsigned(w):
             step = self.step(w, "build", "Build the installers")
@@ -1214,3 +1216,7 @@ class ReleaseDesktop(unittest.TestCase):
     def test_an_unpinned_action_or_kept_credentials_are_rejected(self):
         self.rejects(lambda w: w["jobs"]["build"]["steps"][1].update(uses="actions/checkout@v4"))
         self.rejects(lambda w: w["jobs"]["build"]["steps"][1]["with"].update({"persist-credentials": "true"}))
+
+
+if __name__ == "__main__":
+    unittest.main()

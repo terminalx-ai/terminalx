@@ -93,6 +93,7 @@ jobs:
         run: |
           python3 -m pip install Pillow==11.1.0 PyYAML==6.0.2
           python3 -m unittest discover -s infra/ci-runners -p 'test_*.py'
+          python3 -m unittest discover -s scripts/release -p 'test_desktop_feed.py'
       # The icon check asks Expo for the phone app's configuration (`pnpm exec
       # expo config`), so the packages are installed on every pull request too.
       - name: Install npm dependencies

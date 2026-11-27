@@ -465,12 +465,14 @@ the Linux packages (AppImage, deb, rpm) for a release. It runs when a release
 is published (stable `vX.Y.Z` tags only), after `release.py` has published the
 macOS assets, or by hand (`gh workflow run release-desktop.yml`, optionally
 with `-f tag=vX.Y.Z -f publish=true`). Run by hand without a tag, it builds and
-tests the selected branch and publishes nothing.
+tests the selected branch, and signs and publishes nothing: an updater
+signature is only ever made for a tagged release.
 
 Each build is tested before anything is kept: on Windows the installer is run
 silently, the app, its sidecar, CLI shims, bundled runtime and computer-use
 script are checked, the `terminalx://` scheme must be registered, and the
-uninstaller must remove the app and the scheme; on Linux the deb and rpm are
+uninstaller must remove the app, the scheme and TerminalX's CLI shim while
+keeping a file of the same name that is not TerminalX's; on Linux the deb and rpm are
 read and the AppImage extracted, each holding the runtime, which must start.
 
 Windows and Linux have update feeds of their own, so the macOS assets and

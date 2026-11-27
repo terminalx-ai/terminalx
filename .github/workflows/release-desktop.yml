@@ -226,13 +226,22 @@ jobs:
             if (-not (Test-Path (Join-Path $dir $file))) { throw "Missing after install: $file" }
           }
           if (-not (Test-Path 'HKCU:\Software\Classes\terminalx')) { throw 'The terminalx:// scheme is not registered' }
-          & (Join-Path $dir 'local-runtime\terminalx-serve.exe') --help | Select-Object -First 3
+          $help = & (Join-Path $dir 'local-runtime\terminalx-serve.exe') --help
           if ($LASTEXITCODE -ne 0) { throw "The bundled runtime does not start ($LASTEXITCODE)" }
+          $help | Select-Object -First 3
+          # The uninstaller removes the CLI shims TerminalX wrote, and only those: one shim, one file of the same name that
+          # is not TerminalX's.
+          $bin = Join-Path $env:USERPROFILE '.local\bin'
+          New-Item -ItemType Directory -Force -Path $bin | Out-Null
+          [IO.File]::WriteAllText((Join-Path $bin 'terminalx.cmd'), "@echo off`r`nrem TerminalX CLI shim`r`nsetlocal DisableDelayedExpansion`r`n")
+          [IO.File]::WriteAllText((Join-Path $bin 'tnx.cmd'), "@echo off`r`nrem someone else's tnx`r`n")
           Start-Process -FilePath (Join-Path $dir 'uninstall.exe') -ArgumentList '/S' -Wait
           # The uninstaller copies itself away and returns before it is done.
           foreach ($i in 1..60) { if (-not (Test-Path (Join-Path $dir $app))) { break }; Start-Sleep 1 }
           if (Test-Path (Join-Path $dir $app)) { throw 'The app is still installed after uninstalling' }
           if (Test-Path 'HKCU:\Software\Classes\terminalx') { throw 'The terminalx:// scheme is still registered after uninstalling' }
+          if (Test-Path (Join-Path $bin 'terminalx.cmd')) { throw 'The TerminalX CLI shim is still there after uninstalling' }
+          if (-not (Test-Path (Join-Path $bin 'tnx.cmd'))) { throw 'The uninstaller removed a tnx.cmd that was not TerminalX''s' }
       - name: Check the packages (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -247,7 +256,8 @@ jobs:
           (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/$appimage" --appimage-extract >/dev/null)
           runtime=$(find "$RUNNER_TEMP/squashfs-root" -path '*local-runtime/terminalx-serve' -type f | head -1)
           [ -n "$runtime" ] || { echo "::error::No runtime in the AppImage"; exit 1; }
-          "$runtime" --help | head -3
+          "$runtime" --help > "$RUNNER_TEMP/runtime-help.txt"
+          head -3 "$RUNNER_TEMP/runtime-help.txt"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: desktop-${{ matrix.system }}
@@ -259,7 +269,7 @@ jobs:
   # no build scripts. Each signature is checked against the committed public key.
   sign-updater:
     needs: [plan, build]
-    if: needs.plan.outputs.sign_updater == 'true'
+    if: needs.plan.outputs.sign_updater == 'true' && needs.plan.outputs.tag != ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -300,7 +310,7 @@ jobs:
         run: python3 scripts/release/desktop-feed.py --version "$VERSION" --repo "$GH_REPO" --dir dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: desktop-signed
+          name: signed-desktop
           path: dist/
           if-no-files-found: error
           retention-days: 7
@@ -318,7 +328,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: desktop-signed
+          name: signed-desktop
           path: dist
       # Installers and signatures first, the feeds last: an app reading a feed
       # finds everything it names already there.

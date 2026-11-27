@@ -32,12 +32,15 @@ pub async fn app_update_check(app: tauri::AppHandle, channel: String) -> Result<
             match updater.check().await {
                 Ok(update) => Ok(update),
                 Err(error) if no_build_for_this_system(&error) => {
-                    log::info!("no update for this system in the feed: {error}");
+                    // The plugin says "no release" for any failed answer, not only a missing feed: kept visible in the log.
+                    log::warn!("no update for this system in the feed: {error}");
                     Ok(None)
                 }
                 Err(error) => Err(error.into()),
             }
         }).await?;
+        // A new check replaces whatever an earlier one found or downloaded.
+        DOWNLOADED.lock().unwrap().take();
         let mut found = FOUND.lock().unwrap();
         *found = update.map(|update| Found { id: uuid::Uuid::new_v4().to_string(), update, privacy });
         Ok::<_, anyhow::Error>(found.as_ref().map(|found| Available { id: found.id.clone(), version: found.update.version.clone() }))
@@ -61,6 +64,7 @@ pub async fn app_update_download(id: String, progress: tauri::ipc::Channel<Downl
             anyhow::ensure!(found.as_ref().is_some_and(|found| found.id == id), "Check for updates again before installing");
             found.take().unwrap()
         };
+        DOWNLOADED.lock().unwrap().take();
         let finished = progress.clone();
         let mut began = false;
         let bytes = crate::data_privacy::transfer(&found.privacy, async {
