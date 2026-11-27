@@ -22,6 +22,7 @@ import {
   holdCode,
   isCustomized,
   isMac,
+  actionAvailable,
   isModifierKey,
   resetAllShortcuts,
   resetShortcut,
@@ -86,7 +87,7 @@ export function ShortcutsTab() {
         <section key={group} aria-label={`${group} shortcuts`}>
           <div className={SHORTCUT_GROUP_TITLE}>{group}</div>
           <ul className={SHORTCUT_CARD}>
-            {actions.filter((action) => action.group === group && (!action.requires || switches?.[action.requires] === true)).map((action) => (
+            {actions.filter((action) => action.group === group && actionAvailable(action, switches)).map((action) => (
               <ShortcutRow
                 key={action.id}
                 action={action}

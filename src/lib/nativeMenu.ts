@@ -1,4 +1,4 @@
-import { bindingProblem, bindingText, isMac, isTerminalReserved, normalizeBinding, SHORTCUT_ACTIONS, type Keymap, type NativeMenuSection } from "./shortcuts";
+import { actionAvailable, bindingProblem, bindingText, isMac, isTerminalReserved, normalizeBinding, SHORTCUT_ACTIONS, type Keymap, type NativeMenuSection } from "./shortcuts";
 import type { Project } from "@/types/session";
 
 export interface NativeMenuItem {
@@ -34,7 +34,7 @@ export function nativeAccelerator(binding: string): string | null {
 export function buildNativeMenu(keymap: Keymap, projects: readonly Project[], suspended = false, mac = isMac): NativeMenuGroup[] {
   return SECTIONS.map((section) => ({
     id: section,
-    items: SHORTCUT_ACTIONS.filter((action) => action.menu?.section === section)
+    items: SHORTCUT_ACTIONS.filter((action) => action.menu?.section === section && actionAvailable(action, null))
       .sort((a, b) => a.menu!.order - b.menu!.order)
       .map((action): NativeMenuItem => {
         const menu = action.menu!;

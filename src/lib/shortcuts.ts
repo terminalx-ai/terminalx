@@ -47,7 +47,7 @@ interface ActionDef {
   /** A character typed in the composer, not a key that can be moved. */
   fixed?: boolean;
   /** The Experimental switch the action is behind: while it is off, Settings and ⌘K do not list it. */
-  requires?: "bots";
+  requires?: "bots" | "intro";
 }
 
 export const ORGANIZATION_SHORTCUTS = [1, 2, 3, 4, 5, 6, 7, 8, 9].map((position) => ({
@@ -75,6 +75,8 @@ const STANDARD_ACTIONS = [
   { id: "app.previousSession", label: "Previous session", group: "App", keys: ["mod+alt+up"], menu: { section: "go", order: 4, label: "Previous Session" } },
   { id: "app.docs", label: "Documentation", group: "App", keys: [], menu: { section: "help", order: 0, label: "Documentation" } },
   { id: "app.shortcuts", label: "Keyboard shortcuts", group: "App", keys: [], menu: { section: "help", order: 1, label: "Keyboard Shortcuts" } },
+  // PRO-241 (17.14): the first-run intro again, while its switch is on (Settings → Experimental → Intro).
+  { id: "app.showIntro", label: "Show intro", group: "App", keys: [], menu: { section: "help", order: 1.5, label: "Show Intro" }, requires: "intro" },
   { id: "app.reportIssue", label: "Report an issue", group: "App", keys: [], menu: { section: "help", order: 2, label: "Report an Issue…" } },
   { id: "app.supportReport", label: "Send a support report", group: "App", keys: [], menu: { section: "help", order: 3, label: "Send a Support Report…" } },
 
@@ -506,7 +508,17 @@ function gated(action: ShortcutAction): boolean {
 /** Whether a gated action is available to edit on this client. */
 export function shortcutOffered(action: ShortcutAction): boolean {
   if (action.group === "Organizations") return organizationSwitchingEnabled();
-  return !action.requires || getExperimentalSettings()?.[action.requires] === true;
+  return actionAvailable(action, getExperimentalSettings());
+}
+
+/**
+ * Whether an action's switch is on: an Experimental switch the runtime keeps, or the intro's (PRO-241), a preference
+ * of this app's own. Settings, ⌘K and the Help menu list an action only while it is.
+ */
+export function actionAvailable(action: Pick<ShortcutAction, "requires">, switches: { bots?: boolean } | null | undefined): boolean {
+  if (!action.requires) return true;
+  if (action.requires === "intro") return getPrefs().introSlides;
+  return switches?.[action.requires] === true;
 }
 
 let cached: { raw: unknown; switchingEnabled: boolean; keymap: Keymap } | null = null;
