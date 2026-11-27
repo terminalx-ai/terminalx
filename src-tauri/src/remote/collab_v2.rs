@@ -219,6 +219,12 @@ struct WorkspaceSshGrant {
     ssh_expires_at: u64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct VerifiedWorkspaceSshKey {
+    pub(crate) public_key: String,
+    pub(crate) expires_at: u64,
+}
+
 impl RuntimePolicy {
     /// Bind only to the existing native authenticated runtime identity. A
     /// persisted record is a revision floor, never startup authorization.
@@ -329,12 +335,13 @@ impl RuntimePolicy {
     }
 
     /// Validate the authenticated refresh extension against the installed
-    /// snapshot. The caller supplies its locally negotiated capability.
+    /// snapshot. Keep each key under its authenticated user ID so the
+    /// attachment cannot try another member's SSH identity.
     #[allow(dead_code)]
     pub(crate) fn verified_workspace_ssh_keys(
         &self, extension: Option<serde_json::Value>, workspace_id: &str,
         generation: u64, requested_ssh_v2: bool, now_ms: u64,
-    ) -> Result<HashMap<String, u64>> {
+    ) -> Result<HashMap<String, VerifiedWorkspaceSshKey>> {
         let Some(extension) = extension.filter(|_| requested_ssh_v2) else {
             return Ok(HashMap::new());
         };
@@ -357,9 +364,12 @@ impl RuntimePolicy {
                 && (member.role == Role::Manager
                     || (member.role == Role::Driver && member.can_approve && member.write_source == Some(WriteSource::Explicit))));
             if !allowed { continue; }
-            let key = crate::workspace_ssh::parse_public_key(&grant.ssh_public_keys[0]).context("invalid SSH grant key")?;
-            keys.entry(key).and_modify(|until: &mut u64| *until = (*until).min(grant.ssh_expires_at))
-                .or_insert(grant.ssh_expires_at);
+            let public_key = crate::workspace_ssh::parse_public_key(&grant.ssh_public_keys[0])
+                .context("invalid SSH grant key")?;
+            keys.insert(grant.user_id, VerifiedWorkspaceSshKey {
+                public_key,
+                expires_at: grant.ssh_expires_at,
+            });
         }
         Ok(keys)
     }
@@ -537,7 +547,10 @@ mod tests {
         ).collect();
         let batch = json!({"v":1,"workspaceId":"ws","runtimeGeneration":3,"revision":"7","grants":grants});
         let accepted = policy.verified_workspace_ssh_keys(Some(batch.clone()), "ws", 3, true, 100).unwrap();
-        assert_eq!(accepted, HashMap::from([(key(0), 60_100), (key(1), 60_100)]));
+        assert_eq!(accepted, HashMap::from([
+            ("manager".into(), VerifiedWorkspaceSshKey { public_key: key(0), expires_at: 60_100 }),
+            ("driver".into(), VerifiedWorkspaceSshKey { public_key: key(1), expires_at: 60_100 }),
+        ]));
         assert!(policy.verified_workspace_ssh_keys(Some(batch.clone()), "ws", 3, false, 100).unwrap().is_empty());
         assert!(policy.verified_workspace_ssh_keys(Some(batch.clone()), "other", 3, true, 100).is_err());
         assert!(policy.verified_workspace_ssh_keys(Some(batch.clone()), "ws", 4, true, 100).is_err());
