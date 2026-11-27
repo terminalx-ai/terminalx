@@ -2,8 +2,10 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OrganizationAutomationsList } from "./OrganizationAutomationsList";
 
-const { cloudAutomations, runNow, confirm, showError, opened, authority } = vi.hoisted(() => ({
+const { cloudAutomations, readEdit, copyText, runNow, confirm, showError, opened, authority } = vi.hoisted(() => ({
   cloudAutomations: vi.fn(),
+  readEdit: vi.fn(),
+  copyText: vi.fn().mockResolvedValue(undefined),
   runNow: vi.fn(),
   confirm: vi.fn(),
   showError: vi.fn(),
@@ -11,10 +13,16 @@ const { cloudAutomations, runNow, confirm, showError, opened, authority } = vi.h
   authority: { stamp: "initial", allowed: true },
 }));
 
-vi.mock("@/lib/api", () => ({ api: { cloudAutomations, cloudAutomationRunNow: runNow } }));
+vi.mock("@/lib/api", () => ({ api: { cloudAutomations, cloudAutomationRunNow: runNow, cloudAutomationEdit: readEdit } }));
+vi.mock("@/lib/clipboard", () => ({ copyText }));
 vi.mock("@/lib/confirm", () => ({ confirmInApp: confirm }));
 vi.mock("@/lib/errorToasts", () => ({ showError }));
-vi.mock("@/components/cloud/CloudSchedulesDialog", () => ({ openSchedulesDialog: opened }));
+vi.mock("@/components/cloud/CloudSchedulesDialog", () => ({
+  openSchedulesDialog: opened,
+  OrganizationAutomationEditor: ({ draft, onClose }: { draft: { kind: string; schedule: { updatedAt: number }; configuration: { prompt: string } }; onClose: () => void }) => (
+    <button onClick={onClose}>{draft.kind} {draft.schedule.updatedAt} {draft.configuration.prompt}</button>
+  ),
+}));
 vi.mock("@/components/cloud/CloudAutomationScope", () => ({
   useAutomationScope: () => authority,
   useAutomationFence: () => capture,
@@ -82,6 +90,25 @@ describe("Organization automations list", () => {
     expect(runNow.mock.calls[1]).toEqual(runNow.mock.calls[0]);
     expect(screen.getByText("The run was already requested.")).toBeTruthy();
     expect(screen.getByText(/Latest run · Waiting to start/i)).toBeTruthy();
+  });
+
+  it("loads both drafts through the edit route and copies only the canonical link", async () => {
+    const consoleUrl = "https://console.terminalx.ai/organizations/org-a/automations/schedule-1";
+    cloudAutomations.mockResolvedValue({ schedules: [
+      { ...cloudRow, updatedAt: 10, consoleUrl },
+      { ...cloudRow, id: "other", name: "Unsafe", consoleUrl: "https://other.test/" },
+    ] });
+    readEdit.mockResolvedValue({ schedule: { ...cloudRow, updatedAt: 12 }, configuration: { prompt: "private prompt" } });
+    render(<OrganizationAutomationsList {...props} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Cloud check" }));
+    fireEvent.click(await screen.findByRole("button", { name: "edit 12 private prompt" }));
+    fireEvent.click(screen.getByRole("button", { name: "Duplicate Cloud check" }));
+    await screen.findByRole("button", { name: "duplicate 12 private prompt" });
+    expect(readEdit.mock.calls).toEqual([["org-a", "schedule-1"], ["org-a", "schedule-1"]]);
+    expect(screen.queryByRole("button", { name: "Copy link to Unsafe" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Copy link to Cloud check" }));
+    await screen.findByText("Automation link copied.");
+    expect(copyText).toHaveBeenCalledWith(consoleUrl);
   });
 
   it("discards a late response when authority changes and makes no request while unavailable", async () => {

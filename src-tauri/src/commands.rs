@@ -1829,6 +1829,27 @@ pub async fn cloud_schedule_set_active(
 }
 
 #[tauri::command]
+pub async fn cloud_schedule_edit(
+    org_id: String,
+    schedule_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudScheduleEdit, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedule_edit(&org_id, &schedule_id))
+}
+
+#[tauri::command]
+pub async fn cloud_schedule_patch(
+    org_id: String,
+    schedule_id: String,
+    expected_updated_at: u64,
+    confirm_provider_spend: bool,
+    input: crate::cloud_workspaces::CloudScheduleCreateInput,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudSchedule, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedule_patch(&org_id, &schedule_id, expected_updated_at, confirm_provider_spend, &input))
+}
+
+#[tauri::command]
 pub async fn cloud_schedule_run_now(
     org_id: String,
     schedule_id: String,
