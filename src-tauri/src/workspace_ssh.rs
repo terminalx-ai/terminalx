@@ -10,7 +10,7 @@ use std::path::Path;
 
 /// Locate the active installation. Session processes must use the resolved
 /// version's directory so a later activation cannot change their helper paths.
-pub(crate) const PRIVATE_SSHD: &str = "/opt/terminalx/openssh/current/usr/sbin/sshd";
+pub(crate) const PRIVATE_SSHD: &str = "/var/lib/terminalx/openssh/current/usr/sbin/sshd";
 
 /// OpenSSH portable versions use a patch suffix, such as OpenSSH_9.6p1.
 /// Reject versions we cannot identify and bound the accepted version report.
@@ -42,14 +42,118 @@ pub(crate) fn supported_openssh_version(report: &[u8]) -> bool {
     (major, minor, patch) >= (9, 6, 1)
 }
 
-/// The caller supplies proof from the isolated daemon's configuration check.
-/// Keep the bootstrap header unchanged whenever readiness or that proof is held.
+/// This reason is local runtime telemetry. The updater result enum is a
+/// separate, fixed server contract.
+pub(crate) const LOGIN_SHELL_HELD: &str = "ssh_login_shell_unusable";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LoginShell {
+    Usable,
+    Held,
+}
+
+impl LoginShell {
+    #[cfg(unix)]
+    pub(crate) fn current_account() -> Self {
+        use std::ffi::{CStr, OsStr};
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut storage = [0u8; 16 * 1024];
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut found = std::ptr::null_mut();
+        // The result and its strings point into entry/storage and are used
+        // only before either buffer leaves scope.
+        let result = unsafe {
+            libc::getpwuid_r(
+                libc::geteuid(),
+                entry.as_mut_ptr(),
+                storage.as_mut_ptr().cast(),
+                storage.len(),
+                &mut found,
+            )
+        };
+        if result != 0 || found.is_null() {
+            return Self::Held;
+        }
+        let field = unsafe { (*found).pw_shell };
+        if field.is_null() {
+            return Self::Held;
+        }
+        let bytes = unsafe { CStr::from_ptr(field) }.to_bytes();
+        let shell = Path::new(OsStr::from_bytes(bytes));
+        let Ok(approved) = fs::read_to_string("/etc/shells") else {
+            return Self::Held;
+        };
+        Self::check(shell, &approved)
+    }
+
+    #[cfg(unix)]
+    fn check(shell: &Path, approved: &str) -> Self {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let denied = |path: &Path| {
+            path.file_name()
+                .is_some_and(|name| name == "nologin" || name == "false")
+        };
+        if !shell.is_absolute()
+            || denied(shell)
+            || !approved
+                .lines()
+                .map(str::trim)
+                .any(|line| !line.starts_with('#') && Path::new(line) == shell)
+        {
+            return Self::Held;
+        }
+        let Ok(resolved) = fs::canonicalize(shell) else {
+            return Self::Held;
+        };
+        if denied(&resolved)
+            || !fs::metadata(&resolved).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        {
+            return Self::Held;
+        }
+        let Ok(name) = CString::new(resolved.as_os_str().as_bytes()) else {
+            return Self::Held;
+        };
+        // Check effective access as the service account (which opens its own sessions).
+        if unsafe { libc::faccessat(libc::AT_FDCWD, name.as_ptr(), libc::X_OK, libc::AT_EACCESS) }
+            != 0
+        {
+            return Self::Held;
+        }
+        Self::Usable
+    }
+
+    pub(crate) fn hold_reason(self) -> Option<&'static str> {
+        (self == Self::Held).then_some(LOGIN_SHELL_HELD)
+    }
+}
+
+/// The caller supplies proof from the isolated daemon's configuration check
+/// and a fresh check of the runtime account's passwd shell.
 pub(crate) fn ssh_capability_suffix(
     organization_ready: bool,
     version_report: &[u8],
     configuration_checked: bool,
+    login_shell: LoginShell,
 ) -> &'static str {
-    if organization_ready && configuration_checked && supported_openssh_version(version_report) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static SHELL_HOLD_REPORTED: AtomicBool = AtomicBool::new(false);
+
+    let reason = login_shell.hold_reason().filter(|_| organization_ready);
+    let reported = SHELL_HOLD_REPORTED.swap(reason.is_some(), Ordering::Relaxed);
+    if let Some(reason) = reason.filter(|_| !reported) {
+        log::warn!("workspace SSH held: {reason}");
+    }
+    if organization_ready
+        && reason.is_none()
+        && configuration_checked
+        && supported_openssh_version(version_report)
+    {
         ",workspace-ssh-v1,workspace-ssh-v2"
     } else {
         ""
@@ -385,11 +489,17 @@ mod tests {
     fn workspace_ssh_advertisement_requires_readiness_and_a_usable_supported_daemon() {
         let minimum = b"OpenSSH_9.6p1 Ubuntu-3ubuntu13, OpenSSL 3.0.13";
         assert_eq!(
-            ssh_capability_suffix(true, minimum, true),
+            ssh_capability_suffix(true, minimum, true, LoginShell::Usable),
             ",workspace-ssh-v1,workspace-ssh-v2"
         );
-        assert_eq!(ssh_capability_suffix(false, minimum, true), "");
-        assert_eq!(ssh_capability_suffix(true, minimum, false), "");
+        assert_eq!(
+            ssh_capability_suffix(false, minimum, true, LoginShell::Usable),
+            ""
+        );
+        assert_eq!(
+            ssh_capability_suffix(true, minimum, false, LoginShell::Usable),
+            ""
+        );
         for held in [
             b"".as_slice(),
             b"OpenSSH_9.5p9",
@@ -398,10 +508,52 @@ mod tests {
             b"Dropbear_2025.88",
             b"OpenSSH_10.0pbad",
         ] {
-            assert_eq!(ssh_capability_suffix(true, held, true), "");
+            assert_eq!(
+                ssh_capability_suffix(true, held, true, LoginShell::Usable),
+                ""
+            );
         }
         assert!(supported_openssh_version(b"OpenSSH_10.0p1"));
         assert!(!supported_openssh_version(&[b' '; 4097]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_ssh_holds_capabilities_for_unusable_account_shells() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let make = |name: &str, mode| {
+            let path = root.path().join(name);
+            fs::write(&path, b"fixture").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        let usable = make("bash", 0o700);
+        let nologin = make("nologin", 0o700);
+        let false_shell = make("false", 0o700);
+        let nonexec = make("non-executable", 0o600);
+        let missing = root.path().join("missing");
+        let alias = root.path().join("alias");
+        symlink(&nologin, &alias).unwrap();
+        let banner = b"OpenSSH_9.6p1";
+        assert_eq!(
+            LoginShell::check(&usable, &usable.display().to_string()),
+            LoginShell::Usable
+        );
+        for shell in [&nologin, &false_shell, &nonexec, &missing, &alias] {
+            let state = LoginShell::check(shell, &shell.display().to_string());
+            assert_eq!(
+                state.hold_reason(),
+                Some("ssh_login_shell_unusable"),
+                "{shell:?}"
+            );
+            assert_eq!(ssh_capability_suffix(true, banner, true, state), "");
+        }
+        assert_eq!(
+            LoginShell::check(&usable, "# no usable shell listed"),
+            LoginShell::Held
+        );
     }
 
     #[test]
