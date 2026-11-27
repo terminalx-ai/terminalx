@@ -254,7 +254,17 @@ fn attempt(cloud: &crate::cloud_bootstrap::Bootstrapped, api: &crate::cloud_boot
         let verified =
             payload::verify_manifest(&manifest, &signature, architecture, version.as_ref())?;
         if active.as_deref() == Some(verified.version()) {
-            return Ok(Outcome::UpToDate);
+            return Ok(
+                if cloud
+                    .ssh_runtime
+                    .get()
+                    .is_some_and(|runtime| runtime.is_active())
+                {
+                    Outcome::UpToDate
+                } else {
+                    Outcome::CandidateFailed
+                },
+            );
         }
         if !ready() {
             anyhow::bail!("workspace SSH update held");
@@ -287,7 +297,12 @@ fn attempt(cloud: &crate::cloud_bootstrap::Bootstrapped, api: &crate::cloud_boot
     };
     let outcome = install_release().unwrap_or(Outcome::VerificationFailed);
     if let Some(current) = current() {
-        if let Ok(status) = Status::new(installed_version(&install), outcome, started) {
+        let version = cloud
+            .ssh_runtime
+            .get()
+            .filter(|runtime| runtime.is_active())
+            .and_then(|_| installed_version(&install));
+        if let Ok(status) = Status::new(version, outcome, started) {
             if cloud
                 .report_ssh_update(api, &current, CAPABILITY, &status, now())
                 .is_err()

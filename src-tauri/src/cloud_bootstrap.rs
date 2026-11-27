@@ -649,7 +649,7 @@ impl Bootstrapped {
         const DESKTOP_REFRESH_FAILURE_LIMIT: u8 = 3;
         let relay_host_id = self.key.relay_host_id();
         #[cfg(target_os = "linux")]
-        let requested_ssh = self.ssh_runtime.get().is_some()
+        let requested_ssh = self.ssh_runtime.get().is_some_and(|runtime| runtime.is_active())
             && crate::workspace_ssh::LoginShell::current_account().hold_reason().is_none();
         #[cfg(target_os = "linux")]
         let refreshed = api.refresh_workspace_ssh(&self.credential, requested_ssh);

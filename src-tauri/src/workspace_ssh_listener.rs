@@ -473,6 +473,10 @@ impl Runtime {
         Ok(())
     }
 
+    pub(crate) fn is_active(&self) -> bool {
+        self.listener.routing.lock().unwrap().active.is_some()
+    }
+
     pub(crate) fn host_key(&self) -> &str {
         &self.host_key
     }
