@@ -144,12 +144,19 @@ export async function exchangeAuthorizationCode(args: {
  * the code without regard to capitals or the space around it; the phone sends
  * it trimmed and otherwise as entered.
  */
+/** The request could not be made at all (no route, no DNS, the connection refused): nothing reached the server. */
+export const REDEEM_UNREACHABLE = "redeem_unreachable";
+/** Sent, and no answer in time. */
+export const REDEEM_TIMED_OUT = "redeem_timed_out";
+/** An `unanswered` reason that means the server was not heard from at all, rather than an answer this app could not use. */
+export const REDEEM_NOT_REACHED: ReadonlySet<string> = new Set([REDEEM_UNREACHABLE, REDEEM_TIMED_OUT]);
+
 export async function redeemAccessCode(config: AuthConfig, hold: Pick<AccessHold, "ticket">, code: string, fetchImpl: typeof fetch = fetch): Promise<RedeemOutcome> {
   let response: Response;
   try {
     response = await postJson(config.accessCodeEndpoint, { accessTicket: hold.ticket, code: code.trim(), clientId: config.clientId }, fetchImpl);
   } catch (error) {
-    return { status: "unanswered", reason: error instanceof Error && error.name === "AbortError" ? "redeem_timed_out" : "redeem_unreachable" };
+    return { status: "unanswered", reason: error instanceof Error && error.name === "AbortError" ? REDEEM_TIMED_OUT : REDEEM_UNREACHABLE };
   }
   const body = await response.json().catch(() => null) as Record<string, unknown> | null;
   const error = body && typeof body === "object" ? body.error : undefined;

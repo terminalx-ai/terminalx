@@ -212,6 +212,25 @@ pub struct PairingStatus {
     /// Keep this Mac awake while a phone is connected (default on).
     pub keep_awake: bool,
     pub last_error: Option<String>,
+    /// Whether this Mac is on its account's machine list, where the
+    /// account's other computers and phones find it (PRO-598).
+    pub account_listing: AccountListing,
+}
+
+/// This Mac on its account's machine list, as Settings → Account says it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum AccountListing {
+    /// No account to be listed on: signed out, or data privacy mode is on
+    /// (Settings → Account says that itself).
+    #[default]
+    Off,
+    /// The account service took this Mac's registration.
+    Listed,
+    /// Not listed yet: `reason` says what it waits for, which needs no one.
+    Pending { reason: String },
+    /// The account service refused it and only a person can fix that.
+    Refused { reason: String },
 }
 
 /// This Mac's name as the user's other devices show it (#686): on their work

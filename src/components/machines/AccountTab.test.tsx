@@ -38,6 +38,7 @@ function accountMachine(patch: Partial<AccountMachine> = {}): AccountMachine {
 
 const READY: MachineAccountDirectory = {
   signedIn: true,
+  email: "owner@example.invalid",
   installation: "ready",
   machines: [
     accountMachine(),
@@ -215,8 +216,17 @@ describe("Add a machine → On your account (screen 21.03)", () => {
     expect(requestFailure("something else", "Studio")).toBe("something else");
   });
 
+  // PRO-598: a computer signed in to another address is not on this list; the address says so at a glance.
+  it("names the account's address when no other computer is on it", async () => {
+    directory = { ...READY, machines: [accountMachine({ hostId: "host-pro", machineId: "cccccccccccccccc", name: "This one", thisMac: true })] };
+    const { dialog } = open();
+    const empty = await within(dialog).findByTestId("account-empty");
+    expect(empty.textContent).toBe("No other computer is signed in as owner@example.invalid. Sign in to TerminalX on it with that address, or pair it with a code.");
+    expect(within(dialog).queryByRole("list", { name: "Computers on your account" })).toBeNull();
+  });
+
   it("says the account still has to approve this Mac", async () => {
-    directory = { signedIn: true, installation: "approvalRequired", machines: [] };
+    directory = { signedIn: true, email: "owner@example.invalid", installation: "approvalRequired", machines: [] };
     const { dialog } = open();
     expect((await within(dialog).findByRole("status")).textContent).toContain("Your account has not approved this computer yet.");
   });

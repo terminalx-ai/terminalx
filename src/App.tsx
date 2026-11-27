@@ -8,6 +8,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import { FloatingShell } from "@/components/floating/FloatingShell";
 import { isCompactWindow } from "@/lib/appWindow";
 import { useNativeMenus } from "@/lib/nativeMenuBridge";
+import { useGitForWindowsCheck } from "@/lib/gitForWindows";
 
 /**
  * Every window loads this page. The main one draws the workbench; chat
@@ -16,5 +17,6 @@ import { useNativeMenus } from "@/lib/nativeMenuBridge";
  */
 export default function App() {
   useNativeMenus();
+  useGitForWindowsCheck();
   return <TooltipProvider>{isCompactWindow() ? <FloatingShell /> : <><AppShell /><IssueConfirmation /><SupportReportDialog /></>}<LocalRuntimeNotice /><StartupDiagnostics /><ConfirmDialogHost /></TooltipProvider>;
 }

@@ -110,7 +110,7 @@ macro_rules! secret_store { () => { "macOS Keychain" } }
 #[cfg(windows)]
 macro_rules! secret_store { () => { "the Windows encrypted store" } }
 #[cfg(not(any(target_os = "macos", windows)))]
-macro_rules! secret_store { () => { "the secret store" } }
+macro_rules! secret_store { () => { "the system keyring" } }
 
 const REFRESH_NOT_SAVED: &str = concat!("The account session refreshed, but ", secret_store!(), " could not save it.");
 

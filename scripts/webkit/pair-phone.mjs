@@ -50,6 +50,7 @@ const fixture = `(() => {
     pendingApproval: null,
     keepAwake: true,
     lastError: null,
+    accountListing: { state: "listed" },
   };
   answers.pairing_status = () => status;
   answers.pairing_generate = ({ connectionMode }) => (status = { ...status, activePairing: offer(connectionMode) });

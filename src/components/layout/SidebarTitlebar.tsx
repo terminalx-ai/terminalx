@@ -13,6 +13,7 @@ import { SIDEBAR_FILTERS, setSidebarFilter, useSidebarFilter } from "@/lib/sideb
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { setShowArchived, useSessionStore } from "@/lib/sessions";
 import { TITLEBAR_INSET } from "./AppShell";
+import { AppMenu } from "./AppMenu";
 
 /**
  * The sidebar's titlebar, the same in every layout: after the window's own controls, Hide sidebar. New session and
@@ -21,6 +22,7 @@ import { TITLEBAR_INSET } from "./AppShell";
 export function SidebarTitlebar({ onHide }: { onHide: () => void }) {
   return (
     <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-1 pr-2" style={{ paddingLeft: TITLEBAR_INSET }} data-testid="sidebar-titlebar">
+      <AppMenu />
       <WithTooltip label="Hide sidebar" shortcut="app.toggleSidebar">
         <Button variant="ghost" size="icon-sm" aria-label="Hide sidebar" onClick={onHide} className="text-faint hover:text-foreground">
           <PanelLeft />

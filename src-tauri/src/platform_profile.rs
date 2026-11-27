@@ -155,7 +155,7 @@ mod tests {
             localize_for(profile_for("windows"), text),
             "Check Encrypted store access. Kept in the Windows encrypted store, the Windows encrypted store or Windows encrypted store; open Keychain Access; the Keychain on a Mac."
         );
-        assert_eq!(localize_for(profile_for("linux"), "Saved to the Keychain."), "Saved to the secret store.");
+        assert_eq!(localize_for(profile_for("linux"), "Saved to the Keychain."), "Saved to the keyring.");
     }
 
     #[cfg(feature = "desktop")]

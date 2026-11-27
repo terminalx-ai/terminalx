@@ -133,10 +133,11 @@ export function OpenSettingsFileButton({ projectPath }: { projectPath?: string |
   const openIn = (index: number) => { const app = OPEN_IN[index]; if (!app) return; if (app.editor) open(current, app.editor); else reveal(); };
   const part = "inline-flex h-7 shrink-0 items-center whitespace-nowrap text-xs outline-none hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40";
   const targets = [user, ...ordered];
-  return <div data-open-settings-file="" className={cn("flex shrink-0 items-stretch overflow-hidden rounded-md hairline", broken ? "text-destructive" : "text-foreground", menu && "bg-veil-raised")}>
-    <button type="button" onClick={() => open(current)} className={cn(part, "gap-1.5 px-2.5 [&_svg]:size-3.5")}>
+  return <div data-open-settings-file="" className={cn("flex min-w-0 items-stretch overflow-hidden rounded-md hairline", broken ? "text-destructive" : "text-foreground", menu && "bg-veil-raised")}>
+    <button type="button" onClick={() => open(current)} className={cn(part, "min-w-0 gap-1.5 px-2.5 [&_svg]:size-3.5 [&_svg]:shrink-0")}>
       <FileJson aria-hidden className={broken ? "text-destructive" : "text-muted-foreground"} />
-      <span>Open <span className="font-mono">{name}</span>{line != null && <> · line {line}</>}</span>
+      {/* A long path is cut, never the strip's other buttons (the window's own, on Windows and Linux). */}
+      <span className="min-w-0 truncate">Open <span className="font-mono">{name}</span>{line != null && <> · line {line}</>}</span>
     </button>
     <DropdownMenu open={menu} onOpenChange={setMenu}>
       <DropdownMenuTrigger asChild>

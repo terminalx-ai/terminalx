@@ -9,6 +9,7 @@ mod diagnostics;
 mod direct;
 use crate::pairing_fingerprint as fingerprint;
 mod guest;
+mod host_binding;
 mod host_poll;
 mod machine_grants;
 mod machine_route;
@@ -62,13 +63,37 @@ use self::model::{
     HostBindingPayload, HostMetadata, PairedDeviceConnection, PairingApprovalRequest, PairingCode,
     PairingOffer, PairingTransport, RelayStatus, APPROVAL_TTL_MS, OFFER_TTL_MS,
 };
-pub use self::model::{MachineName, PairingConnectionMode, PairingStatus, RelayPhase};
+pub use self::model::{AccountListing, MachineName, PairingConnectionMode, PairingStatus, RelayPhase};
 use self::registry::{DeviceRegistry, PairingSecrets};
 /// The direct endpoints a phone is given: only addresses the listen setting
 /// binds (PRO-487). Empty under "Relay only". Addresses, not the listener's
 /// state, so an offer regains its LAN route when a busy port frees.
 fn advertised_endpoints() -> Vec<String> {
     crate::direct_endpoints::listening_endpoints(crate::direct_endpoints::DIRECT_PORT, "")
+}
+
+/// This Mac on its account's machine list (PRO-598): listed once a
+/// registration was taken; else what the last one met, or what it waits for.
+fn account_listing(bound: bool, data_privacy: bool, last: Option<&AccountListing>, relay: &RelayStatus) -> AccountListing {
+    if bound {
+        return AccountListing::Listed;
+    }
+    if data_privacy {
+        return AccountListing::Off;
+    }
+    if let Some(last) = last {
+        return last.clone();
+    }
+    let reason = match relay.phase {
+        RelayPhase::Off => return AccountListing::Off,
+        RelayPhase::Connecting => "Connecting to Relay. This Mac is listed once it is connected.".to_string(),
+        RelayPhase::Offline => match relay.message.as_deref() {
+            Some(message) => format!("Relay is unavailable: {message}"),
+            None => "Relay is unavailable. This Mac is listed once it is connected.".to_string(),
+        },
+        RelayPhase::Connected => "Adding this Mac to your account.".to_string(),
+    };
+    AccountListing::Pending { reason: crate::platform_profile::localize(&reason) }
 }
 
 /// An offer's required `endpoint`: the first direct one, or the stand-in
@@ -112,6 +137,9 @@ struct Inner {
     /// The watcher that keeps them in step with the listen setting runs.
     direct_watching: bool,
     last_error: Option<String>,
+    /// Why the last registration in the account's machine list did not
+    /// take, until one does or the account signs out (PRO-598).
+    account_listing: Option<AccountListing>,
 }
 
 impl Inner {
@@ -566,6 +594,7 @@ impl PairingManager {
             let mut inner = self.inner.lock().unwrap();
             inner.relay_status = RelayStatus::default();
             inner.host = None;
+            inner.account_listing = None;
         }
         self.emit();
         if let (Some(context), Some(mirror)) = (context, mirror) {
@@ -859,7 +888,13 @@ impl PairingManager {
 
     pub(super) fn clear_relay(&self) {
         self.epoch.fetch_add(1, Ordering::SeqCst);
-        self.inner.lock().unwrap().relay = None;
+        let mut inner = self.inner.lock().unwrap();
+        inner.relay = None;
+        // A retry ends with the connection; Relay's own state says what is
+        // next. A refusal stays until the next registration is answered.
+        if matches!(inner.account_listing, Some(AccountListing::Pending { .. })) {
+            inner.account_listing = None;
+        }
     }
 
     pub(super) async fn relay_ready(self: &Arc<Self>, context: AccountContext, relay: RelayLive) {
@@ -901,46 +936,170 @@ impl PairingManager {
             self.set_error(format!("Could not save host binding fence: {error:#}"));
             return;
         }
-        let capabilities = self.host_capabilities();
         let payload = HostBindingPayload {
             host_id: keypair.host_id(),
             host_public_key_b64: keypair.public_key_b64(),
             binding_generation: generation,
-            display_name: display_name.clone(),
+            display_name,
             platform: "darwin".into(),
             environment_kind: "native".into(),
-            capabilities: capabilities.clone(),
+            capabilities: self.host_capabilities(),
         };
-        let context_for_bind = context.clone();
-        let bind =
-            tokio::task::spawn_blocking(move || cloud::register_host(&context_for_bind, &payload))
-                .await;
-        if !matches!(bind, Ok(Ok(()))) || !self.is_epoch(epoch) {
-            if let Ok(Err(error)) = bind {
-                self.set_error(crate::platform_profile::localize(&format!("Could not bind this Mac: {error:#}")));
-            }
-            return;
-        }
+        // Off the caller: relay_ready is awaited before the control loop
+        // starts, and a registration may wait minutes for Relay's proof or
+        // the account service. The control loop must answer the cell's pings
+        // meanwhile, or the cell drops this host and the proof never comes.
+        let manager = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let base = crate::account::api_base_url();
+            manager.publish_host(&base, epoch, context, relay, mirror, payload).await;
+        });
+    }
+
+    /// Bind this Mac in the account's machine list, then poll for its phones'
+    /// and computers' grants. Ends with `epoch` or with the control channel.
+    async fn publish_host(
+        self: Arc<Self>,
+        base: &str,
+        epoch: u64,
+        context: AccountContext,
+        relay: RelayLive,
+        mut mirror: AccountMirror,
+        mut payload: HostBindingPayload,
+    ) {
+        let Some(generation) = self.bind_host(base, epoch, &context.user_id, &relay, &mut mirror, &mut payload).await else { return };
         {
             let mut inner = self.inner.lock().unwrap();
+            inner.account_listing = None;
             inner.host = Some(HostMetadata {
-                host_id: keypair.host_id(),
-                public_key: keypair.public_key_b64(),
+                host_id: payload.host_id.clone(),
+                public_key: payload.host_public_key_b64.clone(),
                 binding_generation: generation,
-                display_name,
-                platform: "darwin".into(),
-                environment_kind: "native".into(),
-                capabilities,
+                display_name: payload.display_name.clone(),
+                platform: payload.platform.clone(),
+                environment_kind: payload.environment_kind.clone(),
+                capabilities: payload.capabilities.clone(),
                 app_version: env!("CARGO_PKG_VERSION").into(),
                 last_seen_at: Some(Utc::now().to_rfc3339()),
             });
             inner.last_error = None;
         }
         self.emit();
-        let manager = self.clone();
-        tauri::async_runtime::spawn(async move {
-            manager.host_poll(epoch, context.user_id, relay, generation).await;
-        });
+        self.host_poll(epoch, context.user_id, relay, generation).await;
+    }
+
+    /// Register this Mac in the account's machine list, recovering from a
+    /// binding fence that lags the account service's and retrying what
+    /// settles on its own ([`host_binding`]). Every refusal is logged and
+    /// shown in Settings → Account. Returns the generation the service took,
+    /// or `None` when it refused for good or this attempt was superseded.
+    async fn bind_host(
+        self: &Arc<Self>,
+        base: &str,
+        epoch: u64,
+        user_id: &str,
+        relay: &RelayLive,
+        mirror: &mut AccountMirror,
+        payload: &mut HostBindingPayload,
+    ) -> Option<u64> {
+        use host_binding::Recovery;
+        let this_mac = crate::platform_profile::localize("this Mac");
+        let (mut steps, mut retries) = (0, 0);
+        loop {
+            let (manager, user, sent, at) = (self.clone(), user_id.to_string(), payload.clone(), base.to_string());
+            let bind = tokio::task::spawn_blocking(move || {
+                // A fresh session each attempt, off the async thread: a retry
+                // may come after it expired, and renewing it blocks.
+                let context = manager.account_context().filter(|context| context.user_id == user)?;
+                let registered = cloud::register_host_at(&at, &context, &sent);
+                Some((context, registered))
+            })
+            .await;
+            if !self.is_epoch(epoch) {
+                return None;
+            }
+            let (context, mut error) = match bind {
+                // Signed out, or another account: the relay supervisor takes it from here.
+                Ok(None) => return None,
+                Ok(Some((_, Ok(())))) => return Some(payload.binding_generation),
+                Ok(Some((context, Err(error)))) => (Some(context), error),
+                Err(error) => (None, anyhow!("the registration task failed: {error}")),
+            };
+            let mut recovery = host_binding::recovery(&error);
+            let steps_generation = matches!(recovery, Recovery::NextGeneration | Recovery::UnbindThenNextGeneration);
+            if steps_generation && steps >= host_binding::MAX_GENERATION_STEPS {
+                recovery = Recovery::GiveUp;
+            }
+            if let (Recovery::UnbindThenNextGeneration, Some(context)) = (recovery, context) {
+                let (host_id, generation, at) = (payload.host_id.clone(), payload.binding_generation, base.to_string());
+                let ended = tokio::task::spawn_blocking(move || cloud::unbind_at(&at, &context, &host_id, generation)).await;
+                if !self.is_epoch(epoch) {
+                    return None;
+                }
+                match ended {
+                    Ok(Ok(())) => {}
+                    Ok(Err(unbind)) => {
+                        // Retried as the registration is; a refusal is its reason.
+                        recovery = match host_binding::recovery(&unbind) {
+                            Recovery::Retry => Recovery::Retry,
+                            _ => Recovery::GiveUp,
+                        };
+                        error = unbind.context("end the binding a missed sign-out left");
+                    }
+                    Err(failed) => {
+                        recovery = Recovery::Retry;
+                        error = anyhow!("the unbind task failed: {failed}");
+                    }
+                }
+            }
+            match recovery {
+                Recovery::NextGeneration | Recovery::UnbindThenNextGeneration => {
+                    steps += 1;
+                    let next = payload.binding_generation + 1;
+                    log::info!(
+                        "host binding: the account service refused generation {} ({}); registering at {next}",
+                        payload.binding_generation,
+                        cloud::refusal_code(&error).unwrap_or("refused"),
+                    );
+                    // The fence moves first, so a registration taken but
+                    // never answered is still behind it.
+                    mirror.binding_generation = next;
+                    if let Err(error) = registry::save_account_mirror(mirror) {
+                        self.set_error(format!("Could not save host binding fence: {error:#}"));
+                        self.set_account_listing(AccountListing::Refused { reason: format!("Could not save the host binding fence: {error:#}") });
+                        return None;
+                    }
+                    payload.binding_generation = next;
+                }
+                Recovery::Retry => {
+                    retries += 1;
+                    let wait = host_binding::retry_delay(retries, error.downcast_ref::<cloud::RetryAfter>().map(|after| after.0));
+                    log::warn!("host binding: not on the account's machine list yet, retrying in {} s: {error:#}", wait.as_secs());
+                    self.set_account_listing(AccountListing::Pending { reason: host_binding::reason(&error, &this_mac) });
+                    // A closed control channel ends this attempt at once: the
+                    // supervisor reconnects, and relay_ready starts another.
+                    tokio::select! {
+                        _ = tokio::time::sleep(wait) => {}
+                        _ = relay.control_closed() => return None,
+                    }
+                    if !self.is_epoch(epoch) {
+                        return None;
+                    }
+                }
+                Recovery::GiveUp => {
+                    let reason = host_binding::reason(&error, &this_mac);
+                    log::warn!("host binding: this Mac is not on the account's machine list: {error:#}");
+                    self.set_error(crate::platform_profile::localize(&format!("Could not bind this Mac: {reason}")));
+                    self.set_account_listing(AccountListing::Refused { reason });
+                    return None;
+                }
+            }
+        }
+    }
+
+    fn set_account_listing(&self, listing: AccountListing) {
+        self.inner.lock().unwrap().account_listing = Some(listing);
+        self.emit();
     }
 
     async fn fulfill_grant(
@@ -1694,6 +1853,12 @@ impl PairingManager {
             pending_approval: inner.pending_approval.as_ref().map(|pending| pending.request.clone()),
             keep_awake,
             last_error: inner.last_error.clone(),
+            account_listing: account_listing(
+                inner.host.is_some(),
+                crate::data_privacy::enabled(),
+                inner.account_listing.as_ref(),
+                &inner.relay_status,
+            ),
         }
     }
 
@@ -2154,6 +2319,30 @@ pub(crate) fn phone_session_category(error: anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_account_listing_says_listed_waiting_or_refused_and_never_nothing() {
+        let relay = |phase, message: Option<&str>| RelayStatus { phase, message: message.map(str::to_string), attempt: 0 };
+        let connected = relay(RelayPhase::Connected, None);
+        let refused = AccountListing::Refused { reason: "Another TerminalX account lists this Mac.".into() };
+        assert_eq!(account_listing(true, false, Some(&refused), &connected), AccountListing::Listed, "a registration taken wins");
+        assert_eq!(account_listing(false, true, Some(&refused), &connected), AccountListing::Off, "data privacy mode turns the account off");
+        assert_eq!(account_listing(false, false, Some(&refused), &connected), refused, "the refusal, with its reason");
+        assert_eq!(account_listing(false, false, None, &relay(RelayPhase::Off, None)), AccountListing::Off, "signed out");
+        for (phase, message, says) in [
+            (RelayPhase::Connecting, None, "Connecting to Relay"),
+            (RelayPhase::Offline, Some("Relay needs a TerminalX plan."), "Relay is unavailable: Relay needs a TerminalX plan."),
+            (RelayPhase::Offline, None, "Relay is unavailable."),
+            (RelayPhase::Connected, None, "Adding this Mac to your account"),
+        ] {
+            // The wording names this computer as its platform does: Linux CI reads "this computer".
+            let says = crate::platform_profile::localize(says);
+            let AccountListing::Pending { reason } = account_listing(false, false, None, &relay(phase, message)) else { panic!("{says}") };
+            // The message names what was expected, not the reason itself: CodeQL counts an
+            // account listing written to a panic as logging it.
+            assert!(reason.contains(&says), "the pending reason should say {says:?}");
+        }
+    }
 
     #[test]
     fn paired_device_scopes_are_deny_by_default() {

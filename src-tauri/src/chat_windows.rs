@@ -25,6 +25,9 @@ pub async fn new_chat_window(app: AppHandle) -> Result<(), String> {
         .hidden_title(true)
         .transparent(true)
         .effects(tauri::window::EffectsBuilder::new().effect(tauri::window::Effect::Sidebar).state(tauri::window::EffectState::Active).build());
+    // Windows and Linux: no system title bar; the top strip is the title bar and draws the window's buttons (`WindowControls`).
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.decorations(false);
     let window = builder.build().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())
 }

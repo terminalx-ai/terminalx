@@ -32,6 +32,7 @@ import { useAccount } from "@/lib/account";
 import { computerColorCss, computerNameOf } from "@/lib/computerIdentity";
 import { managesOrganization } from "@/lib/multiOrg";
 import { cloudSessionKey, cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
+import { WindowControls } from "@/components/layout/WindowControls";
 
 const UNRESPONSIVE_DELAY_MS = 15_000;
 const NOT_CONNECTED: WorkspaceConnectionState = { state: "idle" };
@@ -263,6 +264,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
             {resuming ? <Loader2 className="animate-spin" /> : <Play />} Resume
           </Button>
         )}
+        <WindowControls />
       </header>
       {item && startRecovery && <CloudStartFailure key={JSON.stringify([healthScope, workspaceKey])} item={item} failure={startFailure} resuming={startResuming}
         canInspect={(row) => openable(row) || inspectable(row)} onInspect={inspect}
