@@ -39,7 +39,6 @@ import { recoveryFromEvents } from "@/lib/recovery";
 import { cloudAsleep, cloudSessionBackend } from "@/lib/sessionBackend";
 import type { AgentEvent, RecoveryKind } from "@/types/events";
 import { cloudWorkspaceKey, isCloudKey, parseCloudWorkspaceKey, type CloudProject } from "@/types/target";
-import { getSessions } from "@/lib/sessions";
 import { noteTeamArtifact, teamArtifactOrgs, teamArtifactsApi, type TeamArtifactContentType } from "@/lib/teamArtifacts";
 import type { RuntimeIssueRef, WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable/workspace";
 
@@ -235,7 +234,7 @@ async function authorizeRoutineCompute(what: string, okLabel: string): Promise<v
   // Native dispatch precedes catalog/quote I/O; recheck the grant at admission.
   assertAllowed((await loadCloudControlSetting()) && allowed());
 }
-export const CLOUD_CONTROL_CAPABILITIES = ["projects.list", "sessions.list", "sessions.create", "send", "read", "wait", "stop", "resume", "artifacts.publish", "artifacts.show"] as const;
+export const CLOUD_CONTROL_CAPABILITIES = ["projects.list", "sessions.list", "sessions.create", "send", "read", "wait", "stop", "resume"] as const;
 
 /** A refusal the CLI prints as `code: message`, with what to do about it. */
 export class CloudControlError extends Error {
@@ -1184,28 +1183,61 @@ function artifactOrg(params: Params): { id: string; name: string } {
   throw invalid(`Name the organization with --org: ${orgs.map((org) => org.name).join(", ")}.`);
 }
 
-/** Where a publish came from: the calling session's name, when it is one of this Mac's. */
-function artifactSource(params: Params): string | undefined {
-  const caller = params.caller as { session?: unknown } | null | undefined;
-  const id = typeof caller?.session === "string" ? caller.session : null;
-  const session = id ? getSessions().sessions.find((entry) => entry.id === id) : undefined;
-  const title = session?.title?.replace(/\p{Cc}/gu, " ").trim();
-  return title ? title.slice(0, 120) : undefined;
+/** The slug a publish names: a template's, or `--slug`. */
+function namedSlug(params: Params): { slug: string | null; template: boolean } {
+  const template = text(params, "template");
+  if (template) return { slug: template, template: true };
+  return { slug: text(params, "slug") ?? null, template: false };
 }
 
-async function artifactsPublish(params: Params) {
+/**
+ * Whether the named slug may be published to: free, or with `--new-version`
+ * the person's own (or they are an admin). A slug in use is never added to
+ * by default. Answers `adds` with the slug when it adds a version.
+ */
+async function slugClear(orgId: string, orgName: string, params: Params): Promise<string | null> {
+  const { slug } = namedSlug(params);
+  if (!slug) return null;
+  const { artifacts } = await teamArtifactsApi.list(orgId);
+  const existing = artifacts.find((item) => item.slug === slug);
+  const newVersion = params.newVersion === true;
+  if (!existing) {
+    if (newVersion) throw notFound(`No team artifact @${slug} at ${orgName} to add a version to.`, "Leave out --new-version to publish a new one.");
+    return null;
+  }
+  if (!newVersion) {
+    throw new CloudControlError("team_artifact_slug_taken", `@${slug} is already ${existing.title} at ${orgName}. Nothing was published.`,
+      existing.canDelete ? "Add --new-version to publish this as its next version, or choose another slug." : "Choose another slug: only its author and admins can add a version of it.");
+  }
+  if (!existing.canDelete) throw new CloudControlError("team_artifact_publish_forbidden", `Only the author of @${slug} and admins can add a version of it. Nothing was published.`, "Choose another slug.");
+  return slug;
+}
+
+/** Native code asks this before anything is read or asked: the organization, and whether the slug is free. */
+async function artifactsPlan(params: Params) {
   const org = artifactOrg(params);
+  const adds = await slugClear(org.id, org.name, params);
+  return { orgId: org.id, orgName: org.name, adds };
+}
+
+/** Publish the file native code read, after it asked the person when the tab asks first. */
+async function artifactsPublish(params: Params) {
+  const orgId = required(params, "orgId");
+  const org = signedIn().organizations?.find((item) => item.id === orgId);
+  if (!org || !teamArtifactOrgs(signedIn()).includes(orgId)) throw new CloudControlError("team_artifacts_unavailable", "Team artifacts are not available for this organization.");
+  // Asked again: a teammate may have taken the slug while the person was answering.
+  await slugClear(org.id, org.name, params);
   const contentType = required(params, "contentType") as TeamArtifactContentType;
   const content = typeof params.content === "string" ? params.content : "";
-  const template = text(params, "template");
-  const slug = text(params, "slug");
+  const { slug, template } = namedSlug(params);
   const note = text(params, "note");
-  const source = artifactSource(params);
+  const source = text(params, "source")?.replace(/\p{Cc}/gu, " ").slice(0, 120);
   const { artifact, created } = await teamArtifactsApi.publish(org.id, {
     title: required(params, "title").trim(),
     contentType,
     content,
-    ...(template ? { slug: template, template: true } : slug ? { slug } : {}),
+    ...(slug ? { slug } : {}),
+    ...(template ? { template: true } : {}),
     ...(note ? { note } : {}),
     ...(source ? { source } : {}),
   });
@@ -1237,6 +1269,10 @@ async function artifactsShow(params: Params) {
 /** Run one `cloud.*` control command. Throws `CloudControlError` for a refusal. */
 export async function handleCloudControl(action: string, params: Params = {}): Promise<unknown> {
   if (action === "status") return status();
+  // Team artifacts have their own switch, checked in native code with the file and the tab's mode (PRO-158).
+  if (action === "artifacts.plan") return artifactsPlan(params);
+  if (action === "artifacts.publish") return artifactsPublish(params);
+  if (action === "artifacts.show") return artifactsShow(params);
   assertAllowed();
   switch (action) {
     case "projects.list":
@@ -1255,10 +1291,6 @@ export async function handleCloudControl(action: string, params: Params = {}): P
       return stop(params);
     case "resume":
       return resume(params);
-    case "artifacts.publish":
-      return artifactsPublish(params);
-    case "artifacts.show":
-      return artifactsShow(params);
     default:
       throw new CloudControlError("unsupported", `This TerminalX does not know the cloud command ${action}.`, "Update TerminalX, or see terminalx cloud status for what it supports.");
   }

@@ -592,6 +592,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/cloud-control.json" },
   }),
   defineSetting({
+    id: "general.teamArtifactsPublish", section: "general", title: "Let agents publish team artifacts",
+    description: "Allow agents in local sessions to publish files from their session's folder to everyone in your organization.",
+    searchTerms: ["general", "agents", "publish", "team", "artifacts", "templates", "organization"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/team-artifacts-publish.json" },
+  }),
+  defineSetting({
     id: "general.commandLine", section: "general", title: "Command line tool",
     description: "Install terminalx and its tnx alias in ~/.local/bin so shells and agents can control this app.",
     searchTerms: ["general", "command", "line", "tool"], scope: "user",

@@ -13,6 +13,7 @@ import {
   SLUG_PATTERN,
   slugify,
   teamArtifactsApi,
+  useTeamArtifacts,
   type TeamArtifact,
   type TeamArtifactPerson,
 } from "@/lib/teamArtifacts";
@@ -113,15 +114,20 @@ export function PublishDialog({ orgId, onClose, onPublished }: { orgId: string; 
   const [title, setTitle] = useState("");
   const [template, setTemplate] = useState(false);
   const [slug, setSlug] = useState("");
+  const [asVersion, setAsVersion] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { artifacts } = useTeamArtifacts(orgId);
   const type = file ? contentTypeForName(file.name) : null;
   const slugValue = slug || slugify(title);
-  const ready = !!file && !!type && !!title.trim() && (!template || SLUG_PATTERN.test(slugValue));
+  // A slug in use is never published to by default: its author or an admin may choose to add a version.
+  const taken = template ? artifacts?.find((item) => item.slug === slugValue) ?? null : null;
+  const addsVersion = !!taken && taken.canDelete && asVersion;
+  const ready = !!file && !!type && !!title.trim() && (!template || (SLUG_PATTERN.test(slugValue) && artifacts !== null && (!taken || addsVersion)));
 
   const pick = () => {
     setError(null);
-    teamArtifactsApi.pickFile()
+    teamArtifactsApi.pickFile(orgId)
       .then((picked) => {
         if (!picked) return;
         if (!picked.content || picked.refused) {
@@ -180,16 +186,30 @@ export function PublishDialog({ orgId, onClose, onPublished }: { orgId: string; 
               <span className="text-muted-foreground">Inserted as</span>
               <span className="flex h-8 items-center rounded-md border border-hairline px-2 font-mono focus-within:border-ring">
                 <span className="text-faint">@</span>
-                <input value={slug} placeholder={slugify(title)} onChange={(event) => setSlug(event.target.value.toLowerCase())} maxLength={64} spellCheck={false}
+                <input value={slug} placeholder={slugify(title)} onChange={(event) => { setSlug(event.target.value.toLowerCase()); setAsVersion(false); }} maxLength={64} spellCheck={false}
                   aria-label="Template slug" className="min-w-0 flex-1 bg-transparent outline-none" />
               </span>
             </label>
+          )}
+          {taken && (
+            <div className="rounded-md border border-hairline px-2.5 py-2" data-testid="team-artifact-slug-taken">
+              <p className="text-foreground">@{taken.slug} is already “{taken.title}”.</p>
+              {taken.canDelete ? (
+                <label className="mt-1.5 flex items-center gap-2">
+                  <input type="checkbox" checked={asVersion} onChange={(event) => setAsVersion(event.target.checked)} />
+                  <span>Add as a new version of @{taken.slug}</span>
+                </label>
+              ) : (
+                <p className="mt-0.5 text-muted-foreground">Choose another slug. Only its author and admins can add a version.</p>
+              )}
+              {taken.canDelete && !asVersion && <p className="mt-0.5 text-muted-foreground">Or choose another slug.</p>}
+            </div>
           )}
           {error && <p role="alert" className="text-destructive">{error}</p>}
         </div>
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="ghost" size="sm" onClick={onClose} disabled={busy}>Cancel</Button>
-          <Button size="sm" onClick={publish} disabled={!ready || busy}>{busy ? "Publishing…" : "Publish"}</Button>
+          <Button size="sm" onClick={publish} disabled={!ready || busy}>{busy ? "Publishing…" : addsVersion ? `Publish v${(taken?.version ?? 0) + 1}` : "Publish"}</Button>
         </div>
       </DialogContent>
     </Dialog>

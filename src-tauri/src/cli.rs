@@ -114,7 +114,7 @@ Usage:
   terminalx cloud status [--json]
   terminalx cloud stop CLOUD_WORKSPACE --yes [--json]
   terminalx cloud resume CLOUD_WORKSPACE [--json]
-  terminalx artifact publish FILE [--org ORG] [--title TEXT] [--slug SLUG|--template SLUG] [--note TEXT] [--json]
+  terminalx artifact publish FILE [--org ORG] [--title TEXT] [--slug SLUG|--template SLUG] [--new-version] [--note TEXT] [--json]
   terminalx artifact show SLUG [--org ORG] [--json]
   terminalx machines list [--json]
   terminalx machines status MACHINE [--json]
@@ -1299,47 +1299,46 @@ fn parse_artifact(tokens: &mut Tokens) -> Result<Action, ControlError> {
     match tokens.required_front("artifact command (publish or show)")?.as_str() {
         "publish" => {
             let org = tokens.option("--org")?;
-            let title = tokens.option("--title")?;
+            let title = tokens.option("--title")?.filter(|title| !title.trim().is_empty());
             let template = tokens.option("--template")?;
-            // A new version of the artifact with this slug (its author or an admin), or a new one by that name.
+            // An artifact by this name: a new one, or with --new-version the next version of the one there is.
             let slug = tokens.option("--slug")?;
+            let new_version = tokens.flag("--new-version")?;
             let note = tokens.option("--note")?;
             if slug.is_some() && template.is_some() {
                 return Err(invalid("--template names the template's slug; give --slug or --template, not both."));
             }
-            let file = tokens.required_front("file")?;
-            let path = std::path::Path::new(&file);
-            let extension = path.extension().map(|extension| extension.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-            let content_type = match extension.as_str() {
-                "md" | "markdown" => "text/markdown",
-                "html" | "htm" => "text/html",
-                "txt" | "text" => "text/plain",
-                _ => return Err(invalid("Publish a Markdown (.md), HTML (.html) or text (.txt) file.")),
-            };
+            if new_version && slug.is_none() && template.is_none() {
+                return Err(invalid("--new-version adds a version to the artifact you name: give --slug or --template too."));
+            }
             if let Some(slug) = template.as_deref().or(slug.as_deref()) {
                 let valid = (1..=64).contains(&slug.len())
                     && slug.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
                     && !slug.starts_with('-') && !slug.ends_with('-');
                 if !valid { return Err(invalid("--slug and --template need a slug of lowercase letters, digits and dashes, such as migration-plan.")); }
             }
-            let limit = crate::cloud_workspaces::TEAM_ARTIFACT_CONTENT_BYTES;
-            let bytes = std::fs::read(path).map_err(|error| invalid(format!("Could not read {file}: {error}")))?;
-            if bytes.len() > limit {
-                return Err(ControlError::new("team_artifact_too_large", format!("{file} is larger than 1 MB, the most one artifact may hold."), None::<String>));
+            let file = tokens.required_front("file")?;
+            let extension = std::path::Path::new(&file).extension().map(|extension| extension.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+            if !matches!(extension.as_str(), "md" | "markdown" | "html" | "htm" | "txt" | "text") {
+                return Err(invalid("Publish a Markdown (.md), HTML (.html) or text (.txt) file."));
             }
-            let content = String::from_utf8(bytes).map_err(|_| invalid(format!("{file} is not text.")))?;
-            let title = title.filter(|title| !title.trim().is_empty()).unwrap_or_else(|| {
-                path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_else(|| file.clone())
-            });
-            cloud_rpc("artifacts.publish", json!({
-                "org": org, "title": title, "template": template, "slug": slug, "note": note,
-                "contentType": content_type, "content": content, "caller": calling_session(),
-            }), tokens)
+            // The app reads the file itself, and only from the calling session's folder.
+            let path = std::env::current_dir().map(|cwd| cwd.join(&file)).unwrap_or_else(|_| std::path::PathBuf::from(&file));
+            tokens.finish()?;
+            Ok(Action::Rpc {
+                command: "artifacts.publish".into(),
+                params: json!({
+                    "org": org, "title": title, "template": template, "slug": slug, "newVersion": new_version, "note": note,
+                    "path": path.to_string_lossy(), "caller": calling_session(),
+                }),
+                // The person may be asked first (40 s), then it is published.
+                timeout: Duration::from_secs(120),
+            })
         }
         "show" => {
             let org = tokens.option("--org")?;
             let artifact = tokens.required_front("artifact slug")?;
-            cloud_rpc("artifacts.show", json!({"org": org, "artifact": artifact.trim_start_matches('@')}), tokens)
+            rpc("artifacts.show", json!({"org": org, "artifact": artifact.trim_start_matches('@')}), tokens)
         }
         other => Err(invalid(format!("Unknown artifact command {other}. Use publish or show."))),
     }
@@ -2789,38 +2788,35 @@ mod tests {
     }
 
     #[test]
-    fn artifact_publish_reads_the_file_and_hands_it_to_the_window() {
+    fn artifact_publish_names_the_file_for_the_app_to_read() {
         let folder = std::env::temp_dir().join(format!("terminalx-artifact-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
         let page = folder.join("plan.html");
-        std::fs::write(&page, "<h1>Plan</h1>").unwrap();
         let path = page.to_string_lossy().into_owned();
         let (command, params, _) = rpc_of(&["artifact", "publish", &path, "--org", "northwind", "--template", "migration-plan"]);
-        assert_eq!(command, "cloud.artifacts.publish");
+        assert_eq!(command, "artifacts.publish");
         assert_eq!(params["org"], json!("northwind"));
-        assert_eq!(params["title"], json!("plan"));
+        assert_eq!(params["path"], json!(path));
         assert_eq!(params["template"], json!("migration-plan"));
-        assert_eq!(params["contentType"], json!("text/html"));
-        assert_eq!(params["content"], json!("<h1>Plan</h1>"));
+        assert_eq!(params["newVersion"], json!(false));
+        // The content is never sent by the command line: the app reads the session's own file.
+        assert!(params.get("content").is_none());
         let (_, params, _) = rpc_of(&["artifact", "publish", &path, "--title", "Seat migration plan"]);
         assert_eq!((params["org"].clone(), params["title"].clone()), (json!(null), json!("Seat migration plan")));
+        // A relative file is named from where the command runs.
+        let (_, params, _) = rpc_of(&["artifact", "publish", "docs/standup.md"]);
+        assert!(params["path"].as_str().unwrap().ends_with("docs/standup.md") && std::path::Path::new(params["path"].as_str().unwrap()).is_absolute());
 
-        let notes = folder.join("standup.md");
-        std::fs::write(&notes, "# Week").unwrap();
-        assert_eq!(rpc_of(&["artifact", "publish", &notes.to_string_lossy()]).1["contentType"], json!("text/markdown"));
-        let binary = folder.join("logo.png");
-        std::fs::write(&binary, [0u8, 1, 2]).unwrap();
-        assert!(parse(&args(&["artifact", "publish", &binary.to_string_lossy()])).is_err());
+        assert!(parse(&args(&["artifact", "publish", "logo.png"])).is_err());
         assert!(parse(&args(&["artifact", "publish", &path, "--template", "Migration Plan"])).is_err());
-        assert_eq!(rpc_of(&["artifact", "publish", &path, "--slug", "weekly-standup"]).1["slug"], json!("weekly-standup"));
+        let (_, params, _) = rpc_of(&["artifact", "publish", &path, "--slug", "weekly-standup", "--new-version"]);
+        assert_eq!((params["slug"].clone(), params["newVersion"].clone()), (json!("weekly-standup"), json!(true)));
         assert!(parse(&args(&["artifact", "publish", &path, "--slug", "a", "--template", "b"])).is_err());
-        let large = folder.join("large.txt");
-        std::fs::write(&large, vec![b'a'; crate::cloud_workspaces::TEAM_ARTIFACT_CONTENT_BYTES + 1]).unwrap();
-        assert!(parse(&args(&["artifact", "publish", &large.to_string_lossy()])).is_err());
-        assert!(parse(&args(&["artifact", "publish", &folder.join("missing.md").to_string_lossy()])).is_err());
+        // --new-version needs the artifact it adds to.
+        assert!(parse(&args(&["artifact", "publish", &path, "--new-version"])).is_err());
 
         let (command, params, _) = rpc_of(&["artifact", "show", "@migration-plan", "--org", "northwind"]);
-        assert_eq!((command.as_str(), params), ("cloud.artifacts.show", json!({"org": "northwind", "artifact": "migration-plan"})));
+        assert_eq!((command.as_str(), params), ("artifacts.show", json!({"org": "northwind", "artifact": "migration-plan"})));
         std::fs::remove_dir_all(&folder).unwrap();
     }
 

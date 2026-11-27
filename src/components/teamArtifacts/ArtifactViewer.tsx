@@ -70,7 +70,7 @@ function ArtifactBody({ content }: { content: TeamArtifactContent }) {
   if (content.contentType === "text/markdown") {
     return (
       <div className="h-full overflow-y-auto scrollbar-thin px-12 py-10">
-        <Markdown text={content.content} className="mx-auto max-w-[680px] text-[14px]" remoteImages={false} webLinksOnly />
+        <Markdown text={content.content} className="mx-auto max-w-[680px] text-[14px]" remoteImages={false} webLinksOnly rawHtml={false} />
       </div>
     );
   }

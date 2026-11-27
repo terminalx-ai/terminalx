@@ -377,7 +377,11 @@ impl WindowControl {
             let machines = self.machines.as_ref().ok_or_else(|| ControlError::new("unsupported", "This TerminalX has no paired machines.", None::<String>))?;
             return crate::machine_control::execute(machines, self.sink.as_ref(), action, params);
         }
+        // Team artifacts (PRO-158): their own switch, the session's own file, and the tab's mode.
+        if command == "artifacts.publish" { return crate::team_artifact_control::publish(self.sink.as_ref(), self.questions.as_ref(), params); }
+        if command == "artifacts.show" { return crate::team_artifact_control::show(self.sink.as_ref(), params); }
         if let Some(action) = command.strip_prefix("cloud.") {
+            if action.starts_with("artifacts.") { return Err(ControlError::new("unsupported", "Team artifacts are published with terminalx artifact publish.", None::<String>)); }
             if action != "status" && !crate::cloud_control::enabled() { return Err(crate::cloud_control::disabled_error()); }
             let params = if action == "sessions.create" { cloud_issue_start(params)? } else { params };
             return crate::cloud_control::call(self.sink.as_ref(), action, params);
@@ -520,7 +524,7 @@ impl ControlService {
         // A session working for a bot is held to it, whatever it says it is (PRO-468).
         // As is one that acts outward with the owner's sign-in (PRO-489).
         if matches!(command, "sessions.create" | "runs.create" | "runs.start" | "runs.sendBack" | "runs.widen" | "runs.checkFailed" | "runs.takeOver" | "pipelines.start" | "send" | "permissions.allow" | "cloud.sessions.create" | "cloud.send" | "cloud.resume")
-            || matches!(command, "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" | "issues.comment" | "issues.create" | "issues.status" | "issues.assign" | "issues.label")
+            || matches!(command, "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" | "issues.comment" | "issues.create" | "issues.status" | "issues.assign" | "issues.label" | "artifacts.publish")
             || command.starts_with("machine.")
         {
             let caller = Caller::of(&self.manager, &params);
@@ -785,6 +789,9 @@ impl ControlService {
             }
             // The person's switch is checked here, in native code, before the
             // window hears of the command. `status` still answers, to say so.
+            if action.starts_with("artifacts.") {
+                return Err(ControlError::new("unsupported", "Team artifacts are published with terminalx artifact publish.", None::<String>));
+            }
             if action != "status" && !crate::cloud_control::enabled() {
                 return Err(crate::cloud_control::disabled_error());
             }
@@ -3858,6 +3865,7 @@ impl Caller {
             "pipelines.act" if OUTWARD_SAFE_ACTIONS.contains(&params["action"].as_str().unwrap_or_default()) => Ok(()),
             "pipelines.act" => self.refuse_outward("move an issue pipeline on: it pushes, reviews and merges"),
             "issues.comment" | "issues.create" | "issues.status" | "issues.assign" | "issues.label" => self.refuse_outward("write to an issue"),
+            "artifacts.publish" => self.refuse_outward("publish to everyone in an organization"),
             // Held to the bot's access as its local sessions are (PRO-514): how, in `Self::cloud`.
             "cloud.sessions.create" | "cloud.send" | "cloud.resume" => self.refuse_cloud_while_paused(),
             "permissions.allow" => Err(self.forbidden("approve permissions: only a person's answer counts")),
@@ -3890,7 +3898,7 @@ impl Caller {
         let starts_work = match command {
             "sessions.create" | "runs.create" | "runs.start" | "pipelines.start" | "send" | "permissions.allow" | "cloud.sessions.create" | "cloud.send" | "cloud.resume" => true,
             // What acts outward with the owner's sign-in counts too (PRO-489).
-            "pipelines.autoMerge" | "pipelines.resolveConflicts" | "issues.comment" | "issues.create" | "issues.status" | "issues.assign" | "issues.label" => true,
+            "pipelines.autoMerge" | "pipelines.resolveConflicts" | "issues.comment" | "issues.create" | "issues.status" | "issues.assign" | "issues.label" | "artifacts.publish" => true,
             "pipelines.act" => !OUTWARD_SAFE_ACTIONS.contains(&params["action"].as_str().unwrap_or_default()),
             _ => command.strip_prefix("machine.").is_some_and(|action| !MACHINE_READS.contains(&action)),
         };

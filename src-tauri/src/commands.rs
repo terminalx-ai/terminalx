@@ -1612,9 +1612,13 @@ pub struct TeamArtifactPickedFile {
 }
 
 #[tauri::command]
-pub async fn team_artifact_pick_file(app: tauri::AppHandle) -> Result<Option<TeamArtifactPickedFile>, String> {
+pub async fn team_artifact_pick_file(app: tauri::AppHandle, org_id: String, state: tauri::State<'_, crate::AppState>) -> Result<Option<TeamArtifactPickedFile>, String> {
     use std::io::Read;
     use tauri_plugin_dialog::DialogExt;
+    // Nothing is picked or read for an organization without team artifacts.
+    let service = state.cloud_workspaces.clone();
+    let ready = tauri::async_runtime::spawn_blocking(move || service.team_artifacts_ready(&org_id)).await;
+    if !matches!(ready, Ok(Ok(()))) { return Err("team_artifacts_unavailable".to_string()); }
     tauri::async_runtime::spawn_blocking(move || {
         let Some(picked) = app.dialog().file().add_filter("Pages and notes", &["md", "markdown", "html", "htm", "txt"]).blocking_pick_file() else {
             return Ok(None);
@@ -4390,6 +4394,31 @@ pub async fn cloud_control_set_setting(app: tauri::AppHandle, enabled: bool) -> 
     }
     crate::cloud_control::set_enabled(enabled)?;
     Ok(CloudControlSettingChange { enabled: crate::cloud_control::enabled(), refused: None })
+}
+
+/// Whether agents may publish team artifacts (PRO-158).
+#[tauri::command]
+pub fn team_artifacts_publish_setting() -> bool {
+    crate::team_artifact_control::enabled()
+}
+
+/// Turn "Let agents publish team artifacts" on (after the person agrees in a native dialog) or off.
+#[tauri::command]
+pub async fn team_artifacts_publish_set_setting(app: tauri::AppHandle, enabled: bool) -> Result<CloudControlSettingChange, String> {
+    if enabled && !crate::team_artifact_control::enabled() {
+        let answer = cloud_control_question(
+            app,
+            "Let agents publish team artifacts?".to_string(),
+            "Agents in local sessions will be able to publish files from their session's folder to everyone in your organization. Tabs that ask before acting still ask you each time; tabs that run without asking publish without another question.".to_string(),
+            "Turn on".to_string(),
+        )
+        .await;
+        if answer != crate::cloud_control::Answer::Accepted {
+            return Ok(CloudControlSettingChange { enabled: crate::team_artifact_control::enabled(), refused: Some(answer.wire()) });
+        }
+    }
+    crate::team_artifact_control::set_enabled(enabled)?;
+    Ok(CloudControlSettingChange { enabled: crate::team_artifact_control::enabled(), refused: None })
 }
 
 /// Ask the person about a cloud request that came from the command line.

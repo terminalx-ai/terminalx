@@ -84,7 +84,14 @@ export const teamArtifactsApi = {
   remove: (orgId: string, artifactId: string) => invoke<{ deleted: boolean; id: string }>("team_artifact_delete", { orgId, artifactId }),
   removeVersion: (orgId: string, artifactId: string, version: number) =>
     invoke<{ deleted: boolean; artifactId: string; version: number }>("team_artifact_version_delete", { orgId, artifactId, version }),
-  pickFile: () => invoke<PickedArtifactFile | null>("team_artifact_pick_file"),
+  /** The native picker, for an organization that has team artifacts. */
+  pickFile: (orgId: string) => invoke<PickedArtifactFile | null>("team_artifact_pick_file", { orgId }),
+};
+
+/** "Let agents publish team artifacts" (PRO-158): kept in native code, which reads it before any publish. */
+export const teamArtifactsPublishSetting = {
+  get: () => invoke<boolean>("team_artifacts_publish_setting"),
+  set: (enabled: boolean) => invoke<{ enabled: boolean; refused: string | null }>("team_artifacts_publish_set_setting", { enabled }),
 };
 
 /** The organizations whose team artifacts this account may use, the active one first. */

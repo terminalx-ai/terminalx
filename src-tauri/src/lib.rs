@@ -167,6 +167,8 @@ mod issue_control;
 mod issue_confirmation;
 #[cfg(feature = "desktop")]
 mod self_ui;
+#[cfg(feature = "desktop")]
+mod team_artifact_control;
 mod issue_pipeline;
 mod issue_ops;
 mod issues;
@@ -811,6 +813,8 @@ pub fn run() {
             commands::team_artifact_delete,
             commands::team_artifact_version_delete,
             commands::team_artifact_pick_file,
+            commands::team_artifacts_publish_setting,
+            commands::team_artifacts_publish_set_setting,
             commands::announcements_current,
             commands::nudge_preference,
             commands::nudge_preference_set,

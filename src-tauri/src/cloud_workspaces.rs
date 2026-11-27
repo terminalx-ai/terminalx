@@ -3222,6 +3222,11 @@ impl CloudWorkspaceService {
         })
     }
 
+    /// Whether the organization has team artifacts, asked before the file picker opens.
+    pub fn team_artifacts_ready(&self, org: &str) -> Result<(), CloudWorkspaceClientError> {
+        self.phase2_member_in(PHASE2_TEAM_ARTIFACTS, "team_artifacts_unavailable", org, RequestRisk::Read, |_, _| Ok(()))
+    }
+
     /// An old version, pruned by its author or an admin; the server keeps the current one.
     pub fn delete_team_artifact_version(&self, org: &str, artifact: &str, version: u32) -> Result<TeamArtifactVersionDeleted, CloudWorkspaceClientError> {
         if !valid_following_path_id(artifact) || version == 0 { return Err(inbox_invalid()); }

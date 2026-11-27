@@ -30,6 +30,7 @@ import { openTeamArtifact, resetTeamArtifacts, teamArtifactOrg } from "@/lib/tea
 import { TeamPanel, publishedAgo } from "./TeamPanel";
 import { ArtifactsTab, TemplatePicker, matchTemplates } from "./ArtifactsTab";
 import { ArtifactHistory, ArtifactViewer, ARTIFACT_PAGE_POLICY, sandboxedDocument } from "./ArtifactViewer";
+import { PublishDialog } from "./shared";
 
 const now = Date.parse("2026-11-27T12:00:00Z");
 const artifact = (over: Partial<TeamArtifact>): TeamArtifact => ({
@@ -45,6 +46,7 @@ const notes = artifact({ id: "t2", slug: "release-notes", title: "Release notes"
 const chart = artifact({ id: "t3", slug: "benchmark-chart", title: "Benchmark chart", template: true });
 
 let listed: TeamArtifact[] = [];
+let page: string | null = null;
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true, now });
   resetTeamArtifacts();
@@ -52,6 +54,7 @@ beforeEach(() => {
   f.drafts.clear();
   f.openAgents.mockReset();
   listed = [standup, checklist, migration, notes, chart];
+  page = null;
   f.status = {
     state: "signed-in", identity: { organizationId: "org", organization: "Northwind" }, expiresAt: null, lastError: null,
     organizations: [{ id: "org", name: "Northwind", role: "member" }],
@@ -65,7 +68,9 @@ beforeEach(() => {
       const found = listed.find((item) => item.id === args?.artifactId)!;
       return { artifact: found, versions: [3, 2, 1].map((version) => ({ version, contentType: found.contentType, sizeBytes: 10, note: version === 3 ? "Added Sam's blockers" : null, source: "#18", author: found.author, createdAt: "2026-11-27T10:00:00Z" })) };
     }
-    if (command === "team_artifact_content") return { artifactId: args?.artifactId, version: args?.version, contentType: listed.find((item) => item.id === args?.artifactId)!.contentType, content: "<h1>Plan</h1><script>parent.postMessage('x','*')</script>" };
+    if (command === "team_artifact_content") return { artifactId: args?.artifactId, version: args?.version, contentType: listed.find((item) => item.id === args?.artifactId)!.contentType, content: page ?? "<h1>Plan</h1><script>parent.postMessage('x','*')</script>" };
+    if (command === "team_artifact_pick_file") return { name: "plan.html", content: "<h1>Plan</h1>", refused: null };
+    if (command === "team_artifact_publish") return { artifact: { ...migration, version: 2 }, created: false };
     if (command === "team_artifact_version_delete") return { deleted: true, artifactId: args?.artifactId, version: args?.version };
     throw new Error(command);
   });
@@ -201,4 +206,51 @@ it("words a panel's age as the design does", () => {
   expect(publishedAgo("2026-11-27T10:00:00Z", now)).toBe("2h ago");
   expect(publishedAgo("2026-11-26T10:00:00Z", now)).toBe("yesterday");
   expect(publishedAgo("2026-11-23T10:00:00Z", now)).toBe("4 days ago");
+});
+
+it("draws no raw HTML from a Markdown artifact, so a <picture> cannot load a remote image", async () => {
+  page = "# Standup\n\n<picture><source srcset=\"https://tracker.example/pixel.png\"><img src=\"https://tracker.example/pixel.png\"></picture>\n\nDone.";
+  listed = [standup];
+  const view = render(<ArtifactViewer open={{ orgId: "org", id: "a1", version: null }} history={false} onHistory={() => {}} />);
+  await screen.findByText("Done.");
+  expect(view.container.querySelector("picture, source, img")).toBeNull();
+  expect(view.container.innerHTML).not.toContain("tracker.example");
+});
+
+async function publishTemplate(title: string) {
+  render(<PublishDialog orgId="org" onClose={() => {}} onPublished={() => {}} />);
+  fireEvent.click(screen.getByRole("button", { name: "Choose file…" }));
+  await screen.findByText("plan.html");
+  fireEvent.change(screen.getByRole("textbox", { name: "Title" }), { target: { value: title } });
+  fireEvent.click(screen.getByRole("checkbox", { name: "Template for new sessions" }));
+}
+
+it("the picker is asked for with the organization, so its readiness is checked first", async () => {
+  render(<PublishDialog orgId="org" onClose={() => {}} onPublished={() => {}} />);
+  fireEvent.click(screen.getByRole("button", { name: "Choose file…" }));
+  await waitFor(() => expect(f.invoke).toHaveBeenCalledWith("team_artifact_pick_file", { orgId: "org" }));
+});
+
+it("never publishes a template over a slug in use by default; its author may choose a new version (slug clash)", async () => {
+  await publishTemplate("Migration plan");
+  const taken = await screen.findByTestId("team-artifact-slug-taken");
+  expect(taken.textContent).toContain("@migration-plan is already “Migration plan”.");
+  const publish = screen.getByRole("button", { name: "Publish" });
+  expect((publish as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(within(taken).getByRole("checkbox", { name: "Add as a new version of @migration-plan" }));
+  const asVersion = screen.getByRole("button", { name: "Publish v4" });
+  expect((asVersion as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(asVersion);
+  await waitFor(() => expect(f.invoke).toHaveBeenCalledWith("team_artifact_publish", { orgId: "org", input: { title: "Migration plan", contentType: "text/html", content: "<h1>Plan</h1>", template: true, slug: "migration-plan" } }));
+});
+
+it("someone else's slug must be changed: no new version is offered", async () => {
+  await publishTemplate("Release notes");
+  const taken = await screen.findByTestId("team-artifact-slug-taken");
+  expect(taken.textContent).toContain("Choose another slug. Only its author and admins can add a version.");
+  expect(within(taken).queryByRole("checkbox")).toBeNull();
+  expect((screen.getByRole("button", { name: "Publish" }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.change(screen.getByLabelText("Template slug"), { target: { value: "release-notes-q4" } });
+  expect(screen.queryByTestId("team-artifact-slug-taken")).toBeNull();
+  expect((screen.getByRole("button", { name: "Publish" }) as HTMLButtonElement).disabled).toBe(false);
 });
