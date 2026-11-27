@@ -100,3 +100,13 @@ it("keeps the card when a refresh fails", async () => {
   await flush();
   expect(screen.getByTestId("announcement-card")).toBeTruthy();
 });
+
+it("renders title and body as plain text, and offers no link that is not https", async () => {
+  mocks.current.mockResolvedValue(card("x", { title: "<b>Bold</b>", body: "<img src=x onerror=alert(1)>", link: "javascript:alert(1)" }));
+  render(<AnnouncementCard />);
+  await flush();
+  const shown = screen.getByTestId("announcement-card");
+  expect(screen.getByRole("heading").textContent).toBe("<b>Bold</b>");
+  expect(shown.querySelector("b, img")).toBeNull();
+  expect(screen.queryByRole("button", { name: /Read the changelog/ })).toBeNull();
+});
