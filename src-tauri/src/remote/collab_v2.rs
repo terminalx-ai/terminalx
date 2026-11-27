@@ -24,6 +24,7 @@ pub(crate) enum WriteSource {
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ApprovalSource {
     Explicit,
+    Implicit,
 }
 
 fn present_approval_source<'de, D: serde::Deserializer<'de>>(decoder: D) -> std::result::Result<Option<ApprovalSource>, D::Error> {
@@ -95,7 +96,14 @@ impl Snapshot {
                 | (Role::Driver, Some(_))
                 | (Role::Manager, Some(WriteSource::Explicit | WriteSource::Implicit)));
             ensure!(valid, "invalid collaboration drive provenance");
-            ensure!(member.can_approve == (member.approval_source == Some(ApprovalSource::Explicit)),
+            let valid_approval = match (member.can_approve, member.approval_source) {
+                (false, None) | (true, Some(ApprovalSource::Explicit)) => true,
+                (true, Some(ApprovalSource::Implicit)) => {
+                    member.role == Role::Manager && member.write_source == Some(WriteSource::Implicit)
+                }
+                _ => false,
+            };
+            ensure!(valid_approval,
                 "invalid collaboration approval provenance");
         }
         self.members.sort_by(|a, b| a.user_id.cmp(&b.user_id));

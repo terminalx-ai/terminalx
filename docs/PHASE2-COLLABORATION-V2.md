@@ -7,8 +7,12 @@ ordered and bounded without numeric conversion.
 Members contain `userId`, `role`, independent `canApprove`, and required nullable
 `writeSource` (`explicit`, `everyone`, `implicit`). For a runtime advertising
 `collaboration-v2-everyone-write-per-tab`, a member with `canApprove: true`
-must include `approvalSource: "explicit"`. A member with `canApprove: false`
-must omit the field. Missing, null, unknown, or contradictory approval
+must include `approvalSource`. Use `"explicit"` for approval from an explicit
+share, independently of drive provenance. Use `"implicit"` for approval from
+being the workspace creator or an organization owner/admin. The implicit marker
+requires `role: "manager"` and `writeSource: "implicit"`. General access never
+grants approval. A member with `canApprove: false` must omit the field.
+Missing, null, unknown, or contradictory approval
 provenance retires the previous policy and refuses the replacement snapshot.
 The existing endpoints and runtime generation fencing still apply.
 
