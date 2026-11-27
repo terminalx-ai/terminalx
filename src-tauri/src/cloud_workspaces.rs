@@ -14,7 +14,7 @@ use url::Url;
 use crate::account::{
     AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN, PHASE2_ANNOUNCEMENTS, PHASE2_MENTIONS, PHASE2_NUDGES,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_PRESENCE, PHASE2_RESTART_DETAILS,
-    PHASE2_ADMIN_SHARE, PHASE2_AFFECTED_WORKSPACES, PHASE2_GENERAL_ACCESS, PHASE2_PRECREATE_USAGE, PHASE2_WEBHOOK_TRIGGER, PHASE2_WORKSPACE_GROUPS,
+    PHASE2_ADMIN_SHARE, PHASE2_AFFECTED_WORKSPACES, PHASE2_DESKTOP_BILLING, PHASE2_GENERAL_ACCESS, PHASE2_PRECREATE_USAGE, PHASE2_WEBHOOK_TRIGGER, PHASE2_WORKSPACE_GROUPS,
 };
 
 const CONTRACT: &str = "providers-v1";
@@ -997,6 +997,71 @@ pub struct CloudPrecreateUsage {
     #[serde(deserialize_with = "Deserialize::deserialize")]
     caller_owned_running_limit: Option<u32>,
     quota: CloudWorkspaceQuota,
+}
+
+/// The desktop Organization > Billing page (PRO-596): plan, seats and next
+/// charge. Only the fields named here reach the webview.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationBilling {
+    plan: BillingPlan,
+    billed_to: BillingView,
+    seats: Option<BillingSeats>,
+    seat_price: Option<BillingSeatPrice>,
+    next_charge: Option<BillingCharge>,
+    payer: Option<String>,
+    can_manage_billing: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum BillingPlan { Free, Pro, Teams }
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BillingView { Personal, Organization }
+
+#[derive(Debug, Deserialize, Serialize)]
+struct BillingSeats { used: u32, limit: u32 }
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BillingSeatPrice { currency: String, unit_amount_minor: u64, interval: String }
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BillingCharge { date: String, amount_minor: u64, currency: String }
+
+#[derive(Debug, Deserialize)]
+struct BillingPortal { url: String }
+
+fn billing_currency(code: &str) -> bool {
+    code.len() == 3 && code.bytes().all(|byte| byte.is_ascii_uppercase())
+}
+
+impl OrganizationBilling {
+    fn valid(&self) -> bool {
+        self.seat_price.as_ref().is_none_or(|price| billing_currency(&price.currency) && price.interval == "month")
+            && self.next_charge.as_ref().is_none_or(|charge| billing_currency(&charge.currency)
+                && chrono::DateTime::parse_from_rfc3339(&charge.date).is_ok())
+            && self.seats.as_ref().is_none_or(|seats| seats.limit > 0)
+            // A lapsed Teams subscription is still the organization's to manage, whatever the plan now is.
+            && (!matches!(self.plan, BillingPlan::Teams) || self.billed_to == BillingView::Organization)
+    }
+}
+
+/// A Polar customer portal session: https on polar.sh (or a subdomain such as
+/// its sandbox), no port and no credentials.
+fn polar_portal_url(raw: &str) -> Option<String> {
+    let url = Url::parse(raw).ok()?;
+    let host = url.host_str()?;
+    (raw.starts_with("https://")
+        && url.scheme() == "https"
+        && (host == "polar.sh" || host.ends_with(".polar.sh"))
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none())
+        .then(|| url.to_string())
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -3208,6 +3273,39 @@ impl CloudWorkspaceService {
         })
     }
 
+    /// PRO-596: any member reads their organization's billing once it opted in.
+    pub fn organization_billing(&self, org: &str) -> Result<OrganizationBilling, CloudWorkspaceClientError> {
+        let risk = RequestRisk::Read;
+        let unavailable = "organization_billing_unavailable";
+        if !valid_resource_id(org) { return Err(inbox_invalid()); }
+        self.phase2_gate(PHASE2_DESKTOP_BILLING, Some(org), None, unavailable)?;
+        let context = self.account.inbox_member_context(org)
+            .map_err(|code| CloudWorkspaceClientError::local(code, false))?;
+        self.phase2_gate(PHASE2_DESKTOP_BILLING, Some(org), Some(&context), unavailable)?;
+        let result = self.client.request(&context, &["billing"], None, None, None, risk);
+        if !self.account.inbox_member_is_current(&context, org) { return Err(context_changed_error(risk)); }
+        self.phase2_gate(PHASE2_DESKTOP_BILLING, Some(org), Some(&context), unavailable)?;
+        let billing: OrganizationBilling = result?;
+        if !billing.valid() { return Err(invalid_response()); }
+        Ok(billing)
+    }
+
+    /// PRO-596: a fresh Polar customer portal for the payer; the server refuses anyone else.
+    pub fn organization_billing_portal(&self, org: &str, view: BillingView) -> Result<String, CloudWorkspaceClientError> {
+        let risk = RequestRisk::Read;
+        let unavailable = "organization_billing_unavailable";
+        if !valid_resource_id(org) { return Err(inbox_invalid()); }
+        self.phase2_gate(PHASE2_DESKTOP_BILLING, Some(org), None, unavailable)?;
+        let context = self.account.inbox_member_context(org)
+            .map_err(|code| CloudWorkspaceClientError::local(code, false))?;
+        self.phase2_gate(PHASE2_DESKTOP_BILLING, Some(org), Some(&context), unavailable)?;
+        let view = match view { BillingView::Personal => "personal", BillingView::Organization => "teams" };
+        let result = self.client.request_as("POST", &context, &["billing", view, "portal"], None, Some(json!({})), None, risk);
+        if !self.account.inbox_member_is_current(&context, org) { return Err(context_changed_error(risk)); }
+        let portal: BillingPortal = result?;
+        polar_portal_url(&portal.url).ok_or_else(invalid_response)
+    }
+
     pub fn precreate_usage(&self, org: &str) -> Result<CloudPrecreateUsage, CloudWorkspaceClientError> {
         let risk = RequestRisk::Read;
         let unavailable = "cloud_workspace_usage_unavailable";
@@ -5002,6 +5100,7 @@ fn known_error_code(code: &str) -> bool {
             | "inbox_unavailable"
             | "organization_admin_required"
             | "organization_member_limit_reached"
+            | "organization_billing_unavailable"
             | "active_organization_required"
             | "cloud_workspace_not_found"
             | "cloud_workspace_operation_not_found"
@@ -7864,6 +7963,88 @@ mod tests {
         ] {
             assert!(!claude_login_page(page), "{page}");
         }
+    }
+
+    #[test]
+    fn organization_billing_reads_the_enabled_target_organization_only() {
+        let body = json!({
+            "plan": "teams", "billedTo": "organization",
+            "seats": { "used": 3, "limit": 5 },
+            "seatPrice": { "currency": "USD", "unitAmountMinor": 2000, "interval": "month" },
+            "nextCharge": { "date": "2099-02-15T00:00:00.000Z", "amountMinor": 6000, "currency": "USD" },
+            "payer": "Fixture Payer", "canManageBilling": true, "customerId": "never-forwarded"
+        });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        assert_eq!(service.organization_billing("org-2").unwrap_err().code, "organization_billing_unavailable");
+        account.apply_phase2_readiness_for_test(json!({
+            "version": 1, "organizations": { "org-2": { (PHASE2_DESKTOP_BILLING): true } }
+        }));
+        assert_eq!(service.organization_billing("org-1").unwrap_err().code, "organization_billing_unavailable");
+        let billing = serde_json::to_value(service.organization_billing("org-2").unwrap()).unwrap();
+        let mut expected = body.clone();
+        expected.as_object_mut().unwrap().remove("customerId");
+        assert_eq!(billing, expected);
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-2/billing HTTP/1.1"));
+        assert!(!captured.extra_request);
+    }
+
+    #[test]
+    fn organization_billing_rejects_inconsistent_answers_and_keeps_its_error_code() {
+        for body in [
+            r#"{"plan":"teams","billedTo":"personal","seats":null,"seatPrice":null,"nextCharge":null,"payer":null,"canManageBilling":false}"#,
+            r#"{"plan":"free","billedTo":"personal","seats":null,"seatPrice":null,"nextCharge":{"date":"soon","amountMinor":1,"currency":"USD"},"payer":null,"canManageBilling":false}"#,
+            r#"{"plan":"free","billedTo":"personal","seats":null,"seatPrice":null,"nextCharge":{"date":"2099-02-15T00:00:00Z","amountMinor":1,"currency":"usd"},"payer":null,"canManageBilling":false}"#,
+        ] {
+            let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
+            let (account, service) = test_service(&base);
+            account.set_memberships_for_test(&["org-1"], true);
+            account.apply_phase2_readiness_for_test(json!({
+                "version": 1, "organizations": { "org-1": { (PHASE2_DESKTOP_BILLING): true } }
+            }));
+            assert!(service.organization_billing("org-1").is_err(), "{body}");
+            request.join().unwrap();
+        }
+        let (base, _, request) = serve_once(
+            response("404 Not Found", r#"{"error":"organization_billing_unavailable"}"#, ""), Duration::ZERO);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1"], true);
+        account.apply_phase2_readiness_for_test(json!({
+            "version": 1, "organizations": { "org-1": { (PHASE2_DESKTOP_BILLING): true } }
+        }));
+        let error = service.organization_billing("org-1").unwrap_err();
+        request.join().unwrap();
+        assert_eq!((error.code.as_str(), error.status), ("organization_billing_unavailable", Some(404)));
+    }
+
+    #[test]
+    fn organization_billing_portal_posts_the_view_and_opens_only_polar() {
+        for (url, accepted) in [
+            ("https://polar.sh/acme/portal?customer_session_token=fixture", true),
+            ("https://sandbox.polar.sh/acme/portal", true),
+            ("http://polar.sh/acme/portal", false),
+            ("https://polar.sh.evil.test/portal", false),
+            ("https://evilpolar.sh/portal", false),
+            ("https://user@polar.sh/portal", false),
+            ("https://polar.sh:444/portal", false),
+        ] {
+            let (base, _, request) = serve_once(response("200 OK", &json!({ "url": url }).to_string(), ""), Duration::ZERO);
+            let (account, service) = test_service(&base);
+            account.set_memberships_for_test(&["org-1"], true);
+            account.apply_phase2_readiness_for_test(json!({
+                "version": 1, "organizations": { "org-1": { (PHASE2_DESKTOP_BILLING): true } }
+            }));
+            let result = service.organization_billing_portal("org-1", BillingView::Organization);
+            assert_eq!(result.is_ok(), accepted, "{url}");
+            let captured = request.join().unwrap();
+            assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/billing/teams/portal HTTP/1.1"));
+        }
+        let (base, _, _request) = serve_once(response("200 OK", "{}", ""), Duration::ZERO);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1"], true);
+        assert_eq!(service.organization_billing_portal("org-1", BillingView::Personal).unwrap_err().code, "organization_billing_unavailable");
     }
 
     #[test]
