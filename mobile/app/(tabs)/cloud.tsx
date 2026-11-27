@@ -14,7 +14,7 @@ import { codeText } from "@mobile/cloud/words";
 import { workspaceProject } from "@mobile/cloud/pins";
 import { useApp } from "@mobile/state/AppProvider";
 import { useMacPins } from "@mobile/state/mac-pins";
-import { Button, EmptyState } from "@mobile/ui/primitives";
+import { Button, Screen } from "@mobile/ui/primitives";
 import { Spinner } from "@mobile/ui/Spinner";
 import { FoldedSetup, NoComputeCard, SetupCard } from "@mobile/ui/CloudSetup";
 import { CloudWorkspaceRow } from "@mobile/ui/CloudWorkspaceRow";
@@ -107,7 +107,13 @@ export default function CloudScreen() {
     router.push({ pathname: "/cloud/[workspaceId]", params: { workspaceId: item.workspace.id, orgId: item.workspace.orgId, title: workspaceTitle(snapshot, item.workspace) } });
   }, [router, sections, snapshot]);
 
-  if (!app.session) return <View style={[styles.page, { backgroundColor: palette.page }]}><EmptyState title="Sign in for cloud workspaces" detail="Cloud workspaces belong to your TerminalX account." /><Button label={app.signingIn ? "Signing in…" : "Sign in"} disabled={app.signingIn} accessibilityState={{ disabled: app.signingIn, busy: app.signingIn }} icon={app.signingIn ? (color) => <Spinner size={16} color={color} /> : undefined} onPress={() => void app.signIn()} />{app.error ? <Text accessibilityRole="alert" style={[styles.signInError, { color: palette.danger }]}>{app.error}</Text> : null}</View>;
+  // Signed out, the page scrolls as the signed-out Machines tab does, so Sign in is never left under the tab bar at the
+  // largest text sizes; the heading has the whole width of the page, so it wraps between words there (PRO-599).
+  if (!app.session) return <Screen title="Cloud" contentContainerStyle={styles.signedOut}><View testID="cloud-signed-out" style={styles.signedOutBody}>
+    <View style={styles.signedOutText}><Text accessibilityRole="header" style={[styles.signedOutTitle, { color: palette.ink }]}>Sign in for cloud workspaces</Text><Text style={[styles.signedOutDetail, { color: palette.muted }]}>Cloud workspaces belong to your TerminalX account.</Text></View>
+    <Button label={app.signingIn ? "Signing in…" : "Sign in"} disabled={app.signingIn} accessibilityState={{ disabled: app.signingIn, busy: app.signingIn }} icon={app.signingIn ? (color) => <Spinner size={16} color={color} /> : undefined} onPress={() => void app.signIn()} />
+    {app.error ? <Text accessibilityRole="alert" style={[styles.signInError, { color: palette.danger }]}>{app.error}</Text> : null}
+  </View></Screen>;
 
   // Nothing read yet and nothing kept: rows stand in for the list, under the title, until it comes.
   // The same rows while it is not yet known whether a setup is to be carried on: the first step is not offered on a guess.
@@ -195,7 +201,12 @@ function Placeholders() {
 }
 
 const styles = StyleSheet.create({
-  page: { flex: 1, paddingHorizontal: 24, justifyContent: "center", gap: 12 },
+  // The body fills what the title leaves and stands in the middle of it; taller than that, the page scrolls.
+  signedOut: { flexGrow: 1 },
+  signedOutBody: { flex: 1, justifyContent: "center", gap: 12, paddingVertical: 24 },
+  signedOutText: { gap: 6 },
+  signedOutTitle: { fontSize: 17, fontWeight: "600", textAlign: "center" },
+  signedOutDetail: { fontSize: 14, lineHeight: 20, textAlign: "center" },
   screen: { flex: 1 },
   content: { paddingHorizontal: 16, paddingTop: 6 },
   sectionHeader: { marginTop: 18, marginBottom: 8, paddingHorizontal: 4, gap: 3 },
