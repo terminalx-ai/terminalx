@@ -1012,6 +1012,9 @@ fn local_login_confirmation(
         Some(AgentLoginKind::LoginDocument) => format!(
             "THIS REPLACES the login now stored for {agent} in {organization}. When the lent sign-in expires, {agent} agents in every workspace of the organization stop until a login is connected again.\n\n"
         ),
+        Some(AgentLoginKind::Bedrock) => format!(
+            "THIS REPLACES the Amazon Bedrock login now stored for {agent} in {organization}. When the lent sign-in expires, {agent} agents in every workspace of the organization stop until a login is connected again.\n\n"
+        ),
         None => String::new(),
     };
     crate::platform_profile::localize(&format!(

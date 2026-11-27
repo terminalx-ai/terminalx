@@ -114,6 +114,11 @@ delivers it to every workspace instead of a creator's personal route.
   `AWS_SECRET_ACCESS_KEY`, or `AWS_BEARER_TOKEN_BEDROCK`), unsets every other
   Anthropic or AWS sign-in variable, starts the tab on the tested model, and
   pins Bedrock and its region in the launch's `--settings`.
+- Every member's workspace receives the long-lived AWS keys (or Bedrock API
+  key) in its agent's environment, where anyone who can drive the workspace
+  can read them. The form says so and recommends an IAM user limited to
+  `bedrock:InvokeModel*`. Role or temporary credentials (a session token)
+  are not supported.
 - **Disconnect** asks "Disconnect Amazon Bedrock?" (design 12.19).
 
 ## Usage-limit card (PRO-200)

@@ -153,6 +153,7 @@ export function BedrockLoginDialog({ organization, stored, busy, failure, error,
             <p className="text-muted-foreground">
               {auth === "aws-keys" ? "The key needs " : "The API key needs "}<code>bedrock:InvokeModel</code> and <code>bedrock:InvokeModelWithResponseStream</code>.
               {" "}Keys are stored encrypted for {organization} and never shown again.
+              {" "}Members’ workspaces receive these keys: use an IAM user limited to <code>bedrock:InvokeModel*</code>.
               {replaces && ` This replaces the Claude Code login stored now.`}
             </p>
 

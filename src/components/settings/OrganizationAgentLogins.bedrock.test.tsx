@@ -62,6 +62,7 @@ describe("Amazon Bedrock for Claude Code (PRO-200)", () => {
     expect(within(dialog).getByText("Amazon Bedrock for Claude Code")).toBeTruthy();
     expect(within(dialog).getByText(/For everyone in Acme Robotics · takes precedence over members’ own Claude Code logins/)).toBeTruthy();
     expect(within(dialog).getByTestId("bedrock-secret").textContent).toMatch(/secure window/);
+    expect(dialog.textContent).toMatch(/Members’ workspaces receive these keys: use an IAM user limited to bedrock:InvokeModel\*/);
     expect(dialog.querySelectorAll("input[type=password]")).toHaveLength(0);
     const save = within(dialog).getByTestId("bedrock-save") as HTMLButtonElement;
     expect(save.disabled).toBe(true);
