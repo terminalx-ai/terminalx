@@ -22,6 +22,7 @@ export const phase2Features = {
   workspaceSsh: "cloud.workspaces.ssh.v1",
   adminShare: "cloud.workspaces.admin-share.v1",
   generalAccess: "cloud.workspaces.general-access.v1",
+  organizationRoutes: "cloud.agent-routes.organization.v1",
   invitesWelcome: "organization.invites-welcome.v1",
   mcpServers: "organization.mcp-servers.v1",
   desktopBilling: "organization.desktop-billing.v1",

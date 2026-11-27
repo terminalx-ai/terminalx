@@ -113,6 +113,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "organizations.providers",
   "organizations.compute",
   "organizations.agentLogins",
+  "organizations.organizationRoutes",
   "organizations.agentRoutes",
   "organizations.console",
   "organizations.github",
