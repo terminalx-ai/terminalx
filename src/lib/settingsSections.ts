@@ -1,6 +1,7 @@
 import { getExperimentalSettings } from "@/lib/experimentalSettings";
 import { getAccount } from "@/lib/account";
 import { sharedSetupsOrg } from "@/lib/sharedSetups";
+import { mcpSettingsOffered } from "@/lib/mcpServers";
 import { isMac, thisComputer } from "@/lib/platform";
 import { getPrefs } from "@/lib/prefs";
 import type { SettingRegistration } from "@/components/settings/settingsRegistry";
@@ -23,6 +24,7 @@ export const SETTINGS_SECTIONS = [
   { id: "prompts", title: "Prompts", description: "Instructions added to the agent for each action, yours and your organization's", terms: ["prompts instructions review pull request checks conflicts branch names shared organization"] },
   { id: "orchestrator", title: "Orchestrator", description: "Runs a lead session splits across workers: approval, limits, budget and worker permissions", terms: ["orchestration run plan pieces lead workers approve bypass deny rules", "queue concurrent budget points dollars window stall"] },
   { id: "environment", title: "Environment", description: "User and repository variables for local agents and shells", terms: ["env dotenv secrets keychain overrides import"] },
+  { id: "mcp", title: "MCP", description: "MCP servers for Claude Code and Codex: add, sign in, import and share", terms: ["model context protocol servers tools oauth bearer token headers import claude codex shared"] },
   { id: "localVms", title: "Local VMs", description: "Set up a local Cua VM and run selected tasks in it", terms: ["vm virtual machine cua lume sandbox guest macos linux environments"] },
   { id: "transcription", title: "Transcription", description: "Dictation, microphone and speech models", terms: ["voice recording audio mute noise personalization language download"] },
   { id: "projects", title: "Project templates", description: "Starting points for new projects: built in or added from a folder", terms: ["template templates quick start create a project new project starter folder vite react agent"] },
@@ -42,6 +44,7 @@ export function settingsSectionOffered(tab: SettingsTab): boolean {
   if (tab === "localVms") return getExperimentalSettings()?.localVmTasks === true;
   // PRO-154: offered only where team.shared-setups.v1 is on for the active organization.
   if (tab === "defaultModels" || tab === "prompts") return sharedSetupsOrg(getAccount().status) !== null;
+  if (tab === "mcp") return mcpSettingsOffered(getAccount().status);
   return true;
 }
 

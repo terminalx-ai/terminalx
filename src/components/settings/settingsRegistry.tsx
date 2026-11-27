@@ -42,6 +42,8 @@ export const SETTINGS_SECTIONS = {
   prompts: { title: "Prompts", group: "Agents & environment", entry: "prompts.actions", subtitle: "Instructions TerminalX adds to the agent for each action." },
   orchestrator: { title: "Orchestrator", group: "Agents & environment", entry: "orchestrator.requireApproval", subtitle: "How a lead session splits a goal across workers." },
   environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables", subtitle: `Variables for new agent and shell tabs, kept in ${secretStoreShort}.` },
+  // PRO-239, designs 10.09–10.18: offered while an organization reports organization.mcp-servers.v1.
+  mcp: { title: "MCP", group: "Agents & environment", entry: "mcp.servers", subtitle: "Servers your agents can call. TerminalX writes them into each agent’s own config and checks they answer." },
   localVms: { title: "Local VMs", group: "Agents & environment", entry: "localVms.tasks", subtitle: "Virtual machines an agent can use as its computer." },
   transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model", subtitle: "Dictation: the model, your microphone and your words." },
   integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github", subtitle: "GitHub and Linear, for issues and pull requests." },
@@ -419,6 +421,12 @@ export const SETTINGS_ROWS = [
     description: `Variables for new local agent and shell tabs. Repository values override user values. All values are stored in ${secretStoreShort} on ${thisComputer}.`,
     searchTerms: ["environment", "variables", "env", "dotenv", "secrets", "keychain", "repository", "overrides", "import"], scope: "user",
     storage: { kind: "system", location: `${secretStore} (values); $TERMINALX_HOME/environment.json (names and revisions)` }, layout: "content",
+  }),
+  defineSetting({
+    id: "mcp.servers", section: "mcp", title: "MCP servers",
+    description: "MCP servers for Claude Code and Codex on this Mac: added by URL or command, imported from the agents’ own settings, or shared by your organization.",
+    searchTerms: ["mcp", "model context protocol", "servers", "tools", "oauth", "bearer", "token", "headers", "import", "claude", "codex", "shared"], scope: "user",
+    storage: { kind: "file", location: `$TERMINALX_HOME/mcp-servers.json (servers); ${secretStore} (tokens); ~/.claude.json and ~/.codex/config.toml (written)` }, layout: "content", hideDescription: true,
   }),
   defineSetting({
     id: "experimental.nativeCodex", section: "experimental", title: "Native Codex",

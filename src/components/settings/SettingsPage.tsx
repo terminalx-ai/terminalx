@@ -4,12 +4,13 @@ import { SettingsLeaveBoundaryContext, SettingsLeaveGuardContext, useSettingsLea
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { settingsSectionOffered } from "@/lib/settingsSections";
 import { useSharedSetupsOrg } from "@/lib/sharedSetups";
+import { mcpSettingsOffered } from "@/lib/mcpServers";
 import { SettingsFileError } from "./SettingsFile";
 import { BadgeLegend, CantSaveToast, OpenSettingsFileButton } from "./SettingSources";
 import { useSettingsFile } from "@/lib/settingsFile";
 import type { SourceBadgeKind } from "@/lib/settingSources";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { ArrowLeft, BarChart3, Bot, MessageSquare, Sparkles, Wrench, Building2, ChevronDown, ChevronRight, FlaskConical, FolderPlus, Folders, HardDrive, Info, Keyboard, KeyRound, Laptop, Mic, Monitor, Network, Palette, Plug, Plus, Return, Search, Settings, Smartphone, UserRound, X } from "@/icons";
+import { ArrowLeft, BarChart3, Bot, MessageSquare, Sparkles, Wrench, Building2, ChevronDown, ChevronRight, FlaskConical, FolderPlus, Folders, HardDrive, Info, Keyboard, KeyRound, Laptop, Mic, Monitor, Network, Palette, Plug, Plus, Return, Search, Server, Settings, Smartphone, UserRound, X } from "@/icons";
 import type { LucideIcon } from "lucide-react";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";
 import { OrgMark } from "@/components/layout/OrgMark";
@@ -58,6 +59,7 @@ const SECTION_ICONS: Record<SettingsSection, LucideIcon> = {
   defaultModels: Sparkles,
   prompts: MessageSquare,
   environment: KeyRound,
+  mcp: Server,
   localVms: Monitor,
   transcription: Mic,
   integrations: Plug,
@@ -181,7 +183,8 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const localVmTasks = switches?.localVmTasks === true;
   // settingsSectionOffered reads the switches as last read; these re-run it when one changes.
   const sharedSetups = useSharedSetupsOrg() !== null;
-  const offered = useCallback((key: string) => settingsSectionOffered(key as Parameters<typeof settingsSectionOffered>[0]), [orchestratorRuns, localVmTasks, sharedSetups]);
+  const mcpOffered = mcpSettingsOffered(useAccount().status);
+  const offered = useCallback((key: string) => settingsSectionOffered(key as Parameters<typeof settingsSectionOffered>[0]), [orchestratorRuns, localVmTasks, sharedSetups, mcpOffered]);
   // searchSettings reads the Experimental switch itself; the switches re-run it when one changes.
   // Grouped by page, pages in order of their best row; `results` is the rows in that displayed order, which ↑/↓ walk.
   // Every organization the person belongs to has pages, cloud-enabled or not; data privacy mode turns them off.
@@ -199,7 +202,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const pages = useMemo(() => groupSettingsByPage(searchSettings(query).filter((match) =>
     (match.id !== "organizations.billing" || searchBilling)
     && (match.row.section !== "organizations" || match.row.scope !== "organization" || !searchRole || roleManagesOrganizationPage(searchRole, organizationPageForRow(match.id))),
-  )), [query, orchestratorRuns, localVmTasks, searchRole, searchBilling, sharedSetups]);
+  )), [query, orchestratorRuns, localVmTasks, searchRole, searchBilling, sharedSetups, mcpOffered]);
   const results = useMemo(() => pages.flatMap((page) => page.matches), [pages]);
   const searching = !!query.trim();
   // The live control slot of each result row, by row id (see SettingControlSlots).

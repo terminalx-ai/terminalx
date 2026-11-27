@@ -53,7 +53,7 @@ export const checks = [
   "account-row", "issue-session", "issue-work", "pipeline-checks", "agent-dashboard:1", "agent-dashboard:2", "agent-dashboard:3", "organization-visibility", "chat-links",
   "chat-find", "chat-wrapping", "file-citations", "chat-controls", "link-chat", "app-resources", "usage-refresh",
   "dictation-edits", "environment", "environment-info", "agent-logins", "model-access", "tab-strip", "pane-split", "editor-toolbar", "file-tab", "dock-tabs",
-  "machine-name", "account-settings", "star-reminder", "context-menus", "attention-approvals", "repository-settings", "sparse-checkout",
+  "machine-name", "account-settings", "mcp-settings", "star-reminder", "context-menus", "attention-approvals", "repository-settings", "sparse-checkout",
   "repository-scripts", "pr-conversation", "automatic-session-status", "runtime-start-failed", "session-cost",
   "helper-titles", "error-toast", "notifications-off", "pair-phone", "file-tree-filter", "quick-open", "tab-errors",
   "review-threads", "run-menu", "worktree-copy-step", "projects-settings", "branch-toasts", "composer-attachments",
