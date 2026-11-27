@@ -412,6 +412,7 @@ pub struct Bootstrapped {
     /// was revoked or rotated); the relay host stops serving meanwhile.
     rejected: std::sync::atomic::AtomicBool,
     desktop_refresh_failures: Mutex<u8>,
+    refresh_lock: Mutex<()>,
     #[cfg(target_os = "linux")]
     pub(crate) ssh_runtime: std::sync::OnceLock<Arc<crate::workspace_ssh_listener::Runtime>>,
     baseline_path: PathBuf,
@@ -495,6 +496,7 @@ pub fn establish(config: &Config, api: &dyn Api, policy: &Policy) -> Result<Boot
                     credential,
                     rejected: std::sync::atomic::AtomicBool::new(false),
                     desktop_refresh_failures: Mutex::new(0),
+                    refresh_lock: Mutex::new(()),
                     #[cfg(target_os = "linux")]
                     ssh_runtime: std::sync::OnceLock::new(),
                     baseline_path: config.baseline_path(),
@@ -647,6 +649,9 @@ impl Bootstrapped {
     /// Refresh once, replacing the session on success.
     pub fn refresh(&self, api: &dyn Api) -> Result<(), CallError> {
         const DESKTOP_REFRESH_FAILURE_LIMIT: u8 = 3;
+        // The updater's pre-switch refresh and the routine refresh must
+        // publish their authoritative responses in request order.
+        let _refresh = self.refresh_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let relay_host_id = self.key.relay_host_id();
         #[cfg(target_os = "linux")]
         let requested_ssh = self.ssh_runtime.get().is_some_and(|runtime| runtime.is_active())
