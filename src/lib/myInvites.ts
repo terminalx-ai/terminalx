@@ -165,8 +165,9 @@ export async function loadInvites(): Promise<void> {
     const listed = (id: string | null) => (id && invites.some((invite) => invite.id === id) ? id : null);
     set({ enabled: true, invites, deferred, open: listed(state.open), noticed: fresh ?? listed(state.noticed) });
   } catch {
-    // Keep what was listed; the next refresh asks again.
-    if (asked === generation) set({ enabled: true });
+    // Keep what was listed; the next refresh asks again. Only an account
+    // whose readiness still holds keeps the surfaces on.
+    if (asked === generation && phase2ReadyAnywhere(getAccount().status, "invitesWelcome")) set({ enabled: true });
   }
 }
 

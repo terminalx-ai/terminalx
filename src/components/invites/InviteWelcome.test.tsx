@@ -14,6 +14,7 @@ const { store } = vi.hoisted(() => ({
 vi.mock("@/lib/myInvites", async (importOriginal) => ({ ...(await importOriginal<object>()), ...store }));
 vi.mock("@/components/layout/WindowControls", () => ({ WindowControls: () => null }));
 
+import { hotkeysSuspended } from "@/lib/hotkeys";
 import { InviteWelcome } from "./InviteWelcome";
 
 const invite: MyInvite = { id: "inv-1", organizationName: "Orbit Labs", role: "member", expiresAt: Date.now() + 86_400_000, invitedBy: "Ada Park" };
@@ -128,4 +129,27 @@ it("points to Model access for an own model route", async () => {
   render(<InviteWelcome invite={invite} onClose={() => undefined} />);
   fireEvent.click(screen.getByRole("button", { name: "use my own model route" }));
   expect(screen.getByText(/Settings → Orbit Labs → Model access/)).toBeTruthy();
+});
+
+it("is modal: the rest of the app is inert, Tab wraps inside, and app shortcuts wait", async () => {
+  const shell = document.createElement("div");
+  shell.innerHTML = "<textarea aria-label=\"Composer\"></textarea>";
+  document.body.appendChild(shell);
+  const { unmount } = render(<InviteWelcome invite={invite} onClose={() => undefined} />);
+  await screen.findByText("Ready for you");
+  expect(shell.inert).toBe(true);
+  expect(hotkeysSuspended()).toBe(true);
+
+  const dialog = screen.getByRole("dialog");
+  const buttons = within(dialog).getAllByRole("button").filter((button) => !(button as HTMLButtonElement).disabled);
+  buttons.at(-1)!.focus();
+  fireEvent.keyDown(buttons.at(-1)!, { key: "Tab" });
+  expect(document.activeElement).toBe(buttons[0]);
+  fireEvent.keyDown(buttons[0], { key: "Tab", shiftKey: true });
+  expect(document.activeElement).toBe(buttons.at(-1));
+
+  unmount();
+  expect(shell.inert).toBe(false);
+  expect(hotkeysSuspended()).toBe(false);
+  shell.remove();
 });
