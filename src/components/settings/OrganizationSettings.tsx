@@ -11,6 +11,7 @@ import { organizationName } from "@/lib/organizationVisibility";
 import { OrganizationAgentLogins } from "./OrganizationAgentLogins";
 import { OrganizationAgentRoutes } from "./OrganizationAgentRoutes";
 import { OrganizationRoutes } from "./OrganizationRoutes";
+import { AddOrganizationRoute } from "./AddOrganizationRoute";
 import { OrganizationCloudCompute } from "./OrganizationCloudCompute";
 import { OrganizationCloudTeardown } from "./OrganizationCloudTeardown";
 import { OrganizationDelete } from "./OrganizationDelete";
@@ -128,7 +129,8 @@ export function OrganizationSettings({ organization, page = "general", onDeleted
       case "agentLogins":
         return <>
           <RegisteredSetting setting="organizations.agentLogins" instance={organization.id}><div className="contents"><OrganizationAgentLogins key={organization.id} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} /></div></RegisteredSetting>
-          <OrganizationRoutes key={`organization-routes-${organization.id}`} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} />
+          <OrganizationRoutes key={`organization-routes-${organization.id}`} contextRevision={contextRevision} organizationId={organization.id} organizationName={name}
+            renderAdd={({ routes, onAdded }) => <AddOrganizationRoute contextRevision={contextRevision} organizationId={organization.id} organizationName={name} routes={routes} onAdded={onAdded} />} />
         </>;
       case "modelAccess":
         return <RegisteredSetting setting="organizations.agentRoutes" instance={organization.id}><div className="contents"><OrganizationAgentRoutes key={`routes-${organization.id}`} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} /></div></RegisteredSetting>;
