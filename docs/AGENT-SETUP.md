@@ -103,8 +103,17 @@ a new pane.
 A terminal can be in one place at a time. When two views show the same run
 (the new-chat dialog over the welcome screen), the one mounted last holds the
 terminal and the other says where it is. When that view goes, the one before
-it takes the terminal back (`useSetupTerminalHost`). Windows has no installer here (`installable` is false), so only the
-commands to copy are shown there.
+it takes the terminal back (`useSetupTerminalHost`).
+
+On Windows the same two steps run in Windows PowerShell, started by its
+absolute path so the reader's own shell and profile play no part: the
+provider's `install.ps1` (Claude Code's, Codex's), downloaded over HTTPS only
+to a temporary folder, then the CLI's sign-in, with the same checks and exit
+codes as the POSIX scripts (`harness::setup::windows`). An agent with no
+official Windows installer (OpenCode) is not installable there: its setup
+guide is shown instead. Programs installed while the app runs are found
+without a restart: the search path includes the `PATH` Windows keeps in the
+registry, not only the one the app started with (`binpath::login_path`).
 
 Tests: `harness::setup::tests::e2e` runs install → sign-in → Ready, and each
 failure code, through a real terminal and login shell, with `curl` fetching a

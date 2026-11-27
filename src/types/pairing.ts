@@ -299,4 +299,16 @@ export interface PairingStatus {
   /** Keep this Mac awake while a phone is connected (default on). */
   keepAwake: boolean;
   lastError: string | null;
+  /** Whether this Mac is on its account's machine list, where the account's other computers and phones find it (PRO-598). */
+  accountListing: AccountListing;
 }
+
+/** This Mac on its account's machine list, as Settings → Account says it. */
+export type AccountListing =
+  /** Signed out, or data privacy mode is on. */
+  | { state: "off" }
+  | { state: "listed" }
+  /** Not listed yet; `reason` says what it waits for, which needs no one. */
+  | { state: "pending"; reason: string }
+  /** The account service refused it, and only a person can fix that. */
+  | { state: "refused"; reason: string };

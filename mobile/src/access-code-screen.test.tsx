@@ -47,6 +47,7 @@ function held(fields: Record<string, unknown> = {}) {
   mocks.sent = [];
   mocks.app = {
     online: true,
+    refreshNetwork: vi.fn(),
     signingIn: false,
     accessCode: { id: 1, email: "alex@example.com" },
     redeemAccessCode: vi.fn((code: string) => new Promise<AccessCodeAnswer>((resolve) => mocks.sent.push({ code, answer: resolve as (value: unknown) => void }))),
@@ -175,33 +176,78 @@ describe.each(["dark", "light"] as const)("the access code screen in %s", (schem
     expect(off(cont())).toBe(false);
   });
 
-  it("offline: a notice with its own mark above the account, Continue off, and Try again sends once there is a network", async () => {
+  // PRO-603: the owner's live check, where NetInfo said offline on a working network and the code never went.
+  it("a network reading that says offline does not stop the code: Continue sends it, and it is accepted", async () => {
     held({ online: false });
     await show();
+    expect(page.byId("access-code-offline")).toBeNull();
     await type("K7QM2X9TRB");
+    expect(off(cont())).toBe(false);
+    await press(cont());
+    expect(mocks.app.redeemAccessCode).toHaveBeenCalledWith("K7QM2X9TRB");
+    expect(cont()?.textContent).toBe("Checking the code…");
+    await answer({ status: "accepted" });
+    expect(page.byId("access-code-accepted")?.textContent).toContain("Access code accepted");
+    expect(page.byId("access-code-offline")).toBeNull();
+  });
+
+  it("a request that cannot reach the server: a notice with its own mark above the account, and Try again really sends again", async () => {
+    await show();
+    await type("K7QM2X9TRB");
+    await press(cont());
+    await answer({ status: "unanswered", reason: "redeem_unreachable" });
     const notice = page.byId("access-code-offline")!;
     expect(notice.textContent).toContain("Offline. The code was not sent.");
     expect(notice.getAttribute("role")).toBe("alert");
     expect(notice.querySelector('[data-icon="WifiOff"]')?.getAttribute("data-color")).toBe(palette().warning);
     // Above the form: before the account card.
     expect(notice.compareDocumentPosition(page.byId("access-code-account")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(off(cont())).toBe(true);
-    await press(cont());
-    expect(mocks.app.redeemAccessCode).not.toHaveBeenCalled();
+    expect(page.byId("access-code-unanswered")).toBeNull();
+    expect(field().value).toBe("K7QM2X9TRB");
+    expect(off(button("Try again"))).toBe(false);
     await press(button("Try again"));
-    expect(mocks.app.redeemAccessCode).not.toHaveBeenCalled();
-    expect(off(button("Try again"))).toBe(true);
+    // Sent at once, with the network reading asked for again alongside it.
+    expect(mocks.app.redeemAccessCode).toHaveBeenCalledTimes(2);
+    expect(mocks.app.redeemAccessCode).toHaveBeenLastCalledWith("K7QM2X9TRB");
+    expect(mocks.app.refreshNetwork).toHaveBeenCalledTimes(1);
+    expect(cont()?.textContent).toBe("Checking the code…");
+    expect(page.byId("access-code-offline")).toBeNull();
+    // Still not reached: said again, and Continue sends it as well.
+    await answer({ status: "unanswered", reason: "redeem_unreachable" });
+    expect(page.byId("access-code-offline")).not.toBeNull();
+    await press(cont());
+    expect(mocks.app.redeemAccessCode).toHaveBeenCalledTimes(3);
+    await answer({ status: "accepted" });
+    expect(page.byId("access-code-accepted")).not.toBeNull();
+  });
+
+  it("not reached while the phone says it is offline: the code goes by itself once the phone says its network is back", async () => {
+    held({ online: false });
+    await show();
+    await type("K7QM2X9TRB");
+    await press(cont());
+    await answer({ status: "unanswered", reason: "redeem_unreachable" });
+    expect(page.byId("access-code-offline")).not.toBeNull();
     mocks.app = { ...mocks.app, online: true };
     await show();
-    expect(mocks.app.redeemAccessCode).toHaveBeenCalledWith("K7QM2X9TRB");
+    expect(mocks.app.redeemAccessCode).toHaveBeenCalledTimes(2);
     expect(page.byId("access-code-offline")).toBeNull();
     expect(cont()?.textContent).toBe("Checking the code…");
   });
 
-  it("offline with nothing entered: Try again is off", async () => {
+  it("not reached, then the code changed: nothing goes by itself, the notice is gone and Continue sends the new one", async () => {
     held({ online: false });
     await show();
-    expect(off(button("Try again"))).toBe(true);
+    await type("K7QM2X9TRB");
+    await press(cont());
+    await answer({ status: "unanswered", reason: "redeem_unreachable" });
+    await type("K7QM2X9TRC");
+    expect(page.byId("access-code-offline")).toBeNull();
+    mocks.app = { ...mocks.app, online: true };
+    await show();
+    expect(mocks.app.redeemAccessCode).toHaveBeenCalledTimes(1);
+    await press(cont());
+    expect(mocks.app.redeemAccessCode).toHaveBeenLastCalledWith("K7QM2X9TRC");
   });
 
   it("no answer or a server error: a danger notice that says a second try is safe; the code stays, and Try again sends it again", async () => {
@@ -222,14 +268,14 @@ describe.each(["dark", "light"] as const)("the access code screen in %s", (schem
     expect(page.byId("access-code-unanswered")).toBeNull();
   });
 
-  it("an answer lost while the phone went offline is said as offline", async () => {
+  it("sent and not answered in time is not said as offline, whatever the network reading says: the code may have been checked", async () => {
     await show();
     await type("K7QM2X9TRB");
     await press(cont());
     mocks.app = { ...mocks.app, online: false };
-    await answer({ status: "unanswered", reason: "redeem_unreachable" });
-    expect(page.byId("access-code-offline")).not.toBeNull();
-    expect(page.byId("access-code-unanswered")).toBeNull();
+    await answer({ status: "unanswered", reason: "redeem_timed_out" });
+    expect(page.byId("access-code-unanswered")).not.toBeNull();
+    expect(page.byId("access-code-offline")).toBeNull();
   });
 
   it("too many tries: Continue and Try again wait out the server's seconds, counted down, then send again", async () => {
@@ -318,15 +364,16 @@ describe.each(["dark", "light"] as const)("the access code screen in %s", (schem
     expect(button("Cancel")).toBeNull();
   });
 
-  it("offline, a Try again waiting for the network is let go when the field is emptied: nothing is sent", async () => {
+  it("not reached, a code waiting for the network is let go when the field is emptied: nothing more is sent", async () => {
     held({ online: false });
     await show();
     await type("K7QM2X9TRB");
-    await press(button("Try again"));
+    await press(cont());
+    await answer({ status: "unanswered", reason: "redeem_unreachable" });
     await type("");
     mocks.app = { ...mocks.app, online: true };
     await show();
-    expect(mocks.app.redeemAccessCode).not.toHaveBeenCalled();
+    expect(mocks.app.redeemAccessCode).toHaveBeenCalledTimes(1);
     expect(cont()?.textContent).toBe("Continue");
   });
 

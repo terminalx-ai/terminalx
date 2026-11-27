@@ -67,9 +67,12 @@ pub fn known_dirs() -> Vec<PathBuf> {
             v.extend(vers);
         }
     }
+    #[cfg(unix)]
     for p in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/snap/bin"] {
         v.push(PathBuf::from(p));
     }
+    #[cfg(windows)]
+    v.extend(windows_dirs());
     for extra in crate::store::settings::load().extra_bin_dirs {
         v.push(PathBuf::from(extra));
     }
@@ -263,7 +266,9 @@ fn resolve_uncached(name: &str) -> Option<PathBuf> {
 pub fn login_path() -> String {
     let inherited = std::env::var_os("PATH").unwrap_or_default();
     let priority = PRIORITY_DIR.get().map(PathBuf::from);
-    let paths = priority.into_iter().chain(known_dirs()).chain(std::env::split_paths(&inherited));
+    // The PATH as Windows has it now, after the inherited one: an installer that added itself to PATH
+    // (winget, Git for Windows, an agent’s own) while the app runs is found without a restart.
+    let paths = priority.into_iter().chain(known_dirs()).chain(std::env::split_paths(&inherited)).chain(windows_registry::current_path());
     std::env::join_paths(paths).unwrap_or(inherited).to_string_lossy().into_owned()
 }
 
@@ -374,6 +379,63 @@ pub fn python3() -> std::process::Command {
     #[cfg(not(windows))]
     {
         std::process::Command::new(resolve("python3").unwrap_or_else(|| "python3".into()))
+    }
+}
+
+/// Where Windows installers put the programs TerminalX looks for, beyond the
+/// home folders [`known_dirs`] lists for every system: Codex's own installer,
+/// npm's global folder, winget's links, the GitHub CLI and Git for Windows.
+#[cfg(windows)]
+fn windows_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        dirs.push(local.join(r"Programs\OpenAI\Codex\bin"));
+        dirs.push(local.join(r"Microsoft\WinGet\Links"));
+    }
+    if let Some(roaming) = std::env::var_os("APPDATA").map(PathBuf::from) {
+        dirs.push(roaming.join("npm"));
+    }
+    for programs in ["ProgramFiles", "ProgramW6432"].iter().filter_map(std::env::var_os).map(PathBuf::from) {
+        dirs.push(programs.join("GitHub CLI"));
+        dirs.push(programs.join(r"Git\cmd"));
+    }
+    dirs.dedup();
+    dirs
+}
+
+/// `PATH` as Windows keeps it now, the user's and then the system's: the
+/// process's own is the one it started with, and an installer that adds
+/// itself to `PATH` changes only these.
+#[cfg(windows)]
+mod windows_registry {
+    use std::path::PathBuf;
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ};
+
+    pub fn current_path() -> Vec<PathBuf> {
+        let user = read(HKEY_CURRENT_USER, "Environment");
+        let system = read(HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment");
+        user.into_iter().chain(system).flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>()).filter(|dir| !dir.as_os_str().is_empty()).collect()
+    }
+
+    /// The `Path` value under `key`, its `%NAME%` parts expanded; `None` when there is none.
+    fn read(root: HKEY, key: &str) -> Option<String> {
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        let (key, name) = (wide(key), wide("Path"));
+        let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ;
+        let mut bytes = 0u32;
+        // SAFETY: the key and name are NUL-terminated; the first call only asks for the size.
+        let sized = unsafe { RegGetValueW(root, key.as_ptr(), name.as_ptr(), flags, std::ptr::null_mut(), std::ptr::null_mut(), &mut bytes) };
+        if sized != 0 || bytes == 0 {
+            return None;
+        }
+        let mut buffer = vec![0u16; (bytes as usize).div_ceil(2)];
+        // SAFETY: `buffer` holds `bytes` bytes, the size the first call gave.
+        let read = unsafe { RegGetValueW(root, key.as_ptr(), name.as_ptr(), flags, std::ptr::null_mut(), buffer.as_mut_ptr().cast(), &mut bytes) };
+        if read != 0 {
+            return None;
+        }
+        let end = buffer.iter().position(|&unit| unit == 0).unwrap_or(buffer.len());
+        Some(String::from_utf16_lossy(&buffer[..end]))
     }
 }
 

@@ -1215,7 +1215,12 @@ impl RelayHost {
             (device_id.clone(), device.attachment_id.clone(), stamp)
         }).collect();
         install_session_collaboration(&self.rpc, session, generation)?;
-        let changed: Vec<_> = previous.into_iter().filter(|(_, _, stamp)| session.collaboration_v2 && stamp.as_ref().is_none_or(|stamp| !self.rpc.collab.runtime_policy.same_member(stamp)))
+        // Only a v2 policy in force stamps devices. Negotiating v2 is not
+        // enough: an organization outside the Everyone-write rollout is
+        // served the v1 shape, which installs no v2 policy, and every device
+        // would lack a stamp and be retired on each refresh.
+        let v2 = session.collaboration_v2 && self.rpc.collab.runtime_policy.is_v2();
+        let changed: Vec<_> = previous.into_iter().filter(|(_, _, stamp)| v2 && stamp.as_ref().is_none_or(|stamp| !self.rpc.collab.runtime_policy.same_member(stamp)))
             .map(|(device_id, id, _)| Revocation { id, device_id }).collect();
         // Retire saved credentials too: reconnecting an old workspace/session
         // attachment must not evade its observed source change. On restart,
@@ -2107,6 +2112,7 @@ mod tests {
                 collaboration:Some(json!({"v":2,"revision":revision,"members":[
                     {"userId":"driver","role":"driver","canApprove":true,"approvalSource":"explicit", "writeSource":source}
                 ]})),
+                workspace_ssh: None,
                 desktop_ready: false,
             };
             super::super::bootstrap_link::relay_session(&session, capabilities)
@@ -2182,6 +2188,63 @@ mod tests {
         assert_eq!(link.completed.lock().unwrap().len(), 4);
         let (cancel, _) = mpsc::unbounded_channel();
         assert!(host.admit("dev-runtime-raced", "attachment-token-long-enough", &client_key, cancel).await.is_err());
+        relay.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn negotiated_v2_served_v1_keeps_attached_devices_across_refreshes() {
+        let client_key = general_purpose::STANDARD.encode([7u8; 32]);
+        struct Link {
+            session: Mutex<RelaySession>,
+        }
+        impl RuntimeLink for Link {
+            fn host_secret(&self) -> [u8; 32] { [3; 32] }
+            fn session(&self) -> Result<RelaySession> { Ok(self.session.lock().unwrap().clone()) }
+            fn complete_attachment(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
+            fn complete_revocation(&self, _: &str) -> Result<()> { Ok(()) }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let rpc = WorkspaceRpc::new(root.path(), 7, Arc::new(crate::sink::BroadcastSink::new(8)), Arc::new(crate::pty::Terminals::new()), None).unwrap();
+        rpc.collab.runtime_policy.bind(root.path(), 7).unwrap();
+        // The runtime asks for collaboration-v2, but the organization is not in
+        // the Everyone-write rollout, so the server keeps the v1 shape.
+        let session = crate::cloud_bootstrap::Session {
+            workspace_id:"ws".into(), organization_id:"org".into(), relay_host_id:"host".into(),
+            relay_token:jwt(json!({"sub":"host","cloudProfileId":"profile","organizationId":"org","runtimeGeneration":7})),
+            relay_token_expires_at:0, director_url:"http://127.0.0.1:1".into(),
+            access_mode:crate::cloud_bootstrap::AccessMode::Private,
+            attachments: vec![json!({"id":"att-owner", "deviceId":"dev-owner", "deviceToken":"attachment-token-long-enough",
+                "userId":"owner", "scope":"runtime", "expiresAt":now_ms()+60_000})],
+            revocations:vec![], quiesce:None, environment:None,
+            collaboration:Some(json!({"v":1, "members":[{"userId":"owner", "role":"manager", "canApprove":true}]})),
+            desktop_ready: false,
+        };
+        let refresh = super::super::bootstrap_link::relay_session(&session, crate::cloud_bootstrap::CAPABILITIES);
+        assert!(refresh.collaboration_v2, "the native runtime negotiates v2");
+        let link = Arc::new(Link { session: Mutex::new(refresh) });
+        let host = RelayHost::new(link.clone(), rpc.clone(), Some(root.path().join("devices.json")));
+        let (commands, mut receive) = mpsc::unbounded_channel();
+        let live = Live { commands, cell_url:"http://127.0.0.1:1".into(), assignment_epoch:1, relay_generation:1 };
+        let relay = tokio::spawn(async move {
+            while let Some(command) = receive.recv().await {
+                if let ControlCommand::CreateInvite { respond, .. } = command {
+                    let _ = respond.send(Ok(("invite".into(), now_ms()+60_000)));
+                }
+            }
+        });
+        host.apply_refreshed_session(&live, "http://127.0.0.1:1", host.fetch_session().await.unwrap(), 7).await.unwrap();
+        assert!(!rpc.collab.runtime_policy.is_v2());
+        let (cancel, mut cancelled) = mpsc::unbounded_channel();
+        host.admit("dev-owner", "attachment-token-long-enough", &client_key, cancel).await.unwrap();
+        // The periodic refresh repeats the same v1 answer; it must not retire
+        // the device for lacking a v2 stamp.
+        for _ in 0..3 {
+            host.apply_refreshed_session(&live, "http://127.0.0.1:1", host.fetch_session().await.unwrap(), 7).await.unwrap();
+        }
+        assert!(cancelled.try_recv().is_err(), "the attached connection stays open");
+        assert!(host.state.lock().unwrap().devices.contains_key("dev-owner"));
+        let (cancel, _) = mpsc::unbounded_channel();
+        assert!(host.admit("dev-owner", "attachment-token-long-enough", &client_key, cancel).await.is_ok());
         relay.abort();
     }
 

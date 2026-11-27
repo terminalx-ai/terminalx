@@ -1,5 +1,5 @@
 import { createContext, useContext, type ReactNode } from "react";
-import { useWindowDimensions } from "react-native";
+import { useWindowDimensions, View } from "react-native";
 
 /**
  * From this scale up, iOS calls the text size an accessibility size: the
@@ -15,6 +15,34 @@ export function TextSizeProvider({ children }: { children: ReactNode }) {
   const large = useWindowDimensions().fontScale >= LARGE_TEXT_SCALE;
   return <LargeText.Provider value={large}>{children}</LargeText.Provider>;
 }
+
+/**
+ * A page of a navigator, laid out again when the text size changes in
+ * Settings while the app is open (PRO-601); each navigator draws its pages
+ * in it through `textSizeScreenLayout`.
+ *
+ * React Native takes the new size in at once, but measures a text again only
+ * when its page is next laid out, and a size change alone lays out no page:
+ * until something on the page moved, it kept the size the app was opened at.
+ * Each tab and each pushed page is laid out on its own, so the nudge has to be
+ * inside every page, not once around the app. It is a view of no size, put
+ * back under a new key at each text size.
+ */
+export function TextSizePage({ children }: { children: ReactNode }) {
+  const { fontScale } = useWindowDimensions();
+  return <>
+    {children}
+    <View key={fontScale} testID="text-size-relayout" pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={RELAYOUT} />
+  </>;
+}
+
+/** `TextSizePage` as a navigator's `screenLayout`, which is called as a function rather than drawn, so it may hold no hook itself. */
+export function textSizeScreenLayout({ children }: { children: ReactNode }) {
+  return <TextSizePage>{children}</TextSizePage>;
+}
+
+// A plain object, not a StyleSheet: this module is read by layouts whose tests stand in for only part of React Native.
+const RELAYOUT = { position: "absolute", width: 0, height: 0 } as const;
 
 /**
  * Whether the person reads at an accessibility text size (PRO-563). A row
@@ -34,3 +62,23 @@ export const BAR_TITLE_MAX_SCALE = 1.2;
 
 /** How far a tab's large title grows: at 34 points it is already large, and one word has to fit the line. */
 export const LARGE_TITLE_MAX_SCALE = 1.3;
+
+/**
+ * The largest size, in points, the heading of a page with little else on it
+ * grows to, and the sentence under it (PRO-601): the signed-out tabs. At the
+ * largest text sizes a heading that kept growing filled half an iPhone SE,
+ * and its sentence and Sign in went under the tab bar. These are the most the
+ * Machines tab holds on an SE with Sign in still in sight; the button keeps
+ * the system size.
+ */
+export const HEADING_MAX_POINTS = 42;
+export const HEADING_SENTENCE_MAX_POINTS = 21;
+
+/**
+ * The `maxFontSizeMultiplier` that stops text drawn at `fontSize` points
+ * growing past `points`: a cap in points, so a small heading and a large one
+ * stop at the same size. Never below 1, so no text is drawn smaller than set.
+ */
+export function maxScaleFor(fontSize: number, points: number): number {
+  return Math.max(1, points / fontSize);
+}

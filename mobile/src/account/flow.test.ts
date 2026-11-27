@@ -20,7 +20,7 @@ const attempt = (state: string, extra: Partial<AccountDeletionAttempt> = {}): Ac
 
 function setup(read: AccountDeletionRead = plainRead()) {
   const api = { accountDeletion: vi.fn(async () => read), requestAccountDeletion: vi.fn(async (_email: string) => attempt("scheduled", { deleteAfter: "2026-12-09T12:00:00.000Z" })) };
-  const deps = { api, email: "alex@example.com", userId: "user-alex", online: true, reauthenticate: vi.fn(async (): Promise<ReauthOutcome> => "signed-in"), forgetDeletedAccount: vi.fn(async () => undefined), wait: async (_ms: number): Promise<void> => undefined, providerName: (id: string) => (id === "box" ? "Boat" : id) };
+  const deps = { api, email: "alex@example.com", userId: "user-alex", reauthenticate: vi.fn(async (): Promise<ReauthOutcome> => "signed-in"), forgetDeletedAccount: vi.fn(async () => undefined), wait: async (_ms: number): Promise<void> => undefined, providerName: (id: string) => (id === "box" ? "Boat" : id) };
   const flow = new AccountDeletionFlow(deps);
   return { flow, api, deps };
 }
@@ -289,13 +289,17 @@ it("sends what the person typed, trimmed, so the server checks it; nothing when 
   expect(api.requestAccountDeletion).toHaveBeenCalledWith("Alex@Example.com");
 });
 
-it("sends nothing while offline", async () => {
-  const { flow, api, deps } = setup();
+// PRO-603: the phone's network reading can be stale, so it is not asked; what the request meets decides.
+it("sends however the phone reads its network; one that cannot get through is not known to have been scheduled", async () => {
+  const { flow, api } = setup();
   await flow.load();
-  flow.update({ ...deps, online: false });
+  api.requestAccountDeletion.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null, "network"));
   flow.confirm("alex@example.com");
-  expect(api.requestAccountDeletion).not.toHaveBeenCalled();
-  expect(flow.getSnapshot().notice).toEqual({ kind: "offline" });
+  await settled();
+  expect(api.requestAccountDeletion).toHaveBeenCalledWith("alex@example.com");
+  // It may have reached the server before the connection went: never "nothing was sent".
+  expect(flow.getSnapshot().notice).toEqual({ kind: "unknown" });
+  expect(flow.getSnapshot().sending).toBeNull();
 });
 
 it("checks before trying again when the answer was lost, and finds it scheduled", async () => {

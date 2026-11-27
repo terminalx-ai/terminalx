@@ -25,6 +25,11 @@ pub const SETTINGS_EVENT: &str = "status_bar_settings";
 
 #[cfg(feature = "desktop")]
 pub fn install_menu(app: &App) -> Result<()> {
+    // Windows and Linux draw no menu bar: the window has no title bar of its own there, and the app's menu is a
+    // button in its top strip (`AppMenu`).
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
     let menu = Menu::default(app.handle())?;
     let checked = crate::store::settings::load().status_bar.visible;
     let item = CheckMenuItemBuilder::with_id(MENU_ID, "Status Bar").checked(checked).build(app)?;

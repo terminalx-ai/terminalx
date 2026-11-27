@@ -128,8 +128,7 @@ try {
       const profile = page.getByRole("dialog", { name: "Profile of Ada Lovelace" });
       await profile.waitFor();
       assert.equal(await profile.getByText("ada@example.test", { exact: true }).count(), 1);
-      assert.equal(await profile.getByText("Admin", { exact: true }).count(), 1);
-      assert.equal(await profile.getByText("Joined February 3, 2025", { exact: true }).count(), 1);
+      assert.equal(await profile.getByText("Admin · Joined Feb 3, 2025", { exact: true }).count(), 1);
       const box = await profile.boundingBox();
       assert.ok(box && box.x >= 0 && box.y >= 0 && box.x + box.width <= 960 && box.y + box.height <= 720, "profile fits WebKit viewport");
       assert.ok(await profile.evaluate(node => node.scrollWidth <= node.clientWidth + 1), "profile text does not overflow");

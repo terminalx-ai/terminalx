@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   alert: vi.fn(),
   focus: [] as (() => void | (() => void))[],
   sheet: null as any,
+  screen: null as any,
 }));
 vi.mock("expo-router", () => ({
   // The header as the stack draws it: its title, or the screen's own title view, and what is on its right.
@@ -33,7 +34,7 @@ vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
 vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => mocks.catalog, useCatalogSnapshot: (catalog: any) => catalog?.getSnapshot() ?? { organizations: [], loading: false, error: null, refreshedAt: null, saved: false, titles: {} } }));
 vi.mock("react-native", () => {
-  const Box = ({ children, accessibilityRole, accessibilityLabel, testID }: { children?: ReactNode; accessibilityRole?: string; accessibilityLabel?: string; testID?: string }) => <div role={accessibilityRole === "alert" ? "alert" : accessibilityRole === "progressbar" ? "progressbar" : undefined} aria-label={accessibilityLabel} data-testid={testID}>{children}</div>;
+  const Box = ({ children, accessibilityRole, accessibilityLabel, testID, style }: { children?: ReactNode; accessibilityRole?: string; accessibilityLabel?: string; testID?: string; style?: unknown }) => <div role={accessibilityRole === "alert" ? "alert" : accessibilityRole === "progressbar" ? "progressbar" : accessibilityRole === "header" ? "heading" : undefined} aria-label={accessibilityLabel} data-testid={testID} data-style={JSON.stringify(Object.assign({}, ...([style].flat(3).filter(Boolean) as object[])))}>{children}</div>;
   return {
     View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box, RefreshControl: () => null, Keyboard: { addListener: () => ({ remove: () => undefined }), isVisible: () => false, dismiss: () => undefined },
     Animated: { View: Box, Value: class { constructor(public value: number) {} }, timing: () => ({ start: () => undefined, stop: () => undefined }) },
@@ -56,7 +57,8 @@ vi.mock("@mobile/ui/primitives", () => ({
   Button: ({ label, onPress, disabled, accessibilityLabel }: any) => <button disabled={disabled} aria-label={accessibilityLabel} onClick={onPress}>{label}</button>,
   Card: ({ children }: any) => <div>{children}</div>,
   EmptyState: ({ title, detail }: any) => <div>{title} {detail}</div>, StatusDot: () => null,
-  Screen: ({ children }: any) => <div>{children}</div>, SectionTitle: ({ children }: any) => <h2>{children}</h2>,
+  // The page that scrolls, under its title and over the tab bar (its own tests are in the primitives' layout).
+  Screen: (props: any) => (mocks.screen = props) && <div data-testid="screen">{props.children}</div>, SectionTitle: ({ children }: any) => <h2>{children}</h2>,
 }));
 
 let root: Root;
@@ -251,6 +253,26 @@ describe("the Cloud tab", () => {
     await show(<CloudScreen />);
     await click("Sign in");
     expect(mocks.app.signIn).toHaveBeenCalled();
+  });
+
+  it("signed out, scrolls like Machines and gives its heading the page's width (PRO-599)", async () => {
+    mocks.screen = null;
+    mocks.app = { session: null, signIn: vi.fn() };
+    await show(<CloudScreen />);
+    // At Accessibility XL on an iPhone SE, Sign in is lower than the tab bar: only a page that scrolls brings it up.
+    expect(mocks.screen?.title).toBe("Cloud");
+    const page = container.querySelector('[data-testid="screen"]')!;
+    expect(page.querySelector('[data-testid="cloud-signed-out"]')).not.toBeNull();
+    expect([...page.querySelectorAll("button")].map((entry) => entry.textContent)).toContain("Sign in");
+    expect(page.querySelector('[role="heading"]')?.textContent).toBe("Sign in for cloud workspaces");
+    // At the largest size "workspaces" alone is about 322 of the SE's 375 points; with the page's own 16 at each side it
+    // fits, but any more taken at the sides breaks it inside the word ("workspac / es"). Nothing inside narrows it.
+    const sides = ["padding", "paddingHorizontal", "paddingLeft", "paddingRight", "paddingStart", "paddingEnd", "margin", "marginHorizontal", "marginLeft", "marginRight", "marginStart", "marginEnd"];
+    for (const node of [page.querySelector('[data-testid="cloud-signed-out"]')!, ...page.querySelector('[data-testid="cloud-signed-out"]')!.querySelectorAll("[data-style]")]) {
+      const style = JSON.parse(node.getAttribute("data-style") ?? "{}");
+      expect(sides.filter((key) => style[key])).toEqual([]);
+    }
+    expect(sides.filter((key) => [mocks.screen.contentContainerStyle].flat().some((style: any) => style?.[key]))).toEqual([]);
   });
 
   it("says why sign-in failed, under the button", async () => {

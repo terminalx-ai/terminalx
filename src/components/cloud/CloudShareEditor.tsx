@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Loader2, Lock, X } from "@/icons";
+import { Lock, X } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { InlineError, NoAccessNote, SkeletonRows } from "@/components/ui/SurfaceState";
 import { Switch } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { MemberProfile } from "@/components/people/MemberProfile";
@@ -8,7 +9,7 @@ import { getAccount, useAccount } from "@/lib/account";
 import { api, type CloudShareRole, type CloudWorkspaceGeneralAccess, type CloudWorkspaceShares } from "@/lib/api";
 import { notifyAccessChanged, VISIBILITY_ADMIN_REASON } from "@/lib/cloudCollab";
 import { buildShareRequest, pendingShareEdits, rebaseShareEdits, replaceShareEdit, shareRowKey, shareRows, type ShareEdit, type ShareRow } from "@/lib/cloudShareDraft";
-import { ADMIN_SHARE_LABEL, alwaysHasAccess, codeOf, MANAGER_APPROVAL_REASON, OUTCOME_UNKNOWN, shareErrorMessage, shareRoleLabel, yourAccessText } from "@/lib/cloudShareLabels";
+import { ADMIN_SHARE_LABEL, alwaysHasAccess, codeOf, MANAGER_APPROVAL_REASON, OUTCOME_UNKNOWN, shareErrorMessage, shareRoleLabel, yourAccessShort, yourAccessText } from "@/lib/cloudShareLabels";
 import { loadRoster, loadRosterIn, rememberPeople } from "@/lib/cloudPeople";
 import { privacyEnabled } from "@/lib/dataPrivacy";
 import { featureFlags, useFeatureFlag } from "@/lib/featureFlags";
@@ -389,15 +390,19 @@ export function CloudShareEditor({
   const pendingLabel = `${pending.length} unsaved ${pending.length === 1 ? "change" : "changes"}`;
   const activeConfirmation = paused && confirm !== "discard" ? null : confirm;
   const confirmationTitle = activeConfirmation === "discard" ? "Discard access changes?" : activeConfirmation === "visible" ? "Make workspace visible and save?" : "Make workspace private?";
-  const cannotSave = working || !!confirm || (!attempt && (refreshRequired || !mayEdit || needsChoice || pending.length === 0 || pending.length > 128));
+  // One Save: people changes when any are staged, otherwise a General access choice. The two never wait
+  // together, because General access is locked while people changes are staged.
+  const generalPending = !dirty && !!generalChoice && generalChoice !== generalAccess?.mode;
+  const cannotSave = generalPending ? locked
+    : working || !!confirm || (!attempt && (refreshRequired || !mayEdit || needsChoice || pending.length === 0 || pending.length > 128));
   const feedback = !privacy && <>
-    {failures.length > 0 && <div role="alert" className="rounded-md border border-destructive/30 px-3 py-2 text-destructive">
+    {failures.length > 0 && <InlineError>
       <p>Could not save these changes</p>
       <ul className="mt-1 list-disc space-y-1 pl-4">
         {failures.map((failure) => <li key={failure.key} className="break-words"><strong>{failure.name}</strong> · {failure.message}</li>)}
       </ul>
-    </div>}
-    {error && <p className="break-words text-destructive" role="alert">{error}</p>}
+    </InlineError>}
+    {error && <InlineError>{error}</InlineError>}
     {notice && <p className="text-muted-foreground" role="status">{notice}</p>}
   </>;
 
@@ -406,12 +411,12 @@ export function CloudShareEditor({
       <DialogHeader>
         <div className="flex items-start justify-between gap-2 pr-6">
           <DialogTitle className="min-w-0 break-words">{title}</DialogTitle>
-          {!paused && (manage || attempt) && <Button size="sm" className="shrink-0" disabled={cannotSave} onClick={save}>{attempt ? "Retry save" : "Save"}</Button>}
+          {!paused && (manage || attempt) && <Button size="sm" className="shrink-0" disabled={cannotSave} onClick={generalPending ? saveGeneralAccess : save}>{attempt ? "Retry save" : "Save"}</Button>}
         </div>
         <DialogDescription>{privacy ? "Sharing is paused while data privacy mode is on."
           : paused ? "Workspace group sharing is paused until it is available again."
-          : "People with access see agent tabs, terminals, files and Git. Drivers can send to agents. Typing in terminals also needs permission approval."}
-          {!paused && offerAdmin && " Admin grants include permission approval."}</DialogDescription>
+          : "People with access see agent tabs, terminals, files and Git. Drivers can also send to agents."}
+          {!paused && offerAdmin && " Admins also manage who has access."}</DialogDescription>
       </DialogHeader>
 
       {paused ? <div className="flex flex-col gap-2 text-xs">
@@ -419,26 +424,19 @@ export function CloudShareEditor({
         {dirty && <p className="text-warning" aria-live="polite">{attempt ? "Save outcome unknown" : pendingLabel}</p>}
         {feedback}
       </div> : <div className="flex min-w-0 flex-col gap-3 text-xs" data-testid="cloud-share-editor">
-        {!listed && !error && <Loader2 className="size-4 animate-spin" aria-label="Loading access" />}
+        {!listed && !error && <div role="status" aria-label="Loading access"><SkeletonRows rows={3} avatar /></div>}
         {listed && <>
           {mayEdit && <CloudShareSearch {...{ orgId, organization, contextRevision, people, shared }}
             disabled={locked} canRequest={canRequest} onSelect={(row) => stage(row, "put")} />}
-          {manage && rosterFailed && <div className="flex items-center justify-between gap-2 text-muted-foreground" role="alert">
+          {manage && rosterFailed && <InlineError retry={{ label: "Retry members", disabled: working, onAction: () => void loadMembers(true).catch(() => {}) }}>
             Could not load organization members.
-            <Button size="sm" variant="outline" disabled={working} onClick={() => void loadMembers(true).catch(() => {})}>Retry members</Button>
-          </div>}
-          <p className="text-muted-foreground" data-testid="cloud-share-you">
-            Your access: {yourAccessText(listed.you, orgRole ?? self?.role ?? null, creator)}.
+          </InlineError>}
+          <p className="text-muted-foreground" data-testid="cloud-share-you" title={yourAccessText(listed.you, orgRole ?? self?.role ?? null, creator)}>
+            {yourAccessShort(listed.you, orgRole ?? self?.role ?? null, creator)}
           </p>
-          {generalAccess && (
-            <CloudGeneralAccessControls mode={generalAccess.mode} pending={generalChoice}
-              everyone={`Everyone at ${organization}`} editable={!!generalRevision} disabled={locked || dirty}
-              onChoose={(mode) => setGeneralDraft(generalRevision ? { mode, revision: generalRevision } : undefined)}
-              onSave={saveGeneralAccess} />
-          )}
           {rows.length > 0 ? <>
-            <h3 className="font-medium">People and groups with access</h3>
-            <ul className="divide-y divide-hairline rounded-md border border-hairline" aria-label="People and groups with access">
+            <h3 className="font-medium">People with access</h3>
+            <ul className="divide-y divide-hairline rounded-md border border-hairline" aria-label="People with access">
               {rows.map((row) => {
                 const key = shareRowKey(row);
                 const edit = byKey.get(key);
@@ -474,11 +472,11 @@ export function CloudShareEditor({
                         {offerAdmin && row.subject.type === "user" ? <option value="manager">{ADMIN_SHARE_LABEL}</option>
                           : row.role === "manager" && <option value="manager" disabled>Admin</option>}
                       </select>
-                      <label className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+                      <label className="flex min-w-0 items-center gap-1.5 text-muted-foreground" title="Approves permission requests and types in terminals">
                         <Switch size="sm" aria-label={`Can approve permissions: ${row.name}`} checked={row.canApprove}
                           disabled={locked || row.role === "manager"} title={row.role === "manager" ? MANAGER_APPROVAL_REASON : undefined}
                           onCheckedChange={(canApprove) => stage({ ...row, canApprove }, "put")} />
-                        Can approve permissions
+                        Can approve
                       </label>
                       <Button size="icon-xs" variant="ghost" aria-label={`Revoke ${row.name}`} disabled={locked}
                         onClick={() => stage(row, "remove")}><X /></Button>
@@ -490,6 +488,12 @@ export function CloudShareEditor({
           </> : <p className="text-muted-foreground">
             {access === "private" ? "Only the creator can see this private workspace." : "No people or groups have been added. Organization admins and the creator already have access."}
           </p>}
+          {!manage && <NoAccessNote>Only admins and the creator can change who has access.</NoAccessNote>}
+          {generalAccess && (
+            <CloudGeneralAccessControls mode={generalAccess.mode} pending={generalChoice}
+              everyone={`Everyone at ${organization}`} editable={!!generalRevision} disabled={locked || dirty}
+              onChoose={(mode) => setGeneralDraft(generalRevision ? { mode, revision: generalRevision } : undefined)} />
+          )}
           {access === "organization" && <div className="flex flex-wrap items-center justify-between gap-2 border-t border-hairline pt-3 text-muted-foreground">
             <span>{becameVisible ? "Workspace is now visible in the organization’s sidebar." : "Visible in the organization’s sidebar."}</span>
             {canChangeVisibility && <Button size="sm" variant="outline" disabled={locked || dirty} onClick={() => setConfirm("private")}>

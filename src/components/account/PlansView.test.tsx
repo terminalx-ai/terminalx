@@ -3,6 +3,9 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { OrganizationPlan } from "@/lib/api";
 import { PlansView } from "./PlansView";
 
+/** A price line: the amount and its unit sit in separate spans. */
+const price = (pattern: RegExp) => screen.getByText((_, element) => element?.tagName === "P" && pattern.test(element.textContent ?? ""));
+
 const { privacy, openWelcome, openUrl, organization } = vi.hoisted(() => ({
   privacy: { ready: true, enabled: false },
   openWelcome: vi.fn(),
@@ -42,7 +45,7 @@ afterEach(() => {
 it("uses the current organization's catalog and clears it as soon as privacy is enabled", () => {
   const view = render(<PlansView />);
   expect(screen.getByRole("heading", { name: "Plans" })).toBeTruthy();
-  expect(screen.getByText(/23.75 per seat/)).toBeTruthy();
+  expect(price(/23.75 per seat/)).toBeTruthy();
   expect(screen.getByText("Up to 8 members")).toBeTruthy();
   expect(screen.getByText("Local work on this Mac")).toBeTruthy();
   expect(screen.getByText("Cloud and organizations of your own")).toBeTruthy();
@@ -63,7 +66,7 @@ it("renders optional Pro pricing and opens the approved console links", () => {
   render(<PlansView />);
   expect(screen.getByText("$0")).toBeTruthy();
   expect(screen.getByText("Your plan")).toBeTruthy();
-  expect(screen.getByText(/15(?:.00)? \/ month/)).toBeTruthy();
+  expect(price(/15(?:.00)? \/ month/)).toBeTruthy();
   expect(screen.getByText("One bill for Acme")).toBeTruthy();
   expect(screen.getByText("Checkout, invoices and seat changes open in the web console.")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Upgrade to Pro" }));

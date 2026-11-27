@@ -23,6 +23,7 @@ import type { AgentEvent } from "@/types/events";
 import type { WorkStatus } from "@/types/session";
 import { onPanelTab, rememberPanelTab, rememberedPanelTab, takePanelTab, type PanelTab } from "@/lib/panelTab";
 import { onPrLinksChanged } from "@/lib/prLinks";
+import { WindowControls } from "./WindowControls";
 
 export type { PanelTab };
 const TABS: { id: PanelTab; label: string; shortcut?: ShortcutId }[] = [
@@ -283,6 +284,7 @@ export function RightPanel({
             <RefreshCw />
           </Button>
         </WithTooltip>
+        <WindowControls />
       </div>
       {repositories && (
         <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-2 py-1">

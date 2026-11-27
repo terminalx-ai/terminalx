@@ -70,7 +70,7 @@ it("explains a Chrome startup failure and offers to reconnect", () => {
 it("shows a stopped workspace without opening VNC or offering to wake it", () => {
   const reconnect = vi.fn();
   render(<CloudDesktopPane client={client} asleep control onReconnect={reconnect} />);
-  expect(screen.getByRole("status").textContent).toBe("The workspace is stopped.");
+  expect(screen.getByRole("status").textContent).toBe("Workspace stopped");
   expect(screen.queryByTestId("fixture-vnc")).toBeNull();
   expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
   expect(reconnect).not.toHaveBeenCalled();
