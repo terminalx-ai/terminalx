@@ -3,7 +3,7 @@ import { ThisComputer } from "@/lib/platform";
 import { useCloudCatalog } from "@/lib/cloudCatalog";
 import { loadRosterIn, usePeople, userIdForEmail } from "@/lib/cloudPeople";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Check, ChevronDown, Cloud, Laptop, Monitor, X } from "@/icons";
+import { Check, ChevronDown, Cloud, Laptop, Monitor, PanelRight, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -48,6 +48,9 @@ import { isQuickChat, QUICK_CHATS_LABEL } from "@/lib/quickChats";
 import { useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { visibleDashboardSessions } from "@/lib/organizationSessions";
 import { useSessionRowFacts } from "@/lib/sessionRowStatus";
+import { teamArtifactOrg, useOpenTeamArtifact } from "@/lib/teamArtifacts";
+import { TeamPanel } from "@/components/teamArtifacts/TeamPanel";
+import { ArtifactHistory, ArtifactViewer } from "@/components/teamArtifacts/ArtifactViewer";
 
 /** A card: a local session, a cloud one (PRO-23 CS-19) or one on a paired machine (PRO-346), in the same columns. */
 type CardSession = (SessionEntry | CloudDashboardSession | MachineDashboardSession) & { ownerId?: string | null };
@@ -350,6 +353,7 @@ export function AgentDashboard() {
   const loading = !store.loaded || (preferences.view === "board" && summaries.loading && total > 0);
 
   return (
+    <TeamArtifactsFrame>
     <div className="@container flex min-h-0 flex-1 flex-col">
       <header className="flex min-h-[52px] shrink-0 flex-wrap items-center gap-1.5 @min-[1100px]:flex-nowrap border-b border-hairline px-4 py-2.5">
         <SearchField inputRef={searchRef} query={query} onQuery={setQuery} />
@@ -516,6 +520,42 @@ export function AgentDashboard() {
         </div>
       </div>}
       </div>
+    </div>
+    </TeamArtifactsFrame>
+  );
+}
+
+const TEAM_PANEL_KEY = "terminalx.overview.teamPanel.v1";
+
+/**
+ * The overview with its Team panel (PRO-158, 13.17): the organization's
+ * artifacts beside the sessions, and an opened artifact in place of them
+ * (13.32) with its history in the panel (13.33). Only for an organization
+ * the server has team artifacts ready for.
+ */
+function TeamArtifactsFrame({ children }: { children: ReactNode }) {
+  const { status } = useAccount();
+  const privacy = useDataPrivacy();
+  const orgId = privacy.enabled ? null : teamArtifactOrg(status);
+  const opened = useOpenTeamArtifact();
+  const open = opened && opened.orgId === orgId ? opened : null;
+  const [shown, setShown] = useState(() => { try { return localStorage.getItem(TEAM_PANEL_KEY) !== "hidden"; } catch { return true; } });
+  const [history, setHistory] = useState(false);
+  const show = (next: boolean) => {
+    setShown(next);
+    try { localStorage.setItem(TEAM_PANEL_KEY, next ? "shown" : "hidden"); } catch { /* kept for this window */ }
+  };
+  if (!orgId) return <>{children}</>;
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1">
+      {open ? <ArtifactViewer key={open.id} open={open} history={history} onHistory={setHistory} /> : children}
+      {open && history ? <ArtifactHistory key={open.id} open={open} onClose={() => setHistory(false)} />
+        : shown ? <div className="hidden min-[1100px]:flex"><TeamPanel orgId={orgId} selectedId={open?.id ?? null} onCollapse={() => show(false)} /></div>
+        : (
+          <div className="hidden w-10 shrink-0 justify-center border-l border-hairline pt-3.5 min-[1100px]:flex">
+            <Button variant="ghost" size="icon-xs" aria-label="Show team panel" onClick={() => show(true)}><PanelRight /></Button>
+          </div>
+        )}
     </div>
   );
 }

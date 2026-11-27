@@ -20,7 +20,19 @@ const codePlugin = createCodePlugin({ themes: ["github-light", "github-dark"] })
 const citedRemarkPlugins = [...Object.values(defaultRemarkPlugins), remarkCodexFileCitations];
 const routedRemarkPlugins = [...citedRemarkPlugins, routeMarkdownLinks];
 
-const Block = memo(function Block({ text, streaming, mode, linkContext, remoteImages = true, webLinksOnly = false }: { remoteImages?: boolean; webLinksOnly?: boolean; text: string; streaming: boolean; mode: string; linkContext?: ChatLinkContext }) {
+type MdNode = { type: string; children?: MdNode[] };
+/** Drops raw HTML from the Markdown tree, so nothing in it is drawn or loaded (Streamdown ignores `skipHtml`). */
+function remarkDropHtml() {
+  const prune = (node: MdNode) => {
+    if (!node.children) return;
+    node.children = node.children.filter((child) => child.type !== "html");
+    node.children.forEach(prune);
+  };
+  return (tree: MdNode) => prune(tree);
+}
+const textOnlyRemarkPlugins = [...citedRemarkPlugins, remarkDropHtml];
+
+const Block = memo(function Block({ text, streaming, mode, linkContext, remoteImages = true, webLinksOnly = false, rawHtml = true }: { remoteImages?: boolean; webLinksOnly?: boolean; rawHtml?: boolean; text: string; streaming: boolean; mode: string; linkContext?: ChatLinkContext }) {
   // Streamdown would complete unfinished Markdown itself; done here, it leaves Codex file citations whole (#776).
   const source = useMemo(() => (streaming ? completeStreamingMarkdown(text) : text), [text, streaming]);
   const components = useMemo(() => ({
@@ -54,7 +66,7 @@ const Block = memo(function Block({ text, streaming, mode, linkContext, remoteIm
         controls={{ code: { copy: true, download: false }, table: true, mermaid: false }}
         lineNumbers={false}
         components={components}
-        remarkPlugins={linkContext ? routedRemarkPlugins : citedRemarkPlugins}
+        remarkPlugins={!rawHtml ? (linkContext ? [...routedRemarkPlugins, remarkDropHtml] : textOnlyRemarkPlugins) : linkContext ? routedRemarkPlugins : citedRemarkPlugins}
         linkSafety={{ enabled: false }}
         codeBlockMaxHeight="24rem"
       >
@@ -101,6 +113,7 @@ export const Markdown = memo(function Markdown({
   linkContext,
   remoteImages,
   webLinksOnly,
+  rawHtml,
 }: {
   text: string;
   streaming?: boolean;
@@ -110,6 +123,13 @@ export const Markdown = memo(function Markdown({
   remoteImages?: boolean;
   /** Untrusted repository prose may link to websites, never local files or applications. */
   webLinksOnly?: boolean;
+  /**
+   * Raw HTML in the Markdown is drawn (the default) or dropped from the tree
+   * before it is drawn. Dropped for pages other people publish:
+   * `<picture><source srcset>` and the like would load from the network
+   * past `remoteImages`.
+   */
+  rawHtml?: boolean;
 }) {
   const { resolvedMode } = useTheme();
   const shown = useMemo(() => (streaming ? withoutPartialCodexFileCitation(text) : text), [text, streaming]);
@@ -117,7 +137,7 @@ export const Markdown = memo(function Markdown({
   if (chunks.length === 1) {
     return (
       <div className={className}>
-        <Block text={shown} streaming={!!streaming} mode={resolvedMode} linkContext={linkContext} remoteImages={remoteImages} webLinksOnly={webLinksOnly} />
+        <Block text={shown} streaming={!!streaming} mode={resolvedMode} linkContext={linkContext} remoteImages={remoteImages} webLinksOnly={webLinksOnly} rawHtml={rawHtml} />
       </div>
     );
   }
@@ -127,7 +147,7 @@ export const Markdown = memo(function Markdown({
   return (
     <div className={className}>
       {chunks.map((c, i) => (
-        <Block key={i} text={c} streaming={i === last} mode={resolvedMode} linkContext={linkContext} remoteImages={remoteImages} webLinksOnly={webLinksOnly} />
+        <Block key={i} text={c} streaming={i === last} mode={resolvedMode} linkContext={linkContext} remoteImages={remoteImages} webLinksOnly={webLinksOnly} rawHtml={rawHtml} />
       ))}
     </div>
   );

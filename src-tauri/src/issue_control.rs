@@ -26,6 +26,9 @@ pub struct Question {
     pub message: String,
     /// The one button that agrees.
     pub agree: String,
+    /// What agreeing does, under the details; the issue tracker's words when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 /// Presents a [`Question`] and waits for the answer. Only the desktop app has one.
@@ -207,6 +210,7 @@ pub fn question(write: &Write, subject: &Subject) -> Question {
         title: format!("{provider} issue request"),
         message: format!("{who} asks to {}\n\nThis acts on {provider}, where other people can see it and may be notified. If you did not ask an agent for this, refuse.", write.describe(subject.issue)),
         agree: write.agree().to_string(),
+        notice: None,
     }
 }
 

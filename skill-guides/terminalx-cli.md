@@ -1794,6 +1794,36 @@ own terminal), `stop` (the turn ended), `stopped` (nothing is running) or `timeo
 report the state from before the message. Interrupting it leaves nothing running in the app. Answering a permission request, archiving and
 deleting a workspace are done in the app.
 
+### Team artifacts
+
+```
+terminalx artifact publish <file.md|file.html|file.txt> [--org <org>] [--title <text>] \
+  [--slug <slug>|--template <slug>] [--new-version] [--note <text>] --json
+terminalx artifact show <slug> [--org <org>] --json
+```
+
+`artifact publish` publishes a page or note (up to 1 MB) for everyone in the organization: every
+member sees it on their overview within a minute. Run it from a terminal or agent in the session whose file
+it is: the app works out that session from the process itself (or the tab's own launch secret), never
+from `RACCOON_SESSION_ID`, and refuses when it cannot. The app reads the file itself, and only from that session's folder: a path outside it
+(links to folders are followed and judged by where they lead; a link as the file itself is refused), a hidden file or folder (`.env`, `.git/…`) or a file named for secrets
+(keys, tokens, credentials) is refused with `artifact_path_outside` or `artifact_path_refused`.
+
+- Without `--slug` or `--template`, it is always a new artifact.
+- `--template <slug>` publishes a template that people insert as `@slug` in a session's composer.
+  When a prompt names a template as `@slug`, run `artifact show <slug>`, fill it in, and publish
+  the result under a new slug.
+- A slug already in use is refused (`team_artifact_slug_taken`). Add `--new-version` to publish
+  the file as that artifact's next version; only its author and admins may
+  (`team_artifact_publish_forbidden`).
+
+It needs "Let agents publish team artifacts" turned on in Settings > General (otherwise
+`artifacts_publish_disabled`) and team artifacts enabled for the organization
+(`team_artifacts_unavailable`). A tab that asks before acting shows the person an approval card
+naming the file and the organization first; `declined`, `expired`, `busy` and `backoff` mean
+nothing was published, so do not retry: ask the person. `--org` takes the organization's name or
+id; it may be left out when only one organization has team artifacts.
+
 ### Paired machines
 
 A machine is another computer running TerminalX that this computer paired with (Settings →

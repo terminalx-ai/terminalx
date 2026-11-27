@@ -41,7 +41,7 @@ pub(crate) fn supported(command: &str) -> bool {
          | "browser.dialog.status" | "browser.storage.local.get" | "browser.storage.local.set" | "browser.storage.local.clear"
          | "browser.storage.session.get" | "browser.storage.session.set" | "browser.storage.session.clear" | "cloud.status" | "cloud.projects.list"
          | "cloud.sessions.list" | "cloud.sessions.create" | "cloud.send" | "cloud.read"
-         | "cloud.wait" | "cloud.stop" | "cloud.resume" | "share.create"
+         | "cloud.wait" | "cloud.stop" | "cloud.resume" | "artifacts.publish" | "artifacts.show" | "share.create"
          | "share.list" | "share.edit" | "share.revoke" | "share.remove"
          | "share.approve" | "share.note" | "share.takeover"
          | "floating.show" | "floating.hide" | "floating.toggle"
