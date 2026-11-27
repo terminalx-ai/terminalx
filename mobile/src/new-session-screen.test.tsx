@@ -27,6 +27,7 @@ vi.mock("@terminalx/portable/dashboard", () => ({}));
 vi.mock("react-native", () => {
   const Box = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
+    useWindowDimensions: () => ({ width: 375, height: 667, scale: 2, fontScale: 1 }),
     AppState: { currentState: "active" },
     View: Box, Text: Box, RefreshControl: () => null, Platform: { OS: "ios" }, Alert: { alert: vi.fn() }, useColorScheme: () => "dark",
     Modal: ({ visible, children }: any) => visible ? <div>{children}</div> : null,

@@ -18,6 +18,7 @@ import { hostDisplayName } from "@mobile/store/host-name";
 import { Notice } from "@mobile/ui/Notice";
 import { Button, Card, Screen, SectionTitle } from "@mobile/ui/primitives";
 import { Spinner } from "@mobile/ui/Spinner";
+import { withTextSizePage } from "@mobile/ui/text-size";
 import { THEMES, themePalette, useTheme } from "@mobile/ui/theme";
 
 /**
@@ -25,7 +26,7 @@ import { THEMES, themePalette, useTheme } from "@mobile/ui/theme";
  * only; what is here is the account, alerts, the look, the options of the
  * machine in use, and where to read how data is kept.
  */
-export default function SettingsScreen() {
+function SettingsScreen() {
   const app = useApp();
   const router = useRouter();
   const scheme = useColorScheme();
@@ -150,3 +151,6 @@ const styles = StyleSheet.create({
   linkRow: { minHeight: 48, paddingHorizontal: 14, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 10 },
   macError: { paddingHorizontal: 15, paddingBottom: 12 },
 });
+
+// Laid out again when the text size changes while the app is open (PRO-601).
+export default withTextSizePage(SettingsScreen);

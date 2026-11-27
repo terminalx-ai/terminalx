@@ -17,6 +17,7 @@ vi.mock("expo-router", () => ({ useRouter: () => ({ push: mocks.push, navigate: 
 vi.mock("react-native", () => {
   const View = ({ children, testID }: { children?: ReactNode; testID?: string }) => <div data-testid={testID}>{children}</div>;
   return {
+    useWindowDimensions: () => ({ width: 375, height: 667, scale: 2, fontScale: 1 }),
     View, Text: ({ children }: { children?: ReactNode }) => <span>{children}</span>, ScrollView: View, KeyboardAvoidingView: View,
     Modal: ({ children, visible }: { children?: ReactNode; visible: boolean }) => visible ? <div data-testid="modal">{children}</div> : null,
     TextInput: ({ accessibilityLabel, value, onChangeText }: any) => <input aria-label={accessibilityLabel} value={value} onChange={(event) => onChangeText(event.currentTarget.value)} />,

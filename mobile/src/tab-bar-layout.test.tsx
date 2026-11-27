@@ -36,10 +36,9 @@ beforeEach(() => {
 });
 afterEach(() => { act(() => root.unmount()); container.remove(); });
 
-it("draws each tab in the page that lays it out again at a new text size (PRO-601)", async () => {
-  const { textSizeScreenLayout } = await import("@mobile/ui/text-size");
+it("leaves the text size to the tab pages, which NativeTabs' props cannot carry (PRO-601)", async () => {
   await show();
-  expect(mocks.tabs.screenLayout).toBe(textSizeScreenLayout);
+  expect(mocks.tabs.screenLayout).toBeUndefined();
 });
 
 describe("on Android", () => {

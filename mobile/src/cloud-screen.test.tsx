@@ -36,6 +36,7 @@ vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => mocks.cat
 vi.mock("react-native", () => {
   const Box = ({ children, accessibilityRole, accessibilityLabel, testID, style }: { children?: ReactNode; accessibilityRole?: string; accessibilityLabel?: string; testID?: string; style?: unknown }) => <div role={accessibilityRole === "alert" ? "alert" : accessibilityRole === "progressbar" ? "progressbar" : accessibilityRole === "header" ? "heading" : undefined} aria-label={accessibilityLabel} data-testid={testID} data-style={JSON.stringify(Object.assign({}, ...([style].flat(3).filter(Boolean) as object[])))}>{children}</div>;
   return {
+    useWindowDimensions: () => ({ width: 375, height: 667, scale: 2, fontScale: 1 }),
     View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box, RefreshControl: () => null, Keyboard: { addListener: () => ({ remove: () => undefined }), isVisible: () => false, dismiss: () => undefined },
     Animated: { View: Box, Value: class { constructor(public value: number) {} }, timing: () => ({ start: () => undefined, stop: () => undefined }) },
     Alert: { alert: mocks.alert },

@@ -28,6 +28,7 @@ vi.mock("react-native", () => {
   const Box = ({ children, accessibilityLabel, testID }: { children?: ReactNode; accessibilityLabel?: string; testID?: string }) => <div aria-label={accessibilityLabel} data-testid={testID}>{children}</div>;
   const list = ({ sections, renderItem, renderSectionHeader, ListHeaderComponent }: any) => <div>{ListHeaderComponent}{sections.map((section: any) => <div key={section.key}>{renderSectionHeader?.({ section })}{section.data.map((entry: any, index: number) => <div key={index}>{renderItem({ item: entry, section, index })}</div>)}</div>)}</div>;
   return {
+    useWindowDimensions: () => ({ width: 375, height: 667, scale: 2, fontScale: 1 }),
     View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box, RefreshControl: () => null, ActivityIndicator: () => null, Keyboard: { addListener: () => ({ remove: () => undefined }), isVisible: () => false, dismiss: () => undefined },
     Animated: { View: Box, Value: class { constructor(public value: number) {} setValue() {} interpolate() { return "0deg"; } }, timing: () => ({ start: () => undefined, stop: () => undefined }), loop: () => ({ start: () => undefined, stop: () => undefined }) },
     Easing: { linear: (value: number) => value }, AccessibilityInfo: { isReduceMotionEnabled: async () => false, addEventListener: () => ({ remove: () => undefined }) }, Settings: { get: () => undefined, set: () => undefined },

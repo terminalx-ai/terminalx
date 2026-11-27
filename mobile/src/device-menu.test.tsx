@@ -26,6 +26,7 @@ vi.mock("react-native", () => {
   // A view VoiceOver keeps to is marked, and its escape gesture (two fingers in a Z) is the Escape key here.
   const Box = ({ children, accessibilityViewIsModal, onAccessibilityEscape }: { children?: ReactNode; accessibilityViewIsModal?: boolean; onAccessibilityEscape?: () => void }) => <div data-voiceover-modal={accessibilityViewIsModal ? "" : undefined} data-escape={onAccessibilityEscape ? "" : undefined} onKeyDown={onAccessibilityEscape ? (event) => { if (event.key === "Escape") onAccessibilityEscape(); } : undefined}>{children}</div>;
   return {
+    useWindowDimensions: () => ({ width: 375, height: 667, scale: 2, fontScale: 1 }),
     AppState: { currentState: "active" },
     View: Box, Text: Box, KeyboardAvoidingView: Box, RefreshControl: () => null, Platform: { OS: "ios" }, ActivityIndicator: () => null,
     Modal: ({ visible, children }: any) => visible ? <div data-modal>{children}</div> : null,

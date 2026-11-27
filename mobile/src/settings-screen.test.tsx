@@ -41,6 +41,7 @@ vi.mock("react-native", () => {
   const flat = (style: unknown): Record<string, unknown> => Array.isArray(style) ? Object.assign({}, ...style.map(flat)) : style && typeof style === "object" ? style as Record<string, unknown> : {};
   const View = ({ children, testID, style }: { children?: ReactNode; testID?: string; style?: unknown }) => <div data-testid={testID} data-bg={flat(style).backgroundColor as string | undefined}>{children}</div>;
   return {
+    useWindowDimensions: () => ({ width: 375, height: 667, scale: 2, fontScale: 1 }),
     View, Text: ({ children }: { children?: ReactNode }) => <span>{children}</span>, ScrollView: View,
     TextInput: ({ accessibilityLabel, value, onChangeText }: any) => <input aria-label={accessibilityLabel} value={value} onChange={(event) => onChangeText(event.currentTarget.value)} />,
     Platform: { OS: "ios" }, Alert: { alert: mocks.alert }, useColorScheme: () => "dark",

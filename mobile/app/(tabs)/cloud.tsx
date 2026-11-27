@@ -24,7 +24,7 @@ import { workspaceActions } from "@mobile/ui/workspace-actions";
 import { usePullRefresh } from "@mobile/ui/pull-refresh";
 import { TopBar, useTopBar } from "@mobile/ui/top-bar";
 import { useTabBarInset } from "@mobile/ui/tab-bar-inset";
-import { HEADING_MAX_POINTS, HEADING_SENTENCE_MAX_POINTS, maxScaleFor } from "@mobile/ui/text-size";
+import { HEADING_MAX_POINTS, HEADING_SENTENCE_MAX_POINTS, maxScaleFor, withTextSizePage } from "@mobile/ui/text-size";
 import { useTheme } from "@mobile/ui/theme";
 
 /** Rows drawn while the first list is read, with none kept from before. */
@@ -46,7 +46,7 @@ const PLACEHOLDER_ROWS = 3;
  * button for the one to do next. Once other organizations have workspaces,
  * the one still being set up folds to a row under them.
  */
-export default function CloudScreen() {
+function CloudScreen() {
   const app = useApp();
   const { palette } = useTheme();
   const bar = useTabBarInset();
@@ -236,3 +236,6 @@ const styles = StyleSheet.create({
 // Signed out, the heading and its sentence stop growing where the Machines tab's do (PRO-601).
 const SIGNED_OUT_TITLE_MAX_SCALE = maxScaleFor(styles.signedOutTitle.fontSize, HEADING_MAX_POINTS);
 const SIGNED_OUT_DETAIL_MAX_SCALE = maxScaleFor(styles.signedOutDetail.fontSize, HEADING_SENTENCE_MAX_POINTS);
+
+// Laid out again when the text size changes while the app is open (PRO-601).
+export default withTextSizePage(CloudScreen);
