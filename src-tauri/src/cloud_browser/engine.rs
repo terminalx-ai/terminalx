@@ -14,10 +14,11 @@ const TITLE_LIMIT: usize = 200;
 const SHOT_LIMIT: usize = 1_500_000;
 const REAP_EVERY: Duration = Duration::from_secs(30);
 
-/// What holds the desktop for a session. In tests, nothing does.
-#[cfg(target_os = "linux")]
+/// What holds the desktop for a session. In tests (on any platform; this
+/// module only builds on Linux or in tests), a stand-in Chrome and nothing.
+#[cfg(not(test))]
 type Lease = crate::remote::cloud_desktop::AgentLease;
-#[cfg(not(target_os = "linux"))]
+#[cfg(test)]
 type Lease = ();
 
 struct Browser {
@@ -338,19 +339,19 @@ async fn run(key: String, agent: String, tab_title: Option<String>, tool: &str, 
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(not(test))]
 async fn lease() -> Result<(Arc<Cdp>, Lease), String> {
     let pool = crate::remote::cloud_desktop::shared_pool().ok_or("The cloud desktop is not set up in this runtime.")?;
     let lease = pool.agent().await.map_err(|error| format!("The cloud desktop could not start: {error}."))?;
     Ok((lease.devtools.clone(), lease))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(test)]
 async fn lease() -> Result<(Arc<Cdp>, Lease), String> {
     TEST_CDP.lock().unwrap().clone().map(|cdp| (cdp, ())).ok_or_else(|| "No desktop in this test.".to_string())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(test)]
 static TEST_CDP: Mutex<Option<Arc<Cdp>>> = Mutex::new(None);
 
 async fn start(key: &str, agent: &str, tab_title: Option<String>) -> Result<Browser, String> {

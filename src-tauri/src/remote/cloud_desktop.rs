@@ -556,7 +556,7 @@ pub(crate) struct DesktopLease {
 
 /// An agent's hold on the desktop (PRO-209): it keeps the desktop up with no
 /// viewer, like a stream does, and names Chrome's DevTools endpoint.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(any(not(target_os = "linux"), test), allow(dead_code))]
 pub(crate) struct AgentLease {
     pub(crate) devtools: Arc<crate::cloud_browser::cdp::Cdp>,
     pool: Weak<DesktopPool>,
@@ -667,7 +667,7 @@ impl DesktopPool {
 
     /// Start the desktop if it is not up, and hold it for an agent. A Chrome
     /// started without the runtime's DevTools pipe is started again with it.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(any(not(target_os = "linux"), test), allow(dead_code))]
     pub(crate) async fn agent(self: &Arc<Self>) -> Result<AgentLease, DesktopError> {
         let mut state = self.state.lock().await;
         if state.desktop.as_mut().is_some_and(|desktop| !desktop.is_running()) {
