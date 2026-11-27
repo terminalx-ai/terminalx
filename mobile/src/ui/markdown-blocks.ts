@@ -24,6 +24,27 @@ const citations: TokenizerExtension = {
 const parser = new Marked({ gfm: true, breaks: true, extensions: [citations] });
 const MAX_CHARS = 1600;
 const MAX_LINES = 32;
+const MARKDOWN_CACHE_LIMIT = 256;
+const tokenCache = new Map<string, Token[]>();
+const blockCache = new Map<string, Token[]>();
+
+function lruGet<T>(cache: Map<string, T>, key: string): T | undefined {
+  const value = cache.get(key);
+  if (value === undefined) return undefined;
+  cache.delete(key);
+  cache.set(key, value);
+  return value;
+}
+
+function lruSet<T>(cache: Map<string, T>, key: string, value: T): T {
+  cache.delete(key);
+  cache.set(key, value);
+  if (cache.size > MARKDOWN_CACHE_LIMIT) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  return value;
+}
 
 // Keep individual native text layouts small, including a single very long
 // prompt, reasoning message, paragraph, or fenced code block. Preserve every
@@ -50,7 +71,9 @@ export function textChunks(text: string): string[] {
 }
 
 export function markdownTokens(text: string): Token[] {
-  return parser.lexer(text);
+  const cached = lruGet(tokenCache, text);
+  if (cached) return cached;
+  return lruSet(tokenCache, text, parser.lexer(text));
 }
 
 function inlineChunks(tokens: Token[]): Token[][] {
@@ -88,7 +111,9 @@ function inlineText(token: Token): string {
 // formatting must retain their context across virtualized rows. Lists keep
 // their numbering, tables keep their header, and code keeps its language.
 export function markdownBlocks(text: string): Token[] {
-  return markdownTokens(text).flatMap(splitBlock);
+  const cached = lruGet(blockCache, text);
+  if (cached) return cached;
+  return lruSet(blockCache, text, markdownTokens(text).flatMap(splitBlock));
 }
 
 function splitBlock(token: Token): Token[] {

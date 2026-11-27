@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Alert, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ScrollViewInstance } from "react-native";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { MessageSquareDashed, Play, Send, Square, Users } from "lucide-react-native";
-import { interruptUnanswered } from "@terminalx/portable/events";
-import { buildTranscript, type PendingAsk } from "@terminalx/portable/transcript";
+import { interruptUnanswered, type AgentEvent } from "@terminalx/portable/events";
+import type { PendingAsk, Turn } from "@terminalx/portable/transcript";
 import { leaseHeldBy, NOTE_MAX_CHARS } from "@terminalx/portable/workspaceCollab";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { workspaceTitle, type CloudCatalog } from "@mobile/cloud/catalog";
@@ -28,6 +28,7 @@ import { WorkspaceActionsButton } from "@mobile/ui/WorkspaceActionsButton";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
 import { useTheme } from "@mobile/ui/theme";
 import { CompactingLine, PermissionCard, QuestionCard, TurnCard } from "@mobile/ui/transcript";
+import { useIncrementalTranscript } from "@mobile/ui/useIncrementalTranscript";
 import { linkedText } from "@mobile/ui/LinkedText";
 import { CloudBotQuestions } from "@mobile/ui/CloudBotQuestions";
 
@@ -354,6 +355,10 @@ function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { 
   </View>;
 }
 
+const EMPTY_EVENTS: readonly AgentEvent[] = [];
+const keyOfTurn = (turn: Turn) => turn.key;
+const renderCloudTurn = ({ item }: { item: Turn }) => <TurnCard turn={item} deliveredTo="workspace" />;
+
 function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live, listedState, stop, goneHelp, promptNotSent }: { catalog: CloudCatalog; session: CloudWorkspaceSession; scope: string; orgId: string; workspaceId: string; tabId: string; live: boolean; listedState: string | null; stop: "stopping" | "failed" | null; goneHelp: GoneHelp; promptNotSent: boolean }) {
   const { palette } = useTheme();
   // Docked at the bottom: clear of the home indicator and the screen's rounded corners, as the session screen's composer is.
@@ -377,7 +382,7 @@ function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live
   const events = tab?.events;
   // A compaction is shown as running only while the tab's live feed has caught up; otherwise its status is unknown (#644).
   const continuous = tab?.continuous === true;
-  const transcript = useMemo(() => buildTranscript(events ?? [], live, { compactionContinuityKnown: continuous }), [events, live, continuous]);
+  const transcript = useIncrementalTranscript(events ?? EMPTY_EVENTS, live, continuous);
   const outbox = snapshot.outbox.filter((entry) => entry.tabId === tabId);
   const pending = outbox.filter((entry) => entry.kind !== "permission-decision" && outboxLine(entry, listedState === "suspended", nameOf));
 
@@ -492,10 +497,10 @@ function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live
       </View>
     </View> : null}
     {/* Opens at the newest turn, as the desktop and the session screen do; the asks and messages waiting sit at that edge. */}
-    <TranscriptList key={tabId ?? "none"} data={transcript.turns} keyExtractor={(turn) => turn.key}
+    <TranscriptList key={tabId ?? "none"} data={transcript.turns} keyExtractor={keyOfTurn}
       earlier={tab?.truncated ? <Text style={[styles.notice, { color: palette.muted }]}>Earlier messages are not in the saved conversation.</Text> : null}
       ListEmptyComponent={tab?.noKey ? <EmptyState title="Not readable on this phone yet" detail={codeText("no-key")!} /> : <EmptyState title="No conversation yet" detail={live ? "This tab has not published any turns." : "Nothing has been saved for this tab."} />}
-      renderItem={({ item }) => <TurnCard turn={item} deliveredTo="workspace" />}
+      renderItem={renderCloudTurn}
       latest={<>
         {transcript.compacting ? <CompactingLine /> : null}
         {transcript.pendingAsks.map((ask) => ask.kind === "questions"

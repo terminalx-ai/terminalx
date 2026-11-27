@@ -117,6 +117,8 @@ export const REFUSAL_REFRESH_MS = 30_000;
 export const RESUME_QUIET_MS = 1_000;
 export const OUTBOX_POLL_FIRST_MS = 1_000;
 export const OUTBOX_POLL_MAX_MS = 15_000;
+/** Coalescing window for live streamed cloud `AgentEvent`s before merging and publishing a snapshot. */
+export const STREAM_BATCH_MS = 60;
 
 export interface CloudWorkspaceSessionOptions {
   scope: CommandScope;
@@ -161,6 +163,10 @@ export class CloudWorkspaceSession {
   private readonly listeners = new Set<() => void>();
   private readonly stops: (() => void)[] = [];
   private readonly viewing = new Map<string, { stop: (() => void) | null; count: number }>();
+  private readonly pendingEvents = new Map<string, AgentEvent[]>();
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly deferredCheckpoints = new Set<string>();
+  private readonly checkpointLoads = new Map<string, Promise<void>>();
   private snapshot: CloudWorkspaceSnapshot;
   private error: string | null = null;
   private started = false;
@@ -320,6 +326,7 @@ export class CloudWorkspaceSession {
     this.viewing.set(tabId, entry);
     if (entry.count === 1) {
       if (this.client.connection.state === "connected") {
+        if (this.deferredCheckpoints.has(tabId)) void this.readCheckpoint(tabId);
         void this.stream(tabId);
         this.present(tabId, "viewing");
         void this.loadNotes(tabId);
@@ -331,6 +338,7 @@ export class CloudWorkspaceSession {
       done = true;
       entry.count -= 1;
       if (entry.count > 0) return;
+      this.flushPendingEvents(tabId);
       entry.stop?.();
       this.viewing.delete(tabId);
       // Nothing follows it now: what it shows next is what was last seen.
@@ -465,6 +473,9 @@ export class CloudWorkspaceSession {
   /** Stop and let go of the connection. What is kept on the phone stays. */
   close(): void {
     this.closed = true;
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.flushTimer = null;
+    this.pendingEvents.clear();
     if (this.heldTimer) clearTimeout(this.heldTimer);
     this.heldTimer = null;
     if (this.poll) clearTimeout(this.poll);
@@ -760,6 +771,63 @@ export class CloudWorkspaceSession {
     this.publish();
   }
 
+  private enqueueEvent(tabId: string, raw: AgentEvent): void {
+    if (this.closed || !this.tabs.has(tabId)) return;
+    let queue = this.pendingEvents.get(tabId);
+    if (!queue) {
+      queue = [];
+      this.pendingEvents.set(tabId, queue);
+    }
+    queue.push(raw);
+    if (!this.flushTimer) {
+      this.flushTimer = setTimeout(() => {
+        this.flushTimer = null;
+        this.flushPendingEvents();
+      }, STREAM_BATCH_MS);
+    }
+  }
+
+  /** Merge buffered streamed events into tab state; publishes once if any changed. */
+  private flushPendingEvents(onlyTabId?: string, publish = true): boolean {
+    if (onlyTabId === undefined && this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    let changed = false;
+    if (onlyTabId !== undefined) {
+      const queued = this.pendingEvents.get(onlyTabId);
+      if (queued?.length) {
+        this.pendingEvents.delete(onlyTabId);
+        const current = this.tabs.get(onlyTabId);
+        if (current) {
+          const next = mergeAgentEvents(current.events, queued);
+          if (next !== current.events) {
+            current.events = next;
+            changed = true;
+          }
+        }
+      }
+      if (this.pendingEvents.size === 0 && this.flushTimer) {
+        clearTimeout(this.flushTimer);
+        this.flushTimer = null;
+      }
+    } else if (this.pendingEvents.size > 0) {
+      for (const [id, queued] of this.pendingEvents) {
+        if (!queued.length) continue;
+        const current = this.tabs.get(id);
+        if (!current) continue;
+        const next = mergeAgentEvents(current.events, queued);
+        if (next !== current.events) {
+          current.events = next;
+          changed = true;
+        }
+      }
+      this.pendingEvents.clear();
+    }
+    if (changed && publish) this.publish();
+    return changed;
+  }
+
   private async stream(tabId: string): Promise<void> {
     const entry = this.viewing.get(tabId);
     const tab = this.tabs.get(tabId);
@@ -771,22 +839,25 @@ export class CloudWorkspaceSession {
         tabId,
         (raw) => {
           if (!isEvent(raw)) return;
-          const current = this.tabs.get(tabId);
-          if (!current) return;
-          current.events = mergeAgentEvents(current.events, [raw]);
-          this.publish();
+          this.enqueueEvent(tabId, raw);
         },
         {
           onStatus: (change) => {
             const current = this.tabs.get(tabId);
             if (!current) return;
+            this.flushPendingEvents(tabId, false);
             current.status = change.status;
             this.publish();
           },
           // The runtime's history after the cursor is all here (again after each resume): caught up, while still looked at and connected.
           onReplayed: () => {
             const current = this.tabs.get(tabId);
-            if (!current || this.viewing.get(tabId) !== entry || this.client.connection.state !== "connected" || current.continuous) return;
+            if (!current || this.viewing.get(tabId) !== entry || this.client.connection.state !== "connected") return;
+            const flushed = this.flushPendingEvents(tabId, false);
+            if (current.continuous) {
+              if (flushed) this.publish();
+              return;
+            }
             current.continuous = true;
             this.publish();
           },
@@ -810,7 +881,11 @@ export class CloudWorkspaceSession {
     this.publish();
   }
 
-  /** Every tab the API has a checkpoint for, each opened from what is kept and then from the API. */
+  /**
+   * Discover every tab the API has a checkpoint for, loading only the active
+   * (viewed or first) tab's checkpoint immediately and deferring unopened tabs
+   * until `view(tabId)` opens them.
+   */
   private async readCheckpoints(): Promise<void> {
     let metas;
     try {
@@ -820,26 +895,50 @@ export class CloudWorkspaceSession {
       this.publish();
       return;
     }
-    await Promise.all(metas.map((meta) => this.readCheckpoint(meta.tabId)));
+    if (this.closed || !metas.length) return;
+    let addedTab = false;
+    for (const meta of metas) {
+      if (!this.tabs.has(meta.tabId)) {
+        this.tab(meta.tabId);
+        addedTab = true;
+      }
+      this.deferredCheckpoints.add(meta.tabId);
+    }
+    if (addedTab) this.publish();
+    const viewed = metas.filter((meta) => this.viewing.has(meta.tabId)).map((meta) => meta.tabId);
+    const immediate = viewed.length ? viewed : [metas[0].tabId];
+    await Promise.all(immediate.map((tabId) => this.readCheckpoint(tabId)));
   }
 
-  private async readCheckpoint(tabId: string): Promise<void> {
-    let read;
-    try {
-      read = await this.transcripts.cached(tabId);
-      if (read.kind === "transcript") this.applyCheckpoint(tabId, read);
-      read = await this.transcripts.refresh(tabId);
-    } catch (error) {
-      this.error = error instanceof CloudApiError ? error.code : "cloud_workspace_transcript_unreadable";
-      this.publish();
-      return;
-    }
-    if (this.closed) return;
-    if (read.kind === "none") return;
-    this.applyCheckpoint(tabId, read);
+  private readCheckpoint(tabId: string): Promise<void> {
+    const existing = this.checkpointLoads.get(tabId);
+    if (existing) return existing;
+    this.deferredCheckpoints.delete(tabId);
+    const task = (async () => {
+      let cached;
+      let fresh;
+      try {
+        cached = await this.transcripts.cached(tabId);
+        if (this.closed) return;
+        if (cached.kind === "transcript") this.applyCheckpoint(tabId, cached);
+        fresh = await this.transcripts.refresh(tabId, cached);
+      } catch (error) {
+        this.error = error instanceof CloudApiError ? error.code : "cloud_workspace_transcript_unreadable";
+        this.publish();
+        return;
+      }
+      if (this.closed) return;
+      if (fresh.kind === "none" || fresh === cached) return;
+      this.applyCheckpoint(tabId, fresh);
+    })();
+    this.checkpointLoads.set(tabId, task);
+    return task.finally(() => {
+      if (this.checkpointLoads.get(tabId) === task) this.checkpointLoads.delete(tabId);
+    });
   }
 
   private applyCheckpoint(tabId: string, read: Awaited<ReturnType<CloudTranscripts["refresh"]>>): void {
+    this.flushPendingEvents(tabId, false);
     const live = this.tabs.get(tabId)?.source === "live";
     const tab = this.tab(tabId);
     if (read.kind === "no-key") {

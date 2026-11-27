@@ -1,3 +1,4 @@
+import { Buffer } from "buffer";
 import { gcm } from "@noble/ciphers/aes";
 import { sha256 } from "@noble/hashes/sha256";
 import { Gunzip } from "fflate";
@@ -33,18 +34,20 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 export function b64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
 }
 
 export function unb64(text: string): Uint8Array {
   const trimmed = text.replace(/=+$/, "");
   if (!/^[A-Za-z0-9_-]*$/.test(trimmed)) throw new CloudCryptoError("invalid");
-  const binary = atob(trimmed.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (trimmed.length % 4)) % 4));
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
-  return bytes;
+  if (trimmed.length % 4 === 1) throw new CloudCryptoError("invalid");
+  const standard = trimmed.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (trimmed.length % 4)) % 4);
+  const decoded = Buffer.from(standard, "base64");
+  return new Uint8Array(decoded.buffer, decoded.byteOffset, decoded.byteLength);
 }
 
 export function keyFromB64(text: string): Uint8Array {

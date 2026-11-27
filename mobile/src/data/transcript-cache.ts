@@ -300,6 +300,9 @@ export function clearTranscriptCaches(host?: string): Promise<void> {
   for (const k of [...layouts.keys()]) {
     try { if (!host || JSON.parse(k.slice(indexPrefix.length))[0] === host) layouts.delete(k); } catch { layouts.delete(k); }
   }
+  for (const k of [...savedSerialized.keys()]) {
+    try { if (!host || JSON.parse(k.slice(savedPrefix.length))[0] === host) savedSerialized.delete(k); } catch { savedSerialized.delete(k); }
+  }
   const operation = writes.catch(() => undefined).then(async () => {
     const keys = await AsyncStorage.getAllKeys();
     await AsyncStorage.multiRemove(keys.filter((k) => {
@@ -322,13 +325,25 @@ export function clearTranscriptCaches(host?: string): Promise<void> {
  */
 const savedPrefix = "terminalx:saved:v1:";
 const savedKey = (host: string, name: string) => savedPrefix + JSON.stringify([host, name]);
+/** Last serialized value known on disk per saved key, to skip redundant AsyncStorage writes. */
+const savedSerialized = new Map<string, string>();
 
 export async function readSaved<T>(host: string, name: string, valid: (value: unknown) => value is T): Promise<T | null> {
+  const k = savedKey(host, name);
+  const epoch = cacheEpoch(host);
   try {
-    const raw = await AsyncStorage.getItem(savedKey(host, name));
-    if (!raw) return null;
+    const raw = await AsyncStorage.getItem(k);
+    if (!raw) {
+      if (epoch === cacheEpoch(host)) savedSerialized.delete(k);
+      return null;
+    }
     const value: unknown = JSON.parse(raw);
-    return valid(value) ? value : null;
+    if (!valid(value)) {
+      if (epoch === cacheEpoch(host)) savedSerialized.delete(k);
+      return null;
+    }
+    if (epoch === cacheEpoch(host)) savedSerialized.set(k, raw);
+    return value;
   } catch { return null; }
 }
 
@@ -337,10 +352,15 @@ export async function readSaved<T>(host: string, name: string, valid: (value: un
  * so a Mac forgotten (or a sign-out) while that request was under way is not written back (#983).
  */
 export function writeSaved(host: string, name: string, value: unknown, epoch: number): Promise<void> {
+  const k = savedKey(host, name);
   const data = JSON.stringify(value);
+  if (epoch !== cacheEpoch(host)) return Promise.resolve();
+  if (savedSerialized.get(k) === data) return Promise.resolve();
   const operation = writes.catch(() => undefined).then(async () => {
     if (epoch !== cacheEpoch(host)) return;
-    await AsyncStorage.setItem(savedKey(host, name), data);
+    if (savedSerialized.get(k) === data) return;
+    await AsyncStorage.setItem(k, data);
+    if (epoch === cacheEpoch(host)) savedSerialized.set(k, data);
   });
   writes = operation;
   return operation.catch(() => undefined);

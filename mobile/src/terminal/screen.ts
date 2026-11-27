@@ -1,6 +1,6 @@
 // First: xterm reads `navigator` as soon as it loads, and React Native's has none of what it reads.
 import "./xterm-platform";
-import { Terminal, type IBufferCell } from "@xterm/headless";
+import { Terminal, type IBuffer, type IBufferCell, type IDisposable } from "@xterm/headless";
 
 /**
  * The phone's copy of a tab's terminal. The Mac sends the pane's raw output,
@@ -45,8 +45,11 @@ export function paletteColor(index: number): string {
   return hex((grey << 16) | (grey << 8) | grey);
 }
 
+const DEFAULT_LOOK: Omit<Span, "text"> = {};
+
 /** How a cell looks, naming only what differs from the terminal's defaults. */
 function look(cell: IBufferCell): Omit<Span, "text"> {
+  if (cell.isAttributeDefault()) return DEFAULT_LOOK;
   let fg = cell.isFgPalette() ? paletteColor(cell.getFgColor()) : cell.isFgRGB() ? hex(cell.getFgColor()) : undefined;
   let bg = cell.isBgPalette() ? paletteColor(cell.getBgColor()) : cell.isBgRGB() ? hex(cell.getBgColor()) : undefined;
   // Inverse swaps them, with the defaults standing in for an unset side.
@@ -66,24 +69,48 @@ const same = (a: Span, b: Omit<Span, "text">) =>
 
 export class TerminalScreen {
   private readonly term: Terminal;
+  private readonly disposables: IDisposable[] = [];
   private disposed = false;
+  private dirty = true;
+  private scrollEvents = 0;
+  private lastScrollEvents = 0;
+  private lastBaseY = 0;
+  private cachedScrollback: Row[] = [];
+  private cachedLines: Row[] | null = null;
+  private cachedViewport: Row[] | null = null;
+  private cachedBufferType: "normal" | "alternate" | null = null;
+  private _extractedRows = 0;
 
   constructor(cols: number, rows: number, scrollback = SCROLLBACK) {
     this.term = new Terminal({ cols: Math.max(1, cols), rows: Math.max(1, rows), scrollback, allowProposedApi: true });
+    this.disposables.push(
+      this.term.onScroll(() => {
+        if (this.term.buffer.active.type === "normal") this.scrollEvents++;
+      }),
+      this.term.buffer.onBufferChange(() => {
+        this.dirty = true;
+      }),
+    );
   }
 
   get cols() { return this.term.cols; }
   get rows() { return this.term.rows; }
+  /** Total buffer rows extracted across calls; useful for verifying incremental scrollback reuse. */
+  get extractedRowsCount() { return this._extractedRows; }
 
   /** Parse output; resolves once it is on the screen. */
   write(data: string): Promise<void> {
     if (this.disposed || !data) return Promise.resolve();
-    return new Promise((resolve) => this.term.write(data, resolve));
+    return new Promise((resolve) => this.term.write(data, () => {
+      this.dirty = true;
+      resolve();
+    }));
   }
 
   resize(cols: number, rows: number) {
     if (this.disposed || (cols === this.term.cols && rows === this.term.rows) || cols < 1 || rows < 1) return;
     this.term.resize(cols, rows);
+    this.invalidateScrollback();
   }
 
   modes(): ScreenModes {
@@ -98,14 +125,69 @@ export class TerminalScreen {
    * What to draw, oldest first. A normal screen is its history and then its
    * visible rows; a full-screen program's alternate screen is only what it
    * shows. Trailing blank cells are dropped; each row keeps at least a space.
+   *
+   * Scrollback rows (`0 .. baseY - 1`) are cached incrementally so active
+   * output only extracts newly-scrolled lines and the visible viewport.
    */
   lines(): Row[] {
     const buffer = this.term.buffer.active;
-    return this.rowsFrom(buffer.type === "alternate" ? buffer.baseY : 0);
+    if (!this.dirty && this.cachedLines && this.cachedBufferType === buffer.type) {
+      return this.cachedLines;
+    }
+    const cell = buffer.getNullCell();
+    if (buffer.type === "alternate") {
+      const viewport = this.extractRange(buffer, buffer.baseY, buffer.length, cell);
+      this.cachedBufferType = "alternate";
+      this.cachedViewport = viewport;
+      this.cachedLines = viewport;
+      this.dirty = false;
+      return viewport;
+    }
+
+    const baseY = buffer.baseY;
+    const scrollDelta = this.scrollEvents - this.lastScrollEvents;
+    if (baseY === 0) {
+      this.cachedScrollback = [];
+    } else if (baseY < this.lastBaseY || this.cachedScrollback.length === 0) {
+      this.cachedScrollback = this.extractRange(buffer, 0, baseY, cell);
+    } else if (scrollDelta > 0 || baseY > this.cachedScrollback.length) {
+      const added = Math.max(scrollDelta, baseY - this.cachedScrollback.length);
+      if (added >= baseY) {
+        this.cachedScrollback = this.extractRange(buffer, 0, baseY, cell);
+      } else {
+        const evicted = Math.max(0, this.cachedScrollback.length + added - baseY);
+        const kept = evicted > 0 ? this.cachedScrollback.slice(evicted) : this.cachedScrollback;
+        if (evicted > 0) {
+          for (let i = 0; i < kept.length; i++) {
+            const expectedKey = `normal:${i}`;
+            if (kept[i].key !== expectedKey) kept[i] = { key: expectedKey, spans: kept[i].spans };
+          }
+        }
+        const newlyScrolled = this.extractRange(buffer, baseY - added, baseY, cell);
+        this.cachedScrollback = kept.concat(newlyScrolled);
+      }
+    }
+    this.lastBaseY = baseY;
+    this.lastScrollEvents = this.scrollEvents;
+
+    const viewport = this.extractRange(buffer, baseY, buffer.length, cell);
+    const combined = this.cachedScrollback.length ? this.cachedScrollback.concat(viewport) : viewport;
+    this.cachedBufferType = "normal";
+    this.cachedViewport = viewport;
+    this.cachedLines = combined;
+    this.dirty = false;
+    return combined;
   }
 
   /** Only what the screen shows now, its history aside. */
-  viewport(): Row[] { return this.rowsFrom(this.term.buffer.active.baseY); }
+  viewport(): Row[] {
+    const buffer = this.term.buffer.active;
+    if (!this.dirty && this.cachedViewport && this.cachedBufferType === buffer.type) {
+      return this.cachedViewport;
+    }
+    const cell = buffer.getNullCell();
+    return this.extractRange(buffer, buffer.baseY, buffer.length, cell);
+  }
 
   /** Whether the terminal kept a history of its own: lines that scrolled off a normal screen. */
   hasHistory(): boolean {
@@ -113,22 +195,34 @@ export class TerminalScreen {
     return buffer.type === "normal" && buffer.baseY > 0;
   }
 
-  private rowsFrom(first: number): Row[] {
-    const buffer = this.term.buffer.active;
+  private invalidateScrollback() {
+    this.cachedScrollback = [];
+    this.cachedLines = null;
+    this.cachedViewport = null;
+    this.cachedBufferType = null;
+    this.lastBaseY = 0;
+    this.scrollEvents = 0;
+    this.lastScrollEvents = 0;
+    this.dirty = true;
+  }
+
+  private extractRange(buffer: IBuffer, start: number, end: number, cell: IBufferCell): Row[] {
     const out: Row[] = [];
-    const cell = buffer.getNullCell();
-    for (let y = first; y < buffer.length; y++) {
+    const cols = this.term.cols;
+    const prefix = `${buffer.type}:`;
+    for (let y = start; y < end; y++) {
       const line = buffer.getLine(y);
       if (!line) continue;
+      this._extractedRows++;
       const spans: Span[] = [];
-      for (let x = 0; x < this.term.cols; x++) {
+      for (let x = 0; x < cols; x++) {
         line.getCell(x, cell);
         if (cell.getWidth() === 0) continue; // the second half of a wide character
         const chars = cell.getChars() || " ";
         const style = look(cell);
         const last = spans[spans.length - 1];
         if (last && same(last, style)) last.text += chars;
-        else spans.push({ text: chars, ...style });
+        else spans.push(style === DEFAULT_LOOK ? { text: chars } : { text: chars, ...style });
       }
       // Blank cells at the end go, unless something painted them.
       while (spans.length && !spans[spans.length - 1].bg) {
@@ -137,7 +231,7 @@ export class TerminalScreen {
         if (last.text) break;
         spans.pop();
       }
-      out.push({ key: `${buffer.type}:${y}`, spans: spans.length ? spans : [{ text: " " }] });
+      out.push({ key: `${prefix}${y}`, spans: spans.length ? spans : [{ text: " " }] });
     }
     return out;
   }
@@ -145,6 +239,10 @@ export class TerminalScreen {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    for (const disposable of this.disposables.splice(0)) disposable.dispose();
+    this.cachedScrollback = [];
+    this.cachedLines = null;
+    this.cachedViewport = null;
     this.term.dispose();
   }
 }

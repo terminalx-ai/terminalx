@@ -65,4 +65,45 @@ describe("the phone's terminal screen", () => {
     expect(paletteColor(232)).toBe("#080808");
     expect(paletteColor(255)).toBe("#eeeeee");
   });
+
+  it("extracts only newly scrolled and viewport rows instead of re-reading full scrollback (P-45)", async () => {
+    const screen = new TerminalScreen(40, 4, 200);
+    // Push 80 lines into scrollback.
+    const bulk = Array.from({ length: 80 }, (_, i) => `line-${i}`).join("\r\n") + "\r\nactive-0";
+    await screen.write(bulk);
+    const initial = screen.lines();
+    expect(initial.length).toBeGreaterThan(75);
+    expect(text(screen).at(0)).toBe("line-0");
+
+    // Repeated lines() with no new write does zero extraction.
+    const countAfterFirst = screen.extractedRowsCount;
+    expect(screen.lines()).toBe(initial);
+    expect(screen.extractedRowsCount).toBe(countAfterFirst);
+
+    // 10 viewport-only redraws (spinner / progress updates): only 4 viewport rows extracted per draw.
+    for (let i = 1; i <= 10; i++) {
+      await screen.write(`\ractive-${i}   `);
+      const rows = screen.lines();
+      expect(rows.slice(0, 5)).toEqual(initial.slice(0, 5));
+      expect(rows.at(-1)?.spans.map((s) => s.text).join("").trimEnd()).toBe(`active-${i}`);
+    }
+    const extractedDuringRedraws = screen.extractedRowsCount - countAfterFirst;
+    expect(extractedDuringRedraws).toBe(10 * 4);
+
+    // Scrolling 2 more lines extracts only those 2 newly scrolled lines + 4 viewport rows.
+    const beforeScroll = screen.extractedRowsCount;
+    await screen.write("\r\nnew-a\r\nnew-b");
+    const afterScroll = text(screen);
+    expect(afterScroll).toContain("new-a");
+    expect(afterScroll).toContain("new-b");
+    expect(screen.extractedRowsCount - beforeScroll).toBeLessThanOrEqual(8);
+
+    // Wrapping past scrollback capacity keeps exact buffer contents.
+    const overflow = Array.from({ length: 250 }, (_, i) => `wrap-${i}`).join("\r\n");
+    await screen.write(`\r\n${overflow}`);
+    const wrapped = text(screen);
+    expect(wrapped).toContain("wrap-249");
+    expect(wrapped).not.toContain("line-0");
+    screen.dispose();
+  });
 });

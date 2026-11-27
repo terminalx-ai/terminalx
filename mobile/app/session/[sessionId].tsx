@@ -1,5 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
@@ -7,7 +7,7 @@ import { File as ExpoFile } from "expo-file-system";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ArrowUp, CornerDownLeft, FileText, Keyboard as KeyboardIcon, Mic, Plus, TextCursorInput, Shield, ShieldAlert, Square, StickyNote, WifiOff, X } from "lucide-react-native";
-import { buildTranscript, type PendingAsk } from "@terminalx/portable/transcript";
+import type { PendingAsk } from "@terminalx/portable/transcript";
 import type { AgentEvent } from "@terminalx/portable/events";
 import { mergeEvents, type AttachmentInput, type ChatNote } from "@mobile/data/host-api";
 import { draftContent, draftIdFor, readDraftId, type DraftId } from "@mobile/data/draft-id";
@@ -33,11 +33,12 @@ import { ChatTabs, NewChatSheet, SessionHeader } from "@mobile/ui/SessionChrome"
 import { SessionNotificationsSheet, useSessionOverride } from "@mobile/ui/notifications/SessionNotifications";
 import { LinkedText } from "@mobile/ui/LinkedText";
 import { CompactingLine, PermissionCard, QuestionCard, TranscriptRow } from "@mobile/ui/transcript";
+import { useIncrementalTranscript } from "@mobile/ui/useIncrementalTranscript";
 import { SessionControls } from "@mobile/ui/SessionControls";
 import { StatusLine, statusLineState } from "@mobile/ui/StatusLine";
-import { conversationItems } from "@mobile/ui/conversation-items";
+import { conversationItems, type ConversationItem } from "@mobile/ui/conversation-items";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
-import { holdSend, releaseSend, showConversation, takeHeldSend, useConversationState } from "@mobile/state/conversation-state";
+import { evictConversationKey, holdSend, releaseSend, showConversation, takeHeldSend, useConversationState } from "@mobile/state/conversation-state";
 import { addPasteImageListener } from "../../modules/paste-image";
 import { PromptImageContext } from "@mobile/ui/PromptImages";
 import { useHostFeatures } from "@mobile/state/host-features";
@@ -48,6 +49,13 @@ import { ScreenHistory } from "@mobile/terminal/history";
 
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const MAX_ATTACHMENT_COUNT = 8;
+const DRAFT_SAVE_DEBOUNCE_MS = 450;
+
+const keyOfConversationItem = (item: ConversationItem) => item.key;
+const renderConversationItem = ({ item }: { item: ConversationItem }) =>
+  item.kind === "turn" ? <TranscriptRow row={item.row} /> : <NoteCard note={item.note} first={item.first} />;
+const keyOfTerminalRow = (row: ScreenRow) => row.key;
+const renderTerminalRow = ({ item }: { item: ScreenRow }) => <TerminalLine row={item} />;
 
 interface MobileAttachment extends AttachmentInput {
   id: string;
@@ -155,7 +163,6 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
   const words = useHostWords();
   const router = useRouter();
   const { palette } = useTheme();
-  const insets = useSafeAreaInsets();
   const stateKey = conversationKey(hostId, sessionId, tabId);
   const [events, setEvents] = useConversationState<AgentEvent[]>(`${stateKey}:events`, []);
   const [notes, setNotes] = useConversationState<ChatNote[]>(`${stateKey}:notes`, []);
@@ -167,35 +174,21 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [earlierError, setEarlierError] = useState<string | null>(null);
   const earlierRequest = useRef<object | null>(null);
-  const [draft, setDraft] = useConversationState(`${stateKey}:draft`, "");
-  // The id the draft was last sent under, kept until a send under it succeeds (#675).
-  const [draftId, setDraftId] = useConversationState<DraftId | null>(`${stateKey}:draftId`, null);
-  const [sendToAgent, setSendToAgent] = useConversationState(`${stateKey}:sendToAgent`, true);
-  const [sending, setSending] = useConversationState(`${stateKey}:sending`, false);
-  // Sent while not connected: held here, and sent once the phone connects (#983).
-  const [held, setHeld] = useConversationState(`${stateKey}:held`, false);
-  // In flight as a ref too: the held send and a tap can land in the same render.
-  const sendInFlight = useRef(false);
-  // A send that failed, said for this visit only: a sent message shows in the
-  // transcript itself, and nothing about a send outlives leaving the screen.
-  // `resend`: the send failed with the connection, and sending the same draft again can help.
-  const [sendFailure, setSendFailure] = useState<{ message: string; resend?: boolean } | null>(null);
-  const [attachments, setAttachments] = useConversationState<MobileAttachment[]>(`${stateKey}:attachments`, []);
-  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const [composerHeight, setComposerHeight] = useState(0);
   const [answeringPermission, setAnsweringPermission] = useConversationState<string | null>(`${stateKey}:answeringPermission`, null);
   const [permissionErrors, setPermissionErrors] = useConversationState<Record<string, string>>(`${stateKey}:permissionErrors`, {});
   // In flight as a ref too: a second tap lands before the first one's render.
   const answeringAsk = useRef(false);
-  const draftEdited = useRef(false);
-  const cacheKey = `terminalx:draft:${hostId}:${sessionId}:${tabId}`;
   useEffect(() => {
     if (connected) void app.api.markRead(sessionId, tabId).catch(() => {});
   }, [app.api, connected, sessionId, tabId]);
-  const draftIdKey = `terminalx:draft-id:${hostId}:${sessionId}:${tabId}`;
+  // Evict heavy transcript events from in-memory map on unmount; disk transcript-cache reloads them fast.
+  useEffect(() => () => { evictConversationKey(`${stateKey}:events`); }, [stateKey]);
   // Whether this connection's watcher read the Mac's history to its end: only then is a compaction shown as running (#644).
   const [caughtUp, setCaughtUp] = useState(false);
   const continuous = connected && caughtUp;
-  const transcript = useMemo(() => buildTranscript(events, connected, { compactionContinuityKnown: continuous }), [connected, events, continuous]);
+  const transcript = useIncrementalTranscript(events, connected, continuous);
 
   useEffect(() => {
     let receivedPage = false;
@@ -239,20 +232,6 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
     return beginUpdate();
   }, [beginUpdate, connected, loading]);
 
-  useEffect(() => {
-    let active = true;
-    void AsyncStorage.getItem(cacheKey).then((value) => {
-      if (active && !draftEdited.current && value) setDraft((current) => current || value);
-    });
-    // A draft whose send failed goes again under the same id after the app
-    // was closed (#675). Not once the person has typed or sent: a send that
-    // succeeded retired the id.
-    void AsyncStorage.getItem(draftIdKey).then((value) => {
-      const saved = readDraftId(value);
-      if (active && !draftEdited.current && saved) setDraftId((current) => current ?? saved);
-    });
-    return () => { active = false; };
-  }, [cacheKey, draftIdKey, setDraft, setDraftId]);
   useEffect(() => {
     let active = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -305,6 +284,220 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
     }
   };
 
+  // A prompt's images live on the Mac: it hands each over, where it can (`promptImages`).
+  const imagesServed = useHostFeatures(app.api, hostId)?.promptImages === 1;
+  const imageSource = useMemo(() => imagesServed ? { scope: `${hostId}:${sessionId}`, load: (url: string) => app.api.promptImage(sessionId, tabId, url) } : null, [app.api, hostId, imagesServed, sessionId, tabId]);
+
+  const harness = app.sessions.find((item) => item.id === sessionId)?.tabs.find((tab) => tab.id === tabId)?.harness;
+
+  // Opening a conversation shows it, not the keyboard: one still up from the
+  // screen before (a new session's first message) goes, and the composer
+  // takes focus only when tapped.
+  useEffect(() => { Keyboard.dismiss(); }, []);
+
+  const items = useMemo(() => conversationItems(transcript.turns, notes, tabId), [notes, tabId, transcript.turns]);
+  const tabStatus = app.sessions.find((item) => item.id === sessionId)?.tabs.find((tab) => tab.id === tabId)?.status;
+  const status = useMemo(() => statusLineState({ transcript, events, tabStatus }), [events, tabStatus, transcript]);
+
+  const addNote = useCallback((note: ChatNote) => {
+    setNotes((current) => [...current.filter((item) => item.id !== note.id), note].sort((left, right) => left.createdAt - right.createdAt));
+  }, [setNotes]);
+
+  const openTab = useCallback((next: string) => {
+    router.setParams({ tabId: next, hostId });
+  }, [hostId, router]);
+
+  // One answer at a time, to a permission request or a question: the card it
+  // was for goes when the Mac's decision event arrives, and a refusal (the
+  // Mac or another device answered first) is said on that card.
+  const answerAsk = async (ask: PendingAsk, send: () => Promise<{ answered: true } | { answered: false; message: string }>, failed: string) => {
+    if (!connected || answeringAsk.current) return;
+    answeringAsk.current = true;
+    setAnsweringPermission(ask.requestId);
+    setPermissionErrors((current) => { const next = { ...current }; delete next[ask.requestId]; return next; });
+    try {
+      const result = await send();
+      if (!result.answered) setPermissionErrors((current) => ({ ...current, [ask.requestId]: result.message }));
+    } catch (error) {
+      setPermissionErrors((current) => ({ ...current, [ask.requestId]: screenMessage(error, failed) }));
+    } finally {
+      answeringAsk.current = false;
+      setAnsweringPermission(null);
+    }
+  };
+  const respondPermission = (ask: PendingAsk, optionId: string) => answerAsk(ask, () => app.api.respondPermission(sessionId, tabId, ask.requestId, optionId), "The host could not answer this request.");
+  const answerQuestions = (ask: PendingAsk, answers: Record<string, string>) => answerAsk(ask, () => app.api.answerQuestions(sessionId, tabId, ask.requestId, answers), "The answer could not be sent.");
+
+  const retryTranscript = () => {
+    // One more read, even of a page that halted after breaking the connection.
+    retryHaltedTranscript(hostId, sessionId, tabId);
+    if (connected) setRetry((value) => value + 1);
+    // Not connected: try now rather than after the delay. The connection, once made, reads the transcript.
+    else if (app.retryConnection) app.retryConnection();
+    else app.connection.retryNow();
+  };
+  const reconnect = () => app.retryConnection ? app.retryConnection() : app.connection.retryNow();
+  const notice = transcriptNotice({ state, connected, available, loadError, saved: events.length > 0, machine, retry: retryTranscript, reconnect });
+  const noticeLine = notice ? <Card style={styles.noticeLine}>
+    <WifiOff size={18} color={palette.warning} />
+    <Text accessibilityLiveRegion="polite" style={[styles.noticeText, { color: palette.ink }]}>{notice.text}</Text>
+    <Button label={notice.action} kind="secondary" disabled={sending} onPress={notice.onPress} style={styles.noticeAction} />
+  </Card> : null;
+  const transcriptHeader = <>
+    {earlierError ? <EmptyState title="Could not load earlier turns" detail={earlierError} /> : null}
+    {hasMore ? <Button
+      label={loadingEarlier ? "Loading earlier…" : earlierError ? "Retry loading earlier" : "Load earlier"}
+      kind="secondary"
+      disabled={!connected || loading || loadingEarlier || !!loadError}
+      onPress={() => void loadEarlier()}
+    /> : null}
+  </>;
+  // The subtitle shows the one spinner; an empty conversation only says what it is waiting for.
+  const emptyTranscript = !connected
+    ? loading ? undefined : <EmptyState title="No saved messages" detail={`This conversation shows once the phone connects to ${words.your}.`} />
+    // A failed read is said by the line above; "no transcript" would not be true.
+    : loadError ? undefined
+    : loading ? <EmptyState title="Loading transcript" detail={`Reading the latest turns from ${machine}.`} />
+      : hasMore ? <EmptyState title="Earlier turns available" detail="Load earlier to see the context for these updates." />
+        : <EmptyState title="No transcript yet" detail="This tab has not published any turns." />;
+
+  // The bar is drawn in this screen, so the view starts where the screen does: no offset.
+  // The view makes room for the keyboard with padding, which a floating composer ignores: the inner view is what shrinks, and the composer floats at its foot.
+  return <PromptImageContext.Provider value={imageSource}><KeyboardAvoidingView style={styles.flex} behavior={keyboardAvoidingBehavior()}><View style={styles.flex}>{noticeLine}<TranscriptList inset={composerHeight} data={items} keyExtractor={keyOfConversationItem} contentContainerStyle={styles.transcriptRows} earlier={transcriptHeader} ListEmptyComponent={emptyTranscript} renderItem={renderConversationItem} latest={<>{transcript.compacting ? <CompactingLine /> : null}{transcript.pendingAsks.map((ask) => ask.kind === "questions"
+  // Until the Mac has said what it takes, nothing can be sent; one that takes no answer shows the question to be answered there.
+  ? <QuestionCard key={ask.requestId} ask={ask} stateKey={stateKey} connected={connected} answering={answeringPermission !== null || (connected && answersQuestions === null)} readOnly={answersQuestions === false ? answerThere(words) : null} error={permissionErrors[ask.requestId]} onAnswer={(answers) => void answerQuestions(ask, answers)} />
+  : <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission !== null} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><ChatComposer
+    hostId={hostId}
+    sessionId={sessionId}
+    tabId={tabId}
+    stateKey={stateKey}
+    connected={connected}
+    state={state}
+    harness={harness}
+    status={status}
+    events={events}
+    asks={transcript.pendingAsks.length}
+    composerHeight={composerHeight}
+    onHeightChange={setComposerHeight}
+    onNotePosted={addNote}
+    onOpenTab={openTab}
+    onSendingChange={setSending}
+  /></View></KeyboardAvoidingView></PromptImageContext.Provider>;
+}
+
+/**
+ * Isolated composer input state so typing, dictation, and attachments never
+ * re-render `ChatPane` or `TranscriptList`. Draft writes to `AsyncStorage`
+ * are debounced and flushed on unmount.
+ */
+const ChatComposer = memo(function ChatComposer({ hostId, sessionId, tabId, stateKey, connected, state, harness, status, events, asks, composerHeight, onHeightChange, onNotePosted, onOpenTab, onSendingChange }: {
+  hostId: string;
+  sessionId: string;
+  tabId: string;
+  stateKey: string;
+  connected: boolean;
+  state: ConnectionState;
+  harness: string | undefined;
+  status: ReturnType<typeof statusLineState>;
+  events: AgentEvent[];
+  asks: number;
+  composerHeight: number;
+  onHeightChange(height: number): void;
+  onNotePosted(note: ChatNote): void;
+  onOpenTab(tabId: string): void;
+  onSendingChange(sending: boolean): void;
+}) {
+  const app = useApp();
+  const { palette } = useTheme();
+  const insets = useSafeAreaInsets();
+  const [draft, setDraft] = useConversationState(`${stateKey}:draft`, "");
+  // The id the draft was last sent under, kept until a send under it succeeds (#675).
+  const [draftId, setDraftId] = useConversationState<DraftId | null>(`${stateKey}:draftId`, null);
+  const [sendToAgent, setSendToAgent] = useConversationState(`${stateKey}:sendToAgent`, true);
+  const [sending, setSending] = useConversationState(`${stateKey}:sending`, false);
+  // Sent while not connected: held here, and sent once the phone connects (#983).
+  const [held, setHeld] = useConversationState(`${stateKey}:held`, false);
+  // In flight as a ref too: the held send and a tap can land in the same render.
+  const sendInFlight = useRef(false);
+  // A send that failed, said for this visit only: a sent message shows in the
+  // transcript itself, and nothing about a send outlives leaving the screen.
+  // `resend`: the send failed with the connection, and sending the same draft again can help.
+  const [sendFailure, setSendFailure] = useState<{ message: string; resend?: boolean } | null>(null);
+  const [attachments, setAttachments] = useConversationState<MobileAttachment[]>(`${stateKey}:attachments`, []);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const draftEdited = useRef(false);
+  const cacheKey = `terminalx:draft:${hostId}:${sessionId}:${tabId}`;
+  const draftIdKey = `terminalx:draft-id:${hostId}:${sessionId}:${tabId}`;
+
+  // Debounced draft persistence to AsyncStorage (flushed on unmount, cancelled on send success).
+  const draftSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingDraftValue = useRef<string | null>(null);
+  const cancelDraftSave = useCallback(() => {
+    if (draftSaveTimer.current) {
+      clearTimeout(draftSaveTimer.current);
+      draftSaveTimer.current = null;
+    }
+    pendingDraftValue.current = null;
+  }, []);
+  const flushDraftSave = useCallback(() => {
+    if (draftSaveTimer.current) {
+      clearTimeout(draftSaveTimer.current);
+      draftSaveTimer.current = null;
+    }
+    const next = pendingDraftValue.current;
+    if (next === null) return;
+    pendingDraftValue.current = null;
+    void AsyncStorage.setItem(cacheKey, next);
+  }, [cacheKey]);
+  const scheduleDraftSave = useCallback((value: string) => {
+    pendingDraftValue.current = value;
+    if (draftSaveTimer.current) clearTimeout(draftSaveTimer.current);
+    draftSaveTimer.current = setTimeout(() => {
+      draftSaveTimer.current = null;
+      const toSave = pendingDraftValue.current;
+      pendingDraftValue.current = null;
+      if (toSave !== null) void AsyncStorage.setItem(cacheKey, toSave);
+    }, DRAFT_SAVE_DEBOUNCE_MS);
+  }, [cacheKey]);
+  useEffect(() => () => flushDraftSave(), [flushDraftSave]);
+  useEffect(() => { onSendingChange(sending); }, [onSendingChange, sending]);
+
+  useEffect(() => {
+    let active = true;
+    void AsyncStorage.getItem(cacheKey).then((value) => {
+      if (active && !draftEdited.current && value) setDraft((current) => current || value);
+    });
+    // A draft whose send failed goes again under the same id after the app
+    // was closed (#675). Not once the person has typed or sent: a send that
+    // succeeded retired the id.
+    void AsyncStorage.getItem(draftIdKey).then((value) => {
+      const saved = readDraftId(value);
+      if (active && !draftEdited.current && saved) setDraftId((current) => current ?? saved);
+    });
+    return () => { active = false; };
+  }, [cacheKey, draftIdKey, setDraft, setDraftId]);
+
+  // Over the keyboard the composer needs no room for the home indicator.
+  const keyboardShown = useKeyboardShown();
+
+  // Speaking into the composer: what is said goes after what was already typed.
+  const typedBefore = useRef("");
+  const dictation = useDictation((said) => {
+    draftEdited.current = true;
+    setHeld(false);
+    const next = typedBefore.current ? `${typedBefore.current} ${said}` : said;
+    setDraft(next);
+    setSendFailure(null);
+    scheduleDraftSave(next);
+  });
+  const beginDictation = async () => { typedBefore.current = draft.trimEnd(); await dictation.start(); };
+  // Cancelled, what was said goes: the draft is what it was before.
+  const cancelDictation = () => {
+    dictation.cancel();
+    setDraft(typedBefore.current);
+    scheduleDraftSave(typedBefore.current);
+  };
+
   /** `released`: the held message, now that the phone is connected (from this screen or from the app, if it was left). */
   const send = async (released = false) => {
     const text = draft.trim();
@@ -350,8 +543,9 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
       } else {
         const posted = await app.api.postNote(sessionId, text, sendId.id);
         if (!posted.sent) return showError(posted.message);
-        setNotes((current) => [...current.filter((note) => note.id !== posted.note.id), posted.note].sort((left, right) => left.createdAt - right.createdAt));
+        onNotePosted(posted.note);
       }
+      cancelDraftSave();
       setDraft("");
       setDraftId(null);
       setAttachments([]);
@@ -469,39 +663,8 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
   };
   useEffect(() => addPasteImageListener((image) => { if (composerFocused.current) onPastedImage.current(image.data); }), []);
 
-  // A prompt's images live on the Mac: it hands each over, where it can (`promptImages`).
-  const imagesServed = useHostFeatures(app.api, hostId)?.promptImages === 1;
-  const imageSource = useMemo(() => imagesServed ? { scope: `${hostId}:${sessionId}`, load: (url: string) => app.api.promptImage(sessionId, tabId, url) } : null, [app.api, hostId, imagesServed, sessionId, tabId]);
-
-  const harness = app.sessions.find((item) => item.id === sessionId)?.tabs.find((tab) => tab.id === tabId)?.harness;
   // Once the wait is a real one, the box says a message waits for the connection.
   const placeholder = state === "waiting" || state === "offline" ? "Message sends when connected" : harness ? `Message ${providerName(harness)}` : "Message this session";
-
-  // Opening a conversation shows it, not the keyboard: one still up from the
-  // screen before (a new session's first message) goes, and the composer
-  // takes focus only when tapped.
-  useEffect(() => { Keyboard.dismiss(); }, []);
-  // Over the keyboard the composer needs no room for the home indicator.
-  const keyboardShown = useKeyboardShown();
-
-  // Speaking into the composer: what is said goes after what was already typed.
-  const [composerHeight, setComposerHeight] = useState(0);
-  const typedBefore = useRef("");
-  const dictation = useDictation((said) => {
-    draftEdited.current = true;
-    setHeld(false);
-    const next = typedBefore.current ? `${typedBefore.current} ${said}` : said;
-    setDraft(next);
-    setSendFailure(null);
-    void AsyncStorage.setItem(cacheKey, next);
-  });
-  const beginDictation = async () => { typedBefore.current = draft.trimEnd(); await dictation.start(); };
-  // Cancelled, what was said goes: the draft is what it was before.
-  const cancelDictation = () => {
-    dictation.cancel();
-    setDraft(typedBefore.current);
-    void AsyncStorage.setItem(cacheKey, typedBefore.current);
-  };
 
   /** The + button: photos or files, from the system's own chooser. */
   const chooseAttachment = () => {
@@ -513,81 +676,19 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
     });
   };
 
-  const items = useMemo(() => conversationItems(transcript.turns, notes, tabId), [notes, tabId, transcript.turns]);
-  const tabStatus = app.sessions.find((item) => item.id === sessionId)?.tabs.find((tab) => tab.id === tabId)?.status;
-  const status = useMemo(() => statusLineState({ transcript, events, tabStatus }), [events, tabStatus, transcript]);
-
-  // One answer at a time, to a permission request or a question: the card it
-  // was for goes when the Mac's decision event arrives, and a refusal (the
-  // Mac or another device answered first) is said on that card.
-  const answerAsk = async (ask: PendingAsk, send: () => Promise<{ answered: true } | { answered: false; message: string }>, failed: string) => {
-    if (!connected || answeringAsk.current) return;
-    answeringAsk.current = true;
-    setAnsweringPermission(ask.requestId);
-    setPermissionErrors((current) => { const next = { ...current }; delete next[ask.requestId]; return next; });
-    try {
-      const result = await send();
-      if (!result.answered) setPermissionErrors((current) => ({ ...current, [ask.requestId]: result.message }));
-    } catch (error) {
-      setPermissionErrors((current) => ({ ...current, [ask.requestId]: screenMessage(error, failed) }));
-    } finally {
-      answeringAsk.current = false;
-      setAnsweringPermission(null);
-    }
-  };
-  const respondPermission = (ask: PendingAsk, optionId: string) => answerAsk(ask, () => app.api.respondPermission(sessionId, tabId, ask.requestId, optionId), "The host could not answer this request.");
-  const answerQuestions = (ask: PendingAsk, answers: Record<string, string>) => answerAsk(ask, () => app.api.answerQuestions(sessionId, tabId, ask.requestId, answers), "The answer could not be sent.");
-
-  const retryTranscript = () => {
-    // One more read, even of a page that halted after breaking the connection.
-    retryHaltedTranscript(hostId, sessionId, tabId);
-    if (connected) setRetry((value) => value + 1);
-    // Not connected: try now rather than after the delay. The connection, once made, reads the transcript.
-    else if (app.retryConnection) app.retryConnection();
-    else app.connection.retryNow();
-  };
-  const reconnect = () => app.retryConnection ? app.retryConnection() : app.connection.retryNow();
-  const notice = transcriptNotice({ state, connected, available, loadError, saved: events.length > 0, machine, retry: retryTranscript, reconnect });
-  const noticeLine = notice ? <Card style={styles.noticeLine}>
-    <WifiOff size={18} color={palette.warning} />
-    <Text accessibilityLiveRegion="polite" style={[styles.noticeText, { color: palette.ink }]}>{notice.text}</Text>
-    <Button label={notice.action} kind="secondary" disabled={sending} onPress={notice.onPress} style={styles.noticeAction} />
-  </Card> : null;
-  const transcriptHeader = <>
-    {earlierError ? <EmptyState title="Could not load earlier turns" detail={earlierError} /> : null}
-    {hasMore ? <Button
-      label={loadingEarlier ? "Loading earlier…" : earlierError ? "Retry loading earlier" : "Load earlier"}
-      kind="secondary"
-      disabled={!connected || loading || loadingEarlier || !!loadError}
-      onPress={() => void loadEarlier()}
-    /> : null}
-  </>;
-  // The subtitle shows the one spinner; an empty conversation only says what it is waiting for.
-  const emptyTranscript = !connected
-    ? loading ? undefined : <EmptyState title="No saved messages" detail={`This conversation shows once the phone connects to ${words.your}.`} />
-    // A failed read is said by the line above; "no transcript" would not be true.
-    : loadError ? undefined
-    : loading ? <EmptyState title="Loading transcript" detail={`Reading the latest turns from ${machine}.`} />
-      : hasMore ? <EmptyState title="Earlier turns available" detail="Load earlier to see the context for these updates." />
-        : <EmptyState title="No transcript yet" detail="This tab has not published any turns." />;
-
   // Not connected, a message can still be sent: it is held, and goes once the phone connects.
   const sendDisabled = (!draft.trim() && !attachments.length) || sending || held;
   // The model, effort and mode stay in place while not connected, dimmed (#983).
   const dimmed = connected ? undefined : styles.dimmed;
-  // The bar is drawn in this screen, so the view starts where the screen does: no offset.
-  // The view makes room for the keyboard with padding, which a floating composer ignores: the inner view is what shrinks, and the composer floats at its foot.
-  return <PromptImageContext.Provider value={imageSource}><KeyboardAvoidingView style={styles.flex} behavior={keyboardAvoidingBehavior()}><View style={styles.flex}>{noticeLine}<TranscriptList inset={composerHeight} data={items} keyExtractor={(item) => item.key} contentContainerStyle={styles.transcriptRows} earlier={transcriptHeader} ListEmptyComponent={emptyTranscript} renderItem={({ item }) => item.kind === "turn" ? <TranscriptRow row={item.row} /> : <NoteCard note={item.note} first={item.first} />} latest={<>{transcript.compacting ? <CompactingLine /> : null}{transcript.pendingAsks.map((ask) => ask.kind === "questions"
-  // Until the Mac has said what it takes, nothing can be sent; one that takes no answer shows the question to be answered there.
-  ? <QuestionCard key={ask.requestId} ask={ask} stateKey={stateKey} connected={connected} answering={answeringPermission !== null || (connected && answersQuestions === null)} readOnly={answersQuestions === false ? answerThere(words) : null} error={permissionErrors[ask.requestId]} onAnswer={(answers) => void answerQuestions(ask, answers)} />
-  : <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission !== null} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><SessionControls sessionId={sessionId} tabId={tabId} events={events} asks={transcript.pendingAsks.length} connected={connected} onOpenTab={(next) => router.setParams({ tabId: next, hostId })}>{(controls) => {
+
+  return <SessionControls sessionId={sessionId} tabId={tabId} events={events} asks={asks} connected={connected} onOpenTab={onOpenTab}>{(controls) => {
     // Send stays Send while the agent works; the turn is stopped from the status line (22.03).
     const ready = !sendDisabled;
     const action = <Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={sendDisabled} hitSlop={6} onPress={() => void send()} style={[styles.send, { backgroundColor: ready ? palette.ink : palette.raised, borderColor: ready ? palette.ink : palette.border }]}><ArrowUp size={16} color={ready ? palette.page : palette.ink} strokeWidth={2.4} /></Pressable>;
     // A long press on the line's Stop stops the whole session, after asking.
     const stopSession = controls ? () => Alert.alert("Stop this session?", "The agent stops, and its conversation stays.", [{ text: "Cancel", style: "cancel" }, { text: "Stop", style: "destructive", onPress: controls.stop }]) : undefined;
     // Floating over the conversation, which fades and blurs away under it.
-    return <View onLayout={({ nativeEvent }) => setComposerHeight(nativeEvent.layout.height)} style={[styles.composer, styles.dock, { paddingBottom: (keyboardShown ? 0 : insets.bottom) + 8 }]}>
+    return <View onLayout={({ nativeEvent }) => onHeightChange(nativeEvent.layout.height)} style={[styles.composer, styles.dock, { paddingBottom: (keyboardShown ? 0 : insets.bottom) + 8 }]}>
       <EdgeFade edge="bottom" height={composerHeight + 32} />
       {controls?.panel}
       {attachments.length ? <View style={styles.attachments}>{attachments.map((attachment) => <View key={attachment.id} style={styles.attachment}>{attachment.mediaType.startsWith("image/") ? <Image source={{ uri: attachment.uri }} accessibilityLabel={attachment.name} style={styles.attachmentImage} /> : <View accessibilityLabel={attachment.name} style={[styles.attachmentImage, styles.fileAttachment, { backgroundColor: palette.raised }]}><FileText size={22} color={palette.muted} /><Text numberOfLines={1} style={[styles.fileAttachmentName, { color: palette.muted }]}>{attachment.name}</Text></View>}<Pressable accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} style={styles.removeAttachment}><X size={13} color="#fff" /></Pressable></View>)}</View> : null}
@@ -601,7 +702,7 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
       {/* As 22.01 and 22.03 draw it: the message on top, and beneath it what to send it with. */}
       <Glass style={styles.inputGlass}>
         {!sendToAgent ? <View style={styles.noteBanner}><StickyNote size={14} color={palette.warning} /><Text style={[styles.noteBannerText, { color: palette.muted }]}>Worktree note · not sent to the agent</Text><Pressable accessibilityRole="button" accessibilityLabel="Send to agent" hitSlop={10} onPress={() => { setSendToAgent(true); setSendFailure(null); }}><X size={15} color={palette.muted} /></Pressable></View> : null}
-        <TextInput value={draft} autoFocus={false} onFocus={() => { composerFocused.current = true; }} onBlur={() => { composerFocused.current = false; }} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setHeld(false); setSendFailure(null); void AsyncStorage.setItem(cacheKey, value); }} multiline placeholder={dictation.listening ? "Listening…" : placeholder} placeholderTextColor={palette.faint} style={[styles.composeInput, { color: palette.ink }]} />
+        <TextInput value={draft} autoFocus={false} onFocus={() => { composerFocused.current = true; }} onBlur={() => { composerFocused.current = false; }} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setHeld(false); setSendFailure(null); scheduleDraftSave(value); }} multiline placeholder={dictation.listening ? "Listening…" : placeholder} placeholderTextColor={palette.faint} style={[styles.composeInput, { color: palette.ink }]} />
         {dictation.listening ? <View style={styles.toolbar}>
           {/* Listening, as the best chat apps show it: cancel, the voice as it is heard, stop and keep, or send. */}
           <IconButton label="Cancel dictation" icon={<X size={20} color={palette.ink} strokeWidth={2.2} />} onPress={cancelDictation} />
@@ -628,8 +729,8 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
         </View>}
       </Glass>
     </View>;
-  }}</SessionControls></View></KeyboardAvoidingView></PromptImageContext.Provider>;
-}
+  }}</SessionControls>;
+});
 
 /**
  * The slim line above the conversation (#983), shown only when something has
@@ -658,10 +759,10 @@ function base64Size(value: string): number {
   return Math.max(0, Math.floor(value.length * 3 / 4) - padding);
 }
 
-function NoteCard({ note, first }: { note: ChatNote; first: boolean }) {
+const NoteCard = memo(function NoteCard({ note, first }: { note: ChatNote; first: boolean }) {
   const { palette } = useTheme();
   return <Card style={styles.note}>{first ? <Text style={[styles.noteAuthor, { color: palette.accent }]}>{note.author.displayName ?? "Participant"} · note</Text> : null}<LinkedText style={[styles.body, { color: palette.ink }]}>{note.body}</LinkedText></Card>;
-}
+});
 
 /** How much of the retained output is replayed at a time, so the history in it is seen as it scrolls by. */
 const REPLAY_PIECE = 2048;
@@ -782,11 +883,12 @@ function TerminalPane({ hostId, sessionId, tabId, connected, state }: { hostId: 
     void write(keySequence("enter", modes()));
   };
   const sendsText = mode === "buffered" && input.length > 0;
+  const reversedRows = useMemo(() => [...rows].reverse(), [rows]);
   return <KeyboardAvoidingView style={styles.flex} behavior={keyboardAvoidingBehavior()}>
     {/* The agent's screen, edge to edge on the terminal's own black, with how the link is doing in a corner. */}
     <View style={[styles.flex, { backgroundColor: palette.terminal }]}>
       {/* The screen and its history, scrolled as any list; a line wider than the screen wraps onto the next. */}
-      <FlatList inverted data={[...rows].reverse()} keyExtractor={(row) => row.key} renderItem={({ item }) => <TerminalLine row={item} />} contentContainerStyle={styles.terminalOutput} />
+      <FlatList inverted data={reversedRows} keyExtractor={keyOfTerminalRow} renderItem={renderTerminalRow} contentContainerStyle={styles.terminalOutput} />
       <View accessibilityLabel={statusDetail} style={[styles.terminalStatus, { backgroundColor: `${palette.page}cc`, borderColor: palette.border }]}>
         <StatusDot color={live && !refusal ? palette.success : palette.warning} />
         <Text style={[styles.terminalStatusText, { color: palette.muted }]}>{status}</Text>
@@ -824,13 +926,13 @@ function KeyCap({ label, name, live, selected = false, onPress }: { label: strin
   </Pressable>;
 }
 
-function TerminalLine({ row }: { row: ScreenRow }) {
+const TerminalLine = memo(function TerminalLine({ row }: { row: ScreenRow }) {
   // Dim is the colour at 60%: nested text takes a colour, not an opacity.
   return <Text selectable style={[styles.terminalText, { color: TERMINAL_FOREGROUND }]}>{row.spans.map((span, index) => <Text key={index} style={{
     color: span.dim ? `${span.fg ?? TERMINAL_FOREGROUND}99` : span.fg, backgroundColor: span.bg, fontWeight: span.bold ? "700" : undefined,
     fontStyle: span.italic ? "italic" : undefined, textDecorationLine: span.underline ? "underline" : undefined,
   }}>{span.text}</Text>)}</Text>;
-}
+});
 
 const styles = StyleSheet.create({
   transcriptRows: { gap: 0 },

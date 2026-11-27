@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { BYPASS_MODE, PERMISSION_MODES, bypassEffect, effortChoices, EFFORT_LABEL, modelForTab, type ModelInfo } from "@terminalx/portable/agentSettings";
@@ -11,6 +11,45 @@ import { useApp } from "../state/AppProvider";
 import { useHostFeatures } from "../state/host-features";
 import { Button, Card } from "./primitives";
 import { useTheme } from "./theme";
+
+const CONTROL_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "turn_started",
+  "turn_completed",
+  "settings_changed",
+  "error",
+  "recovery",
+  "conversation",
+]);
+
+function controlEventSignature(events: readonly AgentEvent[]): string {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (CONTROL_EVENT_TYPES.has(event.payload.type)) {
+      return `${event.seq}:${event.id}:${event.payload.type}`;
+    }
+  }
+  return "";
+}
+
+function sameTabControls(left: TabControls | null, right: TabControls | null): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.harness === right.harness
+    && left.model === right.model
+    && (left.effort ?? null) === (right.effort ?? null)
+    && left.permissionMode === right.permissionMode
+    && (left.requestedModel ?? null) === (right.requestedModel ?? null)
+    && (left.requestedEffort ?? null) === (right.requestedEffort ?? null)
+    && (left.requestedPermissionMode ?? null) === (right.requestedPermissionMode ?? null)
+    && left.status === right.status
+    && left.transport === right.transport;
+}
+
+function sameModels(left: readonly ModelInfo[], right: readonly ModelInfo[]): boolean {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+  return JSON.stringify(left) === JSON.stringify(right);
+}
 
 interface Choice { key: string; label: string; hint?: string; current?: boolean; pending?: boolean; onSelect(): void }
 
@@ -73,26 +112,63 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
   const [picker, setPicker] = useState<{ title: string; choices: Choice[] } | null>(null);
   const [continuing, setContinuing] = useState(false);
 
+  const refreshInFlight = useRef<Promise<void> | null>(null);
+  const refreshQueued = useRef(false);
+  const refreshScope = useRef(`${host ?? ""}:${sessionId}:${tabId}`);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  useEffect(() => {
+    refreshScope.current = `${host ?? ""}:${sessionId}:${tabId}`;
+    refreshInFlight.current = null;
+    refreshQueued.current = false;
+  }, [host, sessionId, tabId]);
+
   const refresh = useCallback(() => {
-    // Taken before the request: a Mac forgotten while it is under way is not saved again.
-    const epoch = host ? cacheEpoch(host) : 0;
-    return app.api.tabControls(sessionId, tabId).then((next) => {
-      setTab(next);
-      if (next && host) void writeSaved(host, tabKey, next, epoch);
-    }).catch(() => {
-      // The connection failed: what is shown stays, dimmed, until it is back.
+    const scope = `${host ?? ""}:${sessionId}:${tabId}`;
+    if (refreshInFlight.current && refreshScope.current === scope) {
+      refreshQueued.current = true;
+      return refreshInFlight.current;
+    }
+    const run = (async () => {
+      do {
+        refreshQueued.current = false;
+        // Taken before the request: a Mac forgotten while it is under way is not saved again.
+        const epoch = host ? cacheEpoch(host) : 0;
+        try {
+          const next = await app.api.tabControls(sessionId, tabId);
+          if (!mounted.current || refreshScope.current !== scope) return;
+          setTab((current) => {
+            if (sameTabControls(current, next)) return current;
+            if (next && host) void writeSaved(host, tabKey, next, epoch);
+            return next;
+          });
+        } catch {
+          // The connection failed: what is shown stays, dimmed, until it is back.
+        }
+      } while (refreshQueued.current && mounted.current && refreshScope.current === scope);
+    })().finally(() => {
+      if (refreshInFlight.current === run) refreshInFlight.current = null;
     });
+    refreshInFlight.current = run;
+    return run;
   }, [app.api, host, sessionId, tabId, tabKey]);
-  // A setting applied, a turn begun or ended: each arrives as an event.
-  useEffect(() => { if (supported && connected) void refresh(); }, [connected, events.length, refresh, supported]);
+  // Refresh only on control-affecting events, not every streamed delta/chunk.
+  const controlSignal = useMemo(() => controlEventSignature(events), [events]);
+  useEffect(() => { if (supported && connected) void refresh(); }, [connected, controlSignal, refresh, supported]);
   useEffect(() => {
     if (!supported || !connected) return;
     let active = true;
     const epoch = host ? cacheEpoch(host) : 0;
     void app.api.models().then((list) => {
       if (!active || !list.length) return;
-      setModels(list);
-      if (host) void writeSaved(host, "models", list, epoch);
+      setModels((current) => {
+        if (sameModels(current, list)) return current;
+        if (host) void writeSaved(host, "models", list, epoch);
+        return list;
+      });
     }).catch(() => undefined);
     return () => { active = false; };
   }, [app.api, connected, host, supported]);

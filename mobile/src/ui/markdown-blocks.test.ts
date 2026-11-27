@@ -24,3 +24,9 @@ it("keeps a citation whole when a long paragraph is split into rows", () => {
   const citations = blocks.flatMap((block) => (block as { tokens?: Token[] }).tokens ?? []).filter((token) => token.type === "codexFileCitation");
   expect(citations).toEqual([expect.objectContaining({ raw: marker })]);
 });
+
+it("memoizes markdownTokens and markdownBlocks for identical text (P-13, P-45)", () => {
+  const sample = "# Heading\n\nSome **bold** text and `code`.";
+  expect(markdownTokens(sample)).toBe(markdownTokens(sample));
+  expect(markdownBlocks(sample)).toBe(markdownBlocks(sample));
+});

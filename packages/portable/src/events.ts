@@ -291,11 +291,63 @@ export type Payload =
 
 export type PayloadType = Payload["type"];
 
+const sortedEventArrays = new WeakSet<readonly AgentEvent[]>();
+const appendedFromEvents = new WeakMap<readonly AgentEvent[], readonly AgentEvent[]>();
+
+function isStrictlyAscending(events: readonly AgentEvent[]): boolean {
+  for (let i = 1; i < events.length; i++) {
+    if (events[i].seq <= events[i - 1].seq) return false;
+  }
+  return true;
+}
+
+/** True when `next` was built solely by strictly appending higher-`seq` events onto `previous`. */
+export function isStrictEventAppend(previous: readonly AgentEvent[], next: readonly AgentEvent[]): boolean {
+  if (previous === next) return true;
+  if (next.length < previous.length) return false;
+  let cursor: readonly AgentEvent[] | undefined = next;
+  for (let hops = 0; hops < 64 && cursor; hops++) {
+    const parent = appendedFromEvents.get(cursor);
+    if (parent === previous) return true;
+    cursor = parent;
+  }
+  return false;
+}
+
 /** Merge paged tails and live appends without duplicating or reordering sequence numbers. */
 export function mergeAgentEvents(existing: readonly AgentEvent[], incoming: readonly AgentEvent[]): AgentEvent[] {
+  const existingSorted = existing.length <= 1 || sortedEventArrays.has(existing);
+  if (incoming.length === 0) {
+    if (existing.length === 0) return [];
+    if (existingSorted) return existing as AgentEvent[];
+  }
+  if (existingSorted && incoming.length > 0 && isStrictlyAscending(incoming)) {
+    if (existing.length === 0) {
+      const result = incoming.slice();
+      sortedEventArrays.add(result);
+      appendedFromEvents.set(result, existing);
+      return result;
+    }
+    const lastExisting = existing[existing.length - 1];
+    if (incoming[0].seq > lastExisting.seq) {
+      const result = existing.concat(incoming);
+      sortedEventArrays.add(result);
+      appendedFromEvents.set(result, existing);
+      return result;
+    }
+    if (incoming.length === 1 && incoming[0].seq === lastExisting.seq) {
+      if (incoming[0] === lastExisting) return existing as AgentEvent[];
+      const result = existing.slice();
+      result[result.length - 1] = incoming[0];
+      sortedEventArrays.add(result);
+      return result;
+    }
+  }
   const bySequence = new Map(existing.map((event) => [event.seq, event]));
   for (const event of incoming) bySequence.set(event.seq, event);
-  return [...bySequence.values()].sort((left, right) => left.seq - right.seq);
+  const result = [...bySequence.values()].sort((left, right) => left.seq - right.seq);
+  sortedEventArrays.add(result);
+  return result;
 }
 
 /**

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { encodeHandshakeTranscript, validateHandshake, type MobileE2EEHello, type MobileE2EEReady } from "./e2ee-contract";
+import { decodeAnyCanonicalBase64, decodeCanonicalBase64, encodeBase64, encodeHandshakeTranscript, validateHandshake, type MobileE2EEHello, type MobileE2EEReady } from "./e2ee-contract";
 import { openFrame, sealFrame } from "./e2ee-framing";
 import { deriveKeySchedule, MobileE2EESession } from "./e2ee-session";
 
@@ -47,5 +47,38 @@ describe("relay E2EE v2 framing", () => {
     expect(open({ expectedCounter: 1n })).toBeNull();
     expect(open({ direction: "desktop-to-mobile" as const })).toBeNull();
     expect(open({ payloadKind: "binary" as const })).toBeNull();
+  });
+
+  it("encodes and validates canonical base64 via Buffer without round-trip re-encoding (P-44)", () => {
+    for (const length of [0, 1, 2, 3, 4, 31, 32, 33, 65_537]) {
+      const full = new Uint8Array(length + 7);
+      for (let i = 0; i < full.length; i++) full[i] = (i * 73 + 19) & 0xff;
+      // Subarray with non-zero byteOffset verifies slice-safe Buffer view encoding.
+      const slice = full.subarray(5, 5 + length);
+      const encoded = encodeBase64(slice);
+      expect(encoded).toBe(Buffer.from(slice).toString("base64"));
+      const decoded = decodeAnyCanonicalBase64(encoded);
+      expect(decoded).not.toBeNull();
+      expect(decoded).toEqual(slice);
+      expect(decodeCanonicalBase64(encoded, length)).toEqual(slice);
+    }
+
+    // Reject non-canonical trailing bits, missing/extra padding, whitespace, and URL-safe alphabet.
+    for (const invalid of [
+      "AB==",          // trailing 4 bits non-zero (valid chars are [AQgw])
+      "AAB=",          // trailing 2 bits non-zero (valid chars are [AEIMQUYcgkosw048])
+      "AA",            // missing padding
+      "AAA",           // missing padding
+      "AAAA=",         // invalid length
+      "AA=A",          // padding in middle
+      " AAAA",         // whitespace
+      "AAAA\n",        // trailing newline
+      "ab-c",          // base64url '-'
+      "ab_c",          // base64url '_'
+    ]) {
+      expect(decodeAnyCanonicalBase64(invalid)).toBeNull();
+    }
+    expect(decodeCanonicalBase64("AAAA", 1)).toBeNull();
+    expect(decodeCanonicalBase64("AA==", 2)).toBeNull();
   });
 });
