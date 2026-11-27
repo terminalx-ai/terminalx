@@ -8,7 +8,7 @@ import { AppState, Linking } from "react-native";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from "react";
 import type { AccessCodeAnswer, AccessCodeRequest } from "../auth/access-code";
 import { beginSignIn, finishSignIn, forgetStoredSession, readSession, redeemHeldAccessCode, refreshStoredSession, signOut as revokeCloudSession, type SignInResult } from "../auth/native";
-import { AUTH_CONFIG, isAuthCallbackUrl, revokeSession, type AccessHold, type CloudSession } from "../auth/protocol";
+import { AUTH_CONFIG, isAuthCallbackUrl, REDEEM_NOT_REACHED, revokeSession, type AccessHold, type CloudSession } from "../auth/protocol";
 import { HostApi, isSessionSummary, type SessionSummary } from "../data/host-api";
 import { handleNotificationEvent, restoreLocalNotifications } from "../notifications/local";
 import { discoverMachines, pairDiscoveredMachine, signOutPairing, type InstallationState } from "../pairing/account";
@@ -46,8 +46,13 @@ interface AppContextValue {
   connectionSince: number | null;
   /** 15 s have passed since `connectionSince` without a connection: kept here once, so every screen says "Waiting for Mac…" together (#983). */
   connectionWaiting: boolean;
-  /** False while the phone itself has no network. */
+  /**
+   * False while the phone's last network reading (NetInfo) says it has no network. Only ever a hint for what to
+   * say: a reading can be stale (PRO-603), so no request is refused on it alone; a failed request says offline.
+   */
   online: boolean;
+  /** Ask the OS for its network reading again: on Try again, say. Coming back to the front does it by itself. */
+  refreshNetwork(): void;
   /** Connected, and reading what changed meanwhile: the session list after a connect, a transcript catching up. */
   updating: boolean;
   /** Mark a catch-up read under way; the returned function ends it. */
@@ -142,6 +147,9 @@ export function AppProvider({ children }: PropsWithChildren) {
     if (connectionStage === "connected" && activeHostId) sendHeldMessages(activeHostId);
   }, [activeHostId, connectionStage]);
   const [online, setOnline] = useState(true);
+  // NetInfo hands the fresh reading to its listener (below). Any failure (no native module, say) leaves the last one.
+  // On iOS it gives back the last reachability callback's reading, not a new one, so it cannot mend a stale reading there.
+  const refreshNetwork = useCallback(() => { void Promise.resolve().then(() => NetInfo.refresh()).catch(() => undefined); }, []);
   const updates = useRef(0);
   const [updating, setUpdating] = useState(false);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -442,6 +450,8 @@ export function AppProvider({ children }: PropsWithChildren) {
       // to the same Mac and session. "inactive" (the app switcher, a system sheet) is not leaving.
       if (state === "background") return connection.background();
       if (state !== "active") return;
+      // The reading may have gone stale while the app was away (PRO-603).
+      refreshNetwork();
       if (session) void refreshCloudSession(session).catch((cause: unknown) => setError(readableError(cause)));
       if (!activeHostRef.current) return;
       // Back on screen: the 15 s before "Waiting for Mac…" count from now, not from when the phone was put away.
@@ -450,7 +460,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       if (!connection.foreground() && connectionStage !== "connected") connection.restart("the app became active");
     });
     return () => subscription.remove();
-  }, [connection, connectionStage, refreshCloudSession, session]);
+  }, [connection, connectionStage, refreshCloudSession, refreshNetwork, session]);
 
   // "Send recent sessions ahead of time" (#1283): asked of each connection
   // while the app is on screen, and stopped when it goes to the background.
@@ -520,6 +530,9 @@ export function AppProvider({ children }: PropsWithChildren) {
       // The session could not be kept in the keychain: the ticket may be spent, and signing in again finds the account.
       return { status: "unanswered", reason: readableError(cause) };
     }
+    // The server answered: whatever the last network reading said, the phone is online (PRO-603). Not reached: read again.
+    if (outcome.status !== "unanswered" || !REDEEM_NOT_REACHED.has(outcome.reason)) setOnline(true);
+    else refreshNetwork();
     if (outcome.status === "accepted") {
       if (held.current === hold) held.current = null;
       setError(null);
@@ -528,7 +541,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
     if (outcome.status === "ticket_dead" && held.current === hold) held.current = null;
     return outcome;
-  }, []);
+  }, [refreshNetwork]);
   const cancelAccessCode = useCallback(() => {
     held.current = null;
     setAccessCode(null);
@@ -678,7 +691,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     return accountHosts.filter((host) => !paired.has(host.hostPublicKeyB64));
   }, [accountHosts, hosts]);
 
-  const value = useMemo<AppContextValue>(() => ({ ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, updating, beginUpdate, retryConnection, sessions, loadingMachines, error, logs, connection, api, signIn, signingIn, accessCode, redeemAccessCode, cancelAccessCode, finishAccessCode, signOut, reauthenticate, forgetDeletedAccount, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions, clearError: () => setError(null) }), [ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, updating, beginUpdate, retryConnection, sessions, loadingMachines, error, logs, connection, api, signIn, signingIn, accessCode, redeemAccessCode, cancelAccessCode, finishAccessCode, signOut, reauthenticate, forgetDeletedAccount, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions]);
+  const value = useMemo<AppContextValue>(() => ({ ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, refreshNetwork, updating, beginUpdate, retryConnection, sessions, loadingMachines, error, logs, connection, api, signIn, signingIn, accessCode, redeemAccessCode, cancelAccessCode, finishAccessCode, signOut, reauthenticate, forgetDeletedAccount, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions, clearError: () => setError(null) }), [ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, refreshNetwork, updating, beginUpdate, retryConnection, sessions, loadingMachines, error, logs, connection, api, signIn, signingIn, accessCode, redeemAccessCode, cancelAccessCode, finishAccessCode, signOut, reauthenticate, forgetDeletedAccount, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }
