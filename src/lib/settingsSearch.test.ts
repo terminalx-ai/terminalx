@@ -189,9 +189,8 @@ describe("settings row search", () => {
     expect(behind.filter((row) => settingOffered(row)).map((row) => row.id)).toEqual(["shortcuts.app.showIntro"]);
     setPrefs({ introSlides: false });
     orchestratorRuns(false);
-    // Off until the switches are read, as for a section. Default models and
-    // Prompts wait for shared setups on the active organization (PRO-154).
-    expect(SETTINGS_ROWS.filter((row) => !("requires" in row && row.requires) && !("macOnly" in row && row.macOnly) && row.section !== "orchestrator" && row.section !== "localVms" && row.section !== "machines" && row.section !== "mcp" && row.section !== "defaultModels" && row.section !== "prompts").every((row) => settingOffered(row))).toBe(true);
+    // Off until the switches are read, as for a section.
+    expect(SETTINGS_ROWS.filter((row) => !("requires" in row && row.requires) && !("macOnly" in row && row.macOnly) && row.section !== "orchestrator" && row.section !== "localVms" && row.section !== "machines" && row.section !== "mcp").every((row) => settingOffered(row))).toBe(true);
   });
 
   it("finds Local VMs rows only while their Experimental switch is on", () => {
