@@ -129,6 +129,16 @@ export function routeErrorMessage(error: unknown): string {
       return "Your route for this agent changed elsewhere meanwhile. Refresh to see it, then try again. Nothing was changed.";
     case "cloud_agent_route_invalid":
       return "That is not a setting this endpoint type takes. Nothing was changed.";
+    case "cloud_organization_routes_unavailable":
+      return "Organization routes aren't available for this organization yet.";
+    case "cloud_organization_route_repository_invalid":
+      return "Enter the repository as owner/name. Nothing was changed.";
+    case "cloud_organization_route_exists":
+      return "That repository already has a route for this agent. Remove it first. Nothing was changed.";
+    case "cloud_organization_route_not_found":
+      return "That route was already removed. Refresh to see the routes.";
+    case "organization_admin_required":
+      return "Only owners and admins change organization routes. Nothing was changed.";
     case "cloud_workspace_not_found":
       return "You are no longer a member of this organization.";
     case "cloud_provider_entry_cancelled":

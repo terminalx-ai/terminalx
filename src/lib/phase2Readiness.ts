@@ -23,6 +23,7 @@ export const phase2Features = {
   generalAccess: "cloud.workspaces.general-access.v1",
   agentLoginBedrock: "cloud.agent-logins.bedrock.v1",
   usageLimitCard: "cloud.agent-logins.usage-limit-card.v1",
+  organizationRoutes: "cloud.agent-routes.organization.v1",
   invitesWelcome: "organization.invites-welcome.v1",
   mcpServers: "organization.mcp-servers.v1",
   desktopBilling: "organization.desktop-billing.v1",

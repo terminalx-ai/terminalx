@@ -2,7 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { hasSecureDialog, SECURE_DIALOG_OFF, thisComputer } from "@/lib/platform";
 import { Loader2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
-import { api, type AgentRoute, type AgentRouteAgent, type AgentRouteCheckResult, type AgentRoutes, type AgentRouteSettings, type AgentRouteTemplate } from "@/lib/api";
+import { useAccount } from "@/lib/account";
+import { phase2Ready } from "@/lib/phase2Readiness";
+import { api, type OrganizationRoute, type AgentRoute, type AgentRouteAgent, type AgentRouteCheckResult, type AgentRoutes, type AgentRouteSettings, type AgentRouteTemplate } from "@/lib/api";
 import { credentialCarriesOver, fieldProblem, listedModels, macCheckLine, routeErrorMessage, routeStatus, routeSummary, templateSettings } from "@/lib/agentRoutes";
 
 /**
@@ -58,6 +60,21 @@ export function OrganizationAgentRoutes({
   const [confirmRemove, setConfirmRemove] = useState<AgentRouteAgent | null>(null);
   /** What the last save (or failed check) said, for one agent. */
   const [notice, setNotice] = useState<{ agent: string; text: string; warn: boolean } | null>(null);
+  /** Organization routes (PRO-310): on their repositories they replace this member's route. */
+  const { status: accountStatus } = useAccount();
+  const organizationRoutesReady = phase2Ready(accountStatus, organizationId, "organizationRoutes");
+  const [organizationRoutes, setOrganizationRoutes] = useState<OrganizationRoute[]>([]);
+  useEffect(() => {
+    setOrganizationRoutes([]);
+    if (!organizationRoutesReady) return;
+    let current = true;
+    // Only a note on the rows: when it can't be read, the rows show as before.
+    api.cloudOrganizationRoutes(organizationId).then(
+      (loaded) => { if (current) setOrganizationRoutes(loaded.routes); },
+      () => {},
+    );
+    return () => { current = false; };
+  }, [organizationId, organizationRoutesReady]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -178,6 +195,14 @@ export function OrganizationAgentRoutes({
                   ) : (
                     <>
                       <div className="break-words">{routeSummary(route, template)}</div>
+                      {(() => {
+                        const overriding = organizationRoutes.filter((candidate) => candidate.provider === agent).map((candidate) => candidate.repository);
+                        return overriding.length > 0 && (
+                          <div className="break-words text-warning" data-testid="agent-route-organization-override">
+                            {organization} route applies on {overriding.join(", ")}
+                          </div>
+                        );
+                      })()}
                       <div
                         className={status!.tone === "warn" ? "text-warning" : status!.tone === "ok" ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"}
                         data-testid="agent-route-status"

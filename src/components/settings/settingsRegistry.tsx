@@ -802,6 +802,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
   }),
   defineSetting({
+    id: "organizations.organizationRoutes", section: "organizations", title: "Organization routes",
+    description: "Custom providers owners and admins set for everyone, per repository.",
+    searchTerms: ["organizations", "organization", "routes", "custom", "provider", "gateway", "endpoint", "repository"], scope: "organization",
+    storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
+  }),
+  defineSetting({
     id: "organizations.agentRoutes", section: "organizations", title: "Model access",
     description: "Choose model routes and provider access.",
     searchTerms: ["organizations", "model", "access"], scope: "organization",
