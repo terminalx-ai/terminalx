@@ -487,11 +487,22 @@ impl Runtime {
     ) -> Result<(tokio::net::TcpStream, Session)> {
         let pair = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let client = TcpStream::connect(pair.local_addr()?)?;
-        let (socket, _) = pair.accept()?;
+        let socket = accept_bridge_peer(&pair, &client)?;
         client.set_nonblocking(true)?;
         let session = self.listener.admit_key(socket, verified_key)?;
         Ok((tokio::net::TcpStream::from_std(client)?, session))
     }
+}
+
+/// Fail closed if a different local process reaches the temporary listener
+/// first. Only the socket for our own client may reach SSH admission.
+fn accept_bridge_peer(listener: &TcpListener, client: &TcpStream) -> Result<TcpStream> {
+    let (socket, peer) = listener.accept()?;
+    ensure!(
+        peer == client.local_addr()?,
+        "unexpected private SSH bridge peer"
+    );
+    Ok(socket)
 }
 
 fn version_name(root: &Path, directory: &Path) -> Result<String> {
@@ -519,6 +530,29 @@ fn name_str(path: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn workspace_ssh_bridge_refuses_a_connection_queued_before_its_client() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let mut other = TcpStream::connect(endpoint).unwrap();
+        let client = TcpStream::connect(endpoint).unwrap();
+        assert_ne!(other.local_addr().unwrap(), client.local_addr().unwrap());
+
+        let refused = accept_bridge_peer(&listener, &client).unwrap_err();
+        assert_eq!(refused.to_string(), "unexpected private SSH bridge peer");
+        other
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(
+            other.read(&mut [0]).unwrap(),
+            0,
+            "the foreign socket closes"
+        );
+
+        let accepted = accept_bridge_peer(&listener, &client).unwrap();
+        assert_eq!(accepted.peer_addr().unwrap(), client.local_addr().unwrap());
+    }
 
     fn candidate(root: &Path, version: &str) -> Daemon {
         let directory = root.join(version);
