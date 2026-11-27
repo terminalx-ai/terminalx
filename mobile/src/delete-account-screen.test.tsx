@@ -210,13 +210,14 @@ it("says the grace the server gave, never a made-up day, when every device was s
   expect(container.textContent).not.toMatch(/ on \d{1,2} [A-Z][a-z]+ \d{4}/);
 });
 
-it("offline: nothing is sent", async () => {
+it("a network reading that says offline does not stop it: the request goes, and the deletion is scheduled (PRO-603)", async () => {
   mocks.app.online = false;
   await show();
   await type("alex@example.com");
   await act(async () => confirmButton().click());
-  expect(byTestId("delete-account-offline")!.textContent).toBe(T.offline);
-  expect(mocks.catalog.api.requestAccountDeletion).not.toHaveBeenCalled();
+  await act(async () => { await vi.waitFor(() => expect(byTestId("delete-account-done")).not.toBeNull(), { timeout: 5_000 }); });
+  expect(mocks.catalog.api.requestAccountDeletion).toHaveBeenCalledWith("alex@example.com");
+  expect(byTestId("delete-account-offline")).toBeNull();
 });
 
 it("at the accessibility text sizes the sign-out sentence moves into the page, above the field", async () => {

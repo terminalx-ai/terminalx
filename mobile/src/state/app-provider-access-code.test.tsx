@@ -19,8 +19,16 @@ const fake = vi.hoisted(() => ({
   /** The sign-in sheet: closes with the callback once released. */
   sheet: null as null | (() => void),
   holdSheet: false,
+  /** NetInfo: its listener, and how often the app asked it to read the network again. */
+  network: null as null | ((state: unknown) => void),
+  refreshed: 0,
+  /** The redeem request cannot be made at all, as with no route to the server. */
+  unreachable: false,
 }));
-vi.mock("@react-native-community/netinfo", () => ({ default: { addEventListener: () => () => undefined } }));
+vi.mock("@react-native-community/netinfo", () => ({ default: {
+  addEventListener: (listener: (state: unknown) => void) => { fake.network = listener; return () => undefined; },
+  refresh: async () => { fake.refreshed++; return { type: "none", isConnected: false, details: null }; },
+} }));
 vi.mock("@react-native-async-storage/async-storage", () => ({ default: { getItem: async (key: string) => fake.storage.get(key) ?? null, setItem: async (key: string, value: string) => void fake.storage.set(key, value), removeItem: async (key: string) => void fake.storage.delete(key) } }));
 vi.mock("expo-secure-store", () => ({ WHEN_UNLOCKED_THIS_DEVICE_ONLY: 1, getItemAsync: async (key: string) => fake.storage.get(`secure:${key}`) ?? null, setItemAsync: async (key: string, value: string) => void fake.storage.set(`secure:${key}`, value), deleteItemAsync: async (key: string) => void fake.storage.delete(`secure:${key}`) }));
 vi.mock("expo-crypto", () => ({
@@ -76,13 +84,20 @@ beforeEach(async () => {
   fake.redeemAnswers = [];
   fake.requests = [];
   fake.holdSheet = false;
+  fake.network = null;
+  fake.refreshed = 0;
+  fake.unreachable = false;
   logged.length = 0;
   for (const level of ["log", "info", "warn", "error", "debug"] as const) vi.spyOn(console, level).mockImplementation((...args: unknown[]) => { logged.push(args.map(String).join(" ")); });
   vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
     const body = JSON.parse(String(init.body)) as Record<string, unknown>;
     fake.requests.push({ url, body });
     if (url.endsWith("/v1/auth/session")) return respond(fake.sessionAnswer.status, fake.sessionAnswer.body);
-    if (url.endsWith("/v1/auth/access-code/redeem")) { const next = fake.redeemAnswers.shift()!; return respond(next.status, next.body); }
+    if (url.endsWith("/v1/auth/access-code/redeem")) {
+      // React Native's fetch, when no connection can be made.
+      if (fake.unreachable) throw new TypeError("Network request failed");
+      const next = fake.redeemAnswers.shift()!; return respond(next.status, next.body);
+    }
     return respond(404, { error: "not_found" });
   }));
   root = createRoot(document.createElement("div"));
@@ -209,5 +224,45 @@ describe("a sign-in held at the private beta", () => {
     await signIn();
     expect(app().session).toEqual(SESSION);
     expect(app().accessCode).toBeNull();
+  });
+});
+
+// PRO-603: the owner's live check had NetInfo saying offline while the network worked. The app never refuses on the
+// reading alone: the code goes, and the server's answer is what says whether the phone is online.
+describe("a network reading that says offline", () => {
+  const offline = async () => { await act(async () => fake.network!({ type: "none", isConnected: false, details: null })); await settle(); };
+
+  it("does not stop the code: it is sent and accepted, and the answer puts the reading right", async () => {
+    await signIn();
+    await offline();
+    expect(app().online).toBe(false);
+    fake.redeemAnswers = [accepted];
+    expect(await redeem("K7QM2X9TRB")).toEqual({ status: "accepted" });
+    expect(fake.requests.at(-1)?.url).toBe("https://login.terminalx.ai/v1/auth/access-code/redeem");
+    expect(app().session).toEqual(SESSION);
+    expect(app().online).toBe(true);
+  });
+
+  it("a request that really cannot be made is unanswered as unreachable, the reading is asked for again, and the next try is sent", async () => {
+    await signIn();
+    await offline();
+    fake.unreachable = true;
+    expect(await redeem("K7QM2X9TRB")).toEqual({ status: "unanswered", reason: "redeem_unreachable" });
+    expect(fake.refreshed).toBe(1);
+    expect(app().online).toBe(false);
+    expect(app().session).toBeNull();
+    fake.unreachable = false;
+    fake.redeemAnswers = [accepted];
+    expect(await redeem("K7QM2X9TRB")).toEqual({ status: "accepted" });
+    expect(fake.requests.filter((request) => request.url.endsWith("/redeem"))).toHaveLength(2);
+    expect(app().online).toBe(true);
+  });
+
+  it("a refused code is an answer too: the phone is online", async () => {
+    await signIn();
+    await offline();
+    fake.redeemAnswers = [{ status: 404, body: { error: "invalid" } }];
+    expect(await redeem("K7QM2X9TRX")).toEqual({ status: "invalid" });
+    expect(app().online).toBe(true);
   });
 });

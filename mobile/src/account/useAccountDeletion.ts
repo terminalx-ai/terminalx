@@ -21,7 +21,6 @@ export type DeletionNotice =
   | { kind: "stale" }
   | { kind: "blocked" }
   | { kind: "unknown" }
-  | { kind: "offline" }
   | { kind: "other-account" }
   /** Sign in again was held at the private beta: that address has no account. */
   | { kind: "no-account" }
@@ -54,7 +53,6 @@ export interface AccountDeletionDeps {
   email: string | null;
   /** The account's id: a confirmation is kept under it until it is settled, also after the page closes. */
   userId: string | null;
-  online: boolean;
   reauthenticate(): Promise<ReauthOutcome>;
   forgetDeletedAccount(): Promise<void>;
   /** A provider's name as people know it, from the organization of that workspace; the attempt names it by id. */
@@ -95,7 +93,7 @@ export class AccountDeletionFlow {
 
   constructor(private deps: AccountDeletionDeps) {}
 
-  /** What the page hands in now (the network, a provider name read since): the next request uses it. */
+  /** What the page hands in now (a provider name read since, say): the next request uses it. */
   update(deps: AccountDeletionDeps): void {
     this.deps = deps;
   }
@@ -182,18 +180,16 @@ export class AccountDeletionFlow {
    * the server's and not only the page's. Nothing is sent unless it already matches here.
    */
   confirm = (typed: string): void => {
-    const { api, email, online } = this.deps;
+    const { api, email } = this.deps;
     const read = this.state.read;
     if (this.busy || this.finished || !api || !email || !read) return;
     if (!emailConfirmed(typed, email)) {
       this.set({ mismatch: true });
       return;
     }
+    // Sent whatever the phone's network reading says: a stale "offline" must not keep it from going (PRO-603). A
+    // request that does not get through is "unknown", never "nothing was sent": the request may have reached the server.
     const confirmation = typed.trim();
-    if (!online) {
-      this.set({ notice: { kind: "offline" } });
-      return;
-    }
     this.busy = true;
     const running = read.deleted.runningWorkspaces.length;
     this.set({ mismatch: false, notice: null, sending: running ? "stopping" : "deleting" });
@@ -364,7 +360,7 @@ export type AccountDeletionController = DeletionState & Pick<AccountDeletionFlow
 /** The page's flow, read when it opens and again each time the app comes back to the front. */
 export function useAccountDeletion(deps: AccountDeletionDeps): AccountDeletionController {
   const [flow] = useState(() => new AccountDeletionFlow(deps));
-  // The latest of what the page hands in (the network, a provider name read since) is what the next request uses.
+  // The latest of what the page hands in (a provider name read since, say) is what the next request uses.
   useEffect(() => { flow.update(deps); });
   const hasApi = deps.api !== null;
   useEffect(() => {
