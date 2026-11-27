@@ -1,11 +1,85 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "TerminalX",
+        "width": 1360,
+        "height": 860,
+        "minWidth": 760,
+        "minHeight": 520,
+        "decorations": false,
+        "dragDropEnabled": true
+      }
+    ]
+  },
   "bundle": {
-    "externalBin": ["binaries/agent-browser"],
+    "targets": [
+      "appimage",
+      "deb",
+      "rpm"
+    ],
+    "publisher": "TerminalX",
+    "shortDescription": "TerminalX — a desktop workbench for coding agents",
+    "homepage": "https://github.com/terminalx-ai/terminalx",
+    "license": "MIT",
+    "externalBin": [
+      "binaries/agent-browser"
+    ],
     "resources": {
       "../native/computer-use-macos/.build/release/TerminalX Computer Use Helper.app": null,
       "../native/computer-use-macos/.build/release-dev/TerminalX Computer Use Helper.app": null,
       "../native/computer-use-linux/runtime.py": "computer-use-linux/runtime.py"
+    },
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": false
+      },
+      "deb": {
+        "section": "devel",
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "libayatana-appindicator3-1",
+          "libasound2 | libasound2t64"
+        ],
+        "recommends": [
+          "gnome-keyring | kwalletmanager",
+          "libsecret-1-0",
+          "xdg-utils",
+          "pkexec | policykit-1",
+          "python3-gi",
+          "gir1.2-atspi-2.0",
+          "xdotool",
+          "git"
+        ]
+      },
+      "rpm": {
+        "release": "1",
+        "depends": [
+          "webkit2gtk4.1",
+          "gtk3",
+          "libappindicator-gtk3",
+          "alsa-lib"
+        ],
+        "recommends": [
+          "gnome-keyring",
+          "libsecret",
+          "polkit",
+          "python3-gobject",
+          "at-spi2-core",
+          "xdotool",
+          "git"
+        ]
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/terminalx-ai/raccoon/releases/latest/download/latest-linux.json"
+      ]
     }
   }
 }

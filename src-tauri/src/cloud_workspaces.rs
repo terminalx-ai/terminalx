@@ -4603,6 +4603,25 @@ impl CloudWorkspaceService {
         })
     }
 
+    /// Replace or revoke only the authenticated caller's registration.
+    #[allow(dead_code)]
+    pub(crate) fn workspace_ssh_registration(&self, org: &str, workspace: &str, public_key: Option<&str>) -> Result<(), CloudWorkspaceClientError> {
+        use crate::account::PHASE2_WORKSPACE_SSH;
+
+        if !valid_resource_id(workspace) { return Err(inbox_invalid()); }
+        let (method, body) = match public_key {
+            Some(key) => {
+                let key = crate::workspace_ssh::parse_public_key(key).ok_or_else(inbox_invalid)?;
+                ("PUT", Some(json!({ "publicKey": key })))
+            }
+            None => ("DELETE", None),
+        };
+        self.phase2_member_in(PHASE2_WORKSPACE_SSH, "cloud_workspace_ssh_unavailable", org, RequestRisk::Mutation, |client, context| {
+            let _: Value = client.request_as(method, context, &["cloud-workspaces", workspace, "ssh-key"], None, body, None, RequestRisk::Mutation)?;
+            Ok(())
+        })
+    }
+
     /// The organization's scheduled tasks, or one workspace's (saas contract
     /// §24.2). For owners and admins; a server with the feature off answers
     /// `cloud_workspace_unavailable` with status 404.
@@ -6362,6 +6381,33 @@ mod tests {
             value["operation"]["errorCode"] = Value::String(error_code.into());
         }
         value.to_string()
+    }
+
+    #[test]
+    fn phase2_workspace_ssh_registration_is_caller_scoped_and_held_by_default() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+        let mut public = vec![0, 0, 0, 11];
+        public.extend(b"ssh-ed25519");
+        public.extend([0, 0, 0, 32]);
+        public.extend([9; 32]);
+        let key = format!("ssh-ed25519 {}", STANDARD.encode(public));
+        let (_, held) = test_service("http://127.0.0.1:1");
+        assert_eq!(held.workspace_ssh_registration("org-1", "workspace-1", Some(&key)).unwrap_err().code, "cloud_workspace_ssh_unavailable");
+        let (base, requests) = serve_each(vec![
+            response("200 OK", "{}", ""),
+            response("200 OK", "{}", ""),
+        ]);
+        let (_, ready) = phase2_service(&base);
+        ready.workspace_ssh_registration("org-1", "workspace-1", Some(&key)).unwrap();
+        ready.workspace_ssh_registration("org-1", "workspace-1", None).unwrap();
+        let requests = requests.join().unwrap();
+        assert!(requests[0].starts_with("PUT /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/ssh-key HTTP/1.1"));
+        assert!(requests[1].starts_with("DELETE /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/ssh-key HTTP/1.1"));
+        for request in &requests { phase2_headers(request); }
+        let body: Value = serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body, json!({ "publicKey": key }));
+        assert!(requests[1].split_once("\r\n\r\n").unwrap().1.is_empty());
     }
 
     fn phase2_service(base: &str) -> (Arc<AccountManager>, CloudWorkspaceService) {

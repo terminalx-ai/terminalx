@@ -12,6 +12,7 @@ import type { SharePerson, ShareRole, ShareState } from "@/lib/localSharing";
 import { errorMessage } from "@/lib/api";
 import { usePromptTextProps } from "@/lib/autocorrect";
 import { NoticeForeground } from "@/lib/noticeDeferral";
+import { WindowControls } from "@/components/layout/WindowControls";
 
 interface GuestStatus {
   admitted: boolean;
@@ -270,6 +271,7 @@ function GuestSession({ link, leave }: { link: string; leave: () => void }) {
         <Button variant="outline" onClick={leave}>
           Leave session
         </Button>
+        <WindowControls />
       </header>
       {error && (
         <p role="alert" className="px-5 py-2 text-sm text-destructive">

@@ -34,6 +34,7 @@ import { useRunsByLead } from "@/lib/orchestration";
 import type { Run } from "@/types/orchestration";
 import { BotMenu } from "./BotMenu";
 import { BotSettings } from "./BotSettings";
+import { WindowControls } from "@/components/layout/WindowControls";
 
 export type BotTab = "home" | "chat" | "duties" | "role" | "settings";
 
@@ -235,6 +236,7 @@ function TitleStrip({ sidebarOpen, onToggleSidebar, inset }: { sidebarOpen: bool
       <WithTooltip label="Show sidebar" shortcut="app.toggleSidebar">
         <Button variant="ghost" size="icon-sm" aria-label="Show sidebar" onClick={onToggleSidebar}><PanelLeft /></Button>
       </WithTooltip>
+      <WindowControls />
     </header>
   );
 }

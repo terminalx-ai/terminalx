@@ -92,6 +92,8 @@ import { BranchGitButton } from "./BranchGitButton";
 import { MachineBranchButton, MachineDiffSize, useMachineBranch } from "./MachineBranchButton";
 import { SessionCost } from "./SessionCost";
 import { RunMenu, RunRestartOffer, offersRunMenu } from "./RunMenu";
+import { WindowControls } from "@/components/layout/WindowControls";
+import { AppMenu } from "@/components/layout/AppMenu";
 
 /** Why a quick chat's panel has no Changes, Repo or PR. */
 const NO_REPOSITORY = "No repository here: Changes, Repo and PR need one. Point this chat at a repository, or move it to a project, to use them.";
@@ -181,7 +183,9 @@ function CloudPanelHost({ session, cloud, tab, checkFix }: { session: SessionEnt
   if (!cloud.fileSource) {
     return (
       <aside className="flex h-full w-(--panel-w) shrink-0 flex-col border-l border-hairline" data-testid="cloud-panel-offline">
-        <div data-tauri-drag-region="deep" className="h-(--titlebar-h) shrink-0" />
+        <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0">
+          <WindowControls />
+        </div>
         <div className="flex flex-1 items-center justify-center px-6 text-center text-xs text-muted-foreground">
           {cloud.machine
             ? cloud.connected
@@ -799,6 +803,7 @@ export function SessionView({
           className="@container/session-header flex h-(--titlebar-h) shrink-0 items-center gap-1 border-b border-hairline pl-2"
           style={{ paddingLeft: sidebarOpen ? 8 : TITLEBAR_INSET }}
         >
+          {!sidebarOpen && !compact && <AppMenu />}
           {!sidebarOpen && !compact && (
             <WithTooltip label="Show sidebar" shortcut="app.toggleSidebar">
               <Button variant="ghost" size="icon-sm" aria-label="Show sidebar" onClick={onToggleSidebar}>
@@ -1074,6 +1079,7 @@ export function SessionView({
             )}
             {chrome?.trailing}
           </div>
+          <WindowControls />
         </header>
         {/* Only a session that leads a run, or has its Run view open, has the two views: one with no run looks like any other (#1404). */}
         {runOffered && (!!run || runShown) && <RunStrip runShown={runShown} waiting={run?.state === "awaitingApproval"} paused={run?.state === "needsYou"} onChange={(shown) => showRunView(session.id, shown)} />}

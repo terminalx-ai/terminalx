@@ -3,6 +3,7 @@ import { Check, Copy, Loader2, MoreHorizontal, RefreshCw } from "@/icons";
 import type { OrganizationPlan } from "@/lib/api";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { Button } from "@/components/ui/button";
+import { InlineError, SkeletonRows } from "@/components/ui/SurfaceState";
 import {
   isInvitableEmail,
   isTransientMembersError,
@@ -146,16 +147,12 @@ function OrganizationMembersContent({ accountEmail, contextRevision, organizatio
       <div className="rounded-lg border border-hairline p-3">
         <div className="text-sm font-medium">Members</div>
         {loading || rosterLoading ? (
-          <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
-            <Loader2 className="size-3.5 animate-spin" /> Loading members…
+          <div role="status" className="mt-2">
+            <span className="sr-only">Loading members…</span>
+            <SkeletonRows rows={3} avatar />
           </div>
         ) : (
-          <div className="mt-2 flex items-center gap-2">
-            <p className="text-xs text-destructive">{shownError}</p>
-            <Button variant="ghost" size="xs" onClick={() => void load()}>
-              Retry
-            </Button>
-          </div>
+          <InlineError className="mt-2" retry={{ label: "Retry", onAction: () => void load() }}>{shownError}</InlineError>
         )}
       </div>
     );

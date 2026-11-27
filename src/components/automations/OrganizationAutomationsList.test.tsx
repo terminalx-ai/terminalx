@@ -57,6 +57,12 @@ afterEach(() => {
   authority.stamp = "initial";
 });
 
+/** Opens a row's "…" menu and picks one of its items. */
+async function pick(row: string, item: string) {
+  fireEvent.keyDown(await screen.findByRole("button", { name: `Actions for ${row}` }), { key: "ArrowDown" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: item }));
+}
+
 describe("Organization automations list", () => {
   it("shows both sources in All and filters rows by source", async () => {
     cloudAutomations.mockResolvedValue({ schedules: [cloudRow] });
@@ -79,17 +85,19 @@ describe("Organization automations list", () => {
     confirm.mockResolvedValueOnce(false).mockResolvedValue(true);
     runNow.mockRejectedValueOnce(new Error("Connection ended")).mockResolvedValueOnce({ run: { id: "run-1", state: "queued", scheduledFor: 1 }, duplicate: true });
     render(<OrganizationAutomationsList {...props} />);
-    const run = await screen.findByRole("button", { name: "Run Cloud check now" });
-    await act(async () => { fireEvent.click(run); });
+    await pick("Cloud check", "Run now");
+    await act(async () => {});
     expect(runNow).not.toHaveBeenCalled();
-    await act(async () => { fireEvent.click(run); });
+    await pick("Cloud check", "Run now");
+    await act(async () => {});
     expect(showError).toHaveBeenCalledOnce();
-    await act(async () => { fireEvent.click(run); });
+    await pick("Cloud check", "Run now");
+    await act(async () => {});
     const [org, id, key, consent] = runNow.mock.calls[0];
     expect([org, id, typeof key, consent]).toEqual(["org-a", "schedule-1", "string", true]);
     expect(runNow.mock.calls[1]).toEqual(runNow.mock.calls[0]);
     expect(screen.getByText("The run was already requested.")).toBeTruthy();
-    expect(screen.getByText(/Latest run · Waiting to start/i)).toBeTruthy();
+    expect(screen.getByText(/Waiting to start/i)).toBeTruthy();
   });
 
   it("loads both drafts through the edit route and copies only the canonical link", async () => {
@@ -100,13 +108,16 @@ describe("Organization automations list", () => {
     ] });
     readEdit.mockResolvedValue({ schedule: { ...cloudRow, updatedAt: 12 }, configuration: { prompt: "private prompt" } });
     render(<OrganizationAutomationsList {...props} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Edit Cloud check" }));
+    await pick("Cloud check", "Edit");
     fireEvent.click(await screen.findByRole("button", { name: "edit 12 private prompt" }));
-    fireEvent.click(screen.getByRole("button", { name: "Duplicate Cloud check" }));
+    await pick("Cloud check", "Duplicate");
     await screen.findByRole("button", { name: "duplicate 12 private prompt" });
     expect(readEdit.mock.calls).toEqual([["org-a", "schedule-1"], ["org-a", "schedule-1"]]);
-    expect(screen.queryByRole("button", { name: "Copy link to Unsafe" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Copy link to Cloud check" }));
+    fireEvent.keyDown(screen.getByRole("button", { name: "Actions for Unsafe" }), { key: "ArrowDown" });
+    await screen.findByRole("menuitem", { name: "Run now" });
+    expect(screen.queryByRole("menuitem", { name: "Copy link" })).toBeNull();
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    await pick("Cloud check", "Copy link");
     await screen.findByText("Automation link copied.");
     expect(copyText).toHaveBeenCalledWith(consoleUrl);
   });

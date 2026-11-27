@@ -3,6 +3,7 @@ import { BackHandler, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, T
 import { Stack } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { CircleCheck, UserRound, WifiOff } from "lucide-react-native";
+import { REDEEM_UNREACHABLE } from "@mobile/auth/protocol";
 import { ACCEPTED_PAUSE_MS, ACCESS_CODE_TEXT, refusalText, type AccessCodeAnswer, type AccessCodeRefusal, type AccessCodeRequest } from "@mobile/auth/access-code";
 import { useApp } from "@mobile/state/AppProvider";
 import { clockText, useRemaining } from "@mobile/ui/countdown";
@@ -13,12 +14,17 @@ import { Spinner } from "@mobile/ui/Spinner";
 import { TextField, type TextFieldHandle } from "@mobile/ui/TextField";
 import { useTheme } from "@mobile/ui/theme";
 
-/** Where the code stands on the page; offline is the phone's, read from the app, not kept here. */
+/**
+ * Where the code stands on the page. The phone's network reading is not one of these: it can be stale (PRO-603), so
+ * only a request that could not reach the server says offline.
+ */
 type Phase =
   | { kind: "entering" }
   | { kind: "checking" }
   /** The server refused this code: said under the field until the field changes. */
   | { kind: "refused"; refusal: AccessCodeRefusal; code: string }
+  /** The request could not reach the server: nothing was sent. */
+  | { kind: "offline" }
   /** No answer, or one that says nothing about the code. */
   | { kind: "unanswered" }
   /** Too many tries: the next one may go at `until` (the phone's clock; the server gave a number of seconds). */
@@ -54,48 +60,50 @@ function AccessCodeForm({ request }: { request: AccessCodeRequest }) {
   const field = useRef<TextFieldHandle>(null);
   const [code, setCode] = useState("");
   const [phase, setPhase] = useState<Phase>({ kind: "entering" });
-  // Try again while offline: the code goes as soon as there is a network (25.08).
-  const [armed, setArmed] = useState(false);
   const flight = useRef(false);
   const shown = useRef(true);
   useEffect(() => { shown.current = true; return () => { shown.current = false; }; }, []);
 
   const value = code.trim();
-  const online = app.online;
   const left = useRemaining(phase.kind === "waiting" ? phase.until : null);
   const waiting = phase.kind === "waiting" && left > 0;
-  // An armed Try again is under way as soon as there is a network.
-  const checking = phase.kind === "checking" || (armed && online);
+  const checking = phase.kind === "checking";
   const ended = phase.kind === "ended";
   const sameRefused = phase.kind === "refused" && phase.code === value;
-  const canSend = value !== "" && online && !checking && !ended && !waiting && !sameRefused && phase.kind !== "accepted";
+  // Never the phone's network reading: a stale "offline" must not keep the code from going (PRO-603).
+  const canSend = value !== "" && !checking && !ended && !waiting && !sameRefused && phase.kind !== "accepted";
 
   const settle = (answer: AccessCodeAnswer, sent: string) => {
     flight.current = false;
     if (!shown.current) return;
-    setArmed(false);
     switch (answer.status) {
       case "accepted": setPhase({ kind: "accepted" }); return;
       case "invalid": case "expired": case "exhausted": setPhase({ kind: "refused", refusal: answer.status, code: sent }); return;
       case "rate_limited": setPhase({ kind: "waiting", until: Date.now() + answer.retryAfter * 1000 }); return;
       case "ticket_dead": setPhase({ kind: "ended" }); return;
-      case "unanswered": setPhase({ kind: "unanswered" }); return;
+      case "unanswered": setPhase(answer.reason === REDEEM_UNREACHABLE ? { kind: "offline" } : { kind: "unanswered" }); return;
     }
   };
+  // Continue and Try again both really send, whatever the network reading says; only the answer decides what is shown.
   const send = () => {
     if (flight.current || !value || checking || ended || waiting || phase.kind === "accepted") return;
-    if (!online) { setArmed(true); return; }
     flight.current = true;
     setPhase({ kind: "checking" });
     void app.redeemAccessCode(value).then((answer) => settle(answer, value));
   };
+  const tryAgain = () => {
+    // The reading may be what is wrong: asked for again alongside the code, never before it.
+    app.refreshNetwork();
+    send();
+  };
 
-  // Armed while offline: sent once the network is back.
-  const redeem = app.redeemAccessCode;
+  // Not sent for want of a network: it goes by itself once the phone says its network is back (25.08).
+  const online = app.online;
+  const wasOnline = useRef(online);
   useEffect(() => {
-    if (!armed || !online || flight.current || !value) return;
-    flight.current = true;
-    void redeem(value).then((answer) => settle(answer, value));
+    const back = online && !wasOnline.current;
+    wasOnline.current = online;
+    if (back && phase.kind === "offline") send();
   });
 
   // Refused: a mistyped character is the likely cause, so the cursor goes back to the code once the field is unlocked.
@@ -118,10 +126,9 @@ function AccessCodeForm({ request }: { request: AccessCodeRequest }) {
 
   const change = (next: string) => {
     setCode(next);
-    // An offline Try again is for the code that was there: emptied, nothing is waiting to go.
-    if (next.trim() === "") setArmed(false);
-    // The first change takes a refusal away and turns Continue back on; a lost answer is a new try.
-    if (phase.kind === "refused" || phase.kind === "unanswered") setPhase({ kind: "entering" });
+    // The first change takes a refusal away and turns Continue back on; a lost answer, or one not sent, is a new try:
+    // a code waiting for the network is the one that was there, so a changed one waits for Continue.
+    if (phase.kind === "refused" || phase.kind === "unanswered" || phase.kind === "offline") setPhase({ kind: "entering" });
   };
 
   const header = <Stack.Screen options={{
@@ -142,12 +149,12 @@ function AccessCodeForm({ request }: { request: AccessCodeRequest }) {
   // Nothing is said under the field when the code could not be checked: a notice above the form says what happened.
   const notice = ended
     ? <Notice testID="access-code-ended" tone="danger" text={ACCESS_CODE_TEXT.ticketDead} action={{ label: ACCESS_CODE_TEXT.signInAgain, disabled: app.signingIn, onPress: () => void app.signIn() }} />
-    : !online
-      ? <Notice testID="access-code-offline" tone="warning" text={ACCESS_CODE_TEXT.offline} icon={(color) => <WifiOff size={16} color={color} />} action={{ label: ACCESS_CODE_TEXT.tryAgain, disabled: armed || value === "" || waiting || sameRefused, onPress: () => setArmed(true) }} />
+    : phase.kind === "offline"
+      ? <Notice testID="access-code-offline" tone="warning" text={ACCESS_CODE_TEXT.offline} icon={(color) => <WifiOff size={16} color={color} />} action={{ label: ACCESS_CODE_TEXT.tryAgain, onPress: tryAgain }} />
       : phase.kind === "waiting"
-        ? <Notice testID="access-code-waiting" tone="warning" text={ACCESS_CODE_TEXT.rateLimited} action={{ label: waiting ? ACCESS_CODE_TEXT.tryAgainIn(clockText(left)) : ACCESS_CODE_TEXT.tryAgain, disabled: waiting || value === "", onPress: send }} />
+        ? <Notice testID="access-code-waiting" tone="warning" text={ACCESS_CODE_TEXT.rateLimited} action={{ label: waiting ? ACCESS_CODE_TEXT.tryAgainIn(clockText(left)) : ACCESS_CODE_TEXT.tryAgain, disabled: waiting || value === "", onPress: tryAgain }} />
         : phase.kind === "unanswered"
-          ? <Notice testID="access-code-unanswered" tone="danger" text={ACCESS_CODE_TEXT.unanswered} action={{ label: ACCESS_CODE_TEXT.tryAgain, onPress: send }} />
+          ? <Notice testID="access-code-unanswered" tone="danger" text={ACCESS_CODE_TEXT.unanswered} action={{ label: ACCESS_CODE_TEXT.tryAgain, onPress: tryAgain }} />
           : null;
 
   return <KeyboardAvoidingView style={[styles.screen, { backgroundColor: palette.page }]} behavior={keyboardAvoidingBehavior()} keyboardVerticalOffset={insets.top + 44}>

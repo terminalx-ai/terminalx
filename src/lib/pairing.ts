@@ -22,6 +22,7 @@ const emptyStatus: PairingStatus = {
   pendingApproval: null,
   keepAwake: true,
   lastError: null,
+  accountListing: { state: "off" },
 };
 
 let state: PairingState = { status: emptyStatus, ready: false, busy: false, relayRetrying: false, relayRetryError: null, generationError: null, dialogOpen: false };

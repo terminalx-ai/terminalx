@@ -3539,10 +3539,13 @@ fn stop_retry_keeps_its_detached_launch_and_does_not_stop_a_replacement() {
     let first = rig.manager.stop(SESSION, TAB);
     assert!(first.as_ref().is_err_and(|error| error.to_string().contains("PTY process exit could not be confirmed")), "{first:?}");
     assert!(!rig.manager.terminals.is_live(&rig.pane));
-    // A replacement that waits for a line: Windows panes run commands in PowerShell, which has no `sh`.
+    // A replacement that waits for a line, in the pane's own shell: PowerShell on Windows, unless
+    // `SHELL` names a POSIX shell (as Git Bash sets it), which has no `Read-Host`.
+    let posix = cfg!(unix) || std::path::Path::new(&pty::shell()).file_stem()
+        .is_some_and(|stem| matches!(stem.to_str(), Some("bash" | "sh" | "zsh")));
     rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, pty::PaneSpec {
         cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24,
-        command: Some(if cfg!(windows) { "Read-Host" } else { "sh -c 'read line'" }), env: &[],
+        command: Some(if posix { "sh -c 'read line'" } else { "Read-Host" }), env: &[],
     }).unwrap();
     let replacement = rig.manager.terminals.pid(&rig.pane).unwrap();
     let retry = rig.manager.stop(SESSION, TAB);

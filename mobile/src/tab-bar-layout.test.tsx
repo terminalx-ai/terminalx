@@ -36,6 +36,12 @@ beforeEach(() => {
 });
 afterEach(() => { act(() => root.unmount()); container.remove(); });
 
+it("draws each tab in the page that lays it out again at a new text size (PRO-601)", async () => {
+  const { textSizeScreenLayout } = await import("@mobile/ui/text-size");
+  await show();
+  expect(mocks.tabs.screenLayout).toBe(textSizeScreenLayout);
+});
+
 describe("on Android", () => {
   it("gives every tab a Material Symbol and a label that always shows, in the theme's colours", async () => {
     await show();

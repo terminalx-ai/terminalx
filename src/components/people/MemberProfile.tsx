@@ -14,7 +14,7 @@ function Photo({ member, className }: { member: OrganizationMember; className?: 
   const privacy = useDataPrivacy();
   const name = memberName(member);
   return (
-    <span className={cn("flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-full bg-well text-[10px] font-medium", className)}>
+    <span className={cn("flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-full bg-veil-strong text-[10px] font-medium text-foreground", className)}>
       {member.photoUrl && failedUrl !== member.photoUrl && !(privacy.enabled && externalImage(member.photoUrl))
         ? <PrivacyImage className="size-full object-cover" src={member.photoUrl} alt={name} referrerPolicy="no-referrer" onError={() => setFailedUrl(member.photoUrl!)} />
         : <span aria-hidden>{initials(name)}</span>}
@@ -32,7 +32,12 @@ export function MemberProfile({ member, online, open, onOpenChange, className, e
 } & Omit<ComponentProps<"button">, "children">) {
   const name = memberName(member);
   const joined = member.createdAt == null ? null : new Date(member.createdAt);
-  const role = ({ owner: "Owner", admin: "Admin", member: "Member" } as Record<string, string>)[member.role] || member.role || "Role unavailable";
+  const role = ({ owner: "Owner", admin: "Admin", member: "Member" } as Record<string, string>)[member.role] || member.role;
+  const joinedText = joined && Number.isFinite(joined.getTime())
+    ? `Joined ${joined.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}`
+    : null;
+  // What is known, on one line; nothing is said about what is not (2026-11-27 design pass).
+  const about = [role, joinedText].filter(Boolean).join(" · ");
   return (
     <Popover.Root open={open} onOpenChange={onOpenChange}>
       <Popover.Trigger asChild>
@@ -50,15 +55,10 @@ export function MemberProfile({ member, online, open, onOpenChange, className, e
             </span>
             <div className="min-w-0">
               <p className="break-words text-sm font-medium">{name}</p>
-              <p className="text-xs text-muted-foreground">{role}</p>
+              {about && <p className="text-xs text-muted-foreground">{about}</p>}
             </div>
           </div>
-          <p className="mt-3 break-all select-text text-xs">{member.email || "Email unavailable"}</p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {joined && Number.isFinite(joined.getTime())
-              ? `Joined ${joined.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}`
-              : "Join date unavailable"}
-          </p>
+          {member.email && <p className="mt-3 break-all select-text text-xs">{member.email}</p>}
           {extra}
         </Popover.Content>
       </Popover.Portal>

@@ -33,6 +33,28 @@ export function yourAccessText(
   }
 }
 
+/** This person's access in a few words, for the Share dialog; `yourAccessText` gives the full meaning. */
+export function yourAccessShort(
+  you: CloudWorkspaceShares["you"],
+  orgRole: string | null,
+  creator: boolean | null = null,
+): string {
+  switch (you.role) {
+    case "manager":
+    case "driver":
+      if (creator) return "You created this workspace";
+      if (you.role === "driver") return "You are a driver";
+      if (orgRole === "owner") return "You are the owner";
+      return "You are an admin";
+    case "viewer":
+      return "You are a viewer";
+    case "none":
+      return "You have no access";
+    default:
+      return String(you.role);
+  }
+}
+
 /** Owners, admins and the workspace's creator see it without a share; the server refuses one for them. */
 export function alwaysHasAccess(member: { userId: string; role: string }, createdBy: string | null): boolean {
   return member.role === "owner" || member.role === "admin" || (!!createdBy && member.userId === createdBy);
@@ -92,7 +114,7 @@ export function shareRoleLabel(role: CloudShareRole): string {
   }
 }
 
-export const ADMIN_SHARE_LABEL = "Admin — Manages the workspace and who it’s shared with";
+export const ADMIN_SHARE_LABEL = "Admin";
 export const MANAGER_APPROVAL_REASON = "Admin without permission approval is not supported by this workspace runtime.";
 
 export const OUTCOME_UNKNOWN = "cloud_workspace_request_outcome_unknown";

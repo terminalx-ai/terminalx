@@ -15,7 +15,7 @@ vi.mock("@tauri-apps/api/event", () => ({
   },
 }));
 vi.mock("@/lib/pairing", () => ({
-  usePairing: () => ({ status: { relay: { phase: "off" }, host: null } }),
+  usePairing: () => ({ status: { relay: { phase: "off" }, host: null, accountListing: { state: "off" } } }),
 }));
 vi.mock("./MachineNameSettings", () => ({ MachineNameSettings: () => null }));
 vi.mock("./WorkStatusSettings", () => ({ WorkStatusSettings: () => null }));

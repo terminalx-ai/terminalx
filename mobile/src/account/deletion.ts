@@ -77,7 +77,6 @@ export const accountDeletionText = {
   failStopKept: (names: readonly string[]) => `Your ${names.length === 1 ? `${ONE} ${names[0]} stopped and stays stopped; start it` : `${W} ${names.slice(0, -1).join(", ")} and ${names.at(-1)} stopped and stay stopped; start them`} again when you need ${names.length === 1 ? "it" : "them"}.`,
   failUnknown: "We could not confirm whether your deletion was scheduled. Check before trying again.",
   check: "Check again",
-  offline: "You are offline. Nothing was sent.",
   finishing: "Your account is being deleted",
   finishingBody: "The 14 days have passed, so it can no longer be cancelled. You will be signed out when it finishes.",
   signOut: "Sign out",
