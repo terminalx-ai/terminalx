@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        workflow: [ci-pull_request, repeat-flaky-tests]
+        workflow: [ci-pull_request, repeat-flaky-tests, workspace-openssh-pull_request]
     name: stop ${{ matrix.workflow }}
     concurrency:
       group: ${{ matrix.workflow }}-refs/pull/${{ github.event.pull_request.number }}/merge

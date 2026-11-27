@@ -435,6 +435,8 @@ pub(crate) const PHASE2_ADMIN_SHARE: &str = "cloud.workspaces.admin-share.v1";
 pub(crate) const PHASE2_ORGANIZATION_AUTOMATIONS: &str = "cloud.automations.organization.v1";
 const PHASE2_TEAMS_PLAN: &str = "organization.teams-plan.v1";
 pub(crate) const PHASE2_NUDGES: &str = "team.nudges.v1";
+/// Settings › MCP and its shared servers (PRO-239).
+pub(crate) const PHASE2_MCP_SERVERS: &str = "organization.mcp-servers.v1";
 pub(crate) const PHASE2_DESKTOP_BILLING: &str = "organization.desktop-billing.v1";
 pub(crate) const PHASE2_WORKSPACE_SSH: &str = "cloud.workspaces.ssh.v1";
 /// Team artifacts and templates (PRO-158).
@@ -446,6 +448,7 @@ const PHASE2_FEATURES: [&str; 27] = [
     PHASE2_TEAM_ARTIFACTS,
     PHASE2_DESKTOP_BILLING,
     PHASE2_ANNOUNCEMENTS,
+    PHASE2_MCP_SERVERS,
     PHASE2_ORGANIZATION_AUTOMATIONS,
     PHASE2_NUDGES,
     PHASE2_WORKSPACE_SSH,
@@ -908,6 +911,17 @@ impl AccountManager {
         }
         context.organization_id = organization_id.to_string();
         Ok((context, if scope.multi_org { OrgAccess::Member } else { OrgAccess::Active }))
+    }
+
+    /// The organizations reporting `feature`, for work that spans them.
+    pub(crate) fn phase2_ready_orgs(&self, feature: &str) -> Vec<String> {
+        if crate::data_privacy::enabled() || !PHASE2_FEATURES.contains(&feature) { return Vec::new(); }
+        let inner = self.inner.lock().unwrap();
+        inner.session.as_ref().map(|session| {
+            session.organizations.iter().map(|org| org.org_id.clone())
+                .filter(|org| phase2_enabled(session, feature, Some(org)))
+                .collect()
+        }).unwrap_or_default()
     }
 
     pub(crate) fn phase2_ready(&self, feature: &str, org: Option<&str>, context: Option<&AccountContext>) -> bool {

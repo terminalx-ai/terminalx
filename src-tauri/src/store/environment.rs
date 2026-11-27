@@ -141,7 +141,9 @@ fn validate_values(values: &Values) -> Result<()> {
         "Environment values are too large."
     );
     for (name, value) in values {
-        validate_name(name)?;
+        if !is_mcp_name(name) {
+            validate_name(name)?;
+        }
         ensure!(
             !value.contains('\0') && value.len() <= 64 * 1024,
             "Values must contain no NUL and be at most 64 KiB."
@@ -761,7 +763,54 @@ fn merge_file_rows(rows: &mut Vec<Row>, resolution: &super::configuration::Resol
 
 fn private_rows(project: Option<&str>) -> Result<Vec<Row>> {
     let key = scope_key(project)?;
-    Ok(rows(&store()?.index()?, &key))
+    let mut rows = rows(&store()?.index()?, &key);
+    rows.retain(|row| !is_mcp_name(&row.name));
+    Ok(rows)
+}
+
+/// Settings › MCP (PRO-239): a variable named `TERMINALX_MCP_…` carries an
+/// MCP server's token or header value to the agents and shells TerminalX
+/// starts, so the agents' own files name the variable and never hold the
+/// secret. They are Personal variables in the Keychain like any other, but
+/// only Settings › MCP writes them (the name is reserved, so nobody else can),
+/// and the Environment page does not list them.
+pub(crate) const MCP_PREFIX: &str = "TERMINALX_MCP_";
+
+pub(crate) fn is_mcp_name(name: &str) -> bool {
+    name.strip_prefix(MCP_PREFIX).is_some_and(|rest| {
+        !rest.is_empty() && name.len() <= 128 && rest.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+    })
+}
+
+/// Set and remove Settings › MCP's variables in one Keychain write.
+pub(crate) fn mcp_replace(set: &[(String, String)], remove: &BTreeSet<String>) -> Result<()> {
+    ensure!(set.iter().map(|(name, _)| name).chain(remove).all(|name| is_mcp_name(name)), "Not an MCP variable.");
+    if set.is_empty() && remove.is_empty() {
+        return Ok(());
+    }
+    store()?.change_entries(USER, |entries| {
+        for name in remove {
+            entries.remove(name);
+        }
+        for (name, value) in set {
+            entries.plain.remove(name);
+            entries.secret.insert(name.clone(), value.clone());
+        }
+        Ok(())
+    })
+}
+
+/// Settings › MCP's variables and their values.
+pub(crate) fn mcp_values() -> Result<Values> {
+    let store = store()?;
+    let index = store.index()?;
+    let Some(scope) = index.get(USER) else { return Ok(Values::new()) };
+    if !scope.names.iter().any(|name| is_mcp_name(name)) {
+        return Ok(Values::new());
+    }
+    let mut values = store.snapshot(USER, &scope.revision)?.values;
+    values.retain(|name, _| is_mcp_name(name));
+    Ok(values)
 }
 
 pub fn list(project: Option<&str>) -> Result<Vec<Row>> {

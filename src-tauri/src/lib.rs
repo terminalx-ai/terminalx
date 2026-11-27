@@ -88,6 +88,8 @@ mod workspace_ssh_listener;
 #[allow(dead_code)]
 mod workspace_ssh_updater;
 #[cfg(feature = "desktop")]
+mod mcp_servers;
+#[cfg(feature = "desktop")]
 mod desktop_inbox;
 #[cfg(feature = "desktop")]
 mod organization_github_app;
@@ -434,6 +436,7 @@ pub fn run() {
     let workspace_config = Arc::new(organization_workspace_config::WorkspaceConfigService::new(account.clone()));
     let organization_environment = Arc::new(organization_environment::OrganizationEnvironmentService::new(account.clone()));
     let cloud_remote = cloud_remote::CloudRemote::new(account.clone(), cloud_workspaces.clone(), cloud_agents.clone());
+    mcp_servers::commands::start_upkeep(account.clone(), cloud_workspaces.clone());
     machines.set_account(account.clone());
     machines.set_phones(pairing.clone());
     let machine_connections = machines::connect::MachineConnections::new(machines.clone(), account.clone());
@@ -820,6 +823,16 @@ pub fn run() {
             commands::announcements_current,
             commands::nudge_preference,
             commands::nudge_preference_set,
+            mcp_servers::commands::mcp_servers,
+            mcp_servers::commands::mcp_server_save,
+            mcp_servers::commands::mcp_server_remove,
+            mcp_servers::commands::mcp_server_set_off,
+            mcp_servers::commands::mcp_server_add_shared,
+            mcp_servers::commands::mcp_server_check,
+            mcp_servers::commands::mcp_server_sign_in,
+            mcp_servers::commands::mcp_server_sign_out,
+            mcp_servers::commands::mcp_import_scan,
+            mcp_servers::commands::mcp_import,
             commands::nudge_send,
             nudge_overlay::nudge_overlay_show,
             commands::desktop_presence_put,
