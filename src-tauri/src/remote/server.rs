@@ -1805,8 +1805,9 @@ impl WorkspaceRpc {
             if !allowed() {
                 return Err(RpcError::forbidden("Cloud desktop access changed before open"));
             }
-            let pool = self.desktop.get_or_init(|| DesktopPool::new(
-                vec!["/usr/bin".into(), "/bin".into()], Duration::from_secs(60),
+            let workdir = match &self.scope { Scope::Workspace { project, .. } => Some(project.root.clone()), _ => None };
+            let pool = self.desktop.get_or_init(|| DesktopPool::new_in(
+                vec!["/usr/bin".into(), "/bin".into()], workdir, Duration::from_secs(60),
             ));
             let lease = pool.connect(access, &allowed).await.map_err(|error| {
                 if error == DesktopError::AccessChanged { return RpcError::forbidden(error.to_string()); }
