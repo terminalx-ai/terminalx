@@ -3,7 +3,7 @@ import * as Crypto from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
 import { AppState } from "react-native";
 import { createContext, useContext, useEffect, useState, useSyncExternalStore, type PropsWithChildren } from "react";
-import { readSession, refreshStoredSession } from "../auth/native";
+import { refreshStoredSession } from "../auth/native";
 import { AUTH_CONFIG } from "../auth/protocol";
 import packageJson from "../../package.json";
 import { useApp } from "../state/AppProvider";
@@ -62,10 +62,8 @@ export function CloudProvider({ children }: PropsWithChildren) {
         origin: new URL(AUTH_CONFIG.sessionEndpoint).origin,
         accessToken: async () => {
           // The stored session is the current one, also after a refresh elsewhere.
-          const held = await readSession();
-          if (!held || held.user.userId !== userId) return null;
-          const outcome = await refreshStoredSession(held);
-          return outcome.status === "rejected" ? null : outcome.session.accessToken;
+          const outcome = await refreshStoredSession();
+          return outcome.status === "rejected" || outcome.session.user.userId !== userId ? null : outcome.session.accessToken;
         },
       });
       const create = () => new CloudCatalog({ api, secrets, storage, clientInstallationId, appVersion: APP_VERSION, log: (level, message, detail) => app.connection.note(level, message, detail) });

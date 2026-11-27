@@ -5,7 +5,7 @@ import { AUTH_CONFIG } from "../auth/protocol";
 async function send<T>(owner: string | undefined, action: "preview" | "submit", data: PreviewRequest | Submission, authorize?: () => Promise<void>): Promise<T> {
   const held = await readSession();
   if (!held || held.user.userId !== owner) throw new Error("unauthorized");
-  const refreshed = await refreshStoredSession(held);
+  const refreshed = await refreshStoredSession();
   const current = await readSession();
   if (!current || refreshed.status === "rejected" || current.user.userId !== owner || current.accessToken !== refreshed.session.accessToken) {
     throw new Error("unauthorized");

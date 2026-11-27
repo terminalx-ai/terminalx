@@ -234,7 +234,8 @@ export function AppProvider({ children }: PropsWithChildren) {
   }, [adoptHost, api]);
 
   const refreshCloudSession = useCallback(async (stored: CloudSession): Promise<CloudSession | null> => {
-    const outcome = await refreshStoredSession(stored);
+    // `stored` is this screen's copy; what is refreshed is the stored session, which a refresh elsewhere may have replaced (PRO-600).
+    const outcome = await refreshStoredSession();
     if (outcome.status === "rejected") {
       selectionGeneration.current++;
       connection.stop();
@@ -250,7 +251,8 @@ export function AppProvider({ children }: PropsWithChildren) {
       await loadHosts();
       return null;
     }
-    if (outcome.status === "refreshed") setSession(outcome.session);
+    // Refreshed here or elsewhere: the copy in state is the stored one again, or it would be refreshed with a spent token.
+    if (outcome.session.accessToken !== stored.accessToken || outcome.session.refreshToken !== stored.refreshToken) setSession(outcome.session);
     return outcome.session;
   }, [api, connection, loadHosts]);
 
@@ -344,7 +346,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     void Promise.all([readSession(), readHosts(), AsyncStorage.getItem(LOG_KEY)]).then(async ([storedSession, storedHosts, rawLogs]) => {
       let effectiveSession = storedSession;
       if (storedSession) {
-        const outcome = await refreshStoredSession(storedSession);
+        const outcome = await refreshStoredSession();
         if (outcome.status === "rejected") {
           forgetConversationState("");
           await clearTranscriptCaches();
