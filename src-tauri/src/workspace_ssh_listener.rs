@@ -4,7 +4,7 @@ use crate::workspace_ssh_payload::{remove_private_tree, InstallLock, StagedVersi
 use anyhow::{bail, ensure, Context, Result};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::symlink;
@@ -55,15 +55,21 @@ impl Daemon {
         command
     }
 
-    fn serve(&self, connection: TcpStream) -> Result<OwnedChild> {
+    fn serve(&self, connection: TcpStream, keys: Option<&Path>) -> Result<OwnedChild> {
         ensure!(
             connection.peer_addr()?.ip().is_loopback(),
             "non-loopback SSH connection"
         );
         let stdout: OwnedFd = connection.try_clone()?.into();
         let stdin: OwnedFd = connection.into();
+        let mut command = self.command();
+        if let Some(keys) = keys {
+            let mut option = std::ffi::OsString::from("AuthorizedKeysFile=");
+            option.push(keys);
+            command.arg("-o").arg(option);
+        }
         Ok(OwnedChild(
-            self.command()
+            command
                 .arg("-i")
                 .stdin(Stdio::from(stdin))
                 .stdout(Stdio::from(stdout))
@@ -149,7 +155,7 @@ impl Daemon {
                 Err(error) => return Err(error.into()),
             }
         };
-        let _candidate = self.serve(connection)?;
+        let _candidate = self.serve(connection, None)?;
         let status = client.wait_until(deadline)?;
         let mut log = String::new();
         File::open(output)?
@@ -197,6 +203,7 @@ impl Drop for OwnedChild {
 pub(super) struct Session {
     process: OwnedChild,
     daemon: Arc<Daemon>,
+    _authorized_key: Option<tempfile::NamedTempFile>,
 }
 
 impl Drop for Session {
@@ -223,9 +230,8 @@ pub(super) struct Listener {
 }
 
 impl Listener {
-    /// This entry point belongs to the authenticated attachment path. The
-    /// caller must recheck current workspace, account and grant at admission.
-    pub(super) fn admit(
+    #[cfg(test)]
+    fn admit(
         &self,
         socket: TcpStream,
         authorized: impl FnOnce() -> bool,
@@ -236,8 +242,41 @@ impl Listener {
             .clone()
             .context("workspace SSH listener held")?;
         ensure!(authorized(), "workspace SSH grant unavailable");
-        let process = daemon.serve(socket)?;
-        Ok(Session { process, daemon })
+        let process = daemon.serve(socket, None)?;
+        Ok(Session {
+            process,
+            daemon,
+            _authorized_key: None,
+        })
+    }
+
+    /// Admit one attachment using only its verified public key. Each child
+    /// keeps its own file alive through authentication and command execution.
+    pub(super) fn admit_key(
+        &self,
+        socket: TcpStream,
+        verified_key: impl FnOnce() -> Option<String>,
+    ) -> Result<Session> {
+        let routing = self.routing.lock().unwrap();
+        let daemon = routing
+            .active
+            .clone()
+            .context("workspace SSH listener held")?;
+        let key = verified_key()
+            .and_then(|key| parse_public_key(&key))
+            .context("workspace SSH grant unavailable")?;
+        let directory = daemon
+            .configuration
+            .parent()
+            .context("missing private SSH state")?;
+        let mut keys = tempfile::NamedTempFile::new_in(directory)?;
+        writeln!(keys, "{key}")?;
+        let process = daemon.serve(socket, Some(keys.path()))?;
+        Ok(Session {
+            process,
+            daemon,
+            _authorized_key: Some(keys),
+        })
     }
 
     /// Resume new admissions after runtime start. The caller owns the
@@ -612,7 +651,7 @@ mod tests {
 #[cfg(test)]
 mod real_sshd_tests {
     use super::*;
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader};
 
     fn generate_key(path: &Path) {
         assert!(Command::new("/usr/bin/ssh-keygen")
@@ -673,7 +712,13 @@ mod real_sshd_tests {
                 Err(error) => panic!("accept SSH client: {error}"),
             }
         };
-        let session = listener.admit(connection, || true).unwrap();
+        let client_key = fs::read_to_string(root.join("client.pub")).unwrap();
+        let key = client_key
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let session = listener.admit_key(connection, || Some(key)).unwrap();
         let output = BufReader::new(child.0.stdout.take().unwrap());
         (child, output, session)
     }
@@ -713,12 +758,10 @@ mod real_sshd_tests {
                 .join(" "),
         )
         .unwrap();
-        let keys = root.join("authorized_keys");
-        fs::copy(root.join("client.pub"), &keys).unwrap();
         let configuration = root.join("sshd_config");
         fs::write(&configuration, format!(
-            "HostKey {}\nAuthorizedKeysFile {}\nAllowUsers terminalx-runtime\nAuthenticationMethods publickey\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nDisableForwarding yes\nPrintMotd no\n",
-            host.display(), keys.display()
+            "HostKey {}\nAuthorizedKeysFile none\nAllowUsers terminalx-runtime\nAuthenticationMethods publickey\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nDisableForwarding yes\nPrintMotd no\n",
+            host.display()
         )).unwrap();
         let install = InstallLock::acquire(root).unwrap();
         let listener = Listener::default();
