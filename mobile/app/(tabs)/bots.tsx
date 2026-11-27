@@ -13,6 +13,7 @@ import { BotQuestionSheet } from "@mobile/ui/BotQuestionSheet";
 import { GlassIconButton } from "@mobile/ui/glass";
 import { Button, Card, EmptyState, Screen } from "@mobile/ui/primitives";
 import { usePullRefresh } from "@mobile/ui/pull-refresh";
+import { withTextSizePage } from "@mobile/ui/text-size";
 import { useTheme } from "@mobile/ui/theme";
 
 /**
@@ -20,7 +21,7 @@ import { useTheme } from "@mobile/ui/theme";
  * question answerable from the list, then the team. Shown only while the
  * connected Mac offers its bots (`bots`), which it does only with Bots on.
  */
-export default function BotsScreen() {
+function BotsScreen() {
   const app = useApp();
   const router = useRouter();
   const { palette } = useTheme();
@@ -137,3 +138,6 @@ const styles = StyleSheet.create({
   time: { fontSize: 13, fontVariant: ["tabular-nums"] },
   error: { fontSize: 13, textAlign: "center" },
 });
+
+// Laid out again when the text size changes while the app is open (PRO-601).
+export default withTextSizePage(BotsScreen);

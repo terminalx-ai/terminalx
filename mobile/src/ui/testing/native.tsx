@@ -89,3 +89,5 @@ export const AppState = {
   emit: (state: string) => { for (const listener of [...appStateListeners]) listener(state); },
 };
 export const Keyboard = { addListener: () => ({ remove: () => undefined }), dismiss: vi.fn(), isVisible: () => false };
+/** An iPhone SE at the standard text size: tab pages read it to lay themselves out again at a new size (PRO-601). */
+export const useWindowDimensions = () => ({ width: 375, height: 667, scale: 2, fontScale: 1 });

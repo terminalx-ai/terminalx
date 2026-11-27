@@ -24,6 +24,7 @@ vi.mock("react-native", () => {
   // The top bar (#984) fades in and out; here it only needs to exist.
   const Animated = { View: Box, Value: class { constructor(public value: number) {} }, timing: () => ({ start: () => undefined, stop: () => undefined }) };
   return {
+    useWindowDimensions: () => ({ width: 375, height: 667, scale: 2, fontScale: 1 }),
     Animated,
     AppState: { currentState: "active" },
     // No launch arguments: the Cloud tab reads `-openWorkspace` from them on iOS.

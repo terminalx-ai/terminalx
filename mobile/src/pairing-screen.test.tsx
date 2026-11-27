@@ -17,6 +17,7 @@ vi.mock("expo-camera", () => ({
 vi.mock("react-native", () => {
   const Box = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
+    useWindowDimensions: () => ({ width: 375, height: 667, scale: 2, fontScale: 1 }),
     View: Box, Text: Box, RefreshControl: () => null, Platform: { OS: "android" },
     Modal: ({ visible, children }: any) => visible ? <div>{children}</div> : null,
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },

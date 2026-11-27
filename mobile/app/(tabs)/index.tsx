@@ -12,7 +12,7 @@ import { usePullRefresh } from "@mobile/ui/pull-refresh";
 import { Button, Card, EmptyState, Screen, SectionTitle } from "@mobile/ui/primitives";
 import { Spinner } from "@mobile/ui/Spinner";
 import { TerminalXMark } from "@mobile/ui/TerminalXMark";
-import { HEADING_MAX_POINTS, HEADING_SENTENCE_MAX_POINTS, maxScaleFor } from "@mobile/ui/text-size";
+import { HEADING_MAX_POINTS, HEADING_SENTENCE_MAX_POINTS, maxScaleFor, withTextSizePage } from "@mobile/ui/text-size";
 import { GlassIconButton } from "@mobile/ui/glass";
 import { useTheme, type Palette } from "@mobile/ui/theme";
 import { PairingScanner } from "@mobile/ui/PairingScanner";
@@ -24,7 +24,7 @@ import { takePairingRequest } from "@mobile/state/pairing-request";
  * first, then the account's machines that are not paired here. Every row has
  * the same menu, online or offline. One + in the title adds a machine.
  */
-export default function MachinesScreen() {
+function MachinesScreen() {
   const app = useApp();
   const { palette } = useTheme();
   const router = useRouter();
@@ -267,3 +267,6 @@ const styles = StyleSheet.create({
 // Signed out, the heading and its sentence stop growing at a set size, so Sign in stays in sight on an SE (PRO-601).
 const HERO_TITLE_MAX_SCALE = maxScaleFor(styles.heroTitle.fontSize, HEADING_MAX_POINTS);
 const HERO_DETAIL_MAX_SCALE = maxScaleFor(styles.heroDetail.fontSize, HEADING_SENTENCE_MAX_POINTS);
+
+// Laid out again when the text size changes while the app is open (PRO-601).
+export default withTextSizePage(MachinesScreen);

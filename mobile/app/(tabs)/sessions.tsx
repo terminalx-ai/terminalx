@@ -22,13 +22,14 @@ import { CloudWorkspaceRow } from "@mobile/ui/CloudWorkspaceRow";
 import { EdgeFade } from "@mobile/ui/EdgeFade";
 import { newSessionInBar, useTabBarInset } from "@mobile/ui/tab-bar-inset";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { withTextSizePage } from "@mobile/ui/text-size";
 import { useTheme } from "@mobile/ui/theme";
 
 /** The filter last chosen, for as long as the app runs. */
 const chosen: { filter: ListFilter } = { filter: "all" };
 const rememberFilter = (filter: ListFilter) => { chosen.filter = filter; };
 
-export default function SessionsScreen() {
+function SessionsScreen() {
   const app = useApp();
   const words = useHostWords();
   const { palette } = useTheme();
@@ -200,3 +201,6 @@ const styles = StyleSheet.create({
   sectionGap: { height: 10 },
   footnote: { fontSize: 14, textAlign: "center", marginTop: 8 },
 });
+
+// Laid out again when the text size changes while the app is open (PRO-601).
+export default withTextSizePage(SessionsScreen);

@@ -1,4 +1,4 @@
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, useContext, type ComponentType, type ReactNode } from "react";
 import { useWindowDimensions, View } from "react-native";
 
 /**
@@ -17,16 +17,21 @@ export function TextSizeProvider({ children }: { children: ReactNode }) {
 }
 
 /**
- * A page of a navigator, laid out again when the text size changes in
- * Settings while the app is open (PRO-601); each navigator draws its pages
- * in it through `textSizeScreenLayout`.
+ * A page, laid out again when the text size changes in Settings while the app
+ * is open (PRO-601). The root Stack draws its pages in it through
+ * `textSizeScreenLayout`; each tab page is wrapped by `withTextSizePage`.
  *
- * React Native takes the new size in at once, but measures a text again only
- * when its page is next laid out, and a size change alone lays out no page:
- * until something on the page moved, it kept the size the app was opened at.
- * Each tab and each pushed page is laid out on its own, so the nudge has to be
- * inside every page, not once around the app. It is a view of no size, put
- * back under a new key at each text size.
+ * React Native 0.88 takes the new size in at once (RCTFabricSurface puts the
+ * new multiplier in the root's layout context), and Yoga's `configureYogaTree`
+ * marks every text measured at the old multiplier dirty, but only during a
+ * layout pass, and none runs: `RootShadowNode::clone` dirties the root only
+ * when the layout constraints change, and `layoutIfNeeded` returns at once on
+ * a clean root. Until something on the page moved, its text kept the size the
+ * app was opened at (seen on main on the iPhone SE simulator). Each tab and
+ * each pushed page is laid out on its own, so the nudge is inside every page:
+ * a view of no size, put back under a new key at each text size, marks its
+ * page and the root dirty, and the layout pass that follows measures every
+ * text again at the new size.
  */
 export function TextSizePage({ children }: { children: ReactNode }) {
   const { fontScale } = useWindowDimensions();
@@ -39,6 +44,16 @@ export function TextSizePage({ children }: { children: ReactNode }) {
 /** `TextSizePage` as a navigator's `screenLayout`, which is called as a function rather than drawn, so it may hold no hook itself. */
 export function textSizeScreenLayout({ children }: { children: ReactNode }) {
   return <TextSizePage>{children}</TextSizePage>;
+}
+
+/**
+ * A tab's page drawn in `TextSizePage`. Each tab is wrapped here rather than
+ * through NativeTabs' `screenLayout`, which its props type leaves out.
+ */
+export function withTextSizePage<P extends object>(Page: ComponentType<P>): ComponentType<P> {
+  const Wrapped = (props: P) => <TextSizePage><Page {...props} /></TextSizePage>;
+  Wrapped.displayName = `WithTextSizePage(${Page.displayName ?? Page.name})`;
+  return Wrapped;
 }
 
 // A plain object, not a StyleSheet: this module is read by layouts whose tests stand in for only part of React Native.

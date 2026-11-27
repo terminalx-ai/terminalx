@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { stage } from "./testing/kit";
-import { maxScaleFor, TextSizePage, textSizeScreenLayout } from "./text-size";
+import { maxScaleFor, TextSizePage, textSizeScreenLayout, withTextSizePage } from "./text-size";
 
 // PRO-601: a text size changed in Settings while the app is open shows at once, and headings stop at a size.
 const mocks = vi.hoisted(() => ({ fontScale: 1 }));
@@ -39,6 +39,17 @@ it("is what a navigator's screenLayout draws each page in", async () => {
   await page.show(textSizeScreenLayout({ children: <Search /> }));
   expect(page.byId("search")).not.toBeNull();
   expect(page.byId("text-size-relayout")).not.toBeNull();
+});
+
+it("draws a tab's page in it, with the page's own props", async () => {
+  const Tab = withTextSizePage(({ label }: { label: string }) => <span data-testid="tab">{label}</span>);
+  await page.show(<Tab label="Machines" />);
+  expect(page.byId("tab")?.textContent).toBe("Machines");
+  const relayout = page.byId("text-size-relayout");
+  expect(relayout).not.toBeNull();
+  mocks.fontScale = 2;
+  await page.show(<Tab label="Machines" />);
+  expect(page.byId("text-size-relayout")).not.toBe(relayout);
 });
 
 it("stops text at a size in points, whatever size it is set at, and never draws it smaller", () => {
