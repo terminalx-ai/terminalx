@@ -48,6 +48,7 @@ import { ComposerAiEditor } from "./ComposerAiEditor";
 import { ComposerHistorySearch } from "./ComposerHistorySearch";
 import { SnippetVariablesDialog } from "./SnippetVariablesDialog";
 import { snippetVariables } from "@/lib/snippetVariables";
+import { useOrganizationSnippets, useSharedSetupsOrg } from "@/lib/sharedSetups";
 import type { AiEditorBackend } from "@/lib/aiEdit";
 import { beginComposerSend, finishComposerSend, returnToDraft, useComposerSend, withReturned } from "@/lib/composerSends";
 import { useComposerHistory } from "./useComposerHistory";
@@ -439,7 +440,15 @@ export function Composer({
   const prSource = remote ? (attach.imagesOnly ? null : prs) : (cwd ?? null);
   const prMention = usePrMention(!disabled && dismissedToken !== tokenKey ? prSource : null, draft, caret, onDraftChange, ref, setCaret, { onAttachFile: (file) => void attach.addInputs([file]) });
   // Prompts kept from a turn's menu (PRO-379), offered beside the agent's commands.
-  const snippets = useSyncExternalStore(subscribePrefs, savedSnippets, savedSnippets);
+  const ownSnippets = useSyncExternalStore(subscribePrefs, savedSnippets, savedSnippets);
+  // PRO-154: the organization's snippets beside your own, marked with its name.
+  const orgSnippets = useOrganizationSnippets();
+  const snippetOrg = useSharedSetupsOrg();
+  const snippets = useMemo(() => [
+    ...ownSnippets.map((snippet) => ({ ...snippet, hint: "Snippet" })),
+    ...orgSnippets.filter((shared) => !ownSnippets.some((own) => own.name === shared.keyword))
+      .map((shared) => ({ id: `org:${shared.id}`, name: shared.keyword, text: shared.body, hint: snippetOrg?.name ?? "Organization" })),
+  ], [ownSnippets, orgSnippets, snippetOrg]);
   const pickerOpen = !!token && token.kind !== "pr" && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource || mentioning : commands.length > 0 || snippets.length > 0 || !!commandList.note);
 
   // File hits follow the query, lightly debounced.
@@ -464,7 +473,7 @@ export function Composer({
       const q = token.query.toLowerCase();
       const saved = snippets
         .filter((snippet) => snippet.name.includes(q))
-        .map((snippet) => ({ id: `${SNIPPET}${snippet.id}`, label: `/${snippet.name}`, detail: snippet.text.split("\n")[0], hint: "Snippet", icon: <Bookmark className="size-3.5" /> }));
+        .map((snippet) => ({ id: `${SNIPPET}${snippet.id}`, label: `/${snippet.name}`, detail: snippet.text.split("\n")[0], hint: snippet.hint, icon: <Bookmark className="size-3.5" /> }));
       return [...saved, ...commands
         .filter((c) => c.name.toLowerCase().includes(q))
         .slice(0, 30)

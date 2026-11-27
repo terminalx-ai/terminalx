@@ -465,6 +465,20 @@ describe("new session in a cloud project", () => {
     expect(await launch("codex")).toMatchObject({ agent: "codex", prompt: request.prompt, nativeCodex: true });
     expect(await launch("claude")).not.toHaveProperty("nativeCodex");
   });
+
+  it("adds the new-chat prompts to the launch once, and keeps the person's words in the form a retry compares (PRO-154)", async () => {
+    await place([], { used: 0, limit: 5 });
+    const { setPrefs } = await import("@/lib/prefs");
+    setPrefs({ actionPrompts: { general: "Prefer small commits." } });
+    try {
+      const target = { key: `cloud:${ORG}:github.com/acme/web`, orgId: ORG, identity: "github.com/acme/web", fullName: "acme/web", selected: true, pinned: false, blank: false, workspaces: [] } as never;
+      const prepared = await flow.prepareCloudCreate(target, request);
+      expect(prepared.form.prompt).toBe(request.prompt);
+      expect(prepared.pending.request.launch!.prompt).toBe(`${request.prompt}\n\nAdditional instructions:\nPrefer small commits.`);
+    } finally {
+      setPrefs({ actionPrompts: {} });
+    }
+  });
 });
 
 describe("blank projects", () => {

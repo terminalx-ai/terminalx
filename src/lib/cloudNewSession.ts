@@ -1,4 +1,5 @@
-import { api, experimental, type AccountStatus, type CloudWorkspaceProviderId, type CloudWorkspaceQuota, type CloudWorkspaceQuote, type CloudWorkspaceSetup, type CloudWorkspaceSnapshot } from "@/lib/api";
+import { api, experimental, type AccountStatus, type CloudWorkspaceLaunchInput, type CloudWorkspaceProviderId, type CloudWorkspaceQuota, type CloudWorkspaceQuote, type CloudWorkspaceSetup, type CloudWorkspaceSnapshot } from "@/lib/api";
+import { primeSharedPrompts, withNewChatPrompts } from "@/lib/sharedSetups";
 import { getAccount } from "@/lib/account";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { getCloudAgents, newCloudAgentTab } from "@/lib/cloudAgents";
@@ -199,6 +200,7 @@ export async function startInWorkspace(
     const issue = request.issue && client.hasCapability("pipeline/1") ? request.issue : null;
     // Settings → Experimental → Native Codex follows the reader into a workspace (#644).
     const nativeCodex = (await experimental.nativeCodexFor(request.agent)) || undefined;
+    if (request.prompt.trim()) await primeSharedPrompts(`cloud:${orgId}`);
     const params = {
       nativeCodex,
       agent: request.agent,
@@ -206,7 +208,8 @@ export async function startInWorkspace(
       effort: request.effort,
       mode: request.mode || undefined,
       title: request.title || titleOf(request.prompt) || undefined,
-      prompt: request.prompt.trim() ? request.prompt : undefined,
+      // PRO-154: general instructions and branch names, this organization's then the person's.
+      prompt: request.prompt.trim() ? withNewChatPrompts(request.prompt, `cloud:${orgId}`) : undefined,
       useWorktree: request.useWorktree,
       ...(plan.repository ? { repository: { identity: plan.repository.identity, directory: plan.repository.directory! } } : {}),
       ...(request.pipeline?.resolveConflicts ? { pipeline: true, pipelineOptions: { ...request.pipeline, autoMerge: false }, pipelineSettings: request.pipelineSettings as unknown as Record<string, unknown> } : {}),
@@ -458,6 +461,7 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
     const setup = provider.setup ?? (await api.cloudWorkspaceSetup(provider.id, org));
     quote = await api.cloudWorkspaceQuote({ provider: provider.id, ...setup.defaults, idleSuspendMinutes: form.idleSuspendMinutes ?? setup.defaults.idleSuspendMinutes }, org);
   }
+  if (form.prompt.trim()) await primeSharedPrompts(`cloud:${orgId}`);
   const idempotencyKey = crypto.randomUUID();
   const pending: PendingCreate = {
     idempotencyKey,
@@ -469,10 +473,16 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
       confirmProviderSpend: true,
       idempotencyKey,
       repositories,
-      launch: await personLaunchInput(form),
+      // PRO-154: the shared and personal prompts go in here, once, so a retry resends these same bytes under the same key.
+      launch: withLaunchPrompts(await personLaunchInput(form), orgId),
     },
   };
   return { orgId, project, form, pending, quote, quota, providerLabel: provider.label };
+}
+
+/** The launch with the new-chat prompts of `orgId` and the person after its first prompt. */
+function withLaunchPrompts(launch: CloudWorkspaceLaunchInput, orgId: string): CloudWorkspaceLaunchInput {
+  return launch.prompt ? { ...launch, prompt: withNewChatPrompts(launch.prompt, `cloud:${orgId}`) } : launch;
 }
 
 /** The idle windows a new workspace of an organization may have (PRO-410). */

@@ -823,6 +823,7 @@ pub fn run() {
             commands::cloud_workspace_mentions,
             commands::announcements_current,
             commands::nudge_preference,
+            commands::shared_setups,
             commands::nudge_preference_set,
             mcp_servers::commands::mcp_servers,
             mcp_servers::commands::mcp_server_save,

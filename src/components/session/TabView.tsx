@@ -1,4 +1,5 @@
 import { localCommands } from "@/lib/localCommands";
+import { useSharedPromptsFor, withActionPrompt } from "@/lib/sharedSetups";
 import { useTabRead } from "@/lib/useTabRead";
 import { HeldQueueTray } from "@/components/chat/HeldQueueTray";
 import { followUpRoute, heldQueueFrom, heldQueueFromFollowUps, type HeldQueueChange } from "@/lib/heldQueue";
@@ -110,14 +111,15 @@ export const HANDOFF_AFTER_PROMPTS = 5;
  * has merged. It is the app's own action, not a prompt: an agent is never
  * asked to remove the worktree it runs in. It does not wait for a turn.
  */
-export function handoffsFor(t: Transcript, changed: boolean, deleteWorkspace?: () => void, github = true): Handoff[] | undefined {
+/** `target`: the session the steps go to, whose organization's Create PR prompt they carry (PRO-154). */
+export function handoffsFor(t: Transcript, changed: boolean, deleteWorkspace?: () => void, github = true, target: string | null = null): Handoff[] | undefined {
   const last = t.turns[t.turns.length - 1];
   // Early in a conversation the work is still being shaped: the steps wait until it has had some prompts.
   const prompts: Handoff[] =
     last?.completed?.status === "ok" && changed && t.turns.length >= HANDOFF_AFTER_PROMPTS
       ? [
           { label: "Commit", prompt: "Commit the current changes with a clear, conventional message. Do not push." },
-          ...(github ? [{ label: "Create PR", prompt: "Push this branch and open a pull request with a title and a short description of the changes." }] : []),
+          ...(github ? [{ label: "Create PR", prompt: withActionPrompt("Push this branch and open a pull request with a title and a short description of the changes.", "createPr", target) }] : []),
           { label: "Run it", prompt: "Run the project's dev server or test suite in the background and report the first errors, if any." },
         ]
       : [];
@@ -172,6 +174,8 @@ export function TabView({
   workspace?: RemovableWorkspace;
 }) {
   const backend = given ?? localSessionBackend(session.id);
+  // PRO-154: the session's organization's prompts, read before its steps and second opinions are offered.
+  useSharedPromptsFor(session.id);
   const local = backend.caps.local;
   const transcriptPeople = useMentionPeople(local ? null : parseCloudWorkspaceKey(backend.key)?.orgId, null);
   // Local VM task cards are behind Settings → Experimental → Local VM tasks (PRO-114).
@@ -1049,8 +1053,8 @@ export function TabView({
         } : undefined}
       onSendAgain={backend.resendMessage && !gate?.blocked ? sendAgain : undefined}
       onRetry={backend.resendMessage && !gate?.blocked && !readOnly ? sendAgain : undefined}
-      onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, secondOpinionPrompt(turn))
-        : handOffTo ? (turn) => handOffTo({ kind: "review", prompt: secondOpinionPrompt(turn) }) : undefined}
+      onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, withActionPrompt(secondOpinionPrompt(turn), "review", session.id))
+        : handOffTo ? (turn) => handOffTo({ kind: "review", prompt: withActionPrompt(secondOpinionPrompt(turn), "review", session.id) }) : undefined}
       secondOpinionAgent={(counterpart ?? remoteCounterpart)?.name}
       onFork={canFork && turnActions ? (endSeq, into) => void turnActions.fork(tab.id, endSeq, into).then(
         (forked) => { if (forked.note) showError(forked.note, undefined, { title: into === "tab" ? "Forked to a new tab" : "Forked to a new session" }); },
@@ -1161,7 +1165,7 @@ export function TabView({
           modelClient={backend.modelClient}
           contextUsed={transcript.contextUsed ?? tab.contextUsed ?? undefined}
           contextMax={transcript.contextMax ?? tab.contextMax ?? undefined}
-          handoffs={handoffsFor(transcript, isGit && changes.files.length > 0, deleteWorkspace, !local || forge !== "localOnly")}
+          handoffs={handoffsFor(transcript, isGit && changes.files.length > 0, deleteWorkspace, !local || forge !== "localOnly", session.id)}
           disabled={!!gate?.blocked}
           settingsLockedReason={gate && !gate.mayConfigure ? SETTINGS_LOCKED_REASON : null}
           modelLockedReason={handLock.model}
