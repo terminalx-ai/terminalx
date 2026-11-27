@@ -416,6 +416,7 @@ export function NewSessionView({
     model: modelId,
     effort,
     mode,
+    // The person's own words: a retry compares them, and the shared prompts are added once, as the request leaves (cloudNewSession).
     prompt: text,
     useWorktree,
     ...(pipelineLaunch.value.resolveConflicts ? { pipeline: pipelineLaunch.value, pipelineSettings: pipelineLaunch.settings } : {}),

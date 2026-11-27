@@ -435,6 +435,7 @@ pub(crate) const PHASE2_ADMIN_SHARE: &str = "cloud.workspaces.admin-share.v1";
 pub(crate) const PHASE2_ORGANIZATION_AUTOMATIONS: &str = "cloud.automations.organization.v1";
 const PHASE2_TEAMS_PLAN: &str = "organization.teams-plan.v1";
 pub(crate) const PHASE2_NUDGES: &str = "team.nudges.v1";
+pub(crate) const PHASE2_SHARED_SETUPS: &str = "team.shared-setups.v1";
 /// Settings › MCP and its shared servers (PRO-239).
 pub(crate) const PHASE2_MCP_SERVERS: &str = "organization.mcp-servers.v1";
 pub(crate) const PHASE2_DESKTOP_BILLING: &str = "organization.desktop-billing.v1";
@@ -448,6 +449,7 @@ const PHASE2_FEATURES: [&str; 28] = [
     PHASE2_INVITES_WELCOME,
     PHASE2_DESKTOP_BILLING,
     PHASE2_ANNOUNCEMENTS,
+    PHASE2_SHARED_SETUPS,
     PHASE2_MCP_SERVERS,
     PHASE2_ORGANIZATION_AUTOMATIONS,
     PHASE2_NUDGES,

@@ -156,6 +156,18 @@ describe("agentPrompt", () => {
     const snapshot = composeMachineSnapshot({ work: work(), remote: REMOTE, pr: pr({ mergeState: "BEHIND" }), known: true, working: false })!;
     expect(agentPrompt("pull", snapshot)).toMatch(/^Merge the latest "main" into branch "feature"/);
   });
+
+  it("adds the person's Resolve conflicts prompt to a conflict step, never to a plain pull (PRO-154)", async () => {
+    const { setPrefs } = await import("@/lib/prefs");
+    setPrefs({ actionPrompts: { resolveConflicts: "Keep both sides' tests." } });
+    try {
+      const snapshot = composeMachineSnapshot({ work: work(), remote: REMOTE, pr: pr({ mergeState: "BEHIND" }), known: true, working: false })!;
+      expect(agentPrompt("resolveConflicts", snapshot)).toContain("Additional instructions:\nKeep both sides' tests.");
+      expect(agentPrompt("pull", snapshot)).not.toContain("Keep both sides' tests.");
+    } finally {
+      setPrefs({ actionPrompts: {} });
+    }
+  });
 });
 
 describe("sameBranchState", () => {

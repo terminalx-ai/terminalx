@@ -18,6 +18,8 @@ import { openBrowserTab } from "@/lib/browser";
 import { copyText } from "@/lib/clipboard";
 import { showError } from "@/lib/errorToasts";
 import { askToStartFromLink } from "@/lib/linkSessionStart";
+import { openSlotsLink } from "@/components/people/EquipSlotsDialog";
+import { SLOTS_LINK_PREFIX } from "@/lib/favouriteSlots";
 import { getSessionStore, selectSession } from "@/lib/sessions";
 import { followSettingDeepLink, type OpenSettingsAt, type SettingDeepLink } from "@/lib/settingsDeepLink";
 import { followTabDeepLink, whenSessionsLoaded, type TabDeepLink } from "@/lib/tabDeepLink";
@@ -50,6 +52,7 @@ export type DesktopLink =
   | { kind: "session"; sessionId: string }
   | NewSessionLink
   | { kind: "browser"; url: string }
+  | { kind: "slots"; data: string }
   | { kind: "invalid"; link: string; problem: LinkProblem };
 
 /** What a link may open that only the app shell can: Settings, at a row. */
@@ -130,6 +133,8 @@ export function asDesktopLink(value: unknown): DesktopLink | null {
     }
     case "browser":
       return exactly(fields, ["kind", "url"]) && isString(fields.url) && /^https?:\/\//i.test(fields.url) ? { kind: "browser", url: fields.url } : null;
+    case "slots":
+      return exactly(fields, ["kind", "data"]) && isString(fields.data) && /^[A-Za-z0-9_=-]{0,4096}$/.test(fields.data) ? { kind: "slots", data: fields.data } : null;
     case "invalid": {
       const problem = asProblem(fields.problem);
       return exactly(fields, ["kind", "link", "problem"]) && isString(fields.link) && problem ? { kind: "invalid", link: fields.link, problem } : null;
@@ -159,6 +164,8 @@ export async function followDesktopLink(link: DesktopLink, routes: DesktopLinkRo
       return askToStartFromLink(link);
     case "browser":
       return openBrowserLink(link.url);
+    case "slots":
+      return openSlotsLink(link.data, `${SLOTS_LINK_PREFIX}${link.data}`);
     case "invalid":
       showInvalidLink(link.link, link.problem);
   }

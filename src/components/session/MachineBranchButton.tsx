@@ -15,6 +15,7 @@ import type { GitSource } from "@/lib/gitSource";
 import type { FileSource } from "@/lib/workspaceFiles";
 import type { SessionBackend } from "@/lib/sessionBackend";
 import { agentPrompt, branchPr, composeMachineSnapshot, isAgentAction, isGithubRemote, machineBranchBase, sameBranchState, type MachineBranchSnapshot } from "@/lib/machineBranchStep";
+import { primeSharedPrompts } from "@/lib/sharedSetups";
 import type { SessionEntry } from "@/types/session";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
@@ -300,7 +301,8 @@ export function MachineBranchButton({ branch, workspace }: { branch: MachineBran
       if (agent) {
         if (!tabId) throw new Error("Open an agent tab to send this to the agent.");
         agentRun.start(tabId);
-        await backend.send(tabId, agentPrompt(request.action, now), []);
+        await primeSharedPrompts(session.id);
+        await backend.send(tabId, agentPrompt(request.action, now, session.id), []);
       } else {
         const pr = now.pr?.state === "OPEN" ? now.pr : null;
         switch (request.action) {
