@@ -19,7 +19,7 @@ vi.mock("@/lib/account", () => ({
   refreshAccountRoles,
 }));
 
-import { acceptInvite, declineInvite, decideLater, getInvites, inviteErrorMessage, loadInvites, openInvite, resetInvitesForTest } from "./myInvites";
+import { acceptInvite, declineInvite, decideLater, getInvites, inviteErrorMessage, loadInvites, openInvite, registerInviteLeaveGuard, resetInvitesForTest } from "./myInvites";
 
 const DAY = 86_400_000;
 const invite = (id: string, over: Record<string, unknown> = {}) => ({
@@ -49,16 +49,53 @@ describe("my invites", () => {
     expect(getInvites().enabled).toBe(false);
   });
 
-  it("lists invitations and opens the first open one's card once", async () => {
+  it("lists invitations and only tells about a new one; the card never opens by itself", async () => {
     invoke.mockResolvedValue({ invites: [invite("inv-2", { expired: true, expiresAt: Date.now() - DAY }), invite("inv-1")] });
     await loadInvites();
     expect(invoke).toHaveBeenCalledWith("my_invites");
-    expect(getInvites()).toMatchObject({ enabled: true, open: "inv-1" });
+    expect(getInvites()).toMatchObject({ enabled: true, open: null, noticed: "inv-1" });
     expect(getInvites().invites).toHaveLength(2);
-    openInvite(null);
     await loadInvites();
-    // Not again by itself in this window.
+    await loadInvites();
     expect(getInvites().open).toBeNull();
+    // Open is the person's click.
+    expect(openInvite("inv-1")).toBe(true);
+    expect(getInvites()).toMatchObject({ open: "inv-1", noticed: null });
+  });
+
+  it("does not open the card while what is open cannot be left", async () => {
+    invoke.mockResolvedValue({ invites: [invite("inv-1")] });
+    await loadInvites();
+    const release = registerInviteLeaveGuard(() => false);
+    expect(openInvite("inv-1")).toBe(false);
+    expect(getInvites().open).toBeNull();
+    release();
+    expect(openInvite("inv-1")).toBe(true);
+  });
+
+  it("does not bring back an invitation answered while a list read was in flight", async () => {
+    invoke.mockResolvedValueOnce({ invites: [invite("inv-1")] });
+    await loadInvites();
+    let answerList: (value: unknown) => void = () => undefined;
+    invoke.mockImplementationOnce(() => new Promise((resolve) => { answerList = resolve; }));
+    const reading = loadInvites();
+    invoke.mockResolvedValueOnce({ organizationId: "org-2", organizationName: "Orbit Labs", role: "member" });
+    await acceptInvite("inv-1");
+    // The read was asked before the accept and answers with the invitation still in it.
+    answerList({ invites: [invite("inv-1")] });
+    await reading;
+    expect(getInvites().invites).toEqual([]);
+  });
+
+  it("reads again when an accept's outcome is unknown, and says so", async () => {
+    invoke.mockResolvedValueOnce({ invites: [invite("inv-1")] });
+    await loadInvites();
+    invoke.mockRejectedValueOnce({ code: "organization_invites_outcome_unknown", status: null });
+    invoke.mockResolvedValueOnce({ invites: [] });
+    const failure = await acceptInvite("inv-1").catch((error: unknown) => error);
+    expect(inviteErrorMessage(failure)).toMatch(/Couldn’t confirm/);
+    expect(refreshAccountRoles).toHaveBeenCalledWith(true);
+    await vi.waitFor(() => expect(getInvites().invites).toEqual([]));
   });
 
   it("keeps an invitation for later, remembered for this account", async () => {
@@ -68,8 +105,8 @@ describe("my invites", () => {
     expect(getInvites()).toMatchObject({ open: null, deferred: ["inv-1"], kept: { id: "inv-1" } });
     resetInvitesForTest();
     await loadInvites();
-    // A new window does not open a card the person put off.
-    expect(getInvites()).toMatchObject({ open: null, deferred: ["inv-1"] });
+    // A new window does not tell again about one the person put off.
+    expect(getInvites()).toMatchObject({ open: null, noticed: null, deferred: ["inv-1"] });
   });
 
   it("accepts, reads the organizations again and says who was joined", async () => {

@@ -157,6 +157,12 @@ impl OrganizationInvitesService {
             }
         }
         let context = self.account.context().ok_or_else(|| OrganizationInvitesError::local("account_signed_out"))?;
+        // The same rule as the server's: an invitee is not a member of the
+        // inviting organization, so any of their organizations reporting the
+        // key turns these routes on. Nothing is sent while none does.
+        if !self.account.phase2_ready(crate::account::PHASE2_INVITES_WELCOME, None, Some(&context)) {
+            return Err(OrganizationInvitesError::local("invites_welcome_unavailable"));
+        }
         let mutation = !matches!(request, InviteRequest::List | InviteRequest::Welcome(_));
         let result = self.client.request(&context, &request);
         if !self.account.is_current(&context) {
@@ -176,6 +182,8 @@ mod tests {
     use std::io::Write;
     use std::net::TcpListener;
     use std::thread;
+
+    use serde_json::json;
 
     use super::*;
 
@@ -218,9 +226,18 @@ mod tests {
         (base, handle)
     }
 
+    fn ready(account: &AccountManager, enabled: bool) {
+        account.set_memberships_for_test(&["personal-1"], true);
+        account.apply_phase2_readiness_for_test(json!({
+            "version": 1,
+            "organizations": { "personal-1": { (crate::account::PHASE2_INVITES_WELCOME): enabled } }
+        }));
+    }
+
     fn service(base: &str) -> OrganizationInvitesService {
         let account = Arc::new(AccountManager::default());
         account.set_context_for_test(Some(context()));
+        ready(&account, true);
         OrganizationInvitesService::for_test(account, base)
     }
 
@@ -273,5 +290,66 @@ mod tests {
         account.set_context_for_test(None);
         let invites = OrganizationInvitesService::for_test(account, "http://127.0.0.1:9");
         assert_eq!(invites.run(InviteRequest::List).unwrap_err().code, "account_signed_out");
+    }
+
+    #[test]
+    fn sends_nothing_while_no_organization_reports_the_readiness_key() {
+        let account = Arc::new(AccountManager::default());
+        account.set_context_for_test(Some(context()));
+        ready(&account, false);
+        // Port 9 would refuse; the refusal comes first, before any request.
+        let invites = OrganizationInvitesService::for_test(account, "http://127.0.0.1:9");
+        assert_eq!(invites.run(InviteRequest::List).unwrap_err().code, "invites_welcome_unavailable");
+        assert_eq!(invites.run(InviteRequest::Accept("invite-1")).unwrap_err().code, "invites_welcome_unavailable");
+    }
+
+    #[test]
+    fn an_accept_whose_answer_is_lost_reports_an_unknown_outcome() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            // Closed with no answer: the server may have applied it.
+        });
+        let error = service(&base).run(InviteRequest::Accept("invite-1")).unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error, OrganizationInvitesError::local(OUTCOME_UNKNOWN));
+    }
+
+    #[test]
+    fn an_answer_that_lands_after_the_account_changed_is_dropped() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let invites = Arc::new(service(&base));
+        let account = invites.account.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            // Another account signs in while the accept is in flight.
+            account.set_context_for_test(Some(AccountContext { access_token: "other".into(), generation: 4, ..context() }));
+            let body = r#"{"organizationId":"org-2","organizationName":"Orbit Labs","role":"member"}"#;
+            let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes());
+        });
+        let error = invites.run(InviteRequest::Accept("invite-1")).unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.code, "account_context_changed_after_send");
+
+        // A list read is dropped the same way, without claiming anything was sent.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let invites = Arc::new(service(&base));
+        let account = invites.account.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            account.set_context_for_test(None);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 14\r\nconnection: close\r\n\r\n{\"invites\":[]}");
+        });
+        assert_eq!(invites.run(InviteRequest::List).unwrap_err().code, "account_context_changed");
+        server.join().unwrap();
     }
 }

@@ -1,8 +1,8 @@
 import { useEffect } from "react";
-import { CheckCircle2, Clock, X } from "@/icons";
+import { CheckCircle2, Clock, UserPlus, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { useAccount } from "@/lib/account";
-import { dismissJoined, dismissKept, useInvites } from "@/lib/myInvites";
+import { dismissJoined, dismissKept, dismissNoticed, openInvite, useInvites } from "@/lib/myInvites";
 import { organizationSwitchTargets, switchOrganization } from "@/lib/organizationVisibility";
 import { useOrganizationSwitchingEnabled } from "@/lib/organizationVisibilityGate";
 
@@ -19,9 +19,10 @@ function Dismiss({ onClick }: { onClick: () => void }) {
   );
 }
 
-/** "<org> invitation kept for later" (12.20) and "You joined <org>" (01.08). */
+/** A new invitation (opens its card on a click), "<org> invitation kept for later" (12.20) and "You joined <org>" (01.08). */
 export function InviteNotices() {
-  const { kept, joined } = useInvites();
+  const { kept, joined, noticed, invites, open } = useInvites();
+  const invitation = noticed && !open ? invites.find((invite) => invite.id === noticed) : undefined;
   const { status } = useAccount();
   const switching = useOrganizationSwitchingEnabled();
 
@@ -36,6 +37,19 @@ export function InviteNotices() {
 
   return (
     <>
+      {invitation && (
+        <div role="status" aria-label={`Invitation to ${invitation.organizationName}`} className="pointer-events-auto flex items-start gap-2.5 rounded-xl bg-popover p-3 text-sm shadow-surface hairline animate-fade-in">
+          <UserPlus className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+          <div className="min-w-0 flex-1">
+            <div className="font-medium break-words">You have an invitation from {invitation.organizationName}</div>
+            {invitation.invitedBy && <div className="mt-0.5 text-xs text-muted-foreground break-words">{invitation.invitedBy} invited you to join.</div>}
+            <Button size="xs" className="mt-2.5" onClick={() => openInvite(invitation.id)}>
+              Open
+            </Button>
+          </div>
+          <Dismiss onClick={dismissNoticed} />
+        </div>
+      )}
       {kept && (
         <div role="status" aria-label="Invitation kept for later" className="pointer-events-auto flex items-start gap-2.5 rounded-xl bg-popover p-3 text-sm shadow-surface hairline animate-fade-in">
           <Clock className="mt-0.5 size-4 shrink-0 text-muted-foreground" />

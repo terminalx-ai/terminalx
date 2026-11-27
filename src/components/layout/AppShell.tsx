@@ -67,7 +67,7 @@ import { Toasts } from "@/components/ui/Toasts";
 import { NoticeColumn } from "@/components/ui/NoticeColumn";
 import { InviteWelcome } from "@/components/invites/InviteWelcome";
 import { InviteNotices } from "@/components/invites/InviteNotices";
-import { openInvite, useInvites, watchInvites } from "@/lib/myInvites";
+import { openInvite, registerInviteLeaveGuard, useInvites, watchInvites } from "@/lib/myInvites";
 import { ArchiveNotices } from "@/components/ui/ArchiveNotices";
 import { archiveWithUndo } from "@/lib/archiveNotices";
 import { reportError } from "@/lib/errorToasts";
@@ -183,8 +183,10 @@ export function AppShell() {
   // The full-window cloud setup (PRO-370), opened from Settings → Organizations in Settings' place.
   // Any other request for Settings, or any navigation, ends it: its progress is already saved.
   const [cloudSetup, setCloudSetup] = useState<CloudSetupTarget | null>(null);
-  // PRO-175: an invitation's welcome card takes the window until it is answered or put off.
+  // PRO-175: invitations are read in the background and only ever told about in a notice; the card opens on a
+  // click, as a layer over the app, and only when what is open (unsaved Settings edits) can be left.
   useEffect(() => watchInvites(), []);
+  useEffect(() => registerInviteLeaveGuard(canLeave), [canLeave]);
   const invites = useInvites();
   const welcomeInvite = invites.enabled && invites.open ? (invites.invites.find((invite) => invite.id === invites.open) ?? null) : null;
   useEffect(() => setCloudSetup(null), [settingsRequest, store.navigationVersion]);
@@ -477,11 +479,11 @@ export function AppShell() {
       <ProjectStartDialogHost />
       <PairPhoneDialogHost />
       <MachineApprovalHost />
+      {/* PRO-175: opened only by a click (the invitation notice, Settings → Review), as a layer: what is under it stays mounted. */}
+      {welcomeInvite && !intro && <InviteWelcome key={welcomeInvite.id} invite={welcomeInvite} onClose={() => openInvite(null)} />}
       <div className="flex min-h-0 flex-1">
         {intro ? (
           <IntroScreen />
-        ) : welcomeInvite ? (
-          <InviteWelcome key={welcomeInvite.id} invite={welcomeInvite} onClose={() => openInvite(null)} />
         ) : settingsOpen && cloudSetup ? (
           <CloudSetupFlow
             key={`${account.status.identity?.email ?? ""}:${cloudSetup.kind === "resume" ? cloudSetup.organizationId : "create"}`}
@@ -583,7 +585,7 @@ export function AppShell() {
       </div>
 
       <div className="flex shrink-0 justify-end">
-        {(status.settings.visible || runtimeSwitch) && !(settingsOpen && cloudSetup) && !welcomeInvite ? (
+        {(status.settings.visible || runtimeSwitch) && !(settingsOpen && cloudSetup) ? (
           <div className="min-w-0 flex-1">
             <ErrorBoundary label="the status bar" fallback={null}>
               <Suspense fallback={statusBarFallback}>

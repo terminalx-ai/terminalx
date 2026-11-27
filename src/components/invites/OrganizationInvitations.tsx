@@ -100,8 +100,8 @@ function InvitationRow({ invite, deferred }: { invite: MyInvite; deferred: boole
           <InviteOrgMark name={name} size="sm" />
         </span>
         <div className="min-w-0 flex-1 text-muted-foreground">
-          <div className="flex items-center gap-2 text-[13px]">
-            {name}
+          <div className="flex min-w-0 items-center gap-2 text-[13px]">
+            <span className="min-w-0 truncate" title={name}>{name}</span>
             <Chip className="text-muted-foreground">Expired</Chip>
           </div>
           <div className="mt-0.5 text-[12px] text-faint">
@@ -123,8 +123,8 @@ function InvitationRow({ invite, deferred }: { invite: MyInvite; deferred: boole
       <div className="flex items-start gap-3.5">
         <InviteOrgMark name={name} size="sm" />
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2 text-[13px] font-medium">
-            {name}
+          <div className="flex min-w-0 flex-wrap items-center gap-2 text-[13px] font-medium">
+            <span className="min-w-0 truncate" title={name}>{name}</span>
             {seatCovered && <Chip className="font-normal text-muted-foreground">Teams</Chip>}
             {deferred && <Chip className="border-warning/30 bg-warning/10 font-normal text-warning">You chose Decide later</Chip>}
           </div>

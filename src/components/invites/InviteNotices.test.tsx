@@ -3,8 +3,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { InvitesState } from "@/lib/myInvites";
 
 const { state, store, switching } = vi.hoisted(() => ({
-  state: { current: { enabled: true, invites: [], deferred: [], open: null, joined: null, kept: null } as InvitesState },
-  store: { dismissKept: vi.fn(), dismissJoined: vi.fn() },
+  state: { current: { enabled: true, invites: [], deferred: [], open: null, noticed: null, joined: null, kept: null } as InvitesState },
+  store: { dismissKept: vi.fn(), dismissJoined: vi.fn(), dismissNoticed: vi.fn(), openInvite: vi.fn() },
   switching: { switchOrganization: vi.fn(), targets: [{ id: "org-2" }] },
 }));
 
@@ -46,4 +46,17 @@ it("leaves the switch out until the organization is listed", () => {
   state.current = { ...state.current, joined: { organizationId: "org-2", organizationName: "Orbit Labs", role: "member" } };
   render(<InviteNotices />);
   expect(screen.queryByRole("button", { name: "Switch to Orbit Labs" })).toBeNull();
+});
+
+it("tells about a new invitation quietly and opens its card only on Open", () => {
+  state.current = { ...state.current, kept: null, joined: null, noticed: "inv-1", invites: [{ id: "inv-1", organizationName: "Orbit Labs", role: "member", expiresAt: Date.now() + 1e8, invitedBy: "Ada Park" }] };
+  render(<InviteNotices />);
+  expect(screen.getByText("You have an invitation from Orbit Labs")).toBeTruthy();
+  expect(store.openInvite).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Open" }));
+  expect(store.openInvite).toHaveBeenCalledWith("inv-1");
+  cleanup();
+  render(<InviteNotices />);
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+  expect(store.dismissNoticed).toHaveBeenCalled();
 });

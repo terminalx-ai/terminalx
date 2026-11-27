@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // PRO-175: an organization invitation in the desktop's WebKit engine. The
-// combined invite-and-welcome card shown before joining (12.21, with a login
+// invitation notice and, on Open, the combined invite-and-welcome card shown
+// before joining (12.21, with a login
 // still needed and the computer building), Decide later and its notice, the
 // Invitations list in Settings → Organizations with the menu's "1 invite"
 // (12.20), and Accept with "You joined" (01.08). Each state must fit with no
@@ -73,6 +74,15 @@ try {
     const tag = `${viewport.width}`;
     const page = await open(browser, server.url, { cloud: true, localProjects: 1 }, viewport, { extra: backend, colorScheme: "dark", locale: "en-US" });
     const card = page.getByTestId("invite-welcome");
+    // The minute read only tells about it; the card waits for a click.
+    const notice = page.getByRole("status", { name: "Invitation to Orbit Labs" });
+    await notice.waitFor({ timeout: 20_000 });
+    await page.waitForTimeout(500);
+    failed += report(`invitation notice ${tag}`, {
+      "the card is not open by itself": (await card.count()) === 0,
+      "the notice names the organization": /You have an invitation from Orbit Labs/.test(await notice.textContent()),
+    });
+    await notice.getByRole("button", { name: "Open" }).click();
     await card.getByText("Ready for you").first().waitFor({ timeout: 20_000 });
     await page.waitForTimeout(250);
     await page.screenshot({ path: `${shots}/pro-175-welcome-${tag}.png` });
@@ -84,6 +94,8 @@ try {
       "a line per agent, GitHub and the computer, with its state": /GitHub.*Ready.*Claude Code.*Ready.*Codex.*Needs a login.*Cloud computer.*Building/.test(found.text),
       "2 of 4 ready": found.text.includes("2 of 4"),
       "admins and the seat": found.text.includes("Sam Rivera") && found.text.includes("Your seat is covered by Orbit Labs’ Teams plan."),
+      "the app stays mounted under the card": await page.evaluate(() => Boolean(document.querySelector("[data-app-shell] nav, [data-app-shell] main"))),
+      "focus is on Accept and join": await page.evaluate(() => /Accept and join/.test(document.activeElement?.textContent ?? "")),
       "Accept and join, Decline, Decide later": (await page.getByRole("button", { name: /Accept and join/ }).count()) === 1 && (await card.getByRole("button", { name: "Decline" }).count()) === 1 && (await page.getByRole("button", { name: "Decide later" }).count()) === 1,
     }, found);
 

@@ -78,27 +78,41 @@ it("says everything is ready without a count when it is (12.08)", async () => {
   expect(screen.queryByText(/finishes building/)).toBeNull();
 });
 
-it("accepts with the button or Enter, declines, and decides later", async () => {
+it("accepts with its button, declines, and decides later with the button or Esc", async () => {
   const onClose = vi.fn();
   render(<InviteWelcome invite={invite} onClose={onClose} />);
   await screen.findByText("Ready for you");
   await act(async () => fireEvent.click(screen.getByRole("button", { name: /Accept and join/ })));
   expect(store.acceptInvite).toHaveBeenCalledWith("inv-1");
   expect(onClose).toHaveBeenCalledTimes(1);
-
-  cleanup();
-
-  render(<InviteWelcome invite={invite} onClose={onClose} />);
-  await act(async () => fireEvent.keyDown(document.body, { key: "Enter" }));
-  expect(store.acceptInvite).toHaveBeenCalledTimes(2);
   cleanup();
 
   render(<InviteWelcome invite={invite} onClose={onClose} />);
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Decline" })));
   expect(store.declineInvite).toHaveBeenCalledWith("inv-1");
+  cleanup();
 
+  render(<InviteWelcome invite={invite} onClose={onClose} />);
   fireEvent.click(screen.getByRole("button", { name: "Decide later" }));
   expect(store.decideLater).toHaveBeenCalledWith("inv-1");
+  cleanup();
+
+  render(<InviteWelcome invite={invite} onClose={onClose} />);
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+  expect(store.decideLater).toHaveBeenCalledTimes(2);
+});
+
+it("never accepts from an Enter outside its focused Accept and join button", async () => {
+  render(<InviteWelcome invite={invite} onClose={() => undefined} />);
+  await screen.findByText("Ready for you");
+  // Opened by a click, focus is on Accept and join.
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: /Accept and join/ }));
+  // Enter typed anywhere else, in the window or on the card, does nothing.
+  await act(async () => fireEvent.keyDown(window, { key: "Enter" }));
+  await act(async () => fireEvent.keyDown(document.body, { key: "Enter" }));
+  await act(async () => fireEvent.keyDown(screen.getByRole("dialog"), { key: "Enter" }));
+  await act(async () => fireEvent.keyDown(screen.getByRole("heading", { name: "Welcome to Orbit Labs" }), { key: "Enter" }));
+  expect(store.acceptInvite).not.toHaveBeenCalled();
 });
 
 it("keeps the card open with a short reason when accepting is refused", async () => {

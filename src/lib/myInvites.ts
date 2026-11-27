@@ -55,7 +55,12 @@ const ERROR_COPY: Record<string, string> = {
   invite_requires_pro: "Joining this organization needs a Pro plan.",
   organization_member_limit_reached: "This organization has no free seat. Ask an admin.",
   not_found: "This invitation is no longer open.",
+  organization_invites_outcome_unknown: "Couldn’t confirm. Check your organizations before trying again.",
+  account_context_changed_after_send: "Couldn’t confirm. Check your organizations before trying again.",
 };
+
+/** A sent request whose answer was lost: it may have been applied. */
+const UNCONFIRMED = new Set(["organization_invites_outcome_unknown", "account_context_changed_after_send"]);
 
 export function inviteErrorMessage(error: unknown): string {
   return ERROR_COPY[inviteErrorCode(error)] ?? "Couldn’t reach TerminalX. Try again.";
@@ -103,15 +108,17 @@ export interface InvitesState {
   invites: MyInvite[];
   /** Invitation ids the person chose Decide later for (this Mac, this account). */
   deferred: string[];
-  /** The invitation whose welcome card is open. */
+  /** The invitation whose welcome card is open: only ever on the person's click. */
   open: string | null;
+  /** A new invitation the quiet notice tells about ("Open" shows its card). */
+  noticed: string | null;
   /** The organization just joined, for the "You joined" notice (01.08). */
   joined: JoinedOrganization | null;
   /** An invitation kept for later, for its notice (12.20). */
   kept: MyInvite | null;
 }
 
-const EMPTY: InvitesState = { enabled: false, invites: [], deferred: [], open: null, joined: null, kept: null };
+const EMPTY: InvitesState = { enabled: false, invites: [], deferred: [], open: null, noticed: null, joined: null, kept: null };
 let state: InvitesState = EMPTY;
 const listeners = new Set<() => void>();
 let generation = 0;
@@ -151,22 +158,40 @@ export async function loadInvites(): Promise<void> {
     if (asked !== generation) return;
     const invites = Array.isArray(answer?.invites) ? answer.invites : [];
     const deferred = readDeferred().filter((id) => invites.some((invite) => invite.id === id));
-    // A new open invitation, not put off, shows its card once by itself.
-    const first = state.open ?? invites.find((invite) => pending(invite) && !deferred.includes(invite.id) && !shown.has(invite.id))?.id ?? null;
-    if (first) shown.add(first);
-    set({ enabled: true, invites, deferred, open: first });
+    // A new open invitation, not put off, is told about once in a quiet
+    // notice. The card itself never opens by itself over the app.
+    const fresh = invites.find((invite) => pending(invite) && !deferred.includes(invite.id) && !shown.has(invite.id))?.id;
+    if (fresh) shown.add(fresh);
+    const listed = (id: string | null) => (id && invites.some((invite) => invite.id === id) ? id : null);
+    set({ enabled: true, invites, deferred, open: listed(state.open), noticed: fresh ?? listed(state.noticed) });
   } catch {
     // Keep what was listed; the next refresh asks again.
     if (asked === generation) set({ enabled: true });
   }
 }
 
-/** Invitations whose card already opened by itself in this window. */
+/** Invitations already told about in this window. */
 const shown = new Set<string>();
 
-export function openInvite(id: string | null) {
+/** What the app shell says about leaving the current view (unsaved Settings edits). */
+let leaveGuard: () => boolean = () => true;
+export function registerInviteLeaveGuard(guard: () => boolean): () => void {
+  leaveGuard = guard;
+  return () => {
+    if (leaveGuard === guard) leaveGuard = () => true;
+  };
+}
+
+/** Show an invitation's card, on the person's click; null closes it. */
+export function openInvite(id: string | null): boolean {
+  if (id && !leaveGuard()) return false;
   if (id) shown.add(id);
-  set({ open: id });
+  set({ open: id, noticed: id && state.noticed === id ? null : state.noticed });
+  return true;
+}
+
+export function dismissNoticed() {
+  set({ noticed: null });
 }
 
 /** "Decide later": close the card; the invitation waits in Settings → Organizations. */
@@ -185,19 +210,32 @@ export function dismissJoined() {
 }
 
 function forget(id: string) {
+  // A list read already in flight was asked before this answer: drop it.
+  generation++;
   const deferred = state.deferred.filter((other) => other !== id);
   writeDeferred(deferred);
   set({
     invites: state.invites.filter((invite) => invite.id !== id),
     deferred,
     open: state.open === id ? null : state.open,
+    noticed: state.noticed === id ? null : state.noticed,
     kept: state.kept?.id === id ? null : state.kept,
   });
 }
 
 /** Accept and join; the organization appears without a restart once the roles are read again. */
 export async function acceptInvite(id: string): Promise<JoinedOrganization> {
-  const joined = await invoke<JoinedOrganization>("my_invite_accept", { inviteId: id });
+  let joined: JoinedOrganization;
+  try {
+    joined = await invoke<JoinedOrganization>("my_invite_accept", { inviteId: id });
+  } catch (error) {
+    // The request may have been applied: read what is true now.
+    if (UNCONFIRMED.has(inviteErrorCode(error))) {
+      void refreshAccountRoles(true);
+      void loadInvites();
+    }
+    throw error;
+  }
   forget(id);
   set({ joined });
   await refreshAccountRoles(true);

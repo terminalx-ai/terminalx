@@ -38,6 +38,7 @@ beforeEach(() => {
     ],
     deferred: ["inv-1"],
     open: null,
+    noticed: null,
     joined: null,
     kept: null,
   };

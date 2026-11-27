@@ -106,6 +106,9 @@ export function InviteWelcome({ invite, onClose }: { invite: MyInvite; onClose: 
   const [error, setError] = useState<string | null>(null);
   const [routeNote, setRouteNote] = useState(false);
   const root = useRef<HTMLElement>(null);
+  const primary = useRef<HTMLButtonElement>(null);
+  // Opened by a click: focus goes to Accept and join, so Enter there (and only there) accepts.
+  useEffect(() => primary.current?.focus({ preventScroll: true }), []);
 
   useEffect(() => {
     let live = true;
@@ -149,27 +152,6 @@ export function InviteWelcome({ invite, onClose }: { invite: MyInvite; onClose: 
     }
   };
 
-  // Enter accepts from anywhere that is not another control; Esc is Decide later.
-  useEffect(() => {
-    const node = root.current;
-    if (!node) return;
-    const handle = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing) return;
-      if (event.key === "Escape") {
-        event.preventDefault();
-        later();
-        return;
-      }
-      if (event.key !== "Enter" || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-      const from = event.target instanceof Element ? event.target : null;
-      if (from?.closest("button, a, input, textarea, select")) return;
-      event.preventDefault();
-      void accept();
-    };
-    window.addEventListener("keydown", handle);
-    return () => window.removeEventListener("keydown", handle);
-  });
-
   const organization = invite.organizationName;
   const role = (welcome?.role ?? invite.role) === "admin" ? "an admin" : "a member";
   const inviter = welcome?.invitedBy ?? invite.invitedBy;
@@ -179,7 +161,21 @@ export function InviteWelcome({ invite, onClose }: { invite: MyInvite; onClose: 
   const building = welcome?.computer.state === "building";
 
   return (
-    <main ref={root} className="relative flex h-full min-w-0 flex-1 flex-col bg-background" aria-label={`Invitation to ${organization}`} data-testid="invite-welcome">
+    // A layer over the app, which stays mounted under it (composers, Settings edits). Keys are the card's own:
+    // Esc puts it off, and Enter accepts only from the focused Accept and join button.
+    <section
+      ref={root}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="invite-welcome-title"
+      data-testid="invite-welcome"
+      className="fixed inset-0 z-50 flex flex-col bg-background"
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || event.defaultPrevented) return;
+        event.preventDefault();
+        later();
+      }}
+    >
       <div data-tauri-drag-region="deep" className="absolute inset-x-0 top-0 flex h-(--titlebar-h)">
         <WindowControls />
       </div>
@@ -187,18 +183,18 @@ export function InviteWelcome({ invite, onClose }: { invite: MyInvite; onClose: 
         Decide later
       </Button>
       <div className="min-h-0 flex-1 overflow-auto px-10 pt-[92px] pb-16">
-        <section className="mx-auto w-full max-w-[680px]" aria-labelledby="invite-welcome-title">
+        <div className="mx-auto w-full max-w-[680px]">
           <div className="flex items-center gap-2.5">
             <InviteOrgMark name={organization} />
-            <span className="text-[13px] text-muted-foreground">{organization}</span>
+            <span className="min-w-0 truncate text-[13px] text-muted-foreground">{organization}</span>
           </div>
-          <h1 id="invite-welcome-title" className="mt-4 text-[26px] leading-8 font-semibold tracking-[-0.01em]">
+          <h1 id="invite-welcome-title" className="mt-4 text-[26px] leading-8 font-semibold tracking-[-0.01em] break-words">
             Welcome to {organization}
           </h1>
           {inviter && (
             <div className="mt-1.5 flex items-center gap-2 text-[13px] text-muted-foreground">
               <Avatar name={inviter} size="sm" decorative />
-              <span>
+              <span className="min-w-0 break-words">
                 {inviter} invited you as {role}
               </span>
             </div>
@@ -266,7 +262,7 @@ export function InviteWelcome({ invite, onClose }: { invite: MyInvite; onClose: 
           )}
 
           <div className="mt-8 flex flex-wrap items-center gap-3">
-            <Button className="h-9 px-3 text-[12.5px]" disabled={busy !== null} onClick={() => void accept()}>
+            <Button ref={primary} className="h-9 px-3 text-[12.5px]" disabled={busy !== null} onClick={() => void accept()}>
               {busy === "accept" && <Loader2 className="animate-spin" />}
               Accept and join
               <kbd aria-hidden className="ml-1 rounded border border-current/25 px-1 text-xs leading-4 opacity-70">
@@ -294,9 +290,9 @@ export function InviteWelcome({ invite, onClose }: { invite: MyInvite; onClose: 
             {building && "You can join now; cloud sessions can start once the computer finishes building. "}
             Joining doesn’t touch your local projects. Switch between Local and {organization} from the top of the sidebar.
           </Note>
-        </section>
+        </div>
       </div>
-    </main>
+    </section>
   );
 }
 
