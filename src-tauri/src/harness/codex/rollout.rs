@@ -126,8 +126,13 @@ pub fn decode_line(line: &str, skip: &std::collections::HashSet<String>, out: &m
 /// watcher, from the one parse of the record. The same `task_complete` the
 /// decoder leaves to the hooks is, when the hooks have gone quiet, the
 /// evidence that the turn is over rather than stalled.
-pub fn decode_marked(line: &str, _skip: &std::collections::HashSet<String>, out: &mut Vec<Payload>) -> Option<TurnMark> {
+pub fn decode_marked(line: &str, skip: &std::collections::HashSet<String>, out: &mut Vec<Payload>) -> Option<TurnMark> {
     let v = serde_json::from_str::<Value>(line).ok()?;
+    decode_value(&v, skip, out)
+}
+
+/// Decode an already-parsed rollout JSON value without re-deserializing the line.
+pub fn decode_value(v: &Value, _skip: &std::collections::HashSet<String>, out: &mut Vec<Payload>) -> Option<TurnMark> {
     match v["type"].as_str() {
         Some("event_msg") => {}
         Some("turn_context") => {

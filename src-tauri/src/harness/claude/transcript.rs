@@ -437,6 +437,11 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
         return None;
     }
     let v = serde_json::from_str::<Value>(line).ok()?;
+    decode_value(&v, skip, out)
+}
+
+/// Decode an already-parsed Claude transcript JSON value without re-deserializing the line.
+pub fn decode_value(v: &Value, skip: &HashSet<String>, out: &mut Vec<Payload>) -> Option<TurnMark> {
     if v["isSidechain"].as_bool().unwrap_or(false) {
         return None;
     }
@@ -472,7 +477,7 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
         }
         // Ahead of the meta check: a scheduled prompt is written as meta, and
         // dropping it left the CLI working on a turn the tab thought was over.
-        if let Some(started_by) = started_by(&v) {
+        if let Some(started_by) = started_by(v) {
             out.push(Payload::TurnStarted { model: None, provider_session_id: None, prompt_seq: None, started_by: Some(started_by), initiating_prompt: Some(text_of(&v["message"]["content"])) });
             return Some(TurnMark::Opened);
         }
@@ -483,7 +488,7 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
     match v["type"].as_str().unwrap_or("") {
         "user" => {
             let before = out.len();
-            decode_user(&v, out);
+            decode_user(v, out);
             return match out.get(before)? {
                 // A `!` command (#1294) opens no turn: no model turn follows it.
                 Payload::UserMessage { text, .. } if shell_record(text).is_some() => None,
@@ -494,7 +499,7 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
         }
         "attachment" => {
             let before = out.len();
-            decode_queued_prompt(&v, out);
+            decode_queued_prompt(v, out);
             return (out.len() > before).then_some(TurnMark::Opened);
         }
         // The plan's window ran out: the CLI records the limit as an API
@@ -511,7 +516,7 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
         "assistant" if v["isApiErrorMessage"].as_bool() == Some(true) => {
             out.push(Payload::Error { message: text_of(&v["message"]["content"]), fatal: false, detail: None });
         }
-        "assistant" => decode_assistant(&v, out),
+        "assistant" => decode_assistant(v, out),
         "system" if v["subtype"] == "api_error" => {
             let message = v["error"]["message"].as_str().or_else(|| v["message"].as_str()).unwrap_or("Provider request failed");
             // The CLI writes one of these per failed attempt and keeps
@@ -529,7 +534,7 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
             });
         }
         "system" if v["subtype"] == "turn_duration" => return Some(TurnMark::Ended),
-        "system" if v["subtype"] == "local_command" => decode_local_command(&v, out),
+        "system" if v["subtype"] == "local_command" => decode_local_command(v, out),
         _ => {}
     }
     None

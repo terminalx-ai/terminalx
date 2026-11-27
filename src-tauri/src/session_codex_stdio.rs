@@ -203,16 +203,36 @@ fn codex_version(program: &Path) -> Option<String> {
 }
 
 /// Whether the installed Codex can serve the app-server connection.
+/// Cached per `(resolved binary path, mtime, len)` so repeated tab launches
+/// do not spawn `codex --version` every time while still picking up upgrades.
 fn codex_supported() -> bool {
+    use std::sync::LazyLock;
+    use std::time::SystemTime;
+    type CacheEntry = (PathBuf, Option<SystemTime>, u64, bool, bool);
+    static CACHE: LazyLock<Mutex<Option<CacheEntry>>> = LazyLock::new(|| Mutex::new(None));
+
     let Some(program) = crate::binpath::resolve("codex") else { return false };
-    codex_version(&program).is_some_and(|version| codex::stdio::supported(&version))
+    let workspace = in_workspace();
+    let stamp = std::fs::metadata(&program).ok().map(|meta| (meta.modified().ok(), meta.len()));
+    if let Some((mtime, len)) = stamp {
+        let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((cached_path, cached_mtime, cached_len, cached_ws, supported)) = cache.as_ref() {
+            if cached_path == &program && *cached_mtime == mtime && *cached_len == len && *cached_ws == workspace {
+                return *supported;
+            }
+        }
+    }
+    let supported = codex_version(&program).is_some_and(|version| codex::stdio::supported(&version));
+    if let Some((mtime, len)) = stamp {
+        *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((program, mtime, len, workspace, supported));
+    }
+    supported
 }
 
 impl SessionManager {
     /// A recreated runtime has no writer or queue. Preserve pending text but
     /// retire its queued claim; a crash cannot tell us whether bytes arrived.
-    pub(super) fn reconcile_codex_followups(&self, rt: &mut TabRuntime) -> Result<()> {
-        let events: Vec<AgentEvent> = store::read_lines(&rt.log_path)?;
+    pub(super) fn reconcile_codex_followups_from(&self, rt: &mut TabRuntime, events: &[AgentEvent]) -> Vec<AgentEvent> {
         let mut pending = Vec::new();
         for event in events.iter().filter(|event| event.subagent.is_none()) {
             match &event.payload {
@@ -224,10 +244,11 @@ impl SessionManager {
                 _ => {}
             }
         }
+        let mut published = Vec::with_capacity(pending.len());
         for prompt_seq in pending {
-            self.publish(rt, Payload::PromptWithdrawn { prompt_seq, unconfirmed: true }, None);
+            published.push(self.publish(rt, Payload::PromptWithdrawn { prompt_seq, unconfirmed: true }, None));
         }
-        Ok(())
+        published
     }
 
     /// Native Codex is tried, not required (#644): a tab that has not started
@@ -235,15 +256,21 @@ impl SessionManager {
     /// than the app server's minimum, or missing. Decided at its first launch,
     /// so an update since the tab was made is followed, and under admission
     /// like the terminal engine's own `--help` probe. Says whether it moved.
-    pub(super) fn codex_stdio_falls_back(&self, rt: &TabRuntime, tab: &TabEntry) -> Result<bool> {
-        let first_launch = selected(tab) && tab.provider_session_id.is_none() && tab.fork_from.is_none()
-            && matches!(rt.engine, Engine::None) && rt.child.is_none();
+    /// Runs the multi-second CLI probe outside `Mutex<TabRuntime>` so other
+    /// readers (`running_agents`, `delete_session`) never stall on it.
+    pub(super) fn codex_stdio_falls_back_unlocked(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry) -> Result<bool> {
+        let (first_launch, session_id, tab_id) = {
+            let rt = rt_arc.lock().unwrap();
+            let first = selected(tab) && tab.provider_session_id.is_none() && tab.fork_from.is_none()
+                && matches!(rt.engine, Engine::None) && rt.child.is_none();
+            (first, rt.session_id.clone(), rt.tab_id.clone())
+        };
         if !first_launch || codex_supported() { return Ok(false); }
-        index::update_tab(&rt.session_id, &rt.tab_id, |tab| {
+        index::update_tab(&session_id, &tab_id, |tab| {
             if selected(tab) && tab.provider_session_id.is_none() { tab.transport = AgentTransport::Pty; }
             Ok(())
         })?;
-        if let Ok(session) = index::get(&rt.session_id) { self.sink.emit("session_updated", &session); }
+        if let Ok(session) = index::get(&session_id) { self.sink.emit("session_updated", &session); }
         Ok(true)
     }
 
