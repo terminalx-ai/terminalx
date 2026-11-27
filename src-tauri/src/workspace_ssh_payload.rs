@@ -203,8 +203,16 @@ fn verify_with_key(
 
 /// A guard for the private install directory. Keep it alive across staging
 /// and the later listener transaction.
+pub(super) struct StagedVersion(PathBuf);
+
+impl StagedVersion {
+    pub(super) fn directory(&self) -> &Path {
+        &self.0
+    }
+}
+
 pub(super) struct InstallLock {
-    root: PathBuf,
+    pub(super) root: PathBuf,
     _guard: File,
 }
 
@@ -257,7 +265,11 @@ impl InstallLock {
         Ok(daemon)
     }
 
-    pub(super) fn stage(&self, manifest: &VerifiedManifest, payload: &[u8]) -> Result<PathBuf> {
+    pub(super) fn stage(
+        &self,
+        manifest: &VerifiedManifest,
+        payload: &[u8],
+    ) -> Result<StagedVersion> {
         // Verify the actual bytes before either decompressing or writing them.
         ensure!(
             !payload.is_empty() && payload.len() <= MAX_PAYLOAD,
@@ -295,7 +307,7 @@ impl InstallLock {
         // guard until the rename succeeds so partial errors are cleaned up.
         fs::rename(scratch.path(), &target)?;
         File::open(&self.root)?.sync_all()?;
-        Ok(target)
+        Ok(StagedVersion(target))
     }
 }
 

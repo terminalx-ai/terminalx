@@ -165,7 +165,8 @@ fn workspace_ssh_payload_staging_verifies_before_unpack_and_preserves_current() 
     .unwrap();
     assert!(guard.stage(&verified, b"mismatched").is_err());
     assert!(!root_path.join("9.7p1").exists());
-    let version = guard.stage(&verified, &bytes).unwrap();
+    let staged = guard.stage(&verified, &bytes).unwrap();
+    let version = staged.directory();
     let executable = version.join("usr/sbin/sshd");
     assert_eq!(fs::read(&executable).unwrap(), b"test");
     assert_eq!(fs::metadata(executable).unwrap().mode() & 0o777, 0o555);
@@ -177,7 +178,7 @@ fn workspace_ssh_payload_staging_verifies_before_unpack_and_preserves_current() 
 
     // The test process owns the directory and can restore permissions for cleanup.
     for path in [
-        version.clone(),
+        version.to_owned(),
         version.join("usr"),
         version.join("usr/sbin"),
     ] {
