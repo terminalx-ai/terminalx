@@ -45,6 +45,7 @@ import { useShortcutKeys } from "@/lib/hotkeys";
 import { archiveWithUndo } from "@/lib/archiveNotices";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
+import { AnnouncementCard } from "./AnnouncementCard";
 import { SidebarTitlebar, ViewMenu } from "./SidebarTitlebar";
 import { IssuePipelineSettingsDialog } from "@/components/issues/IssuePipelineSettingsDialog";
 import { cn } from "@/lib/cn";
@@ -453,6 +454,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
         />
       )}
 
+      <AnnouncementCard />
       <SidebarBulkBar sessions={store.sessions} />
       <div className="flex shrink-0 items-center gap-1 border-t border-hairline px-2 py-2" data-testid="sidebar-account-row">
         {/* The account; Settings keeps the far end. */}
