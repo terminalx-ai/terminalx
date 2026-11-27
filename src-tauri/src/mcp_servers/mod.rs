@@ -393,19 +393,28 @@ fn public_host(host: &url::Host<&str>) -> bool {
     use std::net::{Ipv4Addr, Ipv6Addr};
     let v4 = |ip: Ipv4Addr| {
         let [a, b, ..] = ip.octets();
-        !(ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified() || ip.is_broadcast() || a == 0 || a == 100 && (64..128).contains(&b))
+        !(ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+            || a == 0
+            || a == 100 && (64..128).contains(&b) // shared address space (CGNAT)
+            || a == 198 && b & 0xfe == 18 // benchmarking, 198.18/15
+            || a >= 240) // reserved and broadcast, 240/4
     };
     let v6 = |ip: Ipv6Addr| {
-        let first = ip.segments()[0];
-        match ip.to_ipv4_mapped() {
-            Some(mapped) => v4(mapped),
-            None => !(ip.is_loopback() || ip.is_unspecified() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80),
+        let segments = ip.segments();
+        if let Some(mapped) = ip.to_ipv4_mapped() {
+            return v4(mapped);
         }
+        // IPv4-compatible (::a.b.c.d) is read as the IPv4 address; NAT64 (64:ff9b::/96) can reach any.
+        if segments[..6] == [0; 6] && !ip.is_loopback() && !ip.is_unspecified() {
+            return v4(Ipv4Addr::from(u128::from(ip) as u32));
+        }
+        !(ip.is_loopback() || ip.is_unspecified() || segments[0] & 0xfe00 == 0xfc00 || segments[0] & 0xffc0 == 0xfe80 || segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0])
     };
     match host {
         url::Host::Domain(name) => {
             let name = name.trim_end_matches('.').to_ascii_lowercase();
-            name.contains('.') && !(name == "localhost" || name.ends_with(".localhost") || name.ends_with(".local"))
+            let local = ["localhost", "local", "lan", "internal", "home.arpa"].iter().any(|suffix| name == *suffix || name.ends_with(&format!(".{suffix}")));
+            name.contains('.') && !local
         }
         url::Host::Ipv4(ip) => v4(*ip),
         url::Host::Ipv6(ip) => v6(*ip),
@@ -674,6 +683,17 @@ fn sync(deps: &Deps, state: &mut State) -> Vec<String> {
     let (want_claude, want_codex) = (names(&claude), names(&codex));
     let drop_claude = state.written.claude.difference(&want_claude).cloned().collect();
     let drop_codex = state.written.codex.difference(&want_codex).cloned().collect();
+    // Ownership is recorded before any file is written: every name about to
+    // be written is TerminalX's even if one file or the save after fails,
+    // so its entry is never later taken for the person's own.
+    let claiming = Written { claude: &state.written.claude | &want_claude, codex: &state.written.codex | &want_codex };
+    if claiming != state.written {
+        state.written = claiming;
+        if let Err(error) = write_state(deps, state) {
+            log::warn!("mcp: the list could not be saved before writing the agents' files: {error:#}");
+            return vec![FILES_PROBLEM.into()];
+        }
+    }
     match agent_configs::sync_managed(&deps.homes, &claude, &codex, &drop_claude, &drop_codex) {
         Ok(_) => {
             state.written = Written { claude: want_claude, codex: want_codex };
@@ -1190,7 +1210,7 @@ pub(crate) fn import_in(deps: &Deps, from_codex: bool) -> Result<Imported> {
 // ------------------------------------------------------------------ status
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase", tag = "state")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "state")]
 pub enum Status {
     Connected,
     NeedsSignIn,
@@ -1330,6 +1350,7 @@ pub(crate) fn sign_in_in(deps: &Deps, key: &str, http: &dyn probe::Http, open: &
         (server, client)
     };
     ensure!(server.auth == Auth::Oauth, "This server does not sign in with OAuth.");
+    ensure!(server.live(), "Add this server first; it is not in use on this Mac.");
     let Target::Url(url) = parse_target(&server.target)? else { bail!("Only a URL server signs in.") };
     let client_secret = match &client {
         Some(_) => deps.secrets.get(SERVICE, &client_secret_account(key))?.and_then(|s| String::from_utf8(s).ok()),

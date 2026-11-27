@@ -310,13 +310,15 @@ fn shared_servers_are_urls_only_and_each_person_can_turn_one_off() {
 
 #[test]
 fn shared_records_are_public_https_with_safe_ids() {
-    for target in ["https://docs.example.com/mcp", "https://203.0.113.9/mcp", "https://[2001:db8::1]/mcp"] {
+    for target in ["https://docs.example.com/mcp", "https://203.0.113.9/mcp", "https://[2001:db8::1]/mcp", "https://198.20.0.1/mcp", "https://239.0.0.1/mcp", "https://lan.example.com/mcp"] {
         assert!(shareable_url(target), "{target}");
     }
     for target in [
         "http://docs.example.com/mcp", "http://127.0.0.1:3000/mcp", "https://localhost/mcp", "https://x.localhost/mcp", "https://printer.local/mcp",
         "https://intranet/mcp", "https://10.0.0.5/mcp", "https://172.16.1.1/mcp", "https://192.168.1.1/mcp", "https://169.254.169.254/latest",
         "https://100.64.0.1/mcp", "https://0.0.0.0/mcp", "https://[::1]/mcp", "https://[fd00::1]/mcp", "https://[fe80::1]/mcp", "https://[::ffff:10.0.0.1]/mcp",
+        "https://nas.lan/mcp", "https://svc.internal/mcp", "https://box.home.arpa/mcp", "https://[::127.0.0.1]/mcp", "https://[::10.1.2.3]/mcp",
+        "https://[64:ff9b::808:808]/mcp", "https://198.18.0.1/mcp", "https://198.19.255.255/mcp", "https://240.0.0.1/mcp", "https://255.255.255.255/mcp",
     ] {
         assert!(!shareable_url(target), "{target}");
     }
@@ -344,6 +346,11 @@ fn a_shared_server_that_changes_url_loses_the_members_secrets_and_asks_again() {
     let var = token_var("org-1/s1", "https://docs.example.com/mcp");
     assert_eq!(rig.codex()["mcp_servers"]["docs"]["bearer_token_env_var"].as_str(), Some(var.as_str()));
 
+    // Not added again yet: no sign-in for it.
+    let mut oauth = shared("s9", "wiki", "https://wiki.example.com/mcp");
+    oauth.auth_kind = Auth::Oauth;
+    set_shared_in(&rig.deps, "org-2", Some(vec![oauth])).unwrap();
+    assert!(sign_in_in(&rig.deps, "org-2/s9", &Script::new(|_, _, _, _| panic!("no sign-in before Add")), &|_| Ok(())).unwrap_err().to_string().contains("Add this server first"));
     let listing = set_shared_in(&rig.deps, "org-1", Some(vec![shared_bearer("https://evil.example.net/mcp")])).unwrap();
     let row = &listing.servers[0];
     assert_eq!((row.offer, row.has_secret), (Some(Offer::Changed), false));
@@ -723,4 +730,25 @@ fn live_check_in_a_fake_home() {
         }
         _ => panic!("MCP_LIVE_STEP: add <url> <token> | remove"),
     }
+}
+
+/// One agent's file cannot be written: what TerminalX did write is still
+/// its own afterwards, never taken for the person's.
+#[cfg(unix)]
+#[test]
+fn ownership_is_recorded_before_the_files_are_written() {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = rig();
+    let codex_dir = rig.deps.homes.codex_dir.clone();
+    fs::set_permissions(&codex_dir, fs::Permissions::from_mode(0o500)).unwrap();
+    let listing = save_in(&rig.deps, input("docs", "https://docs.example.com/mcp", Auth::None)).unwrap();
+    fs::set_permissions(&codex_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(!listing.problems.is_empty(), "Codex's file could not be written");
+    assert!(rig.claude()["mcpServers"]["docs"].is_object(), "Claude Code's was");
+    let state = read_state(&rig.deps).unwrap();
+    assert!(state.written.claude.contains("docs") && state.written.codex.contains("docs"));
+    // The next sync finishes it, and the entry is TerminalX's, not a clash.
+    let listing = list_in(&rig.deps).unwrap();
+    assert!(listing.problems.is_empty() && !listing.servers[0].clash);
+    assert!(rig.codex()["mcp_servers"]["docs"].is_table());
 }
