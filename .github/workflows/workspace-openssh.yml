@@ -1,0 +1,52 @@
+name: Workspace OpenSSH payload
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/workspace-openssh.yml'
+      - 'scripts/release/*workspace-openssh*'
+      - 'scripts/release/test_workspace_openssh.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-amd64:
+    name: Build and validate the AMD64 private daemon
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential libssl-dev libcrypt-dev zlib1g-dev binutils patchelf openssh-client
+      - name: Build a pinned portable release
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          scratch=$(mktemp -d)
+          trap 'find "$scratch" -depth -delete' EXIT
+          version=9.6p1
+          source_file="$scratch/openssh-$version.tar.gz"
+          sha256=910211c07255a8c5ad654391b40ee59800710dd8119dd5362de09385aa7a777c
+          curl --fail --silent --show-error --proto '=https' \
+            "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-$version.tar.gz" \
+            --output "$source_file"
+          mkdir "$scratch/output" "$scratch/unpacked"
+          python3 scripts/release/workspace-openssh.py build \
+            --version "$version" --arch x86_64 --source "$source_file" \
+            --source-sha256 "$sha256" --output "$scratch/output" \
+            --library-dir /usr/lib/x86_64-linux-gnu --library-dir /lib/x86_64-linux-gnu \
+            --library-dir /usr/lib --library-dir /lib
+          tar -xzf "$scratch/output/openssh-$version-linux-x86_64.tar.gz" -C "$scratch/unpacked"
+          daemon="$scratch/unpacked/usr/sbin/sshd"
+          "$daemon" -V
+          ssh-keygen -q -t ed25519 -N '' -f "$scratch/host"
+          printf 'HostKey %s\nAuthorizedKeysFile none\nPasswordAuthentication no\n' \
+            "$scratch/host" > "$scratch/sshd_config"
+          "$daemon" -t -f "$scratch/sshd_config"
