@@ -82,6 +82,9 @@ mod workspace_ssh;
 #[cfg(unix)]
 #[allow(dead_code)]
 mod workspace_ssh_payload;
+#[cfg(unix)]
+#[allow(dead_code)]
+mod workspace_ssh_listener;
 #[cfg(feature = "desktop")]
 mod desktop_inbox;
 #[cfg(feature = "desktop")]

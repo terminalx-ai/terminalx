@@ -67,6 +67,8 @@ struct Window {
 
 struct Stream {
     policy: Option<Permit>,
+    #[cfg(target_os = "linux")]
+    ssh: Option<SshStream>,
     #[cfg(any(target_os = "linux", all(test, unix)))]
     desktop: Option<DesktopStream>,
     id: String,
@@ -96,6 +98,13 @@ pub(super) struct DesktopStream {
     pub(super) collaboration: Arc<super::collab::Collaboration>,
     pub(super) allowed: Box<dyn Fn() -> bool + Send + Sync>,
     pub(super) lease: super::cloud_desktop::DesktopLease,
+}
+
+#[cfg(target_os = "linux")]
+pub(super) struct SshStream {
+    pub(super) collaboration: Arc<super::collab::Collaboration>,
+    pub(super) allowed: Box<dyn Fn() -> bool + Send + Sync>,
+    pub(super) _session: crate::workspace_ssh_listener::Session,
 }
 
 impl Stream {
@@ -168,7 +177,9 @@ impl Ports {
         let socket = desktop.lease.connection.rfb.take().expect("fresh RFB socket");
         let (reader, writer) = socket.into_split();
         let allowed = &|| true;
-        self.attach(peer, 0, allowed, ticket, None, Some(desktop), reader, writer)
+        self.attach(peer, 0, allowed, ticket, None, Some(desktop),
+            #[cfg(target_os = "linux")]
+            None, reader, writer)
     }
 
     #[cfg(any(target_os = "linux", all(test, unix)))]
@@ -182,6 +193,15 @@ impl Ports {
             }
             _ => Err(RpcError::invalid("invalid desktop stream method")),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn open_ssh(
+        self: &Arc<Self>, peer: &Arc<Peer>, ticket: crate::data_privacy::Ticket,
+        socket: TcpStream, ssh: SshStream,
+    ) -> Result<Value, RpcError> {
+        let (reader, writer) = socket.into_split();
+        self.attach(peer, 0, &|| true, ticket, None, None, Some(ssh), reader, writer)
     }
 
     fn opening(&self, id: u64) -> Result<Opening<'_>, RpcError> {
@@ -265,6 +285,8 @@ impl Ports {
         let (reader, writer) = socket.into_split();
         self.attach(peer, port, allowed, ticket, policy,
             #[cfg(any(target_os = "linux", all(test, unix)))]
+            None,
+            #[cfg(target_os = "linux")]
             None, reader, writer)
     }
 
@@ -273,6 +295,7 @@ impl Ports {
         self: &Arc<Self>, peer: &Arc<Peer>, port: u16, allowed: Allowed<'_>,
         ticket: crate::data_privacy::Ticket, policy: Option<Permit>,
         #[cfg(any(target_os = "linux", all(test, unix)))] desktop: Option<DesktopStream>,
+        #[cfg(target_os = "linux")] ssh: Option<SshStream>,
         reader: impl AsyncRead + Unpin + Send + 'static,
         writer: impl AsyncWrite + Unpin + Send + 'static,
     ) -> Result<Value, RpcError> {
@@ -296,10 +319,16 @@ impl Ports {
             if desktop.as_ref().is_some_and(|desktop| !(desktop.allowed)()) {
                 return Err(RpcError::forbidden("Cloud desktop access changed before open"));
             }
+            #[cfg(target_os = "linux")]
+            if ssh.as_ref().is_some_and(|ssh| !(ssh.allowed)()) {
+                return Err(RpcError::forbidden("SSH access changed before open"));
+            }
             let peer_window = self.windows.lock().unwrap().entry(peer.id()).or_default().clone();
             if let Some(permit) = &policy { permit.check(None).map_err(|_| RpcError::forbidden("Port policy changed before open"))?; }
             let stream = Arc::new(Stream {
                 policy,
+                #[cfg(target_os = "linux")]
+                ssh,
                 #[cfg(any(target_os = "linux", all(test, unix)))]
                 desktop,
                 id: format!("{}-{}", self.event("port", "desktop"), self.next.fetch_add(1, Ordering::Relaxed) + 1),
@@ -334,6 +363,25 @@ impl Ports {
                 let _lease = lease;
                 tokio::select! { _ = ticket.cancelled() => {}, _ = work => {} }
                 ports.end(&stream, None);
+            });
+        }
+        #[cfg(target_os = "linux")]
+        if stream.ssh.is_some() {
+            let ports = self.clone();
+            let stream = stream.clone();
+            let peer = peer.clone();
+            tokio::spawn(async move {
+                let ssh = stream.ssh.as_ref().expect("SSH stream");
+                loop {
+                    tokio::select! {
+                        _ = stream.cancel.cancelled() => return,
+                        _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                    }
+                    if !(ssh.allowed)() {
+                        ports.end(&stream, Some((&peer, "revoked")));
+                        return;
+                    }
+                }
             });
         }
         // Who opened what, never what was carried.
@@ -476,6 +524,13 @@ impl Ports {
                         release(&stream.peer_window.unacked, count);
                         break "revoked";
                     }
+                    #[cfg(target_os = "linux")]
+                    let _ssh_admission = stream.ssh.as_ref().map(|ssh| ssh.collaboration.enter_admission());
+                    #[cfg(target_os = "linux")]
+                    if stream.ssh.as_ref().is_some_and(|ssh| !(ssh.allowed)()) {
+                        release(&stream.peer_window.unacked, count);
+                        break "revoked";
+                    }
                     stream.unacked.fetch_add(count, Ordering::SeqCst);
                     peer.notify_sized(
                         self.event("ports.data", "desktop.data"),
@@ -608,6 +663,10 @@ async fn write_stream_input(writer: &mut (impl AsyncWrite + Unpin), bytes: &[u8]
     #[cfg(any(target_os = "linux", all(test, unix)))]
     if let Some(desktop) = &stream.desktop {
         return write_checked(writer, bytes, &desktop.collaboration, || (desktop.allowed)()).await;
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(ssh) = &stream.ssh {
+        return write_checked(writer, bytes, &ssh.collaboration, || (ssh.allowed)()).await;
     }
     write_port_input(writer, bytes, stream.policy.as_ref()).await
 }
