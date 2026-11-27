@@ -251,11 +251,40 @@ final class Provider {
     private var snapshots: [String: Snapshot] = [:]
     private var snapshotEntries: [CachedSnapshotEntry] = []
     private let trustMode: HelperTrustMode
+    private let externalLock: NSLock?
     private var owner: ComputerUseOwner?
     private var ownWindowsAllowedForTests = false
 
-    init(trustMode: HelperTrustMode) {
+    init(trustMode: HelperTrustMode, lock: NSLock? = nil) {
         self.trustMode = trustMode
+        self.externalLock = lock
+    }
+
+    private func sleepOutsideProviderLock(milliseconds: Int) {
+        guard milliseconds > 0 else { return }
+        let duration = TimeInterval(milliseconds) / 1_000
+        if let externalLock {
+            externalLock.unlock()
+            defer { externalLock.lock() }
+            Thread.sleep(forTimeInterval: duration)
+        } else {
+            Thread.sleep(forTimeInterval: duration)
+        }
+    }
+
+    private func recoverWindow(
+        _ app: AppDescriptor,
+        windowId: CGWindowID? = nil,
+        windowBounds: CGRect? = nil
+    ) throws {
+        try recoverWindowImpl(
+            app,
+            windowId: windowId,
+            windowBounds: windowBounds,
+            sleepOutsideLock: { [self] ms in
+                self.sleepOutsideProviderLock(milliseconds: ms)
+            }
+        )
     }
 
     /// The authenticated peer: the app whose windows this helper never acts on.
@@ -346,7 +375,11 @@ final class Provider {
         }
     }
 
-    private func observe(params: [String: JSONValue], forAction: Bool = false) throws -> Snapshot {
+    private func observe(
+        params: [String: JSONValue],
+        forAction: Bool = false,
+        cachedForAction: Snapshot? = nil
+    ) throws -> Snapshot {
         let query = try requiredString(params, "app")
         let windowId = try requestedWindowId(params)
         let windowIndex = try requestedWindowIndex(params)
@@ -363,6 +396,16 @@ final class Provider {
         let restoreWindow = params["restoreWindow"]?.bool == true && protection == nil
         if restoreWindow {
             try recoverWindow(app)
+        }
+        if forAction {
+            return try buildActionSnapshot(
+                app: app,
+                windowId: windowId,
+                windowIndex: windowIndex,
+                restoreWindow: restoreWindow,
+                cached: cachedForAction,
+                requestedIndexes: try requestedElementIndexes(params)
+            )
         }
         let snapshot = try buildSnapshot(
             app: app,
@@ -465,10 +508,13 @@ final class Provider {
         pruneSnapshotCache()
         let cached = try cachedSnapshot(params: params)
         // Why: cached AX frames can be stale after a window move or resize, and
-        // stale geometry can turn an intended action into a misclick.
+        // stale geometry can turn an intended action into a misclick. Re-validate
+        // live window bounds and only the requested elements instead of running a
+        // duplicate 1,200-node AX crawl before the action executes.
         let snapshot = try observe(
             params: params.merging(["noScreenshot": .bool(true)]) { _, replacement in replacement },
-            forAction: true
+            forAction: true,
+            cachedForAction: cached
         )
         try validateRequestedElements(cached: cached, current: snapshot, params: params)
         return snapshot
@@ -522,11 +568,15 @@ final class Provider {
             (isExplicitSnapshotNamespace(namespace) ? nil : snapshots[key])
     }
 
-    private func validateRequestedElements(cached: Snapshot?, current: Snapshot, params: [String: JSONValue]) throws {
-        let requestedIndexes = try ["elementIndex", "fromElementIndex", "toElementIndex"].compactMap { key -> Int? in
+    private func requestedElementIndexes(_ params: [String: JSONValue]) throws -> [Int] {
+        try ["elementIndex", "fromElementIndex", "toElementIndex"].compactMap { key -> Int? in
             guard params[key]?.number != nil else { return nil }
             return try optionalInteger(params, key)
         }
+    }
+
+    private func validateRequestedElements(cached: Snapshot?, current: Snapshot, params: [String: JSONValue]) throws {
+        let requestedIndexes = try requestedElementIndexes(params)
         guard !requestedIndexes.isEmpty else { return }
         guard let cached else {
             throw ProviderError.coded("element_not_found", "element indexes require a fresh get-app-state snapshot for this app/window")
@@ -719,6 +769,95 @@ final class Provider {
         return AppDescriptor(name: name, bundleId: app.bundleIdentifier, pid: pid, app: app)
     }
 
+    private func buildActionSnapshot(
+        app: AppDescriptor,
+        windowId: CGWindowID?,
+        windowIndex: Int?,
+        restoreWindow: Bool,
+        cached: Snapshot?,
+        requestedIndexes: [Int]
+    ) throws -> Snapshot {
+        guard accessibilityTrustedSettled() else {
+            throw ProviderError.coded(
+                "permission_denied",
+                "Accessibility permission is required for TerminalX Computer Use Helper. Run `terminalx computer permissions` or open TerminalX Settings > General > Computer use, grant Accessibility to TerminalX Computer Use Helper, then retry."
+            )
+        }
+        let appElement = AXUIElementCreateApplication(app.pid)
+        enableManualAccessibilityIfNeeded(appElement, app: app)
+        let windowCandidates = WindowCapture.candidates(pid: app.pid)
+        let focused = try focusedWindow(
+            appElement: appElement,
+            app: app,
+            visibleWindowCount: windowCandidates.count,
+            allowRecovery: restoreWindow,
+            recover: { try self.recoverWindow(app) }
+        )
+        let focusedTitle = stringAttribute(focused, kAXTitleAttribute as String) ?? app.name
+        guard let capture = WindowCapture.resolve(
+            candidates: windowCandidates,
+            titleHint: focusedTitle,
+            windowId: windowId,
+            windowIndex: windowIndex,
+            captureImage: false
+        ) else {
+            throw ProviderError.coded("window_not_found", "app '\(app.name)' has no on-screen window")
+        }
+        guard let window = matchingWindow(appElement: appElement, capture: capture, focused: focused, explicitTarget: windowId != nil || windowIndex != nil) else {
+            throw ProviderError.coded("window_not_found", "could not match accessibility window to requested window; run get-app-state again or retry without a window selector")
+        }
+        let title = stringAttribute(window, kAXTitleAttribute as String) ?? capture.title ?? app.name
+        let reader = AXSnapshotReader()
+        var elements: [Int: ElementRecord] = [:]
+        for index in requestedIndexes {
+            guard let expected = cached?.elements[index] else { continue }
+            if let liveRecord = revalidatedElementRecord(
+                expected: expected,
+                appPid: app.pid,
+                targetWindow: window,
+                capture: capture,
+                reader: reader
+            ) {
+                elements[index] = liveRecord
+            }
+        }
+        var focusedElementId: Int?
+        if let focusedEl = focusedElement(appElement: appElement),
+           pidAttribute(focusedEl) == app.pid,
+           elementBelongsToWindow(focusedEl, targetWindow: window, capture: capture) {
+            if let matchingRequested = elements.first(where: { CFEqual($0.value.element, focusedEl) }) {
+                focusedElementId = matchingRequested.key
+            } else {
+                let focusedKey = -1
+                elements[focusedKey] = ElementRecord(
+                    index: focusedKey,
+                    element: focusedEl,
+                    localFrame: nil,
+                    actions: [],
+                    signature: ""
+                )
+                focusedElementId = focusedKey
+            }
+        }
+        return Snapshot(
+            id: UUID().uuidString,
+            app: app,
+            windowTitle: title,
+            windowBounds: capture.bounds,
+            windowId: capture.windowId,
+            windowLayer: capture.layer,
+            treeText: "",
+            focusedElementId: focusedElementId,
+            screenshot: nil,
+            screenshotStatus: .skipped,
+            screenshotScale: CGSize(width: 1, height: 1),
+            screenshotEngine: nil,
+            elements: elements,
+            truncated: false,
+            maxDepthReached: false
+        )
+    }
+
     private func buildSnapshot(
         app: AppDescriptor,
         includeScreenshot: Bool,
@@ -746,7 +885,8 @@ final class Provider {
             appElement: appElement,
             app: app,
             visibleWindowCount: windowCandidates.count,
-            allowRecovery: restoreWindow
+            allowRecovery: restoreWindow,
+            recover: { try self.recoverWindow(app) }
         )
         let focusedTitle = stringAttribute(focused, kAXTitleAttribute as String) ?? app.name
         let wantsScreenshot = includeScreenshot && !protectedTarget
@@ -1236,13 +1376,19 @@ private func enableManualAccessibilityIfNeeded(_ appElement: AXUIElement, app: A
     _ = AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
 }
 
-private func focusedWindow(appElement: AXUIElement, app: AppDescriptor, visibleWindowCount: Int, allowRecovery: Bool) throws -> AXUIElement {
+private func focusedWindow(
+    appElement: AXUIElement,
+    app: AppDescriptor,
+    visibleWindowCount: Int,
+    allowRecovery: Bool,
+    recover: () throws -> Void
+) throws -> AXUIElement {
     let systemWide = AXUIElementCreateSystemWide()
     if let window = lookupUsableWindow(systemWide: systemWide, appElement: appElement, app: app) {
         return window
     }
     if allowRecovery {
-        try recoverWindow(app)
+        try recover()
         if let window = lookupUsableWindow(systemWide: systemWide, appElement: appElement, app: app) {
             return window
         }
@@ -1518,10 +1664,11 @@ private func matchingWindow(appElement: AXUIElement, capture: WindowCapture, foc
 /// for an app by bundle id (neither `open` by bundle nor NSWorkspace's open by bundle):
 /// when builds share a bundle id, that launched a different, stale copy. An
 /// instance that is no longer running is an error; nothing is launched.
-private func recoverWindow(
+private func recoverWindowImpl(
     _ app: AppDescriptor,
     windowId: CGWindowID? = nil,
-    windowBounds: CGRect? = nil
+    windowBounds: CGRect? = nil,
+    sleepOutsideLock: (Int) -> Void
 ) throws {
     let current = NSRunningApplication(processIdentifier: app.pid)
     let decision = RunningAppActivation.decide(
@@ -1537,11 +1684,7 @@ private func recoverWindow(
         }
         throw ProviderError.coded(RunningAppActivation.notRunningCode, RunningAppActivation.notRunningMessage(name: app.name, pid: app.pid))
     }
-    _ = running.unhide()
-    _ = running.activate(options: [.activateAllWindows])
     let appElement = AXUIElementCreateApplication(app.pid)
-    // Frontmost through the target's own accessibility element, the same process.
-    _ = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
     let focusedWindow = copyElement(appElement, kAXFocusedWindowAttribute as String)
     var cachedWindows: [AXUIElement]?
     func windows() -> [AXUIElement] {
@@ -1568,13 +1711,123 @@ private func recoverWindow(
             }
         }
     }
-    if let window = targetWindow ?? focusedWindow ?? windows().first {
+    let resolvedWindow = targetWindow ?? focusedWindow ?? windows().first
+    if isRecoveredWindowReady(
+        app: app,
+        running: running,
+        targetWindow: resolvedWindow,
+        windowId: windowId,
+        windowBounds: windowBounds
+    ) {
+        return
+    }
+    _ = running.unhide()
+    _ = running.activate(options: [.activateAllWindows])
+    // Frontmost through the target's own accessibility element, the same process.
+    _ = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+    if let window = resolvedWindow {
         _ = AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
         _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         _ = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     }
-    Thread.sleep(forTimeInterval: 0.4)
+    _ = WindowActivationSettling.settle(
+        sleepOutsideLock: sleepOutsideLock,
+        probe: {
+            isRecoveredWindowReady(
+                app: app,
+                running: running,
+                targetWindow: resolvedWindow,
+                windowId: windowId,
+                windowBounds: windowBounds
+            )
+        }
+    )
+}
+
+private func isRecoveredWindowReady(
+    app: AppDescriptor,
+    running: NSRunningApplication,
+    targetWindow: AXUIElement?,
+    windowId: CGWindowID?,
+    windowBounds: CGRect?
+) -> Bool {
+    guard running.isActive || NSWorkspace.shared.frontmostApplication?.processIdentifier == app.pid else {
+        return false
+    }
+    guard let focused = focusedSystemWindow(systemWide: AXUIElementCreateSystemWide(), app: app) else {
+        return false
+    }
+    if boolAttribute(focused, kAXMinimizedAttribute as String) == true {
+        return false
+    }
+    if windowId != nil || windowBounds != nil {
+        return windowMatchesCapture(focused, windowId: windowId, windowBounds: windowBounds)
+    }
+    if let targetWindow {
+        if CFEqual(focused, targetWindow) {
+            return true
+        }
+        if let targetId = windowNumber(targetWindow), windowNumber(focused) == targetId {
+            return true
+        }
+    }
+    return true
+}
+
+private func elementBelongsToWindow(
+    _ element: AXUIElement,
+    targetWindow: AXUIElement,
+    capture: WindowCapture
+) -> Bool {
+    if CFEqual(element, targetWindow) {
+        return true
+    }
+    guard let container = containingWindow(element) else {
+        return false
+    }
+    if CFEqual(container, targetWindow) {
+        return true
+    }
+    return windowMatchesCapture(container, windowId: capture.windowId, windowBounds: capture.bounds)
+}
+
+private func revalidatedElementRecord(
+    expected: ElementRecord,
+    appPid: pid_t,
+    targetWindow: AXUIElement,
+    capture: WindowCapture,
+    reader: AXSnapshotReader
+) -> ElementRecord? {
+    guard pidAttribute(expected.element) == appPid,
+          elementBelongsToWindow(expected.element, targetWindow: targetWindow, capture: capture),
+          let role = reader.stringAttribute(expected.element, kAXRoleAttribute as String)
+    else {
+        return nil
+    }
+    let rawActions = reader.actions(expected.element)
+    let roleDescription = reader.stringAttribute(expected.element, kAXRoleDescriptionAttribute as String)
+    let title = reader.stringAttribute(expected.element, kAXTitleAttribute as String)
+    let label = reader.stringAttribute(expected.element, kAXDescriptionAttribute as String)
+    let url = reader.stringAttribute(expected.element, kAXURLAttribute as String)
+    let linkText = role == "AXLink" ? reader.descendantTextSnippets(expected.element, limit: 2, maxDepth: 3).first : nil
+    let liveNode = SnapshotRenderNode(
+        role: role,
+        roleDescription: roleDescription,
+        title: title,
+        label: label,
+        linkText: linkText,
+        url: url,
+        rawActions: rawActions
+    )
+    let localFrame = reader.frame(expected.element, windowBounds: capture.bounds)
+    return ElementRecord(
+        index: expected.index,
+        element: expected.element,
+        localFrame: localFrame,
+        actions: rawActions,
+        signature: elementSignature(liveNode)
+    )
 }
 
 private func windowMatchesCapture(
@@ -2053,20 +2306,32 @@ private final class TreeRenderer {
     }
 
     private func tabStripCompaction(parent: SnapshotRenderNode, children: [AXUIElement]) -> SnapshotTabStripCompaction? {
-        let childNodes = children.map { child in
-            let role = reader.stringAttribute(child, kAXRoleAttribute as String) ?? "AXUnknown"
-            return SnapshotRenderNode(
-                role: role,
-                roleDescription: reader.stringAttribute(child, kAXRoleDescriptionAttribute as String),
-                title: reader.stringAttribute(child, kAXTitleAttribute as String),
-                label: reader.stringAttribute(child, kAXDescriptionAttribute as String),
-                value: reader.valueString(child, role: role),
-                traits: reader.traitsFor(child, role: role)
-            )
+        guard SnapshotRenderHeuristics.shouldInspectTabStripCompaction(parent: parent, childCount: children.count) else {
+            return nil
         }
         // Why: browsers expose every open tab through AX; retaining only the active
         // tab keeps snapshots focused on the current page instead of stale tab titles.
-        return SnapshotRenderHeuristics.tabStripCompaction(parent: parent, children: childNodes)
+        return SnapshotRenderHeuristics.tabStripCompaction(
+            parent: parent,
+            childCount: children.count,
+            childRole: { index in
+                let child = children[index]
+                let role = reader.stringAttribute(child, kAXRoleAttribute as String) ?? "AXUnknown"
+                let roleDescription = reader.stringAttribute(child, kAXRoleDescriptionAttribute as String)
+                return (role: role, roleDescription: roleDescription)
+            },
+            isChildSelected: { index in
+                let child = children[index]
+                if reader.boolAttribute(child, kAXSelectedAttribute as String) == true {
+                    return true
+                }
+                let role = reader.stringAttribute(child, kAXRoleAttribute as String) ?? "AXUnknown"
+                return SnapshotRenderHeuristics.isSelectedBrowserTab(
+                    isSelected: false,
+                    value: reader.valueString(child, role: role)
+                )
+            }
+        )
     }
 
     private func compactRenderedBrowserTabs(parent: SnapshotRenderNode, startLine: Int, depth: Int) {
@@ -2177,8 +2442,9 @@ private final class AXSnapshotReader {
     }
 
     func primaryChildren(_ element: AXUIElement, role: String, windowBounds: CGRect) -> [AXUIElement] {
-        if usesRowsAsPrimaryChildren(role: role), let rows = copyArray(element, kAXRowsAttribute as String), !rows.isEmpty {
-            return visibleRows(rows, parent: element, windowBounds: windowBounds)
+        if usesRowsAsPrimaryChildren(role: role),
+           let rows = visibleRows(parent: element, windowBounds: windowBounds) {
+            return rows
         }
         return copyArray(element, kAXChildrenAttribute as String) ?? []
     }
@@ -2219,13 +2485,15 @@ private final class AXSnapshotReader {
         guard (role == kAXGroupRole as String || role == kAXUnknownRole as String),
               name == nil,
               actions.isEmpty,
-              traits.isEmpty,
-              isPlainTextSubtree(element, maxDepth: 4)
+              traits.isEmpty
         else {
             return nil
         }
-        let texts = descendantTextSnippets(element, limit: 8, maxDepth: 4)
-        guard texts.count >= 2 else { return nil }
+        guard let texts = plainTextSubtreeSnippets(element, limit: 8, maxDepth: 4),
+              texts.count >= 2
+        else {
+            return nil
+        }
         let summary = texts.joined(separator: " ")
         guard summary.count <= 220 else { return nil }
         return summary
@@ -2329,15 +2597,31 @@ private final class AXSnapshotReader {
         return CGRect(origin: point, size: size)
     }
 
-    private func visibleRows(_ rows: [AXUIElement], parent: AXUIElement, windowBounds: CGRect) -> [AXUIElement] {
-        guard let parentFrame = frame(parent, windowBounds: windowBounds) else {
-            return Array(rows.prefix(20))
+    private func visibleRows(parent: AXUIElement, windowBounds: CGRect) -> [AXUIElement]? {
+        var cachedParentFrame: CGRect??
+        func parentFrame() -> CGRect? {
+            if let cachedParentFrame { return cachedParentFrame }
+            let computed = frame(parent, windowBounds: windowBounds)
+            cachedParentFrame = computed
+            return computed
         }
-        let visible = rows.filter { row in
-            guard let rowFrame = frame(row, windowBounds: windowBounds) else { return false }
-            return rowFrame.intersects(parentFrame)
-        }
-        return Array((visible.isEmpty ? rows : visible).prefix(20))
+        return SnapshotRenderHeuristics.selectVisibleRows(
+            directVisibleRows: {
+                copyArray(parent, kAXVisibleRowsAttribute as String)
+            },
+            allRows: {
+                copyArray(parent, kAXRowsAttribute as String)
+            },
+            hasParentFrame: { parentFrame() != nil },
+            isRowVisible: { row in
+                guard let containerFrame = parentFrame(),
+                      let rowFrame = frame(row, windowBounds: windowBounds)
+                else {
+                    return false
+                }
+                return rowFrame.intersects(containerFrame)
+            }
+        )
     }
 
     private func isSecureTextElement(_ element: AXUIElement, role: String) -> Bool {
@@ -2358,8 +2642,10 @@ private final class AXSnapshotReader {
             haystack.contains("one-time code")
     }
 
-    private func isPlainTextSubtree(_ element: AXUIElement, maxDepth: Int) -> Bool {
+    private func plainTextSubtreeSnippets(_ element: AXUIElement, limit: Int, maxDepth: Int) -> [String]? {
         var sawText = false
+        var values: [String] = []
+        var seen = Set<String>()
         let allowedContainerRoles: Set<String> = [
             kAXGroupRole as String,
             kAXUnknownRole as String,
@@ -2372,17 +2658,31 @@ private final class AXSnapshotReader {
             guard depth <= maxDepth else { return false }
             let role = stringAttribute(node, kAXRoleAttribute as String) ?? "AXUnknown"
             guard allowedContainerRoles.contains(role) else { return false }
+            guard SnapshotRenderHeuristics.meaningfulActions(actions(node), role: role).isEmpty else { return false }
             if role == kAXStaticTextRole as String || role == "AXLink" {
                 sawText = true
+                if values.count < limit {
+                    for candidate in [
+                        stringAttribute(node, kAXValueAttribute as String),
+                        stringAttribute(node, kAXTitleAttribute as String),
+                        stringAttribute(node, kAXDescriptionAttribute as String),
+                    ] {
+                        guard let candidate else { continue }
+                        let text = preview(candidate, maxLength: 80)
+                        guard !text.isEmpty, seen.insert(text).inserted else { continue }
+                        values.append(text)
+                        if values.count >= limit { break }
+                    }
+                }
             }
-            guard SnapshotRenderHeuristics.meaningfulActions(actions(node), role: role).isEmpty else { return false }
             for child in copyArray(node, kAXChildrenAttribute as String) ?? [] {
                 guard visit(child, depth: depth + 1) else { return false }
             }
             return true
         }
 
-        return visit(element, depth: 0) && sawText
+        guard visit(element, depth: 0), sawText else { return nil }
+        return values
     }
 
     private func cache(for element: AXUIElement) -> ElementCache {
@@ -2676,15 +2976,21 @@ private struct BoundedPNG {
 }
 
 private func boundedPngData(_ image: CGImage) -> BoundedPNG? {
-    let rep = NSBitmapImageRep(cgImage: image)
-    guard let data = rep.representation(using: .png, properties: [:]) else { return nil }
+    let initialData: Data? = autoreleasepool {
+        let rep = NSBitmapImageRep(cgImage: image)
+        return rep.representation(using: .png, properties: [:])
+    }
+    guard let data = initialData else { return nil }
     if data.count <= 900_000 {
         return BoundedPNG(data: data, width: image.width, height: image.height)
     }
     var scale = min(1, 1280 / CGFloat(max(image.width, image.height)))
     var best = BoundedPNG(data: data, width: image.width, height: image.height)
     while scale >= 0.25 {
-        guard let resized = resizePng(image, scale: scale) else {
+        let resized: BoundedPNG? = autoreleasepool {
+            resizePng(image, scale: scale)
+        }
+        guard let resized else {
             break
         }
         best = resized
@@ -4092,7 +4398,7 @@ private final class SocketListener: @unchecked Sendable {
         self.token = token
         self.onSessionClaimed = onSessionClaimed
         self.onSessionClosed = onSessionClosed
-        self.provider = Provider(trustMode: trust.mode)
+        self.provider = Provider(trustMode: trust.mode, lock: providerLock)
         try bindSocket()
     }
 
@@ -4186,6 +4492,11 @@ private final class SocketListener: @unchecked Sendable {
         return AgentSessionConnectionID(rawValue: lastConnectionID)
     }
 
+    private enum ConnectionLoopAction {
+        case next
+        case close
+    }
+
     private func handleConnection(_ fd: Int32, connectionID: AgentSessionConnectionID) {
         var registeredSession = false
         var hangupMonitor: AuthenticatedConnectionHangupMonitor?
@@ -4196,62 +4507,70 @@ private final class SocketListener: @unchecked Sendable {
             }
             close(fd)
         }
-        let peerOwner = trust.authorizedOwner(ofConnection: fd)
+        let peerOwner = autoreleasepool {
+            trust.authorizedOwner(ofConnection: fd)
+        }
         let authorizedPeer = peerOwner != nil
         let decoder = JSONDecoder()
         while let line = readLine(from: fd) {
-            guard let data = line.data(using: .utf8),
-                  let request = try? decoder.decode(Request.self, from: data)
-            else {
-                continue
-            }
-            if !registeredSession && isAuthenticatedAgentSession(
-                expectedToken: token,
-                requestToken: request.token,
-                authorizedPeer: authorizedPeer
-            ) {
-                let monitor: AuthenticatedConnectionHangupMonitor
-                do {
-                    monitor = try AuthenticatedConnectionHangupMonitor(
-                        fileDescriptor: fd,
-                        onHangup: { [weak self] in
-                            self?.disconnectSession(connectionID)
-                        }
+            let loopAction: ConnectionLoopAction = autoreleasepool {
+                guard let data = line.data(using: .utf8),
+                      let request = try? decoder.decode(Request.self, from: data)
+                else {
+                    return .next
+                }
+                if !registeredSession && isAuthenticatedAgentSession(
+                    expectedToken: token,
+                    requestToken: request.token,
+                    authorizedPeer: authorizedPeer
+                ) {
+                    let monitor: AuthenticatedConnectionHangupMonitor
+                    do {
+                        monitor = try AuthenticatedConnectionHangupMonitor(
+                            fileDescriptor: fd,
+                            onHangup: { [weak self] in
+                                self?.disconnectSession(connectionID)
+                            }
+                        )
+                    } catch {
+                        fputs("computer-use owner monitor failed: \(error)\n", stderr)
+                        return .close
+                    }
+                    sessionLock.lock()
+                    let registration = sessionOwnership.registerConnection(
+                        connectionID,
+                        authenticated: true
                     )
-                } catch {
-                    fputs("computer-use owner monitor failed: \(error)\n", stderr)
-                    return
+                    sessionLock.unlock()
+                    guard registration != .rejected else {
+                        monitor.cancel()
+                        return .close
+                    }
+                    registeredSession = true
+                    if let peerOwner {
+                        providerLock.lock()
+                        provider.setOwner(peerOwner)
+                        providerLock.unlock()
+                    }
+                    hangupMonitor = monitor
+                    monitor.start()
+                    if registration == .claimed {
+                        onSessionClaimed()
+                    }
                 }
-                sessionLock.lock()
-                let registration = sessionOwnership.registerConnection(
-                    connectionID,
-                    authenticated: true
+                let response = handleRequest(
+                    provider: provider,
+                    lock: providerLock,
+                    request: request,
+                    expectedToken: token,
+                    authorizedPeer: authorizedPeer
                 )
-                sessionLock.unlock()
-                guard registration != .rejected else {
-                    monitor.cancel()
-                    return
-                }
-                registeredSession = true
-                if let peerOwner {
-                    providerLock.lock()
-                    provider.setOwner(peerOwner)
-                    providerLock.unlock()
-                }
-                hangupMonitor = monitor
-                monitor.start()
-                if registration == .claimed {
-                    onSessionClaimed()
-                }
+                writeJSON(response, to: fd)
+                return .next
             }
-            let response = handleRequest(
-                provider: provider,
-                lock: providerLock,
-                request: request,
-                expectedToken: token,
-                authorizedPeer: authorizedPeer
-            )
-            writeJSON(response, to: fd)
+            if loopAction == .close {
+                return
+            }
         }
     }
 

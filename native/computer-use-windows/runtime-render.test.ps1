@@ -12,6 +12,32 @@ using System.Collections.Generic;
 
 public sealed class TerminalXRenderTestCounter {
     public int FindAll;
+    public int FindAllDescendants;
+    public int WalkerSteps;
+}
+
+public sealed class TerminalXRenderTestWalker {
+    public TerminalXRenderTestCounter Counter = new TerminalXRenderTestCounter();
+
+    public TerminalXRenderTestElement GetFirstChild(TerminalXRenderTestElement node) {
+        Counter.WalkerSteps++;
+        if (node == null || node.FailFindAll || node.Children.Count == 0) {
+            return null;
+        }
+        return node.Children[0];
+    }
+
+    public TerminalXRenderTestElement GetNextSibling(TerminalXRenderTestElement node) {
+        Counter.WalkerSteps++;
+        if (node == null || node.Parent == null) {
+            return null;
+        }
+        int index = node.Parent.Children.IndexOf(node);
+        if (index < 0 || index + 1 >= node.Parent.Children.Count) {
+            return null;
+        }
+        return node.Parent.Children[index + 1];
+    }
 }
 
 public sealed class TerminalXRenderTestBounds {
@@ -69,6 +95,7 @@ public sealed class TerminalXRenderTestCollection : IEnumerable {
 public sealed class TerminalXRenderTestElement {
     public readonly List<TerminalXRenderTestElement> Children =
         new List<TerminalXRenderTestElement>();
+    public TerminalXRenderTestElement Parent;
     public TerminalXRenderTestCounter Counter = new TerminalXRenderTestCounter();
     public readonly TerminalXRenderTestCurrent Current = new TerminalXRenderTestCurrent();
     public bool FailFindAll;
@@ -76,6 +103,10 @@ public sealed class TerminalXRenderTestElement {
     public string ValueText = "";
 
     public TerminalXRenderTestCollection FindAll(object scope, object condition) {
+        if (scope != null && scope.ToString() == "Descendants") {
+            Counter.FindAllDescendants++;
+            throw new System.InvalidOperationException("unbounded Descendants scan is forbidden");
+        }
         Counter.FindAll++;
         if (FailFindAll) {
             throw new System.InvalidOperationException("defunct node");
@@ -122,6 +153,7 @@ function New-TestElement {
     $element.Current.LocalizedControlType = $Role
     $element.Current.Name = $Name
     foreach ($child in @($Children)) {
+        $child.Parent = $element
         [void]$element.Children.Add($child)
     }
     $element
@@ -140,7 +172,7 @@ try {
     $tree = Render-TerminalXTree $root $null
     Assert-TestEqual $tree.elements.Count 1 "named control record count"
     Assert-TestEqual ([string]$tree.lines[0]) "0 button Save" "named control line"
-    Assert-TestEqual $counter.findAll 1 "named control child enumeration"
+    Assert-TestEqual $counter.FindAll 0 "named control skips child enumeration"
 
     $counter = New-TestCounter
     $leaf = New-TestElement -Role "text" -Name "body" -Counter $counter -RuntimeId 2
@@ -148,7 +180,7 @@ try {
     $tree = Render-TerminalXTree $root $null
     Assert-TestEqual (($tree.elements | ForEach-Object { $_.name }) -join "|") "Details|body" "named generic records"
     Assert-TestEqual (@($tree.lines) -join "|") "0 group Details|`t1 text body" "named generic lines"
-    Assert-TestEqual $counter.findAll 2 "named generic child enumeration"
+    Assert-TestEqual $counter.FindAll 2 "named generic child enumeration"
 
     $counter = New-TestCounter
     $alpha = New-TestElement -Role "text" -Name "Alpha" -Counter $counter -RuntimeId 2
@@ -157,7 +189,7 @@ try {
     $tree = Render-TerminalXTree $root $null
     Assert-TestEqual $tree.elements.Count 1 "anonymous generic record count"
     Assert-TestEqual ([string]$tree.lines[0]) "0 group, Text: Alpha Beta" "anonymous generic summary"
-    Assert-TestEqual $counter.findAll 7 "anonymous generic child enumeration"
+    Assert-TestEqual $counter.FindAll 3 "anonymous generic single-pass child enumeration"
 
     $counter = New-TestCounter
     $alpha = New-TestElement -Role "text" -Name "Alpha" -Counter $counter -RuntimeId 2
@@ -166,7 +198,7 @@ try {
     $tree = Render-TerminalXTree $root $null
     Assert-TestEqual (($tree.elements | ForEach-Object { $_.name }) -join "|") "Invoice|Alpha|Beta" "row records"
     Assert-TestEqual ([string]$tree.lines[0]) "0 row Invoice, Text: Alpha Beta" "row summary"
-    Assert-TestEqual $counter.findAll 6 "row child enumeration"
+    Assert-TestEqual $counter.FindAll 3 "row single-pass child enumeration"
 
     $counter = New-TestCounter
     $button = New-TestElement -Role "button" -Name "Continue" -Counter $counter -RuntimeId 2
@@ -174,14 +206,63 @@ try {
     $tree = Render-TerminalXTree $root $null
     Assert-TestEqual $tree.elements.Count 1 "elided wrapper record count"
     Assert-TestEqual ([string]$tree.lines[0]) "0 button Continue" "elided wrapper line"
-    Assert-TestEqual $counter.findAll 4 "elided wrapper child enumeration"
+    Assert-TestEqual $counter.FindAll 1 "elided wrapper single-pass child enumeration"
 
     $counter = New-TestCounter
     $root = New-TestElement -Role "row" -Name "Invoice" -Counter $counter -FailFindAll
     $tree = Render-TerminalXTree $root $null
     Assert-TestEqual $tree.elements.Count 1 "failed child read record count"
     Assert-TestEqual ([string]$tree.lines[0]) "0 row Invoice" "failed child read line"
-    Assert-TestEqual $counter.findAll 2 "failed child read retries"
+    Assert-TestEqual $counter.FindAll 1 "failed child read cached without retry"
+
+    # P-16: nested depth-4 generic containers must not re-walk subtrees.
+    $counter = New-TestCounter
+    $btn = New-TestElement -Role "button" -Name "Submit" -Counter $counter -RuntimeId 10
+    $hint = New-TestElement -Role "text" -Name "Hint" -Counter $counter -RuntimeId 11
+    $inner = New-TestElement -Role "group" -Children @($btn, $hint) -Counter $counter -RuntimeId 12
+    $lvl3 = New-TestElement -Role "group" -Children @($inner) -Counter $counter -RuntimeId 13
+    $lvl2 = New-TestElement -Role "group" -Children @($lvl3) -Counter $counter -RuntimeId 14
+    $lvl1 = New-TestElement -Role "group" -Children @($lvl2) -Counter $counter -RuntimeId 15
+    $root = New-TestElement -Role "pane" -Children @($lvl1) -Counter $counter -RuntimeId 16
+    $tree = Render-TerminalXTree $root $null
+    Assert-TestEqual (($tree.elements | ForEach-Object { $_.name }) -join "|") "|Submit|Hint" "nested generic records"
+    Assert-TestEqual $counter.FindAll 6 "nested depth-4 generic single-pass child enumeration"
+
+    # P-16: Find-TerminalXElement uses bounded TreeWalker without TreeScope::Descendants.
+    $counter = New-TestCounter
+    $walker = New-Object -TypeName TerminalXRenderTestWalker
+    $walker.Counter = $counter
+    $siblings = @()
+    for ($i = 0; $i -lt 25; $i++) {
+        $siblings += New-TestElement -Role "button" -Name "Btn $i" -Counter $counter -RuntimeId (100 + $i)
+    }
+    $root = New-TestElement -Role "window" -Name "Main" -Children $siblings -Counter $counter -RuntimeId 1
+    $found = Find-TerminalXElement $root ([pscustomobject]@{ index = 4; runtimeId = @(103) }) $walker
+    Assert-TestEqual ($null -ne $found) $true "bounded TreeWalker finds target"
+    Assert-TestEqual $found.Current.Name "Btn 3" "bounded TreeWalker matched element"
+    Assert-TestEqual $counter.FindAllDescendants 0 "Find-TerminalXElement never calls Descendants"
+    Assert-TestEqual $counter.FindAll 0 "Find-TerminalXElement uses TreeWalker instead of FindAll"
+    Assert-TestEqual $counter.WalkerSteps 4 "Find-TerminalXElement exits early on match"
+
+    $originalMaxNodesForFind = $MaxNodes
+    try {
+        $MaxNodes = 5
+        $missing = Find-TerminalXElement $root ([pscustomobject]@{ index = 20; runtimeId = @(120) }) $walker
+        Assert-TestEqual ($null -eq $missing) $true "Find-TerminalXElement respects MaxNodes cap"
+    } finally {
+        $MaxNodes = $originalMaxNodesForFind
+    }
+
+    # P-16: Win32 DLL cache key & cache path verification.
+    $keyA = Get-TerminalXWin32CacheKey "public class A {}"
+    $keyA2 = Get-TerminalXWin32CacheKey "public class A {}"
+    $keyB = Get-TerminalXWin32CacheKey "public class B {}"
+    Assert-TestEqual $keyA $keyA2 "Win32 cache key deterministic"
+    if ($keyA -eq $keyB) {
+        throw "Win32 cache key must change when source changes"
+    }
+    $defaultDllPath = Get-TerminalXWin32CachePath
+    Assert-TestEqual ([System.IO.File]::Exists($defaultDllPath)) $true "Win32 cached DLL exists after startup"
 
     $originalMaxNodes = $MaxNodes
     try {
