@@ -74,11 +74,15 @@ pub fn token_shape(token: &str) -> bool {
     !id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit()) && (30..=100).contains(&secret.len()) && secret.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+fn shared_agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| crate::data_privacy::http_agent().timeout_connect(Duration::from_secs(15)).build())
+}
+
 impl Client {
     /// A client of the Bot API at `base` ([`API`]).
     pub fn new(base: &str, token: &str) -> Self {
-        let agent = crate::data_privacy::http_agent().timeout_connect(Duration::from_secs(15)).build();
-        Self { base: base.trim_end_matches('/').to_owned(), token: token.trim().to_owned(), agent }
+        Self { base: base.trim_end_matches('/').to_owned(), token: token.trim().to_owned(), agent: shared_agent().clone() }
     }
 
     /// Call `method` with `body` as JSON, and read its `result`.
@@ -249,3 +253,13 @@ pub fn start_link(username: &str, code: &str) -> Option<String> {
 #[cfg(test)]
 #[path = "telegram_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod agent_pool_tests {
+    use super::*;
+
+    #[test]
+    fn telegram_agent_is_pooled_across_calls() {
+        assert!(std::ptr::eq(shared_agent(), shared_agent()));
+    }
+}

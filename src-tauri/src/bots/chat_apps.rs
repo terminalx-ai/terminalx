@@ -51,7 +51,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -1453,6 +1453,26 @@ impl From<super::slack::Error> for SendError {
     }
 }
 
+/// Reuse one Slack Web API client (and its pooled `ureq::Agent`) per bot login
+/// instead of constructing a brand-new TLS client on every outbox send.
+fn slack_client_for(bot: &str, login: &Login) -> Arc<super::slack::Client> {
+    use std::hash::{Hash, Hasher};
+    static CLIENTS: std::sync::OnceLock<Mutex<BTreeMap<String, (String, u64, Arc<super::slack::Client>)>>> = std::sync::OnceLock::new();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    login.token.hash(&mut hasher);
+    login.app_token.hash(&mut hasher);
+    let fingerprint = hasher.finish();
+    let mut cache = CLIENTS.get_or_init(|| Mutex::new(BTreeMap::new())).lock().unwrap_or_else(|error| error.into_inner());
+    if let Some((saved, digest, client)) = cache.get(bot) {
+        if *saved == login.saved && *digest == fingerprint {
+            return client.clone();
+        }
+    }
+    let client = Arc::new(super::slack::Client::new(super::slack::API, &login.token, &login.app_token));
+    cache.insert(bot.to_string(), (login.saved.clone(), fingerprint, client.clone()));
+    client
+}
+
 /// Send one message with `login`; the id of what was sent.
 fn send_one(login: &Login, out: &Outgoing) -> std::result::Result<String, SendError> {
     match out.service.as_str() {
@@ -1466,7 +1486,7 @@ fn send_one(login: &Login, out: &Outgoing) -> std::result::Result<String, SendEr
             Ok(client.send(&out.chat, &out.text, reply_to, &out.buttons, out.silent)?)
         }
         SLACK => {
-            let client = super::slack::Client::new(super::slack::API, &login.token, &login.app_token);
+            let client = slack_client_for(&out.bot, login);
             if out.kind == "settle" {
                 client.settle(&out.chat, &out.target, &out.text, &out.note)?;
                 return Ok(out.target.clone());
@@ -1936,3 +1956,25 @@ pub fn runtime_call(manager: &SessionManager, operation: &str, params: &Value) -
 #[cfg(test)]
 #[path = "chat_apps_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod agent_pool_tests {
+    use super::*;
+
+    #[test]
+    fn slack_client_is_reused_until_login_rotates() {
+        let login = Login {
+            token: "xoxb-test-token-00000000000000000".into(),
+            app_token: "xapp-test-token-00000000000000000".into(),
+            account: Account::default(),
+            saved: "2026-01-01T00:00:00Z".into(),
+            unknown: BTreeMap::new(),
+        };
+        let first = slack_client_for("bot-pool-test", &login);
+        let second = slack_client_for("bot-pool-test", &login);
+        assert!(Arc::ptr_eq(&first, &second), "unchanged login must reuse pooled Slack client");
+        let rotated = Login { token: "xoxb-rotated-token-0000000000000".into(), saved: "2026-01-02T00:00:00Z".into(), ..login };
+        let third = slack_client_for("bot-pool-test", &rotated);
+        assert!(!Arc::ptr_eq(&first, &third), "rotated login must rebuild Slack client");
+    }
+}

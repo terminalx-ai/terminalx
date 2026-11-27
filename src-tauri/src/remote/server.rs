@@ -84,9 +84,31 @@ pub const MAX_WRITE_BYTES: usize = 64 * 1024;
 /// Input accepted but not yet read by the program. Past it a write is
 /// refused with `backpressure` and the client retries the same seq.
 const MAX_PENDING_INPUT: usize = 256 * 1024;
-/// Terminal output (base64) queued for one connection before its streams
-/// are ended with `pty.lagged` and resumed from the ring by offset.
+/// Outbound frame bytes queued for one connection before lagging streams are
+/// ended or the connection is disconnected to resync cleanly.
 pub const MAX_QUEUED_OUTPUT: usize = 4 * 1024 * 1024;
+/// Cap on live events buffered in `SessionSubscription::buffered` while a
+/// `session.subscribe` replay read is in flight.
+const MAX_BUFFERED_SESSION_EVENTS: usize = 1024;
+const MAX_BUFFERED_SESSION_BYTES: usize = MAX_QUEUED_OUTPUT;
+
+struct CountingWriter(usize);
+
+impl std::io::Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_bytes<T: serde::Serialize>(value: &T) -> usize {
+    let mut counter = CountingWriter(0);
+    let _ = serde_json::to_writer(&mut counter, value);
+    counter.0
+}
 /// Replay bytes per frame (base64 grows it by a third; well under the frame limit).
 const REPLAY_CHUNK: usize = 256 * 1024;
 /// Distinct writers remembered per terminal for resend detection.
@@ -242,18 +264,76 @@ impl Peer {
         self.gone.load(Ordering::SeqCst) || self.outbound.is_closed()
     }
 
+    /// Close a lagging peer cleanly once its outbound byte budget is exceeded,
+    /// prompting the client to reconnect and resync.
+    fn close_lagging(&self) {
+        if !self.gone.swap(true, Ordering::SeqCst) {
+            log::warn!(
+                "remote: disconnecting lagging peer {} (queued={} bytes)",
+                self.device_id,
+                self.queued.load(Ordering::SeqCst),
+            );
+            self.closed.notify_one();
+        }
+    }
+
+    fn enqueue(&self, frame: Value, size: usize) -> bool {
+        if self.hung_up() {
+            return false;
+        }
+        let previous = self.queued.fetch_add(size, Ordering::SeqCst);
+        if previous.saturating_add(size) > MAX_QUEUED_OUTPUT {
+            self.queued.fetch_sub(size, Ordering::SeqCst);
+            self.close_lagging();
+            return false;
+        }
+        if self.outbound.send((frame, size)).is_err() {
+            self.queued.fetch_sub(size, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
     /// Send `value` in order with this connection's notifications.
     fn deliver(&self, value: Value) {
-        let _ = self.outbound.send((value, 0));
+        let size = serialized_bytes(&value).max(64);
+        let _ = self.enqueue(value, size);
+    }
+
+    /// Enqueue a notification, accounting its serialized byte size against
+    /// [`MAX_QUEUED_OUTPUT`]. Returns `false` if the peer is gone or lagged out.
+    pub(super) fn try_notify(&self, event: &str, params: Value) -> bool {
+        if self.hung_up() {
+            return false;
+        }
+        let frame = json!({ "event": event, "params": params });
+        let size = serialized_bytes(&frame).max(64);
+        self.enqueue(frame, size)
     }
 
     pub(super) fn notify(&self, event: &str, params: Value) {
-        self.notify_sized(event, params, 0);
+        let _ = self.try_notify(event, params);
     }
 
     pub(super) fn notify_sized(&self, event: &str, params: Value, size: usize) {
+        if self.hung_up() {
+            return;
+        }
+        let frame = json!({ "event": event, "params": params });
+        let accounted = serialized_bytes(&frame).max(size).max(64);
+        let _ = self.enqueue(frame, accounted);
+    }
+
+    /// Send a small control notification (e.g. `pty.lagged`) without tearing
+    /// down the connection, so the client can resume its stream from the offset.
+    fn notify_control(&self, event: &str, params: Value) {
+        if self.hung_up() {
+            return;
+        }
+        let frame = json!({ "event": event, "params": params });
+        let size = serialized_bytes(&frame).max(64);
         self.queued.fetch_add(size, Ordering::SeqCst);
-        if self.outbound.send((json!({ "event": event, "params": params }), size)).is_err() {
+        if self.outbound.send((frame, size)).is_err() {
             self.queued.fetch_sub(size, Ordering::SeqCst);
         }
     }
@@ -439,6 +519,8 @@ struct SessionSubscription {
     tab_id: String,
     /// Live events that arrived while the replay was being read.
     buffered: Option<Vec<AgentEvent>>,
+    buffered_bytes: usize,
+    buffer_overflowed: bool,
     last_seq: u64,
 }
 
@@ -1080,7 +1162,9 @@ impl WorkspaceRpc {
     fn notify_granted(&self, capability: &str, event: &str, params: Value) {
         for peer in self.live_peers() {
             if peer.granted.lock().unwrap().as_ref().is_some_and(|granted| granted.contains(capability)) {
-                peer.notify(event, params.clone());
+                if !peer.try_notify(event, params.clone()) {
+                    self.disconnect(&peer);
+                }
             }
         }
     }
@@ -1113,7 +1197,9 @@ impl WorkspaceRpc {
                 (true, Some(labelled)) if self.sees_accounts(&peer) => labelled,
                 (true, _) => &wire,
             };
-            peer.notify("session.sessions", json!({ "sessions": visible }));
+            if !peer.try_notify("session.sessions", json!({ "sessions": visible })) {
+                self.disconnect(&peer);
+            }
         }
     }
 
@@ -1126,7 +1212,9 @@ impl WorkspaceRpc {
         };
         for peer in self.live_peers() {
             if peer.granted("pipeline/1") && self.access(&peer).can_view() {
-                peer.notify("pipeline.changed", json!({ "pipeline": pipeline }));
+                if !peer.try_notify("pipeline.changed", json!({ "pipeline": pipeline })) {
+                    self.disconnect(&peer);
+                }
             }
         }
     }
@@ -1137,7 +1225,9 @@ impl WorkspaceRpc {
                 continue;
             }
             let visible: Vec<_> = if self.access(&peer).can_view() { tabs.iter().collect() } else { Vec::new() };
-            peer.notify("session.tabs", json!({ "tabs": visible }));
+            if !peer.try_notify("session.tabs", json!({ "tabs": visible })) {
+                self.disconnect(&peer);
+            }
         }
     }
 
@@ -2941,10 +3031,11 @@ impl WorkspaceRpc {
         let (first, rest) = replay.split_at(replay.len().min(REPLAY_CHUNK));
         let mut at = from + first.len() as u64;
         for chunk in rest.chunks(REPLAY_CHUNK) {
-            // Bounded by the ring, so it does not count toward the lag
-            // threshold: attaching several full terminals at once is not a
-            // slow link.
-            peer.notify("pty.output", json!({ "subscriptionId": subscription_id, "ptyId": pty_id, "offset": at, "data": STANDARD.encode(chunk) }));
+            if !peer.try_notify("pty.output", json!({ "subscriptionId": subscription_id, "ptyId": pty_id, "offset": at, "data": STANDARD.encode(chunk) })) {
+                drop(ptys);
+                self.disconnect(peer);
+                return Err(RpcError::new("lagged", "client outbound queue exceeded budget; reconnect and resync"));
+            }
             at += chunk.len() as u64;
         }
         pty.subscribers.insert(subscription_id.clone(), peer.clone());
@@ -3121,15 +3212,16 @@ impl WorkspaceRpc {
                 // A connection that cannot keep up is not fed without bound:
                 // its stream ends here and it resumes from this offset,
                 // replayed from the ring (or marked truncated past it).
-                if peer.queued.load(Ordering::SeqCst) > MAX_QUEUED_OUTPUT {
-                    peer.notify("pty.lagged", json!({ "subscriptionId": subscription_id, "ptyId": data.id, "offset": offset }));
+                let estimated = data.data.len().max(256);
+                if peer.queued.load(Ordering::SeqCst).saturating_add(estimated) > MAX_QUEUED_OUTPUT {
+                    peer.notify_control("pty.lagged", json!({ "subscriptionId": subscription_id, "ptyId": data.id, "offset": offset }));
                     lagged.push(subscription_id.clone());
                     continue;
                 }
                 peer.notify_sized(
                     if bytes.is_empty() && data.size.is_some() { "pty.resize-complete" } else { "pty.output" },
                     json!({ "subscriptionId": subscription_id, "ptyId": data.id, "offset": offset, "data": data.data, "size": data.size }),
-                    data.data.len().max(256), // Size-only completions also consume the slow-peer budget.
+                    estimated, // Size-only completions also consume the slow-peer budget.
                 );
             }
             for subscription_id in &lagged {
@@ -4817,6 +4909,8 @@ impl WorkspaceRpc {
                 session_id: session.id.clone(),
                 tab_id: tab_id.clone(),
                 buffered: Some(Vec::new()),
+                buffered_bytes: 0,
+                buffer_overflowed: false,
                 last_seq: 0,
             },
         );
@@ -4838,20 +4932,37 @@ impl WorkspaceRpc {
             .last()
             .and_then(|last| last["event"]["seq"].as_u64())
             .unwrap_or(since.unwrap_or(0));
+        let mut lagged = false;
         {
             let mut subs = self.session_subs.lock().unwrap();
             if let Some(sub) = subs.get_mut(&subscription_id) {
                 sub.last_seq = last_seq;
-                for event in sub.buffered.take().unwrap_or_default() {
-                    if event.seq > sub.last_seq {
-                        sub.last_seq = event.seq;
-                        sub.peer.notify(
-                            "session.event",
-                            json!({ "subscriptionId": subscription_id, "cursor": self.cursor(event.seq), "event": event }),
-                        );
+                if sub.buffer_overflowed {
+                    subs.remove(&subscription_id);
+                    lagged = true;
+                } else {
+                    sub.buffered_bytes = 0;
+                    for event in sub.buffered.take().unwrap_or_default() {
+                        if event.seq > sub.last_seq {
+                            sub.last_seq = event.seq;
+                            if !sub.peer.try_notify(
+                                "session.event",
+                                json!({ "subscriptionId": subscription_id, "cursor": self.cursor(event.seq), "event": event }),
+                            ) {
+                                subs.remove(&subscription_id);
+                                lagged = true;
+                                break;
+                            }
+                        }
                     }
                 }
             }
+        }
+        if lagged {
+            self.subscriptions.lock().unwrap().remove(&subscription_id);
+            peer.close_lagging();
+            self.disconnect(peer);
+            return Err(RpcError::new("lagged", "session subscription fell behind; reconnect and resync"));
         }
         Ok(json!({
             "subscriptionId": subscription_id,
@@ -5223,22 +5334,46 @@ impl WorkspaceRpc {
     }
 
     fn on_agent_event(&self, event: AgentEvent) {
-        let mut subs = self.session_subs.lock().unwrap();
-        for (subscription_id, sub) in subs.iter_mut() {
-            if sub.session_id != event.session_id || sub.tab_id != event.tab_id {
-                continue;
-            }
-            match &mut sub.buffered {
-                Some(buffer) => buffer.push(event.clone()),
-                None if event.seq > sub.last_seq => {
-                    sub.last_seq = event.seq;
-                    sub.peer.notify(
-                        "session.event",
-                        json!({ "subscriptionId": subscription_id, "cursor": self.cursor(event.seq), "event": event }),
-                    );
+        let mut lagged_peers: Vec<Arc<Peer>> = Vec::new();
+        {
+            let mut subs = self.session_subs.lock().unwrap();
+            let mut ev_bytes: Option<usize> = None;
+            for (subscription_id, sub) in subs.iter_mut() {
+                if sub.session_id != event.session_id || sub.tab_id != event.tab_id {
+                    continue;
                 }
-                None => {}
+                match &mut sub.buffered {
+                    Some(buffer) => {
+                        if sub.buffer_overflowed {
+                            continue;
+                        }
+                        let size = *ev_bytes.get_or_insert_with(|| serialized_bytes(&event).max(64));
+                        if buffer.len() >= MAX_BUFFERED_SESSION_EVENTS
+                            || sub.buffered_bytes.saturating_add(size) > MAX_BUFFERED_SESSION_BYTES
+                        {
+                            sub.buffer_overflowed = true;
+                            buffer.clear();
+                            sub.buffered_bytes = 0;
+                        } else {
+                            sub.buffered_bytes += size;
+                            buffer.push(event.clone());
+                        }
+                    }
+                    None if event.seq > sub.last_seq => {
+                        sub.last_seq = event.seq;
+                        if !sub.peer.try_notify(
+                            "session.event",
+                            json!({ "subscriptionId": subscription_id, "cursor": self.cursor(event.seq), "event": event }),
+                        ) {
+                            lagged_peers.push(sub.peer.clone());
+                        }
+                    }
+                    None => {}
+                }
             }
+        }
+        for peer in lagged_peers {
+            self.disconnect(&peer);
         }
     }
 
@@ -5459,5 +5594,110 @@ mod environment_tests {
         assert_eq!(rpc.handle(&manager, &invoke("environment.report", json!({"requestId": "bad", "command": "env"}))).await["error"]["code"], "invalid_params");
         rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 1, "members": []})).unwrap()));
         assert_eq!(call("environment.report", params).await["error"]["code"], "forbidden");
+    }
+
+    #[tokio::test]
+    async fn outbound_byte_accounting_bounds_non_pty_frames_and_disconnects_lagging_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let rpc = WorkspaceRpc::new(
+            dir.path(),
+            1,
+            Arc::new(crate::sink::BroadcastSink::new(64)),
+            Arc::new(Terminals::new()),
+            None,
+        )
+        .unwrap();
+        let (peer, mut events) = Peer::new("slow-peer".into(), Authority::Manage);
+        rpc.handle(&peer, &json!({"id": "h1", "method": "rpc.hello", "params": {"protocol": PROTOCOL, "want": ["session/2"]}})).await;
+
+        // Every non-PTY notification is accounted against `peer.queued` and released on `recv()`.
+        assert!(peer.try_notify("session.sessions", json!({"sessions": [{"id": "s1", "title": "x".repeat(4096)}]})));
+        let queued = peer.queued.load(Ordering::SeqCst);
+        assert!(queued >= 4096, "non-PTY notification must be accounted in peer.queued (got {queued})");
+        let _ = events.recv().await.unwrap();
+        assert_eq!(peer.queued.load(Ordering::SeqCst), 0, "recv() must release accounted bytes");
+
+        // Register a live session subscription and flood `on_agent_event` without draining `events`.
+        let sub_id = "sub-lag-test".to_string();
+        rpc.session_subs.lock().unwrap().insert(
+            sub_id.clone(),
+            SessionSubscription {
+                peer: peer.clone(),
+                session_id: "sess-1".into(),
+                tab_id: "tab-1".into(),
+                buffered: None,
+                buffered_bytes: 0,
+                buffer_overflowed: false,
+                last_seq: 0,
+            },
+        );
+        rpc.subscriptions.lock().unwrap().insert(sub_id.clone(), Subscription::Session { peer: peer.id });
+
+        let chunk = "a".repeat(256 * 1024);
+        for seq in 1..=40u64 {
+            rpc.on_agent_event(AgentEvent {
+                id: format!("ev-{seq}"),
+                session_id: "sess-1".into(),
+                tab_id: "tab-1".into(),
+                harness: "codex".into(),
+                seq,
+                ts: "2026-01-01T00:00:00Z".into(),
+                message_ts: None,
+                prompt_request_id: None,
+                subagent: None,
+                payload: crate::events::Payload::AssistantText { block: None, text: chunk.clone() },
+            });
+        }
+        assert!(peer.queued.load(Ordering::SeqCst) <= MAX_QUEUED_OUTPUT, "queued bytes must stay capped");
+        assert!(peer.disconnected(), "lagging peer must be marked disconnected");
+        tokio::time::timeout(Duration::from_secs(1), peer.closed()).await.expect("peer.closed() must fire");
+        assert!(!rpc.session_subs.lock().unwrap().contains_key(&sub_id), "lagging peer subscriptions must be cleaned up");
+    }
+
+    #[tokio::test]
+    async fn session_subscribe_buffer_is_capped_during_replay_bursts() {
+        let dir = tempfile::tempdir().unwrap();
+        let rpc = WorkspaceRpc::new(
+            dir.path(),
+            1,
+            Arc::new(crate::sink::BroadcastSink::new(64)),
+            Arc::new(Terminals::new()),
+            None,
+        )
+        .unwrap();
+        let (peer, _events) = Peer::new("replay-peer".into(), Authority::Manage);
+        let sub_id = "sub-buf-cap".to_string();
+        rpc.session_subs.lock().unwrap().insert(
+            sub_id.clone(),
+            SessionSubscription {
+                peer,
+                session_id: "sess-buf".into(),
+                tab_id: "tab-buf".into(),
+                buffered: Some(Vec::new()),
+                buffered_bytes: 0,
+                buffer_overflowed: false,
+                last_seq: 0,
+            },
+        );
+
+        for seq in 1..=(MAX_BUFFERED_SESSION_EVENTS as u64 + 50) {
+            rpc.on_agent_event(AgentEvent {
+                id: format!("ev-buf-{seq}"),
+                session_id: "sess-buf".into(),
+                tab_id: "tab-buf".into(),
+                harness: "codex".into(),
+                seq,
+                ts: "2026-01-01T00:00:00Z".into(),
+                message_ts: None,
+                prompt_request_id: None,
+                subagent: None,
+                payload: crate::events::Payload::AssistantText { block: None, text: "delta".into() },
+            });
+        }
+        let subs = rpc.session_subs.lock().unwrap();
+        let sub = &subs[&sub_id];
+        assert!(sub.buffer_overflowed, "buffered overflow must be flagged");
+        assert!(sub.buffered.as_ref().unwrap().is_empty(), "overflowed buffer must be cleared to bound memory");
+        assert_eq!(sub.buffered_bytes, 0);
     }
 }

@@ -156,8 +156,7 @@ impl Screencasts {
 }
 
 async fn stream(rt: &Arc<BrowserRuntime>, page_id: &str, port: u16, stop: &mut watch::Receiver<bool>, inputs: &mut mpsc::UnboundedReceiver<InputBatch>) -> Result<(), String> {
-    let found = find_marked_page(port, page_id).await?;
-    let mut connection = PageConnection::connect(&found.ws_url).await?;
+    let (_found, mut connection) = find_marked_page(port, page_id).await?;
     // Events seen while one of our own commands waited for its reply.
     let mut backlog: VecDeque<(String, Value)> = VecDeque::new();
     call_keeping(&mut connection, "Page.enable", json!({}), &mut backlog).await?;

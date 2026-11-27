@@ -671,12 +671,16 @@ fn watch(automation: &Automation, source: &BotSource) -> Result<BotEvent, Source
     })
 }
 
+fn fetch_agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| crate::data_privacy::http_agent().timeout(std::time::Duration::from_secs(20)).redirects(5).build())
+}
+
 fn fetch(url: &str) -> Result<Vec<u8>, SourceError> {
     use std::io::Read as _;
-    let agent = crate::data_privacy::http_agent().timeout(std::time::Duration::from_secs(20)).redirects(5).build();
     // An error names the URL as it is shown, and never says what the transport saw (it may repeat the URL whole).
     let shown = shown_url(url);
-    match agent.get(url).call() {
+    match fetch_agent().get(url).call() {
         Ok(response) => {
             let mut bytes = Vec::new();
             response.into_reader().take(WATCH_BYTES).read_to_end(&mut bytes).map_err(|_| plain(format!("Could not read {shown}.")))?;
@@ -1009,3 +1013,13 @@ pub fn event_prompt(template: &str, event: &BotEvent) -> String {
 #[cfg(all(test, unix))]
 #[path = "wakes_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod agent_pool_tests {
+    use super::*;
+
+    #[test]
+    fn fetch_agent_is_pooled_across_calls() {
+        assert!(std::ptr::eq(fetch_agent(), fetch_agent()));
+    }
+}

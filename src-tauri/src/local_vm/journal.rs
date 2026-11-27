@@ -231,8 +231,29 @@ impl Journal {
         })
     }
 
+    /// Shared, non-compacting read snapshot: acquires a shared lock so
+    /// concurrent readers never block each other or enter an exclusive
+    /// compaction/rewrite transaction. When `require_existing` is false and
+    /// `journal.json` has never been created yet, initializes it once via a
+    /// transaction so callers like `Journal::open(dir)?.read()?` establish the
+    /// initial journal file on disk.
     pub fn read(&self) -> Result<State> {
-        self.transaction(|state| Ok(state.clone()))
+        let lock = Lock::acquire_shared(&self.dir.join("journal.lock"))?;
+        let path = self.dir.join("journal.json");
+        match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .context("read local VM journal; refusing to replace damaged history"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if self.require_existing {
+                    bail!(
+                        "Local VM history disappeared; refusing to recreate the journal or replay work"
+                    );
+                }
+                drop(lock);
+                self.transaction(|state| Ok(state.clone()))
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// The last complete state, for status that must not write: no lock file,
@@ -753,9 +774,35 @@ pub fn atomic_private_write(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Atomic 0600 write without `fsync` barriers, for ephemeral files such as
+/// supervisor liveness heartbeats (`health.json`) that do not require
+/// power-loss durability.
+pub fn atomic_private_write_ephemeral(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let temporary = path.with_extension(format!("{}.tmp", new_id()));
+    {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+    }
+    fs::rename(&temporary, path)?;
+    Ok(())
+}
+
 pub(super) struct Lock(File);
 impl Lock {
     pub(super) fn acquire(path: &Path) -> Result<Self> {
+        Self::acquire_with(path, libc::LOCK_EX)
+    }
+
+    pub(super) fn acquire_shared(path: &Path) -> Result<Self> {
+        Self::acquire_with(path, libc::LOCK_SH)
+    }
+
+    fn acquire_with(path: &Path, operation: libc::c_int) -> Result<Self> {
         use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
         let file = OpenOptions::new()
             .create(true)
@@ -764,11 +811,16 @@ impl Lock {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(path)?;
-        // SAFETY: file owns the descriptor for the entire lock lifetime.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
+        loop {
+            // SAFETY: file owns the descriptor for the entire lock lifetime.
+            if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+                return Ok(Self(file));
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) {
+                return Err(error.into());
+            }
         }
-        Ok(Self(file))
     }
 }
 impl Drop for Lock {
@@ -1194,5 +1246,47 @@ mod tests {
             assert!(validate_relative(value).is_err());
         }
         assert!(validate_relative("src/main.rs").is_ok());
+    }
+
+    #[test]
+    fn read_is_shared_non_compacting_and_does_not_rewrite_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        // open_existing refuses a missing journal.json without creating it.
+        let existing = Journal::open_existing(dir.path()).unwrap();
+        assert!(existing.read().is_err());
+        assert!(!dir.path().join("journal.json").exists());
+
+        // First open().read() initializes journal.json; subsequent reads use a shared lock
+        // and never compact or rewrite the file.
+        let journal = Journal::open(dir.path()).unwrap();
+        let empty = journal.read().unwrap();
+        assert!(empty.environments.is_empty());
+        assert!(dir.path().join("journal.json").exists());
+
+        // Populate a journal and verify `read()` holds only a shared lock and does not rewrite the file.
+        let env = journal.enroll("Reader test", "local:reader-test").unwrap();
+        let journal_path = dir.path().join("journal.json");
+        let before_meta = fs::metadata(&journal_path).unwrap();
+        // Hold a shared lock externally: `journal.read()` must STILL succeed immediately.
+        let _shared = Lock::acquire_shared(&dir.path().join("journal.lock")).unwrap();
+        let state = journal.read().unwrap();
+        assert!(state.environments.contains_key(&env.id));
+        let after_meta = fs::metadata(&journal_path).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(before_meta.ino(), after_meta.ino(), "read() must not rewrite journal.json");
+        assert_eq!(before_meta.mtime_nsec(), after_meta.mtime_nsec());
+    }
+
+    #[test]
+    fn ephemeral_write_is_atomic_and_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("health.json");
+        atomic_private_write_ephemeral(&path, br#"{"ok":true}"#).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), br#"{"ok":true}"#);
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        atomic_private_write_ephemeral(&path, br#"{"ok":false}"#).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), br#"{"ok":false}"#);
     }
 }

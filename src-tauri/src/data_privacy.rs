@@ -1,12 +1,14 @@
 //! The local owner's network policy. Credentials are retained while access is off.
 //!
-//! HTTP holds a read lease until its request completes. Relay TCP I/O holds a
-//! lease for each poll; disabling cancels and permanently invalidates existing
+//! HTTP holds a counted in-flight lease until its request completes (never an
+//! RwLock guard across blocking I/O). Relay TCP I/O holds a read lease for each
+//! non-blocking poll; disabling cancels and permanently invalidates existing
 //! streams, including TLS/WS handshakes and otherwise idle connections.
 
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::task::{Context, Poll};
 
@@ -25,6 +27,14 @@ pub struct Status {
     pub managed: bool,
 }
 
+fn encode_status(status: Status) -> u8 {
+    (status.enabled as u8) | ((status.managed as u8) << 1)
+}
+
+fn decode_status(bits: u8) -> Status {
+    Status { enabled: (bits & 1) != 0, managed: (bits & 2) != 0 }
+}
+
 struct State {
     status: Status,
     epoch: u64,
@@ -34,6 +44,9 @@ struct State {
 
 pub struct Policy {
     id: String,
+    status_bits: AtomicU8,
+    epoch: AtomicU64,
+    in_flight: AtomicUsize,
     state: RwLock<State>,
     updating: Mutex<()>,
     writers: Mutex<usize>,
@@ -44,6 +57,9 @@ impl Default for Policy {
     fn default() -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
+            status_bits: AtomicU8::new(encode_status(Status::default())),
+            epoch: AtomicU64::new(0),
+            in_flight: AtomicUsize::new(0),
             state: RwLock::new(State { status: Status::default(), epoch: 0, cancel: CancellationToken::new(), forwarding: None }),
             updating: Mutex::new(()), writers: Mutex::new(0), drained: Condvar::new(),
         }
@@ -51,24 +67,50 @@ impl Default for Policy {
 }
 
 impl Policy {
-    fn status(&self) -> Status { self.state.read().unwrap().status }
+    fn status(&self) -> Status { decode_status(self.status_bits.load(Ordering::Acquire)) }
 
-    // The writer waits for requests already admitted. Once it returns, no
-    // old request or socket can send, even if the switch is turned off again.
+    // Fast-path unchanged status via AtomicU8 so periodic refreshes never
+    // acquire `state.write()` (which would starve readers behind a writer on
+    // macOS). When enabling, wait for all requests already admitted so that
+    // once `set` returns no old request or socket can send.
     fn set(&self, status: Status) {
+        let desired = encode_status(status);
+        if self.status_bits.load(Ordering::Acquire) == desired
+            && (!status.enabled || self.in_flight.load(Ordering::Acquire) == 0)
+        {
+            return;
+        }
         let _updating = self.updating.lock().unwrap();
         let mut state = self.state.write().unwrap();
         if status.enabled && !state.status.enabled {
             state.epoch = state.epoch.wrapping_add(1);
+            self.epoch.store(state.epoch, Ordering::Release);
             state.cancel.cancel();
             state.cancel = CancellationToken::new();
         }
         state.status = status;
+        self.status_bits.store(desired, Ordering::Release);
         drop(state);
         if status.enabled {
             let mut writers = self.writers.lock().unwrap();
             while *writers != 0 { writers = self.drained.wait(writers).unwrap(); }
         }
+    }
+
+    // Admit an outbound HTTP request under a counted lease rather than holding
+    // `state.read()` across the blocking HTTP round-trip.
+    fn enter_http(self: &Arc<Self>) -> io::Result<RemoteWrite> {
+        if self.status().enabled {
+            return Err(denied());
+        }
+        let state = self.state.read().unwrap();
+        if state.status.enabled {
+            return Err(denied());
+        }
+        *self.writers.lock().unwrap() += 1;
+        self.in_flight.fetch_add(1, Ordering::AcqRel);
+        drop(state);
+        Ok(RemoteWrite(self.clone()))
     }
 }
 
@@ -170,6 +212,7 @@ impl Ticket {
         let state = self.policy.state.read().unwrap();
         anyhow::ensure!(self.owner == self.policy.id && !state.status.enabled && self.epoch == Some(state.epoch), MESSAGE);
         *self.policy.writers.lock().unwrap() += 1;
+        self.policy.in_flight.fetch_add(1, Ordering::AcqRel);
         Ok(RemoteWrite(self.policy.clone()))
     }
 }
@@ -213,6 +256,7 @@ impl Drop for RemoteWrite {
     fn drop(&mut self) {
         let mut writers = self.0.writers.lock().unwrap();
         *writers -= 1;
+        self.0.in_flight.fetch_sub(1, Ordering::AcqRel);
         if *writers == 0 { self.0.drained.notify_all(); }
     }
 }
@@ -253,8 +297,7 @@ struct HttpPolicy(Arc<Policy>);
 
 impl ureq::Middleware for HttpPolicy {
     fn handle(&self, request: ureq::Request, next: ureq::MiddlewareNext<'_>) -> Result<ureq::Response, ureq::Error> {
-        let state = self.0.state.read().unwrap();
-        if state.status.enabled { return Err(io::Error::new(io::ErrorKind::PermissionDenied, MESSAGE).into()); }
+        let _lease = self.0.enter_http().map_err(ureq::Error::from)?;
         next.handle(request)
     }
 }
@@ -818,5 +861,92 @@ mod tests {
         drop(socket);
         let result = tokio::time::timeout(Duration::from_secs(1), peer).await.unwrap().unwrap();
         assert!(result.is_none_or(|result| result.is_err()));
+    }
+
+    #[test]
+    fn slow_http_request_does_not_starve_readers_behind_unchanged_refresh() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let policy = Arc::new(Policy::default());
+        let client = ureq::AgentBuilder::new().timeout(Duration::from_secs(5)).middleware(HttpPolicy(policy.clone())).build();
+        let slow = std::thread::spawn({
+            let url = url.clone();
+            move || client.get(&url).call().map_err(|error| error.to_string())
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut byte = [0];
+        stream.read_exact(&mut byte).unwrap();
+
+        // While the slow HTTP request is blocked in-flight, unchanged refreshes
+        // (like the 1s background watcher) must fast-path without acquiring
+        // `state.write()`, and concurrent readers/tickets must remain unblocked.
+        let started = std::time::Instant::now();
+        for _ in 0..10 {
+            policy.set(Status::default());
+            assert!(!policy.status().enabled);
+            assert!(Ticket::with_policy(policy.clone()).valid());
+        }
+        assert!(started.elapsed() < Duration::from_millis(500), "unchanged refreshes and readers must not block on slow HTTP");
+
+        // Concurrent second HTTP request also proceeds without starvation.
+        let fast_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let fast_url = format!("http://{}", fast_listener.local_addr().unwrap());
+        let fast_server = std::thread::spawn(move || {
+            let (mut s, _) = fast_listener.accept().unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            read_http_request(&mut s);
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let fast_client = ureq::AgentBuilder::new().timeout(Duration::from_secs(2)).middleware(HttpPolicy(policy.clone())).build();
+        assert_eq!(fast_client.get(&fast_url).call().unwrap().status(), 200);
+        fast_server.join().unwrap();
+
+        // Release the slow HTTP request.
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        assert_eq!(slow.join().unwrap().unwrap().status(), 200);
+    }
+
+    #[test]
+    fn enabling_during_slow_http_flips_status_and_rejects_new_requests_immediately_while_draining() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let policy = Arc::new(Policy::default());
+        let client = ureq::AgentBuilder::new().timeout(Duration::from_secs(5)).middleware(HttpPolicy(policy.clone())).build();
+        let slow = std::thread::spawn({
+            let url = url.clone();
+            move || client.get(&url).call().map_err(|error| error.to_string())
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut byte = [0];
+        stream.read_exact(&mut byte).unwrap();
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let activator = std::thread::spawn({
+            let policy = policy.clone();
+            move || {
+                policy.set(ON);
+                done_tx.send(()).unwrap();
+            }
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !policy.status().enabled {
+            assert!(std::time::Instant::now() < deadline, "policy status must flip immediately without waiting for slow HTTP");
+            std::thread::yield_now();
+        }
+        // Still draining the admitted slow request, so activation has not returned yet.
+        assert!(done_rx.try_recv().is_err());
+        // New HTTP requests must be rejected immediately (not blocked waiting for the slow request).
+        let second_client = ureq::AgentBuilder::new().timeout(Duration::from_secs(2)).middleware(HttpPolicy(policy.clone())).build();
+        let reject_start = std::time::Instant::now();
+        assert!(second_client.get(&url).call().is_err());
+        assert!(reject_start.elapsed() < Duration::from_millis(500));
+
+        // Finish the slow request; activation now completes.
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        assert_eq!(slow.join().unwrap().unwrap().status(), 200);
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        activator.join().unwrap();
     }
 }
