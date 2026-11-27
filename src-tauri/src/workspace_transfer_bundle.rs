@@ -124,12 +124,6 @@ fn path_argument(path: &Path) -> Result<&str> {
     path.to_str().context("unsupported transfer bundle path")
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("Cannot transfer {branch} because the cloud checkout has no usable upstream base.")]
-pub(crate) struct NoTransferBase {
-    branch: String,
-}
-
 pub(crate) fn check_branch_namespace(repo: &Path, expected: &BranchCommit) -> Result<()> {
     if expected.branch().contains('/') {
         let branch = expected.branch().to_lowercase();
@@ -156,21 +150,24 @@ pub(crate) fn export(repo: &Path, expected: &BranchCommit) -> Result<Option<Tran
         head.trim() == expected.commit,
         "cloud branch changed before export"
     );
-    let upstream = format!("{}@{{upstream}}", expected.branch());
-    let boundary = [upstream.as_str(), "refs/remotes/origin/HEAD"]
-        .into_iter()
-        .find_map(|reference| git(repo, &["merge-base", expected.commit(), reference]).ok());
-    let Some(boundary) = boundary else {
-        return Err(NoTransferBase {
-            branch: expected.branch().into(),
+    let boundary = upstream_base(repo, expected);
+    let exclusion = match &boundary {
+        Some(boundary) if boundary == expected.commit() => return Ok(None),
+        Some(boundary) => Some(format!("^{boundary}")),
+        None => {
+            // No remote base: the whole history moves as a root bundle. Its
+            // size is bounded before Git writes anything.
+            let usage = git(
+                repo,
+                &["rev-list", "--objects", "--disk-usage", &expected.branch_ref],
+            )?;
+            let bytes: u64 = usage.trim().parse().context("Invalid Git size estimate")?;
+            if bytes > MAX_BUNDLE_BYTES {
+                return Err(TransferTooLarge.into());
+            }
+            None
         }
-        .into());
     };
-    let boundary = boundary.trim();
-    if boundary == expected.commit() {
-        return Ok(None);
-    }
-    let exclusion = format!("^{boundary}");
     let directory = tempfile::Builder::new()
         .prefix("terminalx-transfer-")
         .tempdir()?;
@@ -181,7 +178,7 @@ pub(crate) fn export(repo: &Path, expected: &BranchCommit) -> Result<Option<Tran
         path_argument(&path)?,
         &expected.branch_ref,
     ];
-    args.push(&exclusion);
+    args.extend(exclusion.as_deref());
     git(repo, &args)?;
     check_head(repo, &path, expected)?;
     let size = std::fs::metadata(&path)?.len();
@@ -190,6 +187,49 @@ pub(crate) fn export(repo: &Path, expected: &BranchCommit) -> Result<Option<Tran
         path,
         size,
     }))
+}
+
+/// The commit the branch shares with its upstream or the remote's default
+/// branch. None when the checkout has no remote base at all.
+fn upstream_base(repo: &Path, expected: &BranchCommit) -> Option<String> {
+    let upstream = format!("{}@{{upstream}}", expected.branch());
+    let boundary = [upstream.as_str(), "refs/remotes/origin/HEAD"]
+        .into_iter()
+        .find_map(|reference| git(repo, &["merge-base", expected.commit(), reference]).ok())?;
+    Some(boundary.trim().to_owned())
+}
+
+/// What the move dialog shows before anything is exported.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TransferPreview {
+    /// Commits that move: those after the remote base, or the whole history.
+    pub(crate) commits: u64,
+    /// The branch has a remote base; without one it moves as a root bundle.
+    pub(crate) has_remote_base: bool,
+    /// Changed and untracked paths that stay in the cloud.
+    pub(crate) uncommitted_files: u64,
+}
+
+pub(crate) fn preview(repo: &Path, expected: &BranchCommit) -> Result<TransferPreview> {
+    let boundary = upstream_base(repo, expected);
+    let range = match &boundary {
+        Some(boundary) => format!("{boundary}..{}", expected.commit()),
+        None => expected.commit().to_owned(),
+    };
+    let commits = git(repo, &["rev-list", "--count", &range])?
+        .trim()
+        .parse()
+        .context("Invalid commit count")?;
+    let status = git(
+        repo,
+        &["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=normal"],
+    )?;
+    let uncommitted_files = status.split('\0').filter(|entry| !entry.is_empty()).count() as u64;
+    Ok(TransferPreview {
+        commits,
+        has_remote_base: boundary.is_some(),
+        uncommitted_files,
+    })
 }
 
 fn check_head(repo: &Path, bundle: &Path, expected: &BranchCommit) -> Result<()> {
@@ -250,10 +290,8 @@ fn check_prerequisites(repo: &Path, bundle: &Path, expected: &BranchCommit) -> R
             "The Git bundle header is incomplete or too large"
         );
         if line == b"\n" {
-            ensure!(
-                !prerequisites.is_empty(),
-                "A transfer bundle must have an upstream prerequisite"
-            );
+            // No prerequisites: a repository without a remote moves its whole
+            // history. Only objects the destination lacks are promoted.
             return Ok(prerequisites);
         }
         if let Some(prerequisite) = line.strip_prefix(b"-") {
@@ -1154,20 +1192,61 @@ mod tests {
     }
 
     #[test]
-    fn an_unpublished_branch_without_a_base_returns_a_typed_refusal() {
+    fn rejects_reserved_or_remote_branch_names() {
         let temp = tempfile::tempdir().unwrap();
         let cloud = temp.path().join("cloud");
         repository(&cloud);
-        for _ in 0..3 {
-            let pin = BranchCommit::new("main", &commit(&cloud)).unwrap();
-            assert!(export(&cloud, &pin).err().unwrap().is::<NoTransferBase>());
-        }
         assert!(BranchCommit::new("refs/heads/main", &"a".repeat(40)).is_err());
         let bad_namespace = BranchCommit::new("origin/topic", &"a".repeat(40)).unwrap();
         assert!(check_branch_namespace(&cloud, &bad_namespace).is_err());
         git(&cloud, &["remote", "add", "team/fork", "unused"]).unwrap();
         let nested = BranchCommit::new("Team/Fork/topic", &"a".repeat(40)).unwrap();
         assert!(check_branch_namespace(&cloud, &nested).is_err());
+    }
+
+    #[test]
+    fn a_branch_without_a_remote_moves_its_whole_history_as_a_bundle() {
+        let temp = tempfile::tempdir().unwrap();
+        let cloud = temp.path().join("cloud");
+        repository(&cloud);
+        commit(&cloud);
+        let pin = BranchCommit::new("main", &commit(&cloud)).unwrap();
+        std::fs::write(cloud.join("draft.txt"), "stays in the cloud").unwrap();
+        assert_eq!(
+            preview(&cloud, &pin).unwrap(),
+            TransferPreview { commits: 2, has_remote_base: false, uncommitted_files: 1 }
+        );
+        let bundle = export(&cloud, &pin).unwrap().expect("a root bundle");
+        let mut received = Vec::new();
+        while (received.len() as u64) < bundle.size() {
+            received.extend(bundle.read_chunk(received.len() as u64).unwrap());
+        }
+        let incoming = temp.path().join("incoming.bundle");
+        std::fs::write(&incoming, received).unwrap();
+        // An unrelated local project receives the history without a ref moving.
+        let local = temp.path().join("local");
+        repository(&local);
+        let local_head = commit(&local);
+        import_objects(&local, &incoming, &pin).unwrap();
+        assert_eq!(git(&local, &["rev-parse", "HEAD"]).unwrap().trim(), local_head);
+        // The local project's own main is untouched; only the objects arrived.
+        assert_eq!(git(&local, &["rev-parse", &pin.branch_ref]).unwrap().trim(), local_head);
+        assert_eq!(git(&local, &["rev-list", "--count", pin.commit()]).unwrap().trim(), "2");
+    }
+
+    #[test]
+    fn preview_counts_only_commits_after_the_remote_base() {
+        let temp = tempfile::tempdir().unwrap();
+        let cloud = temp.path().join("cloud");
+        repository(&cloud);
+        let base = commit(&cloud);
+        mark_upstream(&cloud, &base);
+        commit(&cloud);
+        let pin = BranchCommit::new("main", &commit(&cloud)).unwrap();
+        assert_eq!(
+            preview(&cloud, &pin).unwrap(),
+            TransferPreview { commits: 2, has_remote_base: true, uncommitted_files: 0 }
+        );
     }
 
     #[test]
@@ -1689,7 +1768,8 @@ mod tests {
         repository(&cloud);
         let base = commit(&cloud);
         let root = BranchCommit::new("main", &base).unwrap();
-        assert!(export(&cloud, &root).err().unwrap().is::<NoTransferBase>());
+        // Before any remote base exists, the whole history is the bundle.
+        assert!(export(&cloud, &root).unwrap().is_some());
         mark_upstream(&cloud, &base);
         git(
             temp.path(),

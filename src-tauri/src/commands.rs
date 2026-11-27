@@ -2492,17 +2492,31 @@ pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, i
             && account.phase2_ready("cloud.workspaces.transfer-to-local.v1", Some(&input.org_id), None)
     };
     if !authorized(&account, &input) { return Err("The cloud account changed.".to_owned().into()); }
-    if !git::is_repo(Path::new(&input.project_path)) {
-        return Err("Choose a local Git project.".to_owned().into());
+    // A repository without a remote can also land in a new, empty folder:
+    // it becomes a fresh repository that receives the whole history.
+    let initialized = !git::is_repo(Path::new(&input.project_path));
+    if initialized {
+        let project = Path::new(&input.project_path);
+        let empty = input.bundle.is_some()
+            && std::fs::read_dir(project).is_ok_and(|mut entries| entries.next().is_none());
+        if !empty {
+            return Err("Choose a local Git project, or an empty folder for a repository without a remote.".to_owned().into());
+        }
     }
-    if !crate::configuration_commands::review(&app, &input.project_path).await? {
+    // An empty folder has no repository configuration to review.
+    if !initialized && !crate::configuration_commands::review(&app, &input.project_path).await? {
         return Err("Repository configuration was not trusted.".to_owned().into());
     }
     let sessions = state.sessions().map_err(err)?;
     let ticket = crate::github_process::ticket();
+    let input_path = input.project_path.clone();
     github_work(move || crate::github_process::with_ticket(ticket, || -> anyhow::Result<SessionEntry> {
         anyhow::ensure!(authorized(&account, &input), "The cloud account changed.");
         anyhow::ensure!(input.transcript.len() <= 6 * 1024 * 1024, "Conversation is too large.");
+        if initialized {
+            let format = if input.commit.len() == 64 { "--object-format=sha256" } else { "--object-format=sha1" };
+            transfer::git(Path::new(&input.project_path), &["init", "-q", format])?;
+        }
         let transcript = serde_json::from_slice::<Vec<transfer::TranscriptMessage>>(&STANDARD.decode(&input.transcript)?)?;
         let pin = transfer::BranchCommit::new(&input.branch, &input.commit)?;
         let project = Path::new(&input.project_path);
@@ -2558,7 +2572,17 @@ pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, i
                 }
             }
         }
-    })).await.map_err(err)?.map_err(CloudTransferImportError::from)
+    })).await.map_err(err)?.map_err(|error| {
+        if initialized {
+            // Only the repository this transfer created, and only while it is still bare of anything else.
+            let project = Path::new(&input_path);
+            let only_git = std::fs::read_dir(project).is_ok_and(|entries| {
+                entries.filter_map(|entry| entry.ok()).all(|entry| entry.file_name() == ".git")
+            });
+            if only_git { let _ = std::fs::remove_dir_all(project.join(".git")); }
+        }
+        CloudTransferImportError::from(error)
+    })
 }
 
 /// Create a session: an index entry around an existing checkout, or a new

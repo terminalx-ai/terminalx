@@ -60,6 +60,7 @@ impl WorkspaceRpc {
                     .map_err(|_| RpcError::invalid("Invalid export request ID"))?;
                 self.open_transfer(peer, session, &tab.tab_id, request)
             }
+            "transfer.preview" => self.preview_transfer(peer, session, &tab.tab_id),
             "transfer.read" | "transfer.close" => {
                 let token = required_str(params, "transferId")?;
                 let _admission = self.collab.enter_admission();
@@ -114,6 +115,47 @@ impl WorkspaceRpc {
             }
             _ => Err(RpcError::new("method_not_found", "Unknown transfer method")),
         }
+    }
+
+    /// What would move, read without preparing an export: the branch, how
+    /// many commits move and whether they have a remote base, the messages
+    /// and the uncommitted files that stay behind.
+    fn preview_transfer(
+        &self,
+        peer: &Arc<Peer>,
+        session_id: &str,
+        tab_id: &str,
+    ) -> Result<Value, RpcError> {
+        let session = self.visible_session(peer, session_id)?;
+        let tab = session
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .ok_or_else(|| RpcError::not_found("No such conversation"))?;
+        let (_, checkout) = self.session_checkout(&session)?;
+        if session.worktree_removed
+            || crate::paths::canonicalize(&session.cwd).ok().as_ref() != Some(&checkout)
+        {
+            return Err(RpcError::invalid("The session checkout is unavailable"));
+        }
+        let branch = bundle::git(&checkout, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .map_err(RpcError::internal)?;
+        let head = bundle::git(&checkout, &["rev-parse", "--verify", "HEAD"])
+            .map_err(RpcError::internal)?;
+        let pin = BranchCommit::new(branch.trim(), head.trim()).map_err(RpcError::internal)?;
+        let preview = bundle::preview(&checkout, &pin).map_err(RpcError::internal)?;
+        let log = crate::store::log_path(session_id, tab_id).map_err(RpcError::internal)?;
+        // A conversation over the limit is reported by the move itself.
+        let messages = bundle::transcript_file(&log, MAX_TRANSCRIPT_BYTES)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Vec<Value>>(&bytes).ok())
+            .map(|messages| messages.len());
+        self.transfer_authorize(peer)?;
+        Ok(json!({
+            "branch": pin.branch(), "commit": pin.commit(), "commits": preview.commits,
+            "hasRemoteBase": preview.has_remote_base, "uncommittedFiles": preview.uncommitted_files,
+            "messages": messages, "harness": tab.harness, "title": session.title,
+        }))
     }
 
     fn open_transfer(
@@ -200,8 +242,8 @@ impl WorkspaceRpc {
         })?;
         still_allowed()?;
         let bundle = bundle::export(&checkout, &pin).map_err(|error| {
-            if error.is::<bundle::NoTransferBase>() {
-                RpcError::new("transfer_no_base", error.to_string())
+            if error.is::<bundle::TransferTooLarge>() {
+                RpcError::new("transfer_too_large", "This Git history is too large to transfer")
             } else {
                 RpcError::internal(error)
             }
