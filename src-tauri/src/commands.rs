@@ -1638,6 +1638,16 @@ pub async fn cloud_workspace_agent_browser(workspace_id: String, org_id: Option<
 }
 
 #[tauri::command]
+pub async fn organization_billing(org_id: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::OrganizationBilling, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.organization_billing(&org_id))
+}
+
+#[tauri::command]
+pub async fn organization_billing_portal(org_id: String, view: crate::cloud_workspaces::BillingView, state: tauri::State<'_, crate::AppState>) -> Result<String, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.organization_billing_portal(&org_id, view))
+}
+
+#[tauri::command]
 pub async fn cloud_workspace_precreate_usage(org_id: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::CloudPrecreateUsage, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.precreate_usage(&org_id))
 }
