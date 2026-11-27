@@ -292,6 +292,9 @@ pub(crate) struct MobileRuntime {
     /// The desktop's own Codex model list, so a phone choosing a model for a
     /// new session sees what the new-session view offers.
     codex_models: OnceLock<Arc<crate::harness::codex::models::Cache>>,
+    /// Metadata-only APNs/FCM cloud push hook fired when no live phone client
+    /// received a published notification over Relay/LAN.
+    cloud_push: OnceLock<Arc<dyn Fn(super::cloud_push::CloudPushEvent) + Send + Sync>>,
 }
 
 impl MobileRuntime {
@@ -311,11 +314,19 @@ impl MobileRuntime {
             notes: Mutex::new(()),
             send_ids: SendIds::new(),
             codex_models: OnceLock::new(),
+            cloud_push: OnceLock::new(),
         }
     }
 
     pub(crate) fn attach_models(&self, cache: Arc<crate::harness::codex::models::Cache>) {
         let _ = self.codex_models.set(cache);
+    }
+
+    pub(crate) fn attach_cloud_push(
+        &self,
+        sender: Arc<dyn Fn(super::cloud_push::CloudPushEvent) + Send + Sync>,
+    ) {
+        let _ = self.cloud_push.set(sender);
     }
 
     pub(crate) fn configure(self: &Arc<Self>, sink: Arc<dyn EventSink>) -> Result<()> {
@@ -393,17 +404,23 @@ impl MobileRuntime {
 
     /// `notifications.event` to each connection whose subscription's filter
     /// admits it; to every connection that named none, as before filters.
-    fn broadcast_notification(&self, notification: &MobileNotification) {
+    /// Returns how many live mobile connections accepted the notification.
+    fn broadcast_notification(&self, notification: &MobileNotification) -> usize {
         let value = json!({ "method": "notifications.event", "params": notification });
+        let mut delivered = 0usize;
         self.clients.lock().unwrap().retain(|_, client| {
             if !admitted(client.filter.lock().unwrap().as_ref().map(|(_, filter)| filter), notification) {
                 return true;
             }
-            if client.sender.try_send(value.clone()).is_ok() { true } else {
+            if client.sender.try_send(value.clone()).is_ok() {
+                delivered += 1;
+                true
+            } else {
                 client.overflowed.store(true, std::sync::atomic::Ordering::SeqCst);
                 false
             }
         });
+        delivered
     }
 
     /// Every connection is told once, however many come before it reads it (#1282).
@@ -669,7 +686,27 @@ impl MobileRuntime {
         if let Some(sink) = sink {
             sink.emit("mobile_notification", &notification);
         }
-        self.broadcast_notification(&notification);
+        let delivered = self.broadcast_notification(&notification);
+        if delivered == 0 {
+            if let Some(cloud_push) = self.cloud_push.get() {
+                let kind = match notification.kind {
+                    NoticeKind::Approval => super::cloud_push::CloudPushEventKind::Approval,
+                    NoticeKind::Question | NoticeKind::BotQuestion => {
+                        super::cloud_push::CloudPushEventKind::Question
+                    }
+                    NoticeKind::Finished
+                    | NoticeKind::Failed
+                    | NoticeKind::UsageLimit
+                    | NoticeKind::PrChecksFailed
+                    | NoticeKind::PrMerged => super::cloud_push::CloudPushEventKind::Alert,
+                };
+                cloud_push(super::cloud_push::CloudPushEvent {
+                    kind,
+                    session_id: notification.session_id.clone(),
+                    tab_id: notification.tab_id.clone(),
+                });
+            }
+        }
     }
 
     fn missed_notifications(&self, epoch: Option<&str>, last_seen_seq: u64, filter: Option<&NotificationFilter>) -> Vec<MobileNotification> {

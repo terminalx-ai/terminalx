@@ -12,6 +12,12 @@ import { AUTH_CONFIG, isAuthCallbackUrl, REDEEM_NOT_REACHED, revokeSession, type
 import { HostApi, isSessionSummary, type SessionSummary } from "../data/host-api";
 import { handleNotificationEvent, restoreLocalNotifications } from "../notifications/local";
 import { discoverMachines, pairDiscoveredMachine, signOutPairing, type InstallationState } from "../pairing/account";
+import {
+  subscribeCloudPushTokenRotation,
+  syncCloudPushRegistration,
+  unregisterCloudPushRegistration,
+} from "../notifications/cloud-push";
+import { loadNotificationSettings, onNotificationSettingsChanged } from "../notifications/store";
 import { accountHostIdentityMatches } from "../pairing/account-identity";
 import type { AccountHost } from "../pairing/account-client";
 import { pairingStep } from "../pairing/errors";
@@ -452,7 +458,10 @@ export function AppProvider({ children }: PropsWithChildren) {
       if (state !== "active") return;
       // The reading may have gone stale while the app was away (PRO-603).
       refreshNetwork();
-      if (session) void refreshCloudSession(session).catch((cause: unknown) => setError(readableError(cause)));
+      if (session) {
+        void refreshCloudSession(session).catch((cause: unknown) => setError(readableError(cause)));
+        void syncCloudPushRegistration({ session });
+      }
       if (!activeHostRef.current) return;
       // Back on screen: the 15 s before "Waiting for Mac…" count from now, not from when the phone was put away.
       if (connectionStageRef.current !== "connected" && connectionStageRef.current !== "disconnected-on-mac") setConnectionSince(Date.now());
@@ -461,6 +470,29 @@ export function AppProvider({ children }: PropsWithChildren) {
     });
     return () => subscription.remove();
   }, [connection, connectionStage, refreshCloudSession, refreshNetwork, session]);
+
+  useEffect(() => {
+    if (!session) return;
+    const activeSession = session;
+    const reconcile = () => {
+      void loadNotificationSettings()
+        .then((settings) =>
+          settings.allow
+            ? syncCloudPushRegistration({ session: activeSession })
+            : unregisterCloudPushRegistration({ session: activeSession })
+        )
+        .catch(() => undefined);
+    };
+    reconcile();
+    const offSettings = onNotificationSettingsChanged(reconcile);
+    const offToken = subscribeCloudPushTokenRotation((token) => {
+      void syncCloudPushRegistration({ session: activeSession, tokenOverride: token });
+    });
+    return () => {
+      offSettings();
+      offToken();
+    };
+  }, [session]);
 
   // "Send recent sessions ahead of time" (#1283): asked of each connection
   // while the app is on screen, and stopped when it goes to the background.
@@ -557,6 +589,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     forgetConversationState("");
     await clearTranscriptCaches();
     api.resetConnection(true);
+    await unregisterCloudPushRegistration({ session, remote }).catch(() => undefined);
     await signOutPairing(session, { remote });
     if (remote) await revokeCloudSession(session);
     else await forgetStoredSession();

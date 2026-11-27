@@ -310,6 +310,29 @@ impl PairingManager {
             .set(sink.clone())
             .map_err(|_| anyhow!("pairing manager was already configured"))?;
         self.phone.configure(sink.clone())?;
+        let push_manager = Arc::downgrade(self);
+        self.phone.mobile.attach_cloud_push(Arc::new(move |event| {
+            let Some(manager) = push_manager.upgrade() else { return };
+            let Some(context) = manager.account.context() else { return };
+            let Some(relay_host_id) = manager.host_id() else { return };
+            let host_label = PairingManager::host_name(&context.user_id);
+            let payload = crate::phone::cloud_push::build_push_payload(
+                &relay_host_id,
+                Some(&host_label),
+                &event,
+            );
+            let access_token = context.access_token;
+            let api_base_url = crate::account::api_base_url();
+            let _ = std::thread::Builder::new()
+                .name("cloud-push-notify".into())
+                .spawn(move || {
+                    let _ = crate::phone::cloud_push::send_push_notify(
+                        &api_base_url,
+                        &access_token,
+                        &payload,
+                    );
+                });
+        }));
         let settings = self.clone();
         sink.listen("settings_file_changed", Box::new(move |_| {
             settings.phone.mobile.broadcast_settings_changed();
