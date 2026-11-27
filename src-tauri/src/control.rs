@@ -165,7 +165,7 @@ pub fn call(
         })?;
     // The tab's own secret, for commands whose answer depends on which agent tab asks: the
     // session and tab a caller names are only claims.
-    if matches!(command, "review.comment" | "runs.takeOver") || command.starts_with("bots.") {
+    if matches!(command, "review.comment" | "runs.takeOver" | "artifacts.publish") || command.starts_with("bots.") {
         params["hookToken"] = json!(std::env::var(crate::hooks::TOKEN_ENV).unwrap_or_default());
     }
     let request = ControlRequest {
@@ -490,6 +490,8 @@ impl ControlService {
     }
 
     fn execute(&self, command: &str, params: Value, request_id: &str) -> Result<Value, ControlError> {
+        // PRO-158: who publishes is settled here, never taken from what the command says.
+        let params = if command == "artifacts.publish" { self.with_proved_caller(params) } else { params };
         #[cfg(unix)]
         if let Some(guest) = &self.guest {
             if command != "local_vm.guest" {
@@ -1691,6 +1693,37 @@ impl ControlService {
             }
             other => Err(ControlError::invalid(format!("Unknown control command {other}."))),
         }
+    }
+
+    /// The session and tab a command really runs in (PRO-158): where the
+    /// kernel places the process that sent it, else the tab its claim names
+    /// when that tab's launch secret proves it. An unproved claim is dropped,
+    /// so nothing past here can read it; `provedCaller` is null when neither
+    /// holds. The window reads only `provedCaller`.
+    fn with_proved_caller(&self, mut params: Value) -> Value {
+        let placed = match crate::hooks::caller() {
+            #[cfg(unix)]
+            crate::hooks::Peer::Pid(pid) => self.manager.session_of_process(pid).ok().flatten(),
+            _ => None,
+        };
+        let proved = match placed {
+            Some(crate::session::Placed { session: Some(session), tab: Some(tab) }) => Some((session, tab)),
+            _ => match (params["caller"]["session"].as_str(), params["caller"]["tab"].as_str()) {
+                (Some(session), Some(tab)) if self.manager.authenticates_cli(session, tab, params["hookToken"].as_str().unwrap_or_default()) => {
+                    Some((session.to_string(), tab.to_string()))
+                }
+                _ => None,
+            },
+        };
+        if let Some(object) = params.as_object_mut() {
+            // The bot gate below reads `caller` (with the secret); it now names only what was proved.
+            match &proved {
+                Some((session, tab)) => { object.insert("caller".into(), json!({"session": session, "tab": tab})); }
+                None => { object.remove("caller"); }
+            }
+            object.insert("provedCaller".into(), proved.map_or(Value::Null, |(session, tab)| json!({"session": session, "tab": tab})));
+        }
+        params
     }
 
     fn has_webview(&self) -> bool {
@@ -4303,6 +4336,34 @@ mod tests {
         service.execute("runtime.stopAll",stop,"test").unwrap();
         assert!(life.is_stopping());
         assert!(crate::local_vm::supervisor::admit(&life).is_err());
+    }
+
+    /// PRO-158: a team artifact publish names only the tab that was proved.
+    #[test]
+    fn an_artifact_publish_carries_only_a_proved_caller() {
+        let _home = crate::store::temp_home();
+        let (service, _sink) = headless_service();
+        let root = tempfile::tempdir().unwrap();
+        let session = crate::session_ops::create_session_entry(
+            serde_json::from_value(json!({"projectPath": root.path(), "useWorktree": false, "tab": {"harness": "codex"}})).unwrap(),
+        ).unwrap();
+        index::update_session(&session.id, |stored| { *stored = session.clone(); Ok(()) }).unwrap();
+        let tab = session.tabs[0].id.clone();
+        service.manager.install_review_test_cli(&session.id, &tab, "launch-secret");
+        let claim = json!({"session": session.id, "tab": tab});
+        // A claim with no secret, a wrong one, or a proof written by the caller itself proves nothing.
+        for params in [
+            json!({"path": "/x.md", "caller": claim}),
+            json!({"path": "/x.md", "caller": claim, "hookToken": "forged"}),
+            json!({"path": "/x.md", "caller": claim, "provedCaller": claim}),
+        ] {
+            let proved = service.with_proved_caller(params);
+            assert_eq!(proved["provedCaller"], Value::Null, "{proved}");
+            assert!(proved.get("caller").is_none(), "the unproved claim is dropped: {proved}");
+        }
+        // The tab's own launch secret proves it.
+        let proved = service.with_proved_caller(json!({"path": "/x.md", "caller": claim, "hookToken": "launch-secret"}));
+        assert_eq!(proved["provedCaller"], claim);
     }
 
     pub(super) fn headless_service() -> (ControlService, Arc<crate::sink::BroadcastSink>) {
