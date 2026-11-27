@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use url::Url;
 
 use crate::account::{
-    AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN, PHASE2_ANNOUNCEMENTS, PHASE2_MENTIONS, PHASE2_NUDGES, PHASE2_MCP_SERVERS, PHASE2_SHARED_SETUPS,
+    AccountContext, AccountManager, OrgAccess, PHASE2_EVENTS, PHASE2_FOLLOW_REASSIGN, PHASE2_ANNOUNCEMENTS, PHASE2_MENTIONS, PHASE2_NUDGES, PHASE2_TEAM_ARTIFACTS, PHASE2_MCP_SERVERS, PHASE2_SHARED_SETUPS,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_PRESENCE, PHASE2_RESTART_DETAILS,
     PHASE2_ADMIN_SHARE, PHASE2_AFFECTED_WORKSPACES, PHASE2_DESKTOP_BILLING, PHASE2_GENERAL_ACCESS, PHASE2_PRECREATE_USAGE, PHASE2_WEBHOOK_TRIGGER, PHASE2_WORKSPACE_GROUPS,
 };
@@ -2070,6 +2070,128 @@ pub struct SharedMcpServerInput {
     pub agents: crate::mcp_servers::Agents,
 }
 
+/// PRO-158: what the server says of a team artifact's people.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TeamArtifactPerson {
+    pub id: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TeamArtifact {
+    pub id: String,
+    pub slug: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub template: bool,
+    pub content_type: String,
+    pub size_bytes: u64,
+    pub version: u32,
+    pub author: Option<TeamArtifactPerson>,
+    pub updated_by: Option<TeamArtifactPerson>,
+    pub source: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub can_delete: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamArtifactList {
+    pub artifacts: Vec<TeamArtifact>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TeamArtifactVersion {
+    pub version: u32,
+    pub content_type: String,
+    pub size_bytes: u64,
+    pub note: Option<String>,
+    pub source: Option<String>,
+    pub author: Option<TeamArtifactPerson>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamArtifactDetail {
+    pub artifact: TeamArtifact,
+    pub versions: Vec<TeamArtifactVersion>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TeamArtifactContent {
+    pub artifact_id: String,
+    pub version: u32,
+    pub content_type: String,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamArtifactPublished {
+    pub artifact: TeamArtifact,
+    pub created: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamArtifactDeleted {
+    pub deleted: bool,
+    pub id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TeamArtifactVersionDeleted {
+    pub deleted: bool,
+    pub artifact_id: String,
+    pub version: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TeamArtifactPublishInput {
+    pub title: String,
+    pub content_type: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    #[serde(default)]
+    pub template: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// The server's cap on one version (1 MiB of UTF-8); refused here before sending.
+pub const TEAM_ARTIFACT_CONTENT_BYTES: usize = 1_048_576;
+const TEAM_ARTIFACT_CONTENT_TYPES: [&str; 3] = ["text/markdown", "text/html", "text/plain"];
+
+fn team_artifact_input_valid(input: &TeamArtifactPublishInput) -> Result<(), CloudWorkspaceClientError> {
+    if input.content.len() > TEAM_ARTIFACT_CONTENT_BYTES {
+        return Err(CloudWorkspaceClientError::local("team_artifact_too_large", false));
+    }
+    let title = input.title.trim();
+    let slug_ok = input.slug.as_deref().is_none_or(|slug| {
+        (1..=64).contains(&slug.len())
+            && slug.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            && !slug.starts_with('-') && !slug.ends_with('-')
+    });
+    if title.is_empty() || title.chars().count() > 120 || title.chars().any(char::is_control)
+        || !TEAM_ARTIFACT_CONTENT_TYPES.contains(&input.content_type.as_str()) || input.content.contains('\0') || !slug_ok {
+        return Err(inbox_invalid());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NudgePreference {
@@ -3182,6 +3304,66 @@ impl CloudWorkspaceService {
                 return Err(post_send_error(RequestRisk::Mutation));
             }
             Ok(value)
+        })
+    }
+
+    /// PRO-158: the Organization's published artifacts, newest first.
+    pub fn team_artifacts(&self, org: &str) -> Result<TeamArtifactList, CloudWorkspaceClientError> {
+        self.phase2_member_in(PHASE2_TEAM_ARTIFACTS, "team_artifacts_unavailable", org, RequestRisk::Read, |client, context| {
+            client.request(context, &["team-artifacts"], None, None, None, RequestRisk::Read)
+        })
+    }
+
+    pub fn team_artifact(&self, org: &str, artifact: &str) -> Result<TeamArtifactDetail, CloudWorkspaceClientError> {
+        if !valid_following_path_id(artifact) { return Err(inbox_invalid()); }
+        self.phase2_member_in(PHASE2_TEAM_ARTIFACTS, "team_artifacts_unavailable", org, RequestRisk::Read, |client, context| {
+            let detail: TeamArtifactDetail = client.request(context, &["team-artifacts", artifact], None, None, None, RequestRisk::Read)?;
+            if detail.artifact.id != artifact { return Err(post_send_error(RequestRisk::Read)); }
+            Ok(detail)
+        })
+    }
+
+    pub fn team_artifact_content(&self, org: &str, artifact: &str, version: u32) -> Result<TeamArtifactContent, CloudWorkspaceClientError> {
+        if !valid_following_path_id(artifact) || version == 0 { return Err(inbox_invalid()); }
+        let number = version.to_string();
+        self.phase2_member_in(PHASE2_TEAM_ARTIFACTS, "team_artifacts_unavailable", org, RequestRisk::Read, |client, context| {
+            // One version may be 1 MiB, more once escaped as JSON.
+            let content: TeamArtifactContent = client.request_limited(context, &["team-artifacts", artifact, "versions", &number],
+                None, None, None, RequestRisk::Read, 8 * 1024 * 1024)?;
+            if content.artifact_id != artifact || content.version != version { return Err(post_send_error(RequestRisk::Read)); }
+            Ok(content)
+        })
+    }
+
+    pub fn publish_team_artifact(&self, org: &str, input: TeamArtifactPublishInput) -> Result<TeamArtifactPublished, CloudWorkspaceClientError> {
+        team_artifact_input_valid(&input)?;
+        self.phase2_member_in(PHASE2_TEAM_ARTIFACTS, "team_artifacts_unavailable", org, RequestRisk::Mutation, |client, context| {
+            client.request(context, &["team-artifacts"], None, Some(json!(input)), None, RequestRisk::Mutation)
+        })
+    }
+
+    pub fn delete_team_artifact(&self, org: &str, artifact: &str) -> Result<TeamArtifactDeleted, CloudWorkspaceClientError> {
+        if !valid_following_path_id(artifact) { return Err(inbox_invalid()); }
+        self.phase2_member_in(PHASE2_TEAM_ARTIFACTS, "team_artifacts_unavailable", org, RequestRisk::Mutation, |client, context| {
+            let deleted: TeamArtifactDeleted = client.request_as("DELETE", context, &["team-artifacts", artifact], None, None, None, RequestRisk::Mutation)?;
+            if !deleted.deleted || deleted.id != artifact { return Err(post_send_error(RequestRisk::Mutation)); }
+            Ok(deleted)
+        })
+    }
+
+    /// Whether the organization has team artifacts, asked before the file picker opens.
+    pub fn team_artifacts_ready(&self, org: &str) -> Result<(), CloudWorkspaceClientError> {
+        self.phase2_member_in(PHASE2_TEAM_ARTIFACTS, "team_artifacts_unavailable", org, RequestRisk::Read, |_, _| Ok(()))
+    }
+
+    /// An old version, pruned by its author or an admin; the server keeps the current one.
+    pub fn delete_team_artifact_version(&self, org: &str, artifact: &str, version: u32) -> Result<TeamArtifactVersionDeleted, CloudWorkspaceClientError> {
+        if !valid_following_path_id(artifact) || version == 0 { return Err(inbox_invalid()); }
+        let number = version.to_string();
+        self.phase2_member_in(PHASE2_TEAM_ARTIFACTS, "team_artifacts_unavailable", org, RequestRisk::Mutation, |client, context| {
+            let deleted: TeamArtifactVersionDeleted = client.request_as("DELETE", context, &["team-artifacts", artifact, "versions", &number], None, None, None, RequestRisk::Mutation)?;
+            if !deleted.deleted || deleted.artifact_id != artifact || deleted.version != version { return Err(post_send_error(RequestRisk::Mutation)); }
+            Ok(deleted)
         })
     }
 
@@ -5304,6 +5486,15 @@ fn known_error_code(code: &str) -> bool {
             | "workspace_mentions_unavailable"
             | "nudge_rate_limited"
             | "nudges_unavailable"
+            // Team artifacts (PRO-158)
+            | "team_artifacts_unavailable"
+            | "team_artifact_not_found"
+            | "team_artifact_too_large"
+            | "team_artifact_limit_reached"
+            | "team_artifact_delete_forbidden"
+            | "team_artifact_publish_forbidden"
+            | "team_artifact_storage_full"
+            | "team_artifact_version_current"
             | "shared_setups_unavailable"
             | "snippet_keyword_taken"
             | "action_prompt_conflict"

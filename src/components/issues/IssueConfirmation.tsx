@@ -18,6 +18,8 @@ export interface IssueConfirmationRequest {
     summary: string;
     description: string | null;
     agree: string;
+    /** What agreeing does, when it is not an issue change (a team artifact publish, PRO-158). */
+    notice?: string;
   };
 }
 
@@ -99,7 +101,7 @@ export function IssueConfirmation() {
             </div>
             <details className="mt-3 text-sm"><summary className="cursor-pointer">Source text</summary><pre className="mt-2 whitespace-pre-wrap font-mono text-xs">{q.description}</pre></details>
           </div>}
-          <p className="mt-3 text-sm text-muted-foreground">This changes the issue tracker and may notify other people. Cancel if you did not request it.</p>
+          <p className="mt-3 text-sm text-muted-foreground">{q.notice ?? "This changes the issue tracker and may notify other people. Cancel if you did not request it."}</p>
         </DialogScrollArea>
         {error && <p role="alert" className="mt-2 text-sm text-destructive">{error}</p>}
         <DialogFooter>

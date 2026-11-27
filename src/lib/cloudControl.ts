@@ -40,6 +40,7 @@ import { recoveryFromEvents } from "@/lib/recovery";
 import { cloudAsleep, cloudSessionBackend } from "@/lib/sessionBackend";
 import type { AgentEvent, RecoveryKind } from "@/types/events";
 import { cloudWorkspaceKey, isCloudKey, parseCloudWorkspaceKey, type CloudProject } from "@/types/target";
+import { noteTeamArtifact, teamArtifactOrgs, teamArtifactsApi, type TeamArtifactContentType } from "@/lib/teamArtifacts";
 import type { RuntimeIssueRef, WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable/workspace";
 
 /**
@@ -1163,9 +1164,116 @@ async function resume(params: Params, sleep: Sleep = pause, now: () => number = 
 /** For tests: `stop` and `resume` with their clock and sleep replaced. */
 export const cloudLifecycleCommands = { stop, resume };
 
+// ---- Team artifacts (PRO-158) ------------------------------------------------
+
+/** The organization a team artifact command names, or the only one that has them. */
+function artifactOrg(params: Params): { id: string; name: string } {
+  const status = signedIn();
+  const ready = new Set(teamArtifactOrgs(status));
+  const orgs = (status.organizations ?? []).filter((org) => ready.has(org.id));
+  const named = text(params, "org");
+  if (named) {
+    const wanted = named.toLowerCase();
+    const slug = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    const found = orgs.find((org) => org.id === named || org.name.toLowerCase() === wanted || slug(org.name) === wanted);
+    if (!found) throw notFound(`No organization ${named} with team artifacts.`, "List them with terminalx cloud status.");
+    return found;
+  }
+  if (orgs.length === 1) return orgs[0];
+  if (!orgs.length) throw new CloudControlError("team_artifacts_unavailable", "Team artifacts are not available for this account yet.");
+  throw invalid(`Name the organization with --org: ${orgs.map((org) => org.name).join(", ")}.`);
+}
+
+/** The slug a publish names: a template's, or `--slug`. */
+function namedSlug(params: Params): { slug: string | null; template: boolean } {
+  const template = text(params, "template");
+  if (template) return { slug: template, template: true };
+  return { slug: text(params, "slug") ?? null, template: false };
+}
+
+/**
+ * Whether the named slug may be published to: free, or with `--new-version`
+ * the person's own (or they are an admin). A slug in use is never added to
+ * by default. Answers `adds` with the slug when it adds a version.
+ */
+async function slugClear(orgId: string, orgName: string, params: Params): Promise<string | null> {
+  const { slug } = namedSlug(params);
+  if (!slug) return null;
+  const { artifacts } = await teamArtifactsApi.list(orgId);
+  const existing = artifacts.find((item) => item.slug === slug);
+  const newVersion = params.newVersion === true;
+  if (!existing) {
+    if (newVersion) throw notFound(`No team artifact @${slug} at ${orgName} to add a version to.`, "Leave out --new-version to publish a new one.");
+    return null;
+  }
+  if (!newVersion) {
+    throw new CloudControlError("team_artifact_slug_taken", `@${slug} is already ${existing.title} at ${orgName}. Nothing was published.`,
+      existing.canDelete ? "Add --new-version to publish this as its next version, or choose another slug." : "Choose another slug: only its author and admins can add a version of it.");
+  }
+  if (!existing.canDelete) throw new CloudControlError("team_artifact_publish_forbidden", `Only the author of @${slug} and admins can add a version of it. Nothing was published.`, "Choose another slug.");
+  return slug;
+}
+
+/** Native code asks this before anything is read or asked: the organization, and whether the slug is free. */
+async function artifactsPlan(params: Params) {
+  const org = artifactOrg(params);
+  const adds = await slugClear(org.id, org.name, params);
+  return { orgId: org.id, orgName: org.name, adds };
+}
+
+/** Publish the file native code read, after it asked the person when the tab asks first. */
+async function artifactsPublish(params: Params) {
+  const orgId = required(params, "orgId");
+  const org = signedIn().organizations?.find((item) => item.id === orgId);
+  if (!org || !teamArtifactOrgs(signedIn()).includes(orgId)) throw new CloudControlError("team_artifacts_unavailable", "Team artifacts are not available for this organization.");
+  // Asked again: a teammate may have taken the slug while the person was answering.
+  await slugClear(org.id, org.name, params);
+  const contentType = required(params, "contentType") as TeamArtifactContentType;
+  const content = typeof params.content === "string" ? params.content : "";
+  const { slug, template } = namedSlug(params);
+  const note = text(params, "note");
+  const source = text(params, "source")?.replace(/\p{Cc}/gu, " ").slice(0, 120);
+  const { artifact, created } = await teamArtifactsApi.publish(org.id, {
+    title: required(params, "title").trim(),
+    contentType,
+    content,
+    ...(slug ? { slug } : {}),
+    ...(template ? { template: true } : {}),
+    ...(note ? { note } : {}),
+    ...(source ? { source } : {}),
+  });
+  noteTeamArtifact(org.id, { saved: artifact });
+  return {
+    orgId: org.id,
+    orgName: org.name,
+    created,
+    id: artifact.id,
+    slug: artifact.slug,
+    title: artifact.title,
+    version: artifact.version,
+    template: artifact.template,
+    message: `${created ? "Published" : `Published v${artifact.version} of`} ${artifact.title} for everyone at ${org.name}.`,
+  };
+}
+
+/** A template or artifact by slug, with its current content: what an agent reads to fill it in. */
+async function artifactsShow(params: Params) {
+  const org = artifactOrg(params);
+  const slug = required(params, "artifact").replace(/^@/, "");
+  const { artifacts } = await teamArtifactsApi.list(org.id);
+  const artifact = artifacts.find((item) => item.slug === slug);
+  if (!artifact) throw notFound(`No team artifact @${slug} at ${org.name}.`);
+  const { content } = await teamArtifactsApi.content(org.id, artifact.id, artifact.version);
+  return { orgId: org.id, orgName: org.name, slug, title: artifact.title, template: artifact.template, version: artifact.version, contentType: artifact.contentType, content };
+}
+
 /** Run one `cloud.*` control command. Throws `CloudControlError` for a refusal. */
 export async function handleCloudControl(action: string, params: Params = {}): Promise<unknown> {
   if (action === "status") return status();
+  // Team artifacts have their own switch, checked in native code with the file and the tab's mode (PRO-158).
+  if (action === "artifacts.plan") return artifactsPlan(params);
+  if (action === "artifacts.publish") return artifactsPublish(params);
+  if (action === "artifacts.show") return artifactsShow(params);
   assertAllowed();
   switch (action) {
     case "ssh-stream":

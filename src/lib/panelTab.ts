@@ -2,7 +2,7 @@ import { getPrefs, setPrefs } from "@/lib/prefs";
 import { resetLastView, savePanelTab, savedPanelTab } from "@/lib/lastView";
 
 /** The tabs of a session's right panel. Ports is a cloud session's only, for someone who may use previews; Browser and Computer a local session's. */
-export type PanelTab = "branch" | "changes" | "files" | "browser" | "ports" | "computer";
+export type PanelTab = "artifacts" | "branch" | "changes" | "files" | "browser" | "ports" | "computer";
 
 let pending: PanelTab | null = null;
 const listeners = new Set<(tab: PanelTab) => void>();

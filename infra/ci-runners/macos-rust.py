@@ -87,7 +87,7 @@ MACOS_FILTERS = (
     "machine_name::", "machines::", "native_menu::", "notification_permission::", "orchestration_archive::",
     "pairing::", "power::", "pty::", "quit::", "remote::environment", "remote::machine", "remote::port_listeners",
     "secret_clipboard::", "serve::", "serve_cli::", "sidebar_activity::", "skills::", "startup::", "status::",
-    "store::activity", "store::environment", "store::settings", "store::managed_configuration", "stray_processes::", "transcription::",
+    "store::activity", "store::environment", "store::settings", "store::managed_configuration", "stray_processes::", "team_artifact_control::", "transcription::",
     "transparency::", "updater::", "worktree_cleanup::",
 )
 

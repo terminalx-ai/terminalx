@@ -89,6 +89,7 @@ pub fn call(sink: &dyn EventSink, ask: Option<&Ask>, method: &str, params: Value
             title: "Allow agent access to session controls?".into(),
             message: format!("For {seconds} seconds, allow inspection and these controls only: {}. Actions are attributed to an agent. No screenshots, other sessions, credentials, settings, confirmations, review extensions or security overrides are exposed. Revoke with terminalx computer self-ui revoke GRANT or the access banner.", actions.iter().cloned().collect::<Vec<_>>().join(", ")),
             agree: "Allow session controls".into(),
+            notice: None,
         });
         if answer != crate::cloud_control::Answer::Accepted { return Err(denied("Self-UI authorization was not approved by the person.")); }
         // Caller ids are attribution claims, never authority. The person
