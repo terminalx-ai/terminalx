@@ -97,6 +97,7 @@ impl Decision {
 /// activation closure, which must check it again under its install lock.
 pub(crate) fn with_update_gate<T, U>(
     decision: impl FnOnce() -> Option<Decision>,
+    login_shell: impl Fn() -> crate::workspace_ssh::LoginShell,
     stage: impl FnOnce() -> anyhow::Result<T>,
     refresh_before_switch: impl FnOnce() -> Option<Decision>,
     activate: impl FnOnce(T, Decision) -> anyhow::Result<U>,
@@ -104,12 +105,24 @@ pub(crate) fn with_update_gate<T, U>(
     let Some(initial) = decision() else {
         return Ok(None);
     };
+    let shell_held = || {
+        if let Some(reason) = login_shell().hold_reason() {
+            log::warn!("workspace SSH updater held: {reason}");
+            true
+        } else {
+            false
+        }
+    };
+    if shell_held() {
+        return Ok(None);
+    }
     let candidate = stage()?;
     let Some(current) = refresh_before_switch() else {
         return Ok(None);
     };
     if initial.workspace_id != current.workspace_id
         || initial.runtime_generation != current.runtime_generation
+        || shell_held()
     {
         return Ok(None);
     }
@@ -211,6 +224,7 @@ mod tests {
     fn workspace_ssh_updater_holds_staging_and_switch_on_rollout_loss() {
         let none = with_update_gate(
             || None,
+            || panic!("held updater checked the shell unnecessarily"),
             || -> anyhow::Result<()> { panic!("held updater staged a payload") },
             || panic!("held updater refreshed unnecessarily"),
             |_, _| -> anyhow::Result<()> { panic!("held updater activated a payload") },
@@ -229,8 +243,20 @@ mod tests {
                 1000,
             )
         };
+        use crate::workspace_ssh::LoginShell;
+        let held = with_update_gate(
+            fresh,
+            || LoginShell::Held,
+            || -> anyhow::Result<()> { panic!("unusable shell staged a payload") },
+            || panic!("unusable shell refreshed unnecessarily"),
+            |_, _| -> anyhow::Result<()> { panic!("unusable shell activated a payload") },
+        )
+        .unwrap();
+        assert!(held.is_none());
+
         let none = with_update_gate(
             fresh,
+            || LoginShell::Usable,
             || Ok("candidate"),
             || None,
             |_, _| -> anyhow::Result<()> { panic!("revoked updater activated a payload") },
@@ -239,6 +265,7 @@ mod tests {
         assert!(none.is_none());
         let updated = with_update_gate(
             fresh,
+            || LoginShell::Usable,
             || Ok("candidate"),
             fresh,
             |candidate, _| Ok(candidate),
