@@ -207,7 +207,8 @@ export function DisconnectBedrockDialog({ organization, busy, onClose, onConfirm
       <DialogContent className="max-w-md" data-testid="bedrock-disconnect">
         <DialogTitle className="text-base font-semibold">Disconnect Amazon Bedrock?</DialogTitle>
         <DialogDescription className="text-sm text-muted-foreground">
-          Claude Code there goes back to each member’s own login. The AWS key is deleted from {organization}.
+          Claude Code there goes back to each member’s own login. The AWS key is deleted from {organization}; running
+          sessions keep it until they end, so deactivate it in AWS too.
         </DialogDescription>
         <div className="mt-4 flex justify-end gap-2">
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={onClose}>Cancel</Button>

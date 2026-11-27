@@ -480,6 +480,12 @@ export interface AgentTabInfo {
    * `unavailable`, with a `reason` such as `token-expired`).
    */
   signIn?: { provider: string; state: string; reason?: string | null } | null;
+  /**
+   * Which login the tab's agent started with (PRO-200): the organization's
+   * agent login, or the workspace creator's own route. Absent when neither,
+   * when it has not started, or from a runtime that does not say.
+   */
+  login?: "organization" | "route";
   lastSeq: number;
   created: string;
   modified: string;

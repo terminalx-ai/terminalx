@@ -112,8 +112,18 @@ delivers it to every workspace instead of a creator's personal route.
 - In the workspace the grant (`mode: bedrock`) sets `CLAUDE_CODE_USE_BEDROCK=1`,
   `AWS_REGION`, `ANTHROPIC_MODEL` and the keys (`AWS_ACCESS_KEY_ID` and
   `AWS_SECRET_ACCESS_KEY`, or `AWS_BEARER_TOKEN_BEDROCK`), unsets every other
-  Anthropic or AWS sign-in variable, starts the tab on the tested model, and
-  pins Bedrock and its region in the launch's `--settings`.
+  Anthropic or AWS sign-in variable and every other provider's endpoint, and
+  starts the tab on the tested model.
+- The launch's `--settings` (the level above a checkout's
+  `.claude/settings.json`) pins Bedrock on, `AWS_REGION` (and the small/fast
+  model's region), `ANTHROPIC_BEDROCK_BASE_URL` at
+  `https://bedrock-runtime.<region>.amazonaws.com`, every
+  `CLAUDE_CODE_SKIP_*_AUTH` off, and every other provider switch
+  (`CLAUDE_CODE_USE_VERTEX`, `_FOUNDRY`, `_MANTLE`, `_ANTHROPIC_AWS`,
+  `_ANTHROPIC_GOOGLE_CLOUD`) off. A checkout therefore cannot point Bedrock
+  at another host or send its requests unsigned. Proxy and CA variables are
+  not pinned: code the agent runs in the workspace can read its environment
+  anyway, so a checkout the agent runs is trusted with the key.
 - Every member's workspace receives the long-lived AWS keys (or Bedrock API
   key) in its agent's environment, where anyone who can drive the workspace
   can read them. The form says so and recommends an IAM user limited to
@@ -124,11 +134,19 @@ delivers it to every workspace instead of a creator's personal route.
 ## Usage-limit card (PRO-200)
 
 Behind `cloud.agent-logins.usage-limit-card.v1`: a cloud tab whose agent hit
-its provider's usage limit shows "<Agent> usage limit reached" instead of
-the generic recovery banner (design 17.13). It says the organization's login
-ran out (whose, when the reader may list the logins), **Copy request** puts a
-ready message for an admin on the clipboard, and **Switch to <other agent>**
-opens the continuation dialog on Codex (from Claude Code) or Claude Code.
+its provider's usage limit on the organization's login shows "<Agent> usage
+limit reached" in the recovery card (design 17.13). Only then: the runtime
+says per tab which login its agent started with (`login: "organization" |
+"route"` in the tab's info); a tab on the creator's own route, or a runtime
+that does not say, keeps the usual card.
+
+It says the organization's login ran out (whose, when the reader may list
+the logins; a Bedrock login is named by the organization, since its name is
+a region), **Copy request** puts a ready message for an admin on the
+clipboard, and **Switch to <other agent>** opens the continuation dialog on
+Codex (from Claude Code) or Claude Code. The card's usual actions stay:
+another account, another model, **Continue here** once the limit has reset
+(the time is dropped from the text then), Stop, and Continue in new session.
 
 ## A login the provider no longer accepts (#667)
 

@@ -759,6 +759,8 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const agentProcess = useCallback((tabId: string) => agents.tabs.find((tab) => tab.tabId === tabId)?.info.process ?? null, [agents.tabs]);
   // PRO-110: what the runtime says of the tab's agent's sign-in, for the notice over the tab.
   const signIn = useCallback((tabId: string) => agents.tabs.find((tab) => tab.tabId === tabId)?.info.signIn ?? null, [agents.tabs]);
+  // PRO-200: which login the tab's agent started with, for the usage-limit card.
+  const agentLogin = useCallback((tabId: string) => agents.tabs.find((tab) => tab.tabId === tabId)?.info.login ?? null, [agents.tabs]);
   const backend = useMemo(
     () =>
       cloudSessionBackend({
@@ -783,8 +785,9 @@ export function useCloudSession(key: string): CloudSessionModel | null {
         terminalBase,
         agentProcess,
         signIn,
+        agentLogin,
       }),
-    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, mailboxKinds, workspaceStatus, wake, you, collabLive, settingsNotice, connects, agentPty, terminalBase, agentProcess, signIn],
+    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, mailboxKinds, workspaceStatus, wake, you, collabLive, settingsNotice, connects, agentPty, terminalBase, agentProcess, signIn, agentLogin],
   );
 
   const ownTabs = useMemo(() => {

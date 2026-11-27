@@ -500,31 +500,13 @@ pub enum BedrockAuth {
 impl BedrockSettings {
     /// The same shapes the account service accepts.
     pub(crate) fn valid(&self) -> bool {
-        valid_bedrock_region(&self.region)
-            && valid_bedrock_model(&self.model)
+        crate::cloud_grants::valid_bedrock_region(&self.region)
+            && crate::cloud_grants::valid_bedrock_model(&self.model)
             && match self.auth {
                 BedrockAuth::AwsKeys => self.access_key_id.as_deref().is_some_and(valid_access_key_id),
                 BedrockAuth::ApiKey => self.access_key_id.is_none(),
             }
     }
-}
-
-/// `eu-central-1`, `us-gov-west-1`.
-pub(crate) fn valid_bedrock_region(region: &str) -> bool {
-    let parts: Vec<&str> = region.split('-').collect();
-    let (geo, rest) = match parts.as_slice() {
-        [geo, "gov", area, number] => (*geo, [*area, *number]),
-        [geo, area, number] => (*geo, [*area, *number]),
-        _ => return false,
-    };
-    geo.len() == 2 && geo.bytes().all(|byte| byte.is_ascii_lowercase())
-        && !rest[0].is_empty() && rest[0].bytes().all(|byte| byte.is_ascii_lowercase())
-        && (1..=2).contains(&rest[1].len()) && rest[1].bytes().all(|byte| byte.is_ascii_digit())
-}
-
-/// A model or inference profile id, or an inference profile ARN.
-pub(crate) fn valid_bedrock_model(model: &str) -> bool {
-    (1..=200).contains(&model.len()) && model.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._:/-".contains(&byte))
 }
 
 fn valid_access_key_id(id: &str) -> bool {

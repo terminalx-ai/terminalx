@@ -51,7 +51,7 @@ import { classifyRecovery, CONTINUE_PROMPT, requestRefusalNotice, RECOVERY_MESSA
 import { actionReports, inputOf, RecoveryReports, reporterFor, useExposure, type RecoveryAction, type Surface } from "@/lib/recoveryReports";
 import type { RecoveryKind } from "@/types/events";
 import { RecoveryBanner } from "./RecoveryBanner";
-import { OrgUsageLimitCard } from "./OrgUsageLimitCard";
+import { useOrgLoginOwner, type OrgLimit } from "./OrgUsageLimitCard";
 import { useAccount } from "@/lib/account";
 import { phase2Ready } from "@/lib/phase2Readiness";
 import { useNoticeDeferral } from "@/lib/noticeDeferral";
@@ -970,15 +970,19 @@ export function TabView({
     });
   };
 
-  // A cloud tab on its organization's login at the provider's usage limit: an admin has to act (PRO-200, design 17.13).
+  // A cloud tab whose agent runs on its organization's login, at the provider's usage limit: an admin has to act
+  // (PRO-200, design 17.13). Only when the runtime says the tab started on that login, not the creator's own route.
   const cloudOrg = local ? null : parseCloudWorkspaceKey(backend.key)?.orgId ?? null;
-  const orgUsageLimit = recovery === "usage_limit" && !!cloudOrg && phase2Ready(accountStatus, cloudOrg, "usageLimitCard") && !transcript.pendingAsks.length;
-  const banner = (placement: "top" | "composer") => orgUsageLimit && cloudOrg ? (placement === "top" ? null :
-    <OrgUsageLimitCard harness={tab.harness} organizationId={cloudOrg}
-      organization={accountStatus.organizations?.find((org) => org.id === cloudOrg)?.name ?? "the organization"}
-      resetsAt={transcript.rateLimit?.resetsAt ?? null} busy={recovering || !backend.caps.write}
-      onSwitch={backend.caps.write && !readOnly ? (harness) => continueInNewSession(harness) : undefined} />
-  ) : terminalPrompt ? (placement === "top" ? null :
+  const orgUsageLimit = recovery === "usage_limit" && !!cloudOrg && phase2Ready(accountStatus, cloudOrg, "usageLimitCard")
+    && backend.agentLogin?.(tab.id) === "organization";
+  const orgLimitOwner = useOrgLoginOwner(orgUsageLimit ? cloudOrg : null, tab.harness);
+  const orgLimit: OrgLimit | null = orgUsageLimit && cloudOrg ? {
+    harness: tab.harness,
+    organization: accountStatus.organizations?.find((org) => org.id === cloudOrg)?.name ?? "the organization",
+    who: orgLimitOwner,
+    onSwitch: backend.caps.write && !readOnly ? (harness) => continueInNewSession(harness) : undefined,
+  } : null;
+  const banner = (placement: "top" | "composer") => terminalPrompt ? (placement === "top" ? null :
     <div className="mx-auto w-full max-w-3xl shrink-0 bg-chat px-6 pb-2">
       <TerminalPromptCard prompt={terminalPrompt} agent={cloudAgentLabel(tab.harness)}
         busy={recovering || answering || !backend.caps.write} blockedReason={backend.approveBlockedReason ?? null}
@@ -994,7 +998,7 @@ export function TabView({
         onRetry={(model) => void retry(model)} onStop={() => stop("banner")} onSendContinue={() => void sendContinue()} onResend={backend.resendUnsent && !gate?.blocked ? () => void resend() : undefined}
         signInPending={loginPending === loginIncident && !loginIncident.cancelled}
         onSignIn={signInAgent ? () => void requestSignIn() : undefined}
-        onContinue={() => continueInNewSession(null)} />
+        onContinue={() => continueInNewSession(null)} orgLimit={orgLimit} />
   );
 
   // What the worktree's branch changes, over the composer: a local chat on its own branch.

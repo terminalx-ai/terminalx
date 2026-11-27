@@ -112,7 +112,7 @@ describe("Amazon Bedrock for Claude Code (PRO-200)", () => {
     fireEvent.click(within(claudeRow()).getByText("Disconnect"));
     const confirm = await screen.findByTestId("bedrock-disconnect");
     expect(within(confirm).getByText("Disconnect Amazon Bedrock?")).toBeTruthy();
-    expect(confirm.textContent).toMatch(/Claude Code there goes back to each member’s own login\. The AWS key is deleted from Acme Robotics\./);
+    expect(confirm.textContent).toMatch(/Claude Code there goes back to each member’s own login\. The AWS key is deleted from Acme Robotics; running\s+sessions keep it until they end, so deactivate it in AWS too\./);
     fireEvent.click(within(confirm).getByText("Disconnect Bedrock"));
     await waitFor(() => expect(api.cloudAgentLoginRemove).toHaveBeenCalledWith("claude", "rev", "org-1"));
   });

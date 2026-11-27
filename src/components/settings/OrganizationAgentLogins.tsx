@@ -782,7 +782,8 @@ export function OrganizationAgentLogins({
       </div>
       <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
         What the agents in the cloud workspaces of {organization} sign in with: one login per agent, for this organization only. A login is
-        stored encrypted by the account service and is never shown again; workspace machines only ever receive short-lived access made from it.
+        stored encrypted by the account service and is never shown again; workspace machines only ever receive short-lived access made from it
+        {bedrockReady || logins?.some((login) => login.authKind === "bedrock") ? ", except Amazon Bedrock, whose AWS key they receive as it is." : "."}
       </p>
 
       {loading && !logins && !adminOnly ? (

@@ -346,6 +346,8 @@ export interface SessionBackend {
    * it is signed in. Null when it can sign in.
    */
   signIn?(tabId: string): { signIn: NonNullable<AgentTabInfo["signIn"]>; organizationId: string; machine?: string } | null;
+  /** Cloud only (PRO-200): which login the tab's agent started with, as the runtime last said. Null when it does not say. */
+  agentLogin?(tabId: string): NonNullable<AgentTabInfo["login"]> | null;
   /** Options a local session has that this one cannot take, each with why (#1289). Absent on a local session. */
   unavailable?: Readonly<SessionUnavailable>;
   /** Reset, Fork and turn checkpoints (#1326). Absent where the session cannot take them; `unavailable` says why. */
@@ -675,6 +677,8 @@ export interface CloudSessionContext {
   agentProcess?: (tabId: string) => AgentProcessState | null;
   /** Why a tab's agent cannot sign in, as the runtime last said (see `SessionBackend.signIn`). */
   signIn?: (tabId: string) => AgentTabInfo["signIn"];
+  /** Which login a tab's agent started with, as the runtime last said (see `SessionBackend.agentLogin`). */
+  agentLogin?: (tabId: string) => AgentTabInfo["login"] | null;
 }
 
 /** Why reviewing a turn is refused to a reader who may only read it. */
@@ -948,6 +952,7 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
       const signIn = ctx.signIn?.(tabId);
       return signIn ? { signIn, organizationId: scope.organizationId } : null;
     },
+    agentLogin: (tabId) => ctx.agentLogin?.(tabId) ?? null,
     markRead: (tabId) => markCloudAgentRead(scope, tabId, client),
     patchTab: () => undefined,
     setTabStatus: () => undefined,

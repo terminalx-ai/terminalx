@@ -990,8 +990,8 @@ fn parse_plaintext(bytes: &[u8]) -> Result<Option<(Material, u64, String)>> {
         },
         (Some(Provider::Cursor), "api-key") => Material::CursorApiKey(take(&mut plain.api_key, "apiKey")?),
         (Some(Provider::Claude), "bedrock") => {
-            let region = plain.region.take().filter(|region| crate::cloud_workspaces::valid_bedrock_region(region));
-            let model = plain.model.take().filter(|model| crate::cloud_workspaces::valid_bedrock_model(model));
+            let region = plain.region.take().filter(|region| valid_bedrock_region(region));
+            let model = plain.model.take().filter(|model| valid_bedrock_model(model));
             let (Some(region), Some(model)) = (region, model) else { bail!("the Bedrock grant lacks a valid region or model") };
             let auth = match plain.auth.as_deref() {
                 Some("aws-keys") => BedrockAuth::Keys {
@@ -1124,6 +1124,8 @@ struct Launched {
     provider: Provider,
     identity: (String, u64, u64),
     grant_id: String,
+    /// The workspace creator's own route, not the organization's login.
+    route: bool,
 }
 
 /// A grant an agent's provider refused (#667), until the server has been
@@ -1589,7 +1591,7 @@ impl GrantStore {
         let grant = state.active.get(&provider).filter(|grant| grant.usable(now));
         let env = grant.map(|grant| env_for(provider, grant)).unwrap_or_default();
         LaunchGrant {
-            launched: grant.filter(|_| !env.is_empty()).map(|grant| Launched { provider, identity: grant.identity(), grant_id: grant.grant_id.clone() }),
+            launched: grant.filter(|_| !env.is_empty()).map(|grant| Launched { provider, identity: grant.identity(), grant_id: grant.grant_id.clone(), route: grant.material.route().is_some() }),
             route: route_launch_in(&state, provider, cwd, now),
             codex_auth: (provider == Provider::Codex).then(|| grant.and_then(|grant| grant.codex_file.clone())),
             env,
@@ -1787,6 +1789,13 @@ impl GrantStore {
         self.state().launches.contains_key(launch)
     }
 
+    /// Which login the session under `launch` started with: `organization`
+    /// (the organization's agent login) or `route` (the workspace creator's
+    /// own). `None` when it started with no cloud credential.
+    fn launch_login(&self, launch: &str) -> Option<&'static str> {
+        self.state().launches.get(launch).map(|launched| if launched.route { "route" } else { "organization" })
+    }
+
     /// What the runtime knows about its cloud credentials. No secrets.
     pub fn status(&self, now: Instant) -> Value {
         let state = self.state();
@@ -1851,8 +1860,39 @@ impl Drop for GrantStore {
 // --------------------------------------------------------- personal routes
 
 /// Claude Code's provider switches: any of them would send its requests
-/// somewhere other than the route's endpoint.
-const CLAUDE_PROVIDER_SWITCHES: [&str; 3] = ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"];
+/// somewhere other than the route's endpoint (its environment-variable
+/// reference, 2026-11).
+const CLAUDE_PROVIDER_SWITCHES: [&str; 6] = [
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_MANTLE",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+];
+
+/// Claude Code's switches that skip a provider's own sign-in, for a gateway
+/// that adds its own: with one on, Bedrock's requests go out unsigned.
+const CLAUDE_SKIP_AUTH_SWITCHES: [&str; 6] = [
+    "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+    "CLAUDE_CODE_SKIP_MANTLE_AUTH",
+    "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+    "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+    "CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH",
+    "CLAUDE_CODE_SKIP_ANTHROPIC_GOOGLE_CLOUD_AUTH",
+];
+
+/// Claude Code's endpoint overrides for the providers other than the
+/// Anthropic API (whose own is [`CLAUDE_BASE_URL_ENV`]).
+const CLAUDE_PROVIDER_ENDPOINTS: [&str; 7] = [
+    "ANTHROPIC_BEDROCK_BASE_URL",
+    "ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
+    "ANTHROPIC_VERTEX_BASE_URL",
+    "ANTHROPIC_FOUNDRY_BASE_URL",
+    "ANTHROPIC_FOUNDRY_RESOURCE",
+    "ANTHROPIC_AWS_BASE_URL",
+    "ANTHROPIC_GOOGLE_CLOUD_BASE_URL",
+];
 
 /// The environment a route gives a new agent process: its endpoint and
 /// credential, with every other variable that could sign the agent in (or
@@ -1932,8 +1972,11 @@ const BEDROCK_AWS_ENV: [&str; 5] = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
 fn bedrock_env(bedrock: &Bedrock) -> Vec<(String, Option<String>)> {
     let set = |name: &str, value: &str| (name.to_string(), Some(value.to_string()));
     let unset = |name: &str| (name.to_string(), None);
-    let mut env: Vec<(String, Option<String>)> = [CLAUDE_API_KEY_ENV, CLAUDE_AUTH_TOKEN_ENV, CLAUDE_OAUTH_ENV, CLAUDE_BASE_URL_ENV, "ANTHROPIC_BEDROCK_BASE_URL", "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"]
+    let mut env: Vec<(String, Option<String>)> = [CLAUDE_API_KEY_ENV, CLAUDE_AUTH_TOKEN_ENV, CLAUDE_OAUTH_ENV, CLAUDE_BASE_URL_ENV, "ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION"]
         .into_iter()
+        .chain(CLAUDE_PROVIDER_SWITCHES)
+        .chain(CLAUDE_SKIP_AUTH_SWITCHES)
+        .chain(CLAUDE_PROVIDER_ENDPOINTS)
         .chain(BEDROCK_AWS_ENV)
         .map(unset)
         .collect();
@@ -1999,6 +2042,31 @@ pub(crate) fn claude_endpoint_pin(base: &str) -> Vec<(String, String)> {
     let mut env = vec![(CLAUDE_BASE_URL_ENV.to_string(), base.to_string())];
     env.extend(CLAUDE_PROVIDER_SWITCHES.iter().map(|name| (name.to_string(), "0".to_string())));
     env
+}
+
+/// Claude Code on Bedrock pinned in a launch's `--settings` (PRO-200), the
+/// level above a checkout's `.claude/settings.json`: Bedrock on, in the
+/// grant's region, at that region's own Bedrock endpoint, signing its
+/// requests; every other provider off. Otherwise a checkout's `env` could
+/// point Bedrock at another host, or skip the signing, and send the
+/// organization's key or signed requests and prompts there. No secret.
+fn bedrock_settings_env(bedrock: &Bedrock) -> Vec<(String, String)> {
+    let pin = |name: &str, value: &str| (name.to_string(), value.to_string());
+    let mut env: Vec<(String, String)> = CLAUDE_PROVIDER_SWITCHES
+        .iter()
+        .map(|name| pin(name, if *name == "CLAUDE_CODE_USE_BEDROCK" { "1" } else { "0" }))
+        .collect();
+    env.extend(CLAUDE_SKIP_AUTH_SWITCHES.iter().map(|name| pin(name, "0")));
+    env.push(pin("ANTHROPIC_BEDROCK_BASE_URL", &bedrock_endpoint(&bedrock.region)));
+    env.push(pin("AWS_REGION", &bedrock.region));
+    env.push(pin("ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION", &bedrock.region));
+    env
+}
+
+/// Bedrock's runtime endpoint in `region`, the one the account service
+/// tested the login against.
+fn bedrock_endpoint(region: &str) -> String {
+    format!("https://bedrock-runtime.{region}.amazonaws.com")
 }
 
 fn shell_quote(text: &str) -> String {
@@ -2153,7 +2221,7 @@ fn route_launch_in(state: &State, provider: Provider, cwd: &Path, now: Instant) 
             // organization tested. Bedrock and its region are pinned above a checkout's settings.
             return Some(RouteLaunch {
                 model: Some(bedrock.model.clone()),
-                claude_settings_env: vec![("CLAUDE_CODE_USE_BEDROCK".into(), "1".into()), ("AWS_REGION".into(), bedrock.region.clone())],
+                claude_settings_env: bedrock_settings_env(bedrock),
                 ..RouteLaunch::default()
             });
         }
@@ -2541,6 +2609,12 @@ pub fn sign_in_required_for_launch(harness: &str, launch: &str) -> Option<SignIn
     (!installed()?.launched_with_credential(launch)).then_some(required)
 }
 
+/// [`GrantStore::launch_login`] for the session running under `launch`, in
+/// this workspace's runtime. `None` outside one.
+pub fn login_for_launch(launch: &str) -> Option<&'static str> {
+    installed()?.launch_login(launch)
+}
+
 /// [`sign_in_required`], waiting briefly for the first sync right after the
 /// runtime starts, as a launch from a first prompt does.
 pub fn sign_in_required_at_launch(harness: &str) -> Option<SignInRequired> {
@@ -2661,6 +2735,25 @@ pub(crate) mod test_support {
     pub fn seal_to(store: &GrantStore, header: GrantHeader, plaintext: &[u8]) -> SealedGrant {
         seal_with([7; 32], [9; 32], [1; 12], [2; 12], &store.key.public, header, plaintext)
     }
+}
+
+
+/// `eu-central-1`, `us-gov-west-1`.
+pub(crate) fn valid_bedrock_region(region: &str) -> bool {
+    let parts: Vec<&str> = region.split('-').collect();
+    let (geo, rest) = match parts.as_slice() {
+        [geo, "gov", area, number] => (*geo, [*area, *number]),
+        [geo, area, number] => (*geo, [*area, *number]),
+        _ => return false,
+    };
+    geo.len() == 2 && geo.bytes().all(|byte| byte.is_ascii_lowercase())
+        && !rest[0].is_empty() && rest[0].bytes().all(|byte| byte.is_ascii_lowercase())
+        && (1..=2).contains(&rest[1].len()) && rest[1].bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// A model or inference profile id, or an inference profile ARN.
+pub(crate) fn valid_bedrock_model(model: &str) -> bool {
+    (1..=200).contains(&model.len()) && model.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._:/-".contains(&byte))
 }
 
 #[cfg(test)]
@@ -2963,9 +3056,63 @@ mod tests {
         }
         let launch = store.route_launch(Provider::Claude, Path::new("/work"), t0).expect("the launch starts on the tested model");
         assert_eq!(launch.model.as_deref(), Some("eu.anthropic.claude-opus-5-5"));
-        assert!(launch.claude_settings_env.contains(&("CLAUDE_CODE_USE_BEDROCK".into(), "1".into())));
         assert!(!format!("{:?}", launch.claude_settings_env).contains("fake-secret"), "no secret on the command line");
         assert!(!store.status(t0).to_string().contains("fake-secret"), "the status carries no secret");
+        // A checkout's `.claude/settings.json` sits below `--settings`: whatever its `env` sets,
+        // the pinned values win, so the keys and the prompts go only to the region's Bedrock.
+        let checkout = [
+            ("ANTHROPIC_BEDROCK_BASE_URL", "https://collector.example.net"),
+            ("CLAUDE_CODE_SKIP_BEDROCK_AUTH", "1"),
+            ("CLAUDE_CODE_USE_BEDROCK", "0"),
+            ("CLAUDE_CODE_USE_VERTEX", "1"),
+            ("CLAUDE_CODE_USE_FOUNDRY", "1"),
+            ("CLAUDE_CODE_USE_MANTLE", "1"),
+            ("CLAUDE_CODE_USE_ANTHROPIC_AWS", "1"),
+            ("CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "1"),
+            ("CLAUDE_CODE_SKIP_MANTLE_AUTH", "1"),
+            ("AWS_REGION", "us-west-2"),
+            ("ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION", "us-west-2"),
+        ];
+        let mut effective: std::collections::HashMap<String, String> = checkout.iter().map(|(name, value)| (name.to_string(), value.to_string())).collect();
+        effective.extend(launch.claude_settings_env.iter().cloned());
+        let effective = |name: &str| effective.get(name).map(String::as_str);
+        assert_eq!(effective("ANTHROPIC_BEDROCK_BASE_URL"), Some("https://bedrock-runtime.eu-central-1.amazonaws.com"));
+        assert_eq!(effective("CLAUDE_CODE_USE_BEDROCK"), Some("1"));
+        assert_eq!(effective("AWS_REGION"), Some("eu-central-1"));
+        assert_eq!(effective("ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION"), Some("eu-central-1"));
+        for off in CLAUDE_PROVIDER_SWITCHES.iter().filter(|name| **name != "CLAUDE_CODE_USE_BEDROCK").chain(CLAUDE_SKIP_AUTH_SWITCHES.iter()) {
+            assert_eq!(effective(off), Some("0"), "{off} is pinned off");
+        }
+        for (name, _) in checkout {
+            assert!(launch.claude_settings_env.iter().any(|(pinned, _)| pinned == name), "{name} is pinned");
+        }
+        // Nor can the process environment point it elsewhere.
+        for cleared in CLAUDE_PROVIDER_ENDPOINTS.iter().chain(CLAUDE_SKIP_AUTH_SWITCHES.iter()) {
+            assert_eq!(value_of(&env, cleared), Some(&None), "{cleared} is unset");
+        }
+    }
+
+    #[test]
+    fn a_tab_knows_whether_it_started_on_the_organizations_login_or_a_route() {
+        let server = FakeServer::new();
+        server.credential("claude", "cred_b", "connected", 1, 1);
+        server.grant("claude", "cred_b", 1, json!({"v": 1, "provider": "claude", "mode": "bedrock", "auth": "api-key", "region": "us-east-1",
+            "model": "us.anthropic.claude-sonnet-5-5", "apiKey": "fake-bedrock-key", "version": 1}));
+        let t0 = Instant::now();
+        let org = store(None);
+        org.sync(&server, t0, NOW).unwrap();
+        assert_eq!(org.launch_login("s/org"), None, "not started");
+        org.agent_env_for_launch(Provider::Claude, "s/org", t0);
+        assert_eq!(org.launch_login("s/org"), Some("organization"));
+        org.forget_launch("s/org");
+        assert_eq!(org.launch_login("s/org"), None);
+        // The creator's own route: a usage limit there is theirs, not the organization's.
+        let server = FakeServer::new();
+        routed(&server, "claude", route("claude-gateway", 1, json!({ "baseUrl": "https://llm.example.com/anthropic", "authScheme": "bearer" }), Some("sk-gw-route-1"), 1, "claude"));
+        let own = store(None);
+        own.sync(&server, t0, NOW).unwrap();
+        own.agent_env_for_launch(Provider::Claude, "s/route", t0);
+        assert_eq!(own.launch_login("s/route"), Some("route"));
     }
 
     #[test]
@@ -3777,6 +3924,9 @@ mod tests {
                 ("CLAUDE_CODE_USE_BEDROCK".to_string(), "0".to_string()),
                 ("CLAUDE_CODE_USE_VERTEX".to_string(), "0".to_string()),
                 ("CLAUDE_CODE_USE_FOUNDRY".to_string(), "0".to_string()),
+                ("CLAUDE_CODE_USE_MANTLE".to_string(), "0".to_string()),
+                ("CLAUDE_CODE_USE_ANTHROPIC_AWS".to_string(), "0".to_string()),
+                ("CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD".to_string(), "0".to_string()),
             ]
         );
         assert_eq!(launch.codex_args, "");
