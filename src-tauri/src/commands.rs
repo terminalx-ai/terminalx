@@ -228,6 +228,42 @@ pub async fn organization_member_remove(
     members_call(state, move |service| service.remove(&user_id, &context_revision)).await
 }
 
+// ------------------------------------------------- invitations to the viewer
+
+type InvitesResult = Result<serde_json::Value, crate::organization_invites::OrganizationInvitesError>;
+
+async fn invites_call(
+    state: tauri::State<'_, crate::AppState>,
+    operation: impl FnOnce(&crate::organization_invites::OrganizationInvitesService) -> InvitesResult + Send + 'static,
+) -> InvitesResult {
+    let service = state.organization_invites.clone();
+    tauri::async_runtime::spawn_blocking(move || operation(&service))
+        .await
+        .map_err(|_| crate::organization_invites::OrganizationInvitesError::local("organization_invites_unavailable"))?
+}
+
+/// Invitations addressed to the signed-in person (PRO-175).
+#[tauri::command]
+pub async fn my_invites(state: tauri::State<'_, crate::AppState>) -> InvitesResult {
+    invites_call(state, |service| service.run(crate::organization_invites::InviteRequest::List)).await
+}
+
+/// What the inviting organization has ready, before joining (PRO-175).
+#[tauri::command]
+pub async fn my_invite_welcome(invite_id: String, state: tauri::State<'_, crate::AppState>) -> InvitesResult {
+    invites_call(state, move |service| service.run(crate::organization_invites::InviteRequest::Welcome(&invite_id))).await
+}
+
+#[tauri::command]
+pub async fn my_invite_accept(invite_id: String, state: tauri::State<'_, crate::AppState>) -> InvitesResult {
+    invites_call(state, move |service| service.run(crate::organization_invites::InviteRequest::Accept(&invite_id))).await
+}
+
+#[tauri::command]
+pub async fn my_invite_decline(invite_id: String, state: tauri::State<'_, crate::AppState>) -> InvitesResult {
+    invites_call(state, move |service| service.run(crate::organization_invites::InviteRequest::Decline(&invite_id))).await
+}
+
 // ------------------------------------------------------ organization compute
 
 type ComputeResult = Result<serde_json::Value, crate::organization_compute::OrganizationComputeError>;

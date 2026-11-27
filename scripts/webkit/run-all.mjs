@@ -57,7 +57,7 @@ export const checks = [
   "repository-scripts", "pr-conversation", "automatic-session-status", "runtime-start-failed", "session-cost",
   "helper-titles", "error-toast", "notifications-off", "pair-phone", "file-tree-filter", "quick-open", "tab-errors",
   "review-threads", "run-menu", "worktree-copy-step", "projects-settings", "branch-toasts", "composer-attachments",
-  "organization-roster", "permission-details", "chat-tables", "command-palette", "machine-sidebar", "machine-session", "machine-ports",
+  "organization-roster", "invites-welcome", "permission-details", "chat-tables", "command-palette", "machine-sidebar", "machine-session", "machine-ports",
   "sidebar-design", "chat-transcript", "changes-design", "sidebar-menus", "machines-screens", "review-tab", "checks-panel", "turn-details", "settings-design",
   "project-settings", "pr-panel-design", "settings-pro-377", "cloud-setup", "held-followups", "first-run", "confirm-dialogs",
   "attachment-preview", "chat-mentions", "session-start", "composer-controls", "session-menu", "chat-scrollbar", "settings-stats",
