@@ -1576,6 +1576,12 @@ pub async fn shared_setups(org_id: String, op: crate::cloud_workspaces::SharedSe
     cloud_command!(state, risk, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.shared_setups(&org_id, op))
 }
 
+/// PRO-241: the organization's current announcement for this build.
+#[tauri::command]
+pub async fn announcements_current(org_id: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::CurrentAnnouncement, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.current_announcement(&org_id))
+}
+
 #[tauri::command]
 pub async fn nudge_preference(org_id: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::NudgePreference, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.nudge_preference(&org_id))
