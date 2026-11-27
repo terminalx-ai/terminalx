@@ -7,6 +7,30 @@ const MAX_WINDOW_MS: u64 = 5 * 60 * 1000;
 const UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
 const MAX_JITTER_SECS: u64 = 90 * 60;
 
+/// Called inside an approved update attempt. Creation and lock acquisition
+/// use only the service-owned state directory and require no elevated UID.
+#[cfg(unix)]
+pub(crate) fn state_install_lock(
+    service_state: &std::path::Path,
+) -> anyhow::Result<crate::workspace_ssh_payload::InstallLock> {
+    use std::fs::{self, DirBuilder};
+    use std::io::ErrorKind;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+
+    let root = service_state.join("openssh");
+    match DirBuilder::new().mode(0o700).create(&root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    let metadata = fs::symlink_metadata(&root)?;
+    anyhow::ensure!(
+        metadata.is_dir() && metadata.mode() & 0o777 == 0o700,
+        "workspace OpenSSH state must be a private directory"
+    );
+    crate::workspace_ssh_payload::InstallLock::acquire(&root)
+}
+
 /// Runs inside the workspace service. Attempts are serial and sleep between
 /// completions, so a slow update cannot queue concurrent installs.
 pub(crate) fn spawn_periodic(
@@ -136,6 +160,27 @@ impl Status {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    #[cfg(unix)]
+    fn workspace_ssh_updater_state_root_is_private() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path().join("openssh");
+        let lock = state_install_lock(state.path()).unwrap();
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        drop(lock);
+
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(state_install_lock(state.path()).is_err());
+        let other = tempfile::tempdir().unwrap();
+        symlink(root, other.path().join("openssh")).unwrap();
+        assert!(state_install_lock(other.path()).is_err());
+    }
 
     #[test]
     fn workspace_ssh_updater_decision_requires_current_bound_affirmative_negotiation() {
