@@ -336,6 +336,10 @@ pub enum CallError {
 pub trait Api {
     fn redeem(&self, token: &str, key: &HostKey) -> Result<Redeemed, CallError>;
     fn refresh(&self, credential: &str) -> Result<Refreshed, CallError>;
+    #[cfg(target_os = "linux")]
+    fn refresh_workspace_ssh(&self, credential: &str) -> Result<Refreshed, CallError> {
+        self.refresh(credential)
+    }
 }
 
 pub struct HttpApi {
@@ -378,6 +382,11 @@ impl Api for HttpApi {
     fn refresh(&self, credential: &str) -> Result<Refreshed, CallError> {
         self.post("/v1/cloud-workspace-bootstrap/refresh", credential, serde_json::json!({}), Some((CAPABILITIES_HEADER, CAPABILITIES)))
     }
+    #[cfg(target_os = "linux")]
+    fn refresh_workspace_ssh(&self, credential: &str) -> Result<Refreshed, CallError> {
+        let capabilities = format!("{CAPABILITIES},workspace-ssh-v2");
+        self.post("/v1/cloud-workspace-bootstrap/refresh", credential, serde_json::json!({}), Some((CAPABILITIES_HEADER, &capabilities)))
+    }
 }
 
 /// The workspace and organisation are bound by the authenticated bootstrap
@@ -398,6 +407,8 @@ pub struct Bootstrapped {
     /// was revoked or rotated); the relay host stops serving meanwhile.
     rejected: std::sync::atomic::AtomicBool,
     desktop_refresh_failures: Mutex<u8>,
+    #[cfg(target_os = "linux")]
+    pub(crate) ssh_runtime: std::sync::OnceLock<Arc<crate::workspace_ssh_listener::Runtime>>,
     baseline_path: PathBuf,
     /// The generation the baseline was last recorded for.
     baseline_generation: std::sync::atomic::AtomicU64,
@@ -477,6 +488,8 @@ pub fn establish(config: &Config, api: &dyn Api, policy: &Policy) -> Result<Boot
                     credential,
                     rejected: std::sync::atomic::AtomicBool::new(false),
                     desktop_refresh_failures: Mutex::new(0),
+                    #[cfg(target_os = "linux")]
+                    ssh_runtime: std::sync::OnceLock::new(),
                     baseline_path: config.baseline_path(),
                     baseline_generation: std::sync::atomic::AtomicU64::new(u64::MAX),
                     environment_attempted: Mutex::new(None),
@@ -627,7 +640,19 @@ impl Bootstrapped {
     pub fn refresh(&self, api: &dyn Api) -> Result<(), CallError> {
         const DESKTOP_REFRESH_FAILURE_LIMIT: u8 = 3;
         let relay_host_id = self.key.relay_host_id();
+        #[cfg(target_os = "linux")]
+        let requested_ssh = self.ssh_runtime.get().is_some()
+            && crate::workspace_ssh::LoginShell::current_account().hold_reason().is_none();
+        #[cfg(target_os = "linux")]
+        let refreshed = if requested_ssh {
+            api.refresh_workspace_ssh(&self.credential)
+        } else {
+            api.refresh(&self.credential)
+        };
+        #[cfg(not(target_os = "linux"))]
         let refreshed = api.refresh(&self.credential);
+        #[cfg(not(target_os = "linux"))]
+        let requested_ssh = false;
         let mut failures = self
             .desktop_refresh_failures
             .lock()
@@ -641,13 +666,17 @@ impl Bootstrapped {
             session_from_refresh(response, &relay_host_id).map_err(CallError::Transient)
         });
         match refreshed {
-            Ok(session) => {
+            Ok(mut session) => {
+                if !requested_ssh {
+                    session.workspace_ssh = None;
+                }
                 self.rejected.store(false, std::sync::atomic::Ordering::SeqCst);
                 *failures = 0;
                 *current = session;
                 Ok(())
             }
             Err(error) => {
+                current.workspace_ssh = None;
                 let rejected = matches!(error, CallError::Rejected);
                 if rejected {
                     self.rejected.store(true, std::sync::atomic::Ordering::SeqCst);

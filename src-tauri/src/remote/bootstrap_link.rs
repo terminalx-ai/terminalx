@@ -15,6 +15,17 @@ pub struct BootstrapLink {
 
 impl BootstrapLink {
     pub fn new(cloud: Arc<Bootstrapped>, origin: &str) -> Self {
+        #[cfg(target_os = "linux")]
+        if cloud.ssh_runtime.get().is_none() {
+            use crate::workspace_ssh::{LoginShell, PRIVATE_SSHD};
+            if let Some(reason) = LoginShell::current_account().hold_reason() {
+                log::info!("workspace SSH held: {reason}");
+            } else if let Some(root) = std::path::Path::new(PRIVATE_SSHD).ancestors().nth(4) {
+                if let Ok(runtime) = crate::workspace_ssh_listener::Runtime::restore(root) {
+                    let _ = cloud.ssh_runtime.set(Arc::new(runtime));
+                }
+            }
+        }
         Self { cloud, api: HttpApi::new(origin) }
     }
 }
@@ -29,7 +40,17 @@ impl RuntimeLink for BootstrapLink {
             return Err(Revoked.into());
         }
         let session = self.cloud.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok(relay_session(&session, crate::cloud_bootstrap::CAPABILITIES))
+        #[allow(unused_mut)]
+        let mut relay = relay_session(&session, crate::cloud_bootstrap::CAPABILITIES);
+        #[cfg(target_os = "linux")]
+        if let Some(runtime) = self.cloud.ssh_runtime.get() {
+            relay.workspace_ssh = session.workspace_ssh.as_ref().map(|grants| super::host::WorkspaceSshRefresh {
+                workspace_id: session.workspace_id.clone(),
+                grants: grants.clone(),
+                runtime: runtime.clone(),
+            });
+        }
+        Ok(relay)
     }
 
     fn complete_attachment(&self, attachment_id: &str, pairing_code: &str) -> Result<()> {
@@ -73,6 +94,8 @@ pub(crate) fn relay_session(session: &crate::cloud_bootstrap::Session, requested
         revocations,
         collaboration,
         desktop_ready: session.desktop_ready,
+        #[cfg(target_os = "linux")]
+        workspace_ssh: None,
         collaboration_v2: requested_capabilities.split(',').any(|capability| capability == "collaboration-v2"),
     }
 }

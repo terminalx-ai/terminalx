@@ -231,11 +231,7 @@ pub(super) struct Listener {
 
 impl Listener {
     #[cfg(test)]
-    fn admit(
-        &self,
-        socket: TcpStream,
-        authorized: impl FnOnce() -> bool,
-    ) -> Result<Session> {
+    fn admit(&self, socket: TcpStream, authorized: impl FnOnce() -> bool) -> Result<Session> {
         let routing = self.routing.lock().unwrap();
         let daemon = routing
             .active
@@ -408,6 +404,58 @@ impl Listener {
         }
         File::open(&install.root)?.sync_all()?;
         Ok(())
+    }
+}
+
+/// The listener and host identity shared by this runtime's attachments.
+pub(crate) struct Runtime {
+    listener: Listener,
+    host_key: String,
+}
+
+impl Runtime {
+    pub(crate) fn restore(root: &Path) -> Result<Self> {
+        use crate::workspace_ssh::{atomic_write, private_directory, public_key, LoginShell};
+
+        ensure!(
+            LoginShell::current_account() == LoginShell::Usable,
+            crate::workspace_ssh::LOGIN_SHELL_HELD
+        );
+        let install = InstallLock::acquire(root)?;
+        let state = root.join("listener");
+        private_directory(&state)?;
+        let host = state.join("host");
+        let host_key = public_key(&host, true)?;
+        let configuration = state.join("sshd_config");
+        let path = host
+            .to_str()
+            .context("private host key path is not UTF-8")?;
+        ensure!(
+            !path.contains(['\n', '\r', '"', '\\']),
+            "invalid private host key path"
+        );
+        atomic_write(&configuration, format!(
+            "HostKey \"{path}\"\nAuthorizedKeysFile none\nAllowUsers terminalx-runtime\nAuthenticationMethods publickey\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nDisableForwarding yes\nPermitUserRC no\nPermitUserEnvironment no\nPrintMotd no\n"
+        ).as_bytes())?;
+        let listener = Listener::default();
+        listener.restore(&install, configuration, &host_key, || true)?;
+        Ok(Self { listener, host_key })
+    }
+
+    pub(crate) fn host_key(&self) -> &str {
+        &self.host_key
+    }
+
+    pub(crate) fn open(
+        &self,
+        verified_key: impl FnOnce() -> Option<String>,
+    ) -> Result<(tokio::net::TcpStream, Session)> {
+        let pair = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let client = TcpStream::connect(pair.local_addr()?)?;
+        let (socket, _) = pair.accept()?;
+        client.set_nonblocking(true)?;
+        let session = self.listener.admit_key(socket, verified_key)?;
+        Ok((tokio::net::TcpStream::from_std(client)?, session))
     }
 }
 

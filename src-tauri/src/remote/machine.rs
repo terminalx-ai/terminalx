@@ -70,7 +70,7 @@ pub const MACHINE_9: &str = "machine/9";
 /// Namespaces a machine connection is never granted: the content key opens
 /// checkpoints the cloud API keeps, the mirror is a cloud workspace's, and
 /// sharing with other people is out of scope (docs/MACHINES.md, Method table).
-pub const WITHHELD: [&str; 5] = ["keys/1", "mirror/1", "collab/1", super::protocol::CLOUD_DESKTOP, "workspace-transfer/3"];
+pub const WITHHELD: [&str; 6] = ["keys/1", "mirror/1", "collab/1", super::protocol::CLOUD_DESKTOP, "workspace-transfer/3", super::protocol::WORKSPACE_SSH];
 
 /// Methods of namespaces a machine does grant that it does not serve: each
 /// exists for a cloud workspace's mailbox, API or lifecycle.
