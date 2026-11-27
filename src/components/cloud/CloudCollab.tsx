@@ -11,6 +11,7 @@ import { usePromptTextProps } from "@/lib/autocorrect";
 import { LinkedText } from "@/components/chat/LinkedText";
 
 import { useFeatureFlag, featureFlags } from "@/lib/featureFlags";
+import { SessionNudge, type NudgeSession } from "@/components/people/SessionNudge";
 import { MemberProfile, memberName } from "@/components/people/MemberProfile";
 import { readOrganizationRoster, useOrganizationRoster } from "@/lib/organizationRoster";
 import { cloudKeyOrgId } from "@/lib/multiOrg";
@@ -87,7 +88,7 @@ const HEADER_FACES = 3;
  * Who else is in a shared workspace, compact enough for a session header:
  * initials (ringed while typing), with the details in the tooltip.
  */
-export function PresenceAvatars({ collabKey, you, tabLabel }: { collabKey: string; you: WorkspaceYou | null; tabLabel?: (tabId: string) => string | null }) {
+export function PresenceAvatars({ collabKey, you, tabLabel, nudgeSession }: { collabKey: string; you: WorkspaceYou | null; tabLabel?: (tabId: string) => string | null; nudgeSession?: NudgeSession }) {
   const collab = useCollab(collabKey);
   // A cloud workspace's organization; a machine's view (`machine:…`) has none.
   const orgId = cloudKeyOrgId(collabKey) ?? undefined;
@@ -107,10 +108,11 @@ export function PresenceAvatars({ collabKey, you, tabLabel }: { collabKey: strin
   return (
     <span className="ml-1 flex shrink-0 items-center -space-x-1" data-testid="session-presence" aria-label={`Also here: ${others.map((person) => nameOf(person.userId)).join(", ")}`}>
       {shown.map((person) => (
-        profiles ? <MemberProfile
+        profiles || nudgeSession ? <MemberProfile
           key={person.userId}
           member={memberOf(person.userId)}
           online
+          extra={nudgeSession && <SessionNudge session={nudgeSession} userId={person.userId} />}
           className={cn("size-5 border border-background text-[9px]", person.activity === "typing" && "ring-1 ring-accent")}
           title={describe(person)}
           data-testid="session-presence-person"

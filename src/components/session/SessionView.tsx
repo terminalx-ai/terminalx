@@ -415,6 +415,11 @@ function CloudLocation({
   const [diagnostics, setDiagnostics] = useState(false);
   const [mirror, setMirror] = useState(false);
   const { status } = useAccount();
+  const privacy = useDataPrivacy();
+  const sessionId = parseCloudWorkspaceKey(cloud.session.id)?.sessionId;
+  const nudgeSession = sessionId && !cloud.locked && privacy.ready && !privacy.enabled && phase2Ready(status, cloud.orgId, "nudges")
+    ? { orgId: cloud.orgId, workspaceId: cloud.workspaceId, sessionId, title: cloud.session.title }
+    : undefined;
   const [error, run] = useLifecycleRun();
   const title = `Runs in the cloud workspace ${cloud.workspaceName} (${location.provider}, ${location.org}), not on this computer.`;
   const chipClass = cn("ml-1 flex max-w-[30%] items-center overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground", HEADER_CHIP_YIELDS, yields && HEADER_TIGHT);
@@ -505,7 +510,7 @@ function CloudLocation({
       )}
       {/* While the list and the runtime disagree about a new share, the pane says so; no chip claims either. */}
       {cloud.locked !== "checking" && cloud.locked !== "pending" && cloud.locked !== "deleted" && <AccessChip you={cloud.collab.you} viewOnly={cloud.connected && !cloud.manage} className="ml-1" />}
-      {cloud.collab.live && <PresenceAvatars collabKey={cloud.collab.key} you={cloud.collab.you} tabLabel={(tabId) => tabLabelOf(cloud, tabId)} />}
+      {cloud.collab.live && <PresenceAvatars collabKey={cloud.collab.key} you={cloud.collab.you} tabLabel={(tabId) => tabLabelOf(cloud, tabId)} nudgeSession={nudgeSession} />}
     </>
   );
 }

@@ -4,6 +4,7 @@ export const phase2Features = {
   events: "team.events.v1",
   presence: "team.presence.v1",
   followReassign: "team.follow-reassign.v1",
+  nudges: "team.nudges.v1",
   mentions: "team.mentions.v1",
   restartDetails: "cloud.workspaces.restart-details.v1",
   workspaceGroups: "cloud.workspace-groups.v1",

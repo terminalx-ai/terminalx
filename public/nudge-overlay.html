@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>TerminalX nudge</title>
+<style>
+  html, body { width: 100%; height: 100%; margin: 0; background: transparent; }
+  body {
+    display: grid;
+    place-items: center;
+    pointer-events: none;
+    color: #f5f2ef;
+    font-family: system-ui, sans-serif;
+    background: radial-gradient(closest-side, rgb(255 126 118 / 16%), transparent);
+    animation: nudge 3s ease both;
+  }
+  .flash { position: relative; transform: translateY(-46px); }
+  main {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    box-sizing: border-box;
+    min-height: 104px;
+    padding: 16px 36px 16px 24px;
+    border: 1px solid rgb(255 126 118 / 30%);
+    border-radius: 28px;
+    background: rgb(29 30 34 / 90%);
+    box-shadow: 0 30px 100px rgb(0 0 0 / 60%);
+  }
+  .signal {
+    display: grid;
+    place-items: center;
+    position: relative;
+    width: 64px;
+    height: 64px;
+    flex: none;
+    color: #ff8a83;
+  }
+  .signal::before, .signal::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border: 2px solid rgb(255 126 118 / 30%);
+    border-radius: 50%;
+  }
+  .signal::after { inset: 8px; border-color: rgb(255 126 118 / 50%); }
+  .signal svg {
+    box-sizing: border-box;
+    width: 40px;
+    height: 40px;
+    padding: 10px;
+    border-radius: 50%;
+    background: #3b2025;
+  }
+  h1 { margin: 0; font-size: 30px; font-weight: 600; letter-spacing: -.01em; }
+  h1 span { color: #bab7b5; font-weight: 400; }
+  .hand { width: 30px; height: 30px; flex: none; color: #ff8a83; }
+  .hint {
+    position: absolute;
+    inset: calc(100% + 16px) 0 auto;
+    margin: 0;
+    text-align: center;
+    color: #bab7b5;
+    font-size: 12px;
+  }
+  @keyframes nudge {
+    0%, 100% { opacity: 0; }
+    10%, 86% { opacity: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) { body { animation: none; } }
+</style>
+<div class="flash">
+<main>
+  <span class="signal" aria-hidden="true">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M13 13h8m-8 4h6M7 4 3 9l4 5m5-5H3"/>
+    </svg>
+  </span>
+  <h1>A teammate <span>nudged you</span></h1>
+  <svg class="hand" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M18 11V7a2 2 0 0 0-2-2 2 2 0 0 0-2 2m0 3V4a2 2 0 0 0-2-2 2 2 0 0 0-2 2v10m0-5a2 2 0 0 0-4 0v6a7 7 0 0 0 7 7h1a7 7 0 0 0 7-7v-5a2 2 0 0 0-2-2"/>
+  </svg>
+</main>
+<p class="hint">Click-through · fades in 3 seconds</p>
+</div>
+</html>

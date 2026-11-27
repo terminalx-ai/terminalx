@@ -162,6 +162,8 @@ pub struct OrganizationPlan {
     member_limit: Option<u32>,
     catalog: OrganizationPlanCatalog,
     upgrade_target: OrganizationUpgradeTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    links: Option<OrganizationPlanLinks>,
 }
 
 fn required_member_limit<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<Option<u32>, D::Error> {
@@ -178,7 +180,47 @@ enum OrganizationUpgradeTarget { Plans }
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct OrganizationPlanCatalog { teams: OrganizationTeamsPrice }
+struct OrganizationPlanCatalog {
+    teams: OrganizationTeamsPrice,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pro: Option<OrganizationProPrice>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OrganizationProPrice {
+    currency: OrganizationProCurrency,
+    unit_amount_minor: u32,
+    interval: OrganizationPlanInterval,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+enum OrganizationProCurrency {
+    #[serde(rename = "USD")]
+    Usd,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OrganizationPlanLinks {
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_console_plan_url")]
+    upgrade: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_console_plan_url")]
+    manage: Option<String>,
+}
+
+fn optional_console_plan_url<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<Option<String>, D::Error> {
+    Ok(Option::<String>::deserialize(decoder)?.and_then(|raw| {
+        let url = Url::parse(&raw).ok()?;
+        (raw.starts_with("https://")
+            && url.scheme() == "https"
+            && url.host_str() == Some("console.terminalx.ai")
+            && url.port().is_none()
+            && url.username().is_empty()
+            && url.password().is_none())
+            .then(|| url.to_string())
+    }))
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -392,9 +434,11 @@ pub(crate) const PHASE2_PRECREATE_USAGE: &str = "cloud.workspaces.precreate-usag
 pub(crate) const PHASE2_ADMIN_SHARE: &str = "cloud.workspaces.admin-share.v1";
 pub(crate) const PHASE2_ORGANIZATION_AUTOMATIONS: &str = "cloud.automations.organization.v1";
 const PHASE2_TEAMS_PLAN: &str = "organization.teams-plan.v1";
-const PHASE2_FEATURES: [&str; 22] = [
+pub(crate) const PHASE2_NUDGES: &str = "team.nudges.v1";
+const PHASE2_FEATURES: [&str; 23] = [
     PHASE2_TEAMS_PLAN,
     PHASE2_ORGANIZATION_AUTOMATIONS,
+    PHASE2_NUDGES,
     PHASE2_EVENTS, PHASE2_PRESENCE, PHASE2_FOLLOW_REASSIGN, PHASE2_MENTIONS, PHASE2_RESTART_DETAILS,
     PHASE2_FRESH_WORKSPACE, PHASE2_GITHUB_TRIGGER, PHASE2_WEBHOOK_TRIGGER,
     "cloud.environment-info.v1",
@@ -2595,6 +2639,31 @@ mod tests {
         answer.organizations[0].plan.as_mut().unwrap()["payer"] = json!("sensitive");
         assert!(manager.refresh_roles_with(true, start + ROLES_REFRESH_FLOOR, |_| Ok(answer)));
         assert!(manager.snapshot().organizations[0].plan.is_none());
+    }
+
+    #[test]
+    fn phase2_teams_plan_accepts_optional_pro_price_and_only_console_links() {
+        let plan = json!({
+            "plan": "free", "seatsUsed": 1, "memberLimit": null, "upgradeTarget": "plans",
+            "catalog": {
+                "teams": { "currency": "USD", "unitAmountMinor": 2300, "interval": "month", "memberLimit": 7 },
+                "pro": { "currency": "USD", "unitAmountMinor": 1500, "interval": "month" }
+            },
+            "links": { "upgrade": "https://console.terminalx.ai/plans", "manage": "https://console.terminalx.ai/billing" }
+        });
+        let parse = |value| serde_json::to_value(serde_json::from_value::<OrganizationPlan>(value).unwrap()).unwrap();
+        assert_eq!(parse(plan.clone()), plan);
+        for unsafe_url in [
+            "/plans", "http://console.terminalx.ai/plans", "https://console.terminalx.ai.evil.test/plans",
+            "https://console.terminalx.ai@evil.test/plans", "https://user@console.terminalx.ai/plans",
+            "https://console.terminalx.ai:444/plans",
+        ] {
+            let mut answer = plan.clone();
+            answer["links"]["upgrade"] = json!(unsafe_url);
+            let projected = parse(answer);
+            assert!(projected["links"].get("upgrade").is_none(), "{unsafe_url}");
+            assert_eq!(projected["links"]["manage"], plan["links"]["manage"]);
+        }
     }
 
     #[test]
