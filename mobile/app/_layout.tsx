@@ -9,6 +9,7 @@ import { ACCESS_CODE_ROUTE, accessCodeRouting } from "@mobile/auth/access-code";
 import { useSettleConfirmedDeletion } from "@mobile/account/confirmed-deletion";
 import { CloudProvider, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { answer, intentOf } from "@mobile/notification-actions";
+import { readNativeNotificationData } from "@mobile/notifications/native-data";
 import { AppProvider, useApp } from "@mobile/state/AppProvider";
 import { RowActionSheetHost } from "@mobile/ui/RowActionSheetHost";
 import { textSizeScreenLayout, TextSizeProvider } from "@mobile/ui/text-size";
@@ -53,9 +54,18 @@ function Navigation() {
     if (handled.current.has(key)) return;
     handled.current.add(key);
     const content = response.notification.request.content;
-    const intent = intentOf(response.actionIdentifier, content.data ?? undefined, content.body);
+    const intent = intentOf(response.actionIdentifier, readNativeNotificationData(response.notification.request), content.body);
     if (!intent) return;
-    const hostParam = intent.hostId ? { hostId: intent.hostId } : {};
+    const findHost = (id: string | null) =>
+      id ? app.hosts.find((item) => item.id === id || item.relay?.relayHostId === id) : undefined;
+    const matchedHost = findHost(intent.hostId);
+    const resolvedHostId = matchedHost?.id ?? intent.hostId;
+    const hostParam = resolvedHostId ? { hostId: resolvedHostId } : {};
+    if (intent.type === "openHost") {
+      if (matchedHost && app.activeHost?.id !== matchedHost.id) void app.connectHost(matchedHost);
+      router.navigate("/");
+      return;
+    }
     // A bot's question (PRO-479): over the chat it came from, its home chat; on the bot's page when that is not known.
     const openBot = (sheet: boolean) => {
       if (intent.type !== "botQuestion" && intent.type !== "botAnswer") return;
@@ -68,17 +78,16 @@ function Navigation() {
       router.push({ pathname: "/session/[sessionId]", params: { sessionId: intent.sessionId, tabId: intent.tabId, ...hostParam } });
     };
     if (intent.type === "open" || intent.type === "botQuestion") {
-      const host = intent.hostId ? app.hosts.find((item) => item.id === intent.hostId) : undefined;
       // The session's own Mac first, when it is another than the one connected.
-      if (host && app.activeHost?.id !== host.id) void app.connectHost(host).then(open);
+      if (matchedHost && app.activeHost?.id !== matchedHost.id) void app.connectHost(matchedHost).then(open);
       else open();
       return;
     }
     // A button: answered on its Mac, then the session shows, with the Mac's refusal said if it refused.
     void answer(intent, {
       reach: async (hostId) => {
-        const host = app.hosts.find((item) => item.id === hostId);
-        if (!host || (app.activeHost?.id !== hostId && !(await app.connectHost(host)))) return false;
+        const host = findHost(hostId);
+        if (!host || (app.activeHost?.id !== host.id && !(await app.connectHost(host)))) return false;
         return app.connection.transport() !== null || untilConnected(app.connection, ANSWER_CONNECT_MS);
       },
       respondPermission: (...args) => app.api.respondPermission(...args),

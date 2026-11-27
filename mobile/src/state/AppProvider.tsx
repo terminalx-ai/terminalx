@@ -12,6 +12,12 @@ import { AUTH_CONFIG, isAuthCallbackUrl, REDEEM_NOT_REACHED, revokeSession, type
 import { HostApi, isSessionSummary, type SessionSummary } from "../data/host-api";
 import { handleNotificationEvent, restoreLocalNotifications } from "../notifications/local";
 import { discoverMachines, pairDiscoveredMachine, signOutPairing, type InstallationState } from "../pairing/account";
+import {
+  subscribeCloudPushTokenRotation,
+  syncCloudPushRegistration,
+  unregisterCloudPushRegistration,
+} from "../notifications/cloud-push";
+import { loadNotificationSettings, onNotificationSettingsChanged } from "../notifications/store";
 import { accountHostIdentityMatches } from "../pairing/account-identity";
 import type { AccountHost } from "../pairing/account-client";
 import { pairingStep } from "../pairing/errors";
@@ -128,6 +134,7 @@ export function AppProvider({ children }: PropsWithChildren) {
   const api = useMemo(() => new HostApi(connection), [connection]);
   const [ready, setReady] = useState(false);
   const [session, setSession] = useState<CloudSession | null>(null);
+  const signingOutRef = useRef(false);
   const [hosts, setHosts] = useState<StoredHost[]>([]);
   const [accountHosts, setAccountHosts] = useState<AccountHost[]>([]);
   const [accountMachinePrefs, setAccountMachinePrefs] = useState<AccountMachinePrefs>({});
@@ -254,6 +261,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       forgetConversationState("");
       await clearTranscriptCaches();
       api.resetConnection(true);
+      await unregisterCloudPushRegistration({ session: stored, remote: false }).catch(() => undefined);
       await signOutPairing(stored);
       setSession(null);
       await loadHosts();
@@ -359,6 +367,7 @@ export function AppProvider({ children }: PropsWithChildren) {
           forgetConversationState("");
           await clearTranscriptCaches();
           api.resetConnection(true);
+          await unregisterCloudPushRegistration({ session: storedSession, remote: false }).catch(() => undefined);
           await signOutPairing(storedSession);
           effectiveSession = null;
           storedHosts = await readHosts();
@@ -452,7 +461,18 @@ export function AppProvider({ children }: PropsWithChildren) {
       if (state !== "active") return;
       // The reading may have gone stale while the app was away (PRO-603).
       refreshNetwork();
-      if (session) void refreshCloudSession(session).catch((cause: unknown) => setError(readableError(cause)));
+      if (session && !signingOutRef.current) {
+        void refreshCloudSession(session)
+          .then((fresh) => {
+            if (!fresh || signingOutRef.current) return;
+            return loadNotificationSettings().then((settings) =>
+              settings.allow
+                ? syncCloudPushRegistration({ session: fresh })
+                : unregisterCloudPushRegistration({ session: fresh })
+            );
+          })
+          .catch((cause: unknown) => setError(readableError(cause)));
+      }
       if (!activeHostRef.current) return;
       // Back on screen: the 15 s before "Waiting for Mac…" count from now, not from when the phone was put away.
       if (connectionStageRef.current !== "connected" && connectionStageRef.current !== "disconnected-on-mac") setConnectionSince(Date.now());
@@ -461,6 +481,32 @@ export function AppProvider({ children }: PropsWithChildren) {
     });
     return () => subscription.remove();
   }, [connection, connectionStage, refreshCloudSession, refreshNetwork, session]);
+
+  useEffect(() => {
+    if (!session) return;
+    const activeSession = session;
+    const reconcile = () => {
+      if (signingOutRef.current) return;
+      void loadNotificationSettings()
+        .then((settings) => {
+          if (signingOutRef.current) return;
+          return settings.allow
+            ? syncCloudPushRegistration({ session: activeSession })
+            : unregisterCloudPushRegistration({ session: activeSession });
+        })
+        .catch(() => undefined);
+    };
+    reconcile();
+    const offSettings = onNotificationSettingsChanged(reconcile);
+    const offToken = subscribeCloudPushTokenRotation((token) => {
+      if (signingOutRef.current) return;
+      void syncCloudPushRegistration({ session: activeSession, tokenOverride: token });
+    });
+    return () => {
+      offSettings();
+      offToken();
+    };
+  }, [session]);
 
   // "Send recent sessions ahead of time" (#1283): asked of each connection
   // while the app is on screen, and stopped when it goes to the background.
@@ -550,22 +596,28 @@ export function AppProvider({ children }: PropsWithChildren) {
 
   const endSession = useCallback(async (remote: boolean) => {
     if (!session) return;
-    selectionGeneration.current++;
-    connection.stop();
-    activeHostRef.current = null;
-    setActiveHost(null);
-    forgetConversationState("");
-    await clearTranscriptCaches();
-    api.resetConnection(true);
-    await signOutPairing(session, { remote });
-    if (remote) await revokeCloudSession(session);
-    else await forgetStoredSession();
-    held.current = null;
-    setAccessCode(null);
-    setSession(null);
-    setAccountHosts([]);
-    setSessions([]);
-    await loadHosts();
+    signingOutRef.current = true;
+    try {
+      selectionGeneration.current++;
+      connection.stop();
+      activeHostRef.current = null;
+      setActiveHost(null);
+      forgetConversationState("");
+      await clearTranscriptCaches();
+      api.resetConnection(true);
+      await unregisterCloudPushRegistration({ session, remote }).catch(() => undefined);
+      await signOutPairing(session, { remote });
+      if (remote) await revokeCloudSession(session);
+      else await forgetStoredSession();
+      held.current = null;
+      setAccessCode(null);
+      setSession(null);
+      setAccountHosts([]);
+      setSessions([]);
+      await loadHosts();
+    } finally {
+      signingOutRef.current = false;
+    }
   }, [api, connection, loadHosts, session]);
   const signOut = useCallback(() => endSession(true), [endSession]);
   const forgetDeletedAccount = useCallback(() => endSession(false), [endSession]);

@@ -310,6 +310,42 @@ impl PairingManager {
             .set(sink.clone())
             .map_err(|_| anyhow!("pairing manager was already configured"))?;
         self.phone.configure(sink.clone())?;
+        // Single bounded worker thread so `MobileRuntime::publish` never blocks
+        // on Keychain, disk I/O, OAuth refresh, or HTTP requests, and bursts
+        // cannot spawn unbounded OS threads.
+        let (push_tx, push_rx) =
+            std::sync::mpsc::sync_channel::<crate::phone::cloud_push::CloudPushEvent>(32);
+        let push_manager = Arc::downgrade(self);
+        let _ = std::thread::Builder::new()
+            .name("cloud-push-worker".into())
+            .spawn(move || {
+                while let Ok(event) = push_rx.recv() {
+                    let Some(manager) = push_manager.upgrade() else { break };
+                    if manager.stopped.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let Some(context) = manager.account.context() else { continue };
+                    // Use existing host key only: never create/write a new
+                    // macOS Keychain key for an unpaired desktop.
+                    let Ok(keypair) = manager.host_key(false) else { continue };
+                    let relay_host_id = keypair.host_id();
+                    let host_label = PairingManager::host_name(&context.user_id);
+                    let payload = crate::phone::cloud_push::build_push_payload(
+                        &relay_host_id,
+                        Some(&host_label),
+                        &event,
+                    );
+                    let api_base_url = crate::account::api_base_url();
+                    let _ = crate::phone::cloud_push::send_push_notify(
+                        &api_base_url,
+                        &context.access_token,
+                        &payload,
+                    );
+                }
+            });
+        self.phone.mobile.attach_cloud_push(Arc::new(move |event| {
+            let _ = push_tx.try_send(event);
+        }));
         let settings = self.clone();
         sink.listen("settings_file_changed", Box::new(move |_| {
             settings.phone.mobile.broadcast_settings_changed();

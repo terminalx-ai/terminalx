@@ -81,6 +81,7 @@ export async function prepareCategory(shown: NotificationPresentation): Promise<
 /** What a tap on a notification asks for. */
 export type NotificationIntent =
   | { type: "open"; hostId: string | null; sessionId: string; tabId: string }
+  | { type: "openHost"; hostId: string }
   | { type: "permission"; hostId: string; sessionId: string; tabId: string; requestId: string; optionId: string }
   | { type: "question"; hostId: string; sessionId: string; tabId: string; requestId: string; answers: Record<string, string> }
   /** A bot's question: open it as a sheet over its home chat, or on the bot's page when that chat is not known. */
@@ -95,9 +96,19 @@ export type NotificationIntent =
  */
 export function intentOf(actionIdentifier: string, data: Record<string, unknown> | undefined, body: string | null): NotificationIntent | null {
   const sessionId = typeof data?.sessionId === "string" ? data.sessionId : "";
-  const tabId = typeof data?.tabId === "string" ? data.tabId : "";
+  const tabId =
+    typeof data?.tabId === "string" && data.tabId
+      ? data.tabId
+      : typeof data?.paneKey === "string"
+        ? data.paneKey
+        : "";
+  const hostId =
+    typeof data?.hostId === "string" && data.hostId
+      ? data.hostId
+      : typeof data?.relayHostId === "string" && data.relayHostId
+        ? data.relayHostId
+        : null;
   if (data?.kind === BOT_QUESTION && typeof data.botId === "string" && data.botId && Number.isSafeInteger(data.number)) {
-    const hostId = typeof data.hostId === "string" && data.hostId ? data.hostId : null;
     const where = { botId: data.botId, number: data.number as number, sessionId: sessionId && tabId ? sessionId : null, tabId: sessionId && tabId ? tabId : null };
     const open: NotificationIntent = { type: "botQuestion", hostId, ...where };
     if (!hostId || !actionIdentifier.startsWith(BOT_ANSWER) || typeof data.question !== "string") return open;
@@ -106,8 +117,9 @@ export function intentOf(actionIdentifier: string, data: Record<string, unknown>
     if (!Number.isInteger(index) || index < 0 || index >= answers.length) return open;
     return { type: "botAnswer", hostId, question: data.question, answer: index, ...where };
   }
-  if (!sessionId || !tabId) return null;
-  const hostId = typeof data?.hostId === "string" && data.hostId ? data.hostId : null;
+  if (!sessionId || !tabId) {
+    return hostId ? { type: "openHost", hostId } : null;
+  }
   const requestId = typeof data?.requestId === "string" ? data.requestId : "";
   const open: NotificationIntent = { type: "open", hostId, sessionId, tabId };
   if (!hostId || !requestId) return open;
