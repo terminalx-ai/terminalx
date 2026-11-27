@@ -820,6 +820,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
   }),
   defineSetting({
+    id: "organizations.billing", section: "organizations", title: "Billing",
+    description: "Plan, seats and next charge.",
+    searchTerms: ["organizations", "billing", "plan", "seats", "payment", "invoice"], scope: "organization",
+    storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
+  }),
+  defineSetting({
     id: "organizations.diagnostics", section: "organizations", title: "Diagnostics",
     description: "Inspect organization cloud diagnostics.",
     searchTerms: ["organizations", "diagnostics"], scope: "organization",
