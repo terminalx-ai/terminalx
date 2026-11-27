@@ -429,7 +429,23 @@ fn remove_include(text: &str, scope: &str, include: &Path) -> Result<String> {
     Ok(format!("{}{}", &text[..start], &tail[stop + end.len()..]))
 }
 
-fn file_lock(dir: &Path) -> Result<std::fs::File> {
+struct ConfigLock {
+    _file: std::fs::File,
+}
+
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        // Release explicitly. A concurrent fork can briefly retain the file
+        // description before close-on-exec runs in the child.
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let _ = unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
+fn file_lock(dir: &Path) -> Result<ConfigLock> {
     let path = dir.join(".terminalx.lock");
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
@@ -446,7 +462,7 @@ fn file_lock(dir: &Path) -> Result<std::fs::File> {
             bail!("SSH config is being updated; try again");
         }
     }
-    Ok(file)
+    Ok(ConfigLock { _file: file })
 }
 
 /// Copy binary SSH bytes to an already authorized connection. EOF from the

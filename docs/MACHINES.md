@@ -864,6 +864,8 @@ the pull request that adds it.
 | `environment.report` | `environment/1` | Served | Manage authority only; bounded installed-tool versions from the machine, fixed probes and a per-caller limit, no caller-supplied command or project path |
 | `environment.cancel` | `environment/1` | Served | Manage authority only; cancels only this attachment's report request |
 | `ports.list` | `ports/1` | Served | The machine's loopback |
+| `ssh.open` | `ssh/1` | Not served | Private cloud workspace SSH |
+| `ssh.info` | `ssh/1` | Not served | Private cloud workspace SSH |
 | `ports.open` | `ports/1` | Served | A forward ends with the connection (PRO-355) |
 | `ports.write` | `ports/1` | Served | |
 | `ports.ack` | `ports/1` | Served | |

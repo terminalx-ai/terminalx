@@ -438,8 +438,11 @@ pub(crate) const PHASE2_NUDGES: &str = "team.nudges.v1";
 pub(crate) const PHASE2_WORKSPACE_SSH: &str = "cloud.workspaces.ssh.v1";
 /// The workspace switch for agents using Chrome on the cloud desktop (PRO-209).
 pub(crate) const PHASE2_AGENT_BROWSER: &str = "cloud.desktop.agent-browser.v1";
-const PHASE2_FEATURES: [&str; 25] = [
+/// PRO-241: the sidebar's announcement card.
+pub(crate) const PHASE2_ANNOUNCEMENTS: &str = "desktop.announcements.v1";
+const PHASE2_FEATURES: [&str; 26] = [
     PHASE2_TEAMS_PLAN,
+    PHASE2_ANNOUNCEMENTS,
     PHASE2_ORGANIZATION_AUTOMATIONS,
     PHASE2_NUDGES,
     PHASE2_WORKSPACE_SSH,

@@ -153,6 +153,17 @@ pub struct RelaySession {
     pub(crate) collaboration_v2: bool,
     #[cfg_attr(not(any(target_os = "linux", all(test, unix))), allow(dead_code))]
     pub(crate) desktop_ready: bool,
+    #[cfg(target_os = "linux")]
+    pub(crate) workspace_ssh: Option<WorkspaceSshRefresh>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub(crate) struct WorkspaceSshRefresh {
+    pub workspace_id: String,
+    pub grants: Value,
+    pub v2: bool,
+    pub runtime: Arc<crate::workspace_ssh_listener::Runtime>,
 }
 
 /// The runtime's identity and API session. Calls may block; the host runs
@@ -242,6 +253,8 @@ impl RuntimeLink for FileLink {
             collaboration: contents.collaboration,
             collaboration_v2: false,
             desktop_ready: false,
+            #[cfg(target_os = "linux")]
+            workspace_ssh: None,
         })
     }
 
@@ -1570,9 +1583,12 @@ impl RelayHost {
 /// comes from the authenticated native link, never RPC parameters.
 pub(crate) fn install_session_collaboration(rpc: &WorkspaceRpc, session: &RelaySession, generation: u64) -> Result<()> {
     anyhow::ensure!(token_identity(&session.relay_token)?.runtime_generation == generation, "refresh token generation mismatch");
+    let _admission = rpc.collab.enter_admission();
     let policy = rpc.set_refresh_collaboration(session.collaboration.clone(), generation, session.collaboration_v2);
     #[cfg(any(target_os = "linux", all(test, unix)))]
     rpc.set_desktop_readiness(generation, policy.is_ok() && session.desktop_ready);
+    #[cfg(target_os = "linux")]
+    rpc.install_workspace_ssh_refresh(generation, session.workspace_ssh.as_ref().filter(|_| policy.is_ok()));
     policy
 }
 
@@ -1862,7 +1878,7 @@ where
                             let response = match request["method"].as_str() {
                                 // Connecting can take seconds, so from its own
                                 // task; answered in order with the stream's data.
-                                Some("ports.open" | "desktop.open") => {
+                                Some("ports.open" | "desktop.open" | "ssh.open") => {
                                     let rpc = rpc.clone();
                                     let peer = peer.clone();
                                     let ticket = crate::github_process::ticket();
@@ -2113,6 +2129,7 @@ mod tests {
                     {"userId":"driver","role":"driver","canApprove":true,"approvalSource":"explicit", "writeSource":source}
                 ]})),
                 workspace_ssh: None,
+                ssh_updater: None,
                 desktop_ready: false,
                 agent_browser_ready: false,
             };
@@ -2221,6 +2238,7 @@ mod tests {
             desktop_ready: false,
             workspace_ssh: None,
             agent_browser_ready: false,
+            ssh_updater: None,
         };
         let refresh = super::super::bootstrap_link::relay_session(&session, crate::cloud_bootstrap::CAPABILITIES);
         assert!(refresh.collaboration_v2, "the native runtime negotiates v2");
@@ -2291,6 +2309,8 @@ mod tests {
                 relay_token:jwt(json!({"sub":"host", "cloudProfileId":"profile", "organizationId":"org", "runtimeGeneration":7})),
                 director_url:"http://127.0.0.1:1".into(), attachments:attachments("old"), revocations:vec![],
                 collaboration:Some(json!({"v":2, "revision":"1", "members":[member.clone()]})), collaboration_v2:true, desktop_ready:false,
+                #[cfg(target_os = "linux")]
+                workspace_ssh:None,
             };
             let link = Arc::new(Link { session:Mutex::new(initial), paired:Mutex::new(vec![]), revoked:Mutex::new(vec![]) });
             let devices_path = root.path().join("devices.json");
