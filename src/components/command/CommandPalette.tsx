@@ -69,6 +69,7 @@ import {
   Monitor,
   type LucideIcon,
   Trash2,
+  Server,
 } from "@/icons";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { HighlightedText } from "@/components/ui/HighlightedText";
@@ -174,6 +175,7 @@ const SETTINGS_PAGE_ICONS: Record<SettingsSection, LucideIcon> = {
   agents: Bot,
   orchestrator: Workflow,
   environment: KeyRound,
+  mcp: Server,
   localVms: Monitor,
   transcription: Mic,
   integrations: Plug,
