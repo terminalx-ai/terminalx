@@ -184,6 +184,30 @@ async function pathPreview(facts: FileFacts): Promise<Pick<Attachment, "previewU
   return {};
 }
 
+/** A session tab owns its queue while the chat composer is unmounted in terminal view. */
+export function useAttachmentDraft(protectWindow = true) {
+  const [attachments, setAttachmentState] = useState<Attachment[]>([]);
+  const current = useRef(attachments);
+  // Keep the preservation check and the count current even between an async
+  // file read and React's next render. Every queue edit goes through this.
+  const setAttachments = useCallback((change: (items: Attachment[]) => Attachment[]) => {
+    current.current = change(current.current);
+    setAttachmentState(current.current);
+  }, []);
+  const pendingInput = useRef(0);
+  // Places taken by files admitted but still being read, so two offers close together cannot both fill the last places.
+  const reading = useRef(0);
+  const [notAdded, setNotAdded] = useState(0);
+  const [notice, setNotice] = useState<string | null>(null);
+  const aside = useRef(0);
+  useLayoutEffect(() => protectWindow ? registerWindowDraft(() =>
+    current.current.some((a) => !a.refused) || aside.current > 0 || pendingInput.current > 0,
+  ) : undefined, [protectWindow]);
+  return { attachments, current, setAttachments, pendingInput, reading, aside, notAdded, setNotAdded, notice, setNotice };
+}
+
+export type AttachmentDraft = ReturnType<typeof useAttachmentDraft>;
+
 /**
  * Everything a composer needs to carry files with a prompt (PRO-290): the
  * chips, the native and browser pickers, paste, and both drop paths. Any
@@ -205,12 +229,14 @@ async function pathPreview(facts: FileFacts): Promise<Pick<Attachment, "previewU
  * prompt of a session can carry files like every one after it.
  */
 export function useAttachments({
+  sharedDraft,
   textareaRef,
   draft,
   onDraftChange,
   mentionFiles = true,
   anyFile = mentionFiles,
 }: {
+  sharedDraft?: AttachmentDraft;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   draft: string;
   onDraftChange: (v: string) => void;
@@ -228,24 +254,13 @@ export function useAttachments({
   anyFile?: boolean;
 }): Attachments {
   const imagesOnly = !anyFile;
-  const [attachments, setAttachmentState] = useState<Attachment[]>([]);
-  const current = useRef(attachments);
-  // Keep the preservation check and the count current even between an async
-  // file read and React's next render. Every queue edit goes through this.
-  const setAttachments = useCallback((change: (items: Attachment[]) => Attachment[]) => {
-    current.current = change(current.current);
-    setAttachmentState(current.current);
-  }, []);
-  const pendingInput = useRef(0);
+  const localDraft = useAttachmentDraft(sharedDraft === undefined);
+  const { attachments, current, setAttachments, pendingInput, reading, aside, notAdded, setNotAdded, notice, setNotice } = sharedDraft ?? localDraft;
   const readInput = useCallback(async (read: () => Promise<void>) => {
     pendingInput.current++;
     try { await read(); } finally { pendingInput.current--; }
-  }, []);
-  // Places taken by files admitted but still being read, so two offers close together cannot both fill the last places.
-  const reading = useRef(0);
-  const [notAdded, setNotAdded] = useState(0);
+  }, [pendingInput]);
   const [dragging, setDragging] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   // The drop target is registered once, so it reads the draft through a ref
   // rather than taking it as a dependency — otherwise every keystroke tore
@@ -287,14 +302,14 @@ export function useAttachments({
       else if (body) added.push({ id: nextId(), name: item.name, size: item.size, ...body });
     }
     if (added.length) setAttachments((list) => [...list, ...added]);
-  }, [setAttachments]);
+  }, [current, reading, setAttachments, setNotAdded]);
 
   // A cloud tab takes images and nothing else, and says why it left a file out.
   const addCloudImages = useCallback(async (images: (Omit<Attachment, "id"> | null)[], skipped: string[]) => {
     const kept = images.filter((a): a is Omit<Attachment, "id"> => !!a);
     if (kept.length) setAttachments((list) => [...list, ...kept.map((a) => ({ ...a, id: nextId() }))]);
     setNotice(skipped.length ? notAttached(skipped) : null);
-  }, [setAttachments]);
+  }, [setAttachments, setNotice]);
 
   const addFiles = useCallback((list: File[], verb: OfferVerb = "dropped") => readInput(async () => {
     if (!imagesOnly) return offer(list.map(browserCandidate), verb);
@@ -344,7 +359,7 @@ export function useAttachments({
       }
       textareaRef.current?.focus();
     }),
-    [textareaRef, imagesOnly, mentionFiles, mention, offer, addCloudImages, readInput],
+    [textareaRef, imagesOnly, mentionFiles, mention, offer, addCloudImages, readInput, setNotice],
   );
 
   const chooseFiles = useCallback(() => readInput(async () => {
@@ -373,7 +388,7 @@ export function useAttachments({
       if (removed) release(removed);
       return list.filter((item) => item.id !== id);
     });
-  }, [setAttachments]);
+  }, [setAttachments, setNotAdded]);
 
   const clear = useCallback(() => {
     setNotice(null);
@@ -383,7 +398,7 @@ export function useAttachments({
       return [];
     });
     if (fileRef.current) fileRef.current.value = "";
-  }, [setAttachments]);
+  }, [setAttachments, setNotAdded, setNotice]);
 
   // Dropped paths arrive from the window, not the DOM, through the one
   // router every drop target shares (`fileDrop.ts`). A composer takes what
@@ -406,10 +421,6 @@ export function useAttachments({
   const images = useMemo(() => sendable.flatMap((a) => (a.image ? [a.image] : [])), [sendable]);
   const files = useMemo(() => sendable.flatMap((a) => (a.file ? [a.file] : [])), [sendable]);
 
-  const aside = useRef(0);
-  useLayoutEffect(() => registerWindowDraft(() =>
-    current.current.some((a) => !a.refused) || aside.current > 0 || pendingInput.current > 0,
-  ), []);
   const setAside = useCallback((): SetAside => {
     const taken = current.current.filter((a) => !a.refused);
     // A refused chip was about this message: it goes once the message has.
@@ -436,7 +447,7 @@ export function useAttachments({
         }
       },
     };
-  }, [setAttachments]);
+  }, [aside, current, setAttachments, setNotAdded]);
 
   const dropZoneProps = useMemo<Attachments["dropZoneProps"]>(
     () => ({

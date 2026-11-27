@@ -1062,6 +1062,20 @@ describe("the phone's terminal view, as on the desktop", () => {
     await vi.waitFor(() => expect(mocks.terminalListeners.has("claude")).toBe(true));
   };
 
+  it("keeps an unsent screenshot when returning to chat", async () => {
+    terminalMac();
+    vi.mocked(DocumentPicker.getDocumentAsync).mockResolvedValueOnce({ canceled: false, assets: [
+      { uri: "file:///screen.png", name: "screen.png", mimeType: "image/png", size: 3, base64: "cG5n", lastModified: 1 },
+    ] });
+    await render();
+    await click("Add attachment");
+    await click("Terminal");
+    await click("Chat");
+    expect(button("Remove screen.png")).toBeDefined();
+    await click("Send");
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "", [{ mediaType: "image/png", data: "cG5n", name: "screen.png" }], expect.any(String));
+  });
+
   it("opens the tab's terminal on the computer before watching it, and draws the agent's screen", async () => {
     terminalMac();
     await openTerminalView();
