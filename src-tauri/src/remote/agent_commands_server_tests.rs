@@ -277,18 +277,24 @@ async fn phase2_collaboration_v2_everyone_cannot_start_tabs_or_send_terminal_inp
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn phase2_collaboration_v2_requires_explicit_approval_source_exactly_when_approval_is_granted() {
+async fn phase2_collaboration_v2_validates_approval_provenance() {
     let _home = crate::store::temp_home();
-    for (can_approve, source, valid) in [
-        (false, None, true),
-        (false, Some(json!("explicit")), false),
-        (true, None, false),
-        (true, Some(json!("explicit")), true),
-        (true, Some(Value::Null), false),
-        (true, Some(json!("everyone")), false),
+    for (role, write_source, can_approve, source, valid) in [
+        ("driver", "everyone", false, None, true),
+        ("driver", "everyone", false, Some(json!("explicit")), false),
+        ("driver", "everyone", true, None, false),
+        ("driver", "everyone", true, Some(json!("explicit")), true),
+        ("driver", "everyone", true, Some(Value::Null), false),
+        ("driver", "everyone", true, Some(json!("everyone")), false),
+        ("manager", "implicit", true, Some(json!("implicit")), true),
+        ("manager", "implicit", false, Some(json!("implicit")), false),
+        ("manager", "implicit", true, Some(json!("explicit")), true),
+        ("manager", "explicit", true, Some(json!("implicit")), false),
+        ("driver", "implicit", true, Some(json!("implicit")), false),
+        ("driver", "everyone", true, Some(json!("implicit")), false),
     ] {
         let m = machine();
-        let mut member = json!({"userId":"admin", "role":"driver", "writeSource":"everyone", "canApprove":can_approve});
+        let mut member = json!({"userId":"admin", "role":role, "writeSource":write_source, "canApprove":can_approve});
         if let Some(source) = source { member["approvalSource"] = source; }
         let result = m.rpc.set_refresh_collaboration(Some(json!({"v":2, "revision":"1", "members":[member]})), 7, true);
         assert_eq!(result.is_ok(), valid, "{can_approve}: {member}");
@@ -302,7 +308,7 @@ async fn phase2_collaboration_v2_requires_explicit_approval_source_exactly_when_
 #[tokio::test(flavor = "multi_thread")]
 async fn phase2_collaboration_v2_invalid_approval_source_retires_the_previous_policy() {
     let _home = crate::store::temp_home();
-    for bad_approval in [None, Some(Value::Null), Some(json!("everyone"))] {
+    for bad_approval in [None, Some(Value::Null), Some(json!("everyone")), Some(json!("implicit"))] {
         let m = machine();
         m.rpc.collab.install_v2(v2_policy("1", "manager", true, json!("explicit"))).unwrap();
         let old = m.rpc.collab.runtime_policy.stamp("admin").unwrap();
