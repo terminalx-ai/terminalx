@@ -50,6 +50,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  list.mockReset();
+  remove.mockReset();
 });
 
 it("stays hidden and reads nothing while the readiness key is off", () => {
@@ -65,7 +67,7 @@ it.each([["owner"], ["admin"]])("shows an %s the route, marked as set by the org
   const row = await screen.findByTestId("organization-route");
   expect(within(row).getByText("Custom provider for Claude Code")).toBeTruthy();
   expect(within(row).getByTestId("organization-route-badge").textContent).toContain("Set by Acme");
-  expect(row.textContent).toContain("Claude Code in terminalx workspaces goes through https://gateway.example.com/anthropic. It takes precedence over members’ own logins.");
+  expect(row.textContent).toContain("Claude Code in acme/terminalx workspaces goes through https://gateway.example.com/anthropic. It takes precedence over members’ own logins.");
   expect(screen.getByText("Set by owners and admins for everyone in Acme.")).toBeTruthy();
   expect(list).toHaveBeenCalledWith("org-2");
   expect(within(row).getByRole("button", { name: /Route actions/ })).toBeTruthy();
@@ -85,7 +87,7 @@ it("asks before removing, and Cancel changes nothing", async () => {
   const dialog = await openMenu();
   expect(within(dialog).getByText("Disconnect custom provider?")).toBeTruthy();
   expect(dialog.textContent).toContain("Remove the custom route? Claude Code goes back to each member’s own login.");
-  expect(dialog.textContent).toContain("Route https://gateway.example.com/anthropic for workspaces on terminalx. Members without their own Claude login can’t start Claude Code there until they connect one.");
+  expect(dialog.textContent).toContain("Route https://gateway.example.com/anthropic for workspaces on acme/terminalx. Members without their own Claude login can’t start Claude Code there until they connect one. Running workspaces keep this route until they restart.");
   fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
   await waitFor(() => expect(screen.queryByTestId("organization-route-remove")).toBeNull());
   expect(remove).not.toHaveBeenCalled();
@@ -105,7 +107,7 @@ it("removes the route once the service confirms, and says new sessions use membe
   expect(screen.queryByTestId("organization-routes-notice")).toBeNull();
   confirm(routes(true, []));
   await waitFor(() => expect(screen.queryByTestId("organization-route")).toBeNull());
-  expect(screen.getByTestId("organization-routes-notice").textContent).toBe("Route removed. New Claude Code sessions on terminalx use each member's own login.");
+  expect(screen.getByTestId("organization-routes-notice").textContent).toBe("Route removed. New Claude Code sessions on acme/terminalx use each member's own login.");
 });
 
 it("keeps the route and says so when removing fails", async () => {
@@ -131,4 +133,41 @@ it("shows loading, then a load failure with a retry", async () => {
   fireEvent.click(within(error).getByRole("button", { name: "Retry" }));
   expect(await screen.findByTestId("organization-route")).toBeTruthy();
   expect(screen.queryByTestId("organization-routes-error")).toBeNull();
+});
+
+it("drops a route someone else already removed, with nothing to retry", async () => {
+  list.mockResolvedValue(routes(true));
+  remove.mockRejectedValue({ code: "cloud_organization_route_not_found" });
+  show();
+  const dialog = await openMenu();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Remove route" }));
+  await waitFor(() => expect(screen.queryByTestId("organization-route")).toBeNull());
+  expect(screen.getByTestId("organization-routes-notice").textContent).toBe("That route was already removed.");
+  expect(screen.queryByTestId("organization-routes-error")).toBeNull();
+});
+
+it("doesn't let a reload and a remove race: each waits for the other", async () => {
+  list.mockResolvedValueOnce(routes(true));
+  remove.mockRejectedValueOnce({ code: "cloud_organization_unavailable" });
+  show();
+  const dialog = await openMenu();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Remove route" }));
+  const error = await screen.findByTestId("organization-routes-error");
+  // Reloading: no remove can start until the list is back.
+  let answer: (value: Routes) => void = () => {};
+  list.mockReturnValueOnce(new Promise<Routes>((resolve) => { answer = resolve; }));
+  fireEvent.click(within(error).getByRole("button", { name: "Retry" }));
+  const trigger = screen.getByRole("button", { name: /Route actions/ }) as HTMLButtonElement;
+  await waitFor(() => expect(trigger.disabled).toBe(true));
+  answer(routes(true));
+  await waitFor(() => expect(trigger.disabled).toBe(false));
+});
+
+it("shows forks with the same name apart, by owner", async () => {
+  list.mockResolvedValue(routes(false, [route, { ...route, id: "orgroute_1b6f3c1e-1d2a-4f5b-8c7d-9e0f1a2b3c4d", repository: "fork/terminalx" }]));
+  show();
+  await waitFor(() => expect(screen.getAllByTestId("organization-route")).toHaveLength(2));
+  const text = screen.getAllByTestId("organization-route").map((row) => row.textContent);
+  expect(text[0]).toContain("acme/terminalx");
+  expect(text[1]).toContain("fork/terminalx");
 });

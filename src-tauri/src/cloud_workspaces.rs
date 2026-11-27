@@ -7512,6 +7512,12 @@ mod tests {
         organization_routes_ready(&account);
         assert_eq!(service.prepare_organization_route(&organization_route_add(&revision, "not a repo", "claude-gateway")).err().unwrap().code, "cloud_organization_route_repository_invalid");
         assert_eq!(service.prepare_organization_route(&organization_route_add("stale", "acme/x", "claude-gateway")).err().unwrap().code, "account_context_changed");
+        // An address the check would refuse, or none.
+        for base_url in [json!("http://gateway.example.com"), json!("https://user@gateway.example.com"), json!("")] {
+            let mut add = organization_route_add(&revision, "acme/x", "claude-gateway");
+            add.settings.insert("baseUrl".into(), base_url);
+            assert_eq!(service.prepare_organization_route(&add).err().unwrap().code, "cloud_agent_route_invalid");
+        }
         // A member, and a template the service does not offer for organization routes.
         for (can_manage, template, code) in [(false, "claude-gateway", "organization_admin_required"), (true, "claude-key-helper", "cloud_agent_route_template_unknown")] {
             let (base, requests) = serve_each(vec![response("200 OK", &organization_routes_body(can_manage), "")]);

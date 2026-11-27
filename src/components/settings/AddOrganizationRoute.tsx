@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Building, CircleAlert, Loader2, Plus } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { hasSecureDialog, SECURE_DIALOG_OFF, thisComputer } from "@/lib/platform";
+import { hasSecureDialog, SECURE_DIALOG_OFF, ThisComputer, thisComputer } from "@/lib/platform";
 import { api, type AgentRouteAgent, type AgentRouteCheckResult, type AgentRouteSettings, type OrganizationRoutes } from "@/lib/api";
 import { checkReason, fieldProblem, routeErrorMessage, templateSettings } from "@/lib/agentRoutes";
 import { AGENT_NAMES } from "./OrganizationRoutes";
@@ -26,7 +26,7 @@ export function AddOrganizationRoute({ contextRevision, organizationId, organiza
   onAdded: (routes: OrganizationRoutes) => void;
 }) {
   const [open, setOpen] = useState(false);
-  if (!routes.templates.length) return null;
+  if (!routes.templates.some((template) => template.mode === "custom-endpoint")) return null;
   return (
     <>
       <Button size="xs" variant="outline" onClick={() => setOpen(true)} data-testid="organization-route-add">
@@ -54,7 +54,9 @@ function AddRouteDialog({ contextRevision, organizationId, organizationName, rou
   onClose: () => void;
   onAdded: (routes: OrganizationRoutes) => void;
 }) {
-  const agents = [...new Set(routes.templates.map((template) => template.provider))];
+  // Organization routes are custom providers only: never a helper template.
+  const endpoints = routes.templates.filter((candidate) => candidate.mode === "custom-endpoint");
+  const agents = [...new Set(endpoints.map((template) => template.provider))];
   const [agent, setAgent] = useState<AgentRouteAgent>(agents[0]);
   const [repository, setRepository] = useState("");
   const [values, setValues] = useState<AgentRouteSettings>({});
@@ -62,7 +64,7 @@ function AddRouteDialog({ contextRevision, organizationId, organizationName, rou
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState<AgentRouteCheckResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const template = routes.templates.find((candidate) => candidate.provider === agent)!;
+  const template = endpoints.find((candidate) => candidate.provider === agent)!;
   const name = AGENT_NAMES[agent] ?? agent;
   const repositoryOk = REPOSITORY.test(repository.trim());
   const invalid = !repositoryOk || template.fields.some((field) => fieldProblem(field, values[field.key] ?? (field.kind === "choice" ? field.default : undefined)));
@@ -149,8 +151,8 @@ function AddRouteDialog({ contextRevision, organizationId, organizationName, rou
               );
             })}
           </div>
-          <p className="text-muted-foreground">
-            {thisComputer} asks for the {template.credential?.label.toLowerCase() ?? "credential"} in a secure dialog and tests it before saving. It is stored encrypted for {organizationName} and never shown again.
+          <p className="break-words text-muted-foreground">
+            {ThisComputer} asks for the {template.credential?.label.toLowerCase() ?? "credential"} in a secure dialog and tests it before saving. It is stored encrypted for {organizationName} and never shown again.
           </p>
           {!hasSecureDialog && <p role="note" className="text-warning">{SECURE_DIALOG_OFF}</p>}
           {failed && (
@@ -165,11 +167,11 @@ function AddRouteDialog({ contextRevision, organizationId, organizationName, rou
           )}
           {error && <p role="alert" className="text-destructive" data-testid="organization-route-form-error">{error}</p>}
         </div>
-        <DialogFooter className="items-center border-t border-hairline pt-3 sm:justify-between">
-          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Building className="size-3.5 shrink-0" /> For everyone in {organizationName} · takes precedence over members’ own {name} logins
+        <DialogFooter className="flex-wrap items-center gap-2 border-t border-hairline pt-3 sm:justify-between">
+          <p className="flex min-w-0 flex-1 basis-60 items-start gap-1.5 break-words text-xs text-muted-foreground">
+            <Building className="mt-px size-3.5 shrink-0" /> <span className="min-w-0">For everyone in {organizationName} · takes precedence over members’ own {name} logins</span>
           </p>
-          <div className="flex gap-2">
+          <div className="flex shrink-0 gap-2">
             <Button type="button" variant="outline" disabled={busy} onClick={onClose}>Cancel</Button>
             <Button type="button" disabled={busy || invalid || !hasSecureDialog} onClick={() => void submit()}>
               {busy && <Loader2 className="animate-spin" />}

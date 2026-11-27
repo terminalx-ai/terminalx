@@ -20,7 +20,7 @@ export const AGENT_NAMES: Record<string, string> = { claude: "Claude Code", code
 /** The login a member connects for an agent, as the dialog names it. */
 const LOGIN_NAMES: Record<string, string> = { claude: "Claude", codex: "Codex" };
 
-/** The repository's own name, as the screens show it. */
+/** The repository's own name, without its owner. */
 export const repositoryName = (repository: string) => repository.split("/").pop() || repository;
 
 export function OrganizationRoutes({ contextRevision, organizationId, organizationName, renderAdd }: {
@@ -64,9 +64,15 @@ export function OrganizationRoutes({ contextRevision, organizationId, organizati
     try {
       setData(await api.cloudOrganizationRouteRemove(route.id, contextRevision, organizationId));
       setRemoving(null);
-      setNotice(`Route removed. New ${AGENT_NAMES[route.provider] ?? route.provider} sessions on ${repositoryName(route.repository)} use each member's own login.`);
+      setNotice(`Route removed. New ${AGENT_NAMES[route.provider] ?? route.provider} sessions on ${route.repository} use each member's own login.`);
     } catch (failure) {
       setRemoving(null);
+      // Someone else removed it first: drop the stale row, nothing to retry.
+      if ((failure as { code?: unknown } | null)?.code === "cloud_organization_route_not_found") {
+        setData((current) => current && { ...current, routes: current.routes.filter((candidate) => candidate.id !== route.id) });
+        setNotice("That route was already removed.");
+        return;
+      }
       setError(routeErrorMessage(failure));
     } finally {
       setBusy(false);
@@ -75,10 +81,10 @@ export function OrganizationRoutes({ contextRevision, organizationId, organizati
 
   return (
     <section className="space-y-2" data-testid="organization-routes" aria-labelledby="organization-routes-title">
-      <div className="flex items-start justify-between gap-2">
-        <div>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
           <h3 id="organization-routes-title" className="text-sm font-medium">Organization routes</h3>
-          <p className="text-xs text-muted-foreground">Set by owners and admins for everyone in {organizationName}.</p>
+          <p className="break-words text-xs text-muted-foreground">Set by owners and admins for everyone in {organizationName}.</p>
         </div>
         {data?.canManage && renderAdd?.({ routes: data, onAdded: (routes) => { setData(routes); setNotice(null); setError(null); } })}
       </div>
@@ -92,7 +98,7 @@ export function OrganizationRoutes({ contextRevision, organizationId, organizati
       {data && data.routes.length > 0 && (
         <ul className="flex flex-col gap-2">
           {data.routes.map((route) => (
-            <RouteRow key={route.id} route={route} organizationName={organizationName} canManage={data.canManage} busy={busy} onRemove={() => { setNotice(null); setRemoving(route); }} />
+            <RouteRow key={route.id} route={route} organizationName={organizationName} canManage={data.canManage} busy={busy || loading} onRemove={() => { setNotice(null); setRemoving(route); }} />
           ))}
         </ul>
       )}
@@ -100,7 +106,7 @@ export function OrganizationRoutes({ contextRevision, organizationId, organizati
       {error && (
         <p role="alert" className="flex items-center gap-2 text-xs text-destructive" data-testid="organization-routes-error">
           {error}
-          <Button size="xs" variant="ghost" disabled={loading} onClick={() => void load()}>Retry</Button>
+          <Button size="xs" variant="ghost" disabled={loading || busy} onClick={() => void load()}>Retry</Button>
         </p>
       )}
       {removing && <RemoveRouteDialog route={removing} busy={busy} onClose={() => setRemoving(null)} onConfirm={() => void remove(removing)} />}
@@ -118,16 +124,16 @@ function RouteRow({ route, organizationName, canManage, busy, onRemove }: {
   const agent = AGENT_NAMES[route.provider] ?? route.provider;
   return (
     <li className="rounded-lg border border-hairline px-3 py-2.5 text-xs" data-testid="organization-route" data-route={route.id}>
-      <div className="flex items-center gap-2">
+      <div className="flex min-w-0 items-center gap-2">
         <Waypoints className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-        <span className="font-medium">Custom provider for {agent}</span>
-        <span className="inline-flex items-center gap-1 rounded bg-accent px-1.5 py-0.5 text-[11px] text-muted-foreground" data-testid="organization-route-badge">
-          <Building className="size-3" aria-hidden /> Set by {organizationName}
+        <span className="shrink-0 font-medium">Custom provider for {agent}</span>
+        <span className="inline-flex min-w-0 items-center gap-1 rounded bg-accent px-1.5 py-0.5 text-[11px] text-muted-foreground" data-testid="organization-route-badge" title={`Set by ${organizationName}`}>
+          <Building className="size-3 shrink-0" aria-hidden /> <span className="truncate">Set by {organizationName}</span>
         </span>
         {canManage && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button className="ml-auto" size="icon-xs" variant="ghost" aria-label={`Route actions for ${agent} on ${route.repository}`} disabled={busy}>
+              <Button className="ml-auto shrink-0" size="icon-xs" variant="ghost" aria-label={`Route actions for ${agent} on ${route.repository}`} disabled={busy}>
                 <Ellipsis />
               </Button>
             </DropdownMenuTrigger>
@@ -138,7 +144,7 @@ function RouteRow({ route, organizationName, canManage, busy, onRemove }: {
         )}
       </div>
       <p className="mt-1.5 break-words text-muted-foreground">
-        {agent} in {repositoryName(route.repository)} workspaces goes through <code className="font-mono">{route.settings.baseUrl}</code>. It takes precedence over members’ own logins.
+        {agent} in {route.repository} workspaces goes through <code className="font-mono">{route.settings.baseUrl}</code>. It takes precedence over members’ own logins.
       </p>
     </li>
   );
@@ -161,7 +167,7 @@ export function RemoveRouteDialog({ route, busy, onClose, onConfirm }: {
           <DialogDescription>Remove the custom route? {agent} goes back to each member’s own login.</DialogDescription>
         </DialogHeader>
         <p className="break-words rounded-md border border-hairline px-3 py-2 text-xs">
-          Route <code className="font-mono">{route.settings.baseUrl}</code> for workspaces on {repositoryName(route.repository)}. Members without their own {LOGIN_NAMES[route.provider] ?? agent} login can’t start {agent} there until they connect one.
+          Route <code className="font-mono">{route.settings.baseUrl}</code> for workspaces on {route.repository}. Members without their own {LOGIN_NAMES[route.provider] ?? agent} login can’t start {agent} there until they connect one. Running workspaces keep this route until they restart.
         </p>
         <DialogFooter>
           <Button type="button" variant="outline" disabled={busy} onClick={onClose}>Cancel</Button>

@@ -6,8 +6,21 @@ vi.mock("@/lib/platform", async (importOriginal) => ({ ...(await importOriginal<
 import { api, type AgentRoute, type AgentRoutes, type AgentRouteTemplate } from "@/lib/api";
 import { OrganizationAgentRoutes } from "./OrganizationAgentRoutes";
 
+const { account } = vi.hoisted(() => ({ account: { ready: false } }));
+vi.mock("@/lib/account", () => {
+  const read = () => ({
+    status: {
+      state: "signed-in",
+      context: { revision: "rev-1" },
+      phase2Readiness: account.ready ? { "org-2": ["cloud.agent-routes.organization.v1"] } : {},
+    },
+  });
+  return { getAccount: read, useAccount: read };
+});
+
 vi.mock("@/lib/api", () => ({
   api: {
+    cloudOrganizationRoutes: vi.fn(),
     cloudAgentRoutes: vi.fn(),
     cloudAgentRouteSave: vi.fn(),
     cloudAgentRouteRemove: vi.fn(),
@@ -87,6 +100,7 @@ const fill = (agent: string, key: string, value: string) =>
 
 beforeEach(() => {
   vi.clearAllMocks();
+  account.ready = false;
   routes = [];
   vi.mocked(api.cloudAgentRoutes).mockImplementation(async () => view());
 });
@@ -214,5 +228,43 @@ describe("your model access in Settings (PRO-18)", () => {
     vi.mocked(api.cloudAgentRouteSave).mockRejectedValueOnce({ code: "cloud_agent_route_conflict", status: 409 });
     fireEvent.click(within(row("claude")).getByTestId("agent-route-save"));
     await waitFor(() => expect(screen.getByTestId("agent-route-error").textContent).toMatch(/changed elsewhere/));
+  });
+});
+
+describe("an organization route over your own (PRO-310)", () => {
+  const organizationRoute = (repository: string, provider: "claude" | "codex" = "claude") => ({
+    id: `orgroute_${repository}`, provider, repository, templateId: "claude-gateway", templateVersion: 1, templateCurrent: true,
+    settings: { baseUrl: "https://gateway.example.com" }, version: 1, createdAt: 1, updatedAt: 1,
+  });
+
+  it("says on your route which repositories an organization route takes over", async () => {
+    account.ready = true;
+    routes = [gatewayRoute()];
+    vi.mocked(api.cloudOrganizationRoutes).mockResolvedValue({
+      canManage: false, templates: [],
+      routes: [organizationRoute("acme/terminalx"), organizationRoute("fork/terminalx"), organizationRoute("acme/other", "codex")],
+    });
+    await show();
+    const note = await within(row("claude")).findByTestId("agent-route-organization-override");
+    expect(note.textContent).toBe("Acme Robotics route applies on acme/terminalx, fork/terminalx");
+    expect(api.cloudOrganizationRoutes).toHaveBeenCalledWith("org-2");
+    // Codex has no route of the member's own, so nothing is said there.
+    expect(within(row("codex")).queryByTestId("agent-route-organization-override")).toBeNull();
+  });
+
+  it("says nothing once the organization route is gone", async () => {
+    account.ready = true;
+    routes = [gatewayRoute()];
+    vi.mocked(api.cloudOrganizationRoutes).mockResolvedValue({ canManage: false, templates: [], routes: [] });
+    await show();
+    await waitFor(() => expect(api.cloudOrganizationRoutes).toHaveBeenCalled());
+    expect(screen.queryByTestId("agent-route-organization-override")).toBeNull();
+  });
+
+  it("reads nothing and changes nothing while the readiness key is off", async () => {
+    routes = [gatewayRoute()];
+    await show();
+    expect(api.cloudOrganizationRoutes).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("agent-route-organization-override")).toBeNull();
   });
 });

@@ -74,6 +74,7 @@ export function organizationPageForRow(row: string | null | undefined): Organiza
     case "organizations.compute": return "cloudCompute";
     case "organizations.billing": return "billing";
     case "organizations.agentLogins": return "agentLogins";
+    case "organizations.organizationRoutes": return "agentLogins";
     case "organizations.agentRoutes": return "modelAccess";
     case "organizations.github": return "github";
     case "organizations.workspace": return "workspace";
@@ -139,8 +140,8 @@ export function OrganizationSettings({ organization, page = "general", onDeleted
       case "agentLogins":
         return <>
           <RegisteredSetting setting="organizations.agentLogins" instance={organization.id}><div className="contents"><OrganizationAgentLogins key={organization.id} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} /></div></RegisteredSetting>
-          <OrganizationRoutes key={`organization-routes-${organization.id}`} contextRevision={contextRevision} organizationId={organization.id} organizationName={name}
-            renderAdd={({ routes, onAdded }) => <AddOrganizationRoute contextRevision={contextRevision} organizationId={organization.id} organizationName={name} routes={routes} onAdded={onAdded} />} />
+          <RegisteredSetting setting="organizations.organizationRoutes" instance={organization.id}><div className="contents"><OrganizationRoutes key={`organization-routes-${organization.id}`} contextRevision={contextRevision} organizationId={organization.id} organizationName={name}
+            renderAdd={({ routes, onAdded }) => <AddOrganizationRoute contextRevision={contextRevision} organizationId={organization.id} organizationName={name} routes={routes} onAdded={onAdded} />} /></div></RegisteredSetting>
         </>;
       case "modelAccess":
         return <RegisteredSetting setting="organizations.agentRoutes" instance={organization.id}><div className="contents"><OrganizationAgentRoutes key={`routes-${organization.id}`} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} /></div></RegisteredSetting>;

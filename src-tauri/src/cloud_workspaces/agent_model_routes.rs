@@ -314,6 +314,11 @@ impl CloudWorkspaceService {
             return Err(CloudWorkspaceClientError::local("cloud_organization_route_repository_invalid", false));
         }
         let settings = plain_settings(&add.settings)?;
+        // An organization route is always a custom endpoint: refuse an
+        // address the check would refuse before any dialog opens.
+        if !settings.get("baseUrl").and_then(Value::as_str).is_some_and(crate::agent_route_check::valid_base_url) {
+            return Err(CloudWorkspaceClientError::local("cloud_agent_route_invalid", false));
+        }
         let (context, access) = self.agent_login_context(add.organization_id.as_deref(), &add.context_revision, RequestRisk::Read)?;
         let org = Some(context.organization_id.as_str());
         self.phase2_gate(PHASE2_ORGANIZATION_ROUTES, org, Some(&context), ORGANIZATION_ROUTES_OFF)?;
