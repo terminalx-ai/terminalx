@@ -438,9 +438,12 @@ pub(crate) const PHASE2_NUDGES: &str = "team.nudges.v1";
 pub(crate) const PHASE2_WORKSPACE_SSH: &str = "cloud.workspaces.ssh.v1";
 /// Invitations in Settings and the invite-and-welcome card (PRO-175).
 const PHASE2_INVITES_WELCOME: &str = "organization.invites-welcome.v1";
-const PHASE2_FEATURES: [&str; 25] = [
+/// PRO-241: the sidebar's announcement card.
+pub(crate) const PHASE2_ANNOUNCEMENTS: &str = "desktop.announcements.v1";
+const PHASE2_FEATURES: [&str; 26] = [
     PHASE2_TEAMS_PLAN,
     PHASE2_INVITES_WELCOME,
+    PHASE2_ANNOUNCEMENTS,
     PHASE2_ORGANIZATION_AUTOMATIONS,
     PHASE2_NUDGES,
     PHASE2_WORKSPACE_SSH,
