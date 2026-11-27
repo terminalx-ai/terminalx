@@ -880,11 +880,21 @@ export const api = {
     invoke<CommitInfo[]>("log_commits", { cwd, range: range ?? null, limit: limit ?? 100 }),
 };
 
+export interface OrganizationPlanPrice {
+  currency: "USD";
+  unitAmountMinor: number;
+  interval: "month";
+}
+
 export interface OrganizationPlan {
   plan: "free" | "pro" | "teams";
   seatsUsed: number;
   memberLimit: number | null;
-  catalog: { teams: { currency: "USD"; unitAmountMinor: number; interval: "month"; memberLimit: number } };
+  catalog: {
+    teams: OrganizationPlanPrice & { memberLimit: number };
+    pro?: OrganizationPlanPrice;
+  };
+  links?: { upgrade?: string; manage?: string };
   upgradeTarget: "plans";
 }
 
