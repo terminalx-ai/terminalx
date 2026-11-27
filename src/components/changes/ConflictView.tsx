@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { withActionPrompt } from "@/lib/sharedSetups";
+import { primeSharedPrompts, withActionPrompt } from "@/lib/sharedSetups";
 import { Check, ChevronDown, ChevronUp, Loader2, Sparkles, TriangleAlert } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -229,6 +229,7 @@ export function ConflictView({ entry, visible, source: given, files: givenFiles 
     setError(null);
     setSent(null);
     try {
+      await primeSharedPrompts(entry.sessionId);
       const result = await ask.send(withActionPrompt(combineConflictPrompt(ready.file, hunk), "resolveConflicts", entry.sessionId));
       setSent(result.queued ? `Conflict ${hunk.index + 1} queued in the agent tab.` : `Conflict ${hunk.index + 1} sent to the agent tab.`);
     } catch (e) {

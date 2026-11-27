@@ -3222,9 +3222,19 @@ impl CloudWorkspaceService {
                 ("PUT", vec!["action-prompts", action], Some(json!({ "body": body, "revision": revision }))),
             _ => return Err(inbox_invalid()),
         };
+        let list_snippets = matches!(op, SharedSetupsOp::ListSnippets);
         self.phase2_member_in(PHASE2_SHARED_SETUPS, "shared_setups_unavailable", org, risk, |client, context| {
-            let answer: Value = client.request_as(method, context, &tail, None, body, None, risk)?;
+            let mut answer: Value = client.request_as(method, context, &tail, None, body, None, risk)?;
             if !answer.is_object() { return Err(post_send_error(risk)); }
+            // Which snippets the signed-in person created, from the account itself: the page need not wait for the roster.
+            if list_snippets {
+                if let Some(snippets) = answer.get_mut("snippets").and_then(Value::as_array_mut) {
+                    for snippet in snippets.iter_mut().filter_map(Value::as_object_mut) {
+                        let mine = snippet.get("createdBy").and_then(Value::as_str) == Some(context.user_id.as_str());
+                        snippet.insert("mine".into(), Value::Bool(mine));
+                    }
+                }
+            }
             Ok(answer)
         })
     }
@@ -5857,6 +5867,7 @@ mod tests {
             response("200 OK", r#"{"deleted":true}"#, ""),
             response("200 OK", r#"{"action":"createPr","body":"x"}"#, ""),
             response("200 OK", r#"[]"#, ""),
+            response("200 OK", r#"{"snippets":[{"id":"a","createdBy":"user-1"},{"id":"b","createdBy":"user-2"}]}"#, ""),
         ]);
         let (_, service) = phase2_service(&base);
         let op = |value: Value| serde_json::from_value::<SharedSetupsOp>(value).unwrap();
@@ -5865,6 +5876,10 @@ mod tests {
         service.shared_setups("org-1", op(json!({"op": "deleteSnippet", "id": "snippet-1"}))).unwrap();
         service.shared_setups("org-1", op(json!({"op": "savePrompt", "action": "createPr", "body": "x", "revision": 0}))).unwrap();
         assert_eq!(service.shared_setups("org-1", op(json!({"op": "listPrompts"}))).unwrap_err().code, "cloud_workspace_invalid_response");
+        // The signed-in person's own snippets are marked from the account, not the roster.
+        let listed = service.shared_setups("org-1", op(json!({"op": "listSnippets"}))).unwrap();
+        assert_eq!(listed["snippets"][0]["mine"], json!(true));
+        assert_eq!(listed["snippets"][1]["mine"], json!(false));
         for refused in [json!({"op": "savePrompt", "action": "deploy", "body": "x", "revision": 0}), json!({"op": "shareSlots", "slots": []}),
             json!({"op": "deleteSnippet", "id": "../x"}), json!({"op": "createSnippet", "snippet": "x"}),
             // The server's limits, refused before sending: an 8000-character prompt, a 10000-character snippet body, a 40-character keyword.
@@ -5880,6 +5895,7 @@ mod tests {
         assert!(requests[2].starts_with("DELETE /v1/desktop/orgs/org-1/snippets/snippet-1 HTTP/1.1"));
         assert!(requests[3].starts_with("PUT /v1/desktop/orgs/org-1/action-prompts/createPr HTTP/1.1"));
         assert!(requests[4].starts_with("GET /v1/desktop/orgs/org-1/action-prompts HTTP/1.1"));
+        assert!(requests[5].starts_with("GET /v1/desktop/orgs/org-1/snippets HTTP/1.1"));
         for request in &requests { phase2_headers(request); }
     }
 

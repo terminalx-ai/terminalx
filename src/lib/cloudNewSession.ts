@@ -1,5 +1,5 @@
 import { api, experimental, type AccountStatus, type CloudWorkspaceLaunchInput, type CloudWorkspaceProviderId, type CloudWorkspaceQuota, type CloudWorkspaceQuote, type CloudWorkspaceSetup, type CloudWorkspaceSnapshot } from "@/lib/api";
-import { withNewChatPrompts } from "@/lib/sharedSetups";
+import { primeSharedPrompts, withNewChatPrompts } from "@/lib/sharedSetups";
 import { getAccount } from "@/lib/account";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { getCloudAgents, newCloudAgentTab } from "@/lib/cloudAgents";
@@ -200,6 +200,7 @@ export async function startInWorkspace(
     const issue = request.issue && client.hasCapability("pipeline/1") ? request.issue : null;
     // Settings → Experimental → Native Codex follows the reader into a workspace (#644).
     const nativeCodex = (await experimental.nativeCodexFor(request.agent)) || undefined;
+    if (request.prompt.trim()) await primeSharedPrompts(`cloud:${orgId}`);
     const params = {
       nativeCodex,
       agent: request.agent,
@@ -460,6 +461,7 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
     const setup = provider.setup ?? (await api.cloudWorkspaceSetup(provider.id, org));
     quote = await api.cloudWorkspaceQuote({ provider: provider.id, ...setup.defaults, idleSuspendMinutes: form.idleSuspendMinutes ?? setup.defaults.idleSuspendMinutes }, org);
   }
+  if (form.prompt.trim()) await primeSharedPrompts(`cloud:${orgId}`);
   const idempotencyKey = crypto.randomUUID();
   const pending: PendingCreate = {
     idempotencyKey,

@@ -5,8 +5,6 @@ import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { showError } from "@/lib/errorToasts";
 import { setPrefs, usePrefs, type PromptSnippet } from "@/lib/prefs";
-import { getAccount } from "@/lib/account";
-import { usePeople, userIdForEmail } from "@/lib/cloudPeople";
 import { orgLabel, refreshSharedSetups, sharedSetupsApi, useOrganizationSnippets, useSharedSetupsOrg, type OrganizationSnippet } from "@/lib/sharedSetups";
 import { RegisteredSetting } from "./settingsRegistry";
 
@@ -20,8 +18,6 @@ export function SnippetManager() {
   const orgSnippets = useOrganizationSnippets();
   const [scope, setScope] = useState<"all" | "me" | "org">("all");
   // Only the creator, owners and admins delete a shared snippet (the server's rule), and only after asking.
-  usePeople(!!org);
-  const me = userIdForEmail(getAccount().status.identity?.email);
   const [confirming, setConfirming] = useState<string | null>(null);
   const removeShared = async (snippet: OrganizationSnippet) => {
     if (!org) return;
@@ -63,7 +59,7 @@ export function SnippetManager() {
                 <Button variant="destructive" size="xs" onClick={() => void removeShared(snippet)}>Delete</Button>
               </> : <>
                 <span className="max-w-[10rem] shrink-0 truncate text-[11px] text-faint" title={org?.name}>{org?.name}</span>
-                {(org?.isAdmin || (!!me && snippet.createdBy === me)) && (
+                {(org?.isAdmin || snippet.mine === true) && (
                   <Button variant="ghost" size="icon-xs" aria-label={`Delete /${snippet.keyword} from ${org?.name}`} onClick={() => setConfirming(snippet.id)}><Trash2 aria-hidden /></Button>
                 )}
               </>}

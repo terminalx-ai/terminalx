@@ -16,14 +16,13 @@ function account() {
 }
 vi.mock("@/lib/account", () => ({ getAccount: account, useAccount: account }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-vi.mock("@/lib/cloudPeople", () => ({ usePeople: () => (id: string) => id, userIdForEmail: () => "u-me" }));
 
 const { SaveSnippetDialog } = await import("@/components/chat/SaveSnippetDialog");
 const { SnippetManager } = await import("./SnippetManager");
 
 const shared = { id: "s-1", name: "review", keyword: "review", body: "Review this diff for bugs first.", createdBy: "u-1", updatedBy: "u-1", updatedAt: "2026-11-27T00:00:00Z" };
 
-function serve(snippets = [shared]) {
+function serve(snippets: (typeof shared & { mine?: boolean })[] = [shared]) {
   invoke.mockImplementation((_command: string, { op }: { op: { op: string } }) => {
     if (op.op === "listSnippets") return Promise.resolve({ snippets });
     if (op.op === "listPrompts") return Promise.resolve({ canEdit: false, prompts: {} });
@@ -66,7 +65,7 @@ describe("snippet scope", () => {
   });
 
   it("lets only the creator delete a shared snippet, after asking", async () => {
-    serve([shared, { ...shared, id: "s-mine", keyword: "mine", createdBy: "u-me" }]);
+    serve([shared, { ...shared, id: "s-mine", keyword: "mine", createdBy: "u-me", mine: true }]);
     render(<SnippetManager />);
     await screen.findByText("/mine");
     expect(screen.queryByRole("button", { name: "Delete /review from Fixture Labs" })).toBeNull();

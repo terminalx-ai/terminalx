@@ -13,15 +13,17 @@ function account() {
         { id: "org-a", name: "Fixture Labs", role: "member", isPersonal: false },
         { id: "org-b", name: "Sample Works", role: "member", isPersonal: false },
         { id: "me", name: "Personal", role: "owner", isPersonal: true },
+        { id: "org-c", name: "Third Fixture", role: "member", isPersonal: false },
+        { id: "org-d", name: "Fourth Fixture", role: "member", isPersonal: false },
       ],
-      phase2Readiness: ready.on ? { "org-a": ["team.shared-setups.v1"], "org-b": ["team.shared-setups.v1"], me: ["team.shared-setups.v1"] } : {},
+      phase2Readiness: ready.on ? { "org-a": ["team.shared-setups.v1"], "org-b": ["team.shared-setups.v1"], me: ["team.shared-setups.v1"], "org-c": ["team.shared-setups.v1"], "org-d": ["team.shared-setups.v1"] } : {},
     } as unknown as AccountStatus,
   };
 }
 vi.mock("@/lib/account", () => ({ getAccount: account, useAccount: account }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-const { orgLabel, refreshSharedSetups, refreshStaleSharedSetups, withActionPrompt, withNewChatPrompts, sharedSetupsOrg, SHARED_SETUPS_FRESH_MS } = await import("@/lib/sharedSetups");
+const { orgLabel, primeSharedPrompts, refreshSharedSetups, refreshStaleSharedSetups, withActionPrompt, withNewChatPrompts, sharedSetupsOrg, SHARED_SETUPS_FRESH_MS } = await import("@/lib/sharedSetups");
 
 const shared = (prompts: Record<string, string>, revision = 1) => ({
   canEdit: false,
@@ -79,6 +81,23 @@ describe("action prompts", () => {
       expect(withNewChatPrompts("Fix the login bug", target)).toBe(
         "Fix the login bug\n\nAdditional instructions:\nPrefer small commits.\n\nWhen you name a branch:\nUse feat/<topic>.");
     expect(withActionPrompt("PR.", "createPr", "/repos/app")).toBe("PR.");
+  });
+
+  it("waits for an organization's prompts on the first send to it, but not past the timeout", async () => {
+    byOrg["org-c"] = shared({ createPr: "C: link the issue." });
+    active.id = "org-a";
+    await primeSharedPrompts("cloud:org-c:ws:s");
+    expect(withActionPrompt("PR.", "createPr", "cloud:org-c:ws:s")).toBe("PR.\n\nAdditional instructions:\nC: link the issue.");
+    // A server that never answers holds the send only for the timeout.
+    invoke.mockImplementation(() => new Promise(() => {}));
+    const started = Date.now();
+    await primeSharedPrompts("cloud:org-d:ws:s", 20);
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(withActionPrompt("PR.", "createPr", "cloud:org-d:ws:s")).toBe("PR.");
+    // Local sessions never wait.
+    invoke.mockClear();
+    await primeSharedPrompts("local-1");
+    expect(invoke).not.toHaveBeenCalled();
   });
 
   it("uses only the person's prompts while shared setups are off", () => {

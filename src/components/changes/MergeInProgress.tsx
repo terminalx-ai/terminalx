@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { withActionPrompt } from "@/lib/sharedSetups";
+import { primeSharedPrompts, withActionPrompt } from "@/lib/sharedSetups";
 import { GitMerge, Info, Loader2, Sparkles, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -127,6 +127,7 @@ export function MergeInProgress({ source, merge, files, sessionId, onChanged, on
     setError(null);
     setSent(null);
     try {
+      await primeSharedPrompts(sessionId);
       const { queued } = await ask.send(withActionPrompt(resolveMergePrompt(merge), "resolveConflicts", sessionId));
       setSent(queued ? "Queued in the agent tab." : "Sent to the agent tab.");
     } catch (e) {

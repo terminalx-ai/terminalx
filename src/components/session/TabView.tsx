@@ -1,5 +1,5 @@
 import { localCommands } from "@/lib/localCommands";
-import { withActionPrompt } from "@/lib/sharedSetups";
+import { useSharedPromptsFor, withActionPrompt } from "@/lib/sharedSetups";
 import { useTabRead } from "@/lib/useTabRead";
 import { HeldQueueTray } from "@/components/chat/HeldQueueTray";
 import { followUpRoute, heldQueueFrom, heldQueueFromFollowUps, type HeldQueueChange } from "@/lib/heldQueue";
@@ -171,6 +171,8 @@ export function TabView({
   workspace?: RemovableWorkspace;
 }) {
   const backend = given ?? localSessionBackend(session.id);
+  // PRO-154: the session's organization's prompts, read before its steps and second opinions are offered.
+  useSharedPromptsFor(session.id);
   const local = backend.caps.local;
   const transcriptPeople = useMentionPeople(local ? null : parseCloudWorkspaceKey(backend.key)?.orgId, null);
   // Local VM task cards are behind Settings → Experimental → Local VM tasks (PRO-114).

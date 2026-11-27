@@ -36,6 +36,8 @@ export interface OrganizationSnippet {
   body: string;
   createdBy: string;
   updatedAt: string;
+  /** The signed-in person created it: set by the app from the account, not by the server. */
+  mine?: boolean;
 }
 
 export interface SharedPrompt {
@@ -232,6 +234,33 @@ export function actionInstructions(action: ActionPromptKey, target: PromptTarget
   if (orgId && Date.now() - (entry?.at ?? 0) >= SHARED_SETUPS_FRESH_MS) void refreshSharedSetups(orgId);
   const shared = entry?.prompts?.prompts[action]?.body.trim() ?? "";
   return [shared, personalPrompt(action)].filter(Boolean).join("\n\n");
+}
+
+/** How long a send waits for an organization's prompts it has never read, before going without them. */
+export const PRIME_TIMEOUT_MS = 1500;
+
+/**
+ * Before the first send to an organization this window has not read yet:
+ * read its prompts, waiting at most `timeoutMs`. Anything already read (even
+ * stale) is used as it is, and refreshed in the background.
+ */
+export async function primeSharedPrompts(target: PromptTarget, timeoutMs = PRIME_TIMEOUT_MS): Promise<void> {
+  const orgId = promptOrg(target);
+  if (!orgId || cache.has(orgId)) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([refreshSharedSetups(orgId), new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); })]);
+  clearTimeout(timer);
+}
+
+const cacheHas = (orgId: string | null) => () => !!orgId && cache.has(orgId);
+
+/** For prompts built while rendering (a step's text): reads the target's organization once, and renders again when it arrives. */
+export function useSharedPromptsFor(target: PromptTarget): void {
+  const orgId = promptOrg(target);
+  useSyncExternalStore(subscribe, cacheHas(orgId), cacheHas(orgId));
+  useEffect(() => {
+    if (orgId && !cache.has(orgId)) void refreshSharedSetups(orgId);
+  }, [orgId]);
 }
 
 /** `prompt` with the action's instructions after it, or as it was when there are none. */
