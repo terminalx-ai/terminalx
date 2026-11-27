@@ -1569,6 +1569,73 @@ pub async fn cloud_workspace_mentions(org_id: String, workspace_id: String, inpu
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.workspace_mentions(&org_id, &workspace_id, input))
 }
 
+// Team artifacts (PRO-158).
+#[tauri::command]
+pub async fn team_artifacts_list(org_id: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::TeamArtifactList, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.team_artifacts(&org_id))
+}
+
+#[tauri::command]
+pub async fn team_artifact_get(org_id: String, artifact_id: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::TeamArtifactDetail, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.team_artifact(&org_id, &artifact_id))
+}
+
+#[tauri::command]
+pub async fn team_artifact_content(org_id: String, artifact_id: String, version: u32, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::TeamArtifactContent, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.team_artifact_content(&org_id, &artifact_id, version))
+}
+
+#[tauri::command]
+pub async fn team_artifact_publish(org_id: String, input: crate::cloud_workspaces::TeamArtifactPublishInput, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::TeamArtifactPublished, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.publish_team_artifact(&org_id, input))
+}
+
+#[tauri::command]
+pub async fn team_artifact_delete(org_id: String, artifact_id: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::TeamArtifactDeleted, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.delete_team_artifact(&org_id, &artifact_id))
+}
+
+#[tauri::command]
+pub async fn team_artifact_version_delete(org_id: String, artifact_id: String, version: u32, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::TeamArtifactVersionDeleted, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.delete_team_artifact_version(&org_id, &artifact_id, version))
+}
+
+/// The file the person picks for Publish… (PRO-158). The picker is opened
+/// here, so the window learns only the file chosen: its name and its text,
+/// refused past the team artifact cap. `None` when nothing was picked.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamArtifactPickedFile {
+    name: String,
+    content: Option<String>,
+    refused: Option<&'static str>,
+}
+
+#[tauri::command]
+pub async fn team_artifact_pick_file(app: tauri::AppHandle) -> Result<Option<TeamArtifactPickedFile>, String> {
+    use std::io::Read;
+    use tauri_plugin_dialog::DialogExt;
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(picked) = app.dialog().file().add_filter("Pages and notes", &["md", "markdown", "html", "htm", "txt"]).blocking_pick_file() else {
+            return Ok(None);
+        };
+        let path = picked.into_path().map_err(|_| "unreadable".to_string())?;
+        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let limit = crate::cloud_workspaces::TEAM_ARTIFACT_CONTENT_BYTES;
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(&path).and_then(|file| file.take(limit as u64 + 1).read_to_end(&mut bytes));
+        let (content, refused) = match read {
+            Err(_) => (None, Some("unreadable")),
+            Ok(_) if bytes.len() > limit => (None, Some("too_large")),
+            Ok(_) => match String::from_utf8(bytes) {
+                Ok(text) => (Some(text), None),
+                Err(_) => (None, Some("not_text")),
+            },
+        };
+        Ok(Some(TeamArtifactPickedFile { name, content, refused }))
+    }).await.map_err(|_| "unreadable".to_string())?
+}
+
 #[tauri::command]
 pub async fn nudge_preference(org_id: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::NudgePreference, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.nudge_preference(&org_id))

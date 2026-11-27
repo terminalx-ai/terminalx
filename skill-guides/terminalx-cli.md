@@ -1794,6 +1794,24 @@ own terminal), `stop` (the turn ended), `stopped` (nothing is running) or `timeo
 report the state from before the message. Interrupting it leaves nothing running in the app. Answering a permission request, archiving and
 deleting a workspace are done in the app.
 
+### Team artifacts
+
+```
+terminalx artifact publish <file.md|file.html|file.txt> [--org <org>] [--title <text>] \
+  [--slug <slug>|--template <slug>] [--note <text>] --json
+terminalx artifact show <slug> [--org <org>] --json
+```
+
+`artifact publish` publishes a page or note (up to 1 MB) for everyone in the organization; it
+shows on their overview's Team panel within a minute. Without `--slug` it is always a new
+artifact. `--slug` adds a version to the artifact with that slug (only its author and admins
+may), and `--template` publishes a template that people insert as `@slug` in a session's
+composer. When a prompt names a template as `@slug`, run `artifact show <slug>` to read it, fill
+it in, and publish the result. Both need capability `artifacts.publish` / `artifacts.show` in
+`cloud status`, the same Settings switch as the cloud commands, and team artifacts enabled for
+the organization (otherwise `team_artifacts_unavailable`). `--org` takes the organization's
+name or id; it may be left out when only one organization has team artifacts.
+
 ### Paired machines
 
 A machine is another computer running TerminalX that this computer paired with (Settings →

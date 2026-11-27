@@ -39,6 +39,8 @@ import { recoveryFromEvents } from "@/lib/recovery";
 import { cloudAsleep, cloudSessionBackend } from "@/lib/sessionBackend";
 import type { AgentEvent, RecoveryKind } from "@/types/events";
 import { cloudWorkspaceKey, isCloudKey, parseCloudWorkspaceKey, type CloudProject } from "@/types/target";
+import { getSessions } from "@/lib/sessions";
+import { noteTeamArtifact, teamArtifactOrgs, teamArtifactsApi, type TeamArtifactContentType } from "@/lib/teamArtifacts";
 import type { RuntimeIssueRef, WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable/workspace";
 
 /**
@@ -233,7 +235,7 @@ async function authorizeRoutineCompute(what: string, okLabel: string): Promise<v
   // Native dispatch precedes catalog/quote I/O; recheck the grant at admission.
   assertAllowed((await loadCloudControlSetting()) && allowed());
 }
-export const CLOUD_CONTROL_CAPABILITIES = ["projects.list", "sessions.list", "sessions.create", "send", "read", "wait", "stop", "resume"] as const;
+export const CLOUD_CONTROL_CAPABILITIES = ["projects.list", "sessions.list", "sessions.create", "send", "read", "wait", "stop", "resume", "artifacts.publish", "artifacts.show"] as const;
 
 /** A refusal the CLI prints as `code: message`, with what to do about it. */
 export class CloudControlError extends Error {
@@ -1162,6 +1164,76 @@ async function resume(params: Params, sleep: Sleep = pause, now: () => number = 
 /** For tests: `stop` and `resume` with their clock and sleep replaced. */
 export const cloudLifecycleCommands = { stop, resume };
 
+// ---- Team artifacts (PRO-158) ------------------------------------------------
+
+/** The organization a team artifact command names, or the only one that has them. */
+function artifactOrg(params: Params): { id: string; name: string } {
+  const status = signedIn();
+  const ready = new Set(teamArtifactOrgs(status));
+  const orgs = (status.organizations ?? []).filter((org) => ready.has(org.id));
+  const named = text(params, "org");
+  if (named) {
+    const wanted = named.toLowerCase();
+    const slug = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    const found = orgs.find((org) => org.id === named || org.name.toLowerCase() === wanted || slug(org.name) === wanted);
+    if (!found) throw notFound(`No organization ${named} with team artifacts.`, "List them with terminalx cloud status.");
+    return found;
+  }
+  if (orgs.length === 1) return orgs[0];
+  if (!orgs.length) throw new CloudControlError("team_artifacts_unavailable", "Team artifacts are not available for this account yet.");
+  throw invalid(`Name the organization with --org: ${orgs.map((org) => org.name).join(", ")}.`);
+}
+
+/** Where a publish came from: the calling session's name, when it is one of this Mac's. */
+function artifactSource(params: Params): string | undefined {
+  const caller = params.caller as { session?: unknown } | null | undefined;
+  const id = typeof caller?.session === "string" ? caller.session : null;
+  const session = id ? getSessions().sessions.find((entry) => entry.id === id) : undefined;
+  const title = session?.title?.replace(/\p{Cc}/gu, " ").trim();
+  return title ? title.slice(0, 120) : undefined;
+}
+
+async function artifactsPublish(params: Params) {
+  const org = artifactOrg(params);
+  const contentType = required(params, "contentType") as TeamArtifactContentType;
+  const content = typeof params.content === "string" ? params.content : "";
+  const template = text(params, "template");
+  const slug = text(params, "slug");
+  const note = text(params, "note");
+  const source = artifactSource(params);
+  const { artifact, created } = await teamArtifactsApi.publish(org.id, {
+    title: required(params, "title").trim(),
+    contentType,
+    content,
+    ...(template ? { slug: template, template: true } : slug ? { slug } : {}),
+    ...(note ? { note } : {}),
+    ...(source ? { source } : {}),
+  });
+  noteTeamArtifact(org.id, { saved: artifact });
+  return {
+    orgId: org.id,
+    orgName: org.name,
+    created,
+    id: artifact.id,
+    slug: artifact.slug,
+    title: artifact.title,
+    version: artifact.version,
+    template: artifact.template,
+    message: `${created ? "Published" : `Published v${artifact.version} of`} ${artifact.title} for everyone at ${org.name}.`,
+  };
+}
+
+/** A template or artifact by slug, with its current content: what an agent reads to fill it in. */
+async function artifactsShow(params: Params) {
+  const org = artifactOrg(params);
+  const slug = required(params, "artifact").replace(/^@/, "");
+  const { artifacts } = await teamArtifactsApi.list(org.id);
+  const artifact = artifacts.find((item) => item.slug === slug);
+  if (!artifact) throw notFound(`No team artifact @${slug} at ${org.name}.`);
+  const { content } = await teamArtifactsApi.content(org.id, artifact.id, artifact.version);
+  return { orgId: org.id, orgName: org.name, slug, title: artifact.title, template: artifact.template, version: artifact.version, contentType: artifact.contentType, content };
+}
+
 /** Run one `cloud.*` control command. Throws `CloudControlError` for a refusal. */
 export async function handleCloudControl(action: string, params: Params = {}): Promise<unknown> {
   if (action === "status") return status();
@@ -1183,6 +1255,10 @@ export async function handleCloudControl(action: string, params: Params = {}): P
       return stop(params);
     case "resume":
       return resume(params);
+    case "artifacts.publish":
+      return artifactsPublish(params);
+    case "artifacts.show":
+      return artifactsShow(params);
     default:
       throw new CloudControlError("unsupported", `This TerminalX does not know the cloud command ${action}.`, "Update TerminalX, or see terminalx cloud status for what it supports.");
   }

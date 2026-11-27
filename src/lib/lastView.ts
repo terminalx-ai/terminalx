@@ -23,7 +23,7 @@ import { isLocalKey } from "@/types/target";
 const KEY = "raccoon.lastView";
 /** Panel tabs kept for this many sessions at most; the ones shown longest ago go first. */
 const MAX_PANEL_TABS = 200;
-const PANEL_TABS: readonly PanelTab[] = ["branch", "changes", "files", "browser", "ports", "computer"];
+const PANEL_TABS: readonly PanelTab[] = ["artifacts", "branch", "changes", "files", "browser", "ports", "computer"];
 
 /** The pages a launch can reopen. The new-session form is a draft and is not one: the session behind it is. */
 /** `bots` reopens only while Settings → Experimental → Bots is on: off, the app leaves it for the welcome screen. */

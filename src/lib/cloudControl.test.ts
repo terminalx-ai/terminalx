@@ -244,7 +244,7 @@ describe("discovery", () => {
   it("says what this app supports and which organizations are reachable", async () => {
     const status = (await handleCloudControl("status")) as { version: number; capabilities: string[]; organizations: Record<string, unknown>[] };
     expect(status).toMatchObject({ version: 1, enabled: true, policy: "setting" });
-    expect(status.capabilities).toEqual(["projects.list", "sessions.list", "sessions.create", "send", "read", "wait", "stop", "resume"]);
+    expect(status.capabilities).toEqual(["projects.list", "sessions.list", "sessions.create", "send", "read", "wait", "stop", "resume", "artifacts.publish", "artifacts.show"]);
     expect(status.organizations).toEqual([
       { id: ORG, name: "Acme", role: "admin", live: true, mayStartSessions: true },
       { id: OTHER, name: "Beta", role: "member", live: true, mayStartSessions: false },
@@ -1892,5 +1892,41 @@ describe("a command from a session that works for a bot (PRO-514)", () => {
     resetCloudAgents();
     await handleCloudControl("resume", { workspace, botHold: { sessions: [`${workspace}:s2`], launch: false } });
     expect(agents.getCloudAgents({ organizationId: ORG, workspaceId: "ws-stopped" }).tabs.every((tab) => tab.pendingConfig === null)).toBe(true);
+  });
+});
+
+describe("team artifacts from the command line (PRO-158)", () => {
+  const published = { id: "a1", slug: "migration-plan", title: "Migration plan", description: null, template: true, contentType: "text/html", sizeBytes: 13, version: 1, author: null, updatedBy: null, source: null, createdAt: "2026-11-27T10:00:00Z", updatedAt: "2026-11-27T10:00:00Z", canDelete: true };
+  const ready = (orgs: string[]) => { mocks.status = { ...mocks.status, phase2Readiness: Object.fromEntries(orgs.map((org) => [org, ["team.artifacts.v1"]])) }; };
+
+  it("refuses while the organization has no team artifacts", async () => {
+    await expect(handleCloudControl("artifacts.publish", { title: "Plan", contentType: "text/html", content: "<h1>Plan</h1>" })).rejects.toMatchObject({ code: "team_artifacts_unavailable" });
+    ready([ORG]);
+    await expect(handleCloudControl("artifacts.publish", { org: "Beta", title: "Plan", contentType: "text/html", content: "x" })).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("publishes a template to the named organization, by its name's slug", async () => {
+    ready([ORG, OTHER]);
+    mocks.invoke.mockImplementation(async (command: string) => (command === "team_artifact_publish" ? { artifact: published, created: true } : undefined));
+    // Two organizations have them: the command must name one.
+    await expect(handleCloudControl("artifacts.publish", { title: "Plan", contentType: "text/html", content: "x" })).rejects.toMatchObject({ code: "invalid_arguments" });
+    const result = await handleCloudControl("artifacts.publish", { org: "acme", title: "Migration plan", template: "migration-plan", note: "First draft", contentType: "text/html", content: "<h1>Plan</h1>" });
+    expect(mocks.invoke).toHaveBeenCalledWith("team_artifact_publish", { orgId: ORG, input: { title: "Migration plan", contentType: "text/html", content: "<h1>Plan</h1>", slug: "migration-plan", template: true, note: "First draft" } });
+    expect(result).toMatchObject({ orgId: ORG, created: true, slug: "migration-plan", message: "Published Migration plan for everyone at Acme." });
+  });
+
+  it("adds a version with --slug, and shows a template's content to fill in", async () => {
+    ready([ORG]);
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command === "team_artifact_publish") return { artifact: { ...published, template: false, version: 2 }, created: false };
+      if (command === "team_artifacts_list") return { artifacts: [published] };
+      if (command === "team_artifact_content") return { artifactId: args.artifactId, version: args.version, contentType: "text/html", content: "<h1>Plan</h1>" };
+      return undefined;
+    });
+    const result = await handleCloudControl("artifacts.publish", { slug: "migration-plan", title: "Migration plan", contentType: "text/html", content: "v2" });
+    expect(mocks.invoke).toHaveBeenCalledWith("team_artifact_publish", { orgId: ORG, input: { title: "Migration plan", contentType: "text/html", content: "v2", slug: "migration-plan" } });
+    expect(result).toMatchObject({ message: "Published v2 of Migration plan for everyone at Acme." });
+    expect(await handleCloudControl("artifacts.show", { artifact: "@migration-plan" })).toMatchObject({ slug: "migration-plan", content: "<h1>Plan</h1>", version: 1 });
+    await expect(handleCloudControl("artifacts.show", { artifact: "nothing" })).rejects.toMatchObject({ code: "not_found" });
   });
 });
