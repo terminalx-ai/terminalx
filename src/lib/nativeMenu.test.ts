@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { setPrefs } from "./prefs";
 import { buildNativeMenu, nativeAccelerator, type NativeMenuItem } from "./nativeMenu";
 import { bindingText, resolveKeymap, SHORTCUT_ACTIONS } from "./shortcuts";
 
@@ -7,6 +8,8 @@ function leaves(items: NativeMenuItem[]): NativeMenuItem[] {
 }
 
 describe("native menus and the action registry", () => {
+  afterEach(() => setPrefs({ introSlides: false }));
+
   it("routes New Window to main even when no window has focus", () => {
     const items = leaves(buildNativeMenu(resolveKeymap({}, true), []).flatMap((group) => group.items));
     expect(items.find((item) => item.id.endsWith(":app.newWindow"))).toMatchObject({
@@ -20,13 +23,14 @@ describe("native menus and the action registry", () => {
   });
 
   it("contains the requested menu tree, with each registered menu action exactly once", () => {
+    setPrefs({ introSlides: true });
     const groups = buildNativeMenu(resolveKeymap({}, true), []);
     expect(groups.map((group) => [group.id, group.items.map((item) => item.id.split(":").at(-1))])).toEqual([
       ["app", ["app.about", "app.settings", "app.checkUpdates"]],
       ["file", ["app.newSession", "app.newWindow", "app.startFrom", "app.addProject", "app.openRecent", "session.closeTab", "app.closeWindow"]],
       ["view", ["app.toggleSidebar", "app.togglePanel", "session.latestShell", "session.toggleTerminalView", "app.zoomIn", "app.zoomOut", "app.zoomReset", "app.fullscreen"]],
       ["go", ["app.agentDashboard", "app.issues", "app.automations", "app.runView", "app.nextSession", "app.previousSession", "app.nextAttention"]],
-      ["help", ["app.docs", "app.shortcuts", "app.reportIssue", "app.supportReport"]],
+      ["help", ["app.docs", "app.shortcuts", "app.showIntro", "app.reportIssue", "app.supportReport"]],
     ]);
     const ids = leaves(groups.flatMap((group) => group.items)).map((item) => item.id.split(":").at(-1));
     expect(ids.slice().sort()).toEqual(SHORTCUT_ACTIONS.filter((action) => action.menu).map((action) => action.id).sort());
@@ -34,6 +38,7 @@ describe("native menus and the action registry", () => {
   });
 
   it.each([true, false])("shows every effective binding, including alternatives, on mac=%s", (mac) => {
+    setPrefs({ introSlides: true });
     const keymap = resolveKeymap({}, mac);
     const items = leaves(buildNativeMenu(keymap, [], false, mac).flatMap((group) => group.items));
     for (const action of SHORTCUT_ACTIONS.filter((action) => action.menu)) {
@@ -42,6 +47,13 @@ describe("native menus and the action registry", () => {
       expect(item.accelerator).toBe(bindings[0] ? nativeAccelerator(bindings[0]) : null);
       for (const alternative of bindings.slice(1)) expect(item.text).toContain(bindingText(alternative, mac));
     }
+  });
+
+  it("lists Help › Show Intro only while the intro's switch is on (PRO-241)", () => {
+    const help = () => buildNativeMenu(resolveKeymap({}, true), []).find((group) => group.id === "help")!.items;
+    expect(help().map((item) => item.text)).not.toContain("Show Intro");
+    setPrefs({ introSlides: true });
+    expect(help().find((item) => item.text === "Show Intro")).toMatchObject({ id: "command:main:app.showIntro", accelerator: null });
   });
 
   it("puts Run View in the Go menu on keys no other menu item has", () => {

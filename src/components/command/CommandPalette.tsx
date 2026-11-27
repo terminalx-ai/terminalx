@@ -131,7 +131,7 @@ import {
   upsertSession,
   useSessionStore,
 } from "@/lib/sessions";
-import { ORGANIZATION_SHORTCUTS, SHORTCUT_ACTIONS, defaultBindings, isMac, joinKeycaps, keycaps, useKeymap, type ShortcutAction } from "@/lib/shortcuts";
+import { ORGANIZATION_SHORTCUTS, SHORTCUT_ACTIONS, actionAvailable, defaultBindings, isMac, joinKeycaps, keycaps, useKeymap, type ShortcutAction } from "@/lib/shortcuts";
 import { openCloudSession, useCloudDashboard } from "@/lib/cloudDashboard";
 import { updateCloudSession, useCloudSessionForStatus } from "@/lib/cloudSessions";
 import { openNewCloudWorkspace } from "@/components/cloud/NewCloudWorkspaceDialog";
@@ -432,6 +432,8 @@ export function CommandPalette({
   const deferredQuery = useDeferredValue(query);
   // Settings behind an Experimental switch are listed and found only while it is on; the list follows the switch.
   const switches = useExperimentalSettings();
+  // Help › Show intro is listed only while the intro's switch is on (PRO-241).
+  const introSlides = usePrefs().introSlides;
   const orchestratorRuns = switches?.orchestratorRuns === true;
   const localVmTasks = switches?.localVmTasks === true;
   const [fileHits, setFileHits] = useState<FileHit[]>([]);
@@ -643,7 +645,7 @@ export function CommandPalette({
 
   const commandEntries = useMemo<CommandEntry[]>(() => {
     // An action behind an Experimental switch that is off (Bots) is not offered.
-    const shortcutEntries = SHORTCUT_ACTIONS.filter((shortcut) => !shortcut.requires || switches?.[shortcut.requires] === true).map((shortcut, index) =>
+    const shortcutEntries = SHORTCUT_ACTIONS.filter((shortcut) => actionAvailable(shortcut, switches)).map((shortcut, index) =>
       indexPaletteItem({
         id: `command:shortcut:${shortcut.id}`,
         group: "commands" as const,
@@ -754,7 +756,7 @@ export function CommandPalette({
         ]
       : [];
     return [...runEntries, ...shortcutEntries, ...extras];
-  }, [sections, store.projects, selectedSession, statusTarget, store.selectedCloudWorkspace, cloud.live, cloud.mayCreate, cloud.orgName, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme, switches]);
+  }, [sections, store.projects, selectedSession, statusTarget, store.selectedCloudWorkspace, cloud.live, cloud.mayCreate, cloud.orgName, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme, switches, introSlides]);
 
   const fileEntries = useMemo<FileEntry[]>(
     () => fileHits.map((hit, index) => indexPaletteItem({

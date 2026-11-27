@@ -13,7 +13,7 @@ import { featureFlags, useFeatureFlag } from "@/lib/featureFlags";
 import { phase2Ready } from "@/lib/phase2Readiness";
 import type { OrganizationMember } from "@/lib/organizationMembers";
 import { MemberProfile } from "@/components/people/MemberProfile";
-import { ADMIN_SHARE_LABEL, alwaysHasAccess, codeOf, MANAGER_APPROVAL_REASON, OUTCOME_UNKNOWN, shareErrorMessage, shareRoleLabel, yourAccessText } from "@/lib/cloudShareLabels";
+import { ADMIN_SHARE_LABEL, alwaysHasAccess, codeOf, MANAGER_APPROVAL_REASON, OUTCOME_UNKNOWN, shareErrorMessage, shareRoleLabel, yourAccessShort, yourAccessText } from "@/lib/cloudShareLabels";
 import { CloudGeneralAccessControls } from "./CloudGeneralAccessControls";
 import { CloudShareEditor } from "./CloudShareEditor";
 
@@ -425,8 +425,8 @@ function LegacyCloudShareDialog({
         )}
         {listed && (
           <div className="flex flex-col gap-3 text-xs">
-            <p className="text-muted-foreground" data-testid="cloud-share-you">
-              Your access: {yourAccessText(listed.you, orgRole, creator)}.
+            <p className="text-muted-foreground" data-testid="cloud-share-you" title={yourAccessText(listed.you, orgRole, creator)}>
+              {yourAccessShort(listed.you, orgRole, creator)}
             </p>
             {manage && isPrivate && (
               <p className="flex items-start gap-2 rounded-md border border-hairline bg-well/40 px-3 py-2 text-muted-foreground" data-testid="cloud-share-private">
