@@ -181,7 +181,12 @@ role changed).
   `stop` is refused the same way, except for managers. The lease lasts while
   the turn runs and two minutes after the holder's last send. Managers take it
   over explicitly. `AgentTabInfo` carries `lease`, and every queued follow-up
-  its sender (`followUps[].actorId`).
+  its sender (`followUps[].actorId`). A message, sent at once or queued,
+  is recorded in the tab's transcript as its sender's: its `user_message`
+  `author.userId` is the leased command's verified actor, never anything
+  the message says (PRO-141, so a mention quotes only its sender's own
+  words). The runtime has no name for the actor, so `displayName` is empty
+  and the transcript draws the message as before.
 - **Terminals.** Unchanged ownership (PRO-26): one controller per terminal.
   A driver who may approve permissions may take control too; a plain driver
   and a viewer watch (PRO-88: `pty.write`, `pty.resize` and `pty.control`

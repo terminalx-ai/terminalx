@@ -468,7 +468,7 @@ fn apply(agents: &CloudAgents, command: &Command, session_id: &str, may_configur
                 agents.nudge_follow_ups(tab_id);
                 ("applied", None, mark(json!({ "queued": true })))
             } else {
-                let sent = ops.send_attached(session_id, tab_id, &text, images, files);
+                let sent = ops.send_attached_by(session_id, tab_id, &text, images, files, command.actor_id);
                 // Typed or not, this message is settled: its uploads are done with.
                 agents.attachments.remove(&image_ids);
                 match sent {

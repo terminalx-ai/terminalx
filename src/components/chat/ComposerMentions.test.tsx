@@ -125,6 +125,37 @@ describe("@ mentions in the composer (PRO-141)", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it("over the mention budget: says so on the check and sends nothing, or says the mention went undelivered after the send", async () => {
+    const tooFast = { code: "cloud_workspace_rate_limited", status: 429 };
+    const onSend = vi.fn();
+    render(<Harness people={source({ check: vi.fn(async () => { throw tooFast; }) })} onSend={onSend} />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "@Sam Rivera hi" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    const checked = await screen.findByTestId("mention-refused");
+    expect(checked.textContent).toBe("You're sending mentions too fast, so nothing was sent. Wait a minute, then try again.");
+    expect(within(checked).queryByRole("button", { name: "Share" })).toBeNull();
+    expect(onSend).not.toHaveBeenCalled();
+    cleanup();
+
+    const people = source({ record: vi.fn(async () => { throw tooFast; }) });
+    render(<Harness people={people} onSend={onSend} />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "@Sam Rivera hi" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("@Sam Rivera hi"));
+    expect((await screen.findByTestId("mention-refused")).textContent).toBe("Your message was sent, but you're sending mentions too fast, so nobody was told about this mention.");
+  });
+
+  it("says nothing more when recording fails for another reason", async () => {
+    const people = source({ record: vi.fn(async () => { throw new Error("offline"); }) });
+    const onSend = vi.fn();
+    render(<Harness people={people} onSend={onSend} />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "@Sam Rivera hi" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(people.record).toHaveBeenCalled());
+    await Promise.resolve();
+    expect(screen.queryByTestId("mention-refused")).toBeNull();
+  });
+
   it("keeps files-only behaviour where mentions are not offered", async () => {
     roster.people = [];
     const onSend = vi.fn();

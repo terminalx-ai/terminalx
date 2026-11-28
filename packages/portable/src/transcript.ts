@@ -465,7 +465,10 @@ export class TranscriptReducer {
         if (!event.subagent && event.harness === "codex") this.goal = undefined;
         break;
       case "user_message": {
-        if (followsCompaction && !payload.queued && !payload.author && payload.text.startsWith(COMPACTION_SUMMARY_OPENING)) {
+        // A cloud member's message names them by id alone (PRO-141): what the
+        // transcript draws, copies and parses goes by a named author, as before.
+        const author = payload.author?.displayName ? payload.author : undefined;
+        if (followsCompaction && !payload.queued && !author && payload.text.startsWith(COMPACTION_SUMMARY_OPENING)) {
           this.attachSummary(event, payload.text);
           break;
         }
@@ -476,7 +479,7 @@ export class TranscriptReducer {
         this.messageSeqs.add(event.seq);
         // Only Claude Code's own record of a `!` command, which names nobody:
         // a message someone sent is drawn as theirs, whatever it holds.
-        const shell = event.harness === "claude" && !payload.author ? shellRecord(visibleUserText(payload.text)) : null;
+        const shell = event.harness === "claude" && !author ? shellRecord(visibleUserText(payload.text)) : null;
         if (shell) {
           this.addShell(event, shell);
           break;
@@ -490,11 +493,11 @@ export class TranscriptReducer {
         // nothing yet: a turn the agent started itself is heard of before its
         // first record (#540), and the message is not that turn's prompt.
         if (payload.queued) {
-          this.ensureTurn(event).work.push({ kind: "queued", baseline: payload.baseline, author: payload.author, ...bot, text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, messageTs: event.messageTs, images: payload.images, ...(payload.files?.length ? { files: payload.files } : {}) });
+          this.ensureTurn(event).work.push({ kind: "queued", baseline: payload.baseline, author, ...bot, text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, messageTs: event.messageTs, images: payload.images, ...(payload.files?.length ? { files: payload.files } : {}) });
           break;
         }
         this.abandonUnresolved();
-        this.newTurn(event, { baseline: payload.baseline, author: payload.author, ...bot, text, images: payload.images, ...(payload.files?.length ? { files: payload.files } : {}), ts: event.ts, messageTs: event.messageTs, seq: event.seq });
+        this.newTurn(event, { baseline: payload.baseline, author, ...bot, text, images: payload.images, ...(payload.files?.length ? { files: payload.files } : {}), ts: event.ts, messageTs: event.messageTs, seq: event.seq });
         this.modelRequestOpen = false;
         this.workingSince = Date.parse(event.ts);
         break;

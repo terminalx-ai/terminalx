@@ -58,7 +58,7 @@ import type { ComposerCommandList, ComposerCommands, ComposerFiles, ComposerPrs 
 import type { ComposerPeople } from "@/lib/mentionSends";
 import { matchMentionPeople, mentionText, mentionedPeople, noAccessMessage, withoutMention, type MentionPerson } from "@/lib/mentions";
 import { useMentionPeople } from "./useMentionPeople";
-import { MentionChips, MentionRefusal, PersonAvatar, personDetail, type MentionRefused } from "./ComposerMentions";
+import { MentionChips, MentionRefusal, mentionsTooFast, PersonAvatar, personDetail, type MentionRefused } from "./ComposerMentions";
 import { useCollab } from "@/lib/cloudCollab";
 
 const NO_COMMANDS: ComposerCommandList = { commands: [], note: null };
@@ -594,8 +594,8 @@ export function Composer({
       let noAccess: string[];
       try {
         noAccess = await people.check(mentioned.map((person) => person.userId), tab.id);
-      } catch {
-        setMentionRefused({ kind: "unchecked" });
+      } catch (error) {
+        setMentionRefused({ kind: mentionsTooFast(error) ? "too-fast" : "unchecked" });
         return;
       } finally {
         if (mounted.current) setCheckingMentions(false);
@@ -646,7 +646,10 @@ export function Composer({
       // Ids only, once the message has its own id in the transcript. Access lost since the check: nobody was told.
       void people.record(mentioned.map((person) => person.userId), tab.id, text, afterSeq).then((noAccess) => {
         if (noAccess.length && mounted.current) setMentionRefused(refusal(noAccess, mentioned, people));
-      }, () => undefined);
+      }, (error: unknown) => {
+        // Sent, but over the mention budget: the sender is told nobody was.
+        if (mentionsTooFast(error) && mounted.current) setMentionRefused({ kind: "not-delivered" });
+      });
     }
     void markReviewsSent(reviewSend).catch((error) => {
       if (mounted.current) setReviewReceiptError({ retry: () => markReviewsSent(reviewSend), message: String(error) });

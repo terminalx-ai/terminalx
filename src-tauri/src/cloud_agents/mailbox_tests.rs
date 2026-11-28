@@ -22,6 +22,8 @@ struct FakeOps {
     images: Mutex<Vec<Vec<SentImage>>>,
     /// The files of each sent message (PRO-407), as stored for its session.
     files: Mutex<Vec<Vec<crate::events::FileRef>>>,
+    /// Who each sent message is recorded as from (PRO-141).
+    actors: Mutex<Vec<String>>,
     stops: Mutex<u32>,
     /// Escapes sent to a running turn (#427).
     interrupts: Mutex<u32>,
@@ -89,6 +91,10 @@ impl AgentOps for FakeOps {
     fn send_attached(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>, files: Vec<crate::events::FileRef>) -> anyhow::Result<()> {
         self.files.lock().unwrap().push(files);
         self.send_with_images(session_id, tab_id, text, images)
+    }
+    fn send_attached_by(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>, files: Vec<crate::events::FileRef>, actor_id: &str) -> anyhow::Result<()> {
+        self.actors.lock().unwrap().push(actor_id.into());
+        self.send_attached(session_id, tab_id, text, images, files)
     }
     fn stop(&self, _: &str, _: &str) -> anyhow::Result<()> {
         *self.stops.lock().unwrap() += 1;
@@ -551,6 +557,21 @@ fn a_send_while_busy_is_queued_durably_and_goes_out_when_the_turn_ends() {
     agents.nudge_follow_ups("tab-1");
     assert_eq!(agents.dispatch_follow_ups(), 1);
     assert_eq!(*h.ops.sent.lock().unwrap(), vec!["next", "after"]);
+}
+
+#[test]
+fn a_message_is_recorded_as_its_leased_senders_sent_now_or_queued() {
+    let h = harness();
+    handle(&h.agents, &lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "now" })));
+    // Busy: queued, then typed once the turn ends, still as its sender's.
+    let other = Lease { actor: Actor { user_id: "u2".into(), ..lease(&h.agents, "c2", "send", json!({})).actor }, ..lease(&h.agents, "c2", "send", json!({ "v": 1, "text": "later" })) };
+    assert_eq!(handle(&h.agents, &other).outcome, "applied");
+    assert_eq!(h.agents.tab("tab-1").unwrap().follow_ups[0].text, "later");
+    *h.ops.busy.lock().unwrap() = false;
+    h.agents.nudge_follow_ups("tab-1");
+    assert_eq!(h.agents.dispatch_follow_ups(), 1);
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["now", "later"]);
+    assert_eq!(*h.ops.actors.lock().unwrap(), vec!["u1", "u2"], "the lease's verified sender, never the message's words");
 }
 
 #[test]

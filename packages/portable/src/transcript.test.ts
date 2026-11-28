@@ -513,3 +513,21 @@ describe("a question the agent's CLI drew in its own terminal (PRO-460)", () => 
     expect(asked.turns).toEqual(buildTranscript([compacted, summary], false).turns);
   });
 });
+
+describe("a message's author", () => {
+  const event = (seq: number, payload: Payload): AgentEvent => ({ id: `a-${seq}`, seq, sessionId: "s", tabId: "t", harness: "codex", ts: "2026-11-28T09:00:00Z", payload });
+
+  it("is drawn when named, and a cloud member's message, which names them by id alone, is drawn as before", () => {
+    const aisha = { userId: "u-aisha", displayName: "Aisha Khan" };
+    const member = { userId: "u-member", displayName: "" };
+    const named = buildTranscript([event(1, { type: "user_message", author: aisha, text: "from a guest", queued: false })], false);
+    expect(named.turns[0].prompt?.author).toEqual(aisha);
+    const unnamed = buildTranscript([
+      event(1, { type: "user_message", author: member, text: "from the cloud", queued: false }),
+      event(2, { type: "user_message", author: member, text: "and queued", queued: true }),
+    ], false);
+    expect(unnamed.turns[0].prompt).toMatchObject({ text: "from the cloud" });
+    expect(unnamed.turns[0].prompt?.author).toBeUndefined();
+    expect(unnamed.turns[0].work).toMatchObject([{ kind: "queued", text: "and queued", author: undefined }]);
+  });
+});

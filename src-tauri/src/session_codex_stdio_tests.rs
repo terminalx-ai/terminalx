@@ -1346,6 +1346,12 @@ fn mailbox_fixture(case: &str) {
     settled(2);
     assert_eq!(ended(), [REFUSED, ANSWERED]);
     assert_eq!(starts(), ["fix the build", "sent mid-turn"]);
+    // Sent at once or queued, each is recorded as the leased sender's (PRO-141).
+    let authors = store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap().into_iter()
+        .filter_map(|event| match event.payload { Payload::UserMessage { author, text, .. } => Some((text, author.map(|author| (author.user_id, author.display_name)))), _ => None })
+        .collect::<Vec<_>>();
+    let member = Some(("member".to_owned(), String::new()));
+    assert!(!authors.is_empty() && authors.iter().all(|(_, author)| *author == member), "every message is the member's: {authors:?}");
     assert!(queued().is_empty());
     assert_eq!(launches(), 2);
     assert_eq!(threads(), ["thread/start -", "thread/resume thread-1"]);

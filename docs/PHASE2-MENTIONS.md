@@ -62,10 +62,9 @@ The saas side is described in its `docs/phase2/mentions-contract.md`.
     (its `user_message` `author.userId` is the event's `actorId`). The server
     takes `messageId` from the sender as given, so without this a mention
     could attach someone else's message to it. A message by anyone else, or
-    with no author, gives no quote. Cloud agent tabs do not yet record an
-    author on `user_message` (the runtime's mailbox keeps the sender on the
-    command only), so until the runtime records it, cloud mentions show
-    without a quote.
+    with no author, gives no quote. On a cloud agent tab the runtime records
+    the leased command's verified sender as `author.userId`, sent at once or
+    queued, with no name (docs/CLOUD-SHARING.md).
   - The macOS banner reads "<first name> mentioned you" with the workspace
     name. It never carries the message, because banners can show on the lock
     screen.
@@ -84,5 +83,8 @@ The saas side is described in its `docs/phase2/mentions-contract.md`.
 - 13.16's dedicated Notifications panel, unread total and next-unread shortcut
   are still deferred (see PHASE2-DESKTOP-EVENTS.md). Mentions show as the
   in-app notification and as the row's `@` and bold title.
-- There is no per-sender rate limit beyond the 10-people cap per message and
-  the route's member and body limits.
+- The server limits how many mentions a sender records (saas
+  `docs/phase2/mentions-contract.md`, Budget) and answers 429
+  `cloud_workspace_rate_limited` over it. On the check, the composer says the
+  person is sending mentions too fast and sends nothing; on the record, after
+  the message went, it says nobody was told about the mention.

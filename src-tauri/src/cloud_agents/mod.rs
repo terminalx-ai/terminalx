@@ -210,6 +210,14 @@ pub trait AgentOps: Send + Sync {
         }
         anyhow::bail!("this runtime cannot send files to an agent")
     }
+    /// [`Self::send_attached`] for a member's command (PRO-141): the
+    /// transcript records `actor_id`, the leased command's verified sender,
+    /// as the message's author. An agent host with no transcript of its own
+    /// sends it as any other.
+    fn send_attached_by(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>, files: Vec<crate::events::FileRef>, actor_id: &str) -> Result<()> {
+        let _ = actor_id;
+        self.send_attached(session_id, tab_id, text, images, files)
+    }
     fn stop(&self, session_id: &str, tab_id: &str) -> Result<()>;
     /// Escape for the tab's running turn (#427): the turn is interrupted, the
     /// agent's process stays, and nothing queued is dropped. False when the
@@ -416,6 +424,14 @@ impl AgentOps for ManagerOps {
 
     fn send_attached(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>, files: Vec<crate::events::FileRef>) -> Result<()> {
         self.manager.send_pressed(session_id, tab_id, text.to_string(), images, None, files).map(|_| ())
+    }
+
+    fn send_attached_by(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>, files: Vec<crate::events::FileRef>, actor_id: &str) -> Result<()> {
+        // A paired computer's live command names no person.
+        if actor_id.is_empty() {
+            return self.send_attached(session_id, tab_id, text, images, files);
+        }
+        self.manager.send_from_member(session_id, tab_id, text.to_string(), images, files, actor_id).map(|_| ())
     }
 
     fn interrupt(&self, session_id: &str, tab_id: &str) -> Result<bool> {
@@ -906,7 +922,7 @@ impl CloudAgents {
                     let permit = self.collab.get().map(|collab| collab::v2::Permit::new(collab.clone(), &follow_up.actor_id, follow_up.policy_stamp.clone(), collab::v2::Action::Drive));
                     match self.attachments.load(&follow_up.actor_id, &follow_up.images) {
                         Ok(images) => {
-                            let send = || self.ops.send_attached(&follow_up.session_id, &tab_id, &follow_up.text, images, follow_up.files.clone());
+                            let send = || self.ops.send_attached_by(&follow_up.session_id, &tab_id, &follow_up.text, images, follow_up.files.clone(), &follow_up.actor_id);
                             let result = match permit { Some(permit) => permit.with(send), None => send() };
                             if let Err(error) = result {
                                 log::warn!("send follow-up {}: {error:#}", follow_up.client_command_id);
