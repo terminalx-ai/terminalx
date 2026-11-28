@@ -1815,7 +1815,9 @@ from `RACCOON_SESSION_ID`, and refuses when it cannot. The app reads the file it
   the result under a new slug.
 - A slug already in use is refused (`team_artifact_slug_taken`). Add `--new-version` to publish
   the file as that artifact's next version; only its author and admins may
-  (`team_artifact_publish_forbidden`).
+  (`team_artifact_publish_forbidden`). The same code comes back when a teammate takes the slug,
+  or adds a version, between the check and the publish: nothing was published, so run
+  `artifact show <slug>` and decide again.
 
 It needs "Let agents publish team artifacts" turned on in Settings > General (otherwise
 `artifacts_publish_disabled`) and team artifacts enabled for the organization

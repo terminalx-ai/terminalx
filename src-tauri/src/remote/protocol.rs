@@ -389,6 +389,7 @@ pub const METHODS: &[Method] = &[
     method("ports.write", "ports/1", Participate, false),
     method("ports.ack", "ports/1", Participate, false),
     method("ports.close", "ports/1", Participate, false),
+    method("transfer.preview", "workspace-transfer/3", Manage, false),
     method("transfer.open", "workspace-transfer/3", Manage, false),
     method("transfer.read", "workspace-transfer/3", Manage, false),
     method("transfer.close", "workspace-transfer/3", Manage, false),
@@ -398,6 +399,10 @@ pub const METHODS: &[Method] = &[
     method("desktop.write", "cloud-desktop/1", Participate, false),
     method("desktop.ack", "cloud-desktop/1", Participate, false),
     method("desktop.close", "cloud-desktop/1", Participate, false),
+    // PRO-209: a viewer with control stops the agent driving the cloud
+    // browser, and hands the desktop back.
+    method("desktop.takeControl", "cloud-desktop/1", Participate, false),
+    method("desktop.handBack", "cloud-desktop/1", Participate, false),
     // PRO-340: the machine and its projects, read-only. Only a runtime that
     // serves its machine has them.
     method("machine.describe", "machine/1", Participate, false),

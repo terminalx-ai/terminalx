@@ -1,5 +1,5 @@
 {
-  "source": "node scripts/webkit/run-all.mjs --times over 24 part logs (45588208775-part-1.log, 45588208775-part-2.log, 45588208775-part-3.log, 45588208775-part-4.log, 45595771005-part-1.log, 45595771005-part-2.log, 45595771005-part-3.log, 45595771005-part-4.log, 45597409917-part-1.log, 45597409917-part-2.log, 45597409917-part-3.log, 45597409917-part-4.log, 45598717792-part-1.log, 45598717792-part-2.log, 45598717792-part-3.log, 45598717792-part-4.log, 45598884694-part-1.log, 45598884694-part-2.log, 45598884694-part-3.log, 45598884694-part-4.log, 45604228203-part-1.log, 45604228203-part-2.log, 45604228203-part-3.log, 45604228203-part-4.log), seconds per check, median of the runs it passed in. chat-mentions (PRO-141, new): one local run of 13 s until the next rebuild from CI logs. intro-slides (PRO-241, new): one local run of 12 s until the next rebuild from CI logs. organization-billing (PRO-596, new): one local run of 5.7 s until the next rebuild from CI logs. mcp-settings (PRO-239, new): one local run of 24 s, likewise. invites-welcome (PRO-175, new): one local run of 14 s until the next rebuild from CI logs. organization-routes (PRO-310, new): one local run of 6 s until the next rebuild from CI logs.",
+  "source": "node scripts/webkit/run-all.mjs --times over 24 part logs (45588208775-part-1.log, 45588208775-part-2.log, 45588208775-part-3.log, 45588208775-part-4.log, 45595771005-part-1.log, 45595771005-part-2.log, 45595771005-part-3.log, 45595771005-part-4.log, 45597409917-part-1.log, 45597409917-part-2.log, 45597409917-part-3.log, 45597409917-part-4.log, 45598717792-part-1.log, 45598717792-part-2.log, 45598717792-part-3.log, 45598717792-part-4.log, 45598884694-part-1.log, 45598884694-part-2.log, 45598884694-part-3.log, 45598884694-part-4.log, 45604228203-part-1.log, 45604228203-part-2.log, 45604228203-part-3.log, 45604228203-part-4.log), seconds per check, median of the runs it passed in. chat-mentions (PRO-141, new): one local run of 13 s until the next rebuild from CI logs. intro-slides (PRO-241, new): one local run of 12 s until the next rebuild from CI logs. organization-billing (PRO-596, new): one local run of 5.7 s until the next rebuild from CI logs. mcp-settings (PRO-239, new): one local run of 24 s, likewise. invites-welcome (PRO-175, new): one local run of 14 s until the next rebuild from CI logs. organization-routes (PRO-310, new): one local run of 6 s until the next rebuild from CI logs. cloud-move (PRO-217, new): one local run of 4 s until the next rebuild from CI logs.",
   "seconds": {
     "account-row": 22.7,
     "account-settings": 26.4,
@@ -34,6 +34,7 @@
     "cloud-attention": 18.5,
     "cloud-automations": 26.5,
     "cloud-history": 4.7,
+    "cloud-move": 4,
     "cloud-outbox": 7.8,
     "cloud-sections": 27,
     "cloud-session": 101.8,
@@ -166,6 +167,7 @@
     "cloud-attention": 6,
     "cloud-automations": 6,
     "cloud-history": 6,
+    "cloud-move": 1,
     "cloud-outbox": 6,
     "cloud-sections": 6,
     "cloud-session": 6,

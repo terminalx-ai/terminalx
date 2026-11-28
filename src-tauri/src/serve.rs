@@ -179,6 +179,7 @@ pub fn main() -> i32 {
     #[cfg(target_os = "linux")]
     if let Some(code) = crate::run_pty_supervisor() { return code; }
     if crate::startup::probe_cli() { return 0; }
+    if let Some(code) = crate::cloud_browser::run_stdio_cli() { return code; }
     #[cfg(unix)]
     if let Some(code) = crate::local_vm::attachment::run_stdio_cli() { return code; }
     #[cfg(unix)]
@@ -368,6 +369,10 @@ fn run(options: Options) -> Result<()> {
     let mut runtime = start(&options, guest_mode, adopted, _owner.as_ref())?;
     if let (Some((cloud, origin)), false) = (&cloud, options.self_test) {
         report_activity(&runtime, cloud.clone(), origin);
+        // An organization route that stops applying moves its tabs to the
+        // next login between turns (PRO-310).
+        let manager = runtime.manager.clone();
+        crate::cloud_grants::on_organization_route_gone(move || manager.switch_organization_routes());
     }
     println!(
         "{}",
@@ -711,6 +716,9 @@ fn start(options: &Options, guest_mode: bool, adopted: Inherited, owner: Option<
     }
     crate::workspace_setup::recover(&manager);
     let hooked = manager.clone();
+    // A cloud browser session never outlives its agent's CLI launch (PRO-209).
+    let launches = manager.clone();
+    crate::cloud_browser::set_liveness(move |session, tab, token| launches.cli_launch_alive(session, tab, token));
     let mut service = crate::control::ControlService::headless(
         sink.clone(),
         manager.clone(),

@@ -1103,6 +1103,8 @@ impl WorkspaceRpc {
         if self.agents.set(agents).is_err() {
             return;
         }
+        #[cfg(any(target_os = "linux", all(test, unix)))]
+        self.watch_desktop_agent();
         let weak = Arc::downgrade(self);
         let notify = self.tabs_changed.clone();
         tokio::spawn(async move {
@@ -1816,6 +1818,7 @@ impl WorkspaceRpc {
         if self.desktop_ready.load(Ordering::SeqCst) == ready { return; }
         self.desktop_epoch.fetch_add(1, Ordering::SeqCst);
         self.desktop_ready.store(ready, Ordering::SeqCst);
+        crate::cloud_browser::set_desktop(ready);
         for peer in self.live_peers() {
             if ready {
                 self.offer_desktop(&peer);
@@ -1840,7 +1843,37 @@ impl WorkspaceRpc {
         let mut granted = peer.granted.lock().unwrap();
         if granted.as_mut().is_some_and(|capabilities| capabilities.insert(protocol::CLOUD_DESKTOP.to_owned())) {
             peer.notify("desktop.available", json!({ "runtimeGeneration": self.generation(), "runtimeEpoch": self.epoch }));
+            peer.notify("desktop.agent", crate::cloud_browser::desktop_agent_state());
         }
+    }
+
+    /// `desktop.agent` to every desktop viewer whenever the cloud browser
+    /// for agents changes: offered or not, who drives, its latest action.
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    fn watch_desktop_agent(self: &Arc<Self>) {
+        // The agents' desktop is the viewers': set it up here, in its folder.
+        #[cfg(not(test))]
+        if !self.is_machine() {
+            let _ = self.desktop.get_or_init(|| super::cloud_desktop::shared_pool_in(self.desktop_workdir()));
+        }
+        #[cfg(target_os = "linux")]
+        crate::cloud_browser::install_runtime(tokio::runtime::Handle::current());
+        let weak = Arc::downgrade(self);
+        let mut changes = crate::cloud_browser::subscribe();
+        tokio::spawn(async move {
+            while changes.changed().await.is_ok() {
+                let Some(rpc) = weak.upgrade() else { return };
+                if rpc.desktop_ready.load(Ordering::SeqCst) {
+                    rpc.notify_granted(protocol::CLOUD_DESKTOP, "desktop.agent", crate::cloud_browser::desktop_agent_state());
+                }
+            }
+        });
+    }
+
+    /// The folder the desktop's terminal opens in: the workspace's project.
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    fn desktop_workdir(&self) -> Option<std::path::PathBuf> {
+        match &self.scope { Scope::Workspace { project, .. } => Some(project.root.clone()), _ => None }
     }
 
     #[cfg(any(target_os = "linux", all(test, unix)))]
@@ -1860,9 +1893,18 @@ impl WorkspaceRpc {
 
     #[cfg(any(target_os = "linux", all(test, unix)))]
     async fn run_desktop(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
-        use super::cloud_desktop::{DesktopAccess, DesktopError, DesktopPool};
+        use super::cloud_desktop::{DesktopAccess, DesktopError};
         if !self.desktop_access(peer, DesktopAccess::Watch) {
             return Err(RpcError::forbidden("Cloud desktop access is unavailable"));
+        }
+        if let held @ ("desktop.takeControl" | "desktop.handBack") = method {
+            if !self.desktop_access(peer, DesktopAccess::Control) {
+                return Err(RpcError::forbidden("You need edit access to take control of the cloud desktop"));
+            }
+            // Control comes back if this person disconnects without handing it back.
+            let holder = Arc::downgrade(peer);
+            crate::cloud_browser::set_held(held == "desktop.takeControl", Some(Box::new(move || holder.upgrade().is_some_and(|peer| !peer.hung_up()))));
+            return Ok(crate::cloud_browser::desktop_agent_state());
         }
         if method != "desktop.open" {
             let _privacy = ticket.enter().map_err(|error| RpcError::forbidden(error.to_string()))?;
@@ -1888,14 +1930,11 @@ impl WorkspaceRpc {
                 && rpc.collab.runtime_policy.attachment_current(stamp.as_ref())
         });
         self.desktop_ports.open_desktop(peer, ticket, async {
-            use std::time::Duration;
             if !allowed() {
                 return Err(RpcError::forbidden("Cloud desktop access changed before open"));
             }
-            let workdir = match &self.scope { Scope::Workspace { project, .. } => Some(project.root.clone()), _ => None };
-            let pool = self.desktop.get_or_init(|| DesktopPool::new_in(
-                vec!["/usr/bin".into(), "/bin".into()], workdir, Duration::from_secs(60),
-            ));
+            // One desktop per workspace, shared with its agents (PRO-209).
+            let pool = self.desktop.get_or_init(|| super::cloud_desktop::shared_pool_in(self.desktop_workdir()));
             let lease = pool.connect(access, &allowed).await.map_err(|error| {
                 if error == DesktopError::AccessChanged { return RpcError::forbidden(error.to_string()); }
                 RpcError::new(match error {
@@ -2151,7 +2190,7 @@ impl WorkspaceRpc {
             "session.handoff" => self.session_handoff(peer, params),
             "session.handoffContext" => self.session_handoff_context(peer, params),
             "session.subscribe" => self.session_subscribe(peer, params),
-            "transfer.open" | "transfer.read" | "transfer.close" => self.workspace_transfer(peer, method, &params),
+            "transfer.preview" | "transfer.open" | "transfer.read" | "transfer.close" => self.workspace_transfer(peer, method, &params),
             "session.tabs" => self.session_tabs(peer),
             "session.commands" => self.session_commands(peer, params),
             "session.files" => self.session_files(peer, params),

@@ -241,7 +241,7 @@ it("never publishes a template over a slug in use by default; its author may cho
   const asVersion = screen.getByRole("button", { name: "Publish v4" });
   expect((asVersion as HTMLButtonElement).disabled).toBe(false);
   fireEvent.click(asVersion);
-  await waitFor(() => expect(f.invoke).toHaveBeenCalledWith("team_artifact_publish", { orgId: "org", input: { title: "Migration plan", contentType: "text/html", content: "<h1>Plan</h1>", template: true, slug: "migration-plan" } }));
+  await waitFor(() => expect(f.invoke).toHaveBeenCalledWith("team_artifact_publish", { orgId: "org", input: { title: "Migration plan", contentType: "text/html", content: "<h1>Plan</h1>", template: true, slug: "migration-plan", expect: { version: 3 } } }));
 });
 
 it("someone else's slug must be changed: no new version is offered", async () => {
@@ -253,4 +253,26 @@ it("someone else's slug must be changed: no new version is offered", async () =>
   fireEvent.change(screen.getByLabelText("Template slug"), { target: { value: "release-notes-q4" } });
   expect(screen.queryByTestId("team-artifact-slug-taken")).toBeNull();
   expect((screen.getByRole("button", { name: "Publish" }) as HTMLButtonElement).disabled).toBe(false);
+  // Held on the server to what the dialog showed: nobody had the slug.
+  fireEvent.click(screen.getByRole("button", { name: "Publish" }));
+  await waitFor(() => expect(f.invoke).toHaveBeenCalledWith("team_artifact_publish", { orgId: "org", input: expect.objectContaining({ slug: "release-notes-q4", expect: "new" }) }));
+});
+
+it("a slug a teammate took after the dialog looked is refused by the server and shown at once", async () => {
+  const fallback = f.invoke.getMockImplementation()!;
+  f.invoke.mockImplementation(async (command, args) => {
+    if (command === "team_artifact_publish") {
+      listed = [...listed, { ...migration, id: "taken", slug: "q4-plan", title: "Q4 plan", canDelete: false }];
+      throw { code: "team_artifact_slug_taken", message: "team_artifact_slug_taken" };
+    }
+    return fallback(command, args);
+  });
+  await publishTemplate("Q4 plan");
+  const publish = screen.getByRole("button", { name: "Publish" });
+  await waitFor(() => expect((publish as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(publish);
+  expect(await screen.findByText(/A teammate published this slug, or a new version of it, just now/)).toBeTruthy();
+  // The list is read again, so the clash shows and Publish waits for another slug.
+  expect((await screen.findByTestId("team-artifact-slug-taken")).textContent).toContain("@q4-plan is already “Q4 plan”.");
+  expect((screen.getByRole("button", { name: "Publish" }) as HTMLButtonElement).disabled).toBe(true);
 });

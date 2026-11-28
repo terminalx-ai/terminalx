@@ -706,6 +706,7 @@ async fn phase2_collaboration_v2_bootstrap_refresh_installs_before_actual_rpc_an
             workspace_ssh: None,
                 ssh_updater: None,
             desktop_ready: false,
+                agent_browser_ready: false,
         };
         crate::remote::bootstrap_link::relay_session(&session, crate::cloud_bootstrap::CAPABILITIES)
     };
@@ -792,6 +793,14 @@ async fn workspace_transfer_reauthorizes_each_replayed_chunk() {
 
     let scope = json!({ "sessionId": session.id, "tabId": tab, "requestId": uuid::Uuid::new_v4() });
     assert_eq!(code(call(&f.rpc, &viewer, "transfer.open", scope.clone()).await), "forbidden");
+    let preview_scope = json!({ "sessionId": session.id, "tabId": tab });
+    assert_eq!(code(call(&f.rpc, &viewer, "transfer.preview", preview_scope.clone()).await), "forbidden");
+    let preview = call(&f.rpc, &admin, "transfer.preview", preview_scope.clone()).await.unwrap();
+    assert_eq!(preview["branch"], "topic");
+    assert_eq!(preview["messages"], 2);
+    assert_eq!(preview["harness"], "claude");
+    assert_eq!((preview["otherTabs"].as_u64(), preview["notes"].as_bool()), (Some(0), Some(false)));
+    assert!(preview["commits"].as_u64().unwrap() > 0);
     let export = call(&f.rpc, &admin, "transfer.open", scope.clone()).await.unwrap();
     assert_eq!(call(&f.rpc, &admin, "transfer.open", scope.clone()).await.unwrap(), export);
     assert_eq!(export["branch"], "topic");
@@ -810,4 +819,5 @@ async fn workspace_transfer_reauthorizes_each_replayed_chunk() {
     f.rpc.set_collaboration(members(json!([{ "userId": "admin", "role": "viewer" }])));
     assert_eq!(code(call(&f.rpc, &admin, "transfer.read", read).await), "forbidden");
     assert_eq!(code(call(&f.rpc, &admin, "transfer.open", scope).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &admin, "transfer.preview", preview_scope).await), "forbidden");
 }

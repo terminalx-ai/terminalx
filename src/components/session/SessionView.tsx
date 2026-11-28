@@ -1,5 +1,5 @@
 import { CloudWorkspaceTransfer } from "@/components/cloud/CloudWorkspaceTransfer";
-import { parseCloudWorkspaceKey } from "@/types/target";
+import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 import { RunStrip } from "@/components/orchestration/RunStrip";
 import { RunPill, RunViewHint } from "@/components/orchestration/RunPill";
 import { RunView } from "@/components/orchestration/RunView";
@@ -69,6 +69,7 @@ import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostics } from "@/components/cloud/CloudDiagnosticsDialog";
 import { CloudMirrorChip, CloudMirrorDialog, CloudMirrorMenuItem } from "@/components/cloud/CloudMirrorDialog";
 import { CloudDesktopPane } from "@/components/cloud/CloudDesktopPane";
+import { OPEN_CLOUD_DESKTOP_EVENT, useCloudDesktopAgent } from "@/lib/cloudBrowser";
 import { phase2Ready } from "@/lib/phase2Readiness";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { CloudPortsView } from "@/components/cloud/CloudPorts";
@@ -562,6 +563,15 @@ export function SessionView({
   };
   useEffect(() => {
     setDesktopView((previous) => previous?.scope === desktopScope ? previous : null);
+  }, [desktopScope]);
+  // PRO-209: an agent driving the cloud desktop's browser, and the card's "Open Desktop tab".
+  const desktopAgent = useCloudDesktopAgent(desktopScope && cloud ? cloud.client : null,
+    desktopScope && cloud ? cloudWorkspaceKey(cloud.orgId, cloud.workspaceId) : null);
+  useEffect(() => {
+    if (!desktopScope) return;
+    const open = () => setDesktopView({ scope: desktopScope, shown: true });
+    window.addEventListener(OPEN_CLOUD_DESKTOP_EVENT, open);
+    return () => window.removeEventListener(OPEN_CLOUD_DESKTOP_EVENT, open);
   }, [desktopScope]);
   const local = backend.caps.local;
   const isGit = useSessionIsGit(session, local);
@@ -1149,7 +1159,7 @@ export function SessionView({
             aria-labelledby={`${desktopTabsId}-Desktop`} hidden={!desktopShown}
             className={cn("min-h-0 flex-1", desktopShown && "flex")}>
             {desktopMounted && <CloudDesktopPane key={`${desktopScope}:${cloud.mayControlTerminals}`}
-              client={cloud.client} asleep={cloud.asleep} control={cloud.mayControlTerminals} visible={desktopShown}
+              client={cloud.client} asleep={cloud.asleep} control={cloud.mayControlTerminals} visible={desktopShown} agent={desktopAgent?.driving ?? null}
               onReconnect={() => reconnectCloudWorkspace({ orgId: cloud.orgId, workspaceId: cloud.workspaceId })} />}
           </div>}
           <div role={desktopScope ? "tabpanel" : undefined} id={desktopScope ? `${desktopTabsId}-Session-panel` : undefined}

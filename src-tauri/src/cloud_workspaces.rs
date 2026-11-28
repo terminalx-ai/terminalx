@@ -1328,6 +1328,32 @@ struct CloudStartProgressEvent {
     occurred_at: u64,
 }
 
+/// The workspace's "Cloud browser for agents" switch (PRO-209).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBrowserState {
+    pub enabled: bool,
+    pub can_change: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled_by: Option<AgentBrowserEnabler>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBrowserEnabler {
+    pub user_id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentBrowserReply {
+    agent_browser: AgentBrowserState,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudWorkspaceDetailsResponse {
@@ -2169,6 +2195,26 @@ pub struct TeamArtifactPublishInput {
     pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// What the caller saw of the slug: none had it, or its current version.
+    /// The server refuses with `team_artifact_slug_taken` when that has changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect: Option<TeamArtifactExpect>,
+}
+
+/// `"new"`, or `{"version": n}`: the slug's state a publish is held to (PRO-158).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, rename_all_fields = "camelCase")]
+pub enum TeamArtifactExpect {
+    New(TeamArtifactExpectNew),
+    Version {
+        version: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TeamArtifactExpectNew {
+    New,
 }
 
 /// The server's cap on one version (1 MiB of UTF-8); refused here before sending.
@@ -2186,7 +2232,10 @@ fn team_artifact_input_valid(input: &TeamArtifactPublishInput) -> Result<(), Clo
             && !slug.starts_with('-') && !slug.ends_with('-')
     });
     if title.is_empty() || title.chars().count() > 120 || title.chars().any(char::is_control)
-        || !TEAM_ARTIFACT_CONTENT_TYPES.contains(&input.content_type.as_str()) || input.content.contains('\0') || !slug_ok {
+        || !TEAM_ARTIFACT_CONTENT_TYPES.contains(&input.content_type.as_str()) || input.content.contains('\0') || !slug_ok
+        // An expectation is about a slug the caller names, and a version is never 0.
+        || (input.expect.is_some() && input.slug.is_none())
+        || matches!(input.expect, Some(TeamArtifactExpect::Version { version: 0 })) {
         return Err(inbox_invalid());
     }
     Ok(())
@@ -3642,6 +3691,29 @@ impl CloudWorkspaceService {
                 return Err(post_send_error(RequestRisk::Read));
             }
             Ok(value)
+        })
+    }
+
+    /// Reads the switch, or sets it when `enabled` is given. Only the
+    /// workspace owner and Organization admins may set it; the server checks.
+    pub fn agent_browser(&self, org: Option<&str>, workspace_id: &str, enabled: Option<bool>) -> Result<AgentBrowserState, CloudWorkspaceClientError> {
+        use crate::account::PHASE2_AGENT_BROWSER;
+        let unavailable = "cloud_workspace_agent_browser_unavailable";
+        let risk = if enabled.is_some() { RequestRisk::Mutation } else { RequestRisk::Read };
+        let target = self.phase2_target(org);
+        self.phase2_gate(PHASE2_AGENT_BROWSER, Some(&target), None, unavailable)?;
+        self.member_phase2_workspace(org, workspace_id, risk, |client, context| {
+            self.phase2_gate(PHASE2_AGENT_BROWSER, Some(&context.organization_id), Some(context), unavailable)?;
+            let tail = ["cloud-workspaces", workspace_id, "agent-browser"];
+            let reply: AgentBrowserReply = match enabled {
+                Some(enabled) => client.request_as("PUT", context, &tail, None, Some(json!({ "enabled": enabled })), None, risk)?,
+                None => client.request(context, &tail, None, None, None, risk)?,
+            };
+            let state = reply.agent_browser;
+            if enabled.is_some_and(|enabled| enabled != state.enabled) || (state.enabled_at.is_some() && !state.enabled) {
+                return Err(post_send_error(risk));
+            }
+            Ok(state)
         })
     }
 
@@ -5478,6 +5550,8 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_last_admin"
             | "cloud_workspace_access_revision_conflict"
             | "cloud_workspace_general_access_unavailable"
+            | "cloud_workspace_agent_browser_unavailable"
+            | "cloud_workspace_agent_browser_forbidden"
             | "cloud_workspace_groups_unavailable"
             | "cloud_workspace_group_share_not_found"
             | "cloud_workspace_group_manager_unsupported"
@@ -5495,6 +5569,7 @@ fn known_error_code(code: &str) -> bool {
             | "team_artifact_publish_forbidden"
             | "team_artifact_storage_full"
             | "team_artifact_version_current"
+            | "team_artifact_slug_taken"
             | "shared_setups_unavailable"
             | "snippet_keyword_taken"
             | "action_prompt_conflict"
@@ -5897,6 +5972,33 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    /// PRO-158: what a publish expects of its slug goes to the server as `"new"` or `{"version": n}`.
+    #[test]
+    fn a_team_artifact_publish_carries_what_it_expects_of_the_slug() {
+        let input = |extra: serde_json::Value| {
+            let mut body = serde_json::json!({"title": "Plan", "contentType": "text/markdown", "content": "# Plan"});
+            body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<TeamArtifactPublishInput>(body)
+        };
+        let new = input(serde_json::json!({"slug": "plan", "expect": "new"})).unwrap();
+        assert_eq!(new.expect, Some(TeamArtifactExpect::New(TeamArtifactExpectNew::New)));
+        assert_eq!(serde_json::to_value(&new).unwrap()["expect"], "new");
+        assert!(team_artifact_input_valid(&new).is_ok());
+        let version = input(serde_json::json!({"slug": "plan", "expect": {"version": 3}})).unwrap();
+        assert_eq!(serde_json::to_value(&version).unwrap()["expect"], serde_json::json!({"version": 3}));
+        assert!(team_artifact_input_valid(&version).is_ok());
+        // Left out, nothing is sent: a publish is as before.
+        let plain = input(serde_json::json!({})).unwrap();
+        assert!(serde_json::to_value(&plain).unwrap().get("expect").is_none());
+        // Malformed, or with no slug to hold it to: refused before sending.
+        assert!(input(serde_json::json!({"slug": "plan", "expect": "old"})).is_err());
+        assert!(input(serde_json::json!({"slug": "plan", "expect": {"version": -1}})).is_err());
+        assert!(team_artifact_input_valid(&input(serde_json::json!({"expect": "new"})).unwrap()).is_err());
+        assert!(team_artifact_input_valid(&input(serde_json::json!({"slug": "plan", "expect": {"version": 0}})).unwrap()).is_err());
+        // The server's refusal keeps its own code.
+        assert!(known_error_code("team_artifact_slug_taken"));
+    }
 
     fn context() -> AccountContext {
         AccountContext {
@@ -7079,6 +7181,42 @@ mod tests {
                 assert!(serde_json::from_value::<CloudWorkspaceDetailsResponse>(bad).is_err());
             }
         }
+    }
+
+    #[test]
+    fn agent_browser_switch_reads_and_puts_the_exact_body() {
+        assert!(known_error_code("cloud_workspace_agent_browser_unavailable"));
+        assert!(known_error_code("cloud_workspace_agent_browser_forbidden"));
+        let off = json!({"agentBrowser": {"enabled": false, "canChange": true}});
+        let on = json!({"agentBrowser": {"enabled": true, "canChange": true, "enabledAt": "2026-11-27T10:28:00.000Z",
+            "enabledBy": {"userId": "user-1", "name": "Fixture Person"}}});
+        let (base, requests) = serve_each(vec![
+            response("200 OK", &off.to_string(), ""),
+            response("200 OK", &on.to_string(), ""),
+            response("403 Forbidden", &json!({"error": "cloud_workspace_agent_browser_forbidden"}).to_string(), ""),
+        ]);
+        let (_, service) = phase2_service(&base);
+        assert_eq!(service.agent_browser(None, "workspace-1", None).unwrap(), AgentBrowserState { enabled: false, can_change: true, enabled_at: None, enabled_by: None });
+        let state = service.agent_browser(None, "workspace-1", Some(true)).unwrap();
+        assert_eq!(state.enabled_by.unwrap().name.as_deref(), Some("Fixture Person"));
+        assert_eq!(service.agent_browser(None, "workspace-1", Some(false)).unwrap_err().code, "cloud_workspace_agent_browser_forbidden");
+        let requests = requests.join().unwrap();
+        assert!(requests[0].starts_with("GET /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/agent-browser HTTP/1.1"));
+        assert_eq!(requests[0].split_once("\r\n\r\n").unwrap().1, "");
+        assert!(requests[1].starts_with("PUT /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/agent-browser HTTP/1.1"));
+        let body: Value = serde_json::from_str(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body, json!({"enabled": true}));
+        for request in &requests { phase2_headers(request); }
+    }
+
+    #[test]
+    fn agent_browser_switch_is_held_without_readiness_and_rejects_a_mismatched_reply() {
+        let (_, service) = test_service("http://127.0.0.1:9");
+        assert_eq!(service.agent_browser(None, "workspace-1", None).unwrap_err().code, "cloud_workspace_agent_browser_unavailable");
+        let (base, requests) = serve_each(vec![response("200 OK", &json!({"agentBrowser": {"enabled": false, "canChange": true}}).to_string(), "")]);
+        let (_, service) = phase2_service(&base);
+        assert!(service.agent_browser(None, "workspace-1", Some(true)).is_err());
+        requests.join().unwrap();
     }
 
     #[test]
