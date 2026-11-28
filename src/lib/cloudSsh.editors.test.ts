@@ -4,6 +4,7 @@ const m = vi.hoisted(() => ({
   invoke: vi.fn(),
   ready: true,
   repositories: [{ repo: "widgets" }] as { repo: string }[],
+  sessions: null as null | { projectPath?: string }[],
   rpc: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: m.invoke }));
@@ -13,7 +14,14 @@ vi.mock("@/lib/api", () => ({ workspaceSshConnection: async () => ({
   client: {
     connection: { state: "connected" },
     hasCapability: (name: string) => name === "ssh/1",
-    call: async (method: string, params: unknown) => { m.rpc(method, params); return { repositories: m.repositories }; },
+    call: async (method: string, params: unknown) => {
+      m.rpc(method, params);
+      if (method === "session.list") {
+        if (!m.sessions) throw { code: "method_not_found" };
+        return { sessions: m.sessions };
+      }
+      return { repositories: m.repositories };
+    },
   },
   connectionId: () => "conn", close: vi.fn(),
 }) }));
@@ -27,6 +35,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   m.ready = true;
   m.repositories = [{ repo: "widgets" }];
+  m.sessions = null;
   m.invoke.mockImplementation(async (command: string) => command === "cloud_ssh_prepare" ? "revision" : command === "cloud_ssh_finish" ? "ssh ws_1.terminalx" : undefined);
 });
 
@@ -42,6 +51,7 @@ it("opens the repository's own checkout as the runtime lists it, through the nat
   await openWorkspaceInEditor(target, "cursor", null, "widgets");
   expect(m.invoke.mock.calls.map(([command]) => command)).toEqual(["cloud_ssh_prepare", "cloud_ssh_finish", "cloud_open_in_editor"]);
   expect(m.rpc).toHaveBeenCalledWith("git.repositories", { preferredRepo: "widgets" });
+  // No session shows the runtime's root: the standard root.
   expect(opened()).toEqual([{ editor: "cursor", workspaceId: "ws_1", path: "/var/lib/terminalx/workspace/widgets" }]);
 
   m.repositories = [{ repo: "." }];
@@ -88,4 +98,17 @@ it("runs one open at a time, says plainly when the editor is missing, and clears
   m.invoke.mockImplementation(async (command: string) => command === "cloud_ssh_prepare" ? "revision" : command === "cloud_ssh_finish" ? "ssh ws_1.terminalx" : undefined);
   await act(() => openInEditor(target, "zed"));
   expect(view.result.current).toEqual({ editor: "zed", phase: "opened" });
+});
+
+it("matches the preferred repository however it is spelled, under the root the runtime's sessions show", async () => {
+  m.repositories = [{ repo: "api" }, { repo: "./widgets" }];
+  m.sessions = [{ projectPath: "/srv/terminalx/state/workspace/api" }];
+  await openWorkspaceInEditor(target, "zed", null, "./widgets/");
+  expect(m.rpc).toHaveBeenCalledWith("git.repositories", { preferredRepo: "widgets" });
+  expect(opened()).toEqual([{ editor: "zed", workspaceId: "ws_1", path: "/srv/terminalx/state/workspace/widgets" }]);
+
+  // A session outside any listed checkout says nothing about the root.
+  m.sessions = [{ projectPath: "/elsewhere/scratch" }];
+  await openWorkspaceInEditor(target, "zed", null, "widgets");
+  expect(opened().at(-1)).toEqual({ editor: "zed", workspaceId: "ws_1", path: "/var/lib/terminalx/workspace/widgets" });
 });

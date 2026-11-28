@@ -108,23 +108,46 @@ export const SSH_EDITORS: { id: SshEditor; label: string; needsForwarding: boole
   { id: "zed", label: "Zed", needsForwarding: false },
 ];
 
-/** Where a cloud workspace keeps its checkouts (`<root>/<directory>`, the SaaS standard root). */
+/** Where a cloud workspace keeps its checkouts (`<root>/<directory>`, the SaaS standard root), when its runtime does not show its own. */
 export const WORKSPACE_ROOT = "/var/lib/terminalx/workspace";
+
+/** `./name`, `name/` and `name` are one repository; `.` is the root itself. */
+const normalRepo = (repo: string) => repo.replace(/^(\.\/)+/, "").replace(/\/+$/, "") || ".";
+
+/**
+ * The workspace root as its runtime spells it: a session in a repository
+ * checkout has `<root>/<repo>` as its project path. Null when no session
+ * shows it (none yet, or an older runtime).
+ */
+async function runtimeRoot(connection: CloudWorkspaceConnection, repos: string[]): Promise<string | null> {
+  const listed = await connection.client.call<{ sessions: { projectPath?: string }[] }>("session.list").catch(() => null);
+  for (const session of listed?.sessions ?? []) {
+    const path = session.projectPath?.replace(/\/+$/, "");
+    for (const repo of repos.filter((name) => name !== ".")) {
+      if (path?.endsWith(`/${repo}`) && path.length > repo.length + 1) return path.slice(0, -(repo.length + 1));
+    }
+  }
+  return null;
+}
 
 /**
  * The workspace's repository checkout, as its runtime lists it
  * (`git.repositories`, relative to the root, `.` for the root itself): the
- * preferred one, else the first (the primary).
+ * preferred one, else the first (the primary), under the root the runtime's
+ * sessions show, else the standard root.
  */
 export async function workspaceCheckout(connection: CloudWorkspaceConnection, preferred?: string | null): Promise<string> {
-  const listed = await connection.client.call<{ repositories: { repo: string }[] }>("git.repositories", preferred ? { preferredRepo: preferred } : undefined);
-  const repo = listed.repositories.find((repository) => repository.repo === preferred)?.repo ?? listed.repositories[0]?.repo;
+  const wanted = preferred ? normalRepo(preferred) : null;
+  const listed = await connection.client.call<{ repositories: { repo: string }[] }>("git.repositories", wanted ? { preferredRepo: wanted } : undefined);
+  const repos = listed.repositories.map((repository) => normalRepo(repository.repo));
+  const repo = repos.find((name) => name === wanted) ?? repos[0];
   if (!repo) throw new Error("This workspace has no repository checkout yet");
-  if (repo === ".") return WORKSPACE_ROOT;
-  if (repo.startsWith("/") || repo.split("/").some((part) => part === "" || part === "." || part === "..")) {
+  if (repo.startsWith("/") || (repo !== "." && repo.split("/").some((part) => part === "" || part === "." || part === ".."))) {
     throw new Error("The runtime named an unexpected checkout");
   }
-  return `${WORKSPACE_ROOT}/${repo}`;
+  const root = (await runtimeRoot(connection, repos)) ?? WORKSPACE_ROOT;
+  if (!root.startsWith("/")) throw new Error("The runtime named an unexpected checkout");
+  return repo === "." ? root : `${root}/${repo}`;
 }
 
 /**
