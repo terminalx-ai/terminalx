@@ -77,6 +77,7 @@ describe("Amazon Bedrock for Claude Code (PRO-200)", () => {
     ));
     await waitFor(() => expect(screen.queryByTestId("bedrock-login")).toBeNull());
     expect(within(claudeRow()).getByTestId("agent-login-status").textContent).toMatch(/^Connected · Amazon Bedrock · eu-central-1 · eu\.anthropic\.claude-opus-5-5/);
+    expect(within(claudeRow()).getByTestId("agent-login-status").className, "a long inference profile ARN wraps inside the row").toContain("wrap-anywhere");
   });
 
   it("shows Bedrock's own error when it refuses the test call, and nothing is saved", async () => {

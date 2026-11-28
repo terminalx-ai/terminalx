@@ -824,7 +824,8 @@ export function OrganizationAgentLogins({
                   <div className="flex flex-col gap-1.5">
                     <div className="min-w-0">
                       <div className="font-medium">{agent.name}</div>
-                      <div className={status.warn ? "text-warning" : "text-muted-foreground"} data-testid="agent-login-status">
+                      {/* A Bedrock login's name carries its model, which may be a long inference profile ARN with no spaces. */}
+                      <div className={`wrap-anywhere ${status.warn ? "text-warning" : "text-muted-foreground"}`} data-testid="agent-login-status">
                         {status.text}
                       </div>
                       {agentLoginConfigurerLeft(login) && (

@@ -8566,7 +8566,7 @@ mod tests {
         let api = |region: &str, model: &str| BedrockSettings { auth: BedrockAuth::ApiKey, region: region.into(), model: model.into(), access_key_id: None };
         assert!(api("eu-central-1", "eu.anthropic.claude-opus-5-5").valid());
         assert!(api("us-gov-west-1", "arn:aws:bedrock:us-gov-west-1:123456789012:inference-profile/us-gov.anthropic.claude-sonnet-5-5").valid());
-        for (region, model) in [("eu-central", "m"), ("EU-central-1", "m"), ("eu-central-123", "m"), ("eu-central-1", ""), ("eu-central-1", "a b"), ("eu-central-1", "m?x")] {
+        for (region, model) in [("eu-central", "m"), ("EU-central-1", "m"), ("eu-central-123", "m"), ("eu-central-1", ""), ("eu-central-1", "a b"), ("eu-central-1", "m?x"), ("cn-north-1", "m"), ("cn-northwest-1", "m")] {
             assert!(!api(region, model).valid(), "{region} {model}");
         }
         let keys = |id: Option<&str>| BedrockSettings { auth: BedrockAuth::AwsKeys, region: "eu-central-1".into(), model: "m".into(), access_key_id: id.map(str::to_owned) };

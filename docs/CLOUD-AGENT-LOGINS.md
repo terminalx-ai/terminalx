@@ -114,16 +114,44 @@ delivers it to every workspace instead of a creator's personal route.
   `AWS_SECRET_ACCESS_KEY`, or `AWS_BEARER_TOKEN_BEDROCK`), unsets every other
   Anthropic or AWS sign-in variable and every other provider's endpoint, and
   starts the tab on the tested model.
-- The launch's `--settings` (the level above a checkout's
-  `.claude/settings.json`) pins Bedrock on, `AWS_REGION` (and the small/fast
-  model's region), `ANTHROPIC_BEDROCK_BASE_URL` at
-  `https://bedrock-runtime.<region>.amazonaws.com`, every
-  `CLAUDE_CODE_SKIP_*_AUTH` off, and every other provider switch
-  (`CLAUDE_CODE_USE_VERTEX`, `_FOUNDRY`, `_MANTLE`, `_ANTHROPIC_AWS`,
-  `_ANTHROPIC_GOOGLE_CLOUD`) off. A checkout therefore cannot point Bedrock
-  at another host or send its requests unsigned. Proxy and CA variables are
-  not pinned: code the agent runs in the workspace can read its environment
-  anyway, so a checkout the agent runs is trusted with the key.
+- The launch's `--settings` pins every non-secret value, and the process
+  environment carries the same values. Claude Code writes each settings `env`
+  entry into its process environment, replacing the inherited value, and
+  `--settings` ranks above a checkout's `.claude/settings.local.json` and
+  `.claude/settings.json` (only managed settings rank higher). So the pins win
+  over both. Pinned:
+  - Bedrock on, every other provider switch (`CLAUDE_CODE_USE_VERTEX`,
+    `_FOUNDRY`, `_MANTLE`, `_ANTHROPIC_AWS`, `_ANTHROPIC_GOOGLE_CLOUD`) off,
+    every `CLAUDE_CODE_SKIP_*_AUTH` off;
+  - `AWS_REGION`, `AWS_DEFAULT_REGION` and the small/fast model's region;
+  - `ANTHROPIC_BEDROCK_BASE_URL` and `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` at
+    `https://bedrock-runtime.<region>.amazonaws.com`,
+    `AWS_ENDPOINT_URL_BEDROCK` at `https://bedrock.<region>.amazonaws.com`,
+    `AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true` and `AWS_ENDPOINT_URL` empty;
+  - `ANTHROPIC_BASE_URL` at `https://api.anthropic.com`;
+  - `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` at the null device,
+    so no profile, role or `credential_process` is read;
+  - `AWS_PROFILE` and `AWS_DEFAULT_PROFILE` empty. Not `default`: with
+    `AWS_PROFILE` set at all, the AWS SDK skips the keys in the environment;
+  - `AWS_SESSION_TOKEN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ROLE_ARN`,
+    `AWS_ROLE_SESSION_NAME` and the `AWS_CONTAINER_*` credential variables
+    empty, and `AWS_EC2_METADATA_DISABLED=true`.
+
+  A checkout therefore cannot point Bedrock at another host, send its
+  requests unsigned, or have them signed from another profile or role.
+- Known limits. The keys themselves are not pinned in `--settings`, which
+  would put the secret on the command line, so a checkout's settings could
+  set `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (or
+  `awsCredentialExport`) of another AWS account. Requests still go only to
+  the region's AWS Bedrock endpoint, but on that account. Proxy and CA
+  variables are not pinned either. Code the agent runs in the workspace can
+  read its environment, keys included, so a checkout the agent runs is
+  trusted with the key anyway.
+- AWS China regions (`cn-*`) are refused: their hosts end in
+  `amazonaws.com.cn`, and the account service tests a login only on
+  `amazonaws.com`. A China-region grant is refused with "Amazon Bedrock in
+  the AWS China regions is not supported". GovCloud (`us-gov-*`) uses
+  `amazonaws.com` and is accepted.
 - Every member's workspace receives the long-lived AWS keys (or Bedrock API
   key) in its agent's environment, where anyone who can drive the workspace
   can read them. The form says so and recommends an IAM user limited to
