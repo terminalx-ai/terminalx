@@ -51,6 +51,7 @@ let state: DictationState = { phase: "idle", text: "", session: 0, target: null,
 /** The segments behind `state.text`; see `./dictationText`. */
 let buffer: DictationBuffer = EMPTY_BUFFER;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 function set(patch: Partial<DictationState>) {
   state = { ...state, ...patch };
   for (const l of listeners) l();
@@ -58,10 +59,7 @@ function set(patch: Partial<DictationState>) {
 
 export function useDictation(): DictationState {
   return useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
-    },
+    __subscribe_listeners,
     () => state,
     () => state,
   );

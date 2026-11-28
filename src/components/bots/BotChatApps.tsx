@@ -6,7 +6,7 @@
  */
 import { thisComputer } from "@/lib/platform";
 import { useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { Check, Copy, Hash, Loader2, Send } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -175,7 +175,7 @@ export function ChatAppDialog({ bot, service, onClose }: { bot: Bot; service: Ch
                       {copied ? <Check /> : <Copy />}
                     </Button>
                   </WithTooltip>
-                  {made.link && <Button variant="outline" size="xs" onClick={() => void openUrl(made.link!)}>Open in Telegram</Button>}
+                  {made.link && <Button variant="outline" size="xs" onClick={() => void openExternalWebUrl(made.link!)}>Open in Telegram</Button>}
                   {made.expires && <span className="ml-auto text-[11.5px] text-faint">Good for 10 minutes</span>}
                 </div>
               </div>

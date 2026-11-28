@@ -58,6 +58,7 @@ let notices: Notice[] = [];
 const NO_NOTICES: Notice[] = [];
 const expiryTimers = new Map<string, number>();
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 function emit() {
   // A replacement no longer owns a timer, even when it arrived during a decision.
   for (const [id, timer] of expiryTimers) {
@@ -86,10 +87,7 @@ const visibleNotices = () => noticesDeferred() ? NO_NOTICES : notices;
 
 export function useNotices(): Notice[] {
   return useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
-    },
+    __subscribe_listeners,
     visibleNotices,
     visibleNotices,
   );

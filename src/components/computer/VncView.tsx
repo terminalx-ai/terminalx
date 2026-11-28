@@ -41,6 +41,10 @@ export function VncView({
       report.current?.(next);
     };
     set("connecting");
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+      set("disconnected");
+      return;
+    }
     // Loaded when first shown: the client is only needed by someone who opens the tab.
     void import("@novnc/novnc")
       .then(({ default: Client }) => {

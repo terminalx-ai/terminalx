@@ -11,6 +11,7 @@ type Entry = { view: BotChatAppsView | null; watchers: number; timer: number | n
 
 const entries = new Map<string, Entry>();
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 function notify() {
   for (const listener of [...listeners]) listener();
@@ -47,10 +48,7 @@ export function setChatApps(id: string, view: BotChatAppsView) {
 
 export function useChatApps(id: string | null): BotChatAppsView | null {
   const view = useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => (id ? entries.get(id)?.view ?? null : null),
   );
   useEffect(() => {

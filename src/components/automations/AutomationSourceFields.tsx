@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { Switch } from "@/components/ui/controls";
 import { automationsApi, errorMessage, issues as issuesApi, type IssueTeam } from "@/lib/api";
 import { issueOps, type IssueUser, type WorkflowState } from "@/lib/issueOps";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import type { AutomationEventTrigger, LinearIssueReport, LinearIssueSource, PullRequestEvent, PullRequestSource, SourceMatch } from "@/types/automations";
 
 const INPUT = "h-8 w-full rounded-md bg-well px-2.5 text-[13px] outline-none ring-offset-background focus:ring-2 focus:ring-ring/30";
@@ -233,7 +233,7 @@ export function AutomationSourceFields({ projectPath, trigger, onChange, forDuty
         {preview.length > 0 && (
           <div className="max-h-40 overflow-y-auto scrollbar-thin">
             {preview.map((match) => (
-              <button key={match.id} type="button" onClick={() => void openUrl(match.url)} className="flex w-full min-w-0 items-center gap-2 rounded px-1 py-1 text-left text-xs hover:bg-selected/30">
+              <button key={match.id} type="button" onClick={() => void openExternalWebUrl(match.url)} className="flex w-full min-w-0 items-center gap-2 rounded px-1 py-1 text-left text-xs hover:bg-selected/30">
                 <span className="shrink-0 font-mono text-muted-foreground">{match.identifier}</span>
                 <span className="min-w-0 flex-1 truncate">{match.title}</span>
                 <span className="shrink-0 truncate text-[11px] text-faint">{match.detail}</span>

@@ -25,6 +25,7 @@ let notices: AttachmentNotice[] = [];
 let next = 0;
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 function publish(list: AttachmentNotice[]) {
   notices = list;
@@ -68,10 +69,7 @@ export function announceAdmission<T extends Offered>(offered: number, admission:
 
 export function useAttachmentNotices(): AttachmentNotice[] {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => notices,
     () => notices,
   );

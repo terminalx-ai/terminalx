@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import { errorMessage } from "@/lib/api";
 import { getDraft, setDraft, subscribeDrafts } from "@/lib/drafts";
 import { readAllComments } from "@/lib/issueComments";
@@ -135,16 +135,20 @@ subscribeDrafts((key) => {
 });
 loadIssueDrafts();
 
+function subscribeIssueOutboxKey(key: string, cb: () => void) {
+  let set = listeners.get(key);
+  if (!set) listeners.set(key, (set = new Set()));
+  set.add(cb);
+  return () => {
+    set!.delete(cb);
+    if (!set!.size) listeners.delete(key);
+  };
+}
+
 export function useIssueOutbox(key: string): OutgoingComment[] {
+  const subscribe = useCallback((cb: () => void) => subscribeIssueOutboxKey(key, cb), [key]);
   return useSyncExternalStore(
-    (cb) => {
-      let set = listeners.get(key);
-      if (!set) listeners.set(key, (set = new Set()));
-      set.add(cb);
-      return () => {
-        set!.delete(cb);
-      };
-    },
+    subscribe,
     () => outboxes.get(key) ?? NONE,
     () => NONE,
   );

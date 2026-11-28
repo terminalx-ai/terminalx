@@ -24,6 +24,7 @@ export const SETTING_TOAST_MS = 6000;
 let toasts: SettingToast[] = [];
 let nextId = 1;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 const timers = new Map<number, ReturnType<typeof setTimeout>>();
 
 function emit() {
@@ -83,7 +84,7 @@ export function getSettingToasts(): readonly SettingToast[] {
 }
 
 export function useSettingToasts(): readonly SettingToast[] {
-  return useSyncExternalStore((listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; }, () => toasts, () => toasts);
+  return useSyncExternalStore(__subscribe_listeners, () => toasts, () => toasts);
 }
 
 /** For tests. */

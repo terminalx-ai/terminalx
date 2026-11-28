@@ -154,6 +154,80 @@ function onAccess(key: string, access: "lost" | "regained") {
   if (held) void refreshCloudSessions(held.target, held.client).catch(() => undefined);
 }
 
+function sameValue(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!sameValue(a[i], b[i])) return false;
+    return true;
+  }
+  const objA = a as Record<string, unknown>;
+  const objB = b as Record<string, unknown>;
+  const keysA = Object.keys(objA);
+  const keysB = Object.keys(objB);
+  if (keysA.length !== keysB.length) return false;
+  for (const k of keysA) {
+    if (!Object.prototype.hasOwnProperty.call(objB, k) || !sameValue(objA[k], objB[k])) return false;
+  }
+  return true;
+}
+
+function sameRowStatus(
+  a: RuntimeSession["rowStatus"],
+  b: RuntimeSession["rowStatus"],
+): boolean {
+  return sameValue(a, b);
+}
+
+/** Fast structural + timestamp comparison avoiding `JSON.stringify` allocations on every 10s poll. */
+export function sameRuntimeSessionList(
+  a: readonly RuntimeSession[] | undefined,
+  b: readonly RuntimeSession[] | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const sa = a[i];
+    const sb = b[i];
+    if (
+      sa.id !== sb.id ||
+      sa.title !== sb.title ||
+      sa.modified !== sb.modified ||
+      sa.created !== sb.created ||
+      sa.lastMessageAt !== sb.lastMessageAt ||
+      sa.hasMessages !== sb.hasMessages ||
+      sa.pinned !== sb.pinned ||
+      sa.archived !== sb.archived ||
+      sa.branch !== sb.branch ||
+      sa.worktreeName !== sb.worktreeName ||
+      sa.manualStatus !== sb.manualStatus ||
+      sa.activeTab !== sb.activeTab ||
+      sa.automation?.id !== sb.automation?.id ||
+      sa.tabs.length !== sb.tabs.length ||
+      !sameRowStatus(sa.rowStatus, sb.rowStatus)
+    ) {
+      return false;
+    }
+    for (let j = 0; j < sa.tabs.length; j++) {
+      const ta = sa.tabs[j];
+      const tb = sb.tabs[j];
+      if (
+        ta.id !== tb.id ||
+        ta.harness !== tb.harness ||
+        ta.title !== tb.title ||
+        ta.status !== tb.status ||
+        ta.created !== tb.created ||
+        ta.lastMessageAt !== tb.lastMessageAt ||
+        ta.hasMessages !== tb.hasMessages
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 /** Read the lists on every connect and follow them while connected. */
 function onConnected(target: CloudTarget, client: WorkspaceRpcClient): () => void {
   const scope = { organizationId: target.orgId, workspaceId: target.workspaceId };
@@ -187,7 +261,7 @@ function onConnected(target: CloudTarget, client: WorkspaceRpcClient): () => voi
     if (readingStatus || document.hidden) return;
     readingStatus = true;
     void client.listSessions().then((sessions) => {
-      if (open && JSON.stringify(sessions) !== JSON.stringify(live.get(key)?.sessions)) takeLive(target, sessions, capabilities, manage);
+      if (open && !sameRuntimeSessionList(sessions, live.get(key)?.sessions)) takeLive(target, sessions, capabilities, manage);
     }).catch(() => {
       const known = live.get(key);
       if (open && known?.sessions.some((session) => session.rowStatus)) takeLive(target, known.sessions.map((session) => ({ ...session, rowStatus: undefined })), capabilities, manage);

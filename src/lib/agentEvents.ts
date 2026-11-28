@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { agent, api } from "@/lib/api";
 import { getSessions, patchTab, refreshWorkspaces } from "@/lib/sessions";
@@ -65,6 +65,8 @@ interface StoredLog extends TabLog {
   eventsVersion: number;
   eventsSnapshot: { events: AgentEvent[]; version: number };
 }
+/** Maximum number of inactive (0-listener, non-streaming) tab logs retained in memory. */
+export const MAX_INACTIVE_TAB_LOGS = 20;
 const logs = new Map<string, StoredLog>();
 const historyGenerations = new Map<string, string | undefined>();
 const listeners = new Map<string, Set<() => void>>();
@@ -73,6 +75,43 @@ let frame: number | null = null;
 
 function key(sessionId: string, tabId: string) {
   return `${sessionId}/${tabId}`;
+}
+
+function isEvictable(k: string, log: StoredLog): boolean {
+  return !listeners.get(k)?.size && log.stream.length === 0 && log.status !== "in_progress" && !log.firstMessage;
+}
+
+function evictInactiveLogs(keepKey?: string) {
+  let inactive = 0;
+  for (const [k, log] of logs) {
+    if (isEvictable(k, log)) inactive++;
+  }
+  if (inactive <= MAX_INACTIVE_TAB_LOGS) return;
+  for (const [k, log] of [...logs]) {
+    if (inactive <= MAX_INACTIVE_TAB_LOGS) break;
+    if (k === keepKey || !isEvictable(k, log)) continue;
+    logs.delete(k);
+    dirty.delete(k);
+    inactive--;
+  }
+}
+
+function subscribeTabKey(k: string, cb: () => void): () => void {
+  let set = listeners.get(k);
+  if (!set) listeners.set(k, (set = new Set()));
+  set.add(cb);
+  const existing = logs.get(k);
+  if (existing) {
+    logs.delete(k);
+    logs.set(k, existing);
+  }
+  return () => {
+    set!.delete(cb);
+    if (!set!.size) {
+      listeners.delete(k);
+      evictInactiveLogs();
+    }
+  };
 }
 
 function flush() {
@@ -106,11 +145,15 @@ function touch(k: string, immediate = false) {
 
 function getLog(k: string): StoredLog {
   let l = logs.get(k);
-  if (!l) {
-    const events: AgentEvent[] = [];
-    l = { ...EMPTY, events, stream: [], admission: { generation: 0 }, eventsVersion: 0, eventsSnapshot: { events, version: 0 } };
+  if (l) {
+    logs.delete(k);
     logs.set(k, l);
+    return l;
   }
+  const events: AgentEvent[] = [];
+  l = { ...EMPTY, events, stream: [], admission: { generation: 0 }, eventsVersion: 0, eventsSnapshot: { events, version: 0 } };
+  logs.set(k, l);
+  evictInactiveLogs(k);
   return l;
 }
 
@@ -237,7 +280,39 @@ export function applyEvent(ev: AgentEvent) {
     touch(k, true);
     return;
   }
-  if (p.type === "usage_update" || p.type === "model_request_started") {
+  if (p.type === "usage_update") {
+    // Coalesce transient usage_update events within the same turn/subagent scope
+    // so long streaming turns don't accumulate unbounded transient entries.
+    let priorIndex = -1;
+    for (let i = log.events.length - 1; i >= 0; i--) {
+      const prev = log.events[i];
+      const prevType = prev.payload.type;
+      if (prevType === "turn_completed" || prevType === "turn_started" || (prevType === "user_message" && !prev.payload.queued)) {
+        break;
+      }
+      if (prevType === "usage_update" && prev.subagent === ev.subagent) {
+        priorIndex = i;
+        break;
+      }
+    }
+    if (priorIndex >= 0) {
+      const prevPayload = log.events[priorIndex].payload as Extract<AgentEvent["payload"], { type: "usage_update" }>;
+      const merged: Extract<AgentEvent["payload"], { type: "usage_update" }> = {
+        ...prevPayload,
+        ...p,
+        contextMax: p.contextMax ?? prevPayload.contextMax,
+        model: p.model ?? prevPayload.model,
+      };
+      log.events.splice(priorIndex, 1);
+      log.events.push({ ...ev, payload: merged });
+    } else {
+      log.events.push(ev);
+    }
+    log.eventsDirty = true;
+    touch(k);
+    return;
+  }
+  if (p.type === "model_request_started") {
     log.events.push(ev);
     log.eventsDirty = true;
     touch(k);
@@ -383,25 +458,31 @@ export function lastSeq(sessionId: string, tabId: string): number {
   return 0;
 }
 
+function clearTabLog(k: string) {
+  logs.delete(k);
+  dirty.delete(k);
+  touch(k, true);
+}
+
 function syncHistoryGeneration(sessionId: string, tabId: string, generation: string | undefined) {
   const k = key(sessionId, tabId);
   const changed = historyGenerations.get(k) !== generation;
   historyGenerations.set(k, generation);
-  if (changed) dropTabLog(sessionId, tabId);
+  if (changed) clearTabLog(k);
   return changed;
 }
 
 /** Replace, rather than merge, after a reset; invalidate outstanding reads. */
 export async function reloadTabHistory(sessionId: string, tabId: string, resetGeneration?: string) {
-  dropTabLog(sessionId, tabId);
+  clearTabLog(key(sessionId, tabId));
   await loadTab(sessionId, tabId, resetGeneration);
 }
 
 /** Forget a tab's log, e.g. a cloud tab that was closed. */
 export function dropTabLog(sessionId: string, tabId: string) {
   const k = key(sessionId, tabId);
-  logs.delete(k);
-  touch(k, true);
+  historyGenerations.delete(k);
+  clearTabLog(k);
 }
 
 export function setTabStatus(sessionId: string, tabId: string, status: TabStatus) {
@@ -425,16 +506,9 @@ export function setTabStatus(sessionId: string, tabId: string, status: TabStatus
 
 export function useTabLog(sessionId: string, tabId: string): TabLog {
   const k = key(sessionId, tabId);
+  const subscribe = useCallback((cb: () => void) => subscribeTabKey(k, cb), [k]);
   return useSyncExternalStore(
-    (cb) => {
-      let set = listeners.get(k);
-      if (!set) listeners.set(k, (set = new Set()));
-      set.add(cb);
-      return () => {
-        set!.delete(cb);
-        if (!set!.size) listeners.delete(k);
-      };
-    },
+    subscribe,
     () => logs.get(k) ?? EMPTY,
     () => EMPTY,
   );
@@ -446,16 +520,9 @@ export function useTabLog(sessionId: string, tabId: string): TabLog {
  */
 export function useTabLogEvents(sessionId: string, tabId: string): { events: AgentEvent[]; version: number } {
   const k = key(sessionId, tabId);
+  const subscribe = useCallback((cb: () => void) => subscribeTabKey(k, cb), [k]);
   return useSyncExternalStore(
-    (cb) => {
-      let set = listeners.get(k);
-      if (!set) listeners.set(k, (set = new Set()));
-      set.add(cb);
-      return () => {
-        set!.delete(cb);
-        if (!set!.size) listeners.delete(k);
-      };
-    },
+    subscribe,
     () => logs.get(k)?.eventsSnapshot ?? EMPTY_EVENTS,
     () => EMPTY_EVENTS,
   );
@@ -496,20 +563,25 @@ export async function reconcileAgentEvents() {
         }
       }
     } catch { /* Keep the last verified state when the backend is unavailable. */ }
+    const reloads: { sessionId: string; tabId: string; token: ReturnType<typeof historyReadToken> }[] = [];
     for (const session of getSessions().sessions) {
       for (const tab of session.tabs) {
         const k = key(session.id, tab.id);
         const log = logs.get(k);
         if (!log?.loaded || !listeners.get(k)?.size) continue;
-        const token = historyReadToken(log);
+        reloads.push({ sessionId: session.id, tabId: tab.id, token: historyReadToken(log) });
+      }
+    }
+    await Promise.all(
+      reloads.map(async ({ sessionId, tabId, token }) => {
         try {
-          const events = await agent.loadEvents(session.id, tab.id);
-          admitHistoryRead(session.id, tab.id, token, events);
+          const events = await agent.loadEvents(sessionId, tabId);
+          admitHistoryRead(sessionId, tabId, token, events);
         } catch {
           // Keep the existing conversation; a later resume retries the read.
         }
-      }
-    }
+      }),
+    );
   } finally {
     reconciling = false;
   }

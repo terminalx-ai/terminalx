@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Circle, CircleCheck, CircleDot, CircleX, Clock, ExternalLink, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, ListChecks, Loader2, Maximize2, MessageSquare, RefreshCw, Unplug, Users, X } from "@/icons";
 import type { PrConversation as Conversation } from "@terminalx/portable/workspaceGit";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
 import { api, fs, type GitHubConnectionStatus, type PullRequest, type PrAssociation } from "@/lib/api";
 import { openCheckLog, openPr, useEditors } from "@/lib/editors";
@@ -551,7 +551,7 @@ export function PrPanel({
         const pr = row.pr;
         const onUnlink = unlink(row);
         if (!pr) return <div key={row.identity} role="alert" className="border-b border-hairline px-3 py-3 text-xs">
-          <button type="button" onClick={() => void openUrl(row.identity)} className="hover:underline">{row.identity}</button>
+          <button type="button" onClick={() => void openExternalWebUrl(row.identity)} className="hover:underline">{row.identity}</button>
           <div className="text-destructive">Could not refresh this pull request.</div>
           <CommandDetails details={row.error} />
           {onUnlink && <Button size="xs" variant="outline" disabled={!!working} onClick={onUnlink}>Unlink #{row.association?.number}</Button>}
@@ -617,7 +617,7 @@ export function PrPanel({
               {openInTab && <WithTooltip label={`Open PR #${pr.number} in centre tab`}><Button size="icon-xs" variant="ghost" aria-label={`Open PR #${pr.number} in centre tab`} onClick={() => openInTab(row)}><Maximize2 /></Button></WithTooltip>}
               {onUnlink && <WithTooltip label={`Unlink #${pr.number}`}><Button size="icon-xs" variant="ghost" aria-label={`Unlink #${pr.number}`} disabled={!!working} onClick={onUnlink}><Unplug /></Button></WithTooltip>}
               <div className="min-w-0 flex-1">
-                <button type="button" onClick={() => void openUrl(pr.url)} className="group flex items-center gap-1 text-left text-[13px] font-medium hover:underline">
+                <button type="button" onClick={() => void openExternalWebUrl(pr.url)} className="group flex items-center gap-1 text-left text-[13px] font-medium hover:underline">
                   <span className="truncate">{pr.title}</span>
                   <ExternalLink className="size-3 shrink-0 text-faint opacity-0 group-hover:opacity-100" />
                 </button>
@@ -826,13 +826,13 @@ function PrHeader({ pr, commits, summary, linked, onOpen, onUnlink, unlinkDisabl
     <div className="flex min-w-0 flex-col gap-1.5 border-b border-hairline p-3" data-testid="pr-header">
       <div className="flex min-w-0 items-center gap-2">
         <StatePill pr={pr} />
-        <button type="button" onClick={() => void openUrl(pr.url)} className="min-w-0 truncate text-left text-[13px] font-medium text-foreground hover:underline" title={pr.title}>{pr.title}</button>
+        <button type="button" onClick={() => void openExternalWebUrl(pr.url)} className="min-w-0 truncate text-left text-[13px] font-medium text-foreground hover:underline" title={pr.title}>{pr.title}</button>
         <span className="shrink-0 font-mono text-xs text-faint">#{pr.number}</span>
         {linked && <LinkedTag />}
         <span className="ml-auto flex shrink-0 items-center">
           {onOpen && <WithTooltip label={`Open PR #${pr.number} in centre tab`}><Button size="icon-xs" variant="ghost" aria-label={`Open PR #${pr.number} in centre tab`} onClick={onOpen}><Maximize2 /></Button></WithTooltip>}
           {onUnlink && <WithTooltip label={`Unlink #${pr.number}`}><Button size="icon-xs" variant="ghost" aria-label={`Unlink #${pr.number}`} disabled={unlinkDisabled} onClick={onUnlink}><Unplug /></Button></WithTooltip>}
-          <WithTooltip label="Open on GitHub"><Button size="icon-xs" variant="ghost" aria-label={`Open #${pr.number} on GitHub`} onClick={() => void openUrl(pr.url)}><ExternalLink /></Button></WithTooltip>
+          <WithTooltip label="Open on GitHub"><Button size="icon-xs" variant="ghost" aria-label={`Open #${pr.number} on GitHub`} onClick={() => void openExternalWebUrl(pr.url)}><ExternalLink /></Button></WithTooltip>
         </span>
       </div>
       <div className="min-w-0 truncate text-xs text-muted-foreground" data-testid="pr-branch-line">

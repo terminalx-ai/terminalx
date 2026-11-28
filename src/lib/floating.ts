@@ -34,6 +34,7 @@ function storedSession(): string | null {
 
 let state: State = { status: null, visible: true, sessionId: storedSession() };
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
   for (const listener of listeners) listener();
@@ -41,10 +42,7 @@ function set(patch: Partial<State>) {
 
 export function useFloating(): State {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => state,
     () => state,
   );

@@ -1,7 +1,7 @@
 import { ThisComputer, thisComputer } from "@/lib/platform";
 import { useEffect, useRef, useState, type ComponentType, type KeyboardEvent, type ReactNode } from "react";
 import { AppWindow, Building2, ChevronDown, Cloud, Eye, Github, Laptop, Loader2, Plus, Send, Server, ShieldAlert, ShieldOff, Hash, SquareKanban, UserRound } from "@/icons";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { MachineHostError } from "@/components/machines/MachineHostError";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
@@ -530,7 +530,7 @@ function ChannelActivity({ bot }: { bot: Bot }) {
         {rows.map(({ mention, post }) => {
           const thread = (mention ?? post)!.thread;
           const icon = thread.kind === "linear" ? SquareKanban : Github;
-          const open = thread.url ? <Button variant="ghost" size="xs" onClick={() => void openUrl(thread.url)} aria-label={`Open ${threadName(thread)}`}>Open</Button> : undefined;
+          const open = thread.url ? <Button variant="ghost" size="xs" onClick={() => void openExternalWebUrl(thread.url)} aria-label={`Open ${threadName(thread)}`}>Open</Button> : undefined;
           if (post) {
             return <ListRow key={`post:${post.at}:${post.url}`} icon={icon} name={<span title={threadName(thread)}>{threadName(thread)}</span>} state={POST_KIND[post.kind] ?? post.kind} on detail={`On your behalf · ${relativeTime(post.at)}`} action={open} testId="bot-channel-post" />;
           }

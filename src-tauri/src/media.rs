@@ -37,6 +37,19 @@ impl Drop for Grant {
 }
 type Grants = Arc<Mutex<HashMap<String, Grant>>>;
 
+const MAX_MEDIA_GRANTS: usize = 256;
+
+fn is_allowed_origin(origin: &str) -> bool {
+    matches!(
+        origin,
+        "tauri://localhost"
+            | "http://tauri.localhost"
+            | "https://tauri.localhost"
+            | "http://localhost:1420"
+            | "http://127.0.0.1:1420"
+    )
+}
+
 #[derive(Default)]
 pub struct MediaServer {
     grants: Grants,
@@ -100,15 +113,22 @@ impl MediaServer {
             })
             .await?;
         let token = uuid::Uuid::new_v4().to_string();
-        self.grants.lock().insert(
-            token.clone(),
-            Grant {
-                root,
-                path,
-                mime: mime.clone(),
-                cancelled: CancellationToken::new(),
-            },
-        );
+        {
+            let mut grants = self.grants.lock();
+            anyhow::ensure!(
+                grants.len() < MAX_MEDIA_GRANTS,
+                "Too many concurrent open media grants"
+            );
+            grants.insert(
+                token.clone(),
+                Grant {
+                    root,
+                    path,
+                    mime: mime.clone(),
+                    cancelled: CancellationToken::new(),
+                },
+            );
+        }
         Ok(MediaFile {
             url: format!("http://127.0.0.1:{port}/{token}"),
             token,
@@ -150,6 +170,15 @@ async fn serve(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response<Body>, StatusCode> {
+    if let Some(origin) = headers.get(header::ORIGIN) {
+        let origin = origin.to_str().map_err(|_| StatusCode::FORBIDDEN)?;
+        if !is_allowed_origin(origin) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+    if uuid::Uuid::parse_str(&token).is_err() {
+        return Err(StatusCode::NOT_FOUND);
+    }
     let (root, path, mime, cancelled) = {
         let grants = grants.lock();
         let grant = grants.get(&token).ok_or(StatusCode::NOT_FOUND)?;
@@ -184,7 +213,9 @@ async fn serve(
         .header(header::CONTENT_TYPE, mime)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CACHE_CONTROL, "no-store")
-        .header("X-Content-Type-Options", "nosniff");
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Referrer-Policy", "no-referrer")
+        .header("Content-Security-Policy", "default-src 'none'; sandbox");
     let range = if method == Method::HEAD {
         None
     } else {
@@ -409,5 +440,52 @@ mod tests {
         assert!(server.open(dir.path(), &outside_img.to_string_lossy()).await.is_err());
         assert!(server.open(dir.path(), "../secret.png").await.is_err());
         assert!(server.open(dir.path(), "").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn media_server_sets_sandbox_csp_and_rejects_untrusted_origin_or_bad_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pic.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n").unwrap();
+        let server = MediaServer::default();
+        let grant = server.open(dir.path(), "pic.png").await.unwrap();
+
+        let mut evil_headers = HeaderMap::new();
+        evil_headers.insert(header::ORIGIN, "https://evil.example".parse().unwrap());
+        let err = serve(
+            State(server.grants.clone()),
+            UrlPath(grant.token.clone()),
+            Method::GET,
+            evil_headers,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, StatusCode::FORBIDDEN);
+
+        let err_bad_token = serve(
+            State(server.grants.clone()),
+            UrlPath("not-a-uuid".into()),
+            Method::GET,
+            HeaderMap::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_bad_token, StatusCode::NOT_FOUND);
+
+        let mut tauri_headers = HeaderMap::new();
+        tauri_headers.insert(header::ORIGIN, "tauri://localhost".parse().unwrap());
+        let ok = serve(
+            State(server.grants.clone()),
+            UrlPath(grant.token.clone()),
+            Method::GET,
+            tauri_headers,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ok.headers()["content-security-policy"],
+            "default-src 'none'; sandbox"
+        );
+        assert_eq!(ok.headers()["referrer-policy"], "no-referrer");
     }
 }

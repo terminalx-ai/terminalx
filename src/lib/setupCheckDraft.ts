@@ -39,6 +39,7 @@ function load(): Entry[] {
 
 let entries = load();
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 function store(next: Entry[]) {
   entries = next.filter((entry) => entry.tabId !== null || Date.now() - entry.createdAt < MAX_AGE_MS);
@@ -103,10 +104,7 @@ function boot() {
 export function useSetupCheckCoach(tabId: string): { show: boolean; dismiss: () => void } {
   boot();
   const entry = useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => entries.find((item) => item.tabId === tabId) ?? null,
   );
   return {

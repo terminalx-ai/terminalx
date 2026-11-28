@@ -83,19 +83,17 @@ function allPipelines(): IssuePipeline[] {
   return combined.all;
 }
 
+function subscribeIssuePipelines(listener: () => void) {
+  listeners.add(listener);
+  const stopCloud = subscribeCloudPipelines(listener);
+  return () => {
+    listeners.delete(listener);
+    stopCloud();
+  };
+}
+
 export function useIssuePipelines(): IssuePipeline[] {
-  return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      const stopCloud = subscribeCloudPipelines(listener);
-      return () => {
-        listeners.delete(listener);
-        stopCloud();
-      };
-    },
-    allPipelines,
-    allPipelines,
-  );
+  return useSyncExternalStore(subscribeIssuePipelines, allPipelines, allPipelines);
 }
 
 export function getIssuePipelines(): IssuePipeline[] {

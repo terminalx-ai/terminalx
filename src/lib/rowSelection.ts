@@ -12,6 +12,7 @@ import { useSyncExternalStore } from "react";
 let picked: readonly string[] = [];
 let anchor: readonly string[] | null = null;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 /** The attribute every pickable row carries: the ids of the sessions it stands for, space-separated. */
 export const ROW_ATTRIBUTE = "data-row-sessions";
@@ -23,10 +24,7 @@ function set(next: readonly string[]) {
 
 export function usePickedSessions(): readonly string[] {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => picked,
     () => picked,
   );

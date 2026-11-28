@@ -49,6 +49,7 @@ interface State {
 
 let state: State = { views: {}, info: {}, errors: {}, switching: {}, waiting: {} };
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
   for (const l of listeners) l();
@@ -56,10 +57,7 @@ function set(patch: Partial<State>) {
 
 export function useTabViews(): State {
   return useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
-    },
+    __subscribe_listeners,
     () => state,
     () => state,
   );

@@ -98,6 +98,7 @@ let state: ThemeState = (() => {
 })();
 
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 function apply() {
   const root = document.documentElement;
@@ -179,10 +180,7 @@ export function getTheme(): ThemeState {
 
 export function useTheme(): ThemeState {
   return useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
-    },
+    __subscribe_listeners,
     () => state,
     () => state,
   );

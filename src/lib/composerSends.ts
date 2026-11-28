@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import { getDraft, setDraft } from "./drafts";
 import type { AgentEvent } from "@/types/events";
 
@@ -44,16 +44,18 @@ function publish(key: string, state: Snapshot) {
   else states.set(key, state);
   for (const listener of listeners.get(key) ?? []) listener();
 }
+function subscribeComposerKey(key: string, listener: () => void) {
+  const set = listeners.get(key) ?? new Set<() => void>();
+  listeners.set(key, set);
+  set.add(listener);
+  return () => {
+    set.delete(listener);
+    if (!set.size) listeners.delete(key);
+  };
+}
 export function useComposerSend(key: string): Snapshot {
-  return useSyncExternalStore((listener) => {
-    const set = listeners.get(key) ?? new Set<() => void>();
-    listeners.set(key, set);
-    set.add(listener);
-    return () => {
-      set.delete(listener);
-      if (!set.size) listeners.delete(key);
-    };
-  }, () => states.get(key) ?? EMPTY, () => EMPTY);
+  const subscribe = useCallback((listener: () => void) => subscribeComposerKey(key, listener), [key]);
+  return useSyncExternalStore(subscribe, () => states.get(key) ?? EMPTY, () => EMPTY);
 }
 export function beginComposerSend(key: string, message: SendingMessage | null = null): ComposerSend | null {
   if (states.get(key)?.pending) return null;

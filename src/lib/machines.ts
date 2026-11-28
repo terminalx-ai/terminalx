@@ -72,6 +72,7 @@ interface MachineHostState {
 
 let state: MachineHostState = { view: null, ready: false, busy: false, error: null };
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 function set(patch: Partial<MachineHostState>) {
   state = { ...state, ...patch };
@@ -90,10 +91,7 @@ export function getMachineHost(): MachineHostState {
 /** This Mac as a machine: the switch, its status, the computer asking to operate it. */
 export function useMachineHost(): MachineHostState {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => state,
     () => state,
   );

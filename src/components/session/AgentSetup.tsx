@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { Check, Download, Loader2, RotateCw, X } from "@/icons";
 import { AgentMark, agentVendor } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
@@ -95,7 +95,7 @@ export function AgentSetup({ harness, value, checking, onRefresh, headless = fal
             void copyText(command).then(() => setCopyStatus("Copied"), () => setCopyStatus("Could not copy. Select the command to copy it."));
           }}>Copy command</Button>
         </>}
-        <Button type="button" size="xs" variant="ghost" onClick={() => void openUrl(harness.installUrl)}>Setup guide</Button>
+        <Button type="button" size="xs" variant="ghost" onClick={() => void openExternalWebUrl(harness.installUrl)}>Setup guide</Button>
         {copyStatus && <span role="status">{copyStatus}</span>}
       </div>
       {!newSession && <p className="mt-2 text-faint">A TerminalX account is optional for local work. This signs in to the agent provider.</p>}
@@ -157,7 +157,7 @@ export function AgentSetupCard({ harness, value, checking }: { harness: HarnessI
           {command && <Button type="button" size="sm" variant="outline" onClick={() => {
             void copyText(command).then(() => setCopyStatus("Copied"), () => setCopyStatus("Could not copy. Select the command to copy it."));
           }}>Copy command</Button>}
-          <Button type="button" size="sm" variant="ghost" onClick={() => void openUrl(harness.installUrl)}>Setup guide</Button>
+          <Button type="button" size="sm" variant="ghost" onClick={() => void openExternalWebUrl(harness.installUrl)}>Setup guide</Button>
           {copyStatus && <span role="status">{copyStatus}</span>}
         </div>
       </div>}
@@ -203,7 +203,7 @@ export function AgentSetupNotice({ harness, value, checking, onRefresh, blocking
       onClick={() => void startAgentSetup(harness.id, install ? "install" : "login", { chain: install })}>
       {install && <Download />} {install ? "Install and sign in" : "Sign in"}
     </Button>}
-    <Button type="button" size="xs" variant="ghost" onClick={() => void openUrl(harness.installUrl)}>Setup guide</Button>
+    <Button type="button" size="xs" variant="ghost" onClick={() => void openExternalWebUrl(harness.installUrl)}>Setup guide</Button>
     <Button type="button" size="xs" variant="ghost" aria-expanded={false} onClick={() => setOpen(true)}>Details</Button>
     {onDismiss && <Button type="button" size="icon-xs" variant="ghost" aria-label={`Dismiss ${harness.name} setup`} onClick={onDismiss}><X /></Button>}
   </div>;
@@ -223,7 +223,7 @@ function SetupRun({ harness, flow, card = false }: { harness: HarnessInfo; flow:
       <p>{problemText(flow.problem, harness, flow.detail)}</p>
       <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
         <Button type="button" size={size} variant="secondary" onClick={() => void retryAgentSetup(harness.id)}><RotateCw /> Try again</Button>
-        <Button type="button" size={size} variant="ghost" onClick={() => void openUrl(harness.installUrl)}>Setup guide</Button>
+        <Button type="button" size={size} variant="ghost" onClick={() => void openExternalWebUrl(harness.installUrl)}>Setup guide</Button>
         <Button type="button" size={size} variant="ghost" onClick={() => dismissAgentSetup(harness.id)}>{pane ? "Hide output" : "Dismiss"}</Button>
       </div>
     </div> : card ? null : <div className="flex flex-wrap items-center gap-2 text-muted-foreground">

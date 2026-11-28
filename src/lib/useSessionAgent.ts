@@ -105,6 +105,7 @@ export function handoffStart(source: LaunchSettings, harnesses: HarnessInfo[], m
 const accountViews = new Map<string, { view: AgentAccounts | null; at: number }>();
 const accountReads = new Map<string, Promise<AgentAccounts | null>>();
 const accountListeners = new Set<() => void>();
+const __subscribe_accountListeners = (listener: () => void) => { accountListeners.add(listener); return () => { accountListeners.delete(listener); }; };
 const notifyAccounts = () => accountListeners.forEach((listener) => listener());
 
 /**
@@ -150,7 +151,7 @@ export function forgetAgentAccounts() {
 export function useAgentAccounts(harness: string | null | undefined, maxAgeMs = 0): AgentAccounts | null {
   const id = harness && takesAccounts(harness) ? harness : null;
   const view = useSyncExternalStore(
-    (listener) => { accountListeners.add(listener); return () => { accountListeners.delete(listener); }; },
+    __subscribe_accountListeners,
     () => (id ? accountViews.get(id)?.view ?? null : null),
   );
   useEffect(() => { if (id) void refreshAgentAccounts(id, maxAgeMs); }, [id, maxAgeMs]);

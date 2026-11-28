@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { useEffect } from "react";
 import { inAppWindow, isCompactWindow } from "./appWindow";
 import { showError } from "./errorToasts";
@@ -20,7 +20,7 @@ export async function checkGitForWindows(windows = isWindows): Promise<boolean> 
       tone: "warning",
       key: "git-for-windows",
       copy: false,
-      actions: [{ label: "Download Git for Windows", icon: "external", primary: true, keepOpen: true, run: () => openUrl(GIT_FOR_WINDOWS_URL) }],
+      actions: [{ label: "Download Git for Windows", icon: "external", primary: true, keepOpen: true, run: () => openExternalWebUrl(GIT_FOR_WINDOWS_URL) }],
     });
   }
   return missing;

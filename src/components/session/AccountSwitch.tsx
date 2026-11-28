@@ -73,12 +73,13 @@ const switches = new Map<string, SwitchMade>();
 /** The model each open tab's agent last reported, so a switch from its menu knows it too. */
 const reportedModels = new Map<string, string>();
 const switchListeners = new Set<() => void>();
+const __subscribe_switchListeners = (listener: () => void) => { switchListeners.add(listener); return () => { switchListeners.delete(listener); }; };
 const changed = () => { for (const listener of switchListeners) listener(); };
 
 /** The last switch made in tab `tabId` from this window, until it is dismissed. */
 export function useSwitchMade(tabId: string): SwitchMade | null {
   return useSyncExternalStore(
-    (listener) => { switchListeners.add(listener); return () => { switchListeners.delete(listener); }; },
+    __subscribe_switchListeners,
     () => switches.get(tabId) ?? null,
   );
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
@@ -99,7 +99,7 @@ function ReportForm({ revision, close }: { revision?: string; close: (keepAttemp
     {receipt ? <div className="space-y-3 text-sm"><p>Support reference <code className="select-all">{receipt}</code></p>
       <p>To include another device, open Send a support report on that device and enter this reference under Add to a report.</p>
       <div className="flex flex-wrap gap-2">
-        <Button variant="outline" onClick={() => { void openUrl(supportConsole).catch(() => setError("Open Support reports at console.terminalx.ai to manage this report.")); }}>Manage report</Button>
+        <Button variant="outline" onClick={() => { void openExternalWebUrl(supportConsole).catch(() => setError("Open Support reports at console.terminalx.ai to manage this report.")); }}>Manage report</Button>
         <Button onClick={dismiss}>Done</Button>
       </div>
       {error && <p role="alert">{error}</p>}

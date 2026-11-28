@@ -42,6 +42,7 @@ let run: CleanupRun | null = null;
 let abort: AbortController | null = null;
 let retryContext: { hosts: CleanupHost[]; selections: CleanupSelection[] } | null = null;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 function set(next: CleanupRun | null) {
   run = next;
@@ -54,10 +55,7 @@ export function getCleanupRun(): CleanupRun | null {
 
 export function useCleanupRun(): CleanupRun | null {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => run,
     () => run,
   );

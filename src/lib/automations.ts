@@ -14,6 +14,7 @@ interface State {
 
 let state: State = { loaded: false, automations: [], runs: {}, loadingRuns: {}, issueStates: {} };
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 const loading = new Map<string, Promise<AutomationRun[]>>();
 
 function set(patch: Partial<State>) {
@@ -83,10 +84,7 @@ async function listAutomations() {
 
 export function useAutomationStore(): State {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => state,
     () => state,
   );

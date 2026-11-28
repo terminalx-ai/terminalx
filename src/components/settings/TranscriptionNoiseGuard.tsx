@@ -1,7 +1,7 @@
 import { RegisteredSetting } from "./settingsRegistry";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { listen } from "@tauri-apps/api/event";
 import { Button } from "@/components/ui/button";
 import { errorMessage, type DownloadProgress, type TranscriptionDetector } from "@/lib/api";
@@ -84,7 +84,7 @@ export function TranscriptionNoiseGuard() {
     <p>The local-model noise guard uses a separate 1.24 MB speech detector. Recording never downloads it. Apple keeps its own speech detection. Quiet speech and environmental sounds can still be misclassified; use Test dictation to check results.</p>
     {error && <p role="alert" className="text-destructive">{error}</p>}
     {model && <div className="flex flex-wrap items-center gap-2">
-      <span>{model.name} · <button type="button" className="underline" onClick={() => void openUrl(model.licenseUrl)}>{model.license}</button></span>
+      <span>{model.name} · <button type="button" className="underline" onClick={() => void openExternalWebUrl(model.licenseUrl)}>{model.license}</button></span>
       <span role="status">{{ missing: "Detector file missing", invalid: "Detector file invalid", verifiedFile: "Detector file verified", error: "Detector file could not be verified. Check file access and retry." }[model.readiness]}</span>
       {model.downloading ? <><span>{Math.round((model.progress?.received ?? 0) / model.sizeBytes * 100)}%</span><Button size="xs" variant="outline" disabled={busy} onClick={() => void action("transcription_cancel_download")}>Cancel detector download</Button></>
         : model.readiness === "verifiedFile" ? <Button size="xs" variant="outline" disabled={busy} onClick={() => void action("transcription_delete")}>Delete speech detector</Button>

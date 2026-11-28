@@ -29,6 +29,9 @@ declare global {
 }
 
 async function bench(request: BenchRequest): Promise<unknown> {
+  if (!import.meta.env.DEV) {
+    return { error: "terminal benchmark is disabled in production builds" };
+  }
   return (await import("@/lib/terminalBench")).runTerminalBench(request);
 }
 
@@ -36,7 +39,7 @@ async function answer({ id, action, params }: PerfRequest) {
   let result: unknown;
   try {
     if (action === "counters") result = terminalCounters();
-    else if (action === "bench") result = await bench(params as BenchRequest);
+    else if (action === "bench" && import.meta.env.DEV) result = await bench(params as BenchRequest);
     else result = { error: `unknown action ${action}` };
   } catch (error) {
     result = { error: error instanceof Error ? (error.stack ?? error.message) : String(error) };
@@ -47,7 +50,9 @@ async function answer({ id, action, params }: PerfRequest) {
 let booted: Promise<void> | null = null;
 export function bootTerminalPerf(): Promise<void> {
   return (booted ??= (async () => {
-    window.__TERMINALX_PERF__ = { counters: terminalCounters, bench };
+    if (import.meta.env.DEV) {
+      window.__TERMINALX_PERF__ = { counters: terminalCounters, bench };
+    }
     try {
       await listen<PerfRequest>("terminal_perf_request", (event) => void answer(event.payload));
     } catch {

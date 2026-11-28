@@ -76,23 +76,51 @@ let state: TerminalState = { panes: [], active: {}, selected: restoreSessionTabS
   try { return localStorage.getItem(SELECTION_KEY); } catch { return null; }
 })()), agents: {} };
 const listeners = new Set<() => void>();
+const PERSIST_DEBOUNCE_MS = 150;
+let selectionPersistTimer: ReturnType<typeof setTimeout> | null = null;
+let lastPersistedSelection: string | null = null;
+
+/** Immediately write any pending debounced session-tab selection to `localStorage`. */
+export function flushTerminalSelectionPersistence(): void {
+  if (selectionPersistTimer !== null) {
+    clearTimeout(selectionPersistTimer);
+    selectionPersistTimer = null;
+  }
+  const serialized = JSON.stringify(state.selected);
+  if (serialized === lastPersistedSelection) return;
+  lastPersistedSelection = serialized;
+  try { localStorage.setItem(SELECTION_KEY, serialized); } catch { /* Optional persistence. */ }
+}
+
+function scheduleSelectionPersist(): void {
+  if (selectionPersistTimer !== null) clearTimeout(selectionPersistTimer);
+  selectionPersistTimer = setTimeout(flushTerminalSelectionPersistence, PERSIST_DEBOUNCE_MS);
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", flushTerminalSelectionPersistence);
+  window.addEventListener("beforeunload", flushTerminalSelectionPersistence);
+}
+
 function set(patch: Partial<TerminalState>) {
   state = { ...state, ...patch };
   if (patch.selected) {
-    try { localStorage.setItem(SELECTION_KEY, JSON.stringify(state.selected)); } catch { /* Optional persistence. */ }
+    scheduleSelectionPersist();
   }
   for (const l of listeners) l();
 }
 
+function subscribeTerminalState(cb: () => void) {
+  listeners.add(cb);
+  return () => { listeners.delete(cb); };
+}
+
+function getTerminalSnapshot(): TerminalState {
+  return state;
+}
+
 export function useTerminals(): TerminalState {
-  return useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
-    },
-    () => state,
-    () => state,
-  );
+  return useSyncExternalStore(subscribeTerminalState, getTerminalSnapshot, getTerminalSnapshot);
 }
 
 export function getTerminalState(): TerminalState {

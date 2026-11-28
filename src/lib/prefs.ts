@@ -411,6 +411,7 @@ function load(legacyOnly = false): Prefs {
 
 let state: Prefs = load();
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 type FileWriter = (patch: Record<string, unknown>) => void;
 let fileWriter: FileWriter | null = null;
 const fileKeys = Object.keys(userPreferenceDefaults).filter((key) => key !== "theme" && key !== "mode") as (keyof Prefs)[];
@@ -508,10 +509,7 @@ export function subscribePrefs(listener: () => void): () => void {
 
 export function usePrefs(): Prefs {
   return useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
-    },
+    __subscribe_listeners,
     () => state,
     () => state,
   );

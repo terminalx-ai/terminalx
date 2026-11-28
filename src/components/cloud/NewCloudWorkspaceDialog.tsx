@@ -8,6 +8,7 @@ import { cloudWorkspaceKey } from "@/types/target";
 
 let open = false;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 /**
  * Open (or close) the full new-workspace form: several repositories with
@@ -23,10 +24,7 @@ export function openNewCloudWorkspace(next = true) {
 /** Mounted once (AppShell): the dialog for `openNewCloudWorkspace`. */
 export function NewCloudWorkspaceDialogHost() {
   const shown = useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => open,
     () => false,
   );

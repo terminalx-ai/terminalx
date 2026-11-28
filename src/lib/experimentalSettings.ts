@@ -9,6 +9,7 @@ import { experimental, type ExperimentalSettings } from "@/lib/api";
  */
 let current: ExperimentalSettings | null = null;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 let booted: Promise<void> | null = null;
 
 function set(next: Partial<ExperimentalSettings>) {
@@ -51,10 +52,7 @@ export function useExperimentalSettings(wanted = true): ExperimentalSettings | n
     if (wanted) void boot();
   }, [wanted]);
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => current,
     () => current,
   );

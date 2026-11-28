@@ -207,6 +207,7 @@ export type ProjectStartDialog = "github" | "quick";
 
 let dialog: ProjectStartDialog | null = null;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 /** Open "Open GitHub project" or "Create a project" (Quick start), or close whichever is open. */
 export function openProjectStart(next: ProjectStartDialog | null) {
@@ -221,10 +222,7 @@ export function projectStartDialogOpen(): boolean {
 
 export function useProjectStartDialog(): ProjectStartDialog | null {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => dialog,
     () => null,
   );

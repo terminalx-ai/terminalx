@@ -2,7 +2,8 @@ import { revealInFileManager } from "@/lib/platform";
 import { PrivacyImage } from "@/components/ui/privacy-image";
 import { SessionStatus } from "@/components/ui/SessionStatus";
 import { useEffect, useState } from "react";
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest, Loader2, Plus, RefreshCw, SquarePen } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -62,7 +63,7 @@ export function ProjectOverview({ path }: { path: string }) {
             <h1 className="truncate text-[26px] font-semibold leading-tight tracking-tight text-foreground">{name}</h1>
             <div className="mt-1.5 flex min-w-0 items-center gap-2 text-[12px] text-faint">
               {identity?.repo ? (
-                <button type="button" onClick={() => void openUrl(`https://github.com/${identity.repo}`)} className="truncate hover:text-foreground">
+                <button type="button" onClick={() => void openExternalWebUrl(`https://github.com/${identity.repo}`)} className="truncate hover:text-foreground">
                   github.com/{identity.repo}
                 </button>
               ) : (
@@ -152,7 +153,7 @@ export function ProjectOverview({ path }: { path: string }) {
             <ul className="flex flex-col gap-1">
               {prs.recent.map((pr) => (
                 <li key={pr.number}>
-                  <button type="button" onClick={() => void openUrl(pr.url)} className="-mx-2 flex w-[calc(100%+1rem)] items-center gap-3 rounded-lg px-2 py-2 text-left hover:bg-veil-raised">
+                  <button type="button" onClick={() => void openExternalWebUrl(pr.url)} className="-mx-2 flex w-[calc(100%+1rem)] items-center gap-3 rounded-lg px-2 py-2 text-left hover:bg-veil-raised">
                     <Avatar login={pr.author} name={pr.author} />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[13px] text-foreground">

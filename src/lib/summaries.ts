@@ -19,7 +19,18 @@ import { sessionStatus, type SessionEntry } from "@/types/session";
 /** Slow enough to cost nothing, quick enough that a card is never stale for long. */
 const REFRESH_MS = 30_000;
 
+const MAX_SUMMARIES_CACHE = 200;
 const cache = new Map<string, { key: string; summary: SessionSummary }>();
+
+function cacheSet(sessionId: string, entry: { key: string; summary: SessionSummary }) {
+  if (cache.has(sessionId)) cache.delete(sessionId);
+  cache.set(sessionId, entry);
+  while (cache.size > MAX_SUMMARIES_CACHE) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
 
 export function cacheKey(s: SessionEntry): string {
   return `${s.modified}:${sessionStatus(s)}`;
@@ -62,12 +73,12 @@ export function useSessionSummaries(sessions: SessionEntry[], enabled: boolean):
         if (!live) return;
         const keys = new Map(stale.map((s) => [s.id, cacheKey(s)]));
         for (const summary of list) {
-          cache.set(summary.sessionId, { key: keys.get(summary.sessionId) ?? "", summary });
+          cacheSet(summary.sessionId, { key: keys.get(summary.sessionId) ?? "", summary });
         }
         // A session whose tab has never been written answers with nothing;
         // remember that too, or it is asked about on every render.
         for (const s of stale) {
-          if (!list.some((x) => x.sessionId === s.id)) cache.set(s.id, { key: cacheKey(s), summary: empty(s) });
+          if (!list.some((x) => x.sessionId === s.id)) cacheSet(s.id, { key: cacheKey(s), summary: empty(s) });
         }
         setVersion((v) => v + 1);
       })

@@ -1,6 +1,6 @@
 import { cloudActivityRead, subscribeCloudReadMarkers, writeCloudReadMarker } from "@/lib/cloudReadMarkers";
 import { keepMessageTime, newestMessageTime } from "@/lib/messageActivity";
-import { useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import { WorkspaceRpcError, type RuntimeIssuePipeline, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { applyEvent, dropTabLog, getTabLog, lastSeq, mergeTabEvents, setFeedContinuity } from "@/lib/agentEvents";
 import type { FileInput, ImageInput } from "@/lib/api";
@@ -215,11 +215,12 @@ function publish(s: Store) {
 
 export function useCloudAgents(scope: CloudAgentScope): CloudAgentsSnapshot {
   const s = store(scope);
+  const subscribe = useCallback((cb: () => void) => {
+    s.listeners.add(cb);
+    return () => { s.listeners.delete(cb); };
+  }, [s]);
   return useSyncExternalStore(
-    (cb) => {
-      s.listeners.add(cb);
-      return () => s.listeners.delete(cb);
-    },
+    subscribe,
     () => s.snapshot,
     () => EMPTY,
   );
