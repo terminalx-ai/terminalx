@@ -25,7 +25,7 @@ const clampHeight = (h: number) => Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, h))
 /** Where the project's run actions are saved, for the Run tab's empty state. */
 const RUN_ACTIONS_PLACE = "Settings → Projects → Actions";
 
-export const dockTabClass = (selected: boolean) => cn("flex shrink-0 items-center border-b text-xs", selected ? "border-foreground/60 text-foreground" : "border-transparent text-muted-foreground hover:text-foreground");
+export const dockTabClass = (selected: boolean) => cn("flex shrink-0 items-center rounded-t-sm border-b text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/40", selected ? "border-foreground/60 text-foreground" : "border-transparent text-muted-foreground hover:text-foreground");
 
 export function DockDot({ label, className }: { label: string; className: string }) {
   return <span role="img" aria-label={label} title={label} className={cn("ml-1.5 inline-block size-1.5 shrink-0 rounded-full", className)} />;
@@ -149,10 +149,28 @@ export function TerminalDock({ sessionId, cwd }: { sessionId: string; cwd: strin
           role="separator"
           aria-orientation="horizontal"
           aria-label="Resize terminal"
+          aria-valuemin={MIN_HEIGHT}
+          aria-valuemax={MAX_HEIGHT}
+          aria-valuenow={Math.round(height)}
+          tabIndex={0}
           onPointerDown={onDown}
           onPointerMove={onMove}
           onPointerUp={onUp}
-          className="absolute -top-1 left-0 z-10 h-2 w-full cursor-row-resize hover:bg-ring/30"
+          onKeyDown={(e) => {
+            const step = e.shiftKey ? 64 : 24;
+            const next =
+              e.key === "ArrowUp" ? clampHeight(height + step)
+              : e.key === "ArrowDown" ? clampHeight(height - step)
+              : e.key === "Home" ? MIN_HEIGHT
+              : e.key === "End" ? MAX_HEIGHT
+              : null;
+            if (next !== null) {
+              e.preventDefault();
+              setHeight(next);
+              setPrefs({ panelTerminalHeight: next });
+            }
+          }}
+          className="absolute -top-1 left-0 z-10 h-2 w-full cursor-row-resize outline-none hover:bg-ring/30 focus-visible:bg-ring/50 focus-visible:ring-2 focus-visible:ring-ring/40"
         />
       )}
       <div className="flex h-8 shrink-0 items-center gap-1 px-1.5">
@@ -195,7 +213,7 @@ export function TerminalDock({ sessionId, cwd }: { sessionId: string; cwd: strin
                   type="button"
                   aria-label={`Close ${label}`}
                   onClick={() => void closeTerminal(pane.id)}
-                  className="absolute top-1/2 right-0 flex size-4 -translate-y-1/2 translate-x-1/2 items-center justify-center rounded-sm bg-background text-muted-foreground opacity-0 ring-1 ring-hairline hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
+                  className="absolute top-1/2 right-0 flex size-4 -translate-y-1/2 translate-x-1/2 items-center justify-center rounded-sm bg-background text-muted-foreground opacity-0 ring-1 ring-hairline outline-none hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40"
                 >
                   <X className="size-3" />
                 </button>

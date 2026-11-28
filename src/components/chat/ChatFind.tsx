@@ -141,7 +141,7 @@ export function useChatFind({ root, scroller, transcript, footerHeight }: {
   }, [scroller, open, query, matchCase, includeToolOutput, activeId, occurrence, footerHeight, name]);
 
   // A compact card floating at the transcript's top right, over the reading rather than pushing it down.
-  const bar = open ? <div role="search" aria-label="Find in chat" className="absolute right-4 top-3 z-20 flex h-10 w-[min(480px,calc(100%-2rem))] items-center gap-1 rounded-lg bg-chat px-2 text-xs shadow-surface hairline" data-testid="chat-find">
+  const bar = open ? <div role="search" aria-label="Find in chat" className="absolute right-4 top-3 z-20 flex h-10 w-[min(480px,calc(100%-2rem))] items-center gap-1 rounded-lg bg-chat px-2 text-xs shadow-surface hairline focus-within:ring-2 focus-within:ring-ring/40" data-testid="chat-find">
     <style>{`::highlight(${name}) { background-color: #e4b64866; color: inherit; } ::highlight(${name}-active) { background-color: #e4b648; color: #171717; }`}</style>
     {rects.length > 0 && createPortal(rects.map((rect, i) => <span key={i} aria-hidden data-chat-search-highlight className="pointer-events-none fixed z-20" style={{ top: rect.top, left: rect.left, width: rect.width, height: rect.height, background: rect.active ? "#e4b64888" : "#e4b64844", outline: rect.active ? "1px solid #b78719" : undefined }} />), document.body)}
     <Search className="ml-0.5 size-3.5 shrink-0 text-faint" aria-hidden />

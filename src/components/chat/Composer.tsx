@@ -1,6 +1,7 @@
 import { localCommands } from "@/lib/localCommands";
 import { captureReviewSend, markReviewsSent, pendingReviewCount, restoreReviewSend } from "@/lib/reviewComments";
 import { SetupCheckCoach } from "@/components/cloudSetup/SetupCheckCoach";
+import { dismissSetupCheckCoach } from "@/lib/setupCheckDraft";
 import { ContextPopover } from "./UsagePopovers";
 import type { Turn } from "@/lib/transcript";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
@@ -543,6 +544,7 @@ export function Composer({
     const fileNames = sendable.flatMap((a) => (a.file ? [{ name: a.name, ...(a.size != null ? { size: a.size } : {}) }] : []));
     const operation = beginComposerSend(sendScope, { text, images: previews, ...(fileNames.length ? { files: fileNames } : {}), pressedAt: Date.now(), afterSeq: sentAfter?.() ?? 0 });
     if (!operation) return;
+    dismissSetupCheckCoach(tab.id);
     // The message goes to the chat at once, drawn as sending, and the composer
     // is free for the next one (#727): what was set aside to send a recalled
     // message comes back, or nothing. Failing, the message comes back here.
@@ -755,6 +757,7 @@ export function Composer({
         <textarea
           ref={ref}
           data-composer
+          aria-label="Message"
           {...textProps}
           value={draft}
           onChange={(e) => {

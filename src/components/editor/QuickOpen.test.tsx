@@ -37,7 +37,7 @@ function openQuickOpen() {
   fireEvent.keyDown(window, { key: "p", code: "KeyP", ctrlKey: true });
 }
 
-const input = () => screen.findByRole("textbox", { name: "Search files" });
+const input = () => screen.findByRole("combobox", { name: "Search files" });
 const rowNames = () => screen.getAllByRole("option").map((o) => o.querySelector("span.truncate")?.textContent);
 
 function headingsAndRows(): string[] {
@@ -142,7 +142,7 @@ describe("QuickOpen", () => {
     const diff = getEditors().editors.find((e) => e.kind === "diff" && e.rel === "src/components/settings/ProjectScripts.tsx");
     expect(diff).toBeTruthy();
     expect(diff?.kind === "diff" && diff.diff).toMatchObject({ scope: "all", range: { base: "base-tree", head: "head-tree" }, uncommitted: false });
-    expect(screen.queryByRole("textbox", { name: "Search files" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Search files" })).toBeNull();
   });
 
   it("does nothing on ⌘Enter for an unchanged file", async () => {
@@ -153,7 +153,7 @@ describe("QuickOpen", () => {
     const before = getEditors().editors.length;
     fireEvent.keyDown(await input(), { key: "Enter", ctrlKey: true });
     expect(getEditors().editors.length).toBe(before);
-    expect(screen.getByRole("textbox", { name: "Search files" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Search files" })).toBeTruthy();
   });
 
   it("copies the selected file's path on ⌥⌘C", async () => {
@@ -187,7 +187,7 @@ describe("QuickOpen", () => {
       fireEvent.change(await input(), { target: { value: "needle " } });
       fireEvent.click(await screen.findByRole("button", { name: /Search inside files/ }));
       expect(opened).toEqual(["needle"]);
-      expect(screen.queryByRole("textbox", { name: "Search files" })).toBeNull();
+      expect(screen.queryByRole("combobox", { name: "Search files" })).toBeNull();
 
       // The shortcut does the same while nothing matches.
       openQuickOpen();
@@ -258,7 +258,7 @@ describe("QuickOpen", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Include gitignored files" }));
     await screen.findByRole("button", { name: "Skip gitignored files" });
     fireEvent.keyDown(await input(), { key: "Escape" });
-    await waitFor(() => expect(screen.queryByRole("textbox", { name: "Search files" })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("combobox", { name: "Search files" })).toBeNull());
     openQuickOpen();
     await waitFor(() => expect(screen.getByText(/^7 files in this worktree$/)).toBeTruthy());
   });

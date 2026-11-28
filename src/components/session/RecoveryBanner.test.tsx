@@ -107,6 +107,9 @@ describe("session recovery UI smoke", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry safely" }));
     expect(p.onRetry).toHaveBeenCalledWith();
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "available" } });
+    // Selecting an option must not immediately restart the agent until Switch & retry is clicked (U-34).
+    expect(p.onRetry).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Switch & retry" }));
     expect(p.onRetry).toHaveBeenCalledWith("available");
     rerender(<RecoveryBanner {...p} waiting asks={[ask]} />);
     expect(screen.getByText(/^Run a command$/)).toBeTruthy();
@@ -135,6 +138,8 @@ describe("session recovery UI smoke", () => {
     expect(await screen.findByRole("option", { name: "Opus (latest · Opus 4.6)" })).toBeTruthy();
     expect(screen.queryByText(/Retry/i)).toBeNull();
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "claude-opus-4-6" } });
+    expect(p.onRetry).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Switch & retry" }));
     expect(p.onRetry).toHaveBeenCalledWith("claude-opus-4-6");
     act(() => runtime.emit({ state: "suspended" }));
     expect(screen.getByRole("option", { name: "Opus (latest)" })).toBeTruthy();
@@ -185,6 +190,8 @@ describe("session recovery UI smoke", () => {
     expect(reset).toMatch(/^Weekly limit · resets .+ \(in 23h [45]m\)$/);
     expect(reset).toContain(new Date(resetsAt).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Choose another model" }), { target: { value: "other" } });
+    expect(p.onRetry).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Switch & retry" }));
     expect(p.onRetry).toHaveBeenCalledWith("other");
     // Without a reset time there is nothing to count down to; the window alone is not worth a line.
     cleanup();

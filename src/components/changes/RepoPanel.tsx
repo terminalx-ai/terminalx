@@ -67,6 +67,9 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
     else if (selectedStaged && !staged.some((file) => file.path === selected) && unstaged.some((file) => file.path === selected)) setSelectedStaged(false);
   }, [selected, selectedStaged, staged, unstaged]);
   const [message, setMessage] = useState("");
+  const [previousMessage, setPreviousMessage] = useState<string | null>(null);
+  const messageRef = useRef(message);
+  messageRef.current = message;
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [operation, setOperation] = useState<string | undefined>();
@@ -127,7 +130,12 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
       if (selectedSource.current.generation === generation) setBusy(null);
     }
   };
-  const commit = () => void run("commit", () => source.commit(message.trim())).then((ok) => ok && setMessage(""));
+  const commit = () => void run("commit", () => source.commit(message.trim())).then((ok) => {
+    if (ok) {
+      setMessage("");
+      setPreviousMessage(null);
+    }
+  });
   const pathArgs = (file: ChangedFile) => [file.path, ...(file.oldPath ? [file.oldPath] : [])];
   const stageFile = (file: ChangedFile) => void run("stage", async () => { await source.stagePaths?.(pathArgs(file)); });
   const unstageFile = (file: ChangedFile) => void run("unstage", async () => { await source.unstagePaths?.(pathArgs(file)); });
@@ -137,8 +145,13 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   };
   const generateMessage = () => void run("generate message", async () => {
     if (!source.generateCommitMessage) throw new Error("Commit message generation is available for local repositories.");
+    const before = messageRef.current;
     const generated = await source.generateCommitMessage(commitAgent);
-    if (selectedSource.current.generation === generation) setMessage(generated);
+    if (selectedSource.current.generation === generation) {
+      if (before.trim() && before !== generated) setPreviousMessage(before);
+      else setPreviousMessage(null);
+      setMessage(generated);
+    }
   });
   const commitLabel = staged.length ? `Commit ${staged.length} staged file${staged.length === 1 ? "" : "s"}` : `Commit all ${files.length} file${files.length === 1 ? "" : "s"}`;
   const push = () => void run("push", async () => {
@@ -205,10 +218,14 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
                 {author ? `Committing as ${author}` : "No Git identity on this computer: set user.name and user.email to commit."}
               </div>
             )}
-            <div className="rounded-lg bg-well p-2">
+            <div className="rounded-lg bg-well p-2 focus-within:ring-2 focus-within:ring-ring/40">
               <textarea
+                aria-label="Commit message"
                 value={message}
-                onChange={(e) => setMessage(e.target.value)}
+                onChange={(e) => {
+                  setMessage(e.target.value);
+                  setPreviousMessage(null);
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && message.trim() && !busy) {
                     e.preventDefault();
@@ -219,6 +236,22 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
                 placeholder={`Commit message (${bindingText("mod+enter")} to commit)`}
                 className="w-full resize-none bg-transparent px-1 text-[13px] outline-none placeholder:text-faint"
               />
+              {previousMessage !== null && (
+                <div className="mb-1.5 flex items-center justify-between gap-2 px-1 text-[11px] text-muted-foreground" role="status">
+                  <span>Replaced your previous commit message.</span>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    onClick={() => {
+                      setMessage(previousMessage);
+                      setPreviousMessage(null);
+                    }}
+                  >
+                    Undo
+                  </Button>
+                </div>
+              )}
               {source.generateCommitMessage && <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-[11px]">
                 <Checkbox className="text-[11px] text-foreground" label="Write commit messages with the agent" checked={prefs.writeCommitMessagesWithAgent} onChange={(on) => setPrefs({ writeCommitMessagesWithAgent: on })}>Write commit messages with the agent</Checkbox>
                 <span className="text-faint">Uses your own quota.</span>

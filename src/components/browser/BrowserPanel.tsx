@@ -5,6 +5,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { bootBrowser, closeBrowserPage, focusBrowserPage, openBrowserPage, pagesFor, useBrowser } from "@/lib/browser";
 import { cn } from "@/lib/cn";
+import { showError } from "@/lib/errorToasts";
 import { BrowserView } from "./BrowserView";
 
 /**
@@ -33,7 +34,7 @@ export function BrowserPanel({ sessionId, cwd, active }: { sessionId: string; cw
     setPicked(id);
     setAdding(false);
     // The agent's "current page" follows the reader's pick, so both mean the same page.
-    void focusBrowserPage(id).catch((e) => console.error("browser activate failed", e));
+    void focusBrowserPage(id).catch((e) => showError("Switch browser page", e));
   };
 
   return (
@@ -60,7 +61,7 @@ export function BrowserPanel({ sessionId, cwd, active }: { sessionId: string; cw
                   type="button"
                   aria-label={`Close ${p.title || p.url}`}
                   className="flex size-4 shrink-0 items-center justify-center rounded-sm text-faint opacity-0 hover:bg-veil-strong hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
-                  onClick={() => void closeBrowserPage(sessionId, p.id).catch((e) => console.error("browser close failed", e))}
+                  onClick={() => void closeBrowserPage(sessionId, p.id).catch((e) => showError("Close browser page", e))}
                 >
                   <X className="size-3" />
                 </button>

@@ -245,7 +245,7 @@ const PromptMark = memo(function PromptMark({
         onMouseMove={(e) => actions.move(e.currentTarget, turnKey)}
         onFocus={(e) => actions.show(e.currentTarget, turnKey)}
         onBlur={actions.hide}
-        className="group flex w-6 items-center justify-end outline-none"
+        className="group flex w-6 items-center justify-end rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
       >
         <span
           className={cn(
