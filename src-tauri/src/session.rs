@@ -3842,12 +3842,24 @@ impl SessionManager {
     ) -> Result<SendOutcome> {
         let host = crate::issue_pipeline::host::LocalHost::new(self.sink.clone(), self.clone());
         crate::issue_pipeline::engine::retry_interrupted_resolver(&host, session_id, tab_id, || {
-            self.send_pressed_inner(session_id, tab_id, text, images, pressed_at, files, request_id)
+            self.send_pressed_inner(session_id, tab_id, text, images, pressed_at, files, request_id, None)
+        })
+    }
+
+    /// A cloud workspace member's message from the mailbox (PRO-141): sent as
+    /// [`Self::send_pressed`] sends one, and recorded in the transcript as
+    /// that member's. `user_id` is the verified sender of the leased command,
+    /// never anything the message says; the runtime has no name for them.
+    pub(crate) fn send_from_member(&self, session_id: &str, tab_id: &str, text: String, images: Vec<ImageInput>, files: Vec<FileRef>, user_id: &str) -> Result<SendOutcome> {
+        let author = crate::local_sharing::Person { user_id: user_id.to_string(), display_name: String::new(), email: String::new(), email_verified: false, organization_ids: Vec::new() };
+        let host = crate::issue_pipeline::host::LocalHost::new(self.sink.clone(), self.clone());
+        crate::issue_pipeline::engine::retry_interrupted_resolver(&host, session_id, tab_id, || {
+            self.send_pressed_inner(session_id, tab_id, text, images, None, files, None, Some(author))
         })
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn send_pressed_inner(&self, session_id: &str, tab_id: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<FileRef>, request_id: Option<uuid::Uuid>) -> Result<SendOutcome> {
+    fn send_pressed_inner(&self, session_id: &str, tab_id: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<FileRef>, request_id: Option<uuid::Uuid>, author: Option<crate::local_sharing::Person>) -> Result<SendOutcome> {
         let files = crate::attachments::admit_refs(session_id, &files, images.len())?;
         if !files.is_empty() && tui::is_slash_command(&text) {
             bail!("A command cannot carry attached files.");
@@ -3867,7 +3879,7 @@ impl SessionManager {
         } else {
             drop(sharing);
             let origin = if pressed_at.is_some() { crate::recovery_log::Origin::Composer } else { crate::recovery_log::Origin::Programmatic };
-            self.send_display_admitted(&admission, session_id, tab_id, text.clone(), text, images, files, origin, request_id)
+            self.send_display_admitted(&admission, session_id, tab_id, text.clone(), text, images, files, origin, request_id, author)
         };
         drop(admission);
         self.forget_baseline(session_id, tab_id);
@@ -4096,9 +4108,9 @@ impl SessionManager {
     /// representation to the transcript.
     #[allow(clippy::too_many_arguments)]
     fn send_display_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
-        session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, files: Vec<FileRef>, origin: crate::recovery_log::Origin, request_id: Option<uuid::Uuid>,
+        session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, files: Vec<FileRef>, origin: crate::recovery_log::Origin, request_id: Option<uuid::Uuid>, author: Option<crate::local_sharing::Person>,
     ) -> Result<SendOutcome> {
-        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { bot: None, request_id, collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
+        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { bot: None, request_id, collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text, display: display_text, author, shared_connection: None }, images, None, origin);
         // The app declining to type into the tab's terminal is no error of
         // the agent's: nothing is raised in the tab, and the reason is said.
         if outcome.as_ref().is_err_and(|error| error.is::<follow::Refusal>()) {

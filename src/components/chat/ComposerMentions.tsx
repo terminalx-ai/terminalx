@@ -68,16 +68,30 @@ export function MentionChips({ people, onRemove }: { people: readonly MentionPer
   );
 }
 
-export type MentionRefused = { kind: "no-access"; message: string } | { kind: "unchecked" };
+/**
+ * Why a mention did not go: someone cannot watch the workspace, the check
+ * could not be made, or the sender is over their mention budget (PRO-141),
+ * before the message was sent (`too-fast`) or after it (`not-delivered`).
+ */
+export type MentionRefused = { kind: "no-access"; message: string } | { kind: "unchecked" } | { kind: "too-fast" } | { kind: "not-delivered" };
+
+const REFUSED: Record<Exclude<MentionRefused["kind"], "no-access">, string> = {
+  unchecked: "Couldn't check who can follow this workspace, so nothing was sent. Try again, or remove the mention.",
+  "too-fast": "You're sending mentions too fast, so nothing was sent. Wait a minute, then try again.",
+  "not-delivered": "Your message was sent, but you're sending mentions too fast, so nobody was told about this mention.",
+};
+
+/** The server's answer to a sender over their mention budget. */
+export function mentionsTooFast(error: unknown): boolean {
+  return !!error && typeof error === "object" && (error as { code?: unknown }).code === "cloud_workspace_rate_limited";
+}
 
 /**
  * Nothing was sent and nobody was told (design 14.07): someone mentioned
  * cannot watch the workspace. Share opens the workspace's Share dialog.
  */
 export function MentionRefusal({ refused, onShare, onDismiss }: { refused: MentionRefused; onShare: () => void; onDismiss: () => void }) {
-  const message = refused.kind === "no-access"
-    ? refused.message
-    : "Couldn't check who can follow this workspace, so nothing was sent. Try again, or remove the mention.";
+  const message = refused.kind === "no-access" ? refused.message : REFUSED[refused.kind];
   return (
     <div role="alert" className="mb-2 flex items-center gap-2.5 rounded-lg border border-mention/40 bg-mention/5 px-3 py-2 text-[12.5px] text-foreground" data-testid="mention-refused">
       <AtSign aria-hidden className="size-3.5 shrink-0 text-mention" />
