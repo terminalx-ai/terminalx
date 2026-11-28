@@ -80,6 +80,7 @@ export const checks = [
   "intro-slides",
   "organization-billing",
   "organization-routes",
+  "org-usage-limit",
 ];
 
 /**

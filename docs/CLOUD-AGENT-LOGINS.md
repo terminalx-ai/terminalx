@@ -163,18 +163,26 @@ delivers it to every workspace instead of a creator's personal route.
 
 Behind `cloud.agent-logins.usage-limit-card.v1`: a cloud tab whose agent hit
 its provider's usage limit on the organization's login shows "<Agent> usage
-limit reached" in the recovery card (design 17.13). Only then: the runtime
-says per tab which login its agent started with (`login: "organization" |
-"route"` in the tab's info); a tab on the creator's own route, or a runtime
-that does not say, keeps the usual card.
+limit reached" in a recovery card (design 17.13), drawn from the runtime's
+own `recovery` event. Only then: the runtime says per tab which login its
+agent started with (`login: "organization" | "route"` in the tab's info).
+A cloud tab draws no other recovery card, so a tab on a route (the creator's
+own or an organization route), or on a runtime that does not say, shows
+none, as before.
 
 It says the organization's login ran out (whose, when the reader may list
 the logins; a Bedrock login is named by the organization, since its name is
-a region), **Copy request** puts a ready message for an admin on the
-clipboard, and **Switch to <other agent>** opens the continuation dialog on
-Codex (from Claude Code) or Claude Code. The card's usual actions stay:
-another account, another model, **Continue here** once the limit has reset
-(the time is dropped from the text then), Stop, and Continue in new session.
+a region), and **Copy request** puts a ready message for an admin on the
+clipboard. **Switch to <other agent>** opens the runtime's handoff (#1327)
+to Codex (from Claude Code) or Claude Code: a new tab of that agent in the
+same session on the workspace, carrying the conversation over. It is offered
+only when the runtime has the handoff and that agent. The card's other
+actions are another model, **Continue here** once the limit has reset (the
+time is dropped from the text then), Stop, and **Continue in new session**,
+which is the same handoff in the tab's own agent.
+
+`scripts/webkit/org-usage-limit.mjs` draws the card and Switch's dialog at
+960x600 and 1280x760.
 
 ## A login the provider no longer accepts (#667)
 
