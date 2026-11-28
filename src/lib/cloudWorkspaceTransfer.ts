@@ -69,6 +69,36 @@ interface TransferRpc {
   call<T>(method: string, params: Record<string, unknown>): Promise<T>;
 }
 
+/** What a move would bring, read before anything is exported. */
+export interface TransferPreview {
+  branch: string;
+  commits: number;
+  hasRemoteBase: boolean;
+  uncommittedFiles: number;
+  messages: number | null;
+  harness: string;
+  /** The session's other agent tabs, which stay in the cloud. */
+  otherTabs: number;
+  /** Notes on the session's tabs, which stay in the cloud. */
+  notes: boolean;
+}
+
+export async function readTransferPreview(client: TransferRpc, scope: { sessionId: string; tabId: string }): Promise<TransferPreview> {
+  const value = await client.call<Record<string, unknown>>("transfer.preview", scope);
+  const count = (field: unknown) => typeof field === "number" && Number.isSafeInteger(field) && field >= 0;
+  if (typeof value.branch !== "string" || !count(value.commits) || typeof value.hasRemoteBase !== "boolean"
+    || !count(value.uncommittedFiles) || !(value.messages === null || count(value.messages)) || typeof value.harness !== "string") {
+    throw Error("The runtime returned an invalid move preview.");
+  }
+  return {
+    branch: value.branch, commits: value.commits as number, hasRemoteBase: value.hasRemoteBase,
+    uncommittedFiles: value.uncommittedFiles as number, messages: value.messages as number | null, harness: value.harness,
+    // A runtime from before these fields reports neither.
+    otherTabs: count(value.otherTabs) ? value.otherTabs as number : 0,
+    notes: value.notes === true,
+  };
+}
+
 export async function readCloudTransfer(
   client: TransferRpc,
   scope: { sessionId: string; tabId: string },

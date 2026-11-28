@@ -59,6 +59,9 @@ fn reply_timeout(event: &str) -> Duration {
         "PermissionRequest" | "PreToolUse" => {
             crate::harness::claude::pty::PERMISSION_WAIT.max(crate::harness::codex::pty::PERMISSION_WAIT) + DECISION_SLACK
         }
+        // The cloud browser for agents (PRO-209): an approval card, then an
+        // action that may wait while a person has taken control.
+        crate::cloud_browser::HOOK_EVENT => crate::cloud_browser::HOOK_WAIT,
         _ => REPLY_TIMEOUT,
     }
 }
@@ -1940,6 +1943,13 @@ pub fn run_statusline_cli() -> bool {
 
 /// Send one frame and wait for the reply. `None` on any failure, so the CLI
 /// carries on exactly as it would with no hook installed.
+/// Ask this launch's TerminalX with a frame of the caller's own, from a
+/// process the CLI started with the hook's environment (the cloud browser's
+/// MCP server, PRO-209).
+pub(crate) fn ask_app_event(event: &str, payload: &Value) -> Option<Value> {
+    ask_app_with_policy(event, &payload.to_string(), false)
+}
+
 fn ask_app(event: &str, stdin: &str) -> Option<Value> {
     ask_app_with_policy(event, stdin, false)
 }

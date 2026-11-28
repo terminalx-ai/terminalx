@@ -522,7 +522,7 @@ fn screen_path(operation: &str) -> String {
     format!("/tmp/terminalx-screen-{operation}.png")
 }
 
-fn shell_quote(s: &str) -> String {
+pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 

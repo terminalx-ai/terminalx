@@ -14,6 +14,7 @@ import { cloudWorkspaceKey } from "@/types/target";
 import { cloudProviderLabel } from "@/lib/cloudProviders";
 import { deriveCloudActivity } from "@/lib/cloudRowState";
 import { WorkspaceRestartDialog } from "./WorkspaceActionsRestart";
+import { CloudAgentBrowserSwitch } from "./CloudAgentBrowserSwitch";
 
 type CopyField = "machine" | "info";
 
@@ -125,6 +126,7 @@ export function CloudWorkspaceDetailsCard({ item, initialCopy, onInitialCopy, on
           <DetailsRow label="Created">{new Date(result.workspace.createdAt).toLocaleString()}</DetailsRow>
           {result.workspace.checkout && <DetailsRow label="Setup">{result.workspace.checkout.state === "ready" ? "Checkout ready" : "Checkout failed"}</DetailsRow>}
         </dl>
+        <CloudAgentBrowserSwitch item={item} />
         <section aria-label="Workspace health" className="rounded-lg border border-hairline">
           <dl className="divide-y divide-hairline">
             <DetailsRow label="Status">

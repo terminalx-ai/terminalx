@@ -1,6 +1,6 @@
-import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { joinKeycaps } from "@/lib/shortcuts";
-import { Check, ShieldAlert, MessageCircleQuestion, SquareTerminal } from "@/icons";
+import { Check, Globe, Monitor, ShieldAlert, MessageCircleQuestion, SquareTerminal } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/tooltip";
 import { revealInOwnScroller } from "@/lib/shellScroll";
@@ -12,6 +12,7 @@ import { approvalFiles, rawPatch } from "@/lib/approvalDiff";
 import { ApprovalDiff, Counts } from "./ApprovalDiff";
 import type { ScreenPrompt } from "@/types/events";
 import { LinkedText } from "./LinkedText";
+import { cloudBrowserAskDetail, isCloudBrowserAsk, openCloudDesktop } from "@/lib/cloudBrowser";
 
 /**
  * Someone is typing outside the card: in the composer, a field, a terminal or
@@ -185,6 +186,7 @@ export function PermissionCard({
   useShortcut("session.interrupt", denyKey, { enabled: takesKeys && !!deny && !blocked, priority: 1 });
   const verb = verbFor(ask.toolName ?? "", files?.length);
   const what = verb.charAt(0).toUpperCase() + verb.slice(1);
+  if (isCloudBrowserAsk(ask)) return <CloudBrowserCard ask={ask} onAnswer={onAnswer} busy={busy} blockedReason={blockedReason} aside={aside} cardRef={ref} takesKeys={takesKeys} escKeys={escKeys} />;
   return (
     <AskShell
       ref={ref}
@@ -237,6 +239,73 @@ export function PermissionCard({
           {note && <p className="whitespace-pre-wrap break-words text-xs text-muted-foreground">{note}</p>}
         </div>
       )}
+    </AskShell>
+  );
+}
+
+/**
+ * The one card a browser session on the cloud desktop asks for (PRO-209).
+ * The runtime asks only in tabs that ask first, once per browser session.
+ */
+function CloudBrowserCard({ ask, onAnswer, busy, blockedReason, aside, cardRef, takesKeys, escKeys }: {
+  ask: PendingAsk;
+  onAnswer: (optionId: string) => void;
+  busy?: boolean;
+  blockedReason: string | null;
+  aside?: ReactNode;
+  cardRef: RefObject<HTMLDivElement | null>;
+  takesKeys: boolean;
+  escKeys: string[];
+}) {
+  const { url, plan, agent } = cloudBrowserAskDetail(ask);
+  const blocked = !!blockedReason;
+  const deny = denyOption(ask);
+  const options = barOrder(ask.options ?? []);
+  const render = ({ option: o, primary }: (typeof options)[number]) => (
+    <Button key={o.id} size="sm" variant={blocked || o.kind === "deny" ? "outline" : primary ? "accent" : "outline"}
+      disabled={busy || blocked} title={blockedReason ?? undefined} onClick={() => onAnswer(o.id)} data-primary={primary || undefined}
+      className={cn((blocked || o.kind === "deny") && "text-muted-foreground")}>
+      {o.kind === "deny" ? "Deny" : "Allow for this browser session"}
+      {primary && !blocked && <EnterKey />}
+      {o.kind === "deny" && !primary && !blocked && takesKeys && o.id === deny?.id && escKeys.length > 0 && (
+        <Kbd className="ml-1.5 h-4 min-w-4 px-1 text-[10px] lowercase text-current">{joinKeycaps(escKeys)}</Kbd>
+      )}
+    </Button>
+  );
+  return (
+    <AskShell
+      ref={cardRef}
+      icon={<ShieldAlert className="size-3.5" />}
+      label="Approval"
+      tone="warning"
+      heading={<>
+        <span data-testid="permission-title">Use the browser on the cloud desktop?</span>
+        <span className="ml-auto flex shrink-0 items-center gap-1 rounded-md border border-hairline px-1.5 py-0.5 text-[11px] font-normal text-muted-foreground" data-testid="ask-meta">
+          <Monitor className="size-3" aria-hidden /> Cloud browser
+        </span>
+      </>}
+      // Deny stands apart on the left, as on the other side of a decision.
+      aside={aside ?? options.filter(({ option }) => option.kind === "deny").map(render)}
+      note={blocked ? blockedReason : null}
+      actions={<>
+        {options.filter(({ option }) => option.kind !== "deny").map(({ option: o, primary }) => {
+          const button = render({ option: o, primary });
+          // "Open Desktop tab" sits between Deny and the answer.
+          return primary ? [<Button key="open-desktop" size="sm" variant="outline" onClick={openCloudDesktop}><Monitor /> Open Desktop tab</Button>, button] : button;
+        })}
+      </>}
+    >
+      <div className="space-y-2 px-4 py-2.5 text-xs" data-testid="cloud-browser-ask">
+        <p className="flex min-w-0 flex-wrap items-center gap-x-1.5 rounded-md border border-hairline px-2.5 py-1.5 text-muted-foreground">
+          <Globe className="size-3.5 shrink-0" aria-hidden />
+          <span className="text-foreground">Chrome on the cloud desktop</span>
+          {url && <><span>· starts at</span><code className="truncate font-mono text-foreground">{url}</code></>}
+        </p>
+        <p className="leading-relaxed text-muted-foreground">
+          {agent} and its sub-agents in this tab can open pages, click and type in a new tab until it closes this browser session. It uses the desktop’s Chrome, with any sites signed in there. One approval covers the whole session; a new session asks again. You and anyone watching see every step in the Desktop tab, and can take control there.
+        </p>
+        {plan && <p className="whitespace-pre-wrap break-words text-muted-foreground" data-testid="cloud-browser-plan">Plan: {plan}</p>}
+      </div>
     </AskShell>
   );
 }

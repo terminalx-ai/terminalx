@@ -296,6 +296,9 @@ const ROUTE_REASONS: Record<string, string> = {
  */
 export const SIGN_IN_REQUIRED = "sign-in-required";
 
+/** The runtime's reason for a sign-in an agent needs once the organization route it ran on stopped applying (PRO-310). */
+export const ORGANIZATION_ROUTE_REMOVED = "organization-route-removed";
+
 /** The agents whose organization login is signed in again (rather than replaced with a key): Settings opens their sign-in. */
 const SIGNS_IN_AGAIN: Record<string, AgentLoginProvider> = { claude: "claude", codex: "codex" };
 
@@ -308,6 +311,11 @@ export function signInMessage(info: Pick<AgentTabInfo, "harness" | "signIn">, ma
   const signIn = info.signIn;
   if (!signIn) return null;
   const agent = cloudAgentLabel(info.harness);
+  // The organization route its sessions ran on no longer applies, with no other login in its place (PRO-310).
+  if (signIn.reason === ORGANIZATION_ROUTE_REMOVED) {
+    const fix = mayManage ? `Connect a ${agent} login in ${AGENT_LOGIN_PLACE}, then send again.` : `Ask an owner or admin to connect a ${agent} login, then send again.`;
+    return `Sign in to continue: ${organization?.trim() || "the organization"}’s ${agent} route no longer applies to this workspace, and there is no other ${agent} login here. ${fix}`;
+  }
   const route = signIn.reason ? ROUTE_REASONS[signIn.reason] : undefined;
   if (route) return `Needs sign-in: ${agent} uses its own route in this workspace, and ${route} (Settings → Organizations → Your model access).`;
   if (signIn.state === SIGN_IN_REQUIRED) {

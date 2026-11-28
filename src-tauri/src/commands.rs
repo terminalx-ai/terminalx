@@ -1880,6 +1880,12 @@ pub async fn cloud_workspace_details(workspace_id: String, org_id: Option<String
 }
 
 #[tauri::command]
+pub async fn cloud_workspace_agent_browser(workspace_id: String, org_id: Option<String>, enabled: Option<bool>, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::AgentBrowserState, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    let risk = if enabled.is_some() { crate::cloud_workspaces::RequestRisk::Mutation } else { crate::cloud_workspaces::RequestRisk::Read };
+    cloud_command!(state, risk, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.agent_browser(org_id.as_deref(), &workspace_id, enabled))
+}
+
+#[tauri::command]
 pub async fn organization_billing(org_id: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::OrganizationBilling, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.organization_billing(&org_id))
 }
@@ -2619,20 +2625,34 @@ pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, i
             && account.phase2_ready("cloud.workspaces.transfer-to-local.v1", Some(&input.org_id), None)
     };
     if !authorized(&account, &input) { return Err("The cloud account changed.".to_owned().into()); }
-    if !git::is_repo(Path::new(&input.project_path)) {
-        return Err("Choose a local Git project.".to_owned().into());
+    // A repository without a remote can also land in a new, empty folder:
+    // it becomes a fresh repository that receives the whole history.
+    let initialized = !git::is_repo(Path::new(&input.project_path));
+    if initialized {
+        let project = Path::new(&input.project_path);
+        if !crate::workspace_transfer_bundle::is_empty_folder(project) {
+            return Err("This folder is not a Git project. Choose a local Git project, or an empty folder.".to_owned().into());
+        }
+        if input.bundle.is_none() {
+            return Err("This branch builds on commits from its remote. Choose a local clone of that repository.".to_owned().into());
+        }
     }
-    if !crate::configuration_commands::review(&app, &input.project_path).await? {
+    // An empty folder has no repository configuration to review.
+    if !initialized && !crate::configuration_commands::review(&app, &input.project_path).await? {
         return Err("Repository configuration was not trusted.".to_owned().into());
     }
     let sessions = state.sessions().map_err(err)?;
     let ticket = crate::github_process::ticket();
+    let input_path = input.project_path.clone();
     github_work(move || crate::github_process::with_ticket(ticket, || -> anyhow::Result<SessionEntry> {
         anyhow::ensure!(authorized(&account, &input), "The cloud account changed.");
         anyhow::ensure!(input.transcript.len() <= 6 * 1024 * 1024, "Conversation is too large.");
         let transcript = serde_json::from_slice::<Vec<transfer::TranscriptMessage>>(&STANDARD.decode(&input.transcript)?)?;
         let pin = transfer::BranchCommit::new(&input.branch, &input.commit)?;
         let project = Path::new(&input.project_path);
+        if initialized {
+            transfer::init_empty_destination(project, &pin)?;
+        }
         transfer::check_branch_namespace(project, &pin)?;
         if let Some(encoded) = &input.bundle {
             anyhow::ensure!(encoded.len() as u64 <= transfer::MAX_BUNDLE_BYTES.div_ceil(3) * 4, "Git bundle is too large.");
@@ -2685,7 +2705,14 @@ pub async fn cloud_transfer_import(app: AppHandle, state: State<'_, AppState>, i
                 }
             }
         }
-    })).await.map_err(err)?.map_err(CloudTransferImportError::from)
+    })).await.map_err(err)?.map_err(|error| {
+        // A failed first move into an empty folder leaves it empty again.
+        let error = match initialized.then(|| crate::workspace_transfer_bundle::discard_empty_destination(Path::new(&input_path))) {
+            Some(Err(cleanup)) => error.context(format!("The new repository was kept: {cleanup}")),
+            _ => error,
+        };
+        CloudTransferImportError::from(error)
+    })
 }
 
 /// Create a session: an index entry around an existing checkout, or a new

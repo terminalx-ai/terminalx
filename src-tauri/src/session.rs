@@ -1257,6 +1257,29 @@ pub enum Engine {
     None,
 }
 
+/// How a tab's agent leaves an organization route that no longer applies
+/// (PRO-310), between turns. Each keeps the conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteAction {
+    /// A CLI starts again at once, on the next login.
+    Restart,
+    /// A CLI with no login to start on stops; its tab says "Sign in to
+    /// continue", and the next prompt starts it on whatever login is there then.
+    Stop,
+    /// Codex's app server lets go of its connection; the next message starts
+    /// it again on the next login (as after a refused sign-in, #644).
+    Retire,
+}
+
+/// [`crate::cloud_grants::route_switch_for_launch`], which tests stand in for.
+fn route_switch_of(harness: &str, launch: &str) -> Option<crate::cloud_grants::RouteSwitch> {
+    #[cfg(test)]
+    if let Some(switch) = tests::route_switch_stand_in() {
+        return switch;
+    }
+    crate::cloud_grants::route_switch_for_launch(harness, launch)
+}
+
 pub struct TabRuntime {
     pub session_id: String,
     pub tab_id: String,
@@ -1341,6 +1364,10 @@ pub struct TabRuntime {
     reported_mode_to_judge: Option<String>,
     /// The released launch whose settings restart still owns the empty slot.
     restart_claim: Option<Arc<tui::Tail>>,
+    /// The organization route (PRO-310) this tab's agent runs on went while
+    /// a turn was running: the turn finishes on it, and the switch to the
+    /// next login waits for its end and says so.
+    route_switch_after_turn: bool,
     pub stopping: bool,
     pub stop_in_flight: bool,
     pub stopping_pid: Option<u32>,
@@ -2806,6 +2833,7 @@ impl SessionManager {
                 collaboration_prompts: HashMap::new(), collaboration_settings: HashMap::new(),
                 reported_mode_to_judge: None,
                 restart_claim: None,
+                route_switch_after_turn: false,
                 stopping: false,
                 stop_in_flight: false,
                 stopping_pid: None,
@@ -3542,7 +3570,7 @@ impl SessionManager {
             let turn = running
                 && (runtime.status == TabStatus::InProgress || silence_warning)
                 && now.saturating_duration_since(last_activity) < crate::cloud_activity::MAX_TURN_SILENCE
-                && crate::cloud_grants::sign_in_required_for_launch(&runtime.harness, &runtime.launch_key()).is_none();
+                && !crate::cloud_grants::at_sign_in_screen(&runtime.harness, &runtime.launch_key());
             (active + usize::from(turn), pending + runtime.pending.len())
         })
     }
@@ -5448,7 +5476,15 @@ impl SessionManager {
 
     /// Closing a tab is an owner operation: confirm its agent stopped before
     /// removing the open entry, while retaining provider history for reopening.
+    /// Whether this CLI launch is still the tab's running one (PRO-209): a
+    /// cloud browser session never outlives it.
+    pub fn cli_launch_alive(&self, session_id: &str, tab_id: &str, token: &str) -> bool {
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
+        runtime.is_some_and(|rt| matches!(&rt.lock().unwrap().engine, Engine::Cli(cli) if cli.origin.token == token))
+    }
+
     pub fn close_tab(&self, session_id: &str, tab_id: &str) -> Result<()> {
+        crate::cloud_browser::end_tab(session_id, tab_id);
         // Send/queue admission and view-triggered starts cannot reopen the
         // process between its confirmed exit and removal of the open entry.
         // Fenced, so other tabs' prompts do not wait for the stop (#727).
@@ -6682,7 +6718,9 @@ impl SessionManager {
             env.push((crate::cloud_config::APPENDED_PROMPT_ENV.to_string(), value));
             unset.push(crate::cloud_config::APPENDED_PROMPT_ENV.to_string());
         }
-        let spawned = crate::cloud_grants::env_prefix(&format!("{}{}{}{}", launch.command, config.args, computer.args, prompt.args), &unset, &after_profile);
+        // The cloud desktop's browser, only while the workspace offers it (PRO-209).
+        let browser = crate::cloud_browser::launch_args(&tab.harness, &exe.to_string_lossy(), &token, &rt.session_id, &rt.tab_id);
+        let spawned = crate::cloud_grants::env_prefix(&format!("{}{}{}{}{}", launch.command, config.args, computer.args, browser, prompt.args), &unset, &after_profile);
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
         // Kept up with the file this tab's tail follows, wherever it moves,
@@ -8679,6 +8717,13 @@ impl SessionManager {
                     }
                 }
             }
+            // The cloud browser for agents (PRO-209): its MCP server's calls.
+            crate::cloud_browser::HOOK_EVENT => return self.cloud_browser_hook(&rt_arc, &frame, kind),
+            // The tools of the server this launch was given decide their own
+            // approval, once per browser session; Codex asks at this gate.
+            "PreToolUse" if asks_every_tool && frame.payload["tool_name"].as_str().is_some_and(|name| crate::cloud_browser::is_tool_of_launch(&frame.token, name)) => {
+                return reply_for(kind, &frame.event, Decision::Allow);
+            }
             "PermissionRequest" => {
                 // A bot's gate (PRO-478): what it refuses is refused here too, saying why, and
                 // what it asks about is asked on a card that says why.
@@ -8694,6 +8739,11 @@ impl SessionManager {
                     crate::bots::access::Gate::Ask(reason) => Some(reason),
                     crate::bots::access::Gate::Leave => None,
                 };
+                // After the bot's gate: the cloud browser's own tools (PRO-209),
+                // of exactly the server this launch was given, while it is on.
+                if because.is_none() && frame.payload["tool_name"].as_str().is_some_and(|name| crate::cloud_browser::is_tool_of_launch(&frame.token, name)) {
+                    return reply_for(kind, &frame.event, Decision::Allow);
+                }
                 return self.ask_permission_because(&rt_arc, &frame, kind, because);
             }
             // Codex asks twice about one escalating command: once here for
@@ -8887,11 +8937,93 @@ impl SessionManager {
         self.restart_if_due(rt_arc, &session, &tab, tail.as_deref());
     }
 
+    /// Every tab whose agent runs on an organization route (PRO-310) the
+    /// workspace no longer has: one between turns moves to the next login
+    /// now, one mid-turn when its turn ends. After the grant sync that
+    /// found it gone (`cloud_grants::on_organization_route_gone`).
+    pub fn switch_organization_routes(&self) {
+        let tabs: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
+        for rt_arc in tabs {
+            self.switch_route_if_due(&rt_arc);
+        }
+    }
+
+    /// Move the tab off an organization route that no longer applies, if it
+    /// is between turns: the session is told in one line, and the agent
+    /// starts again on the next login with its conversation kept
+    /// ([`RouteAction`]).
+    fn switch_route_if_due(&self, rt_arc: &Arc<Mutex<TabRuntime>>) {
+        let mut rt = rt_arc.lock().unwrap();
+        let Some(action) = self.route_switch_now(&mut rt) else { return };
+        #[cfg(test)]
+        if let Some(taken) = tests::route_actions_taken() {
+            taken.lock().unwrap().push(action);
+            return;
+        }
+        match action {
+            RouteAction::Retire => self.retire_codex_stdio_later(&mut rt),
+            RouteAction::Restart => {
+                let Engine::Cli(p) = &rt.engine else { return };
+                let tail = p.tail.clone();
+                let work = self.prepare_cli_restart(&mut rt, &tail, false);
+                drop(rt);
+                let Some(work) = work else { return };
+                let (manager, rt_arc) = (self.clone(), rt_arc.clone());
+                std::thread::spawn(move || {
+                    if let Err(e) = manager.complete_cli_restart(&rt_arc, work) {
+                        log::warn!("restart off an organization route: {e:#}");
+                    }
+                });
+            }
+            RouteAction::Stop => {
+                let (manager, session, tab) = (self.clone(), rt.session_id.clone(), rt.tab_id.clone());
+                drop(rt);
+                std::thread::spawn(move || {
+                    if let Err(e) = manager.stop_with(&session, &tab, true) {
+                        log::warn!("stop {session}/{tab} off an organization route: {e:#}");
+                    }
+                });
+            }
+        }
+    }
+
+    /// Whether the tab's agent is to leave an organization route (PRO-310)
+    /// now, and how; the session is told when it is. A turn running (or a
+    /// card waiting) is left to finish on the route it started with, and
+    /// marked so its end says that.
+    fn route_switch_now(&self, rt: &mut TabRuntime) -> Option<RouteAction> {
+        if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() {
+            return None;
+        }
+        let stdio = match &rt.engine {
+            Engine::Cli(p) if p.by_hand.is_none() => false,
+            Engine::CodexStdio(engine) if !engine.exited && !engine.blocked && rt.stdio_retiring.is_none() => true,
+            _ => return None,
+        };
+        let switch = route_switch_of(&rt.harness, &rt.launch_key())?;
+        if rt.turn_open || !rt.pending.is_empty() {
+            rt.route_switch_after_turn = true;
+            return None;
+        }
+        let after_turn = std::mem::take(&mut rt.route_switch_after_turn);
+        let text = crate::cloud_grants::route_switch_notice(&rt.harness, switch, after_turn);
+        self.publish(rt, Payload::Status { text, handoff: None }, None);
+        Some(match (stdio, switch) {
+            (true, _) => RouteAction::Retire,
+            (false, crate::cloud_grants::RouteSwitch::Login(_)) => RouteAction::Restart,
+            (false, crate::cloud_grants::RouteSwitch::SignIn) => RouteAction::Stop,
+        })
+    }
+
     /// A setting the CLI only reads at startup changed mid-turn: the restart
     /// it needs waits here, until the turn it would have interrupted is over.
     /// Off this thread, so the hook's reply reaches the CLI before the CLI is
     /// replaced.
     fn restart_if_due(&self, rt_arc: &Arc<Mutex<TabRuntime>>, session_id: &str, tab_id: &str, tail: Option<&tui::Tail>) {
+        // A route that went mid-turn moves the agent once the turn is over.
+        if rt_arc.lock().unwrap().route_switch_after_turn {
+            self.switch_route_if_due(rt_arc);
+        }
         let expected = {
             let rt = rt_arc.lock().unwrap();
             if rt.stopping || tail.is_some_and(|tail| !Self::has_tail(&rt, tail)) { return; }
@@ -8939,6 +9071,69 @@ impl SessionManager {
 
     /// [`Self::ask_permission`], with `because` as why the card is up when the
     /// app itself is the one asking (a bot's outward call, PRO-478).
+    /// A cloud browser tool call from this tab's agent (PRO-209). A tab that
+    /// asks first shows one card when a browser session opens.
+    fn cloud_browser_hook(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, kind: CliKind) -> HookReply {
+        let (mode, key) = {
+            let rt = rt_arc.lock().unwrap();
+            let Engine::Cli(p) = &rt.engine else { return HookReply::default() };
+            if !p.origin.accepts(frame) { return HookReply::default(); }
+            // One browser session per CLI launch: a restarted or resumed CLI has another token.
+            (p.mode.clone(), format!("{}/{}/{}", rt.session_id, rt.tab_id, p.origin.token))
+        };
+        // Only a launch that was given the tool may use it.
+        if !crate::cloud_browser::launched_with_tool(&frame.token) {
+            return HookReply::refused("This agent was not started with the cloud browser.");
+        }
+        let tab_title = index::get(&frame.session).ok().and_then(|entry| entry.tab(&frame.tab).and_then(|tab| tab.title.clone()));
+        let agent = match kind {
+            CliKind::Claude => "Claude Code",
+            CliKind::Codex => "Codex",
+        };
+        let approve = |input: Value| self.ask_cloud_browser(rt_arc, frame, kind, input);
+        let caller = crate::cloud_browser::Caller { key, agent, tab_title, asks: !crate::cloud_browser::runs_without_asking(&mode) };
+        HookReply { output: Some(crate::cloud_browser::call(caller, &frame.payload, &approve)), refused: None }
+    }
+
+    /// The browser session's one card: allowed or not.
+    fn ask_cloud_browser(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, kind: CliKind, input: Value) -> bool {
+        let gate = "PermissionRequest";
+        let request_id = uuid::Uuid::now_v7().to_string();
+        let tool_name = crate::cloud_browser::OPEN_TOOL.to_string();
+        let (tx, rx) = std::sync::mpsc::channel::<QueuedDecision>();
+        {
+            let mut rt = rt_arc.lock().unwrap();
+            let Engine::Cli(p) = &mut rt.engine else { return false };
+            if !p.origin.accepts(frame) { return false; }
+            p.decisions.insert(request_id.clone(), DecisionSender {
+                sender: tx,
+                caller: crate::hooks::Caller::default(),
+                gate: gate.to_string(),
+                session_command: None,
+            });
+            let options = claude::mapper::build_options(&[]).into_iter().map(|option| match option.kind {
+                crate::events::PermissionOptionKind::AllowOnce => crate::events::PermissionOption { label: "Allow for this browser session".into(), ..option },
+                _ => option,
+            }).collect();
+            let payload = Payload::PermissionRequested {
+                request_id: request_id.clone(),
+                tool_use_id: String::new(),
+                title: Some("Use the browser on the cloud desktop?".into()),
+                description: input["plan"].as_str().filter(|plan| !plan.trim().is_empty()).map(String::from),
+                reason: None,
+                cwd: None,
+                options,
+                tool_name: tool_name.clone(),
+                input: input.clone(),
+            };
+            rt.pending.insert(request_id.clone(), PendingAsk { tool_use_id: String::new(), tool_name, input, suggestions: Vec::new() });
+            self.apply(&mut rt, payload, None);
+        }
+        let waiting = Waiting { kind, gate: gate.to_string(), request_id, local_owner: false };
+        let reply = self.await_decision(rt_arc, waiting, rx, |rt| matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)));
+        reply.output.as_ref().is_some_and(|output| output["hookSpecificOutput"]["decision"]["behavior"] == "allow")
+    }
+
     fn ask_permission_because(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, kind: CliKind, because: Option<String>) -> HookReply {
         let local_owner = crate::local_runtime::permissions::enabled();
         let _waiter = if local_owner {
@@ -9680,6 +9875,30 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
+
+    type RouteActions = Arc<Mutex<Vec<RouteAction>>>;
+
+    thread_local! {
+        /// What this thread's tabs are told of their organization route (PRO-310), in place of the grant store.
+        static ROUTE_SWITCH: std::cell::Cell<Option<Option<crate::cloud_grants::RouteSwitch>>> = const { std::cell::Cell::new(None) };
+        /// The route switches this thread's tabs took, recorded in place of being done.
+        static ROUTE_ACTIONS: std::cell::RefCell<Option<RouteActions>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn route_switch_stand_in() -> Option<Option<crate::cloud_grants::RouteSwitch>> {
+        ROUTE_SWITCH.with(std::cell::Cell::get)
+    }
+
+    pub(super) fn route_actions_taken() -> Option<RouteActions> {
+        ROUTE_ACTIONS.with(|actions| actions.borrow().clone())
+    }
+
+    /// Say `switch` of every tab's organization route on this thread, and
+    /// record what the tabs do about it.
+    pub(super) fn stand_in_route_switch(switch: Option<crate::cloud_grants::RouteSwitch>) -> RouteActions {
+        ROUTE_SWITCH.with(|cell| cell.set(Some(switch)));
+        ROUTE_ACTIONS.with(|actions| actions.borrow_mut().get_or_insert_with(Default::default).clone())
+    }
 
     #[test]
     fn a_bound_guest_provider_never_receives_or_probes_the_host_container() {

@@ -444,6 +444,8 @@ pub(crate) const PHASE2_WORKSPACE_SSH: &str = "cloud.workspaces.ssh.v1";
 pub(crate) const PHASE2_AGENT_LOGIN_BEDROCK: &str = "cloud.agent-logins.bedrock.v1";
 /// The usage-limit card over a cloud tab on an organization's login (PRO-200).
 pub(crate) const PHASE2_AGENT_USAGE_LIMIT_CARD: &str = "cloud.agent-logins.usage-limit-card.v1";
+/// The workspace switch for agents using Chrome on the cloud desktop (PRO-209).
+pub(crate) const PHASE2_AGENT_BROWSER: &str = "cloud.desktop.agent-browser.v1";
 /// Team artifacts and templates (PRO-158).
 pub(crate) const PHASE2_TEAM_ARTIFACTS: &str = "team.artifacts.v1";
 /// Organization model routes (PRO-310): custom providers owners set for everyone.
@@ -452,7 +454,7 @@ pub(crate) const PHASE2_ORGANIZATION_ROUTES: &str = "cloud.agent-routes.organiza
 pub(crate) const PHASE2_INVITES_WELCOME: &str = "organization.invites-welcome.v1";
 /// PRO-241: the sidebar's announcement card.
 pub(crate) const PHASE2_ANNOUNCEMENTS: &str = "desktop.announcements.v1";
-const PHASE2_FEATURES: [&str; 33] = [
+const PHASE2_FEATURES: [&str; 34] = [
     PHASE2_AGENT_LOGIN_BEDROCK,
     PHASE2_AGENT_USAGE_LIMIT_CARD,
     PHASE2_ORGANIZATION_ROUTES,
@@ -480,6 +482,7 @@ const PHASE2_FEATURES: [&str; 33] = [
     "cloud.workspaces.transfer-to-local.v1",
     PHASE2_PRECREATE_USAGE,
     "cloud.desktop.v1",
+    PHASE2_AGENT_BROWSER,
 ];
 
 fn phase2_organizations(session: &DesktopSession) -> Option<&serde_json::Map<String, serde_json::Value>> {

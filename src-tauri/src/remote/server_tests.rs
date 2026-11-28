@@ -4206,9 +4206,17 @@ async fn cloud_desktop_requires_readiness_and_watchers_cannot_open_control_or_ge
     assert!(f.rpc.desktop.set(pool).is_ok());
     let available = next_event(&mut events, "desktop.available").await;
     assert_eq!(available, json!({ "runtimeGeneration": 7, "runtimeEpoch": f.rpc.epoch }));
+    // PRO-209: with it, whether agents may use the desktop's browser and who drives.
+    let agent = next_event(&mut events, "desktop.agent").await;
+    assert_eq!(agent, json!({ "browser": "off", "driving": null }));
     assert!(viewer.granted(protocol::CLOUD_DESKTOP));
     call(&f.rpc, &editor, "rpc.hello", hello.clone()).await.unwrap();
     call(&f.rpc, &stranger, "rpc.hello", hello).await.unwrap();
+    // Taking control from an agent needs control of the desktop.
+    assert_eq!(code(call(&f.rpc, &viewer, "desktop.takeControl", json!({})).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &stranger, "desktop.takeControl", json!({})).await), "capability_not_granted");
+    assert_eq!(call(&f.rpc, &editor, "desktop.takeControl", json!({})).await.unwrap(), json!({ "browser": "off", "driving": null }));
+    call(&f.rpc, &editor, "desktop.handBack", json!({})).await.unwrap();
     assert_eq!(code(call(&f.rpc, &stranger, "desktop.open", json!({})).await), "capability_not_granted");
     assert_eq!(code(call(&f.rpc, &viewer, "desktop.open", json!({"control":true})).await), "forbidden");
     assert_eq!(code(call(&f.rpc, &viewer, "ports.open", json!({"port":5900})).await), "forbidden");

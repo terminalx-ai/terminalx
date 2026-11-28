@@ -6,6 +6,7 @@ run-all's own `shard` through Node, for 1 to 8 parts; no WebKit is needed.
 """
 
 import json
+import math
 import re
 import random
 import subprocess
@@ -80,7 +81,8 @@ class WebKitShardTest(unittest.TestCase):
         dealt = deal(times)
         self.assert_each_once(dealt)
         for name in unknown:
-            self.assertEqual(dealt["weights"][name], round(median * 10), f"{name} not weighed at the median")
+            # run-all.mjs rounds with Math.round (halves up), not Python's round (halves to even).
+            self.assertEqual(dealt["weights"][name], math.floor(median * 10 + 0.5), f"{name} not weighed at the median")
         # The checks left out on Linux take no time in a Linux part; the alone ones count their full time.
         for name in self.dealt["macOnly"]:
             self.assertEqual(self.dealt["weights"][name], 0)

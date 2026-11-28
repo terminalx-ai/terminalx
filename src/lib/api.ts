@@ -552,6 +552,9 @@ export const api = {
     invoke<CloudWorkspaceStartProgress>("cloud_workspace_start_progress", { orgId, workspaceId, operationId }),
   cloudWorkspaceDetails: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceDetailsResponse>("cloud_workspace_details", { workspaceId, orgId: orgId ?? null }),
+  /** The workspace's "Cloud browser for agents" switch (PRO-209); `enabled` sets it. */
+  cloudWorkspaceAgentBrowser: (workspaceId: string, orgId: string, enabled?: boolean) =>
+    invoke<CloudWorkspaceAgentBrowser>("cloud_workspace_agent_browser", { workspaceId, orgId, enabled: enabled ?? null }),
   cloudWorkspaceSuspend: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshotDto>("cloud_workspace_suspend", { workspaceId, orgId: orgId ?? null }).then(projectCloudWorkspaceSnapshot),
   cloudWorkspaceResume: (workspaceId: string, orgId?: string | null) =>
@@ -1966,6 +1969,13 @@ export interface WorkspaceMentionsResponse { workspaceId: string; mentioned: str
 export interface DesktopInboxPage { v: 1; cursor: string; hasMore: boolean; events: DesktopInboxEvent[] }
 export interface DesktopInboxStreamPage { cursor: string; events: DesktopInboxEvent[] }
 
+export interface CloudWorkspaceAgentBrowser {
+  enabled: boolean;
+  /** The workspace owner and Organization owners and admins. */
+  canChange: boolean;
+  enabledAt?: string;
+  enabledBy?: { userId: string; name?: string | null };
+}
 export interface CloudWorkspaceDetailsResponse { workspace: CloudWorkspace; details: CloudWorkspaceDetails }
 /** Original pinned setup. Timestamps here and on workspace are epoch milliseconds. */
 export interface CloudWorkspaceDetails {

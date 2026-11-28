@@ -160,6 +160,14 @@ const CAPABILITIES_HEADER: &str = "x-terminalx-cloud-workspace-runtime-capabilit
 /// Said on every fetch: this runtime applies personal routes (PRO-18).
 pub const ROUTES_CAPABILITY: &str = "agent-routes-v1";
 const ROUTE_STALE: &str = "cloud_agent_route_stale";
+/// The credential ids of organization routes (PRO-310, terminalx-saas
+/// `organizationModelRouteService`): what tells one from a login or a
+/// creator's own route. The server sends them only to organizations behind
+/// `cloud.agent-routes.organization.v1`.
+const ORGANIZATION_ROUTE_PREFIX: &str = "orgroute_";
+/// The reason given with a sign-in an agent needs because the organization
+/// route its sessions ran on no longer applies here, and nothing replaced it.
+pub const ORGANIZATION_ROUTE_REMOVED: &str = "organization-route-removed";
 const KEY_CONFLICT: &str = "cloud_agent_grant_key_conflict";
 const KEY_REQUIRED: &str = "cloud_agent_grant_key_required";
 
@@ -1117,6 +1125,9 @@ struct State {
     refused: HashMap<Provider, Refusal>,
     /// The newest check of each personal route, by route id (PRO-18).
     route_checks: HashMap<String, RouteCheck>,
+    /// Agents whose organization route (PRO-310) went with nothing in its
+    /// place, until a grant for them arrives.
+    organization_route_gone: std::collections::HashSet<Provider>,
     last_sync: Option<u64>,
     last_error: Option<String>,
 }
@@ -1127,7 +1138,7 @@ struct Launched {
     provider: Provider,
     identity: (String, u64, u64),
     grant_id: String,
-    /// The workspace creator's own route, not the organization's login.
+    /// A route (the creator's own or the organization's), not the organization's login.
     route: bool,
 }
 
@@ -1490,6 +1501,7 @@ impl GrantStore {
         });
 
         self.materialize(&mut next);
+        state.organization_route_gone.retain(|provider| !next.contains_key(provider));
         state.active = next;
         state.credentials = credentials;
 
@@ -1773,11 +1785,17 @@ impl GrantStore {
             return None;
         }
         let entry = state.credentials.get(&provider);
-        match entry.map(|entry| entry.state.as_str()) {
+        let mut required = match entry.map(|entry| entry.state.as_str()) {
             Some("connected") => None,
             Some(other) => Some(SignInRequired { provider: provider.as_str(), state: other.to_string(), reason: entry.and_then(|entry| entry.reason.clone()) }),
             None => Some(SignInRequired { provider: provider.as_str(), state: "not-connected".into(), reason: None }),
+        };
+        // Its sessions ran on an organization route that went (PRO-310):
+        // what the tab says is that, unless the server said more.
+        if let Some(required) = required.as_mut().filter(|required| required.reason.is_none() && state.organization_route_gone.contains(&provider)) {
+            required.reason = Some(ORGANIZATION_ROUTE_REMOVED.into());
         }
+        required
     }
 
     /// What [`Self::sign_in_required`] says of each provider, the
@@ -1793,10 +1811,60 @@ impl GrantStore {
     }
 
     /// Which login the session under `launch` started with: `organization`
-    /// (the organization's agent login) or `route` (the workspace creator's
-    /// own). `None` when it started with no cloud credential.
+    /// (the organization's agent login) or `route`: the workspace creator's
+    /// own, or an organization route (PRO-310), whose usage limit keeps the
+    /// usual recovery card. `None` when it started with no cloud credential.
     fn launch_login(&self, launch: &str) -> Option<&'static str> {
         self.state().launches.get(launch).map(|launched| if launched.route { "route" } else { "organization" })
+    }
+
+    /// What replaces the organization route (PRO-310) the session under
+    /// `launch` started on, once the last sync no longer gives it to this
+    /// workspace: the route was removed, or stopped applying here (its
+    /// workspace's creator left, another repository's route now wins).
+    /// `Some((provider, None))` when nothing does. `None` while the route
+    /// still applies (a new version of it is a rotation, which waits for a
+    /// restart like any other), for a session on anything else, while the
+    /// last sync failed, and while a connected login's grant is on its way.
+    fn organization_route_gone(&self, launch: &str, now: Instant) -> Option<(Provider, Option<Replacement>)> {
+        let state = self.state();
+        let launched = state.launches.get(launch)?;
+        if !launched.identity.0.starts_with(ORGANIZATION_ROUTE_PREFIX) || state.last_sync.is_none() || state.last_error.is_some() {
+            return None;
+        }
+        let provider = launched.provider;
+        match state.active.get(&provider).filter(|grant| grant.usable(now)) {
+            Some(grant) if grant.credential_id == launched.identity.0 => None,
+            Some(grant) if grant.credential_id.starts_with(ORGANIZATION_ROUTE_PREFIX) => Some((provider, Some(Replacement::OrganizationRoute))),
+            Some(grant) if matches!(grant.material, Material::Route(_)) => Some((provider, Some(Replacement::OwnRoute))),
+            Some(_) => Some((provider, Some(Replacement::OrganizationLogin))),
+            None if state.credentials.get(&provider).is_some_and(|entry| entry.state == CONNECTED && entry.credential_id != launched.identity.0) => None,
+            None => Some((provider, None)),
+        }
+    }
+
+    /// Whether any session here runs on an organization route that went.
+    fn any_organization_route_gone(&self, now: Instant) -> bool {
+        let launches: Vec<String> = self.state().launches.keys().cloned().collect();
+        launches.iter().any(|launch| self.organization_route_gone(launch, now).is_some())
+    }
+
+    /// [`route_switch_for_launch`] on this store, with `signed_in_elsewhere`
+    /// saying whether the agent can sign in without a grant (a configured
+    /// key, a sign-in typed in the workspace's terminal).
+    fn route_switch(&self, provider: Provider, launch: &str, configured: &[String], signed_in_elsewhere: bool, now: Instant) -> Option<RouteSwitch> {
+        let (launched, next) = self.organization_route_gone(launch, now)?;
+        if launched != provider {
+            return None;
+        }
+        Some(match next {
+            Some(next) => RouteSwitch::Login(next),
+            None if signed_in_elsewhere || self.sign_in_required(provider, configured, now).is_none() => RouteSwitch::Login(Replacement::Workspace),
+            None => {
+                self.state().organization_route_gone.insert(provider);
+                RouteSwitch::SignIn
+            }
+        })
     }
 
     /// What the runtime knows about its cloud credentials. No secrets.
@@ -1847,6 +1915,53 @@ impl GrantStore {
             "lastError": state.last_error,
             "credentials": rows,
         })
+    }
+}
+
+/// What a session's agent signs in with after its organization route
+/// (PRO-310) stopped applying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Replacement {
+    /// Another organization route, for another of the workspace's repositories.
+    OrganizationRoute,
+    /// The workspace creator's own route (PRO-18).
+    OwnRoute,
+    /// The organization's login for the agent.
+    OrganizationLogin,
+    /// No grant: a key the workspace's configuration sets, or a sign-in typed
+    /// in its terminal.
+    Workspace,
+}
+
+/// What the next turn of a session that ran on an organization route
+/// (PRO-310) moves to once that route no longer applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteSwitch {
+    /// Another login: the agent starts again on it, its conversation kept.
+    Login(Replacement),
+    /// Nothing: "Sign in to continue".
+    SignIn,
+}
+
+/// The one line a session is told when its agent leaves an organization
+/// route. `after_turn`: a turn was running when the route went, and
+/// finished on it.
+pub fn route_switch_notice(harness: &str, switch: RouteSwitch, after_turn: bool) -> String {
+    let agent = provider_of_harness(harness).map_or("The agent", Provider::label);
+    let gone = format!("The organization's {agent} route no longer applies to this workspace");
+    let finished = if after_turn { ". The turn that was running finished on it" } else { "" };
+    match switch {
+        RouteSwitch::Login(next) => {
+            let login = match next {
+                Replacement::OrganizationRoute => "the organization's route for another of its repositories",
+                Replacement::OwnRoute => "your own route",
+                Replacement::OrganizationLogin => "the organization's login",
+                Replacement::Workspace => "the sign-in set up in this workspace",
+            };
+            let join = if after_turn { "; " } else { ", so " };
+            format!("{gone}{finished}{join}{agent} now uses {login}.")
+        }
+        RouteSwitch::SignIn => format!("{gone}{finished}, and {agent} has no other login here. Sign in to continue."),
     }
 }
 
@@ -2562,6 +2677,11 @@ pub fn spawn_sync_loop(store: Arc<GrantStore>, api: Arc<dyn GrantApi + Send + Sy
             if store.sign_in_answers(Instant::now()) != before {
                 sign_in_may_have_changed();
             }
+            if store.any_organization_route_gone(Instant::now()) {
+                if let Some(gone) = ROUTES_GONE.get() {
+                    gone();
+                }
+            }
             spawn_route_checks(store.clone(), api.clone(), None, ROUTE_RECHECK_AFTER);
             // Checks whose report did not get through.
             send_route_reports(&store, api.as_ref());
@@ -2680,10 +2800,41 @@ fn signed_in_by_hand(provider: Provider, home: Option<&Path>) -> Option<bool> {
 
 /// [`sign_in_required`] for the session running under `launch`: one that
 /// started with a credential keeps it for as long as its process lives, so
-/// it is not held to a login that was removed afterwards.
+/// it is not held to a login that was removed afterwards. Except an
+/// organization route that went with nothing in its place (PRO-310): its
+/// next turn needs a sign-in, so its tab says so at once.
 pub fn sign_in_required_for_launch(harness: &str, launch: &str) -> Option<SignInRequired> {
+    // First: a route found gone marks the sign-in's reason.
+    let route_gone = route_switch_for_launch(harness, launch) == Some(RouteSwitch::SignIn);
     let required = sign_in_required(harness)?;
-    (!installed()?.launched_with_credential(launch)).then_some(required)
+    (route_gone || !installed()?.launched_with_credential(launch)).then_some(required)
+}
+
+/// Whether the agent under `launch` is at its sign-in screen: it started
+/// without a credential and has none now. A turn running on an
+/// organization route that went is still working, unlike in
+/// [`sign_in_required_for_launch`].
+pub fn at_sign_in_screen(harness: &str, launch: &str) -> bool {
+    sign_in_required(harness).is_some() && installed().is_some_and(|store| !store.launched_with_credential(launch))
+}
+
+/// What the session under `launch` moves to at its next turn, when it ran
+/// on an organization route (PRO-310) that no longer applies here. `None`
+/// outside a cloud workspace and whenever that route still applies.
+pub fn route_switch_for_launch(harness: &str, launch: &str) -> Option<RouteSwitch> {
+    let (store, provider) = (installed()?, provider_of_harness(harness)?);
+    let elsewhere = signed_in_by_hand(provider, dirs::home_dir().as_deref()) != Some(false);
+    store.route_switch(provider, launch, &crate::cloud_config::configured_env_names(), elsewhere, Instant::now())
+}
+
+static ROUTES_GONE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// `gone` runs after a sync that leaves a session on an organization route
+/// (PRO-310) the workspace no longer has: the tabs move off it between turns.
+pub fn on_organization_route_gone(gone: impl Fn() + Send + Sync + 'static) {
+    if ROUTES_GONE.set(Box::new(gone)).is_err() {
+        log::warn!("the organization route hook is already set");
+    }
 }
 
 /// [`GrantStore::launch_login`] for the session running under `launch`, in
@@ -3237,6 +3388,14 @@ mod tests {
         own.sync(&server, t0, NOW).unwrap();
         own.agent_env_for_launch(Provider::Claude, "s/route", t0);
         assert_eq!(own.launch_login("s/route"), Some("route"));
+        // An organization route (PRO-310) is a route too: its limit keeps the usual card.
+        let server = FakeServer::new();
+        server.credential("claude", "orgroute_1", "connected", 1, 1);
+        server.grant("claude", "orgroute_1", 1, route("claude-gateway", 1, json!({ "baseUrl": "https://llm.example.com/anthropic", "authScheme": "bearer" }), Some("sk-org-route"), 1, "claude"));
+        let shared = store(None);
+        shared.sync(&server, t0, NOW).unwrap();
+        shared.agent_env_for_launch(Provider::Claude, "s/orgroute", t0);
+        assert_eq!(shared.launch_login("s/orgroute"), Some("route"));
     }
 
     #[test]
@@ -4325,5 +4484,109 @@ mod tests {
         // Another agent, and no grant at all: nothing, and no Codex file to speak of.
         let claude = store.launch_grant(Provider::Claude, Path::new("/work"), t0);
         assert!(claude.env.is_empty() && claude.route.is_none() && claude.codex_auth.is_none());
+    }
+
+    // ------------------------------------------------- organization routes
+
+    /// The organization's gateway route for Claude Code (PRO-310), at `version`.
+    fn organization_route(server: &FakeServer, version: u64) {
+        server.credential("claude", "orgroute_1", "connected", version, version);
+        server.grant("claude", "orgroute_1", version, route("claude-gateway", 1, json!({ "baseUrl": "https://llm.example.com/anthropic", "authScheme": "bearer" }), Some("sk-org-route"), version, "claude"));
+    }
+
+    /// A session started on what the store holds now, under `launch`.
+    fn launched(store: &GrantStore, launch: &str, now: Instant) {
+        let grant = store.launch_grant(Provider::Claude, Path::new("/work"), now);
+        store.record_launch(launch, &grant);
+    }
+
+    fn removed(server: &FakeServer) {
+        server.credentials.borrow_mut().retain(|entry| entry.provider != "claude");
+        server.grants.borrow_mut().retain(|grant| grant.provider != "claude");
+    }
+
+    #[test]
+    fn a_session_on_an_organization_route_moves_to_the_next_login_once_the_route_goes() {
+        let server = FakeServer::new();
+        organization_route(&server, 1);
+        let store = store(None);
+        let t0 = Instant::now();
+        store.sync(&server, t0, NOW).unwrap();
+        launched(&store, "pane-1", t0);
+        let switch = |store: &GrantStore| store.route_switch(Provider::Claude, "pane-1", &[], false, t0);
+        assert_eq!(switch(&store), None, "the route still applies");
+        // Edited: a new version of the same route is a rotation, which waits for a restart as before.
+        organization_route(&server, 2);
+        store.sync(&server, t0, NOW).unwrap();
+        assert_eq!(switch(&store), None);
+        assert!(!store.any_organization_route_gone(t0));
+        // Removed, with the organization's login back in its place.
+        removed(&server);
+        server.credential("claude", "cred_claude", "connected", 1, 1);
+        server.grant("claude", "cred_claude", 1, claude_oauth("fake-oauth-1", 1));
+        store.sync(&server, t0, NOW).unwrap();
+        assert!(store.any_organization_route_gone(t0));
+        assert_eq!(switch(&store), Some(RouteSwitch::Login(Replacement::OrganizationLogin)));
+        assert_eq!(store.route_switch(Provider::Codex, "pane-1", &[], false, t0), None, "asked as another agent");
+        // Or the creator's own route.
+        removed(&server);
+        routed(&server, "claude", route("claude-gateway", 1, json!({ "baseUrl": "https://own.example.com", "authScheme": "bearer" }), Some("sk-own"), 1, "claude"));
+        store.sync(&server, t0, NOW).unwrap();
+        assert_eq!(switch(&store), Some(RouteSwitch::Login(Replacement::OwnRoute)));
+        // A session started on that login has nothing to switch.
+        launched(&store, "pane-2", t0);
+        assert_eq!(store.route_switch(Provider::Claude, "pane-2", &[], false, t0), None);
+        assert_eq!(
+            route_switch_notice("claude", RouteSwitch::Login(Replacement::OwnRoute), false),
+            "The organization's Claude Code route no longer applies to this workspace, so Claude Code now uses your own route."
+        );
+        assert_eq!(
+            route_switch_notice("claude", RouteSwitch::Login(Replacement::OrganizationLogin), true),
+            "The organization's Claude Code route no longer applies to this workspace. The turn that was running finished on it; Claude Code now uses the organization's login."
+        );
+    }
+
+    #[test]
+    fn a_session_on_an_organization_route_with_no_other_login_is_asked_to_sign_in() {
+        let server = FakeServer::new();
+        organization_route(&server, 1);
+        let store = store(None);
+        let t0 = Instant::now();
+        store.sync(&server, t0, NOW).unwrap();
+        launched(&store, "pane-1", t0);
+        removed(&server);
+        // A failed sync says nothing about the route.
+        *server.fail_fetch.borrow_mut() = true;
+        assert!(store.sync(&server, t0, NOW).is_err());
+        assert_eq!(store.route_switch(Provider::Claude, "pane-1", &[], false, t0), None);
+        // A connected login whose grant is on its way: wait for it.
+        server.credential("claude", "cred_claude", "connected", 1, 1);
+        let _ = store.sync(&server, t0, NOW);
+        assert_eq!(store.route_switch(Provider::Claude, "pane-1", &[], false, t0), None);
+        // Nothing at all.
+        removed(&server);
+        store.sync(&server, t0, NOW).unwrap();
+        assert_eq!(store.sign_in_required(Provider::Claude, &[], t0).unwrap().reason, None, "said before any session is found on the route");
+        assert_eq!(store.route_switch(Provider::Claude, "pane-1", &[], false, t0), Some(RouteSwitch::SignIn));
+        let required = store.sign_in_required(Provider::Claude, &[], t0).unwrap();
+        assert_eq!((required.state.as_str(), required.reason.as_deref()), ("not-connected", Some(ORGANIZATION_ROUTE_REMOVED)));
+        assert_eq!(
+            route_switch_notice("claude", RouteSwitch::SignIn, false),
+            "The organization's Claude Code route no longer applies to this workspace, and Claude Code has no other login here. Sign in to continue."
+        );
+        assert_eq!(
+            route_switch_notice("claude", RouteSwitch::SignIn, true),
+            "The organization's Claude Code route no longer applies to this workspace. The turn that was running finished on it, and Claude Code has no other login here. Sign in to continue."
+        );
+        // A key the workspace sets, or a sign-in typed in its terminal, is a login.
+        assert_eq!(store.route_switch(Provider::Claude, "pane-1", &[CLAUDE_API_KEY_ENV.into()], false, t0), Some(RouteSwitch::Login(Replacement::Workspace)));
+        assert_eq!(store.route_switch(Provider::Claude, "pane-1", &[], true, t0), Some(RouteSwitch::Login(Replacement::Workspace)));
+        // Once a login arrives the reason goes with the need.
+        server.credential("claude", "cred_claude", "connected", 1, 1);
+        server.grant("claude", "cred_claude", 1, claude_oauth("fake-oauth-1", 1));
+        store.sync(&server, t0, NOW).unwrap();
+        removed(&server);
+        store.sync(&server, t0, NOW).unwrap();
+        assert_eq!(store.sign_in_required(Provider::Claude, &[], t0).unwrap().reason, None);
     }
 }

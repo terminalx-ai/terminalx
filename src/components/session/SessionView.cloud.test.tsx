@@ -582,7 +582,7 @@ describe("transfer to local", () => {
     mocks.readiness = { "other-org": ["cloud.workspaces.transfer-to-local.v1"] };
     runtime.transfer = true;
     await openConnected();
-    expect(screen.queryByRole("button", { name: "Transfer to local…" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Move to this Mac…" })).toBeNull();
   });
 
   it("offers the action to a manager with readiness and the negotiated attachment", async () => {
@@ -590,8 +590,8 @@ describe("transfer to local", () => {
     mocks.readiness = { [ORG]: ["cloud.workspaces.transfer-to-local.v1"] };
     runtime.transfer = true;
     await openConnected();
-    fireEvent.click(await screen.findByRole("button", { name: "Transfer to local…" }));
-    expect(await screen.findByRole("dialog", { name: "Transfer to local" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "Move to this Mac…" }));
+    expect(await screen.findByRole("dialog", { name: /^Move .+ to this Mac$/ })).toBeTruthy();
     expect(runtime.sent.some(({ method }) => method === "transfer.open")).toBe(false);
   });
 });

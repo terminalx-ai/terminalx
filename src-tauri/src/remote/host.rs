@@ -2131,6 +2131,7 @@ mod tests {
                 workspace_ssh: None,
                 ssh_updater: None,
                 desktop_ready: false,
+                agent_browser_ready: false,
             };
             super::super::bootstrap_link::relay_session(&session, capabilities)
         };
@@ -2236,6 +2237,7 @@ mod tests {
             collaboration:Some(json!({"v":1, "members":[{"userId":"owner", "role":"manager", "canApprove":true}]})),
             desktop_ready: false,
             workspace_ssh: None,
+            agent_browser_ready: false,
             ssh_updater: None,
         };
         let refresh = super::super::bootstrap_link::relay_session(&session, crate::cloud_bootstrap::CAPABILITIES);

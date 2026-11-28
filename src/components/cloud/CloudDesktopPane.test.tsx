@@ -88,3 +88,32 @@ it("falls back to watch when the runtime refuses control", () => {
   act(() => fixture.fail?.({ code: "forbidden" }));
   expect(screen.getByRole("status").textContent).toBe("Cloud desktop access is unavailable.");
 });
+
+// PRO-209: an agent driving the desktop's browser.
+const driving = { agent: "Claude Code", tabTitle: "Push org events", action: "Clicking “Sign in”", actions: 6, held: false };
+
+it("shows who drives and what it does, sends none of your input meanwhile, and takes control", async () => {
+  const call = vi.fn().mockResolvedValue({});
+  const controlled = { ...client, call } as unknown as CloudSessionModel["client"];
+  const view = render(<CloudDesktopPane client={controlled} asleep={false} control agent={driving} onReconnect={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: "Connected" }));
+  expect(screen.getByTestId("cloud-desktop-agent").textContent).toContain("Claude Code is driving · tab Push org events");
+  expect(screen.getByText(/Your clicks and keys are not sent while Claude Code drives\./)).toBeTruthy();
+  expect(screen.getByTestId("cloud-desktop-agent-action").textContent).toBe("Clicking “Sign in” · action 6");
+  expect(screen.getByTestId("fixture-vnc").getAttribute("data-control")).toBe("false");
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Take control" })); });
+  expect(call).toHaveBeenCalledWith("desktop.takeControl", {});
+
+  view.rerender(<CloudDesktopPane client={controlled} asleep={false} control agent={{ ...driving, held: true }} onReconnect={vi.fn()} />);
+  expect(screen.getByTestId("cloud-desktop-agent").textContent).toContain("You have control · Claude Code waits");
+  expect(screen.queryByTestId("cloud-desktop-agent-action")).toBeNull();
+  expect(screen.getByTestId("fixture-vnc").getAttribute("data-control")).toBe("true");
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Hand back" })); });
+  expect(call).toHaveBeenLastCalledWith("desktop.handBack", {});
+});
+
+it("offers a watcher no control over the agent", () => {
+  render(<CloudDesktopPane client={client} asleep={false} control={false} agent={driving} onReconnect={vi.fn()} />);
+  expect(screen.getByTestId("cloud-desktop-agent").textContent).toContain("Claude Code is driving");
+  expect(screen.queryByRole("button", { name: "Take control" })).toBeNull();
+});
