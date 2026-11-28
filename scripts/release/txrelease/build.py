@@ -58,10 +58,24 @@ def updater_sign_env(env=os.environ) -> dict[str, str]:
     return sign_env
 
 
+def archive_command(release: Release) -> list[str]:
+    # macOS tar stores each file's extended attributes (every built file carries
+    # com.apple.provenance) as AppleDouble `._` members. bsdtar hides them when it lists or
+    # extracts, but the updater's tar extractor writes them into the bundle as files, which
+    # breaks the app's code seal. --no-mac-metadata and COPYFILE_DISABLE leave them out.
+    return ['tar', '--no-mac-metadata', '-czf', str(release.built_archive),
+            '-C', str(release.built_app.parent), release.built_app.name]
+
+
+def archive_env(env=os.environ) -> dict[str, str]:
+    archive = {k: v for k, v in env.items() if k not in _BUILD_STRIPPED_ENV}
+    archive['COPYFILE_DISABLE'] = '1'
+    return archive
+
+
 def package_and_sign_updater(release: Release, runner: Runner, env=os.environ) -> None:
     """Archive the notarized `.app` and sign it in isolation after build scripts finish."""
-    runner.run(['tar', '-czf', str(release.built_archive), '-C', str(release.built_app.parent), release.built_app.name],
-               cwd=release.root)
+    runner.run(archive_command(release), cwd=release.root, env=archive_env(env))
     sign_env = updater_sign_env(env)
     runner.run(['pnpm', 'tauri', 'signer', 'sign', str(release.built_archive)], cwd=release.root, env=sign_env)
     signature = release.built_archive.with_name(SIGNATURE)

@@ -9,6 +9,7 @@ import json
 import os
 import plistlib
 import shutil
+import tarfile
 import tempfile
 from pathlib import Path
 
@@ -36,6 +37,13 @@ def members(base: Path) -> dict[str, str]:
             for p in base.rglob('*') if p.is_file() or p.is_symlink()}
 
 
+def metadata_members(archive: Path) -> list[str]:
+    """AppleDouble `._` members, read the way the updater reads the archive (not through bsdtar,
+    which folds them back into extended attributes and so hides them)."""
+    with tarfile.open(archive) as tar:
+        return [m.name for m in tar.getmembers() if m.name.rstrip('/').rsplit('/', 1)[-1].startswith('._')]
+
+
 def verify(release: Release, runner: Runner) -> dict:
     source = pinned_source(release, runner)
     meta = read_record(release.record('build-metadata.json'), 'build')
@@ -52,6 +60,10 @@ def verify(release: Release, runner: Runner) -> dict:
     if extract.exists():
         shutil.rmtree(extract)
     extract.mkdir()
+    stray = metadata_members(archive)
+    require(not stray, f'the updater archive holds {len(stray)} macOS metadata members (first: {stray[:3]}); '
+                       'the updater would write them into the signed app and break its seal')
+    checks['updaterArchiveHasNoMetadataMembers'] = True
     runner.run(['tar', '-xzf', archive, '-C', extract])
     app = extract / 'TerminalX.app'
     helper = app / 'Contents/Resources/TerminalX Computer Use Helper.app'
