@@ -52,7 +52,10 @@ Checked against the CLIs' own documentation on 2026-10-22:
 Sources: Claude Code's gateway pages (code.claude.com/docs/en/llm-gateway-connect,
 …/llm-gateway-protocol) and Codex's custom model providers
 (learn.chatgpt.com/docs/config-file/config-advanced). Provider-format
-gateways (Bedrock, Vertex, Foundry) are not templates yet.
+gateways (Vertex, Foundry) are not templates yet. Amazon Bedrock is an
+organization login rather than a personal route (PRO-200, see
+`docs/CLOUD-AGENT-LOGINS.md`), and it takes precedence over a member's
+Claude Code route.
 
 Fields, as the service checks them (`src/lib/agentRoutes.ts` checks the same
 first, and `agent_route_check.rs` again in the runtime):

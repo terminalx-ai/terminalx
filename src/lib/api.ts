@@ -464,6 +464,11 @@ export const api = {
     invoke<AgentLoginAffectedWorkspaces>("cloud_agent_login_affected_workspaces", { provider, contextRevision, orgId: orgId ?? null }),
   cloudAgentLoginConnect: (provider: AgentLoginProvider, source: AgentLoginSource, consent: AgentLoginConsent) =>
     invoke<AgentLogin>("cloud_agent_login_connect", { provider, source, consent }),
+  // Amazon Bedrock as Claude Code's organization login (PRO-200). The page sends the region, test model and the
+  // access key ID; the secret access key or Bedrock API key is asked for in a native secure dialog, never here.
+  // The account service tests it with Bedrock before storing it; a refusal carries Bedrock's own error.
+  cloudAgentBedrockConnect: (settings: BedrockSettings, consent: AgentLoginConsent) =>
+    invoke<AgentLogin>("cloud_agent_bedrock_connect", { settings, consent }),
   cloudAgentLoginRemove: (provider: AgentLoginProvider, contextRevision: string, orgId?: string | null) =>
     invoke<void>("cloud_agent_login_remove", { provider, contextRevision, orgId: orgId ?? null }),
   // A member's own model routes (PRO-18): how agents in the cloud workspaces they create reach their model
@@ -1305,10 +1310,26 @@ export interface AgentRouteSaved {
 /** `api-key`: typed into a native secure dialog. `local-login`: the agent's own login on this computer. */
 export type AgentLoginSource = "api-key" | "local-login";
 
+/** How Claude Code reaches Amazon Bedrock (PRO-200). Never a secret. */
+export interface BedrockSettings {
+  auth: "aws-keys" | "api-key";
+  region: string;
+  model: string;
+  /** AWS access keys only. */
+  accessKeyId?: string;
+}
+
+/** What Bedrock answered when it refused the test call (`cloud_agent_bedrock_test_failed`). */
+export interface BedrockTestFailure {
+  status?: number;
+  type: string;
+  message: string;
+}
+
 /** What the service says about a stored agent login; never the login. */
 export interface AgentLogin {
   provider: AgentLoginProvider;
-  authKind: "api-key" | "oauth-credentials-json" | (string & {});
+  authKind: "api-key" | "oauth-credentials-json" | "bedrock" | (string & {});
   fingerprint: string;
   displayIdentity?: string;
   version: number;
