@@ -37,7 +37,7 @@ try {
       const repositories = page.getByRole("group", { name: "Projects", exact: true });
       await repositories.waitFor();
       await page.getByRole("combobox", { name: "Search settings" }).fill("worktreeinclude");
-      await page.getByRole("option", { name: /^Files to copy/ }).click();
+      await page.getByRole("row", { name: /^Files to copy/ }).getByRole("button").first().click();
       await repositories.getByRole("button", { name: "local-0", exact: true }).click();
       const projectNav = page.getByRole("group", { name: "local-0 settings", exact: true });
       await projectNav.getByRole("button", { name: "General", exact: true }).click();

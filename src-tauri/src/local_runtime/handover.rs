@@ -784,7 +784,9 @@ pub(crate) fn verify(home: &Path, binary: &Path) -> Result<Verified> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        verify_release_signature(&path, &mut file)?;
+        if has_release_signature_files(&path) || !is_same_executable_as_self(&digest) {
+            verify_release_signature(&path, &mut file)?;
+        }
         drop(file);
     }
     let answer = ask(&path)?;
@@ -996,45 +998,162 @@ fn verify_sshsig_bytes(sig_pem: &str, message: &[u8], expected_pubkey: &[u8; 32]
     Ok(())
 }
 
-/// Cryptographically verify a non-macOS (Linux) handover binary's detached
-/// OpenSSH signature (`<binary>.sig`) against the compiled-in TerminalX
-/// release Ed25519 signing key BEFORE executing `handover-formats` or `fexecve` (S-02).
+/// Whether `<binary>.sig` or sibling `SHA256SUMS` + `SHA256SUMS.sig` exist next
+/// to `binary_path`.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
-fn verify_release_signature(binary_path: &Path, binary_file: &mut std::fs::File) -> Result<()> {
-    use std::io::{Read, Seek, SeekFrom};
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-
+fn has_release_signature_files(binary_path: &Path) -> bool {
     let mut sig_name = binary_path.as_os_str().to_os_string();
     sig_name.push(".sig");
-    let sig_path = PathBuf::from(sig_name);
-    let sig_file = std::fs::OpenOptions::new()
+    if PathBuf::from(sig_name).symlink_metadata().is_ok() {
+        return true;
+    }
+    binary_path.parent().is_some_and(|dir| {
+        dir.join("SHA256SUMS").symlink_metadata().is_ok()
+            || dir.join("SHA256SUMS.sig").symlink_metadata().is_ok()
+    })
+}
+
+/// Whether `digest` is the exact SHA-256 of the currently running executable
+/// (`current_exe()`). Handing over to a byte-for-byte identical copy of self
+/// executes no new code, so dev/test builds on Linux can self-handover without
+/// a release signature while any different binary still requires one (S-02).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn is_same_executable_as_self(digest: &str) -> bool {
+    let Ok(own) = std::env::current_exe() else { return false };
+    let Ok(mut own_file) = std::fs::File::open(own) else { return false };
+    super::launch::digest(&mut own_file).is_ok_and(|own_digest| own_digest == digest)
+}
+
+/// Read a private, non-symlink regular file bounded by `MAX_SIG_BYTES`.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn read_private_sig_file(path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&sig_path)
-        .with_context(|| format!("{} is missing its cryptographic signature ({})", binary_path.display(), sig_path.display()))?;
-    let meta = sig_file.metadata()?;
+        .open(path)?;
+    let meta = file.metadata()?;
     // SAFETY: geteuid has no preconditions.
     if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o022 != 0 || meta.len() > MAX_SIG_BYTES {
-        bail!("{} is not a valid private signature file", sig_path.display());
+        bail!("{} is not a valid private signature file", path.display());
     }
-    let mut sig_text = String::new();
-    sig_file.take(MAX_SIG_BYTES + 1).read_to_string(&mut sig_text).context("read runtime signature")?;
+    let mut bytes = Vec::new();
+    file.take(MAX_SIG_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_SIG_BYTES {
+        bail!("{} exceeds maximum signature file size", path.display());
+    }
+    Ok(bytes)
+}
+
+/// Trusted Ed25519 release signing public keys for handover verification.
+/// Uses `TEST_SIGNING_KEY` in unit tests, `TERMINALX_INSTALL_ALLOWED_SIGNERS`
+/// when configured in the runtime's own environment (matching `serve_cli::update`),
+/// and otherwise the compiled-in pinned `RUNTIME_SIGNING_KEY`.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn trusted_release_pubkeys() -> Result<Vec<[u8; 32]>> {
+    #[cfg(test)]
+    if let Some(key) = TEST_SIGNING_KEY.with(|slot| *slot.borrow()) {
+        return Ok(vec![key]);
+    }
+    #[cfg(debug_assertions)]
+    if let Ok(path) = std::env::var("TERMINALX_INSTALL_ALLOWED_SIGNERS") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            let text = std::fs::read_to_string(trimmed)
+                .with_context(|| format!("read allowed signers from {trimmed}"))?;
+            let mut keys = Vec::new();
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some(idx) = line.find("ssh-ed25519 ") {
+                    if let Ok(key) = parse_openssh_ed25519_pubkey(&line[idx..]) {
+                        keys.push(key);
+                    }
+                }
+            }
+            if keys.is_empty() {
+                bail!("no Ed25519 signing keys found in {trimmed}");
+            }
+            return Ok(keys);
+        }
+    }
+    Ok(vec![parse_openssh_ed25519_pubkey(crate::serve_cli::RUNTIME_SIGNING_KEY)?])
+}
+
+/// Verify `sig_pem` over `message` against any of `trusted_keys`.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn verify_sshsig_against_any(sig_pem: &str, message: &[u8], trusted_keys: &[[u8; 32]], expected_namespace: &str) -> Result<()> {
+    let mut last_err = None;
+    for key in trusted_keys {
+        match verify_sshsig_bytes(sig_pem, message, key, expected_namespace) {
+            Ok(()) => return Ok(()),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no trusted signing keys configured")))
+}
+
+/// Cryptographically verify a non-macOS (Linux) handover binary's OpenSSH
+/// signature against the TerminalX release Ed25519 signing key BEFORE executing
+/// `handover-formats` or `fexecve` (S-02). Accepts either a detached
+/// `<binary>.sig` over the binary itself or the release `SHA256SUMS` +
+/// `SHA256SUMS.sig` manifest saved beside it by `terminalx-serve update`.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn verify_release_signature(binary_path: &Path, binary_file: &mut std::fs::File) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Seek, SeekFrom};
 
     binary_file.seek(SeekFrom::Start(0))?;
     let mut binary_bytes = Vec::new();
     binary_file.read_to_end(&mut binary_bytes).context("read runtime binary for signature verification")?;
     binary_file.seek(SeekFrom::Start(0))?;
 
-    #[cfg(test)]
-    let pinned_key = TEST_SIGNING_KEY.with(|slot| *slot.borrow());
-    #[cfg(not(test))]
-    let pinned_key: Option<[u8; 32]> = None;
+    let trusted_keys = trusted_release_pubkeys()?;
 
-    let expected_pubkey = match pinned_key {
-        Some(key) => key,
-        None => parse_openssh_ed25519_pubkey(crate::serve_cli::RUNTIME_SIGNING_KEY)?,
-    };
-    verify_sshsig_bytes(&sig_text, &binary_bytes, &expected_pubkey, crate::serve_cli::SIGNATURE_NAMESPACE)
+    let mut sig_name = binary_path.as_os_str().to_os_string();
+    sig_name.push(".sig");
+    let sig_path = PathBuf::from(sig_name);
+    if sig_path.symlink_metadata().is_ok() {
+        let sig_bytes = read_private_sig_file(&sig_path)
+            .with_context(|| format!("read runtime signature {}", sig_path.display()))?;
+        let sig_text = String::from_utf8(sig_bytes).context("runtime signature is not UTF-8")?;
+        return verify_sshsig_against_any(&sig_text, &binary_bytes, &trusted_keys, crate::serve_cli::SIGNATURE_NAMESPACE);
+    }
+
+    if let Some(dir) = binary_path.parent() {
+        let sums_path = dir.join("SHA256SUMS");
+        let sums_sig_path = dir.join("SHA256SUMS.sig");
+        if sums_path.symlink_metadata().is_ok() || sums_sig_path.symlink_metadata().is_ok() {
+            let sums_bytes = read_private_sig_file(&sums_path)
+                .with_context(|| format!("read release checksums {}", sums_path.display()))?;
+            let sig_bytes = read_private_sig_file(&sums_sig_path)
+                .with_context(|| format!("read release signature {}", sums_sig_path.display()))?;
+            let sig_text = String::from_utf8(sig_bytes).context("release signature is not UTF-8")?;
+            verify_sshsig_against_any(&sig_text, &sums_bytes, &trusted_keys, crate::serve_cli::SIGNATURE_NAMESPACE)?;
+            let sums_text = std::str::from_utf8(&sums_bytes).context("SHA256SUMS is not UTF-8")?;
+            let actual_hex: String = Sha256::digest(&binary_bytes).iter().map(|b| format!("{b:02x}")).collect();
+            let listed = sums_text.lines().any(|line| {
+                let Some((hash, file)) = line.split_once(char::is_whitespace) else { return false };
+                let file = file.trim_start().trim_start_matches('*');
+                let known_asset = matches!(
+                    file,
+                    "terminalx-serve"
+                        | "terminalx-serve-linux-x64"
+                        | "terminalx-serve-linux-arm64"
+                        | "terminalx-serve-macos-arm64"
+                );
+                known_asset && hash.eq_ignore_ascii_case(&actual_hex)
+            });
+            anyhow::ensure!(listed, "{} is not listed with matching SHA-256 in signed {}", binary_path.display(), sums_path.display());
+            return Ok(());
+        }
+    }
+
+    bail!("{} is missing its cryptographic signature ({})", binary_path.display(), sig_path.display())
 }
 
 // --------------------------------------------------------------- the new side
@@ -1439,6 +1558,30 @@ mod tests {
         std::os::unix::fs::symlink(&external_sig, &sig_path).unwrap();
         let mut f2 = std::fs::File::open(&bin).unwrap();
         assert!(verify_release_signature(&bin, &mut f2).is_err(), "symlinked sig must fail");
+
+        // 7. Release `SHA256SUMS` + `SHA256SUMS.sig` verification succeeds for
+        //    matching binary hash and rejects tampered binary or untrusted key.
+        std::fs::remove_file(&sig_path).unwrap();
+        use sha2::{Digest as _, Sha256};
+        let hex: String = Sha256::digest(payload).iter().map(|b| format!("{b:02x}")).collect();
+        let sums = format!("{hex}  terminalx-serve-linux-x64\n");
+        let sums_path = dir.path().join("SHA256SUMS");
+        let sums_sig_path = dir.path().join("SHA256SUMS.sig");
+        std::fs::write(&sums_path, &sums).unwrap();
+        std::fs::set_permissions(&sums_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let valid_sums_sig = sign_sshsig_for_test(&keypair, crate::serve_cli::SIGNATURE_NAMESPACE, sums.as_bytes());
+        std::fs::write(&sums_sig_path, &valid_sums_sig).unwrap();
+        std::fs::set_permissions(&sums_sig_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        verify_release_signature(&bin, &mut f2).unwrap();
+
+        let bad_sums_sig = sign_sshsig_for_test(&other_keypair, crate::serve_cli::SIGNATURE_NAMESPACE, sums.as_bytes());
+        std::fs::write(&sums_sig_path, &bad_sums_sig).unwrap();
+        assert!(verify_release_signature(&bin, &mut f2).is_err(), "untrusted SHA256SUMS.sig must fail");
+
+        std::fs::write(&sums_sig_path, &valid_sums_sig).unwrap();
+        std::fs::write(&bin, b"#!/bin/sh\nid\n").unwrap();
+        let mut tampered_sums = std::fs::File::open(&bin).unwrap();
+        assert!(verify_release_signature(&bin, &mut tampered_sums).is_err(), "tampered binary against SHA256SUMS must fail");
 
         TEST_SIGNING_KEY.with(|slot| *slot.borrow_mut() = None);
     }

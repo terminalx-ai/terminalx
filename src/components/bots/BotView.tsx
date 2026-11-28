@@ -192,28 +192,30 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
       </div>
       {error && <MachineHostError error={error} onRestarted={() => setError(null)} onFailed={setError} className="shrink-0 px-5 py-2 text-xs" />}
       {tab === "chat" ? (
-        <div role="tabpanel" aria-label="Chat" className="@container/bot-chat flex min-h-0 flex-1 flex-col @2xl/bot-chat:flex-row">
-          <ChatList bot={bot} chats={chats} startedBy={startedBy} dutyRuns={dutyRuns} openId={briefOpen ? null : open?.id ?? null} onOpen={select} onNewChat={newChat} busy={busy} briefOpen={briefOpen} onOpenBrief={() => setBriefOpen(true)} />
-          <section className="flex min-h-0 min-w-0 flex-1 flex-col">
-            {bot.paused && (
-              <PausedBanner bot={bot} busy={busy} onResume={() => act(() => resumeBot(bot.id))} onDismiss={() => act(() => botsApi.dismissResume(bot.id))} />
-            )}
-            {briefOpen ? (
-              <ErrorBoundary label="the team brief"><TeamBriefEditor /></ErrorBoundary>
-            ) : open ? (
-              <ErrorBoundary key={open.id} label="the chat">
-                <HandoffStrip bot={bot} chatId={open.id} />
-                <RunPlanCards bot={bot} chatId={open.id} chats={chats} />
-                <SessionView session={open} sidebarOpen onToggleSidebar={onToggleSidebar} chrome={{ compact: true, noNewTab: true, leading: <span className="truncate px-1 text-sm text-foreground">{conversationTitle(open)}</span> }} />
-              </ErrorBoundary>
-            ) : (
-              homeFailed ? (
-                <p className="px-6 py-8 text-sm text-muted-foreground">The home chat could not be opened. Start a new chat, or open the bot again.</p>
+        <div role="tabpanel" aria-label="Chat" className="@container/bot-chat flex min-h-0 flex-1">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col @md/bot-chat:flex-row">
+            <ChatList bot={bot} chats={chats} startedBy={startedBy} dutyRuns={dutyRuns} openId={briefOpen ? null : open?.id ?? null} onOpen={select} onNewChat={newChat} busy={busy} briefOpen={briefOpen} onOpenBrief={() => setBriefOpen(true)} />
+            <section className="flex min-h-0 min-w-0 flex-1 flex-col">
+              {bot.paused && (
+                <PausedBanner bot={bot} busy={busy} onResume={() => act(() => resumeBot(bot.id))} onDismiss={() => act(() => botsApi.dismissResume(bot.id))} />
+              )}
+              {briefOpen ? (
+                <ErrorBoundary label="the team brief"><TeamBriefEditor /></ErrorBoundary>
+              ) : open ? (
+                <ErrorBoundary key={open.id} label="the chat">
+                  <HandoffStrip bot={bot} chatId={open.id} />
+                  <RunPlanCards bot={bot} chatId={open.id} chats={chats} />
+                  <SessionView session={open} sidebarOpen onToggleSidebar={onToggleSidebar} chrome={{ compact: true, noNewTab: true, leading: <span className="truncate px-1 text-sm text-foreground">{conversationTitle(open)}</span> }} />
+                </ErrorBoundary>
               ) : (
-                <p className="flex items-center gap-2 px-6 py-8 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Opening the home chat…</p>
-              )
-            )}
-          </section>
+                homeFailed ? (
+                  <p className="px-6 py-8 text-sm text-muted-foreground">The home chat could not be opened. Start a new chat, or open the bot again.</p>
+                ) : (
+                  <p className="flex items-center gap-2 px-6 py-8 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Opening the home chat…</p>
+                )
+              )}
+            </section>
+          </div>
         </div>
       ) : tab === "home" ? (
         <div role="tabpanel" aria-label="Home" className="flex min-h-0 flex-1 flex-col">
@@ -375,7 +377,7 @@ function ChatList({ bot, chats, startedBy, dutyRuns = [], openId, onOpen, onNewC
     return key === null ? "No longer works here" : places.find((place) => place.key === key)?.name;
   };
   return (
-    <nav aria-label={`${bot.name}'s chats`} className="flex max-h-[35%] w-full shrink-0 flex-col gap-4 overflow-y-auto border-b border-hairline px-2 py-3 @2xl/bot-chat:max-h-none @2xl/bot-chat:w-[236px] @2xl/bot-chat:border-r @2xl/bot-chat:border-b-0">
+    <nav aria-label={`${bot.name}'s chats`} className="flex max-h-[35%] w-full shrink-0 flex-col gap-4 overflow-y-auto border-b border-hairline px-2 py-3 @md/bot-chat:max-h-none @md/bot-chat:w-[236px] @md/bot-chat:border-r @md/bot-chat:border-b-0">
       <ChatGroup label={`Chats with ${bot.name}`} action={places.length > 1 ? <NewChatIn bot={bot} places={places} busy={busy} onNewChat={onNewChat} /> : (
         <WithTooltip label="New chat">
           <Button variant="ghost" size="icon-xs" aria-label={`New chat with ${bot.name}`} disabled={busy} onClick={() => onNewChat()}><MessageSquarePlus /></Button>

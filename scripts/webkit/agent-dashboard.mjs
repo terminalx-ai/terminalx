@@ -9,7 +9,7 @@ import { FOCUS_NEXT, launch, serve } from "./harness.mjs";
 
 const stub = `${await readFile(new URL("./tauri-stub.js", import.meta.url), "utf8")}\n${await readFile(new URL("./dashboard-stub.js", import.meta.url), "utf8")}`;
 const labels = ["Needs you", "Working", "Done", "Not started"];
-const cards = (column) => column.locator('[role="button"]');
+const cards = (column) => column.locator("article");
 const allLayouts = [
   { name: "wide", width: 1360, height: 760, stacked: false, counts: [0, 1] },
   { name: "wide, short", width: 1360, height: 420, stacked: false, counts: [36] },
@@ -54,7 +54,7 @@ const visible = (locator) => locator.evaluate((element) => {
 async function checkColumn(column, expectedCount, context) {
   const layout = await column.evaluate((section) => {
     const list = section.lastElementChild;
-    const rows = [...list.querySelectorAll('[role="button"]')];
+    const rows = [...list.querySelectorAll("article")];
     const clipped = [];
     const heights = [];
     for (let cardIndex = 0; cardIndex < rows.length; cardIndex++) {
@@ -108,7 +108,7 @@ async function checkActions(page, column, context) {
   const rows = cards(column);
   // Leave the keyboard cursor near the end, then scroll back to the start.
   // ArrowDown must bring the final card fully into view again.
-  await rows.nth(await rows.count() - 2).focus();
+  await rows.nth(await rows.count() - 2).getByRole("button").first().focus();
   await rows.first().scrollIntoViewIfNeeded();
   const last = rows.last();
   const idleShadow = await last.evaluate((el) => getComputedStyle(el).boxShadow);
@@ -116,7 +116,7 @@ async function checkActions(page, column, context) {
   assert.ok(await visible(last), `${context}: keyboard cursor reaches the last card`);
   assert.notEqual(await last.evaluate((el) => getComputedStyle(el).boxShadow), idleShadow, `${context}: cursor is marked`);
   // WebKit on macOS uses Option-Tab to include buttons in focus traversal.
-  await last.focus();
+  await last.getByRole("button").first().focus();
   await page.keyboard.press(FOCUS_NEXT);
   const trigger = last.getByRole("button", { name: "Session menu" });
   assert.ok(await trigger.evaluate((el) => el === document.activeElement && el.matches(":focus-visible")), `${context}: Tab focuses the session menu`);

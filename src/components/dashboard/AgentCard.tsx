@@ -51,6 +51,7 @@ export function AgentCard({
   focusSignal?: number;
   onFocus: () => void;
 }) {
+  const cardRef = useRef<HTMLElement>(null);
   const ref = useRef<HTMLButtonElement>(null);
   const quick = isQuickChat(session);
   const harnesses = [...new Set(session.tabs.map((t) => t.harness))];
@@ -59,7 +60,7 @@ export function AgentCard({
   // The keyboard cursor lives in the dashboard; the card follows it into view and takes DOM focus on keyboard nav.
   useEffect(() => {
     if (!focused) return;
-    ref.current?.scrollIntoView({ block: "nearest" });
+    cardRef.current?.scrollIntoView({ block: "nearest" });
     if (focusSignal > 0) ref.current?.focus({ preventScroll: true });
   }, [focused, focusSignal]);
 
@@ -73,6 +74,7 @@ export function AgentCard({
   return (
     <DropdownMenu>
       <article
+        ref={cardRef}
         onClick={(e) => {
           if (e.target instanceof Element && e.target.closest("button, a")) return;
           onFocus();
@@ -218,12 +220,13 @@ export function CloudAgentCard({
   onFocus: () => void;
   onOpen: () => void;
 }) {
+  const cardRef = useRef<HTMLElement>(null);
   const ref = useRef<HTMLButtonElement>(null);
   const harnesses = [...new Set(session.tabs.map((t) => t.harness))];
   const waiting = session.tabs.find((t) => t.status === "waiting");
   useEffect(() => {
     if (!focused) return;
-    ref.current?.scrollIntoView({ block: "nearest" });
+    cardRef.current?.scrollIntoView({ block: "nearest" });
     if (focusSignal > 0) ref.current?.focus({ preventScroll: true });
   }, [focused, focusSignal]);
   const state = column === "archived" ? "Archived" : column === "needs"
@@ -233,6 +236,7 @@ export function CloudAgentCard({
   return (
     <DropdownMenu>
       <article
+        ref={cardRef}
         data-testid="cloud-agent-card"
         data-session={session.key}
         onClick={(e) => {
@@ -351,11 +355,12 @@ export function MachineAgentCard({
   onFocus: () => void;
   onOpen: () => void;
 }) {
+  const cardRef = useRef<HTMLElement>(null);
   const ref = useRef<HTMLButtonElement>(null);
   const harnesses = [...new Set(session.tabs.map((t) => t.harness))];
   useEffect(() => {
     if (!focused) return;
-    ref.current?.scrollIntoView({ block: "nearest" });
+    cardRef.current?.scrollIntoView({ block: "nearest" });
     if (focusSignal > 0) ref.current?.focus({ preventScroll: true });
   }, [focused, focusSignal]);
   const state = column === "needs" ? "Waiting for your decision" : null;
@@ -363,6 +368,7 @@ export function MachineAgentCard({
   return (
     <DropdownMenu>
       <article
+        ref={cardRef}
         data-testid="machine-agent-card"
         data-session={session.key}
         onClick={(e) => {

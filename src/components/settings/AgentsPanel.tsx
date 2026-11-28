@@ -110,7 +110,7 @@ export function AgentsPanel({ harnesses, checkRun, busy, onRecheck }: {
       </div>
     </div>
     <div role="tabpanel" aria-label={current.name} key={current.id}>
-      <AgentTab harness={current} readiness={readiness[current.id]} onLogin={loginHeard} />
+      <AgentTab harness={current} checkRun={checkRun} readiness={readiness[current.id]} onLogin={loginHeard} />
     </div>
   </div>;
 }
@@ -144,8 +144,9 @@ function AgentTabButton({ harness, selected, readiness, login, onSelect }: {
   </button>;
 }
 
-function AgentTab({ harness, readiness, onLogin }: {
+function AgentTab({ harness, checkRun, readiness, onLogin }: {
   harness: HarnessInfo;
+  checkRun: number;
   readiness?: { value: AgentReadiness | null; checking: boolean; refresh: () => Promise<unknown> };
   onLogin: (id: string, status: AgentLoginStatus | null) => void;
 }) {
@@ -153,7 +154,7 @@ function AgentTab({ harness, readiness, onLogin }: {
   const checking = readiness?.checking ?? true;
   const recheck = () => { void refreshHarnesses().then(() => readiness?.refresh()).catch(() => readiness?.refresh()); };
   if (harness.id === "opencode") return <OpenCodeAgent harness={harness} readiness={value} checking={checking} recheck={recheck} />;
-  if (takesApiKey(harness.id)) return <KeyedAgent harness={harness} readiness={value} checking={checking} refresh={readiness?.refresh} recheck={recheck} onLogin={onLogin} />;
+  if (takesApiKey(harness.id)) return <KeyedAgent harness={harness} checkRun={checkRun} readiness={value} checking={checking} refresh={readiness?.refresh} recheck={recheck} onLogin={onLogin} />;
   return <div>
     <StatusLine dot={value?.state === "ready" ? "ok" : checking ? "busy" : "off"} onRefresh={recheck} refreshing={checking}>
       {checking ? "Checking…" : BADGES[value?.state ?? "unknown"]}
@@ -184,8 +185,9 @@ function AgentFiles({ harness, onChanged }: { harness: HarnessInfo; onChanged: (
 }
 
 /** Claude Code and Codex: a subscription login or an API key kept in the Keychain. */
-function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }: {
+function KeyedAgent({ harness, checkRun, readiness, checking, refresh, recheck, onLogin }: {
   harness: HarnessInfo;
+  checkRun: number;
   readiness: AgentReadiness | null;
   checking: boolean;
   refresh?: () => Promise<unknown>;
@@ -198,6 +200,11 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
   const [choice, setChoice] = useState<"subscription" | "api_key" | null>(null);
   // #980: read again at every sign-in change, which can move the default account.
   const accounts = useAgentAccountsView(takesAccounts(harness.id) ? harness.id : null, status);
+  useEffect(() => {
+    if (checkRun === 0) return;
+    void login.refresh();
+    void accounts.reload();
+  }, [checkRun]); // eslint-disable-line react-hooks/exhaustive-deps
   const [offer, setOffer] = useState<ShellKeyOffer | null>(null);
   const [busy, setBusy] = useState<"save" | "remove" | "import" | "mode" | "verify" | null>(null);
   const [error, setError] = useState<string | null>(null);

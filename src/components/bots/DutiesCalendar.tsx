@@ -404,7 +404,8 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty, onOpenSe
         </div>
       </div>
 
-      <div className="@container/calendar flex min-h-0 flex-1 flex-col @4xl/calendar:flex-row">
+      <div className="@container/calendar flex min-h-0 flex-1">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col @4xl/calendar:flex-row">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-auto px-6 pt-3 pb-3 scrollbar-thin" data-testid="calendar-main">
           {error && <WeekError error={error} onRestarted={() => { setError(null); setTick((value) => value + 1); }} />}
           {moveError && pending && (
@@ -663,6 +664,7 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty, onOpenSe
           <h3 className="mt-5 mb-1.5 text-[11px] font-medium tracking-[.06em] text-faint uppercase">Quiet hours</h3>
           <QuietHoursList data={data} bots={single ? [single] : only ? bots.filter((bot) => bot.id === only) : bots} />
         </aside>
+        </div>
       </div>
       {kept && (
         <KeptLogDialog

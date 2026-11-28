@@ -112,6 +112,8 @@ pub fn install(source: &Path, home: &Path) -> Result<PathBuf> {
         if foreign || digest(&mut existing)? != hash {
             bail!("installed runtime does not match its immutable version");
         }
+        #[cfg(unix)]
+        copy_release_signatures(source, &directory)?;
         return Ok(target);
     }
     let mut staged = tempfile::NamedTempFile::new_in(&directory)?;
@@ -139,7 +141,56 @@ pub fn install(source: &Path, home: &Path) -> Result<PathBuf> {
         }
         Err(error) => return Err(error.error.into()),
     }
+    #[cfg(unix)]
+    copy_release_signatures(source, &directory)?;
     Ok(target)
+}
+
+/// Copy any detached signature (`<source>.sig`) or signed release checksums
+/// (`SHA256SUMS` + `SHA256SUMS.sig`) sitting beside `source` into the private
+/// immutable runtime `directory` so Linux handover verification can check them.
+#[cfg(unix)]
+fn copy_release_signatures(source: &Path, directory: &Path) -> Result<()> {
+    let mut pairs: Vec<(PathBuf, &str)> = Vec::new();
+    let mut detached = source.as_os_str().to_os_string();
+    detached.push(".sig");
+    let detached = PathBuf::from(detached);
+    if detached.symlink_metadata().is_ok_and(|meta| meta.is_file()) {
+        pairs.push((detached, "terminalx-serve.sig"));
+    }
+    if let Some(parent) = source.parent() {
+        let sums = parent.join("SHA256SUMS");
+        let sig = parent.join("SHA256SUMS.sig");
+        if sums.symlink_metadata().is_ok_and(|meta| meta.is_file())
+            && sig.symlink_metadata().is_ok_and(|meta| meta.is_file())
+        {
+            pairs.push((sums, "SHA256SUMS"));
+            pairs.push((sig, "SHA256SUMS.sig"));
+        }
+    }
+    for (src, dst_name) in pairs {
+        let dst = directory.join(dst_name);
+        if dst.symlink_metadata().is_ok() {
+            continue;
+        }
+        let Ok(mut input) = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&src) else {
+            continue;
+        };
+        if !input.metadata().is_ok_and(|meta| meta.is_file() && meta.len() <= 64 * 1024) {
+            continue;
+        }
+        let mut staged = tempfile::NamedTempFile::new_in(directory)?;
+        std::io::copy(&mut input, &mut staged)?;
+        staged.flush()?;
+        staged.as_file().set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        staged.as_file().sync_all()?;
+        match staged.persist_noclobber(&dst) {
+            Ok(_) => {}
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.error.into()),
+        }
+    }
+    Ok(())
 }
 
 /// The bundled helper, installed in `home` ([`install`]) and checked to be

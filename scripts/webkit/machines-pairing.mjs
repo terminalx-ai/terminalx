@@ -118,7 +118,7 @@ function measure(page) {
     out.dialog = { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, scrollWidth: dialog.scrollWidth, clientWidth: dialog.clientWidth };
     const overlay = document.querySelector("[data-dialog-overlay]");
     out.dimmed = !!overlay && getComputedStyle(overlay).backgroundColor !== "rgba(0, 0, 0, 0)";
-    const texts = [...dialog.querySelectorAll("*")].filter((el) => shown(el) && [...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim()));
+    const texts = [...dialog.querySelectorAll("*")].filter((el) => shown(el) && !el.classList.contains("sr-only") && [...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim()));
     out.smallText = texts.filter((el) => parseFloat(getComputedStyle(el).fontSize) < 12).map((el) => `${el.tagName}:${el.textContent.trim().slice(0, 30)}:${getComputedStyle(el).fontSize}`);
     out.clipped = texts
       .filter((el) => !el.classList.contains("truncate") && el.tagName !== "TEXTAREA" && el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).overflow !== "visible")

@@ -87,7 +87,7 @@ function measure(page) {
       out.dialog = { ...box(dialog), scrollWidth: dialog.scrollWidth, clientWidth: dialog.clientWidth };
       out.columns = left && right ? { left: box(left), right: box(right) } : null;
       // Every element that holds text of its own, with the smallest size used.
-      const texts = [...dialog.querySelectorAll("*")].filter((el) => shown(el) && [...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim()));
+      const texts = [...dialog.querySelectorAll("*")].filter((el) => shown(el) && !el.classList.contains("sr-only") && [...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim()));
       out.smallText = texts.filter((el) => parseFloat(getComputedStyle(el).fontSize) < 11).map((el) => `${el.tagName}:${el.textContent.trim().slice(0, 30)}:${getComputedStyle(el).fontSize}`);
       // Text cut short inside its own box (truncate is fine only for names).
       out.clipped = texts

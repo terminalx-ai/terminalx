@@ -31,7 +31,7 @@ try {
   const calls = () => page.evaluate(() => window.__VISIBILITY_CALLS__);
   // PRO-400: the confirmation is the app's own dialog; the dialog plugin's alert is never asked for.
   const alerts = async () => (await calls()).filter((call) => call.command.startsWith("plugin:dialog|")).length;
-  const asking = page.getByRole("dialog", { name: "Hide Demo?" });
+  const asking = page.getByRole("alertdialog", { name: "Hide Demo?" });
   const prefs = () => page.evaluate(() => window.__PW_STUB__.settingsFile.preferences);
   const openOrganizations = async () => {
     await (await sidebar(page)).getByRole("button", { name: "Settings", exact: true }).click();
@@ -50,7 +50,7 @@ try {
   await openOrganizations();
   // Hiding a member organization with nothing running asks nothing and is saved at once.
   await page.getByRole("switch", { name: "Show Other 0 in sidebar" }).click();
-  const hidden = { switch: await shown("Other 0"), prefs: (await prefs()).hiddenOrganizations, asked: (await page.getByRole("dialog").count()) + (await alerts()) };
+  const hidden = { switch: await shown("Other 0"), prefs: (await prefs()).hiddenOrganizations, asked: (await page.getByRole("dialog").count()) + (await page.getByRole("alertdialog").count()) + (await alerts()) };
   await page.getByRole("switch", { name: "Show Other 0 in sidebar" }).click();
   // Hiding the default organization, with two workspaces running, asks first.
   await page.getByRole("switch", { name: "Show Demo in sidebar" }).click();

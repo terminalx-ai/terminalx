@@ -593,6 +593,10 @@ try {
         await page.waitForFunction(() => document.querySelector('[data-piece="session"]').dataset.pieceState === "done");
         checks["a piece follows its worker as the runtime announces it"] = (await view.getByTestId("run-done").textContent()) === "3";
         await view.getByRole("button", { name: "Stop run", exact: true }).click();
+        const stopConfirm = page.getByRole("alertdialog", { name: "Stop run?" });
+        await stopConfirm.waitFor();
+        await stopConfirm.getByRole("button", { name: "Stop run", exact: true }).click();
+        await stopConfirm.waitFor({ state: "detached" });
         await page.waitForFunction(() => document.querySelector('[data-testid="run-view"]').dataset.runState === "stopped");
         const stopped = await layoutOf(view);
         checks["Stop run stops this run: what was done stays done, the rest is stopped, and it says who stopped it"] = stopped.rows.map((row) => row.state).join() === "done,done,done,stopped,stopped,stopped" && (await view.getByRole("status").filter({ hasText: "A person stopped the run." }).count()) === 1 && (await view.getByRole("button", { name: "Stop run" }).count()) === 0;

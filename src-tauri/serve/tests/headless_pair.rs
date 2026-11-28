@@ -396,9 +396,16 @@ async fn a_person_pairs_a_computer_from_the_servers_terminal_and_revokes_it() {
     let inside = wait_until("pair in the runtime's terminal to be refused", || {
         let output = serve.control("runtime.pty.output", json!({ "id": terminal }));
         let text = String::from_utf8_lossy(&STANDARD.decode(output["data"].as_str().unwrap_or_default()).unwrap()).into_owned();
-        (text.contains("Only a person may do this") || output["running"] == false).then_some(text)
+        (text.contains("Only a person may do this")
+            || text.contains("processes started by this runtime are refused")
+            || output["running"] == false)
+            .then_some(text)
     });
-    assert!(inside.contains("Only a person may do this") && inside.contains("this runtime started"), "{inside}");
+    assert!(
+        (inside.contains("Only a person may do this") && inside.contains("this runtime started"))
+            || inside.contains("processes started by this runtime are refused"),
+        "{inside}"
+    );
     assert!(!inside.contains("txm2."), "no code was shown: {inside}");
     assert!(status(&serve)["code"].is_null(), "no code was made");
 

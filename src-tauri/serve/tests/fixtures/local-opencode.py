@@ -2,11 +2,18 @@
 """Disposable HTTP/SSE lifecycle peer; wire shapes come from OpenCode fixtures.
 Never contacts a provider, executes a requested command, or uses credentials.
 """
-import http.server, json, queue, sys, threading, time, uuid
+import base64, http.server, json, os, queue, sys, threading, time, uuid
 if '--version' in sys.argv:
     print('issue467 OpenCode fixture 1')
     raise SystemExit
 port = int(sys.argv[sys.argv.index('--port') + 1])
+auth_password = os.environ.get('OPENCODE_SERVER_PASSWORD', '')
+auth_username = os.environ.get('OPENCODE_SERVER_USERNAME', 'opencode')
+expected_auth = (
+    'Basic ' + base64.b64encode(f'{auth_username}:{auth_password}'.encode()).decode()
+    if auth_password
+    else None
+)
 sid = 'fixture-' + str(uuid.uuid4())
 events = queue.Queue()
 pending = {}
@@ -32,7 +39,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def authorized(self):
+        if not expected_auth:
+            return True
+        if self.headers.get('Authorization') == expected_auth:
+            return True
+        self.send_response(401)
+        self.send_header('WWW-Authenticate', 'Basic realm="opencode"')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+        return False
+
     def do_GET(self):
+        if not self.authorized():
+            return
         if self.path.startswith('/event'):
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
@@ -54,6 +74,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         global number, cancel
+        if not self.authorized():
+            return
         body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', '0'))) or b'{}')
         if self.path == '/session':
             self.result({'id': sid})

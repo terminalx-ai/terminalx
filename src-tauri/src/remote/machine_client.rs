@@ -579,24 +579,68 @@ async fn prove(connection: &mut Connection, target: &Target, deadline: tokio::ti
 
 async fn open_direct(target: &Target, endpoint: &str) -> Result<Connection, DialFailure> {
     let deadline = tokio::time::Instant::now() + DIRECT_TIMEOUT;
-    let request = endpoint.into_client_request().map_err(DialFailure::unreachable)?;
+    match open_direct_once(target, endpoint, deadline, false).await {
+        Ok(connection) => Ok(connection),
+        // Older released runtimes (<= v0.2.42) reject `clientEphemeralPublicKeyB64`
+        // on `e2ee_hello` (`deny_unknown_fields`) and close the socket before
+        // sending `e2ee_ready`. Retry once with the legacy v2 hello.
+        Err(DirectAttemptError::HelloRejected(_)) => open_direct_once(target, endpoint, deadline, true)
+            .await
+            .map_err(DirectAttemptError::into_dial_failure),
+        Err(other) => Err(other.into_dial_failure()),
+    }
+}
+
+enum DirectAttemptError {
+    HelloRejected(DialFailure),
+    Fatal(DialFailure),
+}
+
+impl DirectAttemptError {
+    fn into_dial_failure(self) -> DialFailure {
+        match self {
+            Self::HelloRejected(failure) | Self::Fatal(failure) => failure,
+        }
+    }
+}
+
+async fn open_direct_once(
+    target: &Target,
+    endpoint: &str,
+    deadline: tokio::time::Instant,
+    legacy_hello: bool,
+) -> Result<Connection, DirectAttemptError> {
+    let request = endpoint.into_client_request().map_err(|e| DirectAttemptError::Fatal(DialFailure::unreachable(e)))?;
     let (mut socket, _) = match tokio::time::timeout_at(deadline, crate::data_privacy::connect(request, Some(websocket_config()), true)).await {
-        Err(_) => return Err(DialFailure::unreachable("timed out")),
+        Err(_) => return Err(DirectAttemptError::Fatal(DialFailure::unreachable("timed out"))),
         Ok(Err(error)) => {
             let denied = local_network_denied(endpoint, &error);
-            return Err(DialFailure::Unreachable { local_network_denied: denied, reason: protocol::redact(&error.to_string()) });
+            return Err(DirectAttemptError::Fatal(DialFailure::Unreachable {
+                local_network_denied: denied,
+                reason: protocol::redact(&error.to_string()),
+            }));
         }
         Ok(Ok(opened)) => opened,
     };
-    let handshake = E2eeClientHandshake::with_secret(*target.client_secret, &target.public_key_b64, "direct", None).map_err(DialFailure::unreachable)?;
+    let handshake = if legacy_hello {
+        E2eeClientHandshake::with_secret_legacy(*target.client_secret, &target.public_key_b64, "direct", None)
+    } else {
+        E2eeClientHandshake::with_secret(*target.client_secret, &target.public_key_b64, "direct", None)
+    }
+    .map_err(|e| DirectAttemptError::Fatal(DialFailure::unreachable(e)))?;
     use futures_util::SinkExt;
-    let hello = serde_json::to_string(handshake.hello()).map_err(DialFailure::unreachable)?;
-    socket.send(tokio_tungstenite::tungstenite::Message::Text(hello.into())).await.map_err(DialFailure::unreachable)?;
-    let ready = client::plaintext(&mut socket, deadline).await.map_err(|closed| DialFailure::unreachable(closed.reason))?;
+    let hello = serde_json::to_string(handshake.hello()).map_err(|e| DirectAttemptError::Fatal(DialFailure::unreachable(e)))?;
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(hello.into()))
+        .await
+        .map_err(|e| DirectAttemptError::Fatal(DialFailure::unreachable(e)))?;
+    let ready = client::plaintext(&mut socket, deadline)
+        .await
+        .map_err(|closed| DirectAttemptError::HelloRejected(DialFailure::unreachable(closed.reason)))?;
     // Pinned: another key is not this machine.
-    let session = handshake.accept_ready(&ready).map_err(DialFailure::unreachable)?;
+    let session = handshake.accept_ready(&ready).map_err(|e| DirectAttemptError::Fatal(DialFailure::unreachable(e)))?;
     let mut connection = Connection { socket, session };
-    prove(&mut connection, target, deadline).await?;
+    prove(&mut connection, target, deadline).await.map_err(DirectAttemptError::Fatal)?;
     Ok(connection)
 }
 

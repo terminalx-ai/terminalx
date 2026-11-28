@@ -1103,6 +1103,7 @@ pub fn write_bytes_in_root(root: &Path, target: &Path, bytes: &[u8], create_new:
 
     #[cfg(windows)]
     {
+        let _ = leaf;
         let mut dir = root.to_path_buf();
         for parent in parents {
             dir.push(parent);

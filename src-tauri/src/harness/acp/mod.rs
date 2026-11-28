@@ -1265,7 +1265,8 @@ fn write_relative_confined(root: &std::path::Path, relative: &std::path::Path, b
         anyhow::ensure!(!meta.file_type().is_symlink(), "refused to write through symlink");
     }
     let mut file = crate::win::fs::open_plain(&cur, true, true)?;
-    let actual = crate::paths::simplified(&crate::win::fs::final_path(&file)?);
+    let final_path = crate::win::fs::final_path(&file)?;
+    let actual = crate::paths::simplified(&final_path);
     let expected_root = crate::paths::simplified(root);
     anyhow::ensure!(actual.starts_with(&expected_root), "target escaped workspace root");
     file.write_all(bytes)?;

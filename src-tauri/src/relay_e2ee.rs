@@ -534,6 +534,23 @@ impl E2eeClientHandshake {
     /// racing its direct and Relay candidates sends the same static key on both,
     /// paired with a fresh ephemeral X25519 key for forward secrecy.
     pub fn with_secret(secret: [u8; 32], desktop_public_key_b64: &str, transport: &str, relay_host_id: Option<&str>) -> Result<Self> {
+        Self::with_secret_inner(secret, desktop_public_key_b64, transport, relay_host_id, true)
+    }
+
+    /// Legacy v2 handshake omitting `clientEphemeralPublicKeyB64`, for fallback
+    /// when talking to older released runtimes whose `E2eeHello` rejects
+    /// unknown fields (`#[serde(deny_unknown_fields)]`).
+    pub fn with_secret_legacy(secret: [u8; 32], desktop_public_key_b64: &str, transport: &str, relay_host_id: Option<&str>) -> Result<Self> {
+        Self::with_secret_inner(secret, desktop_public_key_b64, transport, relay_host_id, false)
+    }
+
+    fn with_secret_inner(
+        secret: [u8; 32],
+        desktop_public_key_b64: &str,
+        transport: &str,
+        relay_host_id: Option<&str>,
+        include_ephemeral: bool,
+    ) -> Result<Self> {
         let desktop_key: [u8; 32] = decode_standard(desktop_public_key_b64, 32)?.try_into().unwrap();
         let secret = StaticSecret::from(secret);
         let public = X25519PublicKey::from(&secret);
@@ -545,7 +562,7 @@ impl E2eeClientHandshake {
             kind: "e2ee_hello".into(),
             v: 2,
             client_public_key_b64: general_purpose::STANDARD.encode(public.as_bytes()),
-            client_ephemeral_public_key_b64: Some(general_purpose::STANDARD.encode(ephemeral_public)),
+            client_ephemeral_public_key_b64: include_ephemeral.then(|| general_purpose::STANDARD.encode(ephemeral_public)),
             client_nonce_b64: general_purpose::STANDARD.encode(client_nonce),
             capabilities: E2eeCapabilities { framing: [2], payload_kinds: ["text".into(), "binary".into()] },
             context: E2eeContext {

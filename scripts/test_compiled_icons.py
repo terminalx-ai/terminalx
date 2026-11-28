@@ -36,6 +36,8 @@ class CompiledIconsTest(unittest.TestCase):
         for name in ("package.json", "app.json", "app.config.js"):
             shutil.copy(REPO / "mobile" / name, project / name)
         shutil.copytree(REPO / "mobile/assets", project / "assets")
+        if (REPO / "mobile/plugins").is_dir():
+            shutil.copytree(REPO / "mobile/plugins", project / "plugins")
         (project / "node_modules").symlink_to(REPO / "mobile/node_modules", target_is_directory=True)
         for variant in ("production", "development", "production"):
             env = {**os.environ, "APP_VARIANT": variant, "CI": "1"}

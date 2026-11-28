@@ -1027,14 +1027,14 @@ fn install(root: &Path, source: &Source, release: &Release, asset: &str, fetch: 
     ensure_monotonic_upgrade(root, None, &release.version)?;
     let scratch = tempfile::Builder::new().prefix(".update.").tempdir_in(&versions).context("make a staging folder")?;
 
-    let sums = fetch(&source.url(tag, SUMS)).with_context(|| format!("download {SUMS} of {tag}"))?;
+    let sums_bytes = fetch(&source.url(tag, SUMS)).with_context(|| format!("download {SUMS} of {tag}"))?;
     let signature = fetch(&source.url(tag, SIGNATURE)).map_err(|_| anyhow!("{tag} has no signature ({SIGNATURE}) and is refused; nothing was changed"))?;
     let manifest = fetch(&source.url(tag, MANIFEST)).with_context(|| format!("download {MANIFEST} of {tag}"))?;
     let binary = fetch(&source.url(tag, asset)).with_context(|| format!("download {asset} of {tag}"))?;
 
     verifying();
-    verify_signature(&sums, &signature, &source.signers, scratch.path())?;
-    let sums = String::from_utf8(sums).context("SHA256SUMS is not text")?;
+    verify_signature(&sums_bytes, &signature, &source.signers, scratch.path())?;
+    let sums = String::from_utf8(sums_bytes.clone()).context("SHA256SUMS is not text")?;
     let checked = |name: &str, bytes: &[u8]| -> Result<()> {
         let expected = listed_hash(&sums, name).ok_or_else(|| anyhow!("{SUMS} of {tag} does not list {name}; nothing was changed"))?;
         let actual = sha256_hex(bytes);
@@ -1076,6 +1076,15 @@ fn install(root: &Path, source: &Source, release: &Release, asset: &str, fetch: 
     #[cfg(unix)]
     std::fs::set_permissions(&dest, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
     std::fs::rename(&staged, dest.join("terminalx-serve")).with_context(|| format!("move the runtime into {}", dest.display()))?;
+    for (name, bytes) in [(SUMS, sums_bytes.as_slice()), (SIGNATURE, signature.as_slice())] {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(dest.join(name)).with_context(|| format!("write {name} into {}", dest.display()))?;
+        std::io::Write::write_all(&mut file, bytes)?;
+        file.sync_all()?;
+    }
     Ok(dest)
 }
 

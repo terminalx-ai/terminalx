@@ -152,6 +152,10 @@ try {
   // 10.20: removed; the subscription login again.
   await saved.getByRole("button", { name: "Dismiss" }).click();
   await page.getByRole("button", { name: "Remove" }).click();
+  const confirmRemove = page.getByRole("alertdialog", { name: "Remove Anthropic API key?" });
+  await confirmRemove.waitFor();
+  await confirmRemove.getByRole("button", { name: "Remove", exact: true }).click();
+  await confirmRemove.waitFor({ state: "detached" });
   const removed = page.getByRole("status", { name: "API key removed · Claude Code uses your Claude login again" });
   await removed.waitFor();
   await page.getByRole("radio", { name: /Claude subscription/, checked: true }).waitFor();
