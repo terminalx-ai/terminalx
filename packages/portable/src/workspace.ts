@@ -160,6 +160,7 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "runtime.agents": "agents/1",
   "environment.report": "environment/1",
   "environment.cancel": "environment/1",
+  "transfer.preview": "workspace-transfer/3",
   "transfer.open": "workspace-transfer/3",
   "transfer.read": "workspace-transfer/3",
   "transfer.close": "workspace-transfer/3",

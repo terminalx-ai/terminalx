@@ -389,6 +389,7 @@ pub const METHODS: &[Method] = &[
     method("ports.write", "ports/1", Participate, false),
     method("ports.ack", "ports/1", Participate, false),
     method("ports.close", "ports/1", Participate, false),
+    method("transfer.preview", "workspace-transfer/3", Manage, false),
     method("transfer.open", "workspace-transfer/3", Manage, false),
     method("transfer.read", "workspace-transfer/3", Manage, false),
     method("transfer.close", "workspace-transfer/3", Manage, false),

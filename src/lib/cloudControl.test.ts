@@ -1947,10 +1947,28 @@ describe("team artifacts from the command line (PRO-158)", () => {
     expect(mocks.invoke).not.toHaveBeenCalledWith("team_artifact_publish", expect.anything());
     serve([]);
     const result = await handleCloudControl("artifacts.publish", { orgId: ORG, template: "migration-plan", note: "First draft", source: "Seat plan", title: "Migration plan", contentType: "text/html", content: "<h1>Plan</h1>" });
-    expect(mocks.invoke).toHaveBeenCalledWith("team_artifact_publish", { orgId: ORG, input: { title: "Migration plan", contentType: "text/html", content: "<h1>Plan</h1>", slug: "migration-plan", template: true, note: "First draft", source: "Seat plan" } });
+    expect(mocks.invoke).toHaveBeenCalledWith("team_artifact_publish", { orgId: ORG, input: { title: "Migration plan", contentType: "text/html", content: "<h1>Plan</h1>", slug: "migration-plan", template: true, note: "First draft", source: "Seat plan", expect: "new" } });
     expect(result).toMatchObject({ orgId: ORG, created: true, message: "Published Migration plan for everyone at Acme." });
     serve([artifact({ template: false })]);
+    serve([artifact({ template: false, version: 3 })]);
     expect(await handleCloudControl("artifacts.publish", { orgId: ORG, slug: "migration-plan", newVersion: true, title: "Migration plan", contentType: "text/html", content: "v2" })).toMatchObject({ message: "Published v2 of Migration plan for everyone at Acme." });
+    // Held to the version it saw.
+    expect(mocks.invoke).toHaveBeenLastCalledWith("team_artifact_publish", { orgId: ORG, input: expect.objectContaining({ slug: "migration-plan", expect: { version: 3 } }) });
+    // Without a slug the server names it, and there is nothing to hold it to.
+    serve([]);
+    await handleCloudControl("artifacts.publish", { orgId: ORG, title: "Notes", contentType: "text/plain", content: "x" });
+    expect(mocks.invoke).toHaveBeenLastCalledWith("team_artifact_publish", { orgId: ORG, input: { title: "Notes", contentType: "text/plain", content: "x" } });
+  });
+
+  it("says so when the server finds the slug changed after the check (expect)", async () => {
+    ready([ORG]);
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "team_artifacts_list") return { artifacts: [] };
+      if (command === "team_artifact_publish") throw { code: "team_artifact_slug_taken", message: "team_artifact_slug_taken" };
+      return undefined;
+    });
+    await expect(handleCloudControl("artifacts.publish", { orgId: ORG, template: "migration-plan", title: "Migration plan", contentType: "text/html", content: "<h1>Plan</h1>" }))
+      .rejects.toMatchObject({ code: "team_artifact_slug_taken", message: expect.stringContaining("Nothing was published") });
   });
 
   it("shows a template's content to fill in", async () => {

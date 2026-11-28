@@ -1257,6 +1257,29 @@ pub enum Engine {
     None,
 }
 
+/// How a tab's agent leaves an organization route that no longer applies
+/// (PRO-310), between turns. Each keeps the conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteAction {
+    /// A CLI starts again at once, on the next login.
+    Restart,
+    /// A CLI with no login to start on stops; its tab says "Sign in to
+    /// continue", and the next prompt starts it on whatever login is there then.
+    Stop,
+    /// Codex's app server lets go of its connection; the next message starts
+    /// it again on the next login (as after a refused sign-in, #644).
+    Retire,
+}
+
+/// [`crate::cloud_grants::route_switch_for_launch`], which tests stand in for.
+fn route_switch_of(harness: &str, launch: &str) -> Option<crate::cloud_grants::RouteSwitch> {
+    #[cfg(test)]
+    if let Some(switch) = tests::route_switch_stand_in() {
+        return switch;
+    }
+    crate::cloud_grants::route_switch_for_launch(harness, launch)
+}
+
 pub struct TabRuntime {
     pub session_id: String,
     pub tab_id: String,
@@ -1341,6 +1364,10 @@ pub struct TabRuntime {
     reported_mode_to_judge: Option<String>,
     /// The released launch whose settings restart still owns the empty slot.
     restart_claim: Option<Arc<tui::Tail>>,
+    /// The organization route (PRO-310) this tab's agent runs on went while
+    /// a turn was running: the turn finishes on it, and the switch to the
+    /// next login waits for its end and says so.
+    route_switch_after_turn: bool,
     pub stopping: bool,
     pub stop_in_flight: bool,
     pub stopping_pid: Option<u32>,
@@ -2806,6 +2833,7 @@ impl SessionManager {
                 collaboration_prompts: HashMap::new(), collaboration_settings: HashMap::new(),
                 reported_mode_to_judge: None,
                 restart_claim: None,
+                route_switch_after_turn: false,
                 stopping: false,
                 stop_in_flight: false,
                 stopping_pid: None,
@@ -3534,7 +3562,7 @@ impl SessionManager {
             let turn = running
                 && (runtime.status == TabStatus::InProgress || silence_warning)
                 && now.saturating_duration_since(last_activity) < crate::cloud_activity::MAX_TURN_SILENCE
-                && crate::cloud_grants::sign_in_required_for_launch(&runtime.harness, &runtime.launch_key()).is_none();
+                && !crate::cloud_grants::at_sign_in_screen(&runtime.harness, &runtime.launch_key());
             (active + usize::from(turn), pending + runtime.pending.len())
         })
     }
@@ -8901,11 +8929,93 @@ impl SessionManager {
         self.restart_if_due(rt_arc, &session, &tab, tail.as_deref());
     }
 
+    /// Every tab whose agent runs on an organization route (PRO-310) the
+    /// workspace no longer has: one between turns moves to the next login
+    /// now, one mid-turn when its turn ends. After the grant sync that
+    /// found it gone (`cloud_grants::on_organization_route_gone`).
+    pub fn switch_organization_routes(&self) {
+        let tabs: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
+        for rt_arc in tabs {
+            self.switch_route_if_due(&rt_arc);
+        }
+    }
+
+    /// Move the tab off an organization route that no longer applies, if it
+    /// is between turns: the session is told in one line, and the agent
+    /// starts again on the next login with its conversation kept
+    /// ([`RouteAction`]).
+    fn switch_route_if_due(&self, rt_arc: &Arc<Mutex<TabRuntime>>) {
+        let mut rt = rt_arc.lock().unwrap();
+        let Some(action) = self.route_switch_now(&mut rt) else { return };
+        #[cfg(test)]
+        if let Some(taken) = tests::route_actions_taken() {
+            taken.lock().unwrap().push(action);
+            return;
+        }
+        match action {
+            RouteAction::Retire => self.retire_codex_stdio_later(&mut rt),
+            RouteAction::Restart => {
+                let Engine::Cli(p) = &rt.engine else { return };
+                let tail = p.tail.clone();
+                let work = self.prepare_cli_restart(&mut rt, &tail, false);
+                drop(rt);
+                let Some(work) = work else { return };
+                let (manager, rt_arc) = (self.clone(), rt_arc.clone());
+                std::thread::spawn(move || {
+                    if let Err(e) = manager.complete_cli_restart(&rt_arc, work) {
+                        log::warn!("restart off an organization route: {e:#}");
+                    }
+                });
+            }
+            RouteAction::Stop => {
+                let (manager, session, tab) = (self.clone(), rt.session_id.clone(), rt.tab_id.clone());
+                drop(rt);
+                std::thread::spawn(move || {
+                    if let Err(e) = manager.stop_with(&session, &tab, true) {
+                        log::warn!("stop {session}/{tab} off an organization route: {e:#}");
+                    }
+                });
+            }
+        }
+    }
+
+    /// Whether the tab's agent is to leave an organization route (PRO-310)
+    /// now, and how; the session is told when it is. A turn running (or a
+    /// card waiting) is left to finish on the route it started with, and
+    /// marked so its end says that.
+    fn route_switch_now(&self, rt: &mut TabRuntime) -> Option<RouteAction> {
+        if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() {
+            return None;
+        }
+        let stdio = match &rt.engine {
+            Engine::Cli(p) if p.by_hand.is_none() => false,
+            Engine::CodexStdio(engine) if !engine.exited && !engine.blocked && rt.stdio_retiring.is_none() => true,
+            _ => return None,
+        };
+        let switch = route_switch_of(&rt.harness, &rt.launch_key())?;
+        if rt.turn_open || !rt.pending.is_empty() {
+            rt.route_switch_after_turn = true;
+            return None;
+        }
+        let after_turn = std::mem::take(&mut rt.route_switch_after_turn);
+        let text = crate::cloud_grants::route_switch_notice(&rt.harness, switch, after_turn);
+        self.publish(rt, Payload::Status { text, handoff: None }, None);
+        Some(match (stdio, switch) {
+            (true, _) => RouteAction::Retire,
+            (false, crate::cloud_grants::RouteSwitch::Login(_)) => RouteAction::Restart,
+            (false, crate::cloud_grants::RouteSwitch::SignIn) => RouteAction::Stop,
+        })
+    }
+
     /// A setting the CLI only reads at startup changed mid-turn: the restart
     /// it needs waits here, until the turn it would have interrupted is over.
     /// Off this thread, so the hook's reply reaches the CLI before the CLI is
     /// replaced.
     fn restart_if_due(&self, rt_arc: &Arc<Mutex<TabRuntime>>, session_id: &str, tab_id: &str, tail: Option<&tui::Tail>) {
+        // A route that went mid-turn moves the agent once the turn is over.
+        if rt_arc.lock().unwrap().route_switch_after_turn {
+            self.switch_route_if_due(rt_arc);
+        }
         let expected = {
             let rt = rt_arc.lock().unwrap();
             if rt.stopping || tail.is_some_and(|tail| !Self::has_tail(&rt, tail)) { return; }
@@ -9757,6 +9867,30 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
+
+    type RouteActions = Arc<Mutex<Vec<RouteAction>>>;
+
+    thread_local! {
+        /// What this thread's tabs are told of their organization route (PRO-310), in place of the grant store.
+        static ROUTE_SWITCH: std::cell::Cell<Option<Option<crate::cloud_grants::RouteSwitch>>> = const { std::cell::Cell::new(None) };
+        /// The route switches this thread's tabs took, recorded in place of being done.
+        static ROUTE_ACTIONS: std::cell::RefCell<Option<RouteActions>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn route_switch_stand_in() -> Option<Option<crate::cloud_grants::RouteSwitch>> {
+        ROUTE_SWITCH.with(std::cell::Cell::get)
+    }
+
+    pub(super) fn route_actions_taken() -> Option<RouteActions> {
+        ROUTE_ACTIONS.with(|actions| actions.borrow().clone())
+    }
+
+    /// Say `switch` of every tab's organization route on this thread, and
+    /// record what the tabs do about it.
+    pub(super) fn stand_in_route_switch(switch: Option<crate::cloud_grants::RouteSwitch>) -> RouteActions {
+        ROUTE_SWITCH.with(|cell| cell.set(Some(switch)));
+        ROUTE_ACTIONS.with(|actions| actions.borrow_mut().get_or_insert_with(Default::default).clone())
+    }
 
     #[test]
     fn a_bound_guest_provider_never_receives_or_probes_the_host_container() {
