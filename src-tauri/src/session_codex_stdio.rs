@@ -486,8 +486,12 @@ impl SessionManager {
         let pending = rt.queued.remove(0);
         rt.stdio_followups.active = Some((pending.seq, false));
         rt.stdio_authority = rt.stdio_followups.authorities.remove(&pending.seq);
+        #[cfg(test)]
+        let refused = self.route_stand_in.lock().unwrap().as_ref().is_some_and(|stand_in| stand_in.fail_carried_start);
+        #[cfg(not(test))]
+        let refused = false;
         let Engine::CodexStdio(engine) = &mut rt.engine else { bail!("Codex owner was replaced") };
-        let started = engine.start(pending.message.text, pending.message.images);
+        let started = if refused { Err(anyhow!("the test refused the carried follow-up's start")) } else { engine.start(pending.message.text, pending.message.images) };
         let applied = started.and_then(|actions| {
             rt.open_turn();
             rt.turn_started_at = Some(Instant::now());
@@ -1159,6 +1163,8 @@ impl SessionManager {
             let mut rt = rt_arc.lock().unwrap();
             forget(&mut rt);
             let (queued, authorities) = carried;
+            // Announced only once what was carried reached the new login.
+            let mut moved = retired.is_ok();
             if !queued.is_empty() {
                 rt.queued = queued;
                 rt.stdio_followups.authorities = authorities;
@@ -1171,9 +1177,12 @@ impl SessionManager {
                 } else if let Err(error) = self.deliver_carried_followup(&mut rt, rt_arc) {
                     log::warn!("[{}] send what was queued to the new Codex connection: {error:#}", key_of(&session, &tab));
                     self.withdraw_codex_followups(&mut rt);
+                    moved = false;
                 }
             }
-            self.route_switch_done(&mut rt, RouteAction::Retire, retired.is_ok());
+            self.route_switch_done(&mut rt, RouteAction::Retire, moved);
+            // The held queue, which waited on the mark, looks again.
+            self.schedule_held(&rt);
             rt.status
         };
         drop(fenced);

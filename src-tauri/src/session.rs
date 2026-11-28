@@ -1288,6 +1288,8 @@ struct RouteStandIn {
     hold: bool,
     /// The last sync failed: no answer either way.
     unsettled: bool,
+    /// The carried Codex follow-up's start fails once the connection spawned.
+    fail_carried_start: bool,
     taken: Vec<(RouteAction, std::thread::ThreadId)>,
 }
 
@@ -9191,6 +9193,12 @@ impl SessionManager {
     /// and its end moves the agent.
     fn route_switch_now(&self, rt: &mut TabRuntime) -> Option<RouteAction> {
         if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() || rt.route_notice.is_some() {
+            return None;
+        }
+        // A Codex connection being let go (after a refused sign-in) still
+        // runs on the route until it has ended: the mark stays, so nothing
+        // queued reaches it, and its end clears the mark.
+        if matches!(rt.engine, Engine::CodexStdio(_)) && rt.stdio_retiring.is_some() {
             return None;
         }
         let stdio = match &rt.engine {
