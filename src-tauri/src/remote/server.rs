@@ -2151,7 +2151,7 @@ impl WorkspaceRpc {
             "session.handoff" => self.session_handoff(peer, params),
             "session.handoffContext" => self.session_handoff_context(peer, params),
             "session.subscribe" => self.session_subscribe(peer, params),
-            "transfer.open" | "transfer.read" | "transfer.close" => self.workspace_transfer(peer, method, &params),
+            "transfer.preview" | "transfer.open" | "transfer.read" | "transfer.close" => self.workspace_transfer(peer, method, &params),
             "session.tabs" => self.session_tabs(peer),
             "session.commands" => self.session_commands(peer, params),
             "session.files" => self.session_files(peer, params),

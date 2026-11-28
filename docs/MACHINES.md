@@ -874,6 +874,7 @@ the pull request that adds it.
 | `desktop.write` | `cloud-desktop/1` | Not served | Cloud workspace display |
 | `desktop.ack` | `cloud-desktop/1` | Not served | Cloud workspace display |
 | `desktop.close` | `cloud-desktop/1` | Not served | Cloud workspace display |
+| `transfer.preview` | `workspace-transfer/3` | Not served | What a cloud workspace transfer would move, read without preparing an export |
 | `transfer.open` | `workspace-transfer/3` | Not served | Cloud workspace transfer to a local checkout without pushing Git refs |
 | `transfer.read` | `workspace-transfer/3` | Not served | Cloud workspace transfer to a local checkout |
 | `transfer.close` | `workspace-transfer/3` | Not served | Cloud workspace transfer to a local checkout |
