@@ -7,6 +7,8 @@ import { AndroidImportance, setNotificationChannelAsync } from "expo-notificatio
  */
 export const ALERT_CHANNEL = "alerts";
 export const QUIET_CHANNEL = "quiet";
+/** Matches `ANDROID_NOTIFICATION_CHANNEL_ID` in `terminalx-saas` (`apps/api/src/services/push/fcmClient.ts`). */
+export const CLOUD_PUSH_CHANNEL = "terminalx_session_alerts";
 
 let made: Promise<void> | null = null;
 
@@ -14,7 +16,13 @@ function makeChannels(): Promise<void> {
   return (made ??= Promise.all([
     setNotificationChannelAsync(ALERT_CHANNEL, { name: "Agents that need you", importance: AndroidImportance.HIGH, sound: "default" }),
     setNotificationChannelAsync(QUIET_CHANNEL, { name: "Quiet updates", importance: AndroidImportance.DEFAULT, sound: null }),
+    setNotificationChannelAsync(CLOUD_PUSH_CHANNEL, { name: "Session alerts", importance: AndroidImportance.HIGH, sound: "default" }),
   ]).then(() => undefined, (cause: unknown) => { made = null; throw cause; }));
+}
+
+/** Ensures all Android notification channels (local and FCM cloud push) are registered. */
+export async function ensureAndroidNotificationChannels(): Promise<void> {
+  await makeChannels();
 }
 
 /** The channel a notification goes on: the sounding one, or the quiet one. */
