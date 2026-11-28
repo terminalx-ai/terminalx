@@ -594,3 +594,25 @@ fn copy_report_names_the_first_copied_file() {
     assert_eq!(report.copied_count, 2);
     assert_eq!(report.first_copied.as_deref(), Some(".env.local"));
 }
+
+#[test]
+fn single_flight_preview_and_cached_dir_scan_handle_nested_ignored_trees() {
+    let _home = crate::store::temp_home();
+    let repo = repo();
+    write(repo.path(), ".gitignore", "secrets/\n");
+    for i in 0..10 {
+        write(repo.path(), &format!("secrets/a/b/file-{i}.env"), "secret");
+    }
+    let path = repo.path().to_path_buf();
+    let results: Vec<Preview> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..4).map(|_| {
+            let p = path.clone();
+            s.spawn(move || preview(&p, Some(&patterns(&["secrets/**/*.env"])), Some("shared-tok")).unwrap())
+        }).collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for res in results {
+        assert_eq!(res.ignored_checked, 10);
+        assert_eq!(res.patterns[0].matches.len(), 10);
+    }
+}

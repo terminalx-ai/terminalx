@@ -1,11 +1,11 @@
 //! Repository copy preferences are a local layer; `.worktreeinclude` replaces
 //! that layer, including when empty. Only Git-ignored, untracked files qualify.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use globset::{GlobBuilder, GlobMatcher};
@@ -91,28 +91,105 @@ impl CopyReport {
 struct IgnoredFiles { files: Vec<String>, limited: bool }
 
 struct CachedScan { project: PathBuf, token: String, scan: Arc<IgnoredFiles> }
+type InFlightSlot = Arc<(Mutex<Option<std::result::Result<Arc<IgnoredFiles>, String>>>, Condvar)>;
 #[derive(Default)]
-struct PreviewCache { entries: VecDeque<CachedScan> }
+struct PreviewCache {
+    entries: VecDeque<CachedScan>,
+    in_flight: HashMap<(PathBuf, String), InFlightSlot>,
+}
 
+#[cfg(test)]
 impl PreviewCache {
     fn get(&mut self, project: &Path, token: &str, scan: impl FnOnce() -> Result<IgnoredFiles>) -> Result<Arc<IgnoredFiles>> {
         if let Some(entry) = self.entries.iter().find(|entry| entry.project == project && entry.token == token) {
             return Ok(entry.scan.clone());
         }
         let scan = Arc::new(scan()?);
-        // At most four bounded snapshots, independent of the number of windows.
         if self.entries.len() == 4 { self.entries.pop_front(); }
         self.entries.push_back(CachedScan { project: project.to_path_buf(), token: token.into(), scan: scan.clone() });
         Ok(scan)
     }
 }
 
+/// Single-flight cache that drops the global `CACHE` mutex while computing
+/// `ignored_files`, so concurrent previews or creations on different projects
+/// never stall each other and identical concurrent keys share one scan.
 fn ignored_snapshot(project: &Path, root: &safe_open::Directory, token: Option<&str>) -> Result<Arc<IgnoredFiles>> {
     let Some(token) = token else { return ignored_files(project, root).map(Arc::new) };
     anyhow::ensure!(!token.is_empty() && token.len() <= 64, "Invalid preview snapshot");
     static CACHE: OnceLock<Mutex<PreviewCache>> = OnceLock::new();
-    CACHE.get_or_init(Default::default).lock().unwrap_or_else(|error| error.into_inner())
-        .get(project, token, || ignored_files(project, root))
+    let cache = CACHE.get_or_init(Default::default);
+    let key = (project.to_path_buf(), token.to_string());
+
+    let slot = {
+        let mut guard = cache.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(entry) = guard.entries.iter().find(|entry| entry.project == project && entry.token == token) {
+            return Ok(entry.scan.clone());
+        }
+        if let Some(waiter) = guard.in_flight.get(&key).cloned() {
+            Err(waiter)
+        } else {
+            let slot: InFlightSlot = Arc::new((Mutex::new(None), Condvar::new()));
+            guard.in_flight.insert(key.clone(), slot.clone());
+            Ok(slot)
+        }
+    };
+
+    match slot {
+        Err(waiter) => {
+            let mut result = waiter.0.lock().unwrap_or_else(|error| error.into_inner());
+            while result.is_none() {
+                result = waiter.1.wait(result).unwrap_or_else(|error| error.into_inner());
+            }
+            match result.as_ref().expect("slot resolved") {
+                Ok(scan) => Ok(scan.clone()),
+                Err(message) => anyhow::bail!("{message}"),
+            }
+        }
+        Ok(leader) => {
+            struct Guard<'a> {
+                cache: &'a Mutex<PreviewCache>,
+                key: (PathBuf, String),
+                slot: InFlightSlot,
+                finished: bool,
+            }
+            impl Drop for Guard<'_> {
+                fn drop(&mut self) {
+                    if !self.finished {
+                        self.cache.lock().unwrap_or_else(|error| error.into_inner()).in_flight.remove(&self.key);
+                        let mut res = self.slot.0.lock().unwrap_or_else(|error| error.into_inner());
+                        if res.is_none() {
+                            *res = Some(Err("Preview scan aborted".to_string()));
+                        }
+                        self.slot.1.notify_all();
+                    }
+                }
+            }
+            let mut guard = Guard { cache, key: key.clone(), slot: leader.clone(), finished: false };
+            let computed = ignored_files(project, root).map(Arc::new);
+            let share = match &computed {
+                Ok(scan) => Ok(scan.clone()),
+                Err(error) => Err(format!("{error:#}")),
+            };
+            {
+                let mut map = cache.lock().unwrap_or_else(|error| error.into_inner());
+                map.in_flight.remove(&key);
+                if let Ok(ref scan) = computed {
+                    if !map.entries.iter().any(|entry| entry.project == project && entry.token == token) {
+                        if map.entries.len() == 4 { map.entries.pop_front(); }
+                        map.entries.push_back(CachedScan { project: project.to_path_buf(), token: token.into(), scan: scan.clone() });
+                    }
+                }
+            }
+            {
+                let mut res = leader.0.lock().unwrap_or_else(|error| error.into_inner());
+                *res = Some(share);
+                leader.1.notify_all();
+            }
+            guard.finished = true;
+            computed
+        }
+    }
 }
 
 pub fn has_include_file(project: &Path) -> Result<bool> {
@@ -169,10 +246,12 @@ fn ignored_files(project: &Path, root: &safe_open::Directory) -> Result<IgnoredF
     let excluded = workspaces.strip_prefix(project).ok().map(|path| format!(":(exclude,literal){}", path.display()));
     if let Some(excluded) = &excluded { args.push(excluded); }
     let (files, limited) = git::file_names_bounded(root.command()?, &args, MAX_SCAN_FILES, MAX_SCAN_BYTES)?;
+    let mut dir_cache = safe_open::DirCache::default();
     let files = files.into_iter().filter(|file| {
+        if file.ends_with('/') { return false; }
         let path = Path::new(file);
         safe_relative(path) && !project.join(path).starts_with(&workspaces)
-            && !root.is_directory(path).unwrap_or(false)
+            && !root.is_directory_cached(path, &mut dir_cache).unwrap_or(false)
     }).collect::<BTreeSet<_>>().into_iter().collect();
     Ok(IgnoredFiles { files, limited })
 }
@@ -462,9 +541,17 @@ mod safe_open {
             Ok(mode_at(&self.0, &CString::new(name)?)?.is_some())
         }
 
-        pub(super) fn is_directory(&self, relative: &Path) -> Result<bool> {
-            let (directory, name) = parent(self, relative, false)?;
-            Ok(mode_at(&directory, &name)?.is_some_and(|mode| mode & libc::S_IFMT == libc::S_IFDIR))
+        /// Check whether `relative` is a directory while caching opened parent
+        /// directory FDs in a bounded prefix cache so scanning 20,000 ignored
+        /// paths reuses each parent FD instead of calling `openat` per component.
+        pub(super) fn is_directory_cached(&self, relative: &Path, cache: &mut DirCache) -> Result<bool> {
+            anyhow::ensure!(safe_relative(relative), "Unsafe relative path");
+            let file_name = CString::new(relative.file_name().context("Missing file name")?.as_bytes())?;
+            let Some(parent_path) = relative.parent().filter(|p| !p.as_os_str().is_empty()) else {
+                return Ok(mode_at(&self.0, &file_name)?.is_some_and(|mode| mode & libc::S_IFMT == libc::S_IFDIR));
+            };
+            let dir_fd = cache.open_parent(&self.0, parent_path)?;
+            Ok(mode_at(dir_fd, &file_name)?.is_some_and(|mode| mode & libc::S_IFMT == libc::S_IFDIR))
         }
 
         pub(super) fn command(&self) -> Result<std::process::Command> {
@@ -479,6 +566,49 @@ mod safe_open {
                 Ok(())
             }); }
             Ok(command)
+        }
+    }
+
+    /// Bounded prefix cache of opened parent directory FDs (keeps FD count low
+    /// while eliminating redundant `openat` traversals on sorted `ls-files` output).
+    #[derive(Default)]
+    pub(super) struct DirCache {
+        fds: HashMap<PathBuf, File>,
+        order: VecDeque<PathBuf>,
+    }
+
+    impl DirCache {
+        const MAX_FDS: usize = 128;
+
+        fn open_parent(&mut self, root_fd: &File, parent_path: &Path) -> Result<&File> {
+            if !self.fds.contains_key(parent_path) {
+                // Build from the deepest already-cached ancestor prefix.
+                let mut cur_path = PathBuf::new();
+                let parts: Vec<_> = parent_path.components().collect();
+                let mut start = 0usize;
+                for depth in (1..=parts.len()).rev() {
+                    let prefix: PathBuf = parts[..depth].iter().collect();
+                    if self.fds.contains_key(&prefix) {
+                        cur_path = prefix;
+                        start = depth;
+                        break;
+                    }
+                }
+                for part in &parts[start..] {
+                    let name = CString::new(part.as_os_str().as_bytes())?;
+                    let base_fd = if cur_path.as_os_str().is_empty() { root_fd } else { &self.fds[&cur_path] };
+                    let opened = open_at(base_fd, &name, libc::O_RDONLY | libc::O_DIRECTORY)?;
+                    cur_path.push(part);
+                    if self.fds.len() >= Self::MAX_FDS {
+                        if let Some(evict) = self.order.pop_front() {
+                            self.fds.remove(&evict);
+                        }
+                    }
+                    self.fds.insert(cur_path.clone(), opened);
+                    self.order.push_back(cur_path.clone());
+                }
+            }
+            Ok(&self.fds[parent_path])
         }
     }
 
@@ -574,6 +704,10 @@ mod safe_open {
     // every component, but path-based opens cannot prevent replacements
     // between this check and use. Unlike the Unix fd traversal, this is not
     // a boundary against concurrent filesystem changes by another process.
+    #[derive(Default)]
+    pub(super) struct DirCache {
+        verified_parents: std::collections::HashSet<PathBuf>,
+    }
     pub(super) struct Directory(PathBuf);
     impl Directory {
         pub(super) fn open_resolved(path: &Path) -> Result<Self> {
@@ -592,7 +726,24 @@ mod safe_open {
                 Err(error) => Err(error.into()),
             }
         }
-        pub(super) fn is_directory(&self, relative: &Path) -> Result<bool> { Ok(fs::symlink_metadata(checked(&self.0, relative, false)?)?.is_dir()) }
+        pub(super) fn is_directory_cached(&self, relative: &Path, cache: &mut DirCache) -> Result<bool> {
+            anyhow::ensure!(safe_relative(relative), "Unsafe relative path");
+            if let Some(parent) = relative.parent().filter(|p| !p.as_os_str().is_empty()) {
+                if !cache.verified_parents.contains(parent) {
+                    checked(&self.0, parent, false)?;
+                    cache.verified_parents.insert(parent.to_path_buf());
+                }
+            }
+            let full = crate::paths::canonicalize(&self.0)?.join(relative);
+            let meta = fs::symlink_metadata(&full)?;
+            anyhow::ensure!(!meta.file_type().is_symlink(), "Symbolic links are not copied");
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                anyhow::ensure!(meta.file_attributes() & 0x400 == 0, "Reparse points are not copied");
+            }
+            Ok(meta.is_dir())
+        }
         pub(super) fn command(&self) -> Result<std::process::Command> {
             let mut command = git::git();
             command.current_dir(&self.0);

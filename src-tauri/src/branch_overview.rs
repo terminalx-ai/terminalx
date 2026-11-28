@@ -118,12 +118,14 @@ pub fn next_step(work: &git::WorkStatus, base_conflicts: bool, ahead: u32, has_r
 /// started from `develop` is not said to be behind `main`. A recorded ref that
 /// is gone, or is only `HEAD`, falls back to the default branch.
 pub fn overview(cwd: &Path, recorded: Option<&str>, local_only: bool) -> BranchOverview {
-    let status = git::work_status(cwd);
+    let Ok((status, extra)) = git::work_status_detailed(cwd) else {
+        return BranchOverview::default();
+    };
     if !status.is_repo {
         return BranchOverview::default();
     }
     let default = status.default_branch.as_deref().map(|d| {
-        if git::run(cwd, &["rev-parse", "--verify", "--quiet", &format!("refs/remotes/origin/{d}")]).is_ok() {
+        if extra.default_has_origin {
             format!("origin/{d}")
         } else {
             d.to_string()
@@ -143,10 +145,13 @@ pub fn overview(cwd: &Path, recorded: Option<&str>, local_only: bool) -> BranchO
     let on_base = status.branch.is_some() && (status.branch == base || (!local_only && status.branch == status.default_branch));
     let main_checkout = main_checkout(cwd);
     let main_root = main_checkout.as_deref().and_then(|path| crate::paths::canonicalize(path).ok());
-    let current_root = git::run(cwd, &["rev-parse", "--show-toplevel"]).ok().and_then(|path| crate::paths::canonicalize(path.strip_suffix('\n').unwrap_or(&path)).ok());
+    let current_root = extra.toplevel.as_deref().and_then(|path| crate::paths::canonicalize(path).ok());
     // An unverified path must not permit switching the agent's own checkout.
     let in_main_checkout = main_root.zip(current_root).is_none_or(|(main, current)| main == current);
-    let comparison_ref = git::comparison_ref(cwd);
+    let comparison_ref = extra.comparison_ref;
+    let has_remote = extra.default_has_origin
+        || comparison_ref.as_deref().is_some_and(|r| r.starts_with("refs/remotes/") || r.contains('/'))
+        || git::run(cwd, &["remote"]).map(|s| !s.trim().is_empty()).unwrap_or(false);
     let mut out = BranchOverview {
         branch: status.branch.clone(),
         main_checkout,
@@ -156,8 +161,8 @@ pub fn overview(cwd: &Path, recorded: Option<&str>, local_only: bool) -> BranchO
         unpushed: status.ahead,
         unpulled: status.behind,
         dirty: status.dirty,
-        changed: if status.dirty { git::run(cwd, &["status", "--porcelain", "--untracked-files=normal", "--"]).map(|s| s.lines().count() as u32).unwrap_or(0) } else { 0 },
-        has_remote: git::run(cwd, &["remote"]).map(|s| !s.trim().is_empty()).unwrap_or(false),
+        changed: extra.changed,
+        has_remote,
         merge: MergeCheck { state: "unknown".into(), conflicted: vec![] },
         ..Default::default()
     };
@@ -170,14 +175,35 @@ pub fn overview(cwd: &Path, recorded: Option<&str>, local_only: bool) -> BranchO
     let fork = git::run(cwd, &["merge-base", &base_ref, "HEAD"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let mine = format!("{base_ref}..HEAD");
     let theirs = format!("HEAD..{base_ref}");
-    out.ahead = count(cwd, &mine);
-    out.behind = count(cwd, &theirs);
-    out.commits = git::log_commits(cwd, Some(&mine), LISTED).unwrap_or_default();
-    out.base_commits = git::log_commits(cwd, Some(&theirs), LISTED).unwrap_or_default();
-    out.contributors = contributors(cwd, &mine);
-    out.base_contributors = contributors(cwd, &theirs);
+    // One `rev-list --left-right --count` yields both behind (`HEAD..base`) and ahead (`base..HEAD`).
+    let (behind, ahead) = git::run(cwd, &["rev-list", "--left-right", "--count", &format!("{base_ref}...HEAD")])
+        .ok()
+        .and_then(|s| git::parse_upstream_counts(&s))
+        .unwrap_or_else(|| (count(cwd, &theirs), count(cwd, &mine)));
+    out.ahead = ahead;
+    out.behind = behind;
+    if out.ahead > 0 {
+        out.commits = git::log_commits(cwd, Some(&mine), LISTED).unwrap_or_default();
+        out.contributors = if out.ahead <= LISTED && out.commits.len() == out.ahead as usize {
+            tally_commits(&out.commits)
+        } else {
+            contributors(cwd, &mine)
+        };
+    }
+    if out.behind > 0 {
+        out.base_commits = git::log_commits(cwd, Some(&theirs), LISTED).unwrap_or_default();
+        out.base_contributors = if out.behind <= LISTED && out.base_commits.len() == out.behind as usize {
+            tally_commits(&out.base_commits)
+        } else {
+            contributors(cwd, &theirs)
+        };
+    }
     out.fork_point = fork.as_deref().and_then(|sha| git::log_commits(cwd, Some(sha), 1).ok()).and_then(|mut v| v.pop());
-    out.merge = if out.ahead == 0 && (!local_only || git::run(cwd, &["merge-base", "--is-ancestor", "HEAD", &base_ref]).is_ok()) { MergeCheck { state: "merged".into(), conflicted: vec![] } } else { merge_check(cwd, &base_ref) };
+    out.merge = if out.ahead == 0 && (!local_only || fork.as_deref() == status.head.as_deref() || git::run(cwd, &["merge-base", "--is-ancestor", "HEAD", &base_ref]).is_ok()) {
+        MergeCheck { state: "merged".into(), conflicted: vec![] }
+    } else {
+        merge_check(cwd, &base_ref)
+    };
     // A remote ref without tracking configuration is already published.
     let comparison = git::WorkStatus { upstream: out.upstream.clone(), ..status };
     out.next_step = next_step(&comparison, out.merge.state == "conflicts", out.ahead, out.has_remote && !local_only);
@@ -293,17 +319,41 @@ fn contributors(cwd: &Path, range: &str) -> Vec<Contributor> {
     tally(&out)
 }
 
+fn tally_commits(commits: &[CommitInfo]) -> Vec<Contributor> {
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut people: Vec<Contributor> = Vec::new();
+    for commit in commits {
+        let key = commit.email.trim().to_ascii_lowercase();
+        if let Some(&pos) = index.get(&key) {
+            people[pos].commits += 1;
+        } else {
+            index.insert(key, people.len());
+            people.push(Contributor {
+                name: commit.author.trim().into(),
+                email: commit.email.trim().into(),
+                commits: 1,
+                last: commit.date.trim().into(),
+            });
+        }
+    }
+    people.sort_by_key(|p| std::cmp::Reverse(p.commits));
+    people
+}
+
 /// Authors in `git log --format=%an%x1f%ae%x1f%aI` output (newest first), one
 /// per email, the most commits first.
 pub fn tally(log: &str) -> Vec<Contributor> {
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut people: Vec<Contributor> = Vec::new();
     for line in log.lines() {
         let mut f = line.split('\x1f');
         let (Some(name), Some(email), Some(date)) = (f.next(), f.next(), f.next()) else { continue };
         let key = email.trim().to_ascii_lowercase();
-        match people.iter_mut().find(|p| p.email.to_ascii_lowercase() == key) {
-            Some(person) => person.commits += 1,
-            None => people.push(Contributor { name: name.trim().into(), email: email.trim().into(), commits: 1, last: date.trim().into() }),
+        if let Some(&pos) = index.get(&key) {
+            people[pos].commits += 1;
+        } else {
+            index.insert(key, people.len());
+            people.push(Contributor { name: name.trim().into(), email: email.trim().into(), commits: 1, last: date.trim().into() });
         }
     }
     people.sort_by_key(|p| std::cmp::Reverse(p.commits));

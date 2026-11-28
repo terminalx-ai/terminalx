@@ -26,7 +26,7 @@
 //! everything is being looked at again, then each leftover as it starts and
 //! what it came to.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
@@ -119,6 +119,62 @@ fn pending_pr_creation(path: &Path) -> Option<String> {
     crate::worktree_cleanup::pending_pr_creation(&canonical(path))
 }
 
+/// Pre-canonicalized session facts computed once per scan/removal to avoid
+/// O(W × S) `realpath` syscalls inside worktree/branch/transcript loops.
+struct SessionIndex {
+    cwds: Vec<PathBuf>,
+    claimed_worktrees: HashSet<(PathBuf, String)>,
+    in_use_branches: HashSet<(PathBuf, String)>,
+    referred_folder_keys: HashSet<String>,
+    referenced_conversations: HashSet<String>,
+}
+
+impl SessionIndex {
+    fn build(sessions: &[SessionEntry]) -> Self {
+        let mut cwd_set = HashSet::new();
+        let mut claimed_worktrees = HashSet::new();
+        let mut in_use_branches = HashSet::new();
+        let mut referred_folder_keys = HashSet::new();
+        let mut project_cache: HashMap<&str, PathBuf> = HashMap::new();
+        for session in sessions {
+            if !session.cwd.is_empty() {
+                cwd_set.insert(canonical(Path::new(&session.cwd)));
+            }
+            let proj = project_cache
+                .entry(session.project_path.as_str())
+                .or_insert_with(|| canonical(Path::new(&session.project_path)))
+                .clone();
+            if !session.worktree_removed {
+                if let Some(wt) = &session.worktree_name {
+                    claimed_worktrees.insert((proj.clone(), wt.clone()));
+                }
+            }
+            if let Some(branch) = &session.branch {
+                in_use_branches.insert((proj, branch.clone()));
+            }
+            for dir in agent_data::session_dirs(session) {
+                referred_folder_keys.insert(agent_data::folder_key(dir));
+            }
+        }
+        let referenced_conversations = agent_data::referenced_conversations(sessions)
+            .into_iter()
+            .map(String::from)
+            .collect();
+        Self {
+            cwds: cwd_set.into_iter().collect(),
+            claimed_worktrees,
+            in_use_branches,
+            referred_folder_keys,
+            referenced_conversations,
+        }
+    }
+
+    fn used_by_dir(&self, dir: &Path) -> bool {
+        let dir = canonical(dir);
+        self.cwds.iter().any(|cwd| cwd.starts_with(&dir))
+    }
+}
+
 /// Whether any session runs in `dir` or below it.
 fn used_by_a_session(sessions: &[SessionEntry], dir: &Path) -> bool {
     let dir = canonical(dir);
@@ -133,27 +189,35 @@ struct Base {
     fresh: bool,
 }
 
-fn worktree_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry], out: &mut Vec<Leftover>) {
+fn worktree_leftovers(
+    project: &Project,
+    base: &Base,
+    index: &SessionIndex,
+    only_names: Option<&HashSet<&str>>,
+    measure_size: bool,
+    out: &mut Vec<Leftover>,
+) {
     let project_path = Path::new(&project.path);
+    let project_canon = canonical(project_path);
     let root = git::worktree_root(project_path);
     let Ok(entries) = std::fs::read_dir(&root) else { return };
     let mut entries: Vec<_> = entries.flatten().collect();
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         let Some(name) = entry.file_name().to_str().map(String::from) else { continue };
+        if let Some(only) = only_names {
+            if !only.contains(name.as_str()) { continue; }
+        }
         let Ok(path) = git::managed_worktree_path(project_path, &name) else { continue };
         // A link is never a worktree Raccoon made, and is never followed.
         let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
         if meta.file_type().is_symlink() || !meta.is_dir() {
             continue;
         }
-        if used_by_a_session(sessions, &path) {
+        if index.used_by_dir(&path) {
             continue;
         }
-        let claimed = sessions.iter().any(|session| {
-            !session.worktree_removed && session.worktree_name.as_deref() == Some(name.as_str()) && canonical(Path::new(&session.project_path)) == canonical(project_path)
-        });
-        if claimed {
+        if index.claimed_worktrees.contains(&(project_canon.clone(), name.clone())) {
             continue;
         }
         // The project's default branch was fetched once for the whole scan.
@@ -169,6 +233,7 @@ fn worktree_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry],
         } else {
             None
         };
+        let size_bytes = if measure_size || kept_because.is_none() { git::size_on_disk(&path) } else { 0 };
         out.push(Leftover {
             id: format!("worktree:{}:{name}", project.path),
             kind: LeftoverKind::Worktree,
@@ -176,15 +241,22 @@ fn worktree_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry],
             project_name: project.name.clone(),
             name,
             agent: None,
-            size_bytes: git::size_on_disk(&path),
+            size_bytes,
             paths: vec![path.to_string_lossy().into_owned()],
             kept_because,
         });
     }
 }
 
-fn branch_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry], out: &mut Vec<Leftover>) {
+fn branch_leftovers(
+    project: &Project,
+    base: &Base,
+    index: &SessionIndex,
+    only_branches: Option<&HashSet<&str>>,
+    out: &mut Vec<Leftover>,
+) {
     let project_path = Path::new(&project.path);
+    let project_canon = canonical(project_path);
     let Ok(prefix) = crate::store::configuration::branch_prefix(project_path) else { return };
     // Without a prefix every branch would look like one of Raccoon's.
     if prefix.is_empty() {
@@ -194,6 +266,9 @@ fn branch_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry], o
     let checked_out: HashSet<String> = worktrees.into_iter().filter_map(|(_, branch)| branch).collect();
     let Ok(refs) = git::run(project_path, &["for-each-ref", "--format=%(refname:short)", "refs/heads"]) else { return };
     for branch in refs.lines().map(str::trim) {
+        if let Some(only) = only_branches {
+            if !only.contains(branch) { continue; }
+        }
         let Some(name) = branch.strip_prefix(&prefix) else { continue };
         if name.is_empty() || checked_out.contains(branch) {
             continue;
@@ -202,8 +277,7 @@ fn branch_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry], o
         if git::managed_worktree_path(project_path, name).is_ok_and(|path| std::fs::symlink_metadata(path).is_ok()) {
             continue;
         }
-        let in_use = sessions.iter().any(|session| session.branch.as_deref() == Some(branch) && canonical(Path::new(&session.project_path)) == canonical(project_path));
-        if in_use {
+        if index.in_use_branches.contains(&(project_canon.clone(), branch.to_string())) {
             continue;
         }
         let kept_because = match (&base.not_verified, &base.name) {
@@ -233,7 +307,7 @@ fn branch_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry], o
 
 /// The project whose managed worktree `cwd` was, when that worktree is known
 /// to be gone from disk (not merely unreadable) and no session refers to it.
-fn gone_worktree_of<'a>(projects: &'a [Project], sessions: &[SessionEntry], cwd: &str) -> Option<(&'a Project, String)> {
+fn gone_worktree_of<'a>(projects: &'a [Project], index: &SessionIndex, cwd: &str) -> Option<(&'a Project, String)> {
     let path = Path::new(cwd);
     let gone = matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
     if !path.is_absolute() || !gone {
@@ -244,8 +318,7 @@ fn gone_worktree_of<'a>(projects: &'a [Project], sessions: &[SessionEntry], cwd:
         std::fs::symlink_metadata(&project.path).is_ok() && git::managed_worktree_path(Path::new(&project.path), &name).is_ok_and(|managed| managed == path)
     })?;
     let key = agent_data::folder_key(cwd);
-    let referred = sessions.iter().flat_map(agent_data::session_dirs).any(|dir| agent_data::folder_key(dir) == key);
-    (!referred).then_some((project, name))
+    (!index.referred_folder_keys.contains(&key)).then_some((project, name))
 }
 
 /// The directory a Claude transcript says it was written in.
@@ -306,10 +379,24 @@ fn claude_root_of<'i>(id: &'i str, sources: &Sources<'_>) -> std::result::Result
     }
 }
 
-fn claude_leftovers(root: &Path, account: Option<&str>, projects: &[Project], sessions: &[SessionEntry], out: &mut Vec<Leftover>) {
+fn claude_leftovers(
+    root: &Path,
+    account: Option<&str>,
+    projects: &[Project],
+    index: &SessionIndex,
+    only_folders: Option<&HashSet<&str>>,
+    measure_size: bool,
+    out: &mut Vec<Leftover>,
+) {
     let Ok(root) = crate::paths::canonicalize(root) else { return };
-    let referenced = agent_data::referenced_conversations(sessions);
-    let names: Vec<String> = children(&root).iter().filter_map(|path| path.file_name()?.to_str().map(String::from)).collect();
+    let names: Vec<String> = match only_folders {
+        Some(only) => {
+            let mut v: Vec<String> = only.iter().map(|s| (*s).to_string()).collect();
+            v.sort();
+            v
+        }
+        None => children(&root).iter().filter_map(|path| path.file_name()?.to_str().map(String::from)).collect(),
+    };
     for folder_name in names {
         let Some(folder) = agent_data::real_child_dir(&root, &folder_name) else { continue };
         let transcripts: Vec<PathBuf> = children(&folder)
@@ -321,17 +408,21 @@ fn claude_leftovers(root: &Path, account: Option<&str>, projects: &[Project], se
             continue;
         }
         let ids: Vec<&str> = transcripts.iter().filter_map(|path| path.file_stem()?.to_str()).collect();
-        if ids.len() != transcripts.len() || ids.iter().any(|id| agent_data::conversation_id(id).is_none() || referenced.contains(id)) {
+        if ids.len() != transcripts.len() || ids.iter().any(|id| agent_data::conversation_id(id).is_none() || index.referenced_conversations.contains(*id)) {
             continue;
         }
-        let Some((project, name)) = gone_worktree_of(projects, sessions, &cwd) else { continue };
+        let Some((project, name)) = gone_worktree_of(projects, index, &cwd) else { continue };
         let mut paths = Vec::new();
         let mut size = 0;
         for (transcript, id) in transcripts.iter().zip(&ids) {
-            size += git::size_on_disk(transcript);
+            if measure_size {
+                size += git::size_on_disk(transcript);
+            }
             paths.push(transcript.to_string_lossy().into_owned());
             if let Some(side) = agent_data::real_child_dir(&folder, id) {
-                size += git::size_on_disk(&side);
+                if measure_size {
+                    size += git::size_on_disk(&side);
+                }
                 paths.push(side.to_string_lossy().into_owned());
             }
         }
@@ -361,10 +452,17 @@ fn rollout_meta(rollout: &Path) -> Option<(String, String)> {
     Some((payload["id"].as_str()?.to_string(), payload["cwd"].as_str()?.to_string()))
 }
 
-fn codex_leftovers(home: &Path, projects: &[Project], sessions: &[SessionEntry], out: &mut Vec<Leftover>) {
+fn codex_leftovers(
+    home: &Path,
+    projects: &[Project],
+    index: &SessionIndex,
+    only_cwds: Option<&HashSet<&str>>,
+    measure_size: bool,
+    out: &mut Vec<Leftover>,
+) {
     let Ok(sessions_root) = crate::paths::canonicalize(home.join("sessions")) else { return };
-    let referenced = agent_data::referenced_conversations(sessions);
     let mut found: Vec<Leftover> = Vec::new();
+    let mut by_id: HashMap<String, usize> = HashMap::new();
     for year in children(&sessions_root) {
         for month in children(&year) {
             for day in children(&month) {
@@ -375,21 +473,24 @@ fn codex_leftovers(home: &Path, projects: &[Project], sessions: &[SessionEntry],
                         continue;
                     }
                     let Some((id, cwd)) = rollout_meta(&rollout) else { continue };
+                    if let Some(only) = only_cwds {
+                        if !only.contains(cwd.as_str()) { continue; }
+                    }
                     // The id in the name is what resume looks for; both must agree.
                     let named_for_id = rollout.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.ends_with(&format!("-{id}.jsonl")));
-                    if !named_for_id || agent_data::conversation_id(&id).is_none() || referenced.contains(id.as_str()) {
+                    if !named_for_id || agent_data::conversation_id(&id).is_none() || index.referenced_conversations.contains(id.as_str()) {
                         continue;
                     }
-                    let Some((project, name)) = gone_worktree_of(projects, sessions, &cwd) else { continue };
+                    let Some((project, name)) = gone_worktree_of(projects, index, &cwd) else { continue };
                     let leftover_id = format!("codex:{cwd}");
-                    let size = git::size_on_disk(&rollout);
+                    let size = if measure_size { git::size_on_disk(&rollout) } else { 0 };
                     let path = rollout.to_string_lossy().into_owned();
-                    match found.iter_mut().find(|leftover| leftover.id == leftover_id) {
-                        Some(leftover) => {
-                            leftover.paths.push(path);
-                            leftover.size_bytes += size;
-                        }
-                        None => found.push(Leftover {
+                    if let Some(&pos) = by_id.get(&leftover_id) {
+                        found[pos].paths.push(path);
+                        found[pos].size_bytes += size;
+                    } else {
+                        by_id.insert(leftover_id.clone(), found.len());
+                        found.push(Leftover {
                             id: leftover_id,
                             kind: LeftoverKind::AgentData,
                             project_path: project.path.clone(),
@@ -399,7 +500,7 @@ fn codex_leftovers(home: &Path, projects: &[Project], sessions: &[SessionEntry],
                             paths: vec![path],
                             size_bytes: size,
                             kept_because: None,
-                        }),
+                        });
                     }
                 }
             }
@@ -409,30 +510,102 @@ fn codex_leftovers(home: &Path, projects: &[Project], sessions: &[SessionEntry],
 }
 
 pub(crate) fn scan_sources(sources: &Sources<'_>) -> Vec<Leftover> {
+    scan_sources_targeted(sources, None)
+}
+
+/// Scan either everything (`wanted == None`) or only the specific requested
+/// deletion IDs (`wanted == Some(ids)`), skipping unrelated projects, remote
+/// fetches, transcript trees, and unneeded `size_on_disk` walks.
+fn scan_sources_targeted(sources: &Sources<'_>, wanted: Option<&[&String]>) -> Vec<Leftover> {
     let _github_request = crate::github_process::scope();
+    let index = SessionIndex::build(sources.sessions);
     let mut out = Vec::new();
+    let Some(wanted) = wanted else {
+        for project in sources.projects {
+            let path = Path::new(&project.path);
+            if !path.is_dir() || !git::is_repo(path) { continue; }
+            let (name, not_verified, fresh) = landed::base_for(path, sources.fetch);
+            let not_verified = not_verified.or_else(|| (!fresh).then(|| "the default branch was not fetched for this scan.".to_string()));
+            let base = Base { name, not_verified, fresh };
+            worktree_leftovers(project, &base, &index, None, true, &mut out);
+            branch_leftovers(project, &base, &index, None, &mut out);
+        }
+        if let Some(root) = sources.claude_root {
+            claude_leftovers(root, None, sources.projects, &index, None, true, &mut out);
+            for (account, root) in claude_account_roots() {
+                claude_leftovers(&root, Some(&account), sources.projects, &index, None, true, &mut out);
+            }
+        }
+        if let Some(home) = sources.codex_home {
+            codex_leftovers(home, sources.projects, &index, None, true, &mut out);
+        }
+        return out;
+    };
+
+    // Partition requested deletion IDs by project / source so deleting 1 leftover
+    // never fetches unrelated repos or walks unrelated worktrees/transcripts.
+    let mut wanted_worktrees: HashMap<&str, HashSet<&str>> = HashMap::new();
+    let mut wanted_branches: HashMap<&str, HashSet<&str>> = HashMap::new();
+    let mut wanted_claude_default: HashSet<&str> = HashSet::new();
+    let mut wanted_claude_accounts: HashMap<&str, HashSet<&str>> = HashMap::new();
+    let mut wanted_codex: HashSet<&str> = HashSet::new();
+
+    for id in wanted {
+        if let Some(rest) = id.strip_prefix("worktree:") {
+            for project in sources.projects {
+                if let Some(name) = rest.strip_prefix(&project.path).and_then(|s| s.strip_prefix(':')) {
+                    wanted_worktrees.entry(project.path.as_str()).or_default().insert(name);
+                }
+            }
+        } else if let Some(rest) = id.strip_prefix("branch:") {
+            for project in sources.projects {
+                if let Some(branch) = rest.strip_prefix(&project.path).and_then(|s| s.strip_prefix(':')) {
+                    wanted_branches.entry(project.path.as_str()).or_default().insert(branch);
+                }
+            }
+        } else if let Some(folder) = id.strip_prefix("claude:") {
+            wanted_claude_default.insert(folder);
+        } else if let Some((account, folder)) = id.strip_prefix("claude@").and_then(|rest| rest.split_once(':')) {
+            wanted_claude_accounts.entry(account).or_default().insert(folder);
+        } else if let Some(cwd) = id.strip_prefix("codex:") {
+            wanted_codex.insert(cwd);
+        }
+    }
+
     for project in sources.projects {
-        let path = Path::new(&project.path);
-        if !path.is_dir() || !git::is_repo(path) {
+        let wt_names = wanted_worktrees.get(project.path.as_str());
+        let br_names = wanted_branches.get(project.path.as_str());
+        if wt_names.is_none() && br_names.is_none() {
             continue;
         }
+        let path = Path::new(&project.path);
+        if !path.is_dir() || !git::is_repo(path) { continue; }
         let (name, not_verified, fresh) = landed::base_for(path, sources.fetch);
-        // A comparison with a copy that was not fetched is not a verified one.
         let not_verified = not_verified.or_else(|| (!fresh).then(|| "the default branch was not fetched for this scan.".to_string()));
         let base = Base { name, not_verified, fresh };
-        worktree_leftovers(project, &base, sources.sessions, &mut out);
-        branch_leftovers(project, &base, sources.sessions, &mut out);
-    }
-    if let Some(root) = sources.claude_root {
-        claude_leftovers(root, None, sources.projects, sources.sessions, &mut out);
-        // What added accounts wrote where their `projects` is not the link
-        // to the person's folder (#980).
-        for (account, root) in claude_account_roots() {
-            claude_leftovers(&root, Some(&account), sources.projects, sources.sessions, &mut out);
+        if let Some(wt_names) = wt_names {
+            worktree_leftovers(project, &base, &index, Some(wt_names), false, &mut out);
+        }
+        if let Some(br_names) = br_names {
+            branch_leftovers(project, &base, &index, Some(br_names), &mut out);
         }
     }
-    if let Some(home) = sources.codex_home {
-        codex_leftovers(home, sources.projects, sources.sessions, &mut out);
+    if let Some(root) = sources.claude_root {
+        if !wanted_claude_default.is_empty() {
+            claude_leftovers(root, None, sources.projects, &index, Some(&wanted_claude_default), false, &mut out);
+        }
+        if !wanted_claude_accounts.is_empty() {
+            for (account, root) in claude_account_roots() {
+                if let Some(folders) = wanted_claude_accounts.get(account.as_str()) {
+                    claude_leftovers(&root, Some(&account), sources.projects, &index, Some(folders), false, &mut out);
+                }
+            }
+        }
+    }
+    if !wanted_codex.is_empty() {
+        if let Some(home) = sources.codex_home {
+            codex_leftovers(home, sources.projects, &index, Some(&wanted_codex), false, &mut out);
+        }
     }
     out
 }
@@ -537,7 +710,7 @@ fn remove_from_sources_with_runner(sources: &Sources<'_>, ids: &[String], report
     wanted.dedup();
     let total = wanted.len();
     report(&Progress::Checking { total });
-    let fresh = scan_sources(sources);
+    let fresh = scan_sources_targeted(sources, Some(&wanted));
     let mut removal = Removal::default();
     for (index, id) in wanted.into_iter().enumerate() {
         report(&Progress::Started { index, total, id: id.clone() });
@@ -1348,5 +1521,18 @@ mod tests {
         assert_eq!(error.as_ref(), Some(&removal.failed[0].error));
         assert_eq!(serde_json::to_value(&progress[4]).unwrap(), serde_json::json!({ "kind": "finished", "index": 1, "total": 3, "id": worktree, "freedBytes": freed, "error": null }));
         assert!(!wt.exists() && dirty.join("notes.txt").exists());
+    }
+
+    #[test]
+    fn targeted_removal_deletes_requested_branch_without_scanning_unrelated_worktrees() {
+        let f = Fixture::new();
+        let kept_wt = f.worktree("untouched-wt");
+        std::fs::write(kept_wt.join("dirty.txt"), "keep").unwrap();
+        sh(f.path(), &["branch", "raccoon/target-branch", "main"]);
+        let target = format!("branch:{}:raccoon/target-branch", f.project.path);
+        let removal = f.remove(&[], &[&target]);
+        assert_eq!(removal.removed, vec![target]);
+        assert!(removal.failed.is_empty());
+        assert!(kept_wt.join("dirty.txt").exists());
     }
 }

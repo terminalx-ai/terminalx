@@ -8,6 +8,7 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 pub(crate) fn removal_record(project: &Path, path: &Path) -> RemovedWorkspace {
@@ -38,10 +39,43 @@ fn branch_tip(project: &Path, branch: &str) -> Option<String> {
     git::run(project, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).ok().map(|tip| tip.trim().to_owned())
 }
 
-fn branch_available(project: &Path, branch: &str) -> Result<bool> {
-    // Git also refuses a ref whose name is a parent/child of an existing ref.
-    let refs = git::run(project, &["for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"])?;
-    Ok(!refs.lines().any(|name| name == branch || name.starts_with(&format!("{branch}/")) || branch.starts_with(&format!("{name}/"))))
+/// Pre-loaded local branch names and their directory prefixes so collision
+/// checks (exact, parent, or child ref) are O(depth) in memory with ONE
+/// `git for-each-ref` spawn instead of one per retry iteration.
+struct LocalBranches {
+    names: HashSet<String>,
+    dir_prefixes: HashSet<String>,
+}
+
+impl LocalBranches {
+    fn load(project: &Path) -> Result<Self> {
+        let refs = git::run(project, &["for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"])?;
+        Ok(Self::from_lines(refs.lines()))
+    }
+
+    fn from_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut names = HashSet::new();
+        let mut dir_prefixes = HashSet::new();
+        for name in lines.into_iter().filter(|l| !l.is_empty()) {
+            names.insert(name.to_owned());
+            for (idx, _) in name.match_indices('/') {
+                dir_prefixes.insert(name[..idx].to_owned());
+            }
+        }
+        Self { names, dir_prefixes }
+    }
+
+    fn is_available(&self, branch: &str) -> bool {
+        if self.names.contains(branch) || self.dir_prefixes.contains(branch) {
+            return false;
+        }
+        for (idx, _) in branch.match_indices('/') {
+            if self.names.contains(&branch[..idx]) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 fn valid_branch(project: &Path, branch: &str) -> Result<()> {
@@ -59,9 +93,9 @@ fn source(session: &SessionEntry) -> Result<&RemovedWorkspace> {
     session.removed_workspace.as_ref().context("This older session has no saved workspace path to restore.")
 }
 
-fn members(sessions: Vec<SessionEntry>, removed: &RemovedWorkspace, project: &str) -> Vec<SessionEntry> {
+fn members<'a>(sessions: &'a [SessionEntry], removed: &RemovedWorkspace, project: &str) -> Vec<&'a SessionEntry> {
     sessions
-        .into_iter()
+        .iter()
         .filter(|session| {
             session.worktree_removed
                 && session.removed_workspace.as_ref() == Some(removed)
@@ -71,8 +105,13 @@ fn members(sessions: Vec<SessionEntry>, removed: &RemovedWorkspace, project: &st
 }
 
 pub(crate) fn preview(session_id: &str) -> Result<Preview> {
-    let session = index::get(session_id)?;
-    let removed = source(&session)?;
+    let sessions = index::load()?;
+    Ok(preview_with_sessions(session_id, &sessions)?.0)
+}
+
+fn preview_with_sessions(session_id: &str, sessions: &[SessionEntry]) -> Result<(Preview, LocalBranches)> {
+    let session = sessions.iter().find(|entry| entry.id == session_id).context("session not found")?;
+    let removed = source(session)?;
     let project_path = removed.repository.as_deref().unwrap_or(&session.project_path);
     let project = crate::paths::canonicalize(project_path).context("The original repository cannot be reached.")?;
     let top = git::run(&project, &["rev-parse", "--show-toplevel"]).context("The original project is no longer a Git checkout.")?;
@@ -125,16 +164,17 @@ pub(crate) fn preview(session_id: &str) -> Result<Preview> {
     };
     let base = removed.branch.as_deref().unwrap_or("restored-workspace");
     let base = if valid_branch(&project, base).is_ok() { base } else { "restored-workspace" };
+    let branches = LocalBranches::load(&project)?;
     let mut suggested_branch = format!("{base}-restored");
     for number in 2.. {
-        if branch_available(&project, &suggested_branch)? {
+        if branches.is_available(&suggested_branch) {
             break;
         }
         suggested_branch = format!("{base}-restored-{number}");
     }
-    let mut session_ids: Vec<_> = members(index::load()?, removed, project_path).into_iter().map(|entry| entry.id).collect();
+    let mut session_ids: Vec<_> = members(sessions, removed, project_path).into_iter().map(|entry| entry.id.clone()).collect();
     session_ids.sort();
-    Ok(Preview {
+    Ok((Preview {
         project_path: project.to_string_lossy().into_owned(),
         path: target.to_string_lossy().into_owned(),
         branch: removed.branch.clone(),
@@ -143,7 +183,7 @@ pub(crate) fn preview(session_id: &str) -> Result<Preview> {
         suggested_branch,
         legacy: removed.commit.is_none(),
         session_ids,
-    })
+    }, branches))
 }
 
 /// Only resources this attempt reserved are rolled back. A compare-and-delete
@@ -229,11 +269,13 @@ fn restore_with(
             admission::Kind::Refuse(admission::SESSION_MOVED),
             expected.session_ids.iter().cloned().map(admission::Scope::Session).chain([admission::Scope::checkout(Path::new(&expected.path))]),
         );
-        if preview(session_id)? != *expected {
+        let sessions = index::load()?;
+        let (checked, branches) = preview_with_sessions(session_id, &sessions)?;
+        if checked != *expected {
             bail!("The workspace changed since it was checked. Review it again before restoring.");
         }
-        let session = index::get(session_id)?;
-        let removed = source(&session)?.clone();
+        let session = sessions.iter().find(|entry| entry.id == session_id).context("session not found")?;
+        let removed = source(session)?.clone();
         let project = Path::new(&expected.project_path);
         // A detached restore checks out the recorded commit itself and creates
         // no branch, so any requested new branch is ignored.
@@ -242,7 +284,7 @@ fn restore_with(
             _ if detached => None,
             Some(branch) => {
                 valid_branch(project, branch)?;
-                if !branch_available(project, branch)? {
+                if !branches.is_available(branch) {
                     bail!("The new branch name is already taken. Choose another name.");
                 }
                 Some(branch)
@@ -251,9 +293,11 @@ fn restore_with(
             None => Some(expected.branch.as_deref().context("Choose a new branch.")?),
         };
         for id in &expected.session_ids {
-            stop(&index::get(id)?)?;
+            let entry = sessions.iter().find(|entry| &entry.id == id).context("session not found")?;
+            stop(entry)?;
         }
-        if preview(session_id)? != *expected {
+        let after_stop = index::load()?;
+        if preview_with_sessions(session_id, &after_stop)?.0 != *expected {
             bail!("The workspace changed while its tabs were stopped. Review it again before restoring.");
         }
         let mut checkout = Checkout { project: project.to_owned(), path: expected.path.clone().into(), created_branch: None, commit: expected.commit.clone() };

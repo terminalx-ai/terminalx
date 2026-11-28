@@ -305,10 +305,43 @@ pub(crate) fn hidden_from_status(cwd: &Path) -> Option<u32> {
     // One that is not on disk was never checked out, so it hides no change;
     // one that is on disk (or assume-unchanged) still could.
     let sparse = git::run(cwd, &["config", "--bool", "core.sparseCheckout"]).is_ok_and(|value| value.trim() == "true");
+    // Cache directory existence top-down so 100k+ skip-worktree files in absent
+    // sparse-checkout subtrees require 1 lstat per absent directory instead of
+    // 1 lstat per file, while still detecting any file materialized on disk.
+    let mut dir_exists: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    let mut path_exists_on_disk = |rel: &str| -> bool {
+        if let Some(slash) = rel.rfind('/') {
+            let parent = &rel[..slash];
+            let mut prefix_end = 0;
+            loop {
+                let next = parent[prefix_end..].find('/').map(|i| prefix_end + i);
+                let dir = match next {
+                    Some(idx) => &parent[..idx],
+                    None => parent,
+                };
+                let exists = match dir_exists.get(dir) {
+                    Some(&cached) => cached,
+                    None => {
+                        let present = std::fs::symlink_metadata(cwd.join(dir)).is_ok();
+                        dir_exists.insert(dir.to_string(), present);
+                        present
+                    }
+                };
+                if !exists {
+                    return false;
+                }
+                match next {
+                    Some(idx) => prefix_end = idx + 1,
+                    None => break,
+                }
+            }
+        }
+        std::fs::symlink_metadata(cwd.join(rel)).is_ok()
+    };
     Some(out.split('\0').filter(|entry| {
         let (flag, path) = (entry.chars().next(), entry.get(2..).unwrap_or_default());
         match flag {
-            Some('S') => !(sparse && std::fs::symlink_metadata(cwd.join(path)).is_err()),
+            Some('S') => !(sparse && !path_exists_on_disk(path)),
             Some(flag) => flag.is_ascii_lowercase(),
             None => false,
         }
@@ -345,17 +378,21 @@ fn applies_in_more_than_one_place(cwd: &Path, merge_base: &str, rev: &str) -> Op
     let mut hunk: Vec<String> = Vec::new();
     let mut in_hunk = false;
     let mut ambiguous = false;
-    let mut close = |hunk: &mut Vec<String>, old_file: &Option<Vec<String>>| {
-        if let Some(old) = old_file {
-            if !hunk.is_empty() && old.windows(hunk.len()).filter(|window| *window == hunk.as_slice()).count() > 1 {
-                ambiguous = true;
+    let close = |hunk: &mut Vec<String>, old_file: &Option<Vec<String>>, ambiguous: &mut bool| {
+        if !*ambiguous {
+            if let Some(old) = old_file {
+                if !hunk.is_empty() && old.windows(hunk.len()).filter(|window| *window == hunk.as_slice()).take(2).count() > 1 {
+                    *ambiguous = true;
+                }
             }
         }
         hunk.clear();
     };
     for line in diff.lines() {
+        if ambiguous { break; }
         if let Some(path) = line.strip_prefix("--- ") {
-            close(&mut hunk, &old_file);
+            close(&mut hunk, &old_file, &mut ambiguous);
+            if ambiguous { break; }
             in_hunk = false;
             // `--- a/<path>`, or `/dev/null` for a file the branch adds.
             old_file = match path.strip_prefix("a/") {
@@ -363,10 +400,10 @@ fn applies_in_more_than_one_place(cwd: &Path, merge_base: &str, rev: &str) -> Op
                 None => None,
             };
         } else if line.starts_with("@@") {
-            close(&mut hunk, &old_file);
+            close(&mut hunk, &old_file, &mut ambiguous);
             in_hunk = true;
         } else if line.starts_with("diff --git") {
-            close(&mut hunk, &old_file);
+            close(&mut hunk, &old_file, &mut ambiguous);
             in_hunk = false;
             old_file = None;
         } else if in_hunk {
@@ -375,7 +412,7 @@ fn applies_in_more_than_one_place(cwd: &Path, merge_base: &str, rev: &str) -> Op
             }
         }
     }
-    close(&mut hunk, &old_file);
+    close(&mut hunk, &old_file, &mut ambiguous);
     Some(ambiguous)
 }
 
@@ -1436,5 +1473,31 @@ mod tests {
         assert_eq!(landed.branch.as_deref(), Some("feature/by-hand"));
         assert_eq!(landed.unmerged_commits, 1);
         assert!(!landed.safe);
+    }
+
+    #[test]
+    fn hidden_from_status_skips_absent_sparse_subtrees_but_detects_materialized_files() {
+        let f = Fixture::new();
+        std::fs::create_dir_all(f.project.join("keep")).unwrap();
+        std::fs::create_dir_all(f.project.join("excluded/deep/dir")).unwrap();
+        std::fs::write(f.project.join("keep/a.txt"), "keep\n").unwrap();
+        for i in 0..20 {
+            std::fs::write(f.project.join(format!("excluded/deep/dir/f{i}.txt")), "x\n").unwrap();
+        }
+        sh(&f.project, &["add", "."]);
+        sh(&f.project, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "sparse files"]);
+        sh(&f.project, &["sparse-checkout", "init", "--cone"]);
+        sh(&f.project, &["sparse-checkout", "set", "keep"]);
+        assert!(!f.project.join("excluded").exists());
+        assert_eq!(hidden_from_status(&f.project), Some(0));
+        // An assume-unchanged file inside the sparse cone is still caught.
+        sh(&f.project, &["update-index", "--assume-unchanged", "keep/a.txt"]);
+        assert_eq!(hidden_from_status(&f.project), Some(1));
+        sh(&f.project, &["update-index", "--no-assume-unchanged", "keep/a.txt"]);
+        assert_eq!(hidden_from_status(&f.project), Some(0));
+        // A manual skip-worktree file outside sparse-checkout mode is still caught.
+        sh(&f.project, &["sparse-checkout", "disable"]);
+        sh(&f.project, &["update-index", "--skip-worktree", "keep/a.txt"]);
+        assert_eq!(hidden_from_status(&f.project), Some(1));
     }
 }

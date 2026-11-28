@@ -121,12 +121,14 @@ fn read_work(cwd: &Path) -> Result<WorkStatus> {
     // work_status is infallible for other callers. Never offer a header write
     // if status could not be read. A conflicted rebase detaches HEAD, but its
     // recorded branch still lets the user ask the agent to finish the rebase.
-    git::run(cwd, &["status", "--porcelain", "--untracked-files=normal", "--"])?;
-    let mut work = git::work_status(cwd);
+    let (mut work, extra) = git::work_status_detailed(cwd)?;
     if work.branch.is_none() && work.operation.as_deref() == Some("rebase") {
-        let dir = git::run(cwd, &["rev-parse", "--absolute-git-dir"])?;
+        let dir = match extra.git_dir {
+            Some(dir) => dir,
+            None => Path::new(crate::git::path_line(&git::run(cwd, &["rev-parse", "--absolute-git-dir"])?)).to_path_buf(),
+        };
         for marker in ["rebase-merge/head-name", "rebase-apply/head-name"] {
-            if let Ok(name) = std::fs::read_to_string(Path::new(crate::git::path_line(&dir)).join(marker)) {
+            if let Ok(name) = std::fs::read_to_string(dir.join(marker)) {
                 if let Some(branch) = name.trim().strip_prefix("refs/heads/") {
                     if git::run(cwd, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok() {
                         work.branch = Some(branch.to_string());
@@ -137,7 +139,9 @@ fn read_work(cwd: &Path) -> Result<WorkStatus> {
         }
     }
     if work.upstream.is_none() {
-        work.upstream = git::comparison_ref(cwd).map(|r| r.strip_prefix("refs/remotes/").unwrap_or(&r).to_string());
+        work.upstream = extra.comparison_ref
+            .or_else(|| git::comparison_ref(cwd))
+            .map(|r| r.strip_prefix("refs/remotes/").unwrap_or(&r).to_string());
     }
     Ok(work)
 }

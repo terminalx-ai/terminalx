@@ -48,10 +48,29 @@ fn withdrawals_path(path: &Path) -> std::path::PathBuf {
     path.with_file_name("session-pr-withdrawals.json")
 }
 
+fn admission_path(path: &Path) -> std::path::PathBuf {
+    path.with_extension("admission.lock")
+}
+
 fn transaction<T>(path: &Path, change: impl FnOnce() -> Result<T>) -> Result<T> {
     // The desktop and local runtime share this cache. Protect the registry and
     // its checkpoints with one stable OS lock, including explicit PR recordings.
-    crate::store::transaction::run(&path.with_extension("lock"), Duration::from_secs(30), change)
+    crate::store::transaction::run_with_readers(
+        &path.with_extension("lock"),
+        &admission_path(path),
+        Duration::from_secs(30),
+        change,
+    )
+}
+
+/// Shared OS lock for read-only queries so concurrent readers do not serialize.
+fn read_transaction<T>(path: &Path, read: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _lock = crate::store::transaction::read_lock(
+        &path.with_extension("lock"),
+        &admission_path(path),
+        Duration::from_secs(30),
+    )?;
+    read()
 }
 
 fn update(path: &Path, session: &str, additions: Vec<Association>) -> Result<Vec<Association>> {
@@ -231,14 +250,16 @@ fn file_id(metadata: &std::fs::Metadata) -> String {
     { format!("{:?}", metadata.created().ok()) }
 }
 
-fn read_new_events(path: &Path, cursor: &mut JournalCursor, session: &str, cwd: &str, found: &mut Vec<Association>) -> Result<u64> {
+fn read_new_events(path: &Path, cursor: &mut JournalCursor, session: &str, cwd: &str, found: &mut Vec<Association>) -> Result<(u64, bool)> {
     let metadata = std::fs::metadata(path)?;
     let id = file_id(&metadata);
+    let mut dirty = false;
     if cursor.file_id != id || cursor.offset > metadata.len() || cursor.observed_len > metadata.len() {
         *cursor = JournalCursor { file_id: id, ..Default::default() };
+        dirty = true;
     }
     // Even a torn final record is read only once until more bytes arrive.
-    if cursor.offset == metadata.len() || cursor.observed_len == metadata.len() { return Ok(0); }
+    if cursor.offset == metadata.len() || cursor.observed_len == metadata.len() { return Ok((0, dirty)); }
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(cursor.offset))?;
     // Bound the snapshot even while a writer keeps appending. Incomplete JSON
@@ -255,13 +276,17 @@ fn read_new_events(path: &Path, cursor: &mut JournalCursor, session: &str, cwd: 
         let event = serde_json::from_slice(&line);
         if !terminated && event.is_err() { break; }
         cursor.offset += count as u64;
+        dirty = true;
         if let Ok(event) = event {
             found.extend(observe(&mut cursor.calls, event, session, cwd));
         }
         if !terminated { break; }
     }
-    cursor.observed_len = metadata.len();
-    Ok(bytes)
+    if cursor.observed_len != metadata.len() {
+        cursor.observed_len = metadata.len();
+        dirty = true;
+    }
+    Ok((bytes, dirty))
 }
 
 /// One batch loads each small registry once. Only journal suffixes that have
@@ -273,7 +298,19 @@ fn refresh(
     load_pipelines: impl FnOnce() -> Result<Vec<crate::issue_pipeline::Pipeline>>,
     additions: BTreeMap<String, Vec<Association>>,
 ) -> Result<(BTreeMap<String, Vec<Association>>, u64)> {
-    transaction(&root.join("session-pr-associations.json"), || refresh_locked(root, sessions, load_cwds, load_pipelines, additions))
+    let path = root.join("session-pr-associations.json");
+    let local = sessions.iter().any(|session| !remote_session(session));
+    if !local && additions.is_empty() {
+        return read_transaction(&path, || {
+            for session in sessions {
+                if session.is_empty() { bail!("A session is required to associate a pull request"); }
+            }
+            let all: Associations = crate::store::read_json(&path)?.unwrap_or_default();
+            let rows = sessions.iter().map(|id| (id.clone(), all.get(id).into_iter().flat_map(|entries| entries.values().cloned()).collect())).collect();
+            Ok((rows, 0))
+        });
+    }
+    transaction(&path, || refresh_locked(root, sessions, load_cwds, load_pipelines, additions))
 }
 
 /// A session that runs elsewhere (a cloud workspace's, or a paired machine's,
@@ -294,7 +331,7 @@ fn refresh_locked(
     let mut all: Associations = crate::store::read_json(&path)?.unwrap_or_default();
     let local = sessions.iter().any(|session| !remote_session(session));
     let mut index: JournalIndex = if local { crate::store::read_json(&index_path)?.unwrap_or_default() } else { BTreeMap::new() };
-    let before = serde_json::to_vec(&index)?;
+    let mut index_dirty = false;
     // As before, missing/unreadable session metadata only prevents journal
     // discovery. It must not hide ownership retained in the separate cache.
     let cwds = if local { load_cwds().unwrap_or_default() } else { BTreeMap::new() };
@@ -331,8 +368,13 @@ fn refresh_locked(
                         let entry = entry?;
                         let path = entry.path();
                         if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") { continue; }
-                        let cursor = index.entry(session.clone()).or_default().entry(entry.file_name().to_string_lossy().into_owned()).or_default();
-                        bytes += read_new_events(&path, cursor, session, cwd, &mut found)?;
+                        let file_name = entry.file_name().to_string_lossy().into_owned();
+                        let session_cursors = index.entry(session.clone()).or_default();
+                        let existed = session_cursors.contains_key(&file_name);
+                        let cursor = session_cursors.entry(file_name).or_default();
+                        let (read_bytes, cursor_dirty) = read_new_events(&path, cursor, session, cwd, &mut found)?;
+                        bytes += read_bytes;
+                        index_dirty |= !existed || cursor_dirty;
                     }
                 }
             }
@@ -343,9 +385,91 @@ fn refresh_locked(
     // Write identities before advancing checkpoints: a crash can repeat evidence,
     // but can never skip a creation that has not yet been saved.
     if changed { crate::store::write_json(&path, &all)?; }
-    if serde_json::to_vec(&index)? != before { crate::store::write_json(&index_path, &index)?; }
+    if index_dirty { crate::store::write_json(&index_path, &index)?; }
     let rows = sessions.iter().map(|id| (id.clone(), all.get(id).into_iter().flat_map(|entries| entries.values().cloned()).collect())).collect();
     Ok((rows, bytes))
+}
+
+/// Prune specific deleted local session IDs from associations, journal cursors,
+/// and withdrawals.
+pub(crate) fn prune_sessions(deleted: &[String]) -> Result<usize> {
+    if deleted.is_empty() { return Ok(0); }
+    let root = crate::store::root()?;
+    let path = root.join("session-pr-associations.json");
+    let index_path = root.join("session-pr-journal-index-v1.json");
+    let w_path = withdrawals_path(&path);
+    let drop_set: BTreeSet<&str> = deleted.iter().map(String::as_str).filter(|id| !remote_session(id)).collect();
+    if drop_set.is_empty() { return Ok(0); }
+    transaction(&path, || {
+        let mut pruned = 0usize;
+        if let Some(mut all) = crate::store::read_json::<Associations>(&path)? {
+            let before = all.len();
+            all.retain(|id, _| !drop_set.contains(id.as_str()));
+            let removed = before - all.len();
+            if removed > 0 { crate::store::write_json(&path, &all)?; pruned += removed; }
+        }
+        if let Some(mut index) = crate::store::read_json::<JournalIndex>(&index_path)? {
+            let before = index.len();
+            index.retain(|id, _| !drop_set.contains(id.as_str()));
+            let removed = before - index.len();
+            if removed > 0 { crate::store::write_json(&index_path, &index)?; pruned += removed; }
+        }
+        if let Some(mut withdrawals) = crate::store::read_json::<Withdrawals>(&w_path)? {
+            let before = withdrawals.len();
+            withdrawals.retain(|id, _| !drop_set.contains(id.as_str()));
+            let removed = before - withdrawals.len();
+            if removed > 0 { crate::store::write_json(&w_path, &withdrawals)?; pruned += removed; }
+        }
+        Ok(pruned)
+    })
+}
+
+/// Prune entries for deleted local sessions across associations, journal cursors,
+/// and withdrawals so the JSON stores do not grow monotonically. Remote sessions
+/// (`cloud:` / `machine:`) are preserved.
+#[allow(dead_code)]
+pub fn prune_deleted_sessions(live: &BTreeSet<String>) -> Result<usize> {
+    prune_deleted_in(&crate::store::root()?, live)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn prune_deleted_in(root: &Path, live: &BTreeSet<String>) -> Result<usize> {
+    let path = root.join("session-pr-associations.json");
+    let index_path = root.join("session-pr-journal-index-v1.json");
+    let w_path = withdrawals_path(&path);
+    transaction(&path, || {
+        let mut pruned = 0usize;
+        let keep = |id: &String| remote_session(id) || live.contains(id);
+
+        if let Some(mut all) = crate::store::read_json::<Associations>(&path)? {
+            let before = all.len();
+            all.retain(|id, _| keep(id));
+            let removed = before - all.len();
+            if removed > 0 {
+                crate::store::write_json(&path, &all)?;
+                pruned += removed;
+            }
+        }
+        if let Some(mut index) = crate::store::read_json::<JournalIndex>(&index_path)? {
+            let before = index.len();
+            index.retain(|id, _| keep(id));
+            let removed = before - index.len();
+            if removed > 0 {
+                crate::store::write_json(&index_path, &index)?;
+                pruned += removed;
+            }
+        }
+        if let Some(mut withdrawals) = crate::store::read_json::<Withdrawals>(&w_path)? {
+            let before = withdrawals.len();
+            withdrawals.retain(|id, _| keep(id));
+            let removed = before - withdrawals.len();
+            if removed > 0 {
+                crate::store::write_json(&w_path, &withdrawals)?;
+                pruned += removed;
+            }
+        }
+        Ok(pruned)
+    })
 }
 
 fn load_cwds() -> Result<BTreeMap<String, String>> {
@@ -455,7 +579,7 @@ pub fn linked_elsewhere(session: &str, urls: &[String]) -> Result<BTreeMap<Strin
     let path = registry()?;
     let urls: BTreeSet<String> = urls.iter().filter_map(|url| identity(url).ok()).collect();
     let live = live_sessions()?;
-    transaction(&path, || {
+    read_transaction(&path, || {
         let all: Associations = crate::store::read_json(&path)?.unwrap_or_default();
         Ok(others_with(&all, session, &urls, &|id| live.contains(id)))
     })
@@ -554,7 +678,7 @@ mod tests {
         read_new_events(&journal, &mut cursor, "one", "/fixture", &mut found).unwrap();
         assert_eq!(cursor.offset, offset);
         assert!(found.is_empty());
-        assert_eq!(read_new_events(&journal, &mut cursor, "one", "/fixture", &mut found).unwrap(), 0);
+        assert_eq!(read_new_events(&journal, &mut cursor, "one", "/fixture", &mut found).unwrap().0, 0);
         writer.write_all(&completion.as_bytes()[split..]).unwrap();
         writer.write_all(b"\n").unwrap();
         read_new_events(&journal, &mut cursor, "one", "/fixture", &mut found).unwrap();
@@ -562,7 +686,7 @@ mod tests {
         crate::store::write_atomic(&journal, format!("{}\n{}", start("one"), completed("one", 3)).as_bytes()).unwrap();
         read_new_events(&journal, &mut cursor, "one", "/fixture", &mut found).unwrap();
         assert_eq!(found[1].number, 3);
-        assert_eq!(read_new_events(&journal, &mut cursor, "one", "/fixture", &mut found).unwrap(), 0);
+        assert_eq!(read_new_events(&journal, &mut cursor, "one", "/fixture", &mut found).unwrap().0, 0);
     }
 
     #[test]
@@ -778,5 +902,52 @@ mod tests {
         let entry: Association = serde_json::from_str(old).unwrap();
         assert!(!entry.linked);
         assert!(!serde_json::to_string(&entry).unwrap().contains("linked"), "unchanged on disk for older readers");
+    }
+
+    #[test]
+    fn shared_read_lock_allows_concurrent_readers_and_prune_removes_deleted_local_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-pr-associations.json");
+        let index_path = dir.path().join("session-pr-journal-index-v1.json");
+        let w_path = withdrawals_path(&path);
+        update(&path, "alive", vec![entry("api", 1, "b1")]).unwrap();
+        update(&path, "deleted", vec![entry("api", 2, "b2")]).unwrap();
+        update(&path, "cloud:org:ws:remote", vec![entry("api", 3, "b3")]).unwrap();
+        let mut idx = JournalIndex::new();
+        idx.entry("alive".into()).or_default().insert("t.jsonl".into(), JournalCursor::default());
+        idx.entry("deleted".into()).or_default().insert("t.jsonl".into(), JournalCursor::default());
+        crate::store::write_json(&index_path, &idx).unwrap();
+        let mut withdrawals = Withdrawals::new();
+        withdrawals.entry("deleted".into()).or_default().insert("https://github.com/acme/api/pull/2".into());
+        crate::store::write_json(&w_path, &withdrawals).unwrap();
+
+        // Shared read transactions can overlap without blocking each other.
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        std::thread::scope(|s| {
+            for _ in 0..2 {
+                let p = &path;
+                let b = barrier.clone();
+                s.spawn(move || {
+                    read_transaction(p, || {
+                        b.wait();
+                        let all: Associations = crate::store::read_json(p)?.unwrap_or_default();
+                        assert!(all.contains_key("alive"));
+                        Ok(())
+                    }).unwrap();
+                });
+            }
+        });
+
+        let live = BTreeSet::from(["alive".to_string()]);
+        let pruned = prune_deleted_in(dir.path(), &live).unwrap();
+        assert_eq!(pruned, 3, "deleted removed from associations, journal index, and withdrawals");
+        let all: Associations = crate::store::read_json(&path).unwrap().unwrap();
+        assert!(all.contains_key("alive"));
+        assert!(!all.contains_key("deleted"));
+        assert!(all.contains_key("cloud:org:ws:remote"), "remote sessions are preserved");
+        let idx: JournalIndex = crate::store::read_json(&index_path).unwrap().unwrap();
+        assert!(idx.contains_key("alive") && !idx.contains_key("deleted"));
+        let withdrawals: Withdrawals = crate::store::read_json(&w_path).unwrap().unwrap();
+        assert!(!withdrawals.contains_key("deleted"));
     }
 }
