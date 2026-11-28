@@ -2177,7 +2177,7 @@ pub struct TeamArtifactPublishInput {
 
 /// `"new"`, or `{"version": n}`: the slug's state a publish is held to (PRO-158).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, rename_all_fields = "camelCase")]
 pub enum TeamArtifactExpect {
     New(TeamArtifactExpectNew),
     Version {
