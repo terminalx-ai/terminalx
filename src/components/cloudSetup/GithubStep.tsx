@@ -496,8 +496,8 @@ export function GithubStep({ organization, onContinue, pollIntervalMs = CONNECT_
                   {choices.length} selected
                 </span>
               </label>
-              <div className="flex h-[260px]">
-                <div className="flex w-[210px] shrink-0 flex-col border-r border-hairline">
+              <div className="flex flex-col md:h-[260px] md:flex-row">
+                <div className="flex max-h-[140px] w-full shrink-0 flex-col border-b border-hairline md:max-h-none md:w-[210px] md:border-r md:border-b-0">
                   <div className="flex h-8 items-center px-3 text-[12px] text-faint">Installations</div>
                   <div className="min-h-0 flex-1 overflow-y-auto" role="radiogroup" aria-label="Installations">
                     {connected.map((installation) => {

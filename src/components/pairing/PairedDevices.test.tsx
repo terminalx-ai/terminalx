@@ -83,6 +83,8 @@ describe("paired device rows", () => {
     expect(screen.queryByRole("button", { name: "Disconnect Priya's iPhone" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Revoke Studio iPad" }));
+    expect(mocks.invoke).not.toHaveBeenCalledWith("pairing_revoke", { deviceId: "ipad-1" });
+    fireEvent.click(await screen.findByRole("button", { name: "Revoke" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("pairing_revoke", { deviceId: "ipad-1" }));
     await waitFor(() => expect(screen.queryByText("Studio iPad")).toBeNull());
   });

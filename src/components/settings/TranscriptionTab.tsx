@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Check, Download, ExternalLink, Trash2, X } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Switch } from "@/components/ui/controls";
 import { TranscriptionInputPicker } from "@/components/chat/TranscriptionInputPicker";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -23,11 +24,19 @@ function mb(bytes: number): string {
 
 /** A thin bar for the relative speed and accuracy scores. */
 function Score({ label, value }: { label: string; value: number }) {
+  const clamped = Math.max(0, Math.min(100, value));
   return (
     <span className="flex items-center gap-2 text-xs text-muted-foreground">
       {label}
-      <span className="relative h-1 w-20 overflow-hidden rounded-full bg-veil-strong">
-        <span className="absolute inset-y-0 left-0 rounded-full bg-foreground/70" style={{ width: `${Math.max(4, Math.min(100, value))}%` }} />
+      <span
+        role="meter"
+        aria-label={label}
+        aria-valuenow={clamped}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        className="relative h-1 w-20 overflow-hidden rounded-full bg-veil-strong"
+      >
+        <span className="absolute inset-y-0 left-0 rounded-full bg-foreground/70" style={{ width: `${Math.max(4, clamped)}%` }} />
       </span>
     </span>
   );
@@ -46,6 +55,8 @@ export function TranscriptionTab() {
   const [progress, setProgress] = useState<Record<string, DownloadProgress>>({});
   const [error, setError] = useState<string | null>(null);
   const [available, setAvailable] = useState<boolean | null>(null);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(null);
   const request = useRef(0);
 
   useEffect(() => {
@@ -97,6 +108,8 @@ export function TranscriptionTab() {
   }, [reload, revision]);
 
   const choose = async (id: string) => {
+    if (busyAction) return;
+    setBusyAction(`choose:${id}`);
     setError(null);
     try {
       await transcription.setModel(id);
@@ -104,27 +117,38 @@ export function TranscriptionTab() {
       void refreshDictationEngine();
     } catch (e) {
       setError(errorMessage(e));
+    } finally {
+      setBusyAction(null);
     }
   };
 
   const download = async (id: string) => {
+    if (busyAction) return;
+    setBusyAction(`download:${id}`);
     setError(null);
     try {
       await transcription.download(id);
       setProgress((p) => ({ ...p, [id]: { id, received: 0, total: models.find((m) => m.id === id)?.sizeBytes ?? 0, done: false } }));
     } catch (e) {
       setError(errorMessage(e));
+    } finally {
+      setBusyAction(null);
     }
   };
 
   const remove = async (id: string) => {
+    if (busyAction) return;
+    setBusyAction(`remove:${id}`);
     setError(null);
     try {
       await transcription.remove(id);
+      setPendingDelete(null);
       await reload();
       void refreshDictationEngine();
     } catch (e) {
       setError(errorMessage(e));
+    } finally {
+      setBusyAction(null);
     }
   };
 
@@ -141,19 +165,20 @@ export function TranscriptionTab() {
         {error && <div className="mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
       </div>
 
-      <RegisteredSetting setting="transcription.model"><div className="flex flex-col gap-2">
+      <RegisteredSetting setting="transcription.model"><div className="flex flex-col gap-2" role="radiogroup" aria-label="Transcription model">
         <ModelCard
           selected={selected === APPLE}
           name="Built in"
           description="Apple's speech recognition, on-device where your language allows. Nothing to download."
           meta="System languages"
           live
-          onUse={() => void choose(APPLE)}
+          onUse={busyAction ? undefined : () => void choose(APPLE)}
           action={null}
         />
         {models.map((m) => {
           const p = progress[m.id];
           const busy = !!p || m.downloading;
+          const percent = p && p.total ? Math.round((p.received / p.total) * 100) : 0;
           return (
             <ModelCard
               key={m.id}
@@ -181,16 +206,23 @@ export function TranscriptionTab() {
                   <Score label="Accuracy" value={m.accuracy} />
                 </>
               }
-              onUse={m.installed ? () => void choose(m.id) : undefined}
+              onUse={m.installed && !busyAction ? () => void choose(m.id) : undefined}
               action={
                 busy ? (
                   <div className="flex items-center gap-2">
-                    <span className="relative h-1 w-24 overflow-hidden rounded-full bg-veil-strong">
-                      <span className="absolute inset-y-0 left-0 rounded-full bg-accent" style={{ width: `${p && p.total ? Math.round((p.received / p.total) * 100) : 0}%` }} />
+                    <span
+                      role="progressbar"
+                      aria-label={`Downloading ${m.name}`}
+                      aria-valuenow={percent}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      className="relative h-1 w-24 overflow-hidden rounded-full bg-veil-strong"
+                    >
+                      <span className="absolute inset-y-0 left-0 rounded-full bg-accent" style={{ width: `${percent}%` }} />
                     </span>
-                    <span className="w-10 text-right text-[11px] tabular-nums text-faint">{p && p.total ? `${Math.round((p.received / p.total) * 100)}%` : ""}</span>
+                    <span className="w-10 text-right text-[11px] tabular-nums text-faint">{p && p.total ? `${percent}%` : ""}</span>
                     <WithTooltip label="Cancel download">
-                      <Button variant="ghost" size="icon-xs" aria-label="Cancel download" onClick={() => void transcription.cancelDownload(m.id)}>
+                      <Button variant="ghost" size="icon-xs" aria-label={`Cancel download of ${m.name}`} disabled={Boolean(busyAction)} onClick={() => void transcription.cancelDownload(m.id)}>
                         <X />
                       </Button>
                     </WithTooltip>
@@ -201,14 +233,14 @@ export function TranscriptionTab() {
                       <Check className="size-3" /> Downloaded
                     </span>
                     <WithTooltip label="Delete model">
-                      <Button variant="ghost" size="icon-xs" aria-label="Delete model" onClick={() => void remove(m.id)}>
+                      <Button variant="ghost" size="icon-xs" aria-label={`Delete ${m.name} model`} disabled={Boolean(busyAction)} onClick={() => setPendingDelete({ id: m.id, name: m.name })}>
                         <Trash2 />
                       </Button>
                     </WithTooltip>
                   </div>
                 ) : (
                   <WithTooltip label={`Download ${mb(m.sizeBytes)}`}>
-                    <Button variant="ghost" size="icon-sm" aria-label="Download" onClick={() => void download(m.id)}>
+                    <Button variant="ghost" size="icon-sm" aria-label={`Download ${m.name} (${mb(m.sizeBytes)})`} disabled={Boolean(busyAction)} onClick={() => void download(m.id)}>
                       <Download />
                     </Button>
                   </WithTooltip>
@@ -237,6 +269,17 @@ export function TranscriptionTab() {
       </div>
       <TranscriptionPersonalization />
       </fieldset>
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title={pendingDelete ? `Delete ${pendingDelete.name}?` : "Delete model?"}
+        action="Delete model"
+        destructive
+        busy={pendingDelete !== null && busyAction === `remove:${pendingDelete.id}`}
+        onAction={() => { if (pendingDelete) void remove(pendingDelete.id); }}
+        onCancel={() => setPendingDelete(null)}
+      >
+        This removes the downloaded weights from {thisComputer}. You will need to download it again to use it offline.
+      </ConfirmDialog>
     </div>
   );
 }
@@ -278,7 +321,7 @@ function ModelCard({
             selected ? "border-accent bg-accent text-accent-foreground" : "border-hairline-strong",
             !onUse && "opacity-40",
           )}
-          aria-label={selected ? "In use" : `Use ${name}`}
+          aria-label={selected ? `${name}, in use` : `Use ${name}`}
         >
           {selected && <Check className="size-3" />}
         </button>

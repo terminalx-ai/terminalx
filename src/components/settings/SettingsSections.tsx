@@ -90,7 +90,7 @@ export function GeneralTab() {
       )}
       {/* Why the switch did not turn on (refused, not answered, or asked again too soon): never a silent no. */}
       {CLOUD_CONTROL_HAS_SETTING && cloudControlReason && (
-        <p role="status" data-testid="cloud-control-reason" className="pb-2 text-[11px] text-amber-600 dark:text-amber-400">
+        <p role="status" data-testid="cloud-control-reason" className="pb-2 text-[11px] text-warning">
           {cloudControlReason}
         </p>
       )}
@@ -545,9 +545,10 @@ export function IntegrationsTab() {
         <div className="mt-2 flex items-center gap-2">
           <input
             type="password"
+            aria-label="Linear API key"
             value={key}
             onChange={(e) => setKey(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && key.trim() && void save(key)}
+            onKeyDown={(e) => e.key === "Enter" && !busy && key.trim() && void save(key)}
             placeholder={linear?.connected ? "Paste a new key to replace" : "lin_api_…"}
             spellCheck={false}
             className="h-8 min-w-0 flex-1 rounded-md bg-well px-2 font-mono text-xs outline-none placeholder:text-faint focus-visible:ring-2 focus-visible:ring-ring/40"

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { useSettingsLeaveGuard } from "./settingsLeaveGuard";
 import {
   IDLE_CAP_OPTIONS,
   alertMessage,
@@ -85,6 +86,7 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
   const [draft, setDraft] = useState<LimitsDraft | null>(null);
   // Unsaved limit edits survive refreshes and pause toggles.
   const [dirty, setDirty] = useState(false);
+  useSettingsLeaveGuard(dirty);
   const [reason, setReason] = useState("");
   const contextEpoch = useRef(0);
   const loadSeq = useRef(0);
@@ -283,7 +285,7 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
         <span>Running {usageText(counts.running, effectiveRunningLimit(view))}</span>
       </div>
       {policy.provisioningPaused && (
-        <p className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-2 text-[11px]" role="status">
+        <p className="mt-2 rounded-md border border-warning/30 bg-warning/5 p-2 text-[11px]" role="status">
           New workspaces are paused{policy.pausedReason ? `: ${policy.pausedReason}` : ""}. Existing workspaces keep running and billing.
         </p>
       )}
@@ -293,7 +295,7 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
           {alerts.map((alert, index) => (
             <li
               key={`${alert.code}:${alert.provider ?? ""}:${alert.workspaceId ?? ""}:${index}`}
-              className={`text-[11px] ${alert.severity === "info" ? "text-muted-foreground" : "text-amber-600 dark:text-amber-400"}`}
+              className={`text-[11px] ${alert.severity === "info" ? "text-muted-foreground" : "text-warning"}`}
             >
               {alertMessage(alert)}
             </li>
@@ -546,7 +548,7 @@ function ProviderUsage({ usage }: { usage: ComputeProviderUsage }) {
           ) : (
             <>
               {formatMicros(reported.totalMicros, reported.currency ?? usage.currency)}{" "}
-              <span className={reported.status === "delayed" ? "text-amber-600 dark:text-amber-400" : "text-faint"}>
+              <span className={reported.status === "delayed" ? "text-warning" : "text-faint"}>
                 reported {formatTime(reported.providerReportedAt)}
                 {reported.status === "delayed" ? " (delayed)" : ""}
               </span>

@@ -36,13 +36,15 @@ export function MachineApprovalHost() {
 export function MachineApprovalDialog({ request }: { request: PendingComputer }) {
   const host = useMachineHost();
   const keepAwake = host.view?.keepAwake ?? true;
-  const decline = () => void declineMachine(request.requestId);
+  const decline = () => {
+    if (!host.busy) void declineMachine(request.requestId);
+  };
   return (
     <Dialog
       open
       onOpenChange={(open) => {
-        // Closing it is an answer: the computer was not allowed.
-        if (!open) decline();
+        // Closing it is an answer: the computer was not allowed. Block dismissal while an approval or decline is in flight.
+        if (!open && !host.busy) decline();
       }}
     >
       <DialogContent width="max-w-[560px]" showClose={false} className="max-h-[calc(100dvh-2rem)] gap-0 overflow-y-auto p-0" data-testid="machine-approval">

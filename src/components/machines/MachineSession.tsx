@@ -68,7 +68,10 @@ export function MachineSessionStrips({
   const view = machineVersionView(machine.record, machine.state, cloud.client, cloud.ports.state, useThisVersion());
   const viewLabel = terminalView?.on ? "Back to chat" : "Show terminal view";
   const [closeError, setCloseError] = useState<string | null>(null);
+  const [closingTabs, setClosingTabs] = useState<ReadonlySet<string>>(() => new Set());
   const close = async (tabId: string) => {
+    if (closingTabs.has(tabId)) return;
+    setClosingTabs((prev) => new Set(prev).add(tabId));
     setCloseError(null);
     const client = cloud.client;
     try {
@@ -79,6 +82,13 @@ export function MachineSessionStrips({
       await syncLiveTabs(machineAgentScope(machine.machineId), client).catch(() => undefined);
     } catch (error) {
       setCloseError(errorMessage(error));
+    } finally {
+      setClosingTabs((prev) => {
+        if (!prev.has(tabId)) return prev;
+        const next = new Set(prev);
+        next.delete(tabId);
+        return next;
+      });
     }
   };
   return (
@@ -108,8 +118,9 @@ export function MachineSessionStrips({
                   <button
                     type="button"
                     aria-label={`Close ${tab.title || tab.harness}`}
+                    disabled={closingTabs.has(tab.id)}
                     onClick={() => void close(tab.id)}
-                    className="absolute right-1 flex size-4 items-center justify-center rounded-sm text-faint opacity-0 hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
+                    className="absolute right-1 flex size-4 items-center justify-center rounded-sm text-faint opacity-0 hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100 disabled:opacity-40"
                   >
                     <X className="size-3" />
                   </button>
@@ -321,17 +332,36 @@ export function MachineTerminalDock({ cloud }: { cloud: CloudSessionModel }) {
     setPrefs({ panelTerminalHeight: height });
   };
 
+  const onSeparatorKeyDown = (e: React.KeyboardEvent) => {
+    const step = e.shiftKey ? 48 : 16;
+    let next: number | null = null;
+    if (e.key === "ArrowUp") next = clampHeight(height + step);
+    else if (e.key === "ArrowDown") next = clampHeight(height - step);
+    else if (e.key === "Home") next = MIN_HEIGHT;
+    else if (e.key === "End") next = MAX_HEIGHT;
+    if (next === null) return;
+    e.preventDefault();
+    setHeight(next);
+    setPrefs({ panelTerminalHeight: next });
+  };
+
   return (
     <section aria-label="Terminal" data-testid="machine-terminal-dock" className="relative flex shrink-0 flex-col border-t border-hairline bg-background" style={open ? { height, maxHeight: "75%" } : undefined}>
       {open && (
         <div
           role="separator"
+          tabIndex={0}
           aria-orientation="horizontal"
           aria-label="Resize terminal"
+          aria-valuemin={MIN_HEIGHT}
+          aria-valuemax={MAX_HEIGHT}
+          aria-valuenow={height}
           onPointerDown={onDown}
           onPointerMove={onMove}
           onPointerUp={onUp}
-          className="absolute -top-1 left-0 z-10 h-2 w-full cursor-row-resize hover:bg-ring/30"
+          onPointerCancel={onUp}
+          onKeyDown={onSeparatorKeyDown}
+          className="absolute -top-1 left-0 z-10 h-2 w-full cursor-row-resize outline-none hover:bg-ring/30 focus-visible:bg-ring/50 focus-visible:ring-2 focus-visible:ring-ring/40"
         />
       )}
       <div className="flex h-8 shrink-0 items-center gap-1 px-1.5">

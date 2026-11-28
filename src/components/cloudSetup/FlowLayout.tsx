@@ -49,7 +49,7 @@ export function StepPage({
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => heading.current?.focus({ preventScroll: true }), [title]);
   return (
-    <div className={cn("flex min-w-0 gap-[60px]", wide ? "max-w-[1100px]" : "max-w-[1020px]")}>
+    <div className={cn("flex min-w-0 flex-col gap-8 xl:flex-row xl:gap-[60px]", wide ? "max-w-[1100px]" : "max-w-[1020px]")}>
       <section className={cn("min-w-0 flex-1", wide ? "max-w-[640px]" : "max-w-[660px]")} aria-labelledby="cloud-setup-step-title">
         {eyebrow && <div className="text-[12.5px] text-muted-foreground">{eyebrow}</div>}
         <h1 id="cloud-setup-step-title" ref={heading} tabIndex={-1} className={cn("text-[26px] leading-8 font-semibold tracking-[-0.01em] outline-none", eyebrow && "mt-1")}>
@@ -59,7 +59,7 @@ export function StepPage({
         <div className="mt-7">{children}</div>
       </section>
       {aside && (
-        <aside className={cn("hidden shrink-0 xl:block", wide ? "w-[440px] pt-[60px]" : "w-[300px] pt-[68px]")} aria-label={asideLabel}>
+        <aside className={cn("min-w-0 shrink-0", wide ? "w-full xl:w-[440px] xl:pt-[60px]" : "w-full xl:w-[300px] xl:pt-[68px]")} aria-label={asideLabel}>
           {asideLabel && <div className="mb-3 text-[11px] font-medium tracking-[0.08em] text-faint uppercase">{asideLabel}</div>}
           {aside}
         </aside>

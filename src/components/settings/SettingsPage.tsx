@@ -14,7 +14,7 @@ import { ProjectGlyph } from "@/components/layout/ProjectRail";
 import { OrgMark } from "@/components/layout/OrgMark";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
-import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
+import { hasEscapeOverlay, isEditable, useHotkey } from "@/lib/hotkeys";
 import { useSessionStore } from "@/lib/sessions";
 import { userFileKeys } from "@/lib/settingSources";
 import { isRowLink, resolveSetting, sectionShowsUserValues, settingById, SETTINGS_ROWS, SettingControlSlots, SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingId, type SettingsSection } from "./settingsRegistry";
@@ -333,8 +333,9 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   }, [selected, query]);
 
 
-  useHotkey("escape", () => {
+  useHotkey("escape", (event) => {
     if (hasEscapeOverlay(resultsRef.current)) return false;
+    if (event.target !== inputRef.current && isEditable(event.target)) return false;
     if (query) {
       changeQuery("");
       inputRef.current?.focus();
@@ -556,21 +557,21 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
             {/* Design 09.31: the query as the page title, the count and the keys beneath it, then the rows by page. */}
             <h2 id="settings-results-title" className="break-words text-[22px] font-semibold tracking-tight">Results for “{query.trim()}”</h2>
             {results.length > 0 && <p className="mt-1 text-[13px] text-muted-foreground">{settingsSearchSummary(results)} · ↑↓ to move · ↵ opens the setting · esc clears</p>}
-            <div ref={resultsRef} id="settings-search-results" role="listbox" aria-label="Settings search results" className="mt-2">
+            <div ref={resultsRef} id="settings-search-results" role="grid" aria-label="Settings search results" className="mt-2">
               {pages.map((page) => {
                 const Icon = SECTION_ICONS[page.section];
                 return (
-                  <div key={page.section} role="group" aria-labelledby={`settings-results-${page.section}`}>
+                  <div key={page.section} role="rowgroup" aria-labelledby={`settings-results-${page.section}`}>
                     <div id={`settings-results-${page.section}`} className="mb-1 mt-4 px-3 text-[12px] uppercase tracking-[.08em] text-faint">{page.title}</div>
                     {page.matches.map((match) => {
                       const index = results.indexOf(match);
                       const current = selected === index;
                       return (
-                        // An option, not a button: it holds the row's live control (design 09.01), which takes its own clicks.
+                        // Composite grid row so portaled live controls keep their ARIA roles and keyboard operability.
                         <div
                           key={match.id}
                           id={resultId(match.id)}
-                          role="option"
+                          role="row"
                           aria-selected={current}
                           onMouseEnter={() => setSelected(index)}
                           onClick={() => open(match)}
@@ -579,13 +580,22 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
                             current ? "bg-selected ring-1 ring-accent/40" : "hover:bg-veil-raised",
                           )}
                         >
-                          <Icon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
-                          <span className="flex min-w-0 flex-1 flex-col [&_mark]:rounded-[3px] [&_mark]:bg-accent/25 [&_mark]:px-px [&_mark]:[font-weight:inherit]">
-                            <span className="text-[13px] font-medium"><HighlightedText text={match.row.title} ranges={match.titleRanges} /></span>
-                            {/* One line, as designed; the full text is on the page and in the tooltip. */}
-                            <span title={match.row.description} className="truncate text-xs text-muted-foreground"><HighlightedText text={match.row.description} ranges={match.descriptionRanges} /></span>
-                          </span>
-                          <span ref={slotRef(match.id)} data-result-control="" className="flex shrink-0 items-center empty:hidden" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()} />
+                          <div role="gridcell" className="flex min-w-0 flex-1 items-center gap-5">
+                            <button
+                              type="button"
+                              tabIndex={-1}
+                              onClick={(event) => { event.stopPropagation(); open(match); }}
+                              className="flex min-w-0 flex-1 items-center gap-5 text-left outline-none"
+                            >
+                              <Icon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+                              <span className="flex min-w-0 flex-1 flex-col [&_mark]:rounded-[3px] [&_mark]:bg-accent/25 [&_mark]:px-px [&_mark]:[font-weight:inherit]">
+                                <span className="text-[13px] font-medium"><HighlightedText text={match.row.title} ranges={match.titleRanges} /></span>
+                                {/* One line, as designed; the full text is on the page and in the tooltip. */}
+                                <span title={match.row.description} className="truncate text-xs text-muted-foreground"><HighlightedText text={match.row.description} ranges={match.descriptionRanges} /></span>
+                              </span>
+                            </button>
+                          </div>
+                          <div role="gridcell" ref={slotRef(match.id)} data-result-control="" className="flex shrink-0 items-center empty:hidden" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()} />
                           {current && <Return aria-hidden className="size-3.5 shrink-0 text-faint" />}
                         </div>
                       );

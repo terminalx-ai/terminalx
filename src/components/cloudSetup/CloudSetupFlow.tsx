@@ -147,7 +147,7 @@ export function CloudSetupFlow({ target, onExit, onDone }: { target: CloudSetupT
         <Button variant="ghost" size="sm" className={cn("absolute top-1.5 z-10 text-[12.5px]", isMac ? "right-3" : "right-[144px]")} onClick={finishLater}>
           Finish later
         </Button>
-        <nav aria-label="Setup steps" className="mt-[72px] ml-7 w-[220px] shrink-0">
+        <nav aria-label="Setup steps" className="mt-14 ml-4 w-[180px] shrink-0 lg:mt-[72px] lg:ml-7 lg:w-[220px]">
           <div className="mb-4 flex items-center gap-2 px-3">
             <span className="grid size-6 shrink-0 place-items-center rounded-[6px] bg-foreground font-mono text-[9px] font-bold text-background" aria-hidden>
               {">_"}
@@ -183,7 +183,7 @@ export function CloudSetupFlow({ target, onExit, onDone }: { target: CloudSetupT
           </ol>
           <p className="mt-6 px-3 text-[11.5px] leading-[17px] text-faint">Progress is saved as you go. Esc returns to Settings.</p>
         </nav>
-        <div className="min-h-0 min-w-0 flex-1 overflow-auto pt-[72px] pr-10 pb-16 pl-[132px] max-xl:pl-16">
+        <div className="min-h-0 min-w-0 flex-1 overflow-auto px-6 pt-14 pb-16 md:pt-[72px] md:pr-10 md:pl-12 xl:pl-[132px]">
           {gone ? (
             <div role="status" className="max-w-[660px] text-sm text-muted-foreground">
               You are no longer a member of this organization, so its setup cannot go on here.

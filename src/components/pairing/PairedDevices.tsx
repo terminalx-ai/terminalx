@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { Smartphone, TabletSmartphone } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { cn } from "@/lib/cn";
 import { disconnectDevice, revokePairing, usePairing } from "@/lib/pairing";
 import type { PairedDevice } from "@/types/pairing";
@@ -17,6 +19,7 @@ function isTablet(device: PairedDevice): boolean {
 /** One paired device: name, how it is (or was last) connected, its fingerprint, and what can be done to it. */
 export function PairedDeviceRow({ device, busy }: { device: PairedDevice; busy: boolean }) {
   const Icon = isTablet(device) ? TabletSmartphone : Smartphone;
+  const [confirmRevoke, setConfirmRevoke] = useState(false);
   return (
     <li data-testid="paired-device" className="flex h-14 items-center gap-3 border-b border-hairline px-4 last:border-b-0">
       <Icon className="size-[18px] shrink-0 text-muted-foreground" aria-hidden />
@@ -42,10 +45,24 @@ export function PairedDeviceRow({ device, busy }: { device: PairedDevice; busy: 
         className="shrink-0 text-destructive hover:text-destructive"
         aria-label={`Revoke ${device.label}`}
         disabled={busy}
-        onClick={() => void revokePairing(device.id)}
+        onClick={() => setConfirmRevoke(true)}
       >
         Revoke
       </Button>
+      <ConfirmDialog
+        open={confirmRevoke}
+        title={`Revoke ${device.label}?`}
+        action="Revoke"
+        destructive
+        busy={busy}
+        onAction={() => {
+          setConfirmRevoke(false);
+          void revokePairing(device.id);
+        }}
+        onCancel={() => setConfirmRevoke(false)}
+      >
+        This device will lose access to this computer until you pair it again.
+      </ConfirmDialog>
     </li>
   );
 }

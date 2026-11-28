@@ -247,6 +247,7 @@ describe("Agents · API key (PRO-306)", () => {
     show();
     await waitFor(() => expect(statusLine().textContent).toBe("Using an API key · verified just now"));
     fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Remove" }));
     const title = "API key removed · Claude Code uses your Claude login again";
     await waitFor(() => expect(toast(title)).toBeTruthy());
     expect(calls("agent_login_remove_key")).toEqual([{ harness: "claude" }]);
@@ -276,6 +277,7 @@ describe("Agents · API key (PRO-306)", () => {
     running.claude = [];
     show();
     fireEvent.click(await screen.findByRole("button", { name: "Remove" }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Remove" }));
     const title = "API key removed · Claude Code needs a sign-in";
     await waitFor(() => expect(toast(title)).toBeTruthy());
     expect(toast(title).textContent).toContain("Deleted from the keyring. Sign in to Claude Code below to start new tabs.");

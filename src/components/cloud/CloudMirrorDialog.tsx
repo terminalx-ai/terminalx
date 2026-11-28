@@ -88,6 +88,7 @@ export function CloudMirrorDialog({ request, onClose }: { request: MirrorRequest
   const [error, setError] = useState<string | null>(null);
   const [exportedTo, setExportedTo] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const on = state.phase !== "off";
 
   // Reads this computer's record only: it connects to nothing.
@@ -121,7 +122,7 @@ export function CloudMirrorDialog({ request, onClose }: { request: MirrorRequest
         <div className="-mr-2 min-h-0 flex-1 space-y-3 overflow-y-auto pr-2 text-[13px]">
           <div className="flex items-center gap-2">
             <span
-              className={cn("size-1.5 shrink-0 rounded-full", state.phase === "synced" ? "bg-success" : state.phase === "failed" || state.phase === "diverged" ? "bg-warning" : "bg-faint")}
+              className={cn("size-1.5 shrink-0 rounded-full", state.phase === "synced" ? "bg-add" : state.phase === "failed" || state.phase === "diverged" ? "bg-warning" : "bg-faint")}
               aria-hidden
             />
             <span role="status" data-testid="cloud-mirror-state">
@@ -190,9 +191,31 @@ export function CloudMirrorDialog({ request, onClose }: { request: MirrorRequest
                 >
                   Keep a copy, then use the workspace's files
                 </Button>
-                <Button size="sm" variant="destructive" disabled={busy} onClick={() => run(async () => void (await resolveCloudMirror({ orgId, workspaceId }, "discard")))}>
-                  Discard my changes
-                </Button>
+                {confirmDiscard ? (
+                  <div className="flex w-full flex-wrap items-center gap-2 rounded-md bg-well/40 px-2.5 py-2 text-xs" data-testid="cloud-mirror-discard-confirm">
+                    <span className="min-w-0 flex-1">Discard your local edits and overwrite them with the workspace&apos;s files? This cannot be undone.</span>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      disabled={busy}
+                      onClick={() =>
+                        run(async () => {
+                          await resolveCloudMirror({ orgId, workspaceId }, "discard");
+                          setConfirmDiscard(false);
+                        })
+                      }
+                    >
+                      Discard changes
+                    </Button>
+                    <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirmDiscard(false)}>
+                      Cancel
+                    </Button>
+                  </div>
+                ) : (
+                  <Button size="sm" variant="destructive" disabled={busy} onClick={() => setConfirmDiscard(true)}>
+                    Discard my changes
+                  </Button>
+                )}
               </div>
             </div>
           )}

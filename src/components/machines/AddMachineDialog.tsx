@@ -240,7 +240,10 @@ function PairingCodeTab({ pairing, onClose, onDone }: { pairing: MachinePairing;
           </div>
         </div>
         <footer className="flex min-h-14 flex-wrap items-center gap-2 border-t border-hairline px-5 py-2.5">
-          <span className="mr-auto text-[12.5px] text-muted-foreground" aria-live="polite">
+          <span
+            className="mr-auto text-[12.5px] text-muted-foreground"
+            aria-live={step.kind === "paired" || (inspected && remaining <= 0) ? "polite" : undefined}
+          >
             {step.kind === "paired"
               ? "The code was used and works no more."
               : inspected && remaining > 0
@@ -248,6 +251,11 @@ function PairingCodeTab({ pairing, onClose, onDone }: { pairing: MachinePairing;
                 : inspected
                   ? "The code has expired."
                   : "A code works once and lasts five minutes."}
+          </span>
+          <span className="sr-only" aria-live="polite">
+            {inspected && step.kind !== "paired" && remaining > 0 && remaining <= 60_000
+              ? "The code expires in less than a minute."
+              : ""}
           </span>
           {step.kind === "paired" ? (
             <Button size="sm" onClick={onDone}>Done</Button>
