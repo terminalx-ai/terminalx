@@ -90,6 +90,11 @@ struct State {
 #[derive(Default)]
 pub struct StatsUsageStore {
     state: Mutex<State>,
+    /// Serializes activity RPCs without holding the view publication lock (P-26).
+    activity_lock: Mutex<()>,
+    /// Serializes display-cache persistence (`write_atomic` + `fsync`) without
+    /// blocking concurrent readers on `state` (P-26).
+    persist_lock: Mutex<()>,
 }
 
 impl StatsUsageStore {
@@ -148,17 +153,29 @@ impl StatsUsageStore {
         mut view: StatsUsageState,
         activity: impl FnOnce() -> Result<super::AppStats>,
     ) -> StatsUsageState {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        // Read under the publication lock so an older concurrent response
-        // cannot overwrite a newer last-known activity summary.
+        // Serialize activity reads on a dedicated lock so RPCs never stall
+        // `self.state` readers/writers (P-26).
+        let _activity_guard = self.activity_lock.lock().unwrap_or_else(|e| e.into_inner());
         let activity = activity();
+        let fallback_root = if activity.is_err() {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.view.scope == view.scope && state.view.activity.is_none() {
+                state.scope.as_ref().map(|scope| scope.root.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let fallback_saved = fallback_root
+            .as_deref()
+            .and_then(|root| crate::store::activity::saved_summary(root).ok().flatten());
+
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.view.scope == view.scope {
             view.activity = state.view.activity.clone();
             if activity.is_err() && view.activity.is_none() {
-                view.activity = state
-                    .scope
-                    .as_ref()
-                    .and_then(|scope| crate::store::activity::saved_summary(&scope.root).ok().flatten());
+                view.activity = fallback_saved;
             }
             view = view.with_activity(activity);
             // Keep the latest known counters across failed reads and provider
@@ -206,6 +223,33 @@ impl StatsUsageStore {
     }
 
     fn finish(&self, scope: Scope, generation: u64, result: Result<StatsUsageSnapshot>) {
+        // Serialize disk persistence via `persist_lock` while keeping `self.state`
+        // unlocked during JSON serialization and `fsync` (P-26).
+        let _persist_guard = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let carried_activity = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.closed
+                || state.scope.as_ref() != Some(&scope)
+                || state.view.generation != generation
+            {
+                return;
+            }
+            state
+                .view
+                .activity
+                .clone()
+                .or_else(|| state.view.snapshot.as_ref().map(|saved| saved.app.clone()))
+        };
+        let result = result.and_then(|mut snapshot| {
+            // Provider candidates do not own activity. Preserve last-known
+            // counters even when this refresh cannot acquire the activity lease.
+            if let Some(activity) = carried_activity {
+                snapshot.app = activity;
+            }
+            snapshot.updated_at = super::now_ms();
+            save(&scope, &snapshot)?;
+            Ok(snapshot)
+        });
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.closed
             || state.scope.as_ref() != Some(&scope)
@@ -213,21 +257,6 @@ impl StatsUsageStore {
         {
             return;
         }
-        let result = result.and_then(|mut snapshot| {
-            // Provider candidates do not own activity. Preserve last-known
-            // counters even when this refresh cannot acquire the activity lease.
-            if let Some(activity) = state
-                .view
-                .activity
-                .as_ref()
-                .or_else(|| state.view.snapshot.as_ref().map(|saved| &saved.app))
-            {
-                snapshot.app = activity.clone();
-            }
-            snapshot.updated_at = super::now_ms();
-            save(&scope, &snapshot)?;
-            Ok(snapshot)
-        });
         match result {
             Ok(snapshot) => {
                 state.view.snapshot = Some(snapshot);
@@ -238,10 +267,12 @@ impl StatsUsageStore {
         state.view.refreshing = false;
     }
 
-    /// Publications persist synchronously under this lock. Acquiring it drains
-    /// any pending write; unfinished scans cannot publish after orderly shutdown.
+    /// Publications persist synchronously under `persist_lock`. Marking closed
+    /// and draining `persist_lock` ensures any pending write finishes and no
+    /// unfinished scan can publish after orderly shutdown.
     pub fn shutdown(&self) {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+        let _drain = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
     }
 }
 

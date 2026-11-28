@@ -2,11 +2,44 @@
 //! studying Juno's context and correction design; no Juno code or data copied.
 //! Raw dictations and contextual text are deliberately never persisted here.
 use anyhow::{bail, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 static LOCK: Mutex<()> = Mutex::new(());
+static FILLERS_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:umm+|uhh+|um|uh)\b[, ]*").unwrap());
+static CLOCK_RETAKE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    let time = r"(?:(?:0?[1-9]|1[0-2])(?::[0-5][0-9])?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?:am|pm)";
+    Regex::new(&format!(r"(?i)\b{time}[,.]?\s+scratch that\s+({time})\b")).unwrap()
+});
+static FILE_EXT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b([A-Za-z][A-Za-z0-9_-]*) dot (tsx|ts|jsx|js|rs|py|json|md|toml|yaml|yml|html|css)\b",
+    )
+    .unwrap()
+});
+static NUMBER_WORD_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\bnumber (zero|one|two|three|four|five|six|seven|eight|nine|ten)\b").unwrap()
+});
+static CODE_CASE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(snake|camel|pascal|kebab) case ([a-z]+(?: [a-z]+){0,7}) end case\b")
+        .unwrap()
+});
+static AT_FILE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bat file ([a-zA-Z0-9_./-]+\.[a-zA-Z]+)\b").unwrap());
+static NORMALIZE_PAIRS: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
+    [
+        ("open parenthesis", "("),
+        ("close parenthesis", ")"),
+        ("double equals", "=="),
+        ("arrow operator", "=>"),
+    ]
+    .into_iter()
+    .map(|(a, b)| (a.to_string(), b.to_string()))
+    .collect()
+});
 const MAX_ENTRIES: usize = 1000;
 const MAX_TERMS: usize = 64;
 const MAX_PROMPT_BYTES: usize = 200;
@@ -363,8 +396,7 @@ pub fn process(
     }
     if data.options.fillers {
         // Only isolated hesitation tokens, not ordinary words such as "like".
-        let re = regex::Regex::new(r"(?i)\b(?:umm+|uhh+|um|uh)\b[, ]*").unwrap();
-        text = re.replace_all(&text, "").into_owned();
+        text = FILLERS_RE.replace_all(&text, "").into_owned();
     }
     let mut pairs = Vec::new();
     // Project entries take precedence over global entries at equal length.
@@ -415,13 +447,10 @@ fn retake(text: &str) -> String {
     // A clock time replacing a clock time has an explicit, bounded slot.
     // Requiring am/pm on both sides avoids interpreting ordinary prose as a
     // numeric correction. Do not touch multiple markers in one utterance.
-    if text.to_ascii_lowercase().matches("scratch that").count() == 1 {
-        let time = r"(?:(?:0?[1-9]|1[0-2])(?::[0-5][0-9])?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?:am|pm)";
-        let clock =
-            regex::Regex::new(&format!(r"(?i)\b{time}[,.]?\s+scratch that\s+({time})\b")).unwrap();
-        if clock.is_match(text) {
-            return clock.replace(text, "$1").into_owned();
-        }
+    if text.to_ascii_lowercase().matches("scratch that").count() == 1
+        && CLOCK_RETAKE_RE.is_match(text)
+    {
+        return CLOCK_RETAKE_RE.replace(text, "$1").into_owned();
     }
     // Require an exact marker and a single changed slot in a repeated phrase.
     let lower = text.to_ascii_lowercase();
@@ -449,21 +478,9 @@ fn retake(text: &str) -> String {
     text.to_string()
 }
 fn normalize(text: &str) -> String {
-    let ext = regex::Regex::new(r"(?i)\b([A-Za-z][A-Za-z0-9_-]*) dot (tsx|ts|jsx|js|rs|py|json|md|toml|yaml|yml|html|css)\b").unwrap();
-    let mut text = ext.replace_all(text, "$1.$2").into_owned();
-    let pairs = [
-        ("open parenthesis", "("),
-        ("close parenthesis", ")"),
-        ("double equals", "=="),
-        ("arrow operator", "=>"),
-    ]
-    .map(|(a, b)| (a.to_string(), b.to_string()));
-    text = replace_entries(&text, &pairs);
-    let digits = regex::Regex::new(
-        r"(?i)\bnumber (zero|one|two|three|four|five|six|seven|eight|nine|ten)\b",
-    )
-    .unwrap();
-    digits
+    let mut text = FILE_EXT_RE.replace_all(text, "$1.$2").into_owned();
+    text = replace_entries(&text, &NORMALIZE_PAIRS);
+    NUMBER_WORD_RE
         .replace_all(&text, |c: &regex::Captures<'_>| {
             [
                 "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
@@ -478,11 +495,7 @@ fn normalize(text: &str) -> String {
 }
 fn code(text: &str) -> String {
     // Explicit closing marker avoids guessing how much prose is an identifier.
-    let re = regex::Regex::new(
-        r"(?i)\b(snake|camel|pascal|kebab) case ([a-z]+(?: [a-z]+){0,7}) end case\b",
-    )
-    .unwrap();
-    let out = re.replace_all(text, |c: &regex::Captures<'_>| {
+    let out = CODE_CASE_RE.replace_all(text, |c: &regex::Captures<'_>| {
         let words: Vec<_> = c[2]
             .split_whitespace()
             .map(str::to_ascii_lowercase)
@@ -503,8 +516,7 @@ fn code(text: &str) -> String {
                 .collect(),
         }
     });
-    let tag = regex::Regex::new(r"(?i)\bat file ([a-zA-Z0-9_./-]+\.[a-zA-Z]+)\b").unwrap();
-    tag.replace_all(&out, "@$1").into_owned()
+    AT_FILE_RE.replace_all(&out, "@$1").into_owned()
 }
 
 /// Learn only one bounded, whole-word substitution inside an anchored segment.

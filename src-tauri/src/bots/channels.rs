@@ -817,20 +817,38 @@ fn read_linear(bots: &[Bot], me: &Me, now: &str) -> Vec<(String, String)> {
 
 /// The title of what a GitHub mention was made on, filled in once it is taken in.
 fn fill_titles(taken: &[(String, String)]) {
+    if taken.is_empty() {
+        return;
+    }
+    let Ok(store) = read() else { return };
+    let mut fetched: BTreeMap<(String, u64), Option<String>> = BTreeMap::new();
+    let mut updates: Vec<(String, String, String)> = Vec::new();
     for (id, bot) in taken {
-        let Ok(store) = read() else { return };
-        let Some(mention) = store.mentions().find(|mention| mention.id == *id && mention.bot == *bot && mention.thread.kind == "github" && mention.thread.title.is_empty()).cloned() else { continue };
-        let Some(home) = super::get(bot).ok().and_then(|bot| super::home(&bot)) else { continue };
-        let path = format!("repos/{}/issues/{}", mention.thread.repo, mention.thread.number.unwrap_or_default());
-        let Ok(issue) = gh_json(&home, &path) else { continue };
-        let title = one_line(issue["title"].as_str().unwrap_or_default());
-        let _ = change(|store| {
-            for kept in store.mentions.iter_mut().filter_map(Kept::known_mut).filter(|mention| mention.id == *id && mention.bot == *bot) {
+        let Some(mention) = store.mentions().find(|mention| mention.id == *id && mention.bot == *bot && mention.thread.kind == "github" && mention.thread.title.is_empty()) else { continue };
+        let number = mention.thread.number.unwrap_or_default();
+        let cache_key = (mention.thread.repo.clone(), number);
+        let title = fetched.entry(cache_key).or_insert_with(|| {
+            let home = super::get(bot).ok().and_then(|bot| super::home(&bot))?;
+            let path = format!("repos/{}/issues/{}", mention.thread.repo, number);
+            let issue = gh_json(&home, &path).ok()?;
+            Some(one_line(issue["title"].as_str().unwrap_or_default()))
+        });
+        if let Some(title) = title.clone() {
+            updates.push((id.clone(), bot.clone(), title));
+        }
+    }
+    if updates.is_empty() {
+        return;
+    }
+    // Batch all fetched titles into one atomic write (P-38).
+    let _ = change(|store| {
+        for (id, bot, title) in updates {
+            for kept in store.mentions.iter_mut().filter_map(Kept::known_mut).filter(|mention| mention.id == id && mention.bot == bot) {
                 kept.thread.title = title.clone();
             }
-            Ok(())
-        });
-    }
+        }
+        Ok(())
+    });
 }
 
 static LAST_POLL: Mutex<Option<DateTime<Utc>>> = Mutex::new(None);
@@ -964,6 +982,25 @@ fn delivered_lately(store: &Store, bot: &str, now: DateTime<Utc>) -> usize {
 
 static DELIVERING: Mutex<()> = Mutex::new(());
 
+enum ChannelDeliverOutcome {
+    NotAccepted {
+        id: String,
+        bot: String,
+        why: String,
+    },
+    Delivered {
+        id: String,
+        bot: String,
+        session: String,
+        delivered_at: String,
+    },
+    Failed {
+        id: String,
+        bot: String,
+        why: String,
+    },
+}
+
 /// Hand each waiting mention to its bot's chat, oldest first: to the chat its pull request or issue has, or a new
 /// one. None goes to a paused bot, nor past [`PER_HOUR`] a bot; those wait. One that cannot be handed over is
 /// tried again on the next tick, [`MAX_TRIES`] times in all. How many went.
@@ -974,8 +1011,13 @@ pub fn deliver(manager: &SessionManager) -> usize {
     let Ok(_one) = DELIVERING.try_lock() else { return 0 };
     let Ok(store) = read() else { return 0 };
     let waiting: Vec<Mention> = store.mentions().filter(|mention| mention.state == WAITING).cloned().collect();
+    if waiting.is_empty() {
+        return 0;
+    }
     let mut sent = 0;
     let mut reached: BTreeMap<String, usize> = BTreeMap::new();
+    let mut opened_places: BTreeMap<(String, String, Option<String>), String> = BTreeMap::new();
+    let mut updates: Vec<ChannelDeliverOutcome> = Vec::new();
     for mention in waiting {
         let Ok(Some(bot)) = crate::store::bots::get(&mention.bot) else { continue };
         if bot.paused.is_some() {
@@ -985,56 +1027,91 @@ pub fn deliver(manager: &SessionManager) -> usize {
         if *count >= PER_HOUR {
             continue;
         }
-        let Ok(current) = read() else { return sent };
         let org = mention.org.as_deref();
         // A person listed for an organisation the bot no longer works in asks nothing there now (`judge`, read again):
         // not accepted, with why, so it is not delivered late and out of context if the place is switched on again.
         if let Some(org) = org.filter(|org| super::memory::place_of(&bot, Some(org)) == super::memory::Place::Bot) {
             let why = format!("{} was listed for organisation {org}, which {} no longer works in", mention.by, bot.name);
-            let outcome = change(|store| {
-                if let Some(kept) = store.mentions.iter_mut().filter_map(Kept::known_mut).find(|kept| kept.id == mention.id && kept.bot == mention.bot && kept.state == WAITING) {
-                    kept.state = NOT_ACCEPTED.into();
-                    kept.why = why.clone();
-                    kept.text.clear();
-                }
-                Ok(())
+            updates.push(ChannelDeliverOutcome::NotAccepted {
+                id: mention.id.clone(),
+                bot: mention.bot.clone(),
+                why,
             });
-            if let Err(error) = outcome {
-                log::warn!("bot channels: turn away a mention of {}: {error:#}", bot.id);
-            }
             continue;
         }
-        let made = match mention.session.as_deref().and_then(|id| index::get(id).ok()).filter(|entry| !entry.archived).or_else(|| chat_for(&current, &bot, &mention.thread, org)) {
+        let place_cache_key = (bot.id.clone(), mention.thread.place(), org.map(str::to_owned));
+        let opened_session = opened_places
+            .get(&place_cache_key)
+            .and_then(|id| index::get(id).ok())
+            .filter(|entry| !entry.archived);
+        let made = match mention
+            .session
+            .as_deref()
+            .and_then(|id| index::get(id).ok())
+            .filter(|entry| !entry.archived)
+            .or(opened_session)
+            .or_else(|| chat_for(&store, &bot, &mention.thread, org))
+        {
             Some(entry) => Ok(entry),
             None => new_chat(manager, &bot, &mention.thread, org),
         };
         let result = made.and_then(|entry| send(manager, &entry, message(&bot, &mention), label(&mention), card(&bot, &mention)).map(|()| entry.id));
-        let outcome = change(|store| {
-            let Some(kept) = store.mentions.iter_mut().filter_map(Kept::known_mut).find(|kept| kept.id == mention.id && kept.bot == mention.bot && kept.state == WAITING) else { return Ok(()) };
-            match &result {
-                Ok(session) => {
-                    kept.state = DELIVERED.into();
-                    kept.session = Some(session.clone());
-                    kept.delivered = Some(index::now());
-                    kept.text.clear();
-                }
-                Err(error) => {
-                    kept.tries += 1;
-                    if kept.tries >= MAX_TRIES {
-                        kept.state = FAILED.into();
-                        kept.why = format!("It could not reach {}'s chat: {error:#}", bot.name);
-                        kept.text.clear();
+        match result {
+            Ok(session) => {
+                opened_places.insert(place_cache_key, session.clone());
+                updates.push(ChannelDeliverOutcome::Delivered {
+                    id: mention.id.clone(),
+                    bot: mention.bot.clone(),
+                    session,
+                    delivered_at: index::now(),
+                });
+                sent += 1;
+                *count += 1;
+            }
+            Err(error) => {
+                updates.push(ChannelDeliverOutcome::Failed {
+                    id: mention.id.clone(),
+                    bot: mention.bot.clone(),
+                    why: format!("It could not reach {}'s chat: {error:#}", bot.name),
+                });
+            }
+        }
+    }
+    if !updates.is_empty() {
+        // Batch all mention delivery outcomes into one atomic write (P-38).
+        if let Err(error) = change(|store| {
+            for update in updates {
+                match update {
+                    ChannelDeliverOutcome::NotAccepted { id, bot, why } => {
+                        if let Some(kept) = store.mentions.iter_mut().filter_map(Kept::known_mut).find(|kept| kept.id == id && kept.bot == bot && kept.state == WAITING) {
+                            kept.state = NOT_ACCEPTED.into();
+                            kept.why = why;
+                            kept.text.clear();
+                        }
+                    }
+                    ChannelDeliverOutcome::Delivered { id, bot, session, delivered_at } => {
+                        if let Some(kept) = store.mentions.iter_mut().filter_map(Kept::known_mut).find(|kept| kept.id == id && kept.bot == bot && kept.state == WAITING) {
+                            kept.state = DELIVERED.into();
+                            kept.session = Some(session);
+                            kept.delivered = Some(delivered_at);
+                            kept.text.clear();
+                        }
+                    }
+                    ChannelDeliverOutcome::Failed { id, bot, why } => {
+                        if let Some(kept) = store.mentions.iter_mut().filter_map(Kept::known_mut).find(|kept| kept.id == id && kept.bot == bot && kept.state == WAITING) {
+                            kept.tries += 1;
+                            if kept.tries >= MAX_TRIES {
+                                kept.state = FAILED.into();
+                                kept.why = why;
+                                kept.text.clear();
+                            }
+                        }
                     }
                 }
             }
             Ok(())
-        });
-        if let Err(error) = outcome {
-            log::warn!("bot channels: record a mention of {}: {error:#}", bot.id);
-        }
-        if result.is_ok() {
-            sent += 1;
-            *count += 1;
+        }) {
+            log::warn!("bot channels: record mention deliveries: {error:#}");
         }
     }
     sent

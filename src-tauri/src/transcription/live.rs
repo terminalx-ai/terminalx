@@ -26,6 +26,16 @@ use super::engine::TARGET_RATE;
 /// tenth of a second adds no delay the reader can see.
 pub const FEED_SAMPLES: usize = TARGET_RATE as usize / 10;
 
+/// Maximum PCM samples retained in RAM while a streaming model is actively
+/// decoding (~60 s at 16 kHz mono ≈ 3.8 MB). Keeps enough audio for noise
+/// guard and short-utterance fallback without growing unboundedly on long
+/// dictations (P-35).
+pub const MAX_STREAMED_SAMPLES: usize = TARGET_RATE as usize * 60;
+
+/// Hard upper bound on retained PCM samples for non-streaming / fallback
+/// whole-recording transcription (~10 min at 16 kHz mono ≈ 38.4 MB).
+pub const MAX_RECORDED_SAMPLES: usize = TARGET_RATE as usize * 600;
+
 /// A recogniser that takes audio as it arrives.
 pub trait LiveStream {
     /// Take more audio; answer with everything heard so far, the settled part
@@ -93,10 +103,37 @@ fn feed(stream: &mut dyn LiveStream, pcm: &[f32]) -> Fed {
 /// more is to be said about it.
 pub fn listen(
     frames: Receiver<Vec<f32>>,
+    stream: Option<&mut dyn LiveStream>,
+    cancelled: &AtomicBool,
+    partial: impl FnMut(&str),
+    lost: impl FnMut(&str),
+) -> Option<Heard> {
+    listen_bounded(
+        frames,
+        stream,
+        cancelled,
+        partial,
+        lost,
+        MAX_STREAMED_SAMPLES,
+        MAX_RECORDED_SAMPLES,
+    )
+}
+
+fn retain_tail(samples: &mut Vec<f32>, cap: usize) {
+    if samples.len() > cap {
+        let excess = samples.len() - cap;
+        samples.drain(..excess);
+    }
+}
+
+fn listen_bounded(
+    frames: Receiver<Vec<f32>>,
     mut stream: Option<&mut dyn LiveStream>,
     cancelled: &AtomicBool,
     mut partial: impl FnMut(&str),
     mut lost: impl FnMut(&str),
+    max_streamed: usize,
+    max_recorded: usize,
 ) -> Option<Heard> {
     let mut samples = Vec::new();
     let mut pending: Vec<f32> = Vec::new();
@@ -134,6 +171,11 @@ pub fn listen(
         }
         step(&mut stream, &pending, &mut broke);
         samples.append(&mut pending);
+        let cap = if stream.is_some() { max_streamed } else { max_recorded };
+        // Trim with 25% slack to avoid shifting the buffer on every 100 ms feed.
+        if samples.len() > cap.saturating_add(cap / 4) {
+            retain_tail(&mut samples, cap);
+        }
     }
     if cancelled.load(Ordering::Relaxed) {
         return None;
@@ -142,6 +184,8 @@ pub fn listen(
         step(&mut stream, &pending, &mut broke);
         samples.append(&mut pending);
     }
+    let cap = if stream.is_some() { max_streamed } else { max_recorded };
+    retain_tail(&mut samples, cap);
     let ending = match stream {
         Some(live) => match live.finalize() {
             Ok(text) => Ending::Streamed(text.trim().to_string()),
@@ -401,5 +445,33 @@ mod tests {
     #[test]
     fn a_stream_that_begins_is_used() {
         assert!(begin("nemotron-3.5-asr-streaming-0.6b", true, || Ok(Counting::default())).is_some());
+    }
+
+    #[test]
+    fn retained_pcm_samples_are_bounded_to_rolling_window() {
+        let (tx, rx) = mpsc::channel();
+        // Send 3 seconds of tagged samples; cap streaming window to 0.5 seconds.
+        let half_sec = TARGET_RATE as usize / 2;
+        for i in 0..30 {
+            tx.send(vec![i as f32 + 1.0; FEED_SAMPLES]).unwrap();
+        }
+        drop(tx);
+        let mut stream = Counting::default();
+        let heard = listen_bounded(
+            rx,
+            Some(&mut stream),
+            &AtomicBool::new(false),
+            |_| {},
+            |_| {},
+            half_sec,
+            TARGET_RATE as usize,
+        )
+        .unwrap();
+        assert_eq!(heard.samples.len(), half_sec);
+        // The rolling window retains the most recent samples (from the last 5 feeds: 26..=30).
+        assert_eq!(heard.samples[0], 26.0);
+        assert_eq!(*heard.samples.last().unwrap(), 30.0);
+        // All 3 seconds were still fed to the live recognizer.
+        assert_eq!(stream.fed.load(Ordering::SeqCst), 30 * FEED_SAMPLES);
     }
 }

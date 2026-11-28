@@ -548,9 +548,16 @@ where
     R: std::future::Future<Output = serde_json::Value>,
 {
     let mut reassembly = wire::Reassembly::default();
-    let mut stream_health = tokio::time::interval(std::time::Duration::from_millis(250));
-    let mut grant_health = tokio::time::interval(std::time::Duration::from_secs(1));
+    // Event-driven buffer/close health wakeup replaces the unconditional 250ms
+    // polling timer; only connections with an external Unix authority hook keep
+    // a periodic authority check. Idle grant checks run every 15s (reset on any
+    // active request/output permit check) instead of polling the runtime every 1s (P-37).
+    let has_authority = connection.has_authority();
+    let mut authority_health = tokio::time::interval(std::time::Duration::from_secs(1));
+    authority_health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut grant_health = tokio::time::interval(std::time::Duration::from_secs(15));
     grant_health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    grant_health.reset();
     let mut waiting: std::collections::VecDeque<serde_json::Value> = std::collections::VecDeque::new();
     let mut answering = None;
     // Whether the request being answered is a `pairing.forget`.
@@ -573,8 +580,12 @@ where
                 answering = Some(Box::pin(answer(host, connection, &respond, request)));
             }
         }
+        // Check synchronously before awaiting so an already-set overflow/close
+        // flag is never missed between notifications.
+        connection.check_buffer()?;
         tokio::select! {
-            _ = stream_health.tick() => { connection.check_buffer()?; }
+            _ = connection.health_notified() => { connection.check_buffer()?; }
+            _ = authority_health.tick(), if has_authority => { connection.check_buffer()?; }
             _ = grant_health.tick(), if ending.is_none() => {
                 if let Err(error) = connection.check_off_runtime(host).await {
                     ending = Some(revocation(connection, error).await?);
@@ -603,6 +614,7 @@ where
                 } else if replies_under_permit(ending) {
                     match connection.output_permit(host).await {
                         Ok(_permit) => {
+                            grant_health.reset();
                             // The permit first, then the signal: a disconnect
                             // that came while the permit was taken withholds
                             // the reply (#1332). A revocation cannot have been
@@ -627,7 +639,10 @@ where
                 let pending = connection.invalidations().take();
                 if !pending.is_empty() {
                     let _permit = match connection.output_permit(host).await {
-                        Ok(permit) => permit,
+                        Ok(permit) => {
+                            grant_health.reset();
+                            permit
+                        }
                         Err(error) => {
                             ending = Some(revocation(connection, error).await?);
                             continue;
@@ -651,7 +666,10 @@ where
                 // One permit for what is queued now, not a runtime round trip
                 // and a device file read for every message (#1282).
                 let _permit = match connection.output_permit(host).await {
-                    Ok(permit) => permit,
+                    Ok(permit) => {
+                        grant_health.reset();
+                        permit
+                    }
                     Err(error) => {
                         ending = Some(revocation(connection, error).await?);
                         continue;

@@ -14,7 +14,7 @@ pub use saved::{StatsUsageState, StatsUsageStore};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -122,6 +122,51 @@ struct CachedFile {
     events: Vec<UsageEvent>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct CodexResumeState {
+    session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current_model: Option<String>,
+    #[serde(default)]
+    unpriced_tier: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_totals: Option<RawUsage>,
+    #[serde(default)]
+    turn_opened: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct FileCursor {
+    byte_offset: u64,
+    /// FNV-1a fingerprint of the first 256 bytes so a rewritten-and-grown file
+    /// falls back to a full re-parse instead of assuming pure append (P-26).
+    #[serde(default)]
+    prefix_hash: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codex: Option<CodexResumeState>,
+}
+
+/// Compact daily rollup for usage events older than the 30-day overview window,
+/// keeping `stats-usage-cache.json` bounded instead of growing forever (P-26).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct DailyRollup {
+    day: String,
+    provider: Provider,
+    new_input_tokens: u64,
+    output_tokens: u64,
+    cache_tokens: u64,
+    reasoning_tokens: u64,
+    total_tokens: u64,
+    activity_count: usize,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ScanCache {
@@ -129,6 +174,12 @@ struct ScanCache {
     files: Vec<CachedFile>,
     #[serde(default)]
     scope_paths: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    file_cursors: BTreeMap<String, FileCursor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    archived_daily: Vec<DailyRollup>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    archived_session_cwds: Vec<(Provider, String, String)>,
 }
 
 impl Default for ScanCache {
@@ -137,6 +188,9 @@ impl Default for ScanCache {
             schema_version: CACHE_SCHEMA,
             files: Vec::new(),
             scope_paths: Vec::new(),
+            file_cursors: BTreeMap::new(),
+            archived_daily: Vec::new(),
+            archived_session_cwds: Vec::new(),
         }
     }
 }
@@ -151,12 +205,88 @@ fn scan_snapshot(store_root: &Path) -> Result<StatsUsageSnapshot> {
     )
 }
 
+fn cursor_key(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+/// Keep 32 days of per-event detail (30-day overview + 2-day local timezone
+/// rollover buffer) and roll older events into compact daily aggregates (P-26).
+fn rollup_cutoff(reference: DateTime<Local>) -> String {
+    reference
+        .date_naive()
+        .checked_sub_days(Days::new(OVERVIEW_DAYS + 1))
+        .unwrap_or_else(|| reference.date_naive())
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+fn rollup_old_events(
+    files: &mut [CachedFile],
+    archived_daily: &mut Vec<DailyRollup>,
+    archived_session_cwds: &mut Vec<(Provider, String, String)>,
+    retain_cutoff: &str,
+) -> bool {
+    let mut daily_map: BTreeMap<(String, Provider), DailyRollup> = archived_daily
+        .drain(..)
+        .map(|entry| ((entry.day.clone(), entry.provider), entry))
+        .collect();
+    let mut cwd_set: HashSet<(Provider, String, String)> =
+        archived_session_cwds.drain(..).collect();
+    let mut rolled_any = false;
+    let mut seen_old = HashSet::<(Provider, String)>::new();
+
+    for file in files.iter_mut() {
+        let before = file.events.len();
+        let mut kept = Vec::with_capacity(before);
+        for event in file.events.drain(..) {
+            if event.day.as_str() < retain_cutoff {
+                rolled_any = true;
+                if let Some(cwd) = event.cwd.as_ref() {
+                    cwd_set.insert((event.provider, event.session_id.clone(), cwd.clone()));
+                }
+                if seen_old.insert((event.provider, projection_key(&event))) {
+                    let entry = daily_map
+                        .entry((event.day.clone(), event.provider))
+                        .or_insert_with(|| DailyRollup {
+                            day: event.day.clone(),
+                            provider: event.provider,
+                            new_input_tokens: 0,
+                            output_tokens: 0,
+                            cache_tokens: 0,
+                            reasoning_tokens: 0,
+                            total_tokens: 0,
+                            activity_count: 0,
+                        });
+                    entry.new_input_tokens =
+                        entry.new_input_tokens.saturating_add(event.new_input_tokens);
+                    entry.output_tokens = entry.output_tokens.saturating_add(event.output_tokens);
+                    entry.cache_tokens = entry.cache_tokens.saturating_add(event.cache_tokens);
+                    entry.reasoning_tokens =
+                        entry.reasoning_tokens.saturating_add(event.reasoning_tokens);
+                    entry.total_tokens = entry.total_tokens.saturating_add(event.total_tokens);
+                    entry.activity_count = entry.activity_count.saturating_add(1);
+                }
+            } else {
+                kept.push(event);
+            }
+        }
+        file.events = kept;
+    }
+
+    *archived_daily = daily_map.into_values().collect();
+    let mut cwds: Vec<_> = cwd_set.into_iter().collect();
+    cwds.sort();
+    *archived_session_cwds = cwds;
+    rolled_any
+}
+
 fn scan_snapshot_with(
     store_root: &Path,
     sources: impl FnOnce() -> Result<Vec<(PathBuf, Provider)>>,
     inputs: impl FnOnce() -> Result<(AppStats, UsageScope)>,
 ) -> Result<StatsUsageSnapshot> {
     let cache_path = store_root.join(CACHE_FILE);
+    let cache_existed = cache_path.exists();
     let previous = crate::store::read_json::<ScanCache>(&cache_path)
         .context("read recorded usage accounting")?
         .unwrap_or_default();
@@ -167,6 +297,10 @@ fn scan_snapshot_with(
 
     let files = sources()?;
     let reparse = previous.schema_version != CACHE_SCHEMA;
+    let mut cache_dirty = reparse || !cache_existed;
+    let mut previous_cursors = previous.file_cursors;
+    let mut archived_daily = previous.archived_daily;
+    let mut archived_session_cwds = previous.archived_session_cwds;
     let mut previous_by_path: HashMap<PathBuf, CachedFile> = previous
         .files
         .into_iter()
@@ -184,6 +318,7 @@ fn scan_snapshot_with(
         })
         .collect();
     let mut current = Vec::with_capacity(files.len());
+    let mut next_cursors: BTreeMap<String, FileCursor> = BTreeMap::new();
     for (path, provider) in files {
         let metadata = match fs::metadata(&path) {
             Ok(metadata) => metadata,
@@ -195,18 +330,56 @@ fn scan_snapshot_with(
         };
         let modified_nanos = modified_nanos(&metadata)?;
         let size = metadata.len();
+        let key = cursor_key(&path);
         let prior = previous_by_path.remove(&path);
+        let prior_cursor = previous_cursors.remove(&key);
         if prior.as_ref().is_some_and(|cached| {
             !reparse
                 && cached.provider == provider
                 && cached.modified_nanos == modified_nanos
                 && cached.size == size
         }) {
+            if let Some(cursor) = prior_cursor {
+                next_cursors.insert(key, cursor);
+            }
             current.push(prior.expect("checked above"));
             continue;
         }
-        match parse_file(&path, provider) {
-            Ok(mut events) => {
+        cache_dirty = true;
+
+        // Incremental scan when the transcript grew strictly past its last
+        // complete-line offset and kept the same header prefix, avoiding full
+        // re-parse from byte 0 on appends while safely reparsing same-size or
+        // rewritten files (P-26).
+        let can_incremental = !reparse
+            && prior.as_ref().is_some_and(|p| p.provider == provider)
+            && prior_cursor.as_ref().is_some_and(|cursor| {
+                cursor.byte_offset > 0
+                    && size > cursor.byte_offset
+                    && (provider == Provider::Claude || cursor.codex.is_some())
+                    && file_prefix_hash(&path).ok() == Some(cursor.prefix_hash)
+            });
+
+        if can_incremental {
+            let mut cached = prior.expect("checked above");
+            let cursor = prior_cursor.expect("checked above");
+            match parse_file_incremental(&path, provider, &mut cached.events, cursor) {
+                Ok(updated_cursor) => {
+                    cached.modified_nanos = modified_nanos;
+                    cached.size = size;
+                    next_cursors.insert(key, updated_cursor);
+                    current.push(cached);
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("scan usage transcript {}", path.display()))
+                }
+            }
+        }
+
+        match parse_file_with_cursor(&path, provider) {
+            Ok((mut events, cursor)) => {
                 // A resumed/replaced file may contain only the recent suffix.
                 // Keep previously observed events without replaying copies.
                 if let Some(prior) = prior.filter(|prior| prior.provider == provider) {
@@ -227,6 +400,7 @@ fn scan_snapshot_with(
                         }
                     }
                 }
+                next_cursors.insert(key, cursor);
                 current.push(CachedFile {
                     path,
                     provider,
@@ -249,25 +423,49 @@ fn scan_snapshot_with(
     // event identity during aggregation.
     current.extend(previous_by_path.into_values());
     current.sort_by(|left, right| lexical_path_cmp(&left.path, &right.path));
+    let now = Local::now();
+    let retain_cutoff = rollup_cutoff(now);
+    if rollup_old_events(
+        &mut current,
+        &mut archived_daily,
+        &mut archived_session_cwds,
+        &retain_cutoff,
+    ) {
+        cache_dirty = true;
+    }
+
     let (app, mut scope) = inputs()?;
-    scope
-        .roots
-        .extend(UsageScope::from_paths(previous.scope_paths).roots);
-    let scope_paths = scope
-        .roots
-        .iter()
-        .map(|root| PathBuf::from(&root.match_path))
+    let prev_scope_paths = previous.scope_paths;
+    scope.extend(UsageScope::from_paths(prev_scope_paths.iter().cloned()));
+    let scope_paths: Vec<PathBuf> = scope
+        .index
+        .keys()
+        .map(PathBuf::from)
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
-    let snapshot = aggregate(&current, app, &scope, &overview_cutoff(Local::now()));
-    let cache = ScanCache {
-        schema_version: CACHE_SCHEMA,
-        files: current,
-        scope_paths,
-    };
-    let bytes = serde_json::to_vec(&cache)?;
-    crate::store::write_atomic(&cache_path, &bytes).context("write stats scan cache")?;
+    if scope_paths != prev_scope_paths {
+        cache_dirty = true;
+    }
+    let snapshot = aggregate_with_archived(
+        &current,
+        &archived_session_cwds,
+        app,
+        &scope,
+        &overview_cutoff(now),
+    );
+    if cache_dirty {
+        let cache = ScanCache {
+            schema_version: CACHE_SCHEMA,
+            files: current,
+            scope_paths,
+            file_cursors: next_cursors,
+            archived_daily,
+            archived_session_cwds,
+        };
+        let bytes = serde_json::to_vec(&cache)?;
+        crate::store::write_atomic(&cache_path, &bytes).context("write stats scan cache")?;
+    }
     Ok(snapshot)
 }
 
@@ -412,10 +610,161 @@ fn discover_jsonl(
     Ok(())
 }
 
+#[cfg(test)]
 fn parse_file(path: &Path, provider: Provider) -> Result<Vec<UsageEvent>> {
+    Ok(parse_file_with_cursor(path, provider)?.0)
+}
+
+fn read_lines_from_offset(
+    path: &Path,
+    start_offset: u64,
+    mut on_line: impl FnMut(&str),
+) -> Result<u64> {
+    let mut file = File::open(path)?;
+    if start_offset > 0 {
+        file.seek(SeekFrom::Start(start_offset))?;
+    }
+    let mut reader = BufReader::new(file);
+    let mut offset = start_offset;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes_read = reader
+            .read_line(&mut line)
+            .with_context(|| format!("read usage transcript {}", path.display()))?;
+        if bytes_read == 0 {
+            break;
+        }
+        let ended_with_newline = line.ends_with('\n');
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        on_line(trimmed);
+        if ended_with_newline {
+            offset = offset.saturating_add(bytes_read as u64);
+        }
+    }
+    Ok(offset)
+}
+
+fn file_prefix_hash(path: &Path) -> Result<u64> {
+    use std::io::Read;
+    let mut file = File::open(path)?;
+    let mut buf = [0u8; 256];
+    let n = file.read(&mut buf)?;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in &buf[..n] {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    Ok(hash)
+}
+
+fn parse_file_with_cursor(path: &Path, provider: Provider) -> Result<(Vec<UsageEvent>, FileCursor)> {
+    let prefix_hash = file_prefix_hash(path)?;
     match provider {
-        Provider::Claude => parse_claude(path, &HashSet::new()),
-        Provider::Codex => parse_codex(path),
+        Provider::Claude => {
+            let mut parser = ClaudeParser::new(path);
+            let skip = HashSet::new();
+            let byte_offset = read_lines_from_offset(path, 0, |line| parser.line(line, &skip))?;
+            Ok((
+                parser.events,
+                FileCursor {
+                    byte_offset,
+                    prefix_hash,
+                    codex: None,
+                },
+            ))
+        }
+        Provider::Codex => {
+            let mut parser = CodexParser::new(path);
+            let byte_offset = read_lines_from_offset(path, 0, |line| parser.line(line))?;
+            let codex = Some(parser.snapshot_state());
+            Ok((
+                parser.events,
+                FileCursor {
+                    byte_offset,
+                    prefix_hash,
+                    codex,
+                },
+            ))
+        }
+    }
+}
+
+fn merge_claude_event(
+    existing: &mut Vec<UsageEvent>,
+    by_key: &mut HashMap<String, usize>,
+    event: UsageEvent,
+) {
+    if let Some(key) = event.event_key.clone() {
+        if let Some(index) = by_key.get(&key).copied() {
+            let prior = &mut existing[index];
+            prior.new_input_tokens = prior.new_input_tokens.max(event.new_input_tokens);
+            prior.output_tokens = prior.output_tokens.max(event.output_tokens);
+            prior.cache_read_tokens = prior.cache_read_tokens.max(event.cache_read_tokens);
+            prior.cache_write_tokens = prior.cache_write_tokens.max(event.cache_write_tokens);
+            prior.cache_write_hour_tokens = prior
+                .cache_write_hour_tokens
+                .max(event.cache_write_hour_tokens);
+            prior.unpriced |= event.unpriced;
+            prior.cache_tokens = prior
+                .cache_read_tokens
+                .saturating_add(prior.cache_write_tokens);
+            prior.total_tokens = prior
+                .new_input_tokens
+                .saturating_add(prior.output_tokens)
+                .saturating_add(prior.cache_tokens);
+            return;
+        }
+        by_key.insert(key, existing.len());
+    }
+    existing.push(event);
+}
+
+fn parse_file_incremental(
+    path: &Path,
+    provider: Provider,
+    existing_events: &mut Vec<UsageEvent>,
+    cursor: FileCursor,
+) -> Result<FileCursor> {
+    match provider {
+        Provider::Claude => {
+            let mut parser = ClaudeParser::new(path);
+            let skip = HashSet::new();
+            let byte_offset =
+                read_lines_from_offset(path, cursor.byte_offset, |line| parser.line(line, &skip))?;
+            if !parser.events.is_empty() {
+                let mut by_key: HashMap<String, usize> = existing_events
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, e)| e.event_key.clone().map(|k| (k, idx)))
+                    .collect();
+                for event in parser.events {
+                    merge_claude_event(existing_events, &mut by_key, event);
+                }
+            }
+            Ok(FileCursor {
+                byte_offset,
+                prefix_hash: cursor.prefix_hash,
+                codex: None,
+            })
+        }
+        Provider::Codex => {
+            let state = cursor.codex.unwrap_or_default();
+            let seen_records: HashSet<String> = existing_events
+                .iter()
+                .filter_map(|e| e.event_key.clone())
+                .collect();
+            let mut parser = CodexParser::from_state(state, seen_records);
+            let byte_offset =
+                read_lines_from_offset(path, cursor.byte_offset, |line| parser.line(line))?;
+            let next_state = parser.snapshot_state();
+            existing_events.extend(parser.events);
+            Ok(FileCursor {
+                byte_offset,
+                prefix_hash: cursor.prefix_hash,
+                codex: Some(next_state),
+            })
+        }
     }
 }
 
@@ -808,6 +1157,32 @@ impl CodexParser {
         Self { session_id, ..Default::default() }
     }
 
+    fn from_state(state: CodexResumeState, seen_records: HashSet<String>) -> Self {
+        Self {
+            session_id: state.session_id,
+            session_cwd: state.session_cwd,
+            current_cwd: state.current_cwd,
+            current_model: state.current_model,
+            unpriced_tier: state.unpriced_tier,
+            previous_totals: state.previous_totals,
+            turn_opened: state.turn_opened,
+            seen_records,
+            events: Vec::new(),
+        }
+    }
+
+    fn snapshot_state(&self) -> CodexResumeState {
+        CodexResumeState {
+            session_id: self.session_id.clone(),
+            session_cwd: self.session_cwd.clone(),
+            current_cwd: self.current_cwd.clone(),
+            current_model: self.current_model.clone(),
+            unpriced_tier: self.unpriced_tier,
+            previous_totals: self.previous_totals,
+            turn_opened: self.turn_opened,
+        }
+    }
+
     fn line(&mut self, line: &str) {
         let interesting = line.contains("session_meta")
             || line.contains("turn_context")
@@ -983,21 +1358,17 @@ fn project_label(cwd: Option<&str>) -> String {
     }
 }
 
+/// Pre-indexed scope path table (`normalized_path -> canonical_identity`) so
+/// matching each event's `cwd` is O(path_depth) instead of O(roots) (P-26).
 #[derive(Debug, Default)]
 struct UsageScope {
-    roots: Vec<UsageScopeRoot>,
+    index: HashMap<String, String>,
     warnings: Vec<String>,
-}
-
-#[derive(Debug)]
-struct UsageScopeRoot {
-    match_path: String,
-    identity: String,
 }
 
 impl UsageScope {
     fn from_paths(paths: impl IntoIterator<Item = PathBuf>) -> Self {
-        let mut roots = HashMap::new();
+        let mut index = HashMap::new();
         for path in paths {
             let raw = normalize_path(&path.to_string_lossy());
             if raw.is_empty() {
@@ -1006,21 +1377,18 @@ impl UsageScope {
             let canonical = crate::paths::canonicalize(&path)
                 .map(|path| normalize_path(&path.to_string_lossy()))
                 .unwrap_or_else(|_| raw.clone());
-            roots.insert(raw, canonical.clone());
-            roots.insert(canonical.clone(), canonical);
+            index.insert(raw, canonical.clone());
+            index.insert(canonical.clone(), canonical);
         }
-        let mut roots = roots
-            .into_iter()
-            .map(|(match_path, identity)| UsageScopeRoot {
-                match_path,
-                identity,
-            })
-            .collect::<Vec<_>>();
-        roots.sort_by_key(|root| std::cmp::Reverse(root.match_path.len()));
         Self {
-            roots,
+            index,
             warnings: Vec::new(),
         }
+    }
+
+    fn extend(&mut self, other: UsageScope) {
+        self.index.extend(other.index);
+        self.warnings.extend(other.warnings);
     }
 
     fn contains(&self, cwd: Option<&str>) -> bool {
@@ -1029,14 +1397,18 @@ impl UsageScope {
 
     fn attribution(&self, cwd: Option<&str>) -> Option<&str> {
         let cwd = cwd?;
-        let cwd = normalize_path(cwd);
-        self.roots.iter().find_map(|root| {
-            (cwd == root.match_path
-                || cwd
-                    .strip_prefix(&root.match_path)
-                    .is_some_and(|rest| rest.starts_with('/')))
-            .then_some(root.identity.as_str())
-        })
+        let normalized = normalize_path(cwd);
+        let mut probe = normalized.as_str();
+        loop {
+            if let Some(identity) = self.index.get(probe) {
+                return Some(identity.as_str());
+            }
+            match probe.rfind('/') {
+                Some(0) if probe != "/" => probe = "/",
+                Some(pos) if pos > 0 => probe = &probe[..pos],
+                _ => return None,
+            }
+        }
     }
 }
 
@@ -1118,7 +1490,7 @@ fn usage_scope() -> Result<UsageScope> {
             read_usage_scope_cache(&root.join(name), &mut paths)?;
         }
     }
-    scope.roots.extend(UsageScope::from_paths(paths).roots);
+    scope.extend(UsageScope::from_paths(paths));
     Ok(scope)
 }
 
@@ -1235,8 +1607,19 @@ fn top_key(totals: &BTreeMap<String, u64>) -> Option<String> {
         .map(|(key, _)| key.clone())
 }
 
+#[cfg(test)]
 fn aggregate(
     files: &[CachedFile],
+    app: AppStats,
+    scope: &UsageScope,
+    cutoff: &str,
+) -> StatsUsageSnapshot {
+    aggregate_with_archived(files, &[], app, scope, cutoff)
+}
+
+fn aggregate_with_archived(
+    files: &[CachedFile],
+    archived_session_cwds: &[(Provider, String, String)],
     app: AppStats,
     scope: &UsageScope,
     cutoff: &str,
@@ -1266,6 +1649,14 @@ fn aggregate(
     }
 
     let mut sessions = HashMap::<(Provider, String), SessionEligibility>::new();
+    for (provider, session_id, cwd) in archived_session_cwds {
+        if scope.contains(Some(cwd.as_str())) {
+            sessions
+                .entry((*provider, session_id.clone()))
+                .or_default()
+                .has_scoped_location = true;
+        }
+    }
     for event in &events {
         if event.day > range_end {
             continue;
@@ -1907,5 +2298,63 @@ mod tests {
             .unwrap();
         assert_eq!(after.files.len(), 1);
         assert_eq!(after.files[0].events.len(), before.files[0].events.len());
+    }
+
+    #[test]
+    fn incremental_scan_skips_unchanged_cache_write_and_rolls_up_old_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        fs::create_dir(&store).unwrap();
+        let transcript = dir.path().join("claude.jsonl");
+        let today = Local::now().to_rfc3339();
+        let old = (Local::now() - chrono::Duration::days(60)).to_rfc3339();
+        let row = |ts: &str, id: &str, out: u64| {
+            serde_json::json!({
+                "type": "assistant",
+                "sessionId": "s-inc",
+                "timestamp": ts,
+                "cwd": "/work/repo",
+                "requestId": id,
+                "message": {
+                    "id": id,
+                    "model": "claude-opus-5",
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": out,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0
+                    }
+                }
+            })
+            .to_string()
+        };
+        fs::write(&transcript, format!("{}\n{}\n", row(&old, "old-1", 5), row(&today, "r1", 20))).unwrap();
+        let sources = || Ok(vec![(transcript.clone(), Provider::Claude)]);
+        let inputs = || Ok((AppStats::default(), UsageScope::from_paths(["/work/repo".into()])));
+
+        let snap1 = scan_snapshot_with(&store, sources, inputs).unwrap();
+        assert_eq!(snap1.total_tokens, 30);
+        let cache_path = store.join(CACHE_FILE);
+        let cache1: ScanCache = crate::store::read_json(&cache_path).unwrap().unwrap();
+        // Old event (>30 days) was rolled up into archived_daily, not retained in file.events.
+        assert_eq!(cache1.files[0].events.len(), 1);
+        assert_eq!(cache1.archived_daily.len(), 1);
+        assert_eq!(cache1.archived_daily[0].total_tokens, 15);
+        assert!(cache1.file_cursors[&cursor_key(&transcript)].byte_offset > 0);
+
+        // Unchanged second scan must skip rewriting stats-usage-cache.json.
+        let mtime_before = fs::metadata(&cache_path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let snap2 = scan_snapshot_with(&store, sources, inputs).unwrap();
+        assert_eq!(snap2.total_tokens, 30);
+        let mtime_after = fs::metadata(&cache_path).unwrap().modified().unwrap();
+        assert_eq!(mtime_before, mtime_after, "unchanged scan must not rewrite cache file");
+
+        // Appending a new line incrementally updates from byte_offset without re-reading byte 0.
+        let mut f = fs::OpenOptions::new().append(true).open(&transcript).unwrap();
+        writeln!(f, "{}", row(&today, "r2", 40)).unwrap();
+        drop(f);
+        let snap3 = scan_snapshot_with(&store, sources, inputs).unwrap();
+        assert_eq!(snap3.total_tokens, 80);
     }
 }

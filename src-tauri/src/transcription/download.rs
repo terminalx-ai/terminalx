@@ -38,9 +38,95 @@ pub fn model_path(spec: &ModelSpec) -> Result<PathBuf> {
     Ok(models_dir()?.join(spec.id).join(spec.filename))
 }
 
-/// Complete on disk: right size, and the checksum was verified when it landed.
+/// Complete on disk: regular file (not a symlink) of the expected size.
+/// Load-time verification in [`verify_model_file`] additionally checks `O_NOFOLLOW`
+/// and the pinned SHA-256 before passing weights to native parsers.
 pub fn is_installed(spec: &ModelSpec) -> bool {
-    model_path(spec).ok().and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len() == spec.size_bytes).unwrap_or(false)
+    model_path(spec)
+        .ok()
+        .and_then(|p| std::fs::symlink_metadata(p).ok())
+        .map(|m| m.is_file() && m.len() == spec.size_bytes)
+        .unwrap_or(false)
+}
+
+/// Verify regular-file status (refusing symlinks/FIFOs via `O_NOFOLLOW`),
+/// pinned byte size, and streaming SHA-256 before passing a `.gguf` model to
+/// native C++ `transcribe-cpp` (S-34).
+pub fn verify_model_file(spec: &ModelSpec, path: &std::path::Path) -> Result<()> {
+    let symlink_meta = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect model file {}", path.display()))?;
+    if !symlink_meta.is_file() {
+        bail!("model path {} is not a regular file", path.display());
+    }
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+            .open(path)
+            .with_context(|| format!("open model file {}", path.display()))?
+    };
+    #[cfg(not(unix))]
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("open model file {}", path.display()))?;
+    let meta = file
+        .metadata()
+        .with_context(|| format!("stat model file {}", path.display()))?;
+    if !meta.is_file() {
+        bail!("model path {} is not a regular file", path.display());
+    }
+    if meta.len() != spec.size_bytes {
+        bail!(
+            "model file {} has size {} bytes, expected {}",
+            path.display(),
+            meta.len(),
+            spec.size_bytes
+        );
+    }
+    let mut reader = file.take(spec.size_bytes.saturating_add(1));
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut total: u64 = 0;
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .with_context(|| format!("read model file {}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        total = total.saturating_add(n as u64);
+        if total > spec.size_bytes {
+            bail!(
+                "model file {} exceeded expected size {}",
+                path.display(),
+                spec.size_bytes
+            );
+        }
+        hasher.update(&buf[..n]);
+    }
+    if total != spec.size_bytes {
+        bail!(
+            "model file {} was {total} bytes, expected {}",
+            path.display(),
+            spec.size_bytes
+        );
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    if digest != spec.sha256 {
+        bail!("model file {} failed SHA-256 verification", path.display());
+    }
+    // Re-check path identity against the verified file descriptor to narrow TOCTOU.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let current = std::fs::symlink_metadata(path)
+            .with_context(|| format!("re-inspect model file {}", path.display()))?;
+        if !current.is_file() || current.dev() != meta.dev() || current.ino() != meta.ino() {
+            bail!("model file {} changed during verification", path.display());
+        }
+    }
+    Ok(())
 }
 
 pub fn delete(spec: &ModelSpec) -> Result<()> {
@@ -146,21 +232,30 @@ pub fn fetch(spec: &ModelSpec, cancel: &AtomicBool, report: &dyn Fn(u64)) -> Res
 
 fn receive(spec: &ModelSpec, reader: impl Read, cancel: &AtomicBool,
     report: &dyn Fn(u64), final_path: &std::path::Path) -> Result<()> {
-    if spec.id == catalog::DETECTOR.id {
-        receive_detector(spec, reader, cancel, report, final_path)
+    let prefix = if spec.id == catalog::DETECTOR.id {
+        ".detector-"
     } else {
-        receive_recognizer(spec, reader, cancel, report, final_path)
-    }
+        ".model-"
+    };
+    receive_staged(spec, reader, cancel, report, final_path, prefix)
 }
 
-/// Recovery owns an exclusively created, randomly named regular file in the
-/// destination directory. Never open the legacy predictable .part entry.
-/// NamedTempFile removes only its owned staging path on every error/cancel exit.
-fn receive_detector(spec: &ModelSpec, mut reader: impl Read, cancel: &AtomicBool,
-    report: &dyn Fn(u64), final_path: &std::path::Path) -> Result<()> {
+/// Stage downloads into an exclusively created, randomly named regular file
+/// (`O_CREAT | O_EXCL` / `O_NOFOLLOW`) in the destination directory, never
+/// opening a predictable `.part` path (S-34). `NamedTempFile` removes only its
+/// owned staging file on every error/cancel exit, and `persist` atomically
+/// replaces `final_path` only after size and SHA-256 agree.
+fn receive_staged(
+    spec: &ModelSpec,
+    mut reader: impl Read,
+    cancel: &AtomicBool,
+    report: &dyn Fn(u64),
+    final_path: &std::path::Path,
+    prefix: &str,
+) -> Result<()> {
     if cancel.load(Ordering::SeqCst) { bail!("download cancelled"); }
-    let parent = final_path.parent().ok_or_else(|| anyhow!("missing detector directory"))?;
-    let mut staging = tempfile::Builder::new().prefix(".detector-").suffix(".part").tempfile_in(parent)?;
+    let parent = final_path.parent().ok_or_else(|| anyhow!("missing model directory"))?;
+    let mut staging = tempfile::Builder::new().prefix(prefix).suffix(".part").tempfile_in(parent)?;
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
     let mut buf = vec![0u8; 256 * 1024];
@@ -191,59 +286,7 @@ fn receive_detector(spec: &ModelSpec, mut reader: impl Read, cancel: &AtomicBool
     if cancel.load(Ordering::SeqCst) { bail!("download cancelled"); }
     // persist atomically replaces the final entry only after validation. On
     // failure PersistError still owns the temporary file and drops it here.
-    staging.persist(final_path).map_err(|e| anyhow!("commit detector file: {}", e.error))?;
-    Ok(())
-}
-
-// Preserve the existing recognizer staging behavior and policy separately.
-fn receive_recognizer(spec: &ModelSpec, mut reader: impl Read, cancel: &AtomicBool,
-    report: &dyn Fn(u64), final_path: &std::path::Path) -> Result<()> {
-    let part = final_path.with_extension("gguf.part");
-    let mut file = std::fs::File::create(&part)?;
-    let mut hasher = Sha256::new();
-    let mut received: u64 = 0;
-    let mut buf = vec![0u8; 256 * 1024];
-    let mut last_report = Instant::now();
-    report(0);
-    loop {
-        if cancel.load(Ordering::SeqCst) {
-            drop(file);
-            let _ = std::fs::remove_file(&part);
-            bail!("download cancelled");
-        }
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        if received.saturating_add(n as u64) > spec.size_bytes {
-            drop(file);
-            let _ = std::fs::remove_file(&part);
-            bail!("download exceeded the pinned model size");
-        }
-        file.write_all(&buf[..n])?;
-        hasher.update(&buf[..n]);
-        received += n as u64;
-        if last_report.elapsed() >= Duration::from_millis(200) {
-            report(received);
-            last_report = Instant::now();
-        }
-    }
-    file.flush()?;
-    drop(file);
-    if received != spec.size_bytes {
-        let _ = std::fs::remove_file(&part);
-        bail!("download was {received} bytes, expected {}", spec.size_bytes);
-    }
-    let digest = format!("{:x}", hasher.finalize());
-    if digest != spec.sha256 {
-        let _ = std::fs::remove_file(&part);
-        bail!("checksum did not match; the file was discarded");
-    }
-    if cancel.load(Ordering::SeqCst) {
-        let _ = std::fs::remove_file(&part);
-        bail!("download cancelled");
-    }
-    std::fs::rename(&part, final_path)?;
+    staging.persist(final_path).map_err(|e| anyhow!("commit model file: {}", e.error))?;
     Ok(())
 }
 
@@ -387,6 +430,43 @@ mod tests {
         assert!(receive(&spec, b"abc".as_slice(), &AtomicBool::new(false), &|_| {}, &path).is_err());
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
         assert_eq!(std::fs::read(path.join("keep")).unwrap(), b"original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recognizer_staging_never_follows_predictable_part_symlink_and_verify_checks_sha256_and_symlinks() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("canary.gguf");
+        let victim = temp.path().join("victim");
+        std::fs::write(&victim, b"untouched").unwrap();
+        let predictable_part = path.with_extension("gguf.part");
+        symlink(&victim, &predictable_part).unwrap();
+
+        let mut spec = catalog::MODELS[0].clone();
+        spec.size_bytes = 3;
+        spec.sha256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+        let cancel = AtomicBool::new(false);
+        receive(&spec, b"abc".as_slice(), &cancel, &|_| {}, &path).unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
+        assert_eq!(std::fs::read(&path).unwrap(), b"abc");
+        verify_model_file(&spec, &path).unwrap();
+
+        // Symlink to valid target is refused by load-time verification.
+        let link = temp.path().join("alias.gguf");
+        symlink(&path, &link).unwrap();
+        assert!(verify_model_file(&spec, &link).is_err());
+
+        // Tampered bytes or wrong size are refused.
+        let tampered = temp.path().join("tampered.gguf");
+        std::fs::write(&tampered, b"abd").unwrap();
+        assert!(verify_model_file(&spec, &tampered).is_err());
+        std::fs::write(&tampered, b"ab").unwrap();
+        assert!(verify_model_file(&spec, &tampered).is_err());
+
+        // Directory is refused.
+        assert!(verify_model_file(&spec, temp.path()).is_err());
     }
 
     /// Pulls the smallest model for real and runs a tone through it. Network

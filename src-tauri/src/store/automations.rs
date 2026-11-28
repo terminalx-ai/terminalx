@@ -11,6 +11,9 @@ use crate::automations::{Automation, AutomationRun, AutomationRunStatus};
 
 /// How many finished runs each automation's log keeps; older ones are dropped.
 pub const RUN_RETENTION: usize = 100;
+/// Hysteresis threshold before compacting `runs.jsonl` back down to
+/// [`RUN_RETENTION`] terminal runs, avoiding a full rewrite+fsync on every run (P-63).
+pub const RUN_COMPACT_THRESHOLD: usize = RUN_RETENTION * 2;
 static RUN_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static DEFINITION_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static SEEN_WRITE_LOCK: Mutex<()> = Mutex::new(());
@@ -206,9 +209,17 @@ pub fn remove_keeping_runs(id: &str, deleted_at: &str) -> Result<()> {
     }
     // A run still going ends here: recovery and the run's own ending read only the duties there are, so nothing
     // would close it after, and the week would draw it running for ever.
-    for mut open in resolve_runs(&runs)?.into_iter().filter(|run| !run.status.is_terminal()) {
-        close_at_deletion(&mut open, deleted_at);
-        append_and_compact_unlocked(&open)?;
+    let mut existing = resolve_runs(&runs)?;
+    let mut closed_any = false;
+    for run in &mut existing {
+        if !run.status.is_terminal() {
+            close_at_deletion(run, deleted_at);
+            super::append_line(&runs, &serde_json::to_string(run)?)?;
+            closed_any = true;
+        }
+    }
+    if closed_any {
+        maybe_compact_unlocked(&runs, existing)?;
     }
     super::write_json(
         &dir.join(DELETED_FILE),
@@ -285,18 +296,28 @@ pub fn append_run(run: &AutomationRun) -> Result<()> {
     let _guard = RUN_WRITE_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    append_and_compact_unlocked(run)
+    let path = runs_path(&run.automation_id)?;
+    let mut latest = resolve_runs(&path)?;
+    super::append_line(&path, &serde_json::to_string(run)?)?;
+    upsert_resolved(&mut latest, run.clone());
+    maybe_compact_unlocked(&path, latest)
 }
 
-fn append_and_compact_unlocked(run: &AutomationRun) -> Result<()> {
-    let path = runs_path(&run.automation_id)?;
-    super::append_line(&path, &serde_json::to_string(run)?)?;
-    let mut latest = resolve_runs(&path)?;
+fn upsert_resolved(latest: &mut Vec<AutomationRun>, run: AutomationRun) {
+    if let Some(existing) = latest.iter_mut().find(|value| value.run_id == run.run_id) {
+        *existing = run;
+    } else {
+        latest.push(run);
+    }
+    latest.sort_by_key(|value| std::cmp::Reverse(value.run_number));
+}
+
+fn maybe_compact_unlocked(path: &std::path::Path, mut latest: Vec<AutomationRun>) -> Result<()> {
     let terminal_count = latest
         .iter()
         .filter(|value| value.status.is_terminal())
         .count();
-    if terminal_count > RUN_RETENTION {
+    if terminal_count > RUN_COMPACT_THRESHOLD {
         let mut kept_terminal = 0;
         latest.retain(|value| {
             if !value.status.is_terminal() {
@@ -312,7 +333,7 @@ fn append_and_compact_unlocked(run: &AutomationRun) -> Result<()> {
             .collect::<std::result::Result<Vec<_>, _>>()?
             .join("\n");
         compacted.push('\n');
-        super::write_atomic(&path, compacted.as_bytes())?;
+        super::write_atomic(path, compacted.as_bytes())?;
     }
     Ok(())
 }
@@ -325,13 +346,17 @@ pub fn insert_run(mut run: AutomationRun) -> Result<AutomationRun> {
     let _guard = RUN_WRITE_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    run.run_number = list_runs(&run.automation_id)?
-        .into_iter()
+    let path = runs_path(&run.automation_id)?;
+    let mut latest = resolve_runs(&path)?;
+    run.run_number = latest
+        .iter()
         .map(|value| value.run_number)
         .max()
         .unwrap_or(0)
         + 1;
-    append_and_compact_unlocked(&run)?;
+    super::append_line(&path, &serde_json::to_string(&run)?)?;
+    upsert_resolved(&mut latest, run.clone());
+    maybe_compact_unlocked(&path, latest)?;
     Ok(run)
 }
 
@@ -343,13 +368,17 @@ pub fn replace_run(
     let _guard = RUN_WRITE_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let mut run = list_runs(automation_id)?
-        .into_iter()
+    let path = runs_path(automation_id)?;
+    let mut latest = resolve_runs(&path)?;
+    let run = latest
+        .iter_mut()
         .find(|run| run.run_id == run_id)
         .ok_or_else(|| anyhow::anyhow!("automation run {run_id} not found"))?;
-    update(&mut run)?;
-    append_and_compact_unlocked(&run)?;
-    Ok(run)
+    update(run)?;
+    let updated = run.clone();
+    super::append_line(&path, &serde_json::to_string(&updated)?)?;
+    maybe_compact_unlocked(&path, latest)?;
+    Ok(updated)
 }
 
 /// Take one run out of the history: a pending run whose first check's result
@@ -514,7 +543,19 @@ mod tests {
         open.run_number = 0;
         append_run(&open).unwrap();
 
-        for number in 1..=102 {
+        // Hysteresis: runs past RUN_RETENTION (100) stay append-only until
+        // RUN_COMPACT_THRESHOLD (200) is exceeded.
+        for number in 1..=(RUN_RETENTION as u64 + 5) {
+            let mut completed = run(AutomationRunStatus::Completed);
+            completed.run_id = format!("run-{number}");
+            completed.run_number = number;
+            append_run(&completed).unwrap();
+        }
+        assert_eq!(list_runs("auto-1").unwrap().len(), RUN_RETENTION + 6);
+
+        // Exceeding RUN_COMPACT_THRESHOLD triggers compaction down to RUN_RETENTION
+        // terminal runs plus every open run.
+        for number in (RUN_RETENTION as u64 + 6)..=(RUN_COMPACT_THRESHOLD as u64 + 1) {
             let mut completed = run(AutomationRunStatus::Completed);
             completed.run_id = format!("run-{number}");
             completed.run_number = number;
@@ -522,7 +563,7 @@ mod tests {
         }
 
         let retained = list_runs("auto-1").unwrap();
-        assert_eq!(retained.len(), 101);
+        assert_eq!(retained.len(), RUN_RETENTION + 1);
         assert!(retained.iter().any(|value| value.run_id == "run-open"));
         assert!(!retained
             .iter()
@@ -532,7 +573,7 @@ mod tests {
                 .unwrap()
                 .lines()
                 .count(),
-            101
+            RUN_RETENTION + 1
         );
     }
 }

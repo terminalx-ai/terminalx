@@ -5,7 +5,8 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    borrow::Cow,
+    collections::{BTreeMap, HashSet},
     fs,
     path::{Component, Path, PathBuf},
     time::Duration,
@@ -130,26 +131,64 @@ pub enum Action {
 }
 
 pub(crate) fn valid_anchor(anchor: &Anchor, note: &str) -> Result<()> {
-    if anchor.base.as_ref().is_some_and(|base| {
+    valid_anchor_parts(
+        &anchor.path,
+        anchor.start_line,
+        anchor.end_line,
+        &anchor.line_text,
+        anchor.base.as_deref(),
+        anchor.original_path.as_deref(),
+        &anchor.context_before,
+        &anchor.context_after,
+        note,
+    )
+}
+
+fn valid_comment(comment: &Comment) -> Result<()> {
+    valid_anchor_parts(
+        &comment.path,
+        comment.start_line,
+        comment.end_line,
+        &comment.line_text,
+        comment.base.as_deref(),
+        comment.original_path.as_deref(),
+        &comment.context_before,
+        &comment.context_after,
+        &comment.note,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn valid_anchor_parts(
+    path: &str,
+    start_line: usize,
+    end_line: usize,
+    line_text: &str,
+    base: Option<&str>,
+    original_path: Option<&str>,
+    context_before: &[String],
+    context_after: &[String],
+    note: &str,
+) -> Result<()> {
+    if base.is_some_and(|base| {
         !(7..=64).contains(&base.len()) || !base.bytes().all(|b| b.is_ascii_hexdigit())
     }) {
         bail!("Invalid review comment base tree");
     }
-    if let Some(original) = &anchor.original_path {
+    if let Some(original) = original_path {
         valid_path(original)?;
     }
-    if anchor.context_before.len() > 3
-        || anchor.context_after.len() > 3
-        || anchor
-            .context_before
+    if context_before.len() > 3
+        || context_after.len() > 3
+        || context_before
             .iter()
-            .chain(&anchor.context_after)
+            .chain(context_after)
             .any(|s| s.contains(['\n', '\r']) || s.len() > 1_000_000)
     {
         bail!("Invalid review comment context");
     }
-    valid_path(&anchor.path)?;
-    valid_range(anchor, note)
+    valid_path(path)?;
+    valid_range_parts(start_line, end_line, line_text, note)
 }
 
 fn valid_path(value: &str) -> Result<()> {
@@ -167,30 +206,43 @@ fn valid_path(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn valid_range(anchor: &Anchor, note: &str) -> Result<()> {
-    if anchor.start_line == 0
-        || anchor.end_line < anchor.start_line
-        || anchor.end_line - anchor.start_line >= 10_000
-        || anchor.line_text.len() > 1_000_000
+fn valid_range_parts(start_line: usize, end_line: usize, line_text: &str, note: &str) -> Result<()> {
+    if start_line == 0
+        || end_line < start_line
+        || end_line - start_line >= 10_000
+        || line_text.len() > 1_000_000
         || note.len() > 100_000
         || note.trim().is_empty()
     {
         bail!("Invalid review comment range or note");
     }
-    if anchor.line_text.split('\n').count() != anchor.end_line - anchor.start_line + 1 {
+    if line_text.split('\n').count() != end_line - start_line + 1 {
         bail!("Quoted lines do not match the review comment range");
     }
     Ok(())
 }
 
+fn normalize_newlines(content: &str) -> Cow<'_, str> {
+    if content.contains('\r') {
+        Cow::Owned(content.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(content)
+    }
+}
+
 /// Relocate only exact text. Context disambiguates duplicates; ambiguity is
 /// unplaced, never evidence that the text disappeared. Keep this in sync with reviewAnchors.ts.
+#[cfg(test)]
 fn locate(comment: &Comment, content: Option<&str>) -> (bool, Option<usize>) {
-    let Some(content) = content else {
+    let normalized = content.map(normalize_newlines);
+    let lines: Option<Vec<&str>> = normalized.as_deref().map(|text| text.split('\n').collect());
+    locate_in_lines(comment, lines.as_deref())
+}
+
+fn locate_in_lines(comment: &Comment, lines: Option<&[&str]>) -> (bool, Option<usize>) {
+    let Some(lines) = lines else {
         return (false, None);
     };
-    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
-    let lines: Vec<_> = normalized.split('\n').collect();
     let quote: Vec<_> = comment.line_text.split('\n').collect();
     // KMP avoids quadratic scans for long selections of repeated lines.
     let mut fallback = vec![0; quote.len()];
@@ -247,12 +299,75 @@ pub fn workspace_key(path: &Path) -> Result<String> {
     Ok(format!("local:{}", path.canonical()?.to_string_lossy()))
 }
 
-fn file(root: &Path, workspace: &str) -> Result<PathBuf> {
+fn workspace_digest(workspace: &str) -> Result<String> {
     if workspace.is_empty() || workspace.len() > 8192 {
         bail!("Invalid review workspace");
     }
+    Ok(format!("{:x}", Sha256::digest(workspace.as_bytes())))
+}
+
+fn file(root: &Path, workspace: &str) -> Result<PathBuf> {
+    let digest = workspace_digest(workspace)?;
     let dir = super::ensure_dir(root.join("review-comments"))?;
-    Ok(dir.join(format!("{:x}.json", Sha256::digest(workspace.as_bytes()))))
+    Ok(dir.join(format!("{digest}.json")))
+}
+
+/// Stable per-workspace lock sidecars kept outside the JSON directory so
+/// workspace deletion removes `{hash}.json` / legacy `{hash}.lock` cleanly
+/// while concurrent readers/writers on different workspaces never block each
+/// other (P-62).
+fn workspace_locks(root: &Path, workspace: &str) -> Result<(PathBuf, PathBuf)> {
+    let digest = workspace_digest(workspace)?;
+    let dir = super::ensure_dir(root.join("review-comments-locks"))?;
+    Ok((
+        dir.join(format!("{digest}.lock")),
+        dir.join(format!("{digest}.admission.lock")),
+    ))
+}
+
+#[derive(Deserialize, Serialize)]
+struct StoredDocumentObject {
+    version: u64,
+    comments: Vec<Comment>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredDocument {
+    Object(StoredDocumentObject),
+    LegacyArray(Vec<Comment>),
+}
+
+fn read_document(path: &Path) -> Result<StoredDocumentObject> {
+    if fs::metadata(path).is_ok_and(|m| m.len() > MAX_STORE_BYTES) {
+        bail!("Review comment store is too large");
+    }
+    let document = match fs::read(path) {
+        Ok(bytes) => {
+            let parsed: StoredDocument =
+                serde_json::from_slice(&bytes).context("Read review comments")?;
+            match parsed {
+                StoredDocument::Object(doc) => doc,
+                StoredDocument::LegacyArray(comments) => StoredDocumentObject {
+                    version: 1,
+                    comments,
+                    extra: BTreeMap::new(),
+                },
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => StoredDocumentObject {
+            version: 1,
+            comments: Vec::new(),
+            extra: BTreeMap::new(),
+        },
+        Err(e) => return Err(e.into()),
+    };
+    for c in &document.comments {
+        valid_comment(c).context("Invalid saved review comment")?;
+    }
+    Ok(document)
 }
 
 const MAX_STORE_BYTES: u64 = 16 * 1024 * 1024;
@@ -294,18 +409,33 @@ fn apply_inner(
     reviewed_commit: Option<&str>,
     saved: &mut Option<(Comment, bool)>,
 ) -> Result<Vec<Comment>> {
-    // A directory-level lock remains stable while individual workspaces are deleted.
-    super::transaction::run(
-        &root.join("review-comments.lock"),
+    let key = match workspace.strip_prefix("local:") {
+        Some(local) => workspace_key(Path::new(local))?,
+        None => workspace.to_owned(),
+    };
+    let path = file(root, &key)?;
+    let legacy = file(root, workspace)?;
+    let (lock_path, admission_path) = workspace_locks(root, &key)?;
+
+    // Fast path for read-only List: shared per-workspace lock (no cross-workspace
+    // serialization, concurrent readers allowed) unless a legacy file needs migration.
+    if matches!(action, Action::List) && (path == legacy || path.exists() || !legacy.exists()) {
+        let _read_guard =
+            super::transaction::read_lock(&lock_path, &admission_path, Duration::from_secs(5))?;
+        return Ok(read_document(&path)?.comments);
+    }
+
+    super::transaction::run_with_readers(
+        &lock_path,
+        &admission_path,
         Duration::from_secs(5),
         || {
-            let key = match workspace.strip_prefix("local:") {
-                Some(local) => workspace_key(Path::new(local))?,
-                None => workspace.to_owned(),
-            };
-            let path = file(root, &key)?;
+            // Re-verify canonical workspace inside the lock so a worktree deleted
+            // while waiting cannot recreate its store.
+            if let Some(local) = workspace.strip_prefix("local:") {
+                let _ = workspace_key(Path::new(local))?;
+            }
             // Migrate pre-canonical desktop keys without losing notes.
-            let legacy = file(root, workspace)?;
             if path != legacy && !path.exists() && legacy.exists() {
                 fs::rename(&legacy, &path)?;
                 match fs::remove_file(legacy.with_extension("lock")) {
@@ -315,42 +445,8 @@ fn apply_inner(
                 }
             }
 
-            if fs::metadata(&path).is_ok_and(|m| m.len() > MAX_STORE_BYTES) {
-                bail!("Review comment store is too large");
-            }
-            let mut document: serde_json::Value = match fs::read(&path) {
-                Ok(bytes) => serde_json::from_slice(&bytes).context("Read review comments")?,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    serde_json::json!({"version": 1, "comments": []})
-                }
-                Err(e) => return Err(e.into()),
-            };
-            if document.is_array() {
-                document = serde_json::json!({"version": 1, "comments": document});
-            }
-            let mut comments: Vec<Comment> = serde_json::from_value(
-                document
-                    .get("comments")
-                    .context("Missing review comments")?
-                    .clone(),
-            )?;
-            for c in &comments {
-                valid_anchor(
-                    &Anchor {
-                        path: c.path.clone(),
-                        side: c.side.clone(),
-                        start_line: c.start_line,
-                        end_line: c.end_line,
-                        line_text: c.line_text.clone(),
-                        base: c.base.clone(),
-                        original_path: c.original_path.clone(),
-                        context_before: c.context_before.clone(),
-                        context_after: c.context_after.clone(),
-                    },
-                    &c.note,
-                )
-                .context("Invalid saved review comment")?;
-            }
+            let mut document = read_document(&path)?;
+            let comments = &mut document.comments;
             let mut changed = true;
             match action {
                 Action::List => changed = false,
@@ -443,12 +539,10 @@ fn apply_inner(
                 }
                 Action::Sent { comments: sent } => {
                     changed = false;
-                    for c in &mut comments {
-                        if !c.sent
-                            && sent
-                                .iter()
-                                .any(|s| s.id == c.id && s.revision == c.revision)
-                        {
+                    let sent_set: HashSet<(&str, u64)> =
+                        sent.iter().map(|s| (s.id.as_str(), s.revision)).collect();
+                    for c in comments.iter_mut() {
+                        if !c.sent && sent_set.contains(&(c.id.as_str(), c.revision)) {
                             c.sent = true;
                             changed = true;
                         }
@@ -462,18 +556,27 @@ fn apply_inner(
                     comments: expected,
                 } => {
                     changed = false;
+                    let expected_set: HashSet<(&str, u64)> = expected
+                        .iter()
+                        .map(|e| (e.id.as_str(), e.revision))
+                        .collect();
+                    // Normalize and split each file side at most once per batch (P-62).
+                    let before_norm = before.as_deref().map(normalize_newlines);
+                    let before_lines: Option<Vec<&str>> =
+                        before_norm.as_deref().map(|text| text.split('\n').collect());
+                    let after_norm = after.as_deref().map(normalize_newlines);
+                    let after_lines: Option<Vec<&str>> =
+                        after_norm.as_deref().map(|text| text.split('\n').collect());
                     for c in comments.iter_mut().filter(|c| {
                         c.path == path
                             && c.base.as_deref() == Some(base.as_str())
-                            && expected
-                                .iter()
-                                .any(|e| e.id == c.id && e.revision == c.revision)
+                            && expected_set.contains(&(c.id.as_str(), c.revision))
                     }) {
-                        let content = match c.side {
-                            Side::Before => before.as_deref(),
-                            Side::After => after.as_deref(),
+                        let lines = match c.side {
+                            Side::Before => before_lines.as_deref(),
+                            Side::After => after_lines.as_deref(),
                         };
-                        let (exists, position) = locate(c, content);
+                        let (exists, position) = locate_in_lines(c, lines);
                         if c.outdated == exists {
                             c.outdated = !exists;
                             changed = true;
@@ -489,7 +592,6 @@ fn apply_inner(
                 }
             }
             if changed {
-                document["comments"] = serde_json::to_value(&comments)?;
                 let bytes = serde_json::to_vec(&document)?;
                 if bytes.len() as u64 > MAX_STORE_BYTES {
                     bail!(
@@ -498,19 +600,22 @@ fn apply_inner(
                 }
                 super::write_atomic(&path, &bytes)?;
             }
-            Ok(comments)
+            Ok(document.comments)
         },
     )
 }
 
-/// Call after a successful worktree removal. The stable directory lock also
+/// Call after a successful worktree removal. The per-workspace lock also
 /// makes concurrent saves fail canonicalization instead of recreating the file.
 pub fn remove_workspace(root: &Path, canonical_path: &Path) -> Result<()> {
-    super::transaction::run(
-        &root.join("review-comments.lock"),
+    let key = format!("local:{}", canonical_path.to_string_lossy());
+    let (lock_path, admission_path) = workspace_locks(root, &key)?;
+    super::transaction::run_with_readers(
+        &lock_path,
+        &admission_path,
         Duration::from_secs(5),
         || {
-            let path = file(root, &format!("local:{}", canonical_path.to_string_lossy()))?;
+            let path = file(root, &key)?;
             for path in [path.clone(), path.with_extension("lock")] {
                 match fs::remove_file(path) {
                     Ok(()) => {}
@@ -797,5 +902,46 @@ mod tests {
         assert!(!path.with_extension("lock").exists());
         assert!(apply(root.path(), &key, save("late", None)).is_err());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn list_uses_shared_per_workspace_lock_and_reconcile_handles_crlf_batch() {
+        let root = tempfile::tempdir().unwrap();
+        let first = apply(root.path(), "ws-a", save("first", None))
+            .unwrap()
+            .remove(0);
+        let second = apply(root.path(), "ws-a", save("second", None))
+            .unwrap()
+            .remove(1);
+        // Holding the shared read lock on ws-a allows concurrent Action::List on ws-a
+        // and does not block writes to ws-b.
+        let (lock_a, adm_a) = workspace_locks(root.path(), "ws-a").unwrap();
+        let _shared =
+            crate::store::transaction::read_lock(&lock_a, &adm_a, Duration::from_secs(1)).unwrap();
+        assert_eq!(apply(root.path(), "ws-a", Action::List).unwrap().len(), 2);
+        assert_eq!(
+            apply(root.path(), "ws-b", save("other ws", None))
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(_shared);
+
+        // Batch reconcile normalizes CRLF once and relocates both comments together.
+        let reconciled = apply(
+            root.path(),
+            "ws-a",
+            Action::Reconcile {
+                path: "src/a.ts".into(),
+                base: "a".repeat(40),
+                before: None,
+                after: Some("header\r\none\r\ntwo\r\nthree\r\n".into()),
+                comments: vec![revision(&first), revision(&second)],
+            },
+        )
+        .unwrap();
+        assert_eq!(reconciled[0].start_line, 3);
+        assert_eq!(reconciled[1].start_line, 3);
+        assert!(!reconciled[0].outdated && !reconciled[1].outdated);
     }
 }

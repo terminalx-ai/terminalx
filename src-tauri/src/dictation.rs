@@ -99,19 +99,234 @@ fn emit_event(app: &AppHandle, event: DictationEvent) {
     let _ = app.emit("dictation", event);
 }
 
-/// System output volume, read and written through AppleScript. Best effort:
-/// a failure here must never stop a dictation.
+/// System output muting via native CoreAudio (`kAudioDevicePropertyMute`),
+/// avoiding blocking `osascript` subprocesses on the macOS main thread (P-35).
+/// Falls back to an off-main-thread serialized `osascript` worker only when
+/// the active output device does not expose a settable CoreAudio mute property.
 #[cfg(target_os = "macos")]
 mod volume {
+    use std::ffi::c_void;
     use std::process::Command;
+    use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
-    pub fn get() -> Option<u8> {
-        let out = Command::new("osascript").args(["-e", "output volume of (get volume settings)"]).output().ok()?;
-        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    #[repr(C)]
+    struct AudioObjectPropertyAddress {
+        m_selector: u32,
+        m_scope: u32,
+        m_element: u32,
     }
 
-    pub fn set(level: u8) {
-        let _ = Command::new("osascript").args(["-e", &format!("set volume output volume {level}")]).output();
+    const AUDIO_OBJECT_SYSTEM: u32 = 1;
+    const PROP_DEFAULT_OUTPUT_DEVICE: u32 = u32::from_be_bytes(*b"dOut");
+    const PROP_MUTE: u32 = u32::from_be_bytes(*b"mute");
+    const SCOPE_GLOBAL: u32 = u32::from_be_bytes(*b"glob");
+    const SCOPE_OUTPUT: u32 = u32::from_be_bytes(*b"outp");
+    const ELEMENT_MAIN: u32 = 0;
+
+    #[link(name = "CoreAudio", kind = "framework")]
+    extern "C" {
+        fn AudioObjectHasProperty(
+            in_object_id: u32,
+            in_address: *const AudioObjectPropertyAddress,
+        ) -> u8;
+        fn AudioObjectIsPropertySettable(
+            in_object_id: u32,
+            in_address: *const AudioObjectPropertyAddress,
+            out_is_settable: *mut u8,
+        ) -> i32;
+        fn AudioObjectGetPropertyData(
+            in_object_id: u32,
+            in_address: *const AudioObjectPropertyAddress,
+            in_qualifier_data_size: u32,
+            in_qualifier_data: *const c_void,
+            io_data_size: *mut u32,
+            out_data: *mut c_void,
+        ) -> i32;
+        fn AudioObjectSetPropertyData(
+            in_object_id: u32,
+            in_address: *const AudioObjectPropertyAddress,
+            in_qualifier_data_size: u32,
+            in_qualifier_data: *const c_void,
+            in_data_size: u32,
+            in_data: *const c_void,
+        ) -> i32;
+    }
+
+    pub enum Restore {
+        CoreAudio { device: u32, element: u32, was_muted: u32 },
+        Osascript(Arc<Mutex<Option<u8>>>),
+    }
+
+    enum WorkerOp {
+        Mute(Arc<Mutex<Option<u8>>>),
+        Restore(Arc<Mutex<Option<u8>>>),
+    }
+
+    fn worker() -> &'static Mutex<mpsc::Sender<WorkerOp>> {
+        static WORKER: OnceLock<Mutex<mpsc::Sender<WorkerOp>>> = OnceLock::new();
+        WORKER.get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<WorkerOp>();
+            let _ = std::thread::Builder::new()
+                .name("dictation-volume".into())
+                .spawn(move || {
+                    for op in rx {
+                        match op {
+                            WorkerOp::Mute(slot) => {
+                                let level = Command::new("osascript")
+                                    .args(["-e", "output volume of (get volume settings)"])
+                                    .output()
+                                    .ok()
+                                    .and_then(|out| {
+                                        String::from_utf8_lossy(&out.stdout).trim().parse::<u8>().ok()
+                                    });
+                                if let Some(l) = level {
+                                    let _ = Command::new("osascript")
+                                        .args(["-e", "set volume output volume 0"])
+                                        .output();
+                                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
+                                }
+                            }
+                            WorkerOp::Restore(slot) => {
+                                let level = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                                if let Some(l) = level {
+                                    let _ = Command::new("osascript")
+                                        .args(["-e", &format!("set volume output volume {l}")])
+                                        .output();
+                                }
+                            }
+                        }
+                    }
+                });
+            Mutex::new(tx)
+        })
+    }
+
+    fn default_output_device() -> Option<u32> {
+        let addr = AudioObjectPropertyAddress {
+            m_selector: PROP_DEFAULT_OUTPUT_DEVICE,
+            m_scope: SCOPE_GLOBAL,
+            m_element: ELEMENT_MAIN,
+        };
+        let mut device: u32 = 0;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        // SAFETY: `addr`, `size`, and `device` point to valid aligned stack memory.
+        let status = unsafe {
+            AudioObjectGetPropertyData(
+                AUDIO_OBJECT_SYSTEM,
+                &addr,
+                0,
+                std::ptr::null(),
+                &mut size,
+                (&mut device as *mut u32).cast(),
+            )
+        };
+        (status == 0 && device != 0).then_some(device)
+    }
+
+    fn try_coreaudio_mute() -> Option<Option<Restore>> {
+        let device = default_output_device()?;
+        for element in [ELEMENT_MAIN, 1] {
+            let addr = AudioObjectPropertyAddress {
+                m_selector: PROP_MUTE,
+                m_scope: SCOPE_OUTPUT,
+                m_element: element,
+            };
+            // SAFETY: Valid address struct and device ID returned by CoreAudio.
+            if unsafe { AudioObjectHasProperty(device, &addr) } == 0 {
+                continue;
+            }
+            let mut settable: u8 = 0;
+            // SAFETY: Valid pointers for out_is_settable.
+            if unsafe { AudioObjectIsPropertySettable(device, &addr, &mut settable) } != 0
+                || settable == 0
+            {
+                continue;
+            }
+            let mut muted: u32 = 0;
+            let mut size = std::mem::size_of::<u32>() as u32;
+            // SAFETY: Valid pointers for reading u32 mute state.
+            if unsafe {
+                AudioObjectGetPropertyData(
+                    device,
+                    &addr,
+                    0,
+                    std::ptr::null(),
+                    &mut size,
+                    (&mut muted as *mut u32).cast(),
+                )
+            } != 0
+            {
+                continue;
+            }
+            if muted != 0 {
+                // Already muted: nothing to change or restore.
+                return Some(None);
+            }
+            let one: u32 = 1;
+            // SAFETY: Valid pointers for writing u32 mute state.
+            if unsafe {
+                AudioObjectSetPropertyData(
+                    device,
+                    &addr,
+                    0,
+                    std::ptr::null(),
+                    std::mem::size_of::<u32>() as u32,
+                    (&one as *const u32).cast(),
+                )
+            } == 0
+            {
+                return Some(Some(Restore::CoreAudio {
+                    device,
+                    element,
+                    was_muted: muted,
+                }));
+            }
+        }
+        None
+    }
+
+    pub fn mute() -> Option<Restore> {
+        if let Some(handled) = try_coreaudio_mute() {
+            return handled;
+        }
+        // Fallback: dispatch off the main thread so UI/IPC never blocks on osascript.
+        let slot = Arc::new(Mutex::new(None));
+        if let Ok(tx) = worker().lock() {
+            let _ = tx.send(WorkerOp::Mute(Arc::clone(&slot)));
+        }
+        Some(Restore::Osascript(slot))
+    }
+
+    pub fn restore(target: Restore) {
+        match target {
+            Restore::CoreAudio {
+                device,
+                element,
+                was_muted,
+            } => {
+                let addr = AudioObjectPropertyAddress {
+                    m_selector: PROP_MUTE,
+                    m_scope: SCOPE_OUTPUT,
+                    m_element: element,
+                };
+                // SAFETY: Valid pointers for restoring u32 mute state on the same device.
+                let _ = unsafe {
+                    AudioObjectSetPropertyData(
+                        device,
+                        &addr,
+                        0,
+                        std::ptr::null(),
+                        std::mem::size_of::<u32>() as u32,
+                        (&was_muted as *const u32).cast(),
+                    )
+                };
+            }
+            Restore::Osascript(slot) => {
+                if let Ok(tx) = worker().lock() {
+                    let _ = tx.send(WorkerOp::Restore(slot));
+                }
+            }
+        }
     }
 }
 
@@ -507,13 +722,13 @@ mod mac {
         capture: audio::Capture,
         frames: Receiver<Vec<f32>>,
         opening: audio::Opening,
-        restore_volume: Option<u8>,
+        restore_volume: Option<volume::Restore>,
     }
 
     pub struct Active {
         capture: Option<audio::Capture>,
         route: Route,
-        restore_volume: Option<u8>,
+        restore_volume: Option<volume::Restore>,
     }
     // Apple's handles are only touched on the main thread; the mutex in
     // `Dictation` just moves the bundle between commands.
@@ -655,9 +870,7 @@ mod mac {
         fn open_capture(&self) -> Result<Opened, String> {
             let settings = crate::store::settings::load();
             let restore = if settings.transcription_mute {
-                let level = volume::get();
-                volume::set(0);
-                level
+                volume::mute()
             } else {
                 None
             };
@@ -665,8 +878,8 @@ mod mac {
             match audio::Capture::start(settings.transcription_input_device.clone(), tx) {
                 Ok((capture, opening)) => Ok(Opened { capture, frames: rx, opening, restore_volume: restore }),
                 Err(e) => {
-                    if let Some(l) = restore {
-                        volume::set(l);
+                    if let Some(target) = restore {
+                        volume::restore(target);
                     }
                     Err(format!("{e:#}"))
                 }
@@ -698,6 +911,13 @@ mod mac {
             if *closing { return Err("Dictation is shutting down.".into()); }
             let spec = crate::transcription::catalog::find(id).ok_or_else(|| format!("unknown model {id}"))?;
             let path = crate::transcription::download::model_path(spec).map_err(|e| e.to_string())?;
+            // Reject symlinks or non-regular files early before opening the mic;
+            // full O_NOFOLLOW + pinned SHA-256 verification runs on the worker thread (S-34).
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) if meta.is_file() && meta.len() == spec.size_bytes => {}
+                Ok(_) => return Err("The speech model file is invalid. Re-download it under Settings → Transcription.".into()),
+                Err(err) => return Err(format!("The speech model could not be read: {err}")),
+            }
             // Open first: what is said while the model loads is kept in the
             // frame channel and fed to it as soon as it is ready.
             let Opened { capture, frames, opening, restore_volume } = self.open_capture()?;
@@ -1059,8 +1279,8 @@ mod mac {
                         task.cancel();
                     }
                 }
-                if let Some(level) = active.restore_volume.take() {
-                    volume::set(level);
+                if let Some(target) = active.restore_volume.take() {
+                    volume::restore(target);
                 }
                 drop(active);
             }
@@ -1127,8 +1347,8 @@ mod mac {
             };
             if let Some(mut a) = taken {
                 self.clear_personalization();
-                if let Some(level) = a.restore_volume.take() {
-                    volume::set(level);
+                if let Some(target) = a.restore_volume.take() {
+                    volume::restore(target);
                 }
                 // A recogniser that finishes a stopped dictation with no words,
                 // over audio that never held a single non-zero sample, was
