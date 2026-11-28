@@ -141,16 +141,29 @@ export function noAccessMessage(names: readonly string[], workspace: string): st
 const QUOTE_MAX = 140;
 
 /**
- * The quoted text of a mentioned message, read from a transcript this device
- * has decrypted itself. Null when the message is not here yet.
+ * The mentioned message, as this device's transcript has it: `missing` while
+ * it has not arrived, `other` when it is not that person's message.
  */
-export function mentionQuote(events: readonly AgentEvent[], messageId: string): string | null {
+export function mentionMessage(events: readonly AgentEvent[], messageId: string, actorId: string): "missing" | "other" | AgentEvent {
   for (let index = events.length - 1; index >= 0; index--) {
     const event = events[index];
     if (event.id !== messageId || event.payload.type !== "user_message") continue;
-    const text = event.payload.text.replace(/\s+/g, " ").trim();
-    if (!text) return null;
-    return text.length > QUOTE_MAX ? `${text.slice(0, QUOTE_MAX - 1).trimEnd()}…` : text;
+    // The server takes the message id from the sender as given: only a message
+    // the transcript says that person wrote may be quoted as theirs.
+    return event.payload.author?.userId === actorId ? event : "other";
   }
-  return null;
+  return "missing";
+}
+
+/**
+ * The quoted text of a mentioned message, read from a transcript this device
+ * has decrypted itself. Null when the message is not here yet, or was written
+ * by someone other than the person who mentioned (`actorId`).
+ */
+export function mentionQuote(events: readonly AgentEvent[], messageId: string, actorId: string): string | null {
+  const event = mentionMessage(events, messageId, actorId);
+  if (typeof event === "string" || event.payload.type !== "user_message") return null;
+  const text = event.payload.text.replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  return text.length > QUOTE_MAX ? `${text.slice(0, QUOTE_MAX - 1).trimEnd()}…` : text;
 }

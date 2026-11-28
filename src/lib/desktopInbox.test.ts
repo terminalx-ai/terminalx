@@ -512,7 +512,8 @@ describe("mentions (PRO-141)", () => {
     expect(f.api.cloudWorkspaces).toHaveBeenCalledWith("org");
     expect(f.invalidate).toHaveBeenCalledWith("workspace", "org");
     expect(mentionMarked(rowKey)).toBe(true);
-    expect(f.quote).toHaveBeenCalledWith({ organizationId: "org", workspaceId: "workspace", sessionId: "sess-1", tabId: "tab-1", messageId: "msg-1" });
+    // The mention's sender goes with it: only their own message may be quoted.
+    expect(f.quote).toHaveBeenCalledWith({ organizationId: "org", workspaceId: "workspace", sessionId: "sess-1", tabId: "tab-1", messageId: "msg-1", actorId: "actor" });
     expect(getMentionNotices()).toMatchObject([{ id: "21", actorName: "Aisha Khan", workspaceName: "Visible", quote: "can you check the widths?", tabId: "tab-1" }]);
     expect(f.notifyMention).toHaveBeenCalledExactlyOnceWith("Aisha Khan", "Visible", expect.any(Function));
     expect(f.notify).not.toHaveBeenCalled();

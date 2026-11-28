@@ -89,6 +89,93 @@ is refused locally with `cloud_organization_unavailable`.
 ChatGPT" are the lasting ways to connect a subscription; lending this Mac's
 sign-in is the secondary, temporary one. Cursor connects with an API key.
 
+## Amazon Bedrock for Claude Code (PRO-200)
+
+Behind the readiness key `cloud.agent-logins.bedrock.v1` (off by default,
+per organization, the account service and the desktop agreeing), Claude
+Code's row offers **Amazon Bedrock**: the organization's Claude Code login
+becomes its AWS account. It is organization-wide and takes precedence over
+members' own Claude Code routes (owner decision, 2026-11-26): the service
+delivers it to every workspace instead of a creator's personal route.
+
+- The form (design 12.22) holds what is not a secret: AWS access keys or a
+  Bedrock API key, the access key ID, the region and a test model (Claude
+  Opus/Sonnet/Haiku 5.5 as the region's cross-region inference profile,
+  `eu.anthropic.claude-opus-5-5`, or any model or profile ID). The secret
+  access key or Bedrock API key is asked for by the app in a native secure
+  dialog on **Test and save**, as every other login (`cloud_agent_bedrock_connect`).
+- The account service sends Bedrock one short Converse call with it and
+  stores it only if Bedrock answers. A refusal answers
+  `cloud_agent_bedrock_test_failed` with Bedrock's own error type and
+  message, which the form shows (design 12.23) with Copy error and Open AWS
+  console. Nothing is saved.
+- In the workspace the grant (`mode: bedrock`) sets `CLAUDE_CODE_USE_BEDROCK=1`,
+  `AWS_REGION`, `ANTHROPIC_MODEL` and the keys (`AWS_ACCESS_KEY_ID` and
+  `AWS_SECRET_ACCESS_KEY`, or `AWS_BEARER_TOKEN_BEDROCK`), unsets every other
+  Anthropic or AWS sign-in variable and every other provider's endpoint, and
+  starts the tab on the tested model.
+- The launch's `--settings` pins every non-secret value, and the process
+  environment carries the same values. Claude Code writes each settings `env`
+  entry into its process environment, replacing the inherited value, and
+  `--settings` ranks above a checkout's `.claude/settings.local.json` and
+  `.claude/settings.json` (only managed settings rank higher). So the pins win
+  over both. Pinned:
+  - Bedrock on, every other provider switch (`CLAUDE_CODE_USE_VERTEX`,
+    `_FOUNDRY`, `_MANTLE`, `_ANTHROPIC_AWS`, `_ANTHROPIC_GOOGLE_CLOUD`) off,
+    every `CLAUDE_CODE_SKIP_*_AUTH` off;
+  - `AWS_REGION`, `AWS_DEFAULT_REGION` and the small/fast model's region;
+  - `ANTHROPIC_BEDROCK_BASE_URL` and `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` at
+    `https://bedrock-runtime.<region>.amazonaws.com`,
+    `AWS_ENDPOINT_URL_BEDROCK` at `https://bedrock.<region>.amazonaws.com`,
+    `AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true` and `AWS_ENDPOINT_URL` empty;
+  - `ANTHROPIC_BASE_URL` at `https://api.anthropic.com`;
+  - `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` at the null device,
+    so no profile, role or `credential_process` is read;
+  - `AWS_PROFILE` and `AWS_DEFAULT_PROFILE` empty. Not `default`: with
+    `AWS_PROFILE` set at all, the AWS SDK skips the keys in the environment;
+  - `AWS_SESSION_TOKEN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ROLE_ARN`,
+    `AWS_ROLE_SESSION_NAME` and the `AWS_CONTAINER_*` credential variables
+    empty, and `AWS_EC2_METADATA_DISABLED=true`.
+
+  A checkout therefore cannot point Bedrock at another host, send its
+  requests unsigned, or have them signed from another profile or role.
+- Known limits. The keys themselves are not pinned in `--settings`, which
+  would put the secret on the command line, so a checkout's settings could
+  set `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (or
+  `awsCredentialExport`) of another AWS account. Requests still go only to
+  the region's AWS Bedrock endpoint, but on that account. Proxy and CA
+  variables are not pinned either. Code the agent runs in the workspace can
+  read its environment, keys included, so a checkout the agent runs is
+  trusted with the key anyway.
+- AWS China regions (`cn-*`) are refused: their hosts end in
+  `amazonaws.com.cn`, and the account service tests a login only on
+  `amazonaws.com`. A China-region grant is refused with "Amazon Bedrock in
+  the AWS China regions is not supported". GovCloud (`us-gov-*`) uses
+  `amazonaws.com` and is accepted.
+- Every member's workspace receives the long-lived AWS keys (or Bedrock API
+  key) in its agent's environment, where anyone who can drive the workspace
+  can read them. The form says so and recommends an IAM user limited to
+  `bedrock:InvokeModel*`. Role or temporary credentials (a session token)
+  are not supported.
+- **Disconnect** asks "Disconnect Amazon Bedrock?" (design 12.19).
+
+## Usage-limit card (PRO-200)
+
+Behind `cloud.agent-logins.usage-limit-card.v1`: a cloud tab whose agent hit
+its provider's usage limit on the organization's login shows "<Agent> usage
+limit reached" in the recovery card (design 17.13). Only then: the runtime
+says per tab which login its agent started with (`login: "organization" |
+"route"` in the tab's info); a tab on the creator's own route, or a runtime
+that does not say, keeps the usual card.
+
+It says the organization's login ran out (whose, when the reader may list
+the logins; a Bedrock login is named by the organization, since its name is
+a region), **Copy request** puts a ready message for an admin on the
+clipboard, and **Switch to <other agent>** opens the continuation dialog on
+Codex (from Claude Code) or Claude Code. The card's usual actions stay:
+another account, another model, **Continue here** once the limit has reset
+(the time is dropped from the text then), Stop, and Continue in new session.
+
 ## A login the provider no longer accepts (#667)
 
 The service marks a stored login whose provider refuses it (a revoked or

@@ -440,6 +440,10 @@ pub(crate) const PHASE2_SHARED_SETUPS: &str = "team.shared-setups.v1";
 pub(crate) const PHASE2_MCP_SERVERS: &str = "organization.mcp-servers.v1";
 pub(crate) const PHASE2_DESKTOP_BILLING: &str = "organization.desktop-billing.v1";
 pub(crate) const PHASE2_WORKSPACE_SSH: &str = "cloud.workspaces.ssh.v1";
+/// Amazon Bedrock as an organization's Claude Code login (PRO-200).
+pub(crate) const PHASE2_AGENT_LOGIN_BEDROCK: &str = "cloud.agent-logins.bedrock.v1";
+/// The usage-limit card over a cloud tab on an organization's login (PRO-200).
+pub(crate) const PHASE2_AGENT_USAGE_LIMIT_CARD: &str = "cloud.agent-logins.usage-limit-card.v1";
 /// The workspace switch for agents using Chrome on the cloud desktop (PRO-209).
 pub(crate) const PHASE2_AGENT_BROWSER: &str = "cloud.desktop.agent-browser.v1";
 /// Team artifacts and templates (PRO-158).
@@ -450,7 +454,9 @@ pub(crate) const PHASE2_ORGANIZATION_ROUTES: &str = "cloud.agent-routes.organiza
 pub(crate) const PHASE2_INVITES_WELCOME: &str = "organization.invites-welcome.v1";
 /// PRO-241: the sidebar's announcement card.
 pub(crate) const PHASE2_ANNOUNCEMENTS: &str = "desktop.announcements.v1";
-const PHASE2_FEATURES: [&str; 32] = [
+const PHASE2_FEATURES: [&str; 34] = [
+    PHASE2_AGENT_LOGIN_BEDROCK,
+    PHASE2_AGENT_USAGE_LIMIT_CARD,
     PHASE2_ORGANIZATION_ROUTES,
     PHASE2_TEAMS_PLAN,
     PHASE2_TEAM_ARTIFACTS,

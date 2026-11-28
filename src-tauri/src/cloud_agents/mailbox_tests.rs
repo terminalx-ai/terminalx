@@ -55,6 +55,7 @@ impl AgentOps for FakeOps {
             follow_ups: Vec::new(),
             lease: None,
             sign_in: None,
+            login: None,
             last_seq: 0,
             created: String::new(),
             modified: String::new(),

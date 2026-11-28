@@ -8,6 +8,8 @@ import { modelOptionText } from "@/lib/models";
 import { formatResetCountdown, useCountdownNow } from "@/lib/statusTime";
 import { inputOf, type ActionInput } from "@/lib/recoveryReports";
 import type { AgentAccount } from "@/lib/agentAccounts";
+import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
+import { OrgLimitActions, orgLimitHint, usageLimitCardText, type OrgLimit } from "./OrgUsageLimitCard";
 
 /** The plan window a refused request ran out of, and when it refills. */
 export type UsageLimit = { status?: string; resetsAt?: number; window?: string };
@@ -23,7 +25,7 @@ export function usageLimitText(limit: UsageLimit, now: number): string | null {
   return `${name} · resets ${when}${countdown === "now" ? " (now)" : countdown ? ` (in ${countdown})` : ""}`;
 }
 
-export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, native = false, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSendContinue, onSignIn, signInPending = false, onResend, onPressed, accounts = null }: {
+export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, native = false, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSendContinue, onSignIn, signInPending = false, onResend, onPressed, accounts = null, orgLimit = null }: {
   /** Above the composer in the chat, or across the top of a terminal. */
   placement?: "top" | "composer";
   kind: RecoveryKind | null;
@@ -63,6 +65,12 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
    * "Continue with <label>", the person's click; none with one account.
    */
   accounts?: { choices: AgentAccount[]; switching: string | null; error?: string | null; onSwitch: (account: AgentAccount) => void } | null;
+  /**
+   * The usage limit is the organization's agent login's (PRO-200, design
+   * 17.13): an admin has to act. The card says so, with "Switch to <other
+   * agent>" and "Copy request" ahead of its usual actions.
+   */
+  orgLimit?: OrgLimit | null;
 }) {
   // A button pressed with a key fires a click with no count; a choice made in the model list is not told how.
   const pressed = (run: () => void) => (event: { detail?: number }) => {
@@ -74,6 +82,15 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   const reset = kind === "usage_limit" && limit ? usageLimitText(limit, now) : null;
   const limitReset = kind === "usage_limit" && limit?.resetsAt != null && limit.resetsAt <= now;
   const offer = recoveryOffer(kind, { asks: asks.length, limitReset, canResend: !!onResend, canSendContinue: !!onSendContinue, canSignIn: !!onSignIn, native });
+  const org = kind === "usage_limit" && orgLimit ? orgLimit : null;
+  const orgText = org ? usageLimitCardText({
+    agent: cloudAgentLabel(org.harness),
+    organization: org.organization,
+    // Past the reset there is no "until": the limit has reset, and Retry is offered.
+    resetsAt: limit?.resetsAt != null && limit.resetsAt > now ? limit.resetsAt : null,
+    who: org.who,
+  }) : null;
+  const orgHint = org ? orgLimitHint(org) : null;
   // Only a request to answer: the request's own card says it all, with stopping in its action bar.
   if (!kind && asks.length) {
     const stop = <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={pressed(onStop)}>Stop session</Button>;
@@ -94,14 +111,15 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
     <section aria-label="Session recovery" role="status" className={placement === "composer"
       ? "max-h-[50vh] overflow-auto rounded-xl border border-warning/30 bg-[color-mix(in_oklab,var(--color-warning)_10%,var(--color-chat))] p-3 text-xs shadow-surface"
       : "max-h-[50vh] shrink-0 overflow-auto border-b border-warning/30 bg-warning/10 p-3 text-xs"}>
-    <p className="font-medium">{offer.title}</p>
-    <p className="mt-1">{signInPending && kind === "signed_out" ? "Finish signing in in the terminal. After sign-in is verified, the interrupted turn will retry once." : offer.message}</p>
-    {reset && <p className="mt-1 text-muted-foreground" data-testid="usage-limit-reset">{reset}</p>}
+    <p className="font-medium">{orgText?.title ?? offer.title}</p>
+    <p className="mt-1" data-testid={org ? "org-usage-limit" : undefined}>{orgText ? orgText.body : signInPending && kind === "signed_out" ? "Finish signing in in the terminal. After sign-in is verified, the interrupted turn will retry once." : offer.message}</p>
+    {reset && !org && <p className="mt-1 text-muted-foreground" data-testid="usage-limit-reset">{reset}</p>}
     {accounts?.error && (kind === "usage_limit" || kind === "signed_out") && <p className="mt-1 text-warning" data-testid="account-switch-error">{accounts.error}</p>}
     {asks.map(ask => <div key={ask.requestId} className="mt-2">{ask.kind === "permission"
       ? <PermissionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={option => onPermission(ask.requestId, option)} />
       : <QuestionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} onAnswer={answers => onQuestions(ask.requestId, answers)} />}</div>)}
     <div className="mt-2 flex flex-wrap gap-2">
+      {org && orgText && <OrgLimitActions limit={org} request={orgText.request} busy={busy} />}
       {(kind === "usage_limit" || kind === "signed_out") && accounts?.choices.map(account => (
         <Button key={account.id} size="sm" disabled={busy || !!accounts.switching} data-testid="continue-with-account"
           title={`Restart the agent on ${account.label} and resume this conversation`} onClick={pressed(() => accounts.onSwitch(account))}>
@@ -119,6 +137,7 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
       <Button size="sm" variant="outline" disabled={busy} onClick={pressed(onStop)}>Stop session</Button>
       {offer.continueInNewSession && <Button size="sm" variant="ghost" disabled={busy} onClick={pressed(onContinue)}>Continue in new session</Button>}
     </div>
+    {orgHint && <p className="mt-1.5 text-muted-foreground">{orgHint}</p>}
   </section>
   );
   // The space under it is the wrapper's, on the chat's colour: a margin there was a gap the transcript showed through.

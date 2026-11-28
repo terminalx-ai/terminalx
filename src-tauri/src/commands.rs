@@ -907,6 +907,58 @@ pub async fn cloud_agent_login_connect(
         .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Mutation))?
 }
 
+/// Store Amazon Bedrock as Claude Code's login for the organization's cloud
+/// workspaces (PRO-200). The page sends the region, test model, sign-in
+/// way and the access key ID; the secret access key or Bedrock API key is
+/// asked for here, in a native secure dialog, after consent and the
+/// owner-or-admin check. The account service tests it with Bedrock before
+/// storing it, and a refusal comes back with Bedrock's own error.
+#[tauri::command]
+pub async fn cloud_agent_bedrock_connect(
+    app: AppHandle,
+    settings: crate::cloud_workspaces::BedrockSettings,
+    consent: crate::cloud_workspaces::AgentLoginConsent,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::AgentLogin, crate::cloud_workspaces::BedrockConnectError> {
+    use crate::cloud_workspaces::{AgentLoginKind, AgentLoginProvider, BedrockAuth, CloudWorkspaceClientError, RequestRisk};
+    if !settings.valid() {
+        return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false).into());
+    }
+    static GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = GUARD.try_lock().map_err(|_| CloudWorkspaceClientError::local("cloud_provider_operation_in_progress", true))?;
+    let service = state.cloud_workspaces.clone();
+    let authorization = tauri::async_runtime::spawn_blocking(move || service.authorize_agent_login(AgentLoginProvider::Claude, &consent))
+        .await
+        .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Read))??;
+    // Off until the account service says this organization takes Bedrock logins.
+    if !state.account.phase2_ready(crate::account::PHASE2_AGENT_LOGIN_BEDROCK, Some(authorization.organization_id()), None) {
+        return Err(CloudWorkspaceClientError::local("cloud_agent_bedrock_unavailable", false).into());
+    }
+    let organization = dialog_name(state.account.organization_name(authorization.organization_id()), authorization.organization_id());
+    let unavailable = || CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false);
+    let (title, field, what) = match settings.auth {
+        BedrockAuth::AwsKeys => ("AWS secret access key", "Secret access key", format!("the secret access key for {}", settings.access_key_id.as_deref().unwrap_or_default())),
+        BedrockAuth::ApiKey => ("Bedrock API key", "Bedrock API key", "the Amazon Bedrock API key".to_owned()),
+    };
+    let text = format!(
+        "{}Enter {what} that Claude Code in organization {organization} uses for Amazon Bedrock in {}. The account service sends Bedrock one short test message with it, then stores it encrypted; it is not shown again. {}",
+        replacement_notice("Claude Code", &organization, authorization.replaces()),
+        settings.region,
+        authorization.reach(AgentLoginKind::Bedrock).sentence()
+    );
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let _ = sender.send(secure_prompt(title, &text, field));
+    })
+    .map_err(|_| unavailable())?;
+    let entered = tauri::async_runtime::spawn_blocking(move || receiver.recv()).await.map_err(|_| unavailable())?.map_err(|_| unavailable())?;
+    let secret = entered.map_err(ProviderPromptError::client_error)?;
+    let service = state.cloud_workspaces.clone();
+    tauri::async_runtime::spawn_blocking(move || service.save_bedrock_login(authorization, &settings, secret))
+        .await
+        .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Mutation))?
+}
+
 /// What the native dialog for the sign-in's code says: what it finishes,
 /// what is replaced, and who the login reaches (a default for a new login,
 /// the stored scope for one that is replaced).
@@ -926,6 +978,7 @@ fn replacement_notice(agent: &str, organization: &str, replaces: Option<crate::c
     match replaces {
         Some(AgentLoginKind::ApiKey) => format!("THIS REPLACES the API key now stored for {agent} in {organization}.\n\n"),
         Some(AgentLoginKind::LoginDocument) => format!("THIS REPLACES the login now stored for {agent} in {organization}.\n\n"),
+        Some(AgentLoginKind::Bedrock) => format!("THIS REPLACES the Amazon Bedrock login now stored for {agent} in {organization}.\n\n"),
         None => String::new(),
     }
 }
@@ -994,6 +1047,9 @@ fn local_login_confirmation(
         ),
         Some(AgentLoginKind::LoginDocument) => format!(
             "THIS REPLACES the login now stored for {agent} in {organization}. When the lent sign-in expires, {agent} agents in every workspace of the organization stop until a login is connected again.\n\n"
+        ),
+        Some(AgentLoginKind::Bedrock) => format!(
+            "THIS REPLACES the Amazon Bedrock login now stored for {agent} in {organization}. When the lent sign-in expires, {agent} agents in every workspace of the organization stop until a login is connected again.\n\n"
         ),
         None => String::new(),
     };

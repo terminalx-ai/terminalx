@@ -29,7 +29,7 @@
   // last message was: since PRO-180 a chat without one is "Not started".
   const session = { id: SESSION, projectPath: "/w", cwd: "/w", title, branch: f.branch ?? null, created: at, modified: at, lastMessageAt: at, archived: false, pinned: !!f.pinned, tabs: [tab], activeTab: TAB };
   const capabilities = ["pty/1", ...(f.sessionTerminals === false ? [] : ["pty/2"]), "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "collab/1", ...(f.agentTerminal ? ["agent-pty/1"] : [])];
-  // `f.transfer`: the runtime offers Move to this Mac (PRO-217) and answers its preview.
+  // `f.transfer`: the runtime offers Move to this Mac (PRO-217) and answers its preview; `f.uncommittedFiles` is what it says stays behind.
   if (f.transfer) capabilities.push("workspace-transfer/3");
   if (f.manualStatus) {
     session.manualStatus = f.manualStatus;
@@ -135,7 +135,7 @@
       }
       case "transfer.preview":
         return f.transfer ? ok({ branch: "raccoon/org-event-channel", commit: "a".repeat(40), commits: 2, hasRemoteBase: false,
-          uncommittedFiles: 0, messages: 214, harness: "claude", title }) : { id: frame.id, ok: false, error: { code: "method_not_found", message: frame.method } };
+          uncommittedFiles: f.uncommittedFiles ?? 0, messages: 214, harness: "claude", title }) : { id: frame.id, ok: false, error: { code: "method_not_found", message: frame.method } };
       case "git.repositories":
         return ok({ repositories: [] });
       case "fs.list":

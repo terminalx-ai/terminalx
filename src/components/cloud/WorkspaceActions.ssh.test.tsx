@@ -11,6 +11,7 @@ const m = vi.hoisted(() => ({
   remove: vi.fn(),
   copy: vi.fn(),
   openEditor: vi.fn(),
+  editorState: null as null | { phase: string },
 }));
 vi.mock("@/lib/account", () => ({ useAccount: () => ({ status: {
   state: "signed-in", phase2Readiness: { org: m.ready ? ["cloud.workspaces.ssh.v1"] : [] },
@@ -32,14 +33,19 @@ vi.mock("@/lib/cloudSchedules", () => ({ useSchedulesOffer: () => "held" }));
 vi.mock("@/components/cloud/CloudSchedulesDialog", () => ({ openSchedulesDialog: vi.fn() }));
 vi.mock("@/components/cloud/CloudShareDialog", () => ({ openShareDialog: vi.fn() }));
 vi.mock("@/lib/cloudSsh", () => ({
-  setupWorkspaceSsh: m.setup, removeWorkspaceSsh: m.remove, openWorkspaceInEditor: m.openEditor,
+  setupWorkspaceSsh: m.setup, removeWorkspaceSsh: m.remove,
   SSH_EDITORS: [{ id: "vscode", label: "VS Code" }, { id: "cursor", label: "Cursor" }, { id: "zed", label: "Zed" }],
+}));
+vi.mock("@/components/cloud/CloudEditorOpen", () => ({
+  openEditorDialog: m.openEditor,
+  useEditorOpen: () => m.editorState,
+  EditorButtonNote: ({ editor }: { editor: string }) => (editor === "zed" ? null : <span>Experimental</span>),
 }));
 vi.mock("@/lib/clipboard", () => ({ copyText: m.copy }));
 vi.mock("@/lib/platform", async (original) => ({ ...(await original<typeof import("@/lib/platform")>()), isWindows: false }));
 vi.mock("@/components/ui/menu", () => ({
-  DropdownMenuItem: ({ children, onSelect }: { children: React.ReactNode; onSelect?: () => void }) =>
-    <button onClick={onSelect}>{children}</button>,
+  DropdownMenuItem: ({ children, onSelect, disabled }: { children: React.ReactNode; onSelect?: () => void; disabled?: boolean }) =>
+    <button disabled={disabled} onClick={onSelect}>{children}</button>,
   DropdownMenuSeparator: () => <hr />,
 }));
 
@@ -58,6 +64,7 @@ beforeEach(() => {
   m.rows = [item];
   m.setup.mockResolvedValue("ssh ws.terminalx");
   m.remove.mockResolvedValue(undefined);
+  m.editorState = null;
 });
 afterEach(cleanup);
 
@@ -91,15 +98,22 @@ it("holds SSH in privacy mode and hides setup for viewers", () => {
 });
 
 it("offers the editors to whoever may set up SSH, and opens one only on its own click", async () => {
-  m.openEditor.mockResolvedValue(undefined);
   const view = render(<WorkspaceActionItems item={item} onLifecycle={onLifecycle} run={run} />);
   expect(screen.queryByText("Open in VS Code")).toBeNull();
   m.ready = true;
   view.rerender(<WorkspaceActionItems item={item} onLifecycle={onLifecycle} run={run} />);
   expect(["Open in VS Code", "Open in Cursor", "Open in Zed"].every((label) => screen.getByText(label))).toBe(true);
+  // VS Code and Cursor need SSH forwarding, which is off: marked, still offered.
+  expect(screen.getByText("Open in VS Code").textContent).toBe("Open in VS CodeExperimental");
+  expect(screen.getByText("Open in Zed").textContent).toBe("Open in Zed");
   expect(m.openEditor).not.toHaveBeenCalled();
   fireEvent.click(screen.getByText("Open in Zed"));
-  expect(m.openEditor).toHaveBeenCalledExactlyOnceWith({ orgId: "org", workspaceId: "ws" }, "zed");
+  expect(m.openEditor).toHaveBeenCalledExactlyOnceWith({ orgId: "org", workspaceId: "ws", name: "Docs", preferredRepo: null }, "zed");
+  // While an open runs, none starts again from the menu.
+  m.editorState = { phase: "opening" };
+  view.rerender(<WorkspaceActionItems item={item} onLifecycle={onLifecycle} run={run} />);
+  expect((screen.getByText("Open in Cursor") as HTMLButtonElement).disabled).toBe(true);
+  m.editorState = null;
 
   const driver = { ...item, workspace: { ...item.workspace, you: { role: "driver" as const, canApprove: false } } };
   m.rows = [driver];
