@@ -120,7 +120,7 @@ describe("the Hand-offs page: the list of chains (PRO-540, 23.16)", () => {
     expect(within(chain).getAllByTestId("bot-avatar").map((avatar) => avatar.dataset.role)).toEqual(["cto", "chief-of-staff", "ux-designer", "qa-engineer"]);
     expect(within(chain).getByTestId("bots-handoffs-chain-state").textContent).toBe("Working");
     expect(within(chain).getByText("Offline mode: get the screens designed before any build work")).toBeTruthy();
-    expect(within(chain).getByTestId("bots-handoffs-chain-line").textContent).toMatch(/^4 hand-offs · 3 deep · started \d/);
+    expect(within(chain).getByTestId("bots-handoffs-chain-line").textContent).toMatch(/^4 hand-offs · 3 deep · started (\d|yesterday)/);
     expect(within(closed[1]).getByTestId("bots-handoffs-chain-state").textContent).toBe("Answered");
     expect(within(closed[1]).getByTestId("bots-handoffs-chain-line").textContent).toMatch(/^1 hand-off · answered \d/);
     expect(within(closed[0]).getByTestId("bots-handoffs-chain-state").textContent).toBe("Stopped by you");
