@@ -40,7 +40,7 @@ import { recoveryFromEvents } from "@/lib/recovery";
 import { cloudAsleep, cloudSessionBackend } from "@/lib/sessionBackend";
 import type { AgentEvent, RecoveryKind } from "@/types/events";
 import { cloudWorkspaceKey, isCloudKey, parseCloudWorkspaceKey, type CloudProject } from "@/types/target";
-import { noteTeamArtifact, teamArtifactOrgs, teamArtifactsApi, type TeamArtifactContentType } from "@/lib/teamArtifacts";
+import { noteTeamArtifact, teamArtifactOrgs, teamArtifactsApi, type TeamArtifactContentType, type TeamArtifactExpect } from "@/lib/teamArtifacts";
 import type { RuntimeIssueRef, WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable/workspace";
 
 /**
@@ -1197,21 +1197,26 @@ function namedSlug(params: Params): { slug: string | null; template: boolean } {
  * by default. Answers `adds` with the slug when it adds a version.
  */
 async function slugClear(orgId: string, orgName: string, params: Params): Promise<string | null> {
+  return (await slugState(orgId, orgName, params)).adds;
+}
+
+/** As {@link slugClear}, with the slug's state the publish is then held to on the server. */
+async function slugState(orgId: string, orgName: string, params: Params): Promise<{ adds: string | null; expect: TeamArtifactExpect | null }> {
   const { slug } = namedSlug(params);
-  if (!slug) return null;
+  if (!slug) return { adds: null, expect: null };
   const { artifacts } = await teamArtifactsApi.list(orgId);
   const existing = artifacts.find((item) => item.slug === slug);
   const newVersion = params.newVersion === true;
   if (!existing) {
     if (newVersion) throw notFound(`No team artifact @${slug} at ${orgName} to add a version to.`, "Leave out --new-version to publish a new one.");
-    return null;
+    return { adds: null, expect: "new" };
   }
   if (!newVersion) {
     throw new CloudControlError("team_artifact_slug_taken", `@${slug} is already ${existing.title} at ${orgName}. Nothing was published.`,
       existing.canDelete ? "Add --new-version to publish this as its next version, or choose another slug." : "Choose another slug: only its author and admins can add a version of it.");
   }
   if (!existing.canDelete) throw new CloudControlError("team_artifact_publish_forbidden", `Only the author of @${slug} and admins can add a version of it. Nothing was published.`, "Choose another slug.");
-  return slug;
+  return { adds: slug, expect: { version: existing.version } };
 }
 
 /** Native code asks this before anything is read or asked: the organization, and whether the slug is free. */
@@ -1227,7 +1232,8 @@ async function artifactsPublish(params: Params) {
   const org = signedIn().organizations?.find((item) => item.id === orgId);
   if (!org || !teamArtifactOrgs(signedIn()).includes(orgId)) throw new CloudControlError("team_artifacts_unavailable", "Team artifacts are not available for this organization.");
   // Asked again: a teammate may have taken the slug while the person was answering.
-  await slugClear(org.id, org.name, params);
+  // Held to on the server too: a slug taken or versioned between this check and the publish is refused there.
+  const { expect } = await slugState(org.id, org.name, params);
   const contentType = required(params, "contentType") as TeamArtifactContentType;
   const content = typeof params.content === "string" ? params.content : "";
   const { slug, template } = namedSlug(params);
@@ -1241,6 +1247,13 @@ async function artifactsPublish(params: Params) {
     ...(template ? { template: true } : {}),
     ...(note ? { note } : {}),
     ...(source ? { source } : {}),
+    ...(expect ? { expect } : {}),
+  }).catch((error: unknown) => {
+    if (error && typeof error === "object" && (error as { code?: unknown }).code === "team_artifact_slug_taken") {
+      throw new CloudControlError("team_artifact_slug_taken", `@${slug} changed at ${org.name} just now: a teammate published it or a new version of it. Nothing was published.`,
+        "Run terminalx artifact show to see it, then publish again with --new-version or another slug.");
+    }
+    throw error;
   });
   noteTeamArtifact(org.id, { saved: artifact });
   return {

@@ -369,6 +369,10 @@ fn run(options: Options) -> Result<()> {
     let mut runtime = start(&options, guest_mode, adopted, _owner.as_ref())?;
     if let (Some((cloud, origin)), false) = (&cloud, options.self_test) {
         report_activity(&runtime, cloud.clone(), origin);
+        // An organization route that stops applying moves its tabs to the
+        // next login between turns (PRO-310).
+        let manager = runtime.manager.clone();
+        crate::cloud_grants::on_organization_route_gone(move || manager.switch_organization_routes());
     }
     println!(
         "{}",
