@@ -73,6 +73,46 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 960, height: 600 
   await page.close();
 }
 
+// Archiving with uncommitted files left behind asks first; in the smallest window that
+// confirmation is above the editors and scrolled into view, never below the footer.
+{
+  const viewport = { width: 960, height: 600 };
+  const page = await open(browser, server.url, { cloud: true, localProjects: 1, session: { role: "manager", lines: 6, title: "Push org events to the desktop", transfer: true, uncommittedFiles: 3 } }, viewport, {
+    extra: `(() => {
+      const { answers } = window.__PW_STUB__;
+      answers.account_status.phase2Readiness = { "org-a": ["cloud.workspaces.transfer-to-local.v1", "cloud.workspaces.ssh.v1"] };
+    })()`,
+  });
+  await openCloudSession(page, "Push org events to the desktop");
+  await page.getByRole("button", { name: "Move to this Mac…" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByText("Uncommitted files: 3 (they stay in the cloud)").waitFor();
+  await dialog.getByRole("radio", { name: /Archive share-demo/ }).check();
+  await dialog.getByRole("button", { name: "Move to this Mac", exact: true }).click();
+  const alert = dialog.getByRole("alert");
+  await alert.waitFor();
+  await page.waitForTimeout(400);
+  const placed = await dialog.evaluate((node) => {
+    const scroller = node.querySelector("[data-dialog-scroll-area]").getBoundingClientRect();
+    const alert = node.querySelector("[role=alert]").getBoundingClientRect();
+    const footer = [...node.querySelectorAll("button")].find((button) => button.textContent === "Archive and move").getBoundingClientRect();
+    const editors = [...node.querySelectorAll("p")].find((p) => p.textContent.startsWith("Or keep it in the cloud")).getBoundingClientRect();
+    return {
+      visible: alert.top >= scroller.top - 1 && alert.bottom <= scroller.bottom + 1,
+      aboveFooter: alert.bottom <= footer.top,
+      aboveEditors: alert.bottom <= editors.top,
+    };
+  });
+  failed += report("Move to this Mac 960x600, archive confirmation", {
+    "the confirmation is in view": placed.visible,
+    "it is above the footer's buttons": placed.aboveFooter,
+    "it is above the editors": placed.aboveEditors,
+    "it names what stays behind": (await alert.textContent()).includes("3 uncommitted files"),
+  }, placed);
+  if (process.env.WEBKIT_SHOTS) await page.screenshot({ path: `${process.env.WEBKIT_SHOTS}/cloud-move-confirm-960x600.png` });
+  await page.close();
+}
+
 await browser.close();
 server.close();
 process.exit(failed ? 1 : 0);

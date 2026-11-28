@@ -1,7 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { getAccount } from "@/lib/account";
-import { workspaceSshConnection } from "@/lib/api";
+import { workspaceSshConnection, type CloudWorkspaceConnection } from "@/lib/api";
 import { phase2Ready } from "@/lib/phase2Readiness";
 import { isWindows } from "@/lib/platform";
 
@@ -41,16 +40,25 @@ async function connectSsh({ orgId, workspaceId }: Target) {
   throw new Error("The runtime did not offer workspace SSH");
 }
 
-/** Only the explicit setup action calls either native mutation. */
-export async function setupWorkspaceSsh(target: Target): Promise<string> {
+/**
+ * The setup, with `during` run on the same runtime connection before it
+ * closes (what an editor needs to know of the workspace).
+ */
+async function setUp<T>(target: Target, during: (connection: CloudWorkspaceConnection) => Promise<T>): Promise<[string, T]> {
   requireSsh(target.orgId);
   const revision = await invoke<string>("cloud_ssh_prepare", target);
   const { connection, connectionId } = await connectSsh(target);
   try {
-    return await invoke<string>("cloud_ssh_finish", { ...target, revision, connectionId });
+    const command = await invoke<string>("cloud_ssh_finish", { ...target, revision, connectionId });
+    return [command, await during(connection)];
   } finally {
     connection.close();
   }
+}
+
+/** Only the explicit setup action calls either native mutation. */
+export async function setupWorkspaceSsh(target: Target): Promise<string> {
+  return (await setUp(target, async () => undefined))[0];
 }
 
 export async function removeWorkspaceSsh(target: Target): Promise<void> {
@@ -88,29 +96,46 @@ export function workspaceSshAlias(command: string, workspaceId: string): string 
 
 export type SshEditor = "vscode" | "cursor" | "zed";
 
-export const SSH_EDITORS: { id: SshEditor; label: string }[] = [
-  { id: "vscode", label: "VS Code" },
-  { id: "cursor", label: "Cursor" },
-  { id: "zed", label: "Zed" },
+/**
+ * VS Code and Cursor reach their server through an SSH tunnel, which the
+ * workspace's sshd does not allow yet (`DisableForwarding yes`): offered,
+ * marked experimental, until forwarding is decided. Zed runs its server over
+ * the SSH session itself.
+ */
+export const SSH_EDITORS: { id: SshEditor; label: string; needsForwarding: boolean }[] = [
+  { id: "vscode", label: "VS Code", needsForwarding: true },
+  { id: "cursor", label: "Cursor", needsForwarding: true },
+  { id: "zed", label: "Zed", needsForwarding: false },
 ];
 
-/** The workspace checkout on a cloud workspace (the SaaS standard root). */
-export const WORKSPACE_CHECKOUT = "/var/lib/terminalx/workspace";
+/** Where a cloud workspace keeps its checkouts (`<root>/<directory>`, the SaaS standard root). */
+export const WORKSPACE_ROOT = "/var/lib/terminalx/workspace";
 
 /**
- * The link that opens `path` on the workspace in an editor over SSH. VS Code
- * and Cursor take `<scheme>://vscode-remote/ssh-remote+<alias><path>`; Zed
- * takes `zed://ssh/<alias><path>`.
+ * The workspace's repository checkout, as its runtime lists it
+ * (`git.repositories`, relative to the root, `.` for the root itself): the
+ * preferred one, else the first (the primary).
  */
-export function sshEditorUrl(editor: SshEditor, alias: string, path: string = WORKSPACE_CHECKOUT): string {
-  if (!path.startsWith("/") || path.split("/").includes("..")) throw new Error("Invalid workspace path");
-  const encoded = path.split("/").map(encodeURIComponent).join("/");
-  if (editor === "zed") return `zed://ssh/${alias}${encoded}`;
-  return `${editor}://vscode-remote/ssh-remote+${alias}${encoded}`;
+export async function workspaceCheckout(connection: CloudWorkspaceConnection, preferred?: string | null): Promise<string> {
+  const listed = await connection.client.call<{ repositories: { repo: string }[] }>("git.repositories", preferred ? { preferredRepo: preferred } : undefined);
+  const repo = listed.repositories.find((repository) => repository.repo === preferred)?.repo ?? listed.repositories[0]?.repo;
+  if (!repo) throw new Error("This workspace has no repository checkout yet");
+  if (repo === ".") return WORKSPACE_ROOT;
+  if (repo.startsWith("/") || repo.split("/").some((part) => part === "" || part === "." || part === "..")) {
+    throw new Error("The runtime named an unexpected checkout");
+  }
+  return `${WORKSPACE_ROOT}/${repo}`;
 }
 
-/** Set up workspace SSH (the same explicit action) and open the workspace in an editor. */
-export async function openWorkspaceInEditor(target: Target, editor: SshEditor): Promise<void> {
-  const alias = workspaceSshAlias(await setupWorkspaceSsh(target), target.workspaceId);
-  await openUrl(sshEditorUrl(editor, alias));
+/**
+ * Set up workspace SSH (the same explicit action) and open a checkout in an
+ * editor: `path` when the caller knows it from the runtime (a session's own
+ * worktree), else the repository checkout the runtime lists. The native
+ * command builds the link from the workspace id, so only the
+ * `<workspaceId>.terminalx` alias is ever opened.
+ */
+export async function openWorkspaceInEditor(target: Target, editor: SshEditor, path?: string | null, preferredRepo?: string | null): Promise<void> {
+  const [command, checkout] = await setUp(target, async (connection) => path ?? workspaceCheckout(connection, preferredRepo));
+  workspaceSshAlias(command, target.workspaceId);
+  await invoke("cloud_open_in_editor", { editor, workspaceId: target.workspaceId, path: checkout });
 }

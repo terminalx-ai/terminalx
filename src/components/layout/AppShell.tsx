@@ -78,6 +78,7 @@ import { ShareSessionDialogHost } from "@/components/session/ShareSessionDialog"
 import { GuestSessionHost } from "@/components/session/GuestSession";
 import { CloudSchedulesDialogHost } from "@/components/cloud/CloudSchedulesDialog";
 import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
+import { CloudEditorOpenHost } from "@/components/cloud/CloudEditorOpen";
 import { NewCloudWorkspaceDialogHost } from "@/components/cloud/NewCloudWorkspaceDialog";
 import { startMachineConnections } from "@/lib/machineConnections";
 import { updateMachineSession } from "@/lib/machineCatalog";
@@ -473,6 +474,7 @@ export function AppShell() {
       <ImageViewerHost />
       <SessionDialogs />
       <CloudShareDialogHost />
+      <CloudEditorOpenHost />
       <CloudSchedulesDialogHost />
       <ShareSessionDialogHost />
       <SignInLinkDialog />

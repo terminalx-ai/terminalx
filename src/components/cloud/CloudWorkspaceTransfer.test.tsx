@@ -2,11 +2,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { CloudSessionModel } from "@/lib/cloudSession";
 import { CloudWorkspaceTransfer } from "./CloudWorkspaceTransfer";
+import { clearEditorOpen } from "./CloudEditorOpen";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), archive: vi.fn(), operation: vi.fn(), role: "manager", sharedWith: 2, ssh: false, privateMode: false, openEditor: vi.fn() }));
 vi.mock("@/lib/cloudSsh", () => ({
   openWorkspaceInEditor: mocks.openEditor,
-  SSH_EDITORS: [{ id: "vscode", label: "VS Code" }, { id: "cursor", label: "Cursor" }, { id: "zed", label: "Zed" }],
+  SSH_EDITORS: [{ id: "vscode", label: "VS Code", needsForwarding: true }, { id: "cursor", label: "Cursor", needsForwarding: true }, { id: "zed", label: "Zed", needsForwarding: false }],
 }));
 vi.mock("@/lib/dataPrivacy", async (original) => ({
   ...(await original<typeof import("@/lib/dataPrivacy")>()),
@@ -39,6 +40,7 @@ beforeEach(() => {
   mocks.ssh = false;
   mocks.privateMode = false;
   mocks.openEditor.mockReset();
+  clearEditorOpen("workspace");
 });
 afterEach(cleanup);
 
@@ -66,9 +68,9 @@ function runtime(options: { preview?: Record<string, unknown> | Error; openError
   };
 }
 
-function model(client: ReturnType<typeof runtime>, workspaceId = "workspace") {
+function model(client: ReturnType<typeof runtime>, workspaceId = "workspace", checkoutPath: string | null = null) {
   return {
-    client, orgId: "org", workspaceId, workspaceName: "widgets-desktop", projectName: "acme/widgets",
+    client, orgId: "org", checkoutPath, workspaceId, workspaceName: "widgets-desktop", projectName: "acme/widgets",
     session: { title: "Push org events" }, location: { provider: "Hetzner", org: "Org" },
   } as unknown as CloudSessionModel;
 }
@@ -199,10 +201,15 @@ it("offers the editors over SSH only when workspace SSH is ready and the person 
   await screen.findByText("Bring topic");
   expect(screen.queryByRole("button", { name: /^VS Code/ })).toBeNull();
   mocks.ssh = true;
-  view.rerender(<CloudWorkspaceTransfer cloud={model(runtime())} accountRevision="r" sessionId="session-editors" tabId="tab" />);
+  const worktree = "/var/lib/terminalx/workspace/.raccoon/worktrees/topic";
+  view.rerender(<CloudWorkspaceTransfer cloud={model(runtime(), "workspace", worktree)} accountRevision="r" sessionId="session-editors" tabId="tab" />);
   expect(screen.getByText("Or keep it in the cloud and open it in an editor")).toBeTruthy();
+  expect(screen.getByRole("button", { name: /^VS Code/ }).textContent).toBe("VS CodeExperimental");
+  expect(screen.getByText("VS Code and Cursor may not connect yet: they need SSH forwarding, which is off.")).toBeTruthy();
+  // The session's own folder on the runtime, not the workspace root.
   fireEvent.click(screen.getByRole("button", { name: /^Zed/ }));
-  expect(mocks.openEditor).toHaveBeenCalledExactlyOnceWith({ orgId: "org", workspaceId: "workspace" }, "zed");
+  expect(mocks.openEditor).toHaveBeenCalledExactlyOnceWith({ orgId: "org", workspaceId: "workspace" }, "zed", worktree, undefined);
+  expect((screen.getByRole("button", { name: /^Cursor/ }) as HTMLButtonElement).disabled).toBe(true);
   expect(await screen.findByText("Workspace SSH is unavailable")).toBeTruthy();
   expect(mocks.invoke).not.toHaveBeenCalled();
   mocks.privateMode = true;
@@ -212,4 +219,17 @@ it("offers the editors over SSH only when workspace SSH is ready and the person 
   mocks.role = "viewer";
   view.rerender(<CloudWorkspaceTransfer cloud={model(runtime())} accountRevision="r" sessionId="session-editors" tabId="tab" />);
   expect(screen.queryByRole("button", { name: /^VS Code/ })).toBeNull();
+});
+
+it("puts the archive confirmation above the editors", async () => {
+  mocks.ssh = true;
+  const client = runtime({ preview: { branch: "topic", commits: 1, hasRemoteBase: false, uncommittedFiles: 2, messages: 4, harness: "claude" } });
+  render(<CloudWorkspaceTransfer cloud={model(client)} accountRevision="r" sessionId="session-confirm-order" tabId="tab" />);
+  fireEvent.click(screen.getByRole("button", { name: "Move to this Mac…" }));
+  await screen.findByText("Bring topic");
+  fireEvent.click(screen.getByRole("radio", { name: /Archive widgets-desktop/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Move to this Mac" }));
+  const alert = await screen.findByRole("alert");
+  const editors = screen.getByText("Or keep it in the cloud and open it in an editor");
+  expect(alert.compareDocumentPosition(editors) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });

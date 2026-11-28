@@ -324,6 +324,8 @@ export interface CloudSessionModel {
    * for a session in the repository's main directory.
    */
   removableWorkspace: RemovableWorkspace | undefined;
+  /** The folder this session works in on the runtime (its worktree or checkout), as the runtime reports it; null until it has. */
+  checkoutPath?: string | null;
   /**
    * A session on a paired machine (PRO-347) rather than in a cloud workspace:
    * where it runs and how that machine is reached. Everything that belongs to
@@ -986,6 +988,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     gitSource: locked ? undefined : gitSource,
     fileSource: locked ? undefined : fileSource,
     removableWorkspace: locked ? undefined : removableWorkspace,
+    checkoutPath: locked || !worktreePath ? null : worktreePath,
     // While connected the runtime's word; while not, whoever would manage it once it runs, or an approving driver.
     ports: { offered: !locked && mayUsePreviews(connected ? manage : wouldManage, you), state, connectionId: connection?.connectionId?.() ?? null },
     error,

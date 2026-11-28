@@ -1,21 +1,33 @@
 import { beforeEach, expect, it, vi } from "vitest";
 
-const m = vi.hoisted(() => ({ invoke: vi.fn(), openUrl: vi.fn(), ready: true }));
+const m = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  ready: true,
+  repositories: [{ repo: "widgets" }] as { repo: string }[],
+  rpc: vi.fn(),
+}));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: m.invoke }));
-vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: m.openUrl }));
 vi.mock("@/lib/account", () => ({ getAccount: () => ({ status: { state: "signed-in", phase2Readiness: { org: m.ready ? ["cloud.workspaces.ssh.v1"] : [] } } }) }));
 vi.mock("@/lib/platform", () => ({ isWindows: false }));
 vi.mock("@/lib/api", () => ({ workspaceSshConnection: async () => ({
-  client: { connection: { state: "connected" }, hasCapability: (name: string) => name === "ssh/1" },
+  client: {
+    connection: { state: "connected" },
+    hasCapability: (name: string) => name === "ssh/1",
+    call: async (method: string, params: unknown) => { m.rpc(method, params); return { repositories: m.repositories }; },
+  },
   connectionId: () => "conn", close: vi.fn(),
 }) }));
 
-const { openWorkspaceInEditor, sshEditorUrl, workspaceSshAlias } = await import("./cloudSsh");
+const { openWorkspaceInEditor, workspaceSshAlias } = await import("./cloudSsh");
+const { openInEditor, useEditorOpen } = await import("@/components/cloud/CloudEditorOpen");
+const target = { orgId: "org", workspaceId: "ws_1" };
+const opened = () => m.invoke.mock.calls.filter(([command]) => command === "cloud_open_in_editor").map(([, args]) => args);
 
 beforeEach(() => {
   vi.clearAllMocks();
   m.ready = true;
-  m.invoke.mockImplementation(async (command: string) => command === "cloud_ssh_prepare" ? "revision" : "ssh ws_1.terminalx");
+  m.repositories = [{ repo: "widgets" }];
+  m.invoke.mockImplementation(async (command: string) => command === "cloud_ssh_prepare" ? "revision" : command === "cloud_ssh_finish" ? "ssh ws_1.terminalx" : undefined);
 });
 
 it("reads the alias from the setup answer, and only this workspace's", () => {
@@ -25,23 +37,55 @@ it("reads the alias from the setup answer, and only this workspace's", () => {
   }
 });
 
-it("builds each editor's SSH link from the alias, never a host and port", () => {
-  expect(sshEditorUrl("vscode", "ws_1.terminalx")).toBe("vscode://vscode-remote/ssh-remote+ws_1.terminalx/var/lib/terminalx/workspace");
-  expect(sshEditorUrl("cursor", "ws_1.terminalx")).toBe("cursor://vscode-remote/ssh-remote+ws_1.terminalx/var/lib/terminalx/workspace");
-  expect(sshEditorUrl("zed", "ws_1.terminalx")).toBe("zed://ssh/ws_1.terminalx/var/lib/terminalx/workspace");
-  expect(sshEditorUrl("vscode", "ws_1.terminalx", "/var/lib/terminalx/workspace/a b")).toMatch(/\/a%20b$/);
-  expect(() => sshEditorUrl("zed", "ws_1.terminalx", "relative")).toThrow();
-  expect(() => sshEditorUrl("zed", "ws_1.terminalx", "/var/../etc")).toThrow();
+it("opens the repository's own checkout as the runtime lists it, through the native command", async () => {
+  m.repositories = [{ repo: "api" }, { repo: "widgets" }];
+  await openWorkspaceInEditor(target, "cursor", null, "widgets");
+  expect(m.invoke.mock.calls.map(([command]) => command)).toEqual(["cloud_ssh_prepare", "cloud_ssh_finish", "cloud_open_in_editor"]);
+  expect(m.rpc).toHaveBeenCalledWith("git.repositories", { preferredRepo: "widgets" });
+  expect(opened()).toEqual([{ editor: "cursor", workspaceId: "ws_1", path: "/var/lib/terminalx/workspace/widgets" }]);
+
+  m.repositories = [{ repo: "." }];
+  await openWorkspaceInEditor(target, "zed");
+  expect(opened().at(-1)).toEqual({ editor: "zed", workspaceId: "ws_1", path: "/var/lib/terminalx/workspace" });
 });
 
-it("sets up SSH, then opens the editor's link", async () => {
-  await openWorkspaceInEditor({ orgId: "org", workspaceId: "ws_1" }, "cursor");
-  expect(m.invoke.mock.calls.map(([command]) => command)).toEqual(["cloud_ssh_prepare", "cloud_ssh_finish"]);
-  expect(m.openUrl).toHaveBeenCalledExactlyOnceWith("cursor://vscode-remote/ssh-remote+ws_1.terminalx/var/lib/terminalx/workspace");
+it("opens a session's own folder as given, special characters and all, without listing checkouts", async () => {
+  await openWorkspaceInEditor(target, "vscode", "/var/lib/terminalx/workspace/.raccoon/worktrees/a #1?%");
+  expect(m.rpc).not.toHaveBeenCalled();
+  expect(opened()).toEqual([{ editor: "vscode", workspaceId: "ws_1", path: "/var/lib/terminalx/workspace/.raccoon/worktrees/a #1?%" }]);
+});
+
+it("refuses a checkout the runtime names outside the root, and a workspace without one", async () => {
+  for (const repositories of [[{ repo: "../etc" }], [{ repo: "/etc" }], []]) {
+    m.repositories = repositories;
+    await expect(openWorkspaceInEditor(target, "zed")).rejects.toThrow();
+  }
+  expect(opened()).toEqual([]);
 });
 
 it("opens nothing when SSH is held", async () => {
   m.ready = false;
-  await expect(openWorkspaceInEditor({ orgId: "org", workspaceId: "ws_1" }, "vscode")).rejects.toThrow("Workspace SSH is unavailable");
-  expect(m.openUrl).not.toHaveBeenCalled();
+  await expect(openWorkspaceInEditor(target, "vscode")).rejects.toThrow("Workspace SSH is unavailable");
+  expect(opened()).toEqual([]);
+});
+
+it("runs one open at a time, says plainly when the editor is missing, and clears that on a later success", async () => {
+  const { renderHook, act } = await import("@testing-library/react");
+  const view = renderHook(() => useEditorOpen("ws_1"));
+  let finish!: () => void;
+  m.invoke.mockImplementation(async (command: string) => {
+    if (command === "cloud_ssh_prepare") return "revision";
+    if (command === "cloud_ssh_finish") return "ssh ws_1.terminalx";
+    return new Promise<void>((_, reject) => { finish = () => reject("VS Code is not installed"); });
+  });
+  let first!: Promise<void>;
+  act(() => { first = openInEditor(target, "vscode"); });
+  expect(view.result.current).toEqual({ editor: "vscode", phase: "opening" });
+  await act(() => openInEditor(target, "zed"));
+  await vi.waitFor(() => expect(opened()).toHaveLength(1));
+  await act(async () => { finish(); await first; });
+  expect(view.result.current).toEqual({ editor: "vscode", phase: "failed", message: "VS Code is not installed" });
+  m.invoke.mockImplementation(async (command: string) => command === "cloud_ssh_prepare" ? "revision" : command === "cloud_ssh_finish" ? "ssh ws_1.terminalx" : undefined);
+  await act(() => openInEditor(target, "zed"));
+  expect(view.result.current).toEqual({ editor: "zed", phase: "opened" });
 });
