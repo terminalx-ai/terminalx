@@ -150,10 +150,11 @@ export function present(settings: NotificationSettings, hostId: string, machineN
     sessionId: event.sessionId ?? "",
     tabId: event.tabId ?? "",
     kind: event.kind ?? "",
-    detailsHidden: show === "nothing",
+    detailsHidden: show !== "everything",
     // Which bot and item is no detail: a tap opens the question in the app, which shows it there.
     ...(bot ? { botId: bot.botId, number: bot.number } : {}),
-    ...(show === "nothing" ? {} : answer),
+    // Only attach sensitive question/option/bot answer payloads when "everything" is explicitly chosen (S-58).
+    ...(show === "everything" ? answer : {}),
   };
   const sound = settings.lockScreen.sound;
   const thread = bot ? `${hostId}:bot:${bot.botId}` : event.sessionId ? `${hostId}:${event.sessionId}` : hostId;

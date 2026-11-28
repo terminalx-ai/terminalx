@@ -3,6 +3,7 @@ import { directEndpoints } from "../transport/direct-endpoints";
 import { sha256 } from "@noble/hashes/sha256";
 import { z } from "zod";
 import {
+  canonicalRelayCellUrl,
   DeviceCredentialInstalledSchema,
   HostStatusSchema,
   PairingGetEndpointsResultSchema,
@@ -43,7 +44,7 @@ type PairingCandidate = {
 
 const RelayResolvedSchema = z.object({
   v: z.literal(1),
-  cellUrl: z.string().url(),
+  cellUrl: z.string().refine(canonicalRelayCellUrl),
   assignmentEpoch: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   leaseExpiresAt: z.number().int().nonnegative(),
 }).strict();
@@ -301,6 +302,7 @@ async function resolveResumeRelay(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ v: 1, relayHostId: relay.relayHostId, resumeToken }),
+      redirect: "error",
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(`Relay director returned ${response.status}`);

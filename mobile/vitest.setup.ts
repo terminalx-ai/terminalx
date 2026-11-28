@@ -62,3 +62,12 @@ vi.mock("expo-crypto", () => ({
     return createHash(alg).update(data).digest(encoding);
   },
 }));
+
+// SecureStore is native: tests use an in-memory keychain map unless a test defines its own mock.
+const defaultSecureStore = ((globalThis as { __terminalxTestSecureStore?: Map<string, string> }).__terminalxTestSecureStore ??= new Map<string, string>());
+vi.mock("expo-secure-store", () => ({
+  WHEN_UNLOCKED_THIS_DEVICE_ONLY: 5,
+  getItemAsync: async (key: string) => defaultSecureStore.get(key) ?? null,
+  setItemAsync: async (key: string, value: string) => { defaultSecureStore.set(key, value); },
+  deleteItemAsync: async (key: string) => { defaultSecureStore.delete(key); },
+}));

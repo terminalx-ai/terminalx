@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { Platform, Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import { ChevronRight, Cloud } from "lucide-react-native";
 import type { CloudWorkspaceItem } from "@mobile/cloud/api";
@@ -22,7 +23,7 @@ const MONO = Platform.OS === "ios" ? "Menlo" : "monospace";
  * where a cloud mark says what it is, as the Cloud tab's icon does.
  * `actions`: what a long press offers (Pin project or Unpin project).
  */
-export function CloudWorkspaceRow({ item, title, first, last, onPress, cloud = false, actions = [], style }: {
+export const CloudWorkspaceRow = memo(function CloudWorkspaceRow({ item, title, first, last, onPress, cloud = false, actions = [], style }: {
   item: CloudWorkspaceItem;
   title: string;
   first: boolean;
@@ -62,7 +63,7 @@ export function CloudWorkspaceRow({ item, title, first, last, onPress, cloud = f
       <ChevronRight size={18} color={palette.faint} />
     </View>
   </Pressable>;
-}
+});
 
 const styles = StyleSheet.create({
   row: { minHeight: 56, paddingHorizontal: 14, paddingVertical: 12, flexDirection: "row", gap: 12, alignItems: "flex-start" },

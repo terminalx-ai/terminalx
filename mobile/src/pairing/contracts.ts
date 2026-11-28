@@ -11,14 +11,48 @@ export const ACCOUNT_PAIRING_HPKE_ALGORITHM = "HPKE-Base-X25519-HKDF-SHA256-ChaC
 export const RECONNECT_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000] as const;
 export const RECONNECT_TRICKLE_MS = 90_000;
 
-const canonicalHttpsOrigin = (value: string): boolean => {
+export const canonicalHttpsOrigin = (value: string): boolean => {
   try {
     const url = new URL(value);
-    return value.length <= 2_048 && url.protocol === "https:" && url.origin === value;
+    return value.length <= 2_048 && url.protocol === "https:" && url.origin === value && !url.username && !url.password && !url.hash;
   } catch {
     return false;
   }
 };
+
+export const canonicalRelayCellUrl = (value: string): boolean => {
+  try {
+    const url = new URL(value);
+    return value.length <= 2_048 && (url.protocol === "https:" || url.protocol === "wss:") && url.origin === value && !url.username && !url.password && !url.hash;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Whether a hostname refers to a local LAN, RFC1918/RFC6598 private address,
+ * loopback, link-local, ULA IPv6, or mDNS `.local` address where cleartext `ws:`
+ * is permitted for direct local pairing (S-46).
+ */
+export function isLanOrPrivateHost(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!host) return false;
+  if (host === "localhost" || host === "::1" || host === "0:0:0:0:0:0:0:1") return true;
+  if (host.endsWith(".local") && host.length > ".local".length) return true;
+  if (/^(fe[89ab][0-9a-f]:|f[cd][0-9a-f]{2}:)/i.test(host)) return true;
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!ipv4) return false;
+  const octets = ipv4.slice(1).map(Number);
+  if (octets.some((n) => n < 0 || n > 255)) return false;
+  const [a, b] = octets as [number, number, number, number];
+  if (a === 10 || a === 127) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true;
+  // RFC 6598 shared address space (Tailscale / CGNAT VPN direct endpoints).
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return false;
+}
 
 const canonicalPublicKey = (value: string): boolean => {
   if (!/^[A-Za-z0-9+/]{43}=$/.test(value)) return false;
@@ -39,7 +73,9 @@ export const hostIdForPublicKey = (value: string): string | null => {
 export const DirectEndpointsSchema = z.array(z.string().max(2_048).refine((value) => {
   try {
     const url = new URL(value);
-    return ["ws:", "wss:"].includes(url.protocol) && !!url.hostname && !url.username && !url.password && !url.hash;
+    if (!url.hostname || url.username || url.password || url.hash) return false;
+    if (url.protocol === "wss:") return true;
+    return url.protocol === "ws:" && isLanOrPrivateHost(url.hostname);
   } catch { return false; }
 })).max(64);
 

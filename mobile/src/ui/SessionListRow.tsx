@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { Pin } from "lucide-react-native";
 import { statusTooltip } from "@terminalx/portable/sessionStatus";
@@ -22,7 +22,7 @@ const MONO = Platform.OS === "ios" ? "Menlo" : "monospace";
  * Pinned section (`inPinned`), whose heading says so (#1403). `actions` are
  * what a long press offers: Pin or Unpin, when the Mac takes them.
  */
-export function SessionListRow({ row, hostId, first, last, onOpen, inPinned = false, actions = [] }: { row: ChatRow; hostId: string; first: boolean; last: boolean; onOpen(tabId: string): void; inPinned?: boolean; actions?: RowAction[] }) {
+export const SessionListRow = memo(function SessionListRow({ row, hostId, first, last, onOpen, inPinned = false, actions = [] }: { row: ChatRow; hostId: string; first: boolean; last: boolean; onOpen(tabId: string): void; inPinned?: boolean; actions?: RowAction[] }) {
   const { palette } = useTheme();
   const [open, setOpen] = useState(false);
   const many = row.tabs.length > 1;
@@ -76,7 +76,7 @@ export function SessionListRow({ row, hostId, first, last, onOpen, inPinned = fa
       </Pressable>
     </View>) : null}
   </View>;
-}
+});
 
 const RADIUS = 16;
 // After 22.04: rows in a card per section, a 20pt mark at the edge, three lines, the time at the end.

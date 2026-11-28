@@ -2,6 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
 import type { AgentEvent } from "@terminalx/portable/events";
+import { getLocalStorageKey, isSealedLocalEnvelope, openLocalString, openLocalStringWithKey, sealLocalString, sealLocalStringWithKey } from "./local-crypto";
 
 export interface SyncCursor { offset: number; digest: string }
 export interface TranscriptCache { events: AgentEvent[]; cursor?: SyncCursor; hasEarlier: boolean }
@@ -70,11 +71,16 @@ export async function readCache(host: string, session: string, tab: string): Pro
     const index = readIndex(await AsyncStorage.getItem(k));
     if (!index) return await readCacheV2(host, session, tab);
     const stored = index.chunks.length ? await AsyncStorage.multiGet(index.chunks.map((c) => chunkKey(host, session, tab, c.id))) : [];
+    const needsKey = stored.some((entry) => typeof entry?.[1] === "string" && isSealedLocalEnvelope(entry[1]));
+    const localKey = needsKey ? await getLocalStorageKey() : null;
     const chunks: AgentEvent[][] = [];
     for (const [i, ref] of index.chunks.entries()) {
       const raw = stored[i]?.[1];
       if (typeof raw !== "string" || checksum(raw) !== ref.checksum) return emptyTranscript();
-      const events: unknown = JSON.parse(raw);
+      const cKey = chunkKey(host, session, tab, ref.id);
+      const plaintext = localKey && isSealedLocalEnvelope(raw) ? openLocalStringWithKey(localKey, raw, cKey) : raw;
+      if (plaintext === null) return emptyTranscript();
+      const events: unknown = JSON.parse(plaintext);
       if (!Array.isArray(events) || events.length !== ref.count || !events.every((e: unknown) => isAgentEvent(e) && e.sessionId === session && e.tabId === tab)) return emptyTranscript();
       chunks.push(events);
     }
@@ -163,14 +169,16 @@ async function saveIndex(host: string, session: string, tab: string, index: Tran
   if (dropped.length) await AsyncStorage.multiRemove(dropped.map((id) => chunkKey(host, session, tab, id)));
 }
 
-function chunkOf(events: AgentEvent[], written: [string, string][], host: string, session: string, tab: string): ChunkRef {
+function chunkOf(localKey: Uint8Array, events: AgentEvent[], written: [string, string][], host: string, session: string, tab: string): ChunkRef {
   const id = newChunkId();
-  const raw = JSON.stringify(events);
-  written.push([chunkKey(host, session, tab, id), raw]);
-  return { id, count: events.length, checksum: checksum(raw) };
+  const cKey = chunkKey(host, session, tab, id);
+  const sealed = sealLocalStringWithKey(localKey, JSON.stringify(events), cKey);
+  written.push([cKey, sealed]);
+  return { id, count: events.length, checksum: checksum(sealed) };
 }
 
 async function appendChunks(host: string, session: string, tab: string, layout: Layout, added: AgentEvent[], cursor: SyncCursor | undefined, hasEarlier: boolean): Promise<void> {
+  const localKey = await getLocalStorageKey();
   const chunks = [...layout.index.chunks];
   const written: [string, string][] = [];
   const dropped: string[] = [];
@@ -181,11 +189,11 @@ async function appendChunks(host: string, session: string, tab: string, layout: 
     last = [...last, ...rest.slice(0, CHUNK - last.length)];
     rest = rest.slice(CHUNK - layout.last.length);
     dropped.push(open.id);
-    chunks[chunks.length - 1] = chunkOf(last, written, host, session, tab);
+    chunks[chunks.length - 1] = chunkOf(localKey, last, written, host, session, tab);
   }
   for (let at = 0; at < rest.length; at += CHUNK) {
     last = rest.slice(at, at + CHUNK);
-    chunks.push(chunkOf(last, written, host, session, tab));
+    chunks.push(chunkOf(localKey, last, written, host, session, tab));
   }
   let total = chunks.reduce((sum, c) => sum + c.count, 0);
   while (chunks.length > 1 && total - chunks[0].count >= LIMIT) {
@@ -208,9 +216,12 @@ async function replaceChunks(host: string, session: string, tab: string, events:
       try { previous = readIndex(raw)?.chunks.map((c) => c.id); unreadable = raw !== null && !previous; } catch { unreadable = true; }
     } catch { /* Storage failed: nothing known to drop; a sweep reclaims it later. */ }
   }
+  const localKey = events.length ? await getLocalStorageKey() : null;
   const written: [string, string][] = [];
   const chunks: ChunkRef[] = [];
-  for (let at = 0; at < events.length; at += CHUNK) chunks.push(chunkOf(events.slice(at, at + CHUNK), written, host, session, tab));
+  if (localKey) {
+    for (let at = 0; at < events.length; at += CHUNK) chunks.push(chunkOf(localKey, events.slice(at, at + CHUNK), written, host, session, tab));
+  }
   const last = events.length ? events.slice(Math.floor((events.length - 1) / CHUNK) * CHUNK) : [];
   if (unreadable) {
     const kept = new Set(chunks.map((c) => c.id));
@@ -309,7 +320,9 @@ export function clearTranscriptCaches(host?: string): Promise<void> {
       for (const scoped of [indexPrefix, chunkPrefix, prefix, savedPrefix]) if (k.startsWith(scoped)) {
         try { return !host || JSON.parse(k.slice(scoped.length))[0] === host; } catch { return true; }
       }
-      return k.startsWith(host ? `terminalx:transcript:${host}:` : "terminalx:transcript:") || k.startsWith(host ? `terminalx:draft:${host}:` : "terminalx:draft:");
+      return k.startsWith(host ? `terminalx:transcript:${host}:` : "terminalx:transcript:")
+        || k.startsWith(host ? `terminalx:draft:${host}:` : "terminalx:draft:")
+        || k.startsWith(host ? `terminalx:draft-id:${host}:` : "terminalx:draft-id:");
     }));
   });
   writes = operation;
@@ -337,12 +350,17 @@ export async function readSaved<T>(host: string, name: string, valid: (value: un
       if (epoch === cacheEpoch(host)) savedSerialized.delete(k);
       return null;
     }
-    const value: unknown = JSON.parse(raw);
+    const plaintext = isSealedLocalEnvelope(raw) ? await openLocalString(raw, k) : raw;
+    if (plaintext === null) {
+      if (epoch === cacheEpoch(host)) savedSerialized.delete(k);
+      return null;
+    }
+    const value: unknown = JSON.parse(plaintext);
     if (!valid(value)) {
       if (epoch === cacheEpoch(host)) savedSerialized.delete(k);
       return null;
     }
-    if (epoch === cacheEpoch(host)) savedSerialized.set(k, raw);
+    if (epoch === cacheEpoch(host)) savedSerialized.set(k, plaintext);
     return value;
   } catch { return null; }
 }
@@ -359,7 +377,9 @@ export function writeSaved(host: string, name: string, value: unknown, epoch: nu
   const operation = writes.catch(() => undefined).then(async () => {
     if (epoch !== cacheEpoch(host)) return;
     if (savedSerialized.get(k) === data) return;
-    await AsyncStorage.setItem(k, data);
+    const sealed = await sealLocalString(data, k);
+    if (epoch !== cacheEpoch(host)) return;
+    await AsyncStorage.setItem(k, sealed);
     if (epoch === cacheEpoch(host)) savedSerialized.set(k, data);
   });
   writes = operation;

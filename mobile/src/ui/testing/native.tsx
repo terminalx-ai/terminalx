@@ -29,6 +29,15 @@ function attributes({ testID, style, accessibilityRole, accessibilityLabel, acce
 
 export const View = (props: Props) => <div {...attributes(props)}>{props.children}</div>;
 export const ScrollView = View;
+export const FlatList = ({ data = [], renderItem, keyExtractor, ListHeaderComponent, ListFooterComponent, ListEmptyComponent, ...props }: Props) => (
+  <div {...attributes(props)}>
+    {typeof ListHeaderComponent === "function" ? <ListHeaderComponent /> : ListHeaderComponent}
+    {data.length
+      ? data.map((item: unknown, index: number) => <div key={keyExtractor ? keyExtractor(item, index) : index}>{renderItem({ item, index })}</div>)
+      : (typeof ListEmptyComponent === "function" ? <ListEmptyComponent /> : ListEmptyComponent)}
+    {typeof ListFooterComponent === "function" ? <ListFooterComponent /> : ListFooterComponent}
+  </div>
+);
 export const Text = (props: Props) => <span {...attributes(props)} data-selectable={props.selectable ? "true" : undefined} data-lines={props.numberOfLines}>{props.children}</span>;
 
 export function Pressable(props: Props) {
@@ -73,7 +82,11 @@ class Value { constructor(public value: number) {} setValue(value: number) { thi
 const motion = () => ({ start: () => undefined, stop: () => undefined });
 export const Animated = { View, Value, timing: motion, loop: motion };
 export const Easing = { linear: (value: number) => value };
-export const AccessibilityInfo = { isReduceMotionEnabled: async () => false, addEventListener: () => ({ remove: () => undefined }) };
+export const AccessibilityInfo = {
+  isReduceMotionEnabled: async () => false,
+  isReduceTransparencyEnabled: async () => false,
+  addEventListener: () => ({ remove: () => undefined }),
+};
 
 export const ActionSheetIOS = { showActionSheetWithOptions: vi.fn() };
 export const Alert = { alert: vi.fn() };

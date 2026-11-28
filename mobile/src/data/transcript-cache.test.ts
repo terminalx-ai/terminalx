@@ -76,7 +76,12 @@ describe("a transcript kept in chunks (#1283)", () => {
   it("reads an empty copy rather than a part when a chunk is lost or changed", async () => {
     await writeCache("host", "session", "tab", { events: range(1, 120), cursor: cursor(120), hasEarlier: false });
     const chunk = [...storage.keys()].find((key) => key.startsWith("terminalx:transcript:v3c:"))!;
-    storage.set(chunk, storage.get(chunk)!.replace("turn 1", "turn one"));
+    const raw = storage.get(chunk)!;
+    // Stored chunk must be AES-256-GCM encrypted (no plaintext conversation text in AsyncStorage, S-48).
+    expect(raw).not.toContain("turn 1");
+    const envelope = JSON.parse(raw) as { ct: string };
+    const tampered = { ...envelope, ct: (envelope.ct[0] === "A" ? "B" : "A") + envelope.ct.slice(1) };
+    storage.set(chunk, JSON.stringify(tampered));
     expect(await readCache("host", "session", "tab")).toEqual({ events: [], hasEarlier: false });
     storage.delete(chunk);
     expect(await readCache("host", "session", "tab")).toEqual({ events: [], hasEarlier: false });

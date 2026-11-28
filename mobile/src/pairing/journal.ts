@@ -1,4 +1,4 @@
-import { DirectEndpointsSchema } from "./contracts";
+import { canonicalHttpsOrigin, canonicalRelayCellUrl, DirectEndpointsSchema } from "./contracts";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Crypto from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
@@ -31,8 +31,8 @@ const metadataSchema = z.object({
     identityMode: z.enum(["inherit", "authenticate"]).optional(),
     relay: z.object({
       v: z.literal(1),
-      directorUrl: z.string().url(),
-      cellUrl: z.string().url(),
+      directorUrl: z.string().refine(canonicalHttpsOrigin),
+      cellUrl: z.string().refine(canonicalRelayCellUrl),
       assignmentEpoch: z.number().int().nonnegative(),
       relayHostId: z.string().regex(/^[A-Za-z0-9_-]{16}$/),
       inviteExpiresAt: z.number().int().nonnegative(),

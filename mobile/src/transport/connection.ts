@@ -3,7 +3,7 @@ import { z } from "zod";
 import { accountPairedHostIds, isCurrentPairingInstance, pairingInstance, revokePairingInstance, type SupportPairing } from "../store/pairing-instance";
 import type { ReportEvent, ReportWindow } from "@terminalx/portable/supportReports";
 import type { RpcCallResult } from "@terminalx/portable/rpc";
-import { PairingGetEndpointsResultSchema, RECONNECT_DELAYS_MS, RECONNECT_TRICKLE_MS } from "../pairing/contracts";
+import { canonicalRelayCellUrl, PairingGetEndpointsResultSchema, RECONNECT_DELAYS_MS, RECONNECT_TRICKLE_MS } from "../pairing/contracts";
 import { updateStoredHost, writeHostCredential, type HostCredential, type StoredHost } from "../store/hosts";
 import { hostDisplayName } from "../store/host-name";
 import { CredentialRefusedError, RelayClient, RelayOuterError, type RelayEvent } from "./relay-client";
@@ -54,7 +54,7 @@ export function scopedConnectionSnapshot(logs: readonly ConnectionLogEntry[], ow
   return { events, retainedSince, pairings: [...contributors.values()] };
 }
 
-const resolvedSchema = z.object({ v: z.literal(1), cellUrl: z.string().url(), assignmentEpoch: z.number().int().nonnegative(), leaseExpiresAt: z.number().int().nonnegative() }).strict();
+const resolvedSchema = z.object({ v: z.literal(1), cellUrl: z.string().refine(canonicalRelayCellUrl), assignmentEpoch: z.number().int().nonnegative(), leaseExpiresAt: z.number().int().nonnegative() }).strict();
 
 /** After a return to the foreground, a reconnect is not shown for this long: most finish sooner and nobody needs to see them. */
 export const RESUME_QUIET_MS = 1_000;
@@ -685,7 +685,7 @@ async function resolveRelay(host: StoredHost & { relay: NonNullable<StoredHost["
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5_000);
   try {
-    const response = await fetch(new URL("/v1/resolve", host.relay.directorUrl), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ v: 1, relayHostId: host.relay.relayHostId, resumeToken }), signal: controller.signal });
+    const response = await fetch(new URL("/v1/resolve", host.relay.directorUrl), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ v: 1, relayHostId: host.relay.relayHostId, resumeToken }), redirect: "error", signal: controller.signal });
     if (!response.ok) throw new Error(`Relay director returned ${response.status}`);
     const raw = await response.text();
     if (new TextEncoder().encode(raw).length > 16 * 1_024) throw new Error("Relay director response too large");

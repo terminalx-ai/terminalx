@@ -258,6 +258,11 @@ export function withPinnedCloud(sections: RowSection[], cloud: CloudPinRow[], fi
   return sections.map((section, index) => index === at ? { ...section, data } : section);
 }
 
+const WEEKDAY_SHORT_FMT = new Intl.DateTimeFormat(undefined, { weekday: "short" });
+const MONTH_DAY_FMT = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+const SHORT_DATE_FMT = new Intl.DateTimeFormat(undefined, { year: "2-digit", month: "numeric", day: "numeric" });
+const SPOKEN_DATE_FMT = new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" });
+
 /** When, as a chat list says it: "now", "5m", "3h", a weekday, then a date. */
 export function shortTime(time: number, now = Date.now()): string {
   if (!time) return "";
@@ -267,9 +272,9 @@ export function shortTime(time: number, now = Date.now()): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h`;
   const date = new Date(time);
-  if (hours < 24 * 6) return date.toLocaleDateString(undefined, { weekday: "short" });
-  if (date.getFullYear() === new Date(now).getFullYear()) return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  return date.toLocaleDateString(undefined, { year: "2-digit", month: "numeric", day: "numeric" });
+  if (hours < 24 * 6) return WEEKDAY_SHORT_FMT.format(date);
+  if (date.getFullYear() === new Date(now).getFullYear()) return MONTH_DAY_FMT.format(date);
+  return SHORT_DATE_FMT.format(date);
 }
 
 /**
@@ -291,7 +296,7 @@ export function spokenTime(time: number, now = Date.now()): string {
   if (minutes < 60) return `active ${minutes} ${minutes === 1 ? "minute" : "minutes"} ago`;
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `active ${hours} ${hours === 1 ? "hour" : "hours"} ago`;
-  return `active ${new Date(time).toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}`;
+  return `active ${SPOKEN_DATE_FMT.format(new Date(time))}`;
 }
 
 /** One of the chats a branch holds: a tab on the Mac. */
