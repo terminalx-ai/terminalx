@@ -335,7 +335,9 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
 
   useHotkey("escape", (event) => {
     if (hasEscapeOverlay(resultsRef.current)) return false;
-    if (event.target !== inputRef.current && isEditable(event.target)) return false;
+    const target = event.target;
+    const isReadOnlyField = (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) && target.readOnly;
+    if (target !== inputRef.current && isEditable(target) && !isReadOnlyField) return false;
     if (query) {
       changeQuery("");
       inputRef.current?.focus();

@@ -258,7 +258,7 @@ it("discards a live comparison from the centre diff header and refreshes it, but
   await screen.findByRole("button", { name: "Copy file contents" });
   fireEvent.click(within(openViewOptions()).getByRole("menuitem", { name: "Discard changes to live.ts" }));
   expect(git.discard).not.toHaveBeenCalled();
-  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }));
+  fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Discard" }));
   await waitFor(() => expect(git.discard).toHaveBeenCalledWith("/workspace", "live.ts", "merge-base", undefined));
   await waitFor(() => expect(getEditors().editors.find((e) => e.id === id)).toMatchObject({ diff: { range: { base: "merge-base", head: "fresh" } } }));
   view.unmount();

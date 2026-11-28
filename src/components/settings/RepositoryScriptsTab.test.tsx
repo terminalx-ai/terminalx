@@ -253,6 +253,9 @@ it.each([
   fireEvent.change(editor, { target: { value: "echo changed" } });
   expect(document.activeElement).toBe(editor);
   fireEvent.keyDown(editor, { key: "Escape" });
+  // U-05: Escape inside an editable textarea does not close Settings; pressing Escape outside triggers the leave guard.
+  expect(screen.queryByText("Reopen Settings")).toBeNull();
+  fireEvent.keyDown(document, { key: "Escape" });
   expect(screen.queryByText("Reopen Settings")).toBeNull();
   expect(screen.getByRole("alert").textContent).toContain("Save your changes");
   expect(state.update).not.toHaveBeenCalled();
@@ -333,7 +336,7 @@ it("keeps the local draft and close guard when removing an override fails", asyn
   expect(textarea("Setup script").value).toBe("echo unsaved");
   expect(textarea("Setup script").readOnly).toBe(false);
   expect(button("Save setup script").disabled).toBe(false);
-  fireEvent.keyDown(textarea("Setup script"), { key: "Escape" });
+  fireEvent.keyDown(document, { key: "Escape" });
   expect(screen.queryByText("Reopen Settings")).toBeNull();
   expect(screen.getByText(/Save your changes before leaving Settings/)).toBeTruthy();
 });
