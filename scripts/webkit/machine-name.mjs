@@ -21,10 +21,14 @@ const cases = [
 const server = await serve();
 const browser = await launch();
 let failed = 0;
+const nameCases = shots
+  ? ["light", "dark"].flatMap((mode) => [960, 720].flatMap((width) => cases.map((item) => ({ mode, width, ...item }))))
+  : [
+      { mode: "light", width: 960, ...cases[0] },
+      { mode: "dark", width: 720, ...cases[1] },
+    ];
 try {
-  for (const mode of ["light", "dark"]) {
-    for (const width of [960, 720]) {
-      for (const { name, machine } of cases) {
+  for (const { mode, width, name, machine } of nameCases) {
         const page = await open(
           browser,
           server.url,
@@ -106,8 +110,6 @@ try {
         checks["Enter sends the trimmed name and shows it"] = JSON.stringify(await page.evaluate(() => window.__RENAMES__)) === JSON.stringify(["Desk Mac"]) && (await input.inputValue()) === "Desk Mac";
         failed += report(`${mode}, ${width}px, ${name}`, checks, { before, editing });
         await page.close();
-      }
-    }
   }
 } finally {
   await browser.close();

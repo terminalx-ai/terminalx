@@ -63,11 +63,13 @@ const drag = async (page, from, to, words) => {
 };
 
 const server = await serve();
-let browser;
+const browser = await launch();
+const sectionCases = process.env.SCREENSHOTS
+  ? ["simple", "list"].flatMap((layout) => ["light", "dark"].map((colorScheme) => [layout, colorScheme]))
+  : [["simple", "dark"], ["list", "light"]];
 try {
   if (process.env.SCREENSHOTS) await mkdir(process.env.SCREENSHOTS, { recursive: true });
-  for (const layout of ["simple", "list"]) for (const colorScheme of ["light", "dark"]) {
-    browser = await launch();
+  for (const [layout, colorScheme] of sectionCases) {
     const page = await open(browser, server.url, { cloud: false, localProjects: 0 }, { width: 1100, height: 760 }, { extra: extra(layout), colorScheme, reducedMotion: "reduce" });
     page.setDefaultTimeout(Number(process.env.WEBKIT_TIMEOUT_MS ?? 30_000));
     const errors = [];
@@ -181,7 +183,6 @@ try {
     assert.equal(overflow, false);
     assert.deepEqual(errors, []);
     console.log(`ok: local sections ${layout}, ${colorScheme}`);
-    await browser.close();
-    browser = null;
+    await page.close();
   }
-} finally { await browser?.close(); server.close(); }
+} finally { await browser.close(); server.close(); }

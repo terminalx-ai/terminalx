@@ -65,16 +65,18 @@ it("grows each column to its widest cell, up to a cap, and never shrinks it", ()
   expect(growColumns(widths, 2, 900, 200)).toEqual([62, undefined, 200]); // full screen caps lower, and wraps past it
 });
 
-it("keeps each cell in the card on one line, no wider than the cap, so no cut characters show", async () => {
+it("keeps each cell on one line, bolds header & first column, starts at first column with edge fades, and expands/closes full screen", async () => {
   await render(SIX_COLUMNS);
   const notes = [...scroller().querySelectorAll("div")].filter((node) => node.textContent === ROWS[0][5]).at(-1)!;
   expect(getComputedStyle(notes).whiteSpace).toBe("nowrap");
   expect(getComputedStyle(notes).textOverflow).toBe("ellipsis");
   expect(getComputedStyle(notes.parentElement!).maxWidth).toBe("220px");
-});
 
-it("starts a six-column table at its first column and fades only where more content exists", async () => {
-  await render(SIX_COLUMNS);
+  const weight = (text: string) => getComputedStyle([...scroller().querySelectorAll("div")].filter((node) => node.textContent === text).at(-1)!).fontWeight;
+  expect(weight("Task")).toBe("600");
+  expect(weight("Ship sync")).toBe("600");
+  expect(weight("Alice")).not.toBe("600");
+
   expect(scroller().scrollLeft).toBe(0);
   expect(scroller().textContent?.startsWith("TaskOwnerStatus")).toBe(true);
 
@@ -90,10 +92,7 @@ it("starts a six-column table at its first column and fades only where more cont
 
   await scrollTo(0, 340, 340);
   expect(fades()).toEqual({ start: false, end: false });
-});
 
-it("opens the table full screen with every cell, and closes it again", async () => {
-  await render(SIX_COLUMNS);
   expect(document.querySelector('[aria-label="Expanded table"]')).toBeNull();
   const expand = container.querySelector('[aria-label="Expand table"]') as HTMLElement;
   expect(expand).not.toBeNull();
@@ -106,15 +105,13 @@ it("opens the table full screen with every cell, and closes it again", async () 
   expect(full.textContent).toBe([...HEADERS, ...ROWS.flat()].join(""));
   expect(full.textContent).not.toContain("|");
   // Cells may wrap: a long cell is a capped column of wrapped text, not one cut line.
-  const notes = [...full.querySelectorAll("div")].filter((node) => node.textContent === ROWS[0][5]).at(-1)!;
-  expect(getComputedStyle(notes.parentElement!).maxWidth).toBe("200px");
-  expect(getComputedStyle(notes).whiteSpace).not.toBe("nowrap");
+  const fullNotes = [...full.querySelectorAll("div")].filter((node) => node.textContent === ROWS[0][5]).at(-1)!;
+  expect(getComputedStyle(fullNotes.parentElement!).maxWidth).toBe("200px");
+  expect(getComputedStyle(fullNotes).whiteSpace).not.toBe("nowrap");
 
   const close = document.querySelector('[aria-label="Close table"]') as HTMLElement;
   const animated = () => document.body.lastElementChild!.firstElementChild!;
   await act(async () => { close.click(); });
-  // The slide-out ends with an animation event on the modal's own element; jsdom never fires it by itself.
-  // jsdom has no AnimationEvent, so React listens under the prefixed name there.
   for (const name of ["animationend", "webkitAnimationEnd"]) await act(async () => { animated().dispatchEvent(new Event(name, { bubbles: true })); });
   expect(document.querySelector('[aria-label="Expanded table"]')).toBeNull();
 });
@@ -124,12 +121,4 @@ it("copies the table as the agent wrote it from the full-screen bar (22.03)", as
   await act(async () => { (container.querySelector('[aria-label="Expand table"]') as HTMLElement).click(); });
   await act(async () => { (document.querySelector('[aria-label="Copy table"]') as HTMLElement).click(); });
   expect(Clipboard.setStringAsync).toHaveBeenCalledWith(SIX_COLUMNS);
-});
-
-it("sets the first column in bold, as the header row is", async () => {
-  await render(SIX_COLUMNS);
-  const weight = (text: string) => getComputedStyle([...scroller().querySelectorAll("div")].filter((node) => node.textContent === text).at(-1)!).fontWeight;
-  expect(weight("Task")).toBe("600");
-  expect(weight("Ship sync")).toBe("600");
-  expect(weight("Alice")).not.toBe("600");
 });

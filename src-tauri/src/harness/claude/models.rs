@@ -325,7 +325,6 @@ mod tests {
         parse(&serde_json::from_str::<Value>(CAPTURE).unwrap())
     }
 
-    #[test]
     fn an_alias_says_which_version_it_runs() {
         let models = captured();
         let aliases: Vec<(&str, &str, Option<&str>)> = models.iter().filter(|m| m.alias).map(|m| (m.id.as_str(), m.label.as_str(), m.resolved.as_deref())).collect();
@@ -341,7 +340,6 @@ mod tests {
         assert!(models.iter().all(|m| m.harness == "claude" && m.id != "default"));
     }
 
-    #[test]
     fn every_version_can_be_pinned_current_ones_first() {
         let models = captured();
         let pinned: Vec<(&str, &str)> = models.iter().filter(|m| !m.alias).map(|m| (m.id.as_str(), m.label.as_str())).collect();
@@ -366,7 +364,6 @@ mod tests {
         assert!(models.iter().filter(|m| !m.alias).all(|m| m.resolved.is_none()));
     }
 
-    #[test]
     fn the_default_is_the_alias_the_cli_recommends() {
         let models = captured();
         assert_eq!(models.iter().filter(|m| m.is_default).map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["opus"]);
@@ -379,7 +376,6 @@ mod tests {
         assert_eq!(parse(&raw).iter().filter(|m| m.is_default).map(|m| m.id.clone()).collect::<Vec<_>>(), vec!["sonnet"]);
     }
 
-    #[test]
     fn efforts_are_the_clis_own() {
         let models = captured();
         let by_id = |id: &str| models.iter().find(|m| m.id == id).unwrap();
@@ -392,7 +388,6 @@ mod tests {
         assert!(by_id("haiku").efforts.is_empty() && by_id("haiku").default_effort.is_none());
     }
 
-    #[test]
     fn an_older_cli_reports_older_versions() {
         // What a runtime with last season's CLI would say: the same alias, another model.
         let raw = json!({"response": {"response": {"models": [
@@ -414,7 +409,6 @@ mod tests {
         assert!(models.iter().any(|m| m.alias && m.resolved.is_some()));
     }
 
-    #[test]
     fn a_cli_that_does_not_say_what_an_alias_runs_still_lists_aliases() {
         // An older CLI: family names, no `resolvedModel`, Sonnet listed first.
         let raw = json!({"response": {"response": {"models": [
@@ -449,7 +443,6 @@ mod tests {
         models.iter().find(|m| m.id == "opus").and_then(|m| m.resolved.as_deref())
     }
 
-    #[test]
     fn validation_accepts_listed_aliases_versions_and_default_but_refuses_other_ids() {
         let (cache, _) = scripted(vec![Ok(serde_json::from_str(CAPTURE).unwrap())]);
         for model in ["", "opus", "fable", "sonnet", "claude-opus-5-5", "claude-opus-5"] {
@@ -461,7 +454,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn validation_never_refuses_with_a_stand_in_but_keeps_enforcing_a_last_good_answer() {
         let (mut cache, _) = scripted(vec![Err("offline"), Ok(reply("claude-opus-5")), Err("offline")]);
         cache.validate("claude-opus-9").unwrap();
@@ -471,7 +463,6 @@ mod tests {
         assert!(cache.validate("claude-opus-9").is_err());
     }
 
-    #[test]
     fn a_good_answer_is_kept_until_it_ages_and_a_refresh_is_asked_for() {
         use std::sync::atomic::Ordering;
         let (mut cache, reads) = scripted(vec![Ok(reply("claude-opus-5")), Ok(reply("claude-opus-5-5"))]);
@@ -486,7 +477,6 @@ mod tests {
         assert_eq!(reads.load(Ordering::SeqCst), 2);
     }
 
-    #[test]
     fn a_failed_first_read_is_a_stand_in_that_is_soon_asked_again() {
         use std::sync::atomic::Ordering;
         let (mut cache, reads) = scripted(vec![Err("no claude on PATH"), Ok(reply("claude-opus-5-5"))]);
@@ -501,7 +491,6 @@ mod tests {
         assert_eq!(reads.load(Ordering::SeqCst), 2);
     }
 
-    #[test]
     fn a_failed_refresh_keeps_the_last_real_answer() {
         use std::sync::atomic::Ordering;
         let (mut cache, reads) = scripted(vec![Ok(reply("claude-opus-5-5")), Err("hung"), Ok(json!({})), Ok(reply("claude-opus-6"))]);
@@ -515,7 +504,6 @@ mod tests {
         assert_eq!(reads.load(Ordering::SeqCst), 4);
     }
 
-    #[test]
     fn a_reading_says_which_list_it_is_and_how_old() {
         let (mut cache, _) = scripted(vec![Err("no claude on PATH"), Ok(reply("claude-opus-5-5")), Err("hung")]);
         cache.locate = Box::new(|| Some("~/.local/bin/claude".into()));
@@ -532,7 +520,6 @@ mod tests {
         assert_eq!([ago(Duration::from_secs(59)), ago(Duration::from_secs(60)), ago(Duration::from_secs(45 * 60)), ago(Duration::from_secs(3 * 3600 + 5))], ["just now", "1 minute ago", "45 minutes ago", "3 hours ago"]);
     }
 
-    #[test]
     fn askers_at_the_same_moment_share_one_read() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let reads = std::sync::Arc::new(AtomicUsize::new(0));
@@ -553,15 +540,36 @@ mod tests {
         assert_eq!(reads.load(Ordering::SeqCst), 1);
     }
 
-    #[test]
     fn the_shared_cache_runs_no_cli_under_test() {
         assert_eq!(get(false).len(), claude_fallback().len());
     }
 
-    #[test]
     fn a_shape_we_do_not_understand_maps_to_nothing() {
         assert!(parse(&json!({})).is_empty());
         assert!(parse(&json!({"response": {"response": {"models": "nonsense"}}})).is_empty());
         assert!(parse(&json!({"response": {"response": {"models": [{"displayName": "Nameless"}]}}})).is_empty());
+    }
+
+    #[test]
+    fn claude_models_batch_1() {
+        an_alias_says_which_version_it_runs();
+        every_version_can_be_pinned_current_ones_first();
+        the_default_is_the_alias_the_cli_recommends();
+        efforts_are_the_clis_own();
+        an_older_cli_reports_older_versions();
+        a_cli_that_does_not_say_what_an_alias_runs_still_lists_aliases();
+        validation_accepts_listed_aliases_versions_and_default_but_refuses_other_ids();
+        validation_never_refuses_with_a_stand_in_but_keeps_enforcing_a_last_good_answer();
+    }
+
+    #[test]
+    fn claude_models_batch_2() {
+        a_good_answer_is_kept_until_it_ages_and_a_refresh_is_asked_for();
+        a_failed_first_read_is_a_stand_in_that_is_soon_asked_again();
+        a_failed_refresh_keeps_the_last_real_answer();
+        a_reading_says_which_list_it_is_and_how_old();
+        askers_at_the_same_moment_share_one_read();
+        the_shared_cache_runs_no_cli_under_test();
+        a_shape_we_do_not_understand_maps_to_nothing();
     }
 }

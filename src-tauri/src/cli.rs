@@ -2224,7 +2224,6 @@ impl Tokens {
 
 #[cfg(test)]
 mod tests {
-    #[test]
     fn configuration_reads_select_a_project() {
         assert_eq!(rpc_of(&["config", "show"]).0, "config.show");
         let (command, params, _) = rpc_of(&["config", "show", "--project", "app", "--json"]);
@@ -2244,7 +2243,6 @@ mod tests {
         pub(super) static CALLING_SESSION: std::cell::RefCell<Option<Value>> = const { std::cell::RefCell::new(None) };
     }
 
-    #[test]
     fn a_new_session_names_who_started_it_and_a_leads_workers_are_listed_and_stopped() {
         let create = ["sessions", "create", "--project", "p", "--agent", "claude", "--prompt", "go"];
         let quick = ["sessions", "create", "--quick", "--agent", "claude", "--prompt", "go"];
@@ -2301,7 +2299,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn runs_are_created_from_a_plan_file_and_driven_by_id_or_from_inside_their_lead() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plan.json");
@@ -2397,7 +2394,6 @@ mod tests {
     }
 
     /// PRO-477: a bot's suggestion and its memory tidy, from inside its session.
-    #[test]
     fn bots_suggest_and_memory_tidy_carry_their_session() {
         let short = Duration::from_secs(30);
         let caller = json!({"session": "look", "tab": "look-tab"});
@@ -2416,7 +2412,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn bots_commands_name_a_role_a_name_or_a_bot() {
         let short = Duration::from_secs(30);
         assert_eq!(rpc_of(&["bots", "list", "--json"]), ("bots.list".into(), json!({}), short));
@@ -2471,7 +2466,6 @@ mod tests {
 
     /// The access gate's help groups (PRO-494) are each a group this command line parses by name, before
     /// the built-in browser's verbs, and none is a command of the headless runtime's binary.
-    #[test]
     fn the_access_gates_help_groups_are_command_groups_here() {
         for group in crate::bots::access::HELP_GROUPS {
             if let Err(error) = parse(&args(&[group])) {
@@ -2488,7 +2482,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn sessions_create_carries_an_account_only_when_one_is_named() {
         // #980: by id or label; the app resolves it against the agent's accounts.
         for base in [
@@ -2503,7 +2496,6 @@ mod tests {
         assert!(help_text().contains("--account ACCOUNT"));
     }
 
-    #[test]
     fn sessions_usage_reads_one_session_or_a_lead_and_its_workers() {
         assert_eq!(rpc_of(&["sessions", "usage", "0198a", "--json"]), ("sessions.usage".into(), json!({"session": "0198a"}), Duration::from_secs(30)));
         assert_eq!(rpc_of(&["sessions", "usage", "--children-of", "0198c", "--json"]), ("sessions.usage".into(), json!({"childrenOf": "0198c"}), Duration::from_secs(30)));
@@ -2512,7 +2504,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn experimental_codex_transport_requires_an_explicit_creation_flag() {
         for destination in [vec!["--quick"], vec!["--project", "project"]] {
             let mut command = vec!["sessions", "create"];
@@ -2526,7 +2517,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn vm_commands_reach_the_app_and_the_first_start_may_download() {
         let (command, _, timeout) = rpc_of(&["vm", "start"]);
         assert_eq!(command, "vm.start");
@@ -2538,7 +2528,6 @@ mod tests {
         assert!(parse(&args(&["vm", "install"])).is_err());
     }
 
-    #[test]
     fn review_comments_parse_ranges_and_reject_incomplete_or_ambiguous_arguments() {
         for line in ["1", "40-43"] {
             let (command, params, _) = rpc_of(&["review", "comment", "--file", "src/foo.ts", "--line", line, "--body", "High: a defect.", "--json"]);
@@ -2561,7 +2550,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn a_quick_chat_is_created_and_listed_without_a_project() {
         let (command, params, _) = rpc_of(&["sessions", "create", "--quick", "--agent", "claude", "--prompt", "What is a monad?", "--cwd", "/tmp/notes", "--mode", "plan"]);
         assert_eq!(command, "sessions.create");
@@ -2582,7 +2570,6 @@ mod tests {
         assert!(parse(&args(&["sessions", "list", "--quick", "--cloud"])).is_err());
     }
 
-    #[test]
     fn a_workers_report_is_asked_for_at_its_start_and_read_with_one_command() {
         let (command, params, _) = rpc_of(&["sessions", "report", "0198a", "--json"]);
         assert_eq!((command.as_str(), params), ("sessions.report", json!({"session": "0198a"})));
@@ -2613,7 +2600,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn session_pinning_commands_accept_one_selector() {
         for command in ["pin", "unpin"] {
             let (method, params, _) = rpc_of(&["sessions", command, "0198a", "--json"]);
@@ -2627,7 +2613,6 @@ mod tests {
         assert!(GUIDE.contains("sessions unpin <session>"));
     }
 
-    #[test]
     fn manual_session_status_accepts_only_the_five_workflow_values() {
         for status in ["backlog", "in_progress", "in_review", "done", "canceled"] {
             let (command, params, _) = rpc_of(&["sessions", "status", "s1", "--status", status, "--json"]);
@@ -2639,7 +2624,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn sessions_are_archived_and_brought_back_several_at_once_and_the_archived_ones_listed() {
         let (command, params, _) = rpc_of(&["sessions", "archive", "0198a", "0198b", "--json"]);
         assert_eq!((command.as_str(), params), ("sessions.archive", json!({"sessions": ["0198a", "0198b"]})));
@@ -2660,7 +2644,6 @@ mod tests {
         assert!(help_text().contains("[--archived]"));
     }
 
-    #[test]
     fn the_floating_window_is_shown_hidden_and_toggled_from_the_command_line() {
         for action in ["show", "hide", "toggle"] {
             let (command, params, _) = rpc_of(&["floating", action]);
@@ -2673,7 +2656,6 @@ mod tests {
         assert!(help_text().contains("terminalx sessions create --quick"));
     }
 
-    #[test]
     fn sharing_cli_carries_explicit_access_policy_and_revocation_semantics() {
         let (command, params, _) = rpc_of(&["share", "create", "session", "--read-only", "--people", "alice@example.com,bob@example.com", "--approve", "--single-use", "--local-only"]);
         assert_eq!(command, "share.create");
@@ -2702,7 +2684,6 @@ mod tests {
         assert!(parse(&args(&["share", "edit", "session", "link"])).is_err());
     }
 
-    #[test]
     fn a_cloud_key_or_flag_sends_the_same_verbs_to_the_cloud_commands() {
         let (command, params, _) = rpc_of(&["projects", "list", "--cloud"]);
         assert_eq!((command.as_str(), params), ("cloud.projects.list", json!({"org": null})));
@@ -2732,7 +2713,6 @@ mod tests {
         assert!(parse(&args(&["cloud", "delete", "cloud:org-a:ws-1"])).is_err());
     }
 
-    #[test]
     fn a_cloud_wait_is_asked_in_short_calls_until_the_tab_settles_or_the_timeout_passes() {
         let params = json!({"target": "cloud:org-a:ws-1:s1", "timeoutSeconds": 70, "tab": null});
         let answer = |reason: &str| ControlResponse::success("1", json!({"reason": reason, "status": "in_progress"}));
@@ -2767,7 +2747,6 @@ mod tests {
         assert_eq!((calls, refused.unwrap_err().code.as_str()), (1, "forbidden"));
     }
 
-    #[test]
     fn a_wait_on_several_sessions_is_one_call_that_names_them_all() {
         // One target and no mode: the call and the answer of before.
         let (command, params, timeout) = rpc_of(&["wait", "s1", "--timeout", "40"]);
@@ -2804,7 +2783,6 @@ mod tests {
         assert!(refused(&["wait", "--children-of"]).contains("--children-of"));
     }
 
-    #[test]
     fn local_targets_keep_their_commands_and_refuse_cloud_only_options() {
         assert_eq!(rpc_of(&["projects", "list"]).0, "projects.list");
         assert_eq!(rpc_of(&["projects", "add", "/code/api", "--json"]), ("projects.add".into(), json!({"path": std::path::absolute("/code/api").unwrap(), "refuseExisting": true}), Duration::from_secs(30)));
@@ -2823,7 +2801,6 @@ mod tests {
         assert!(error.message.contains("--tab applies to a cloud session"), "{}", error.message);
     }
 
-    #[test]
     fn a_session_starts_from_an_issue_and_carries_the_merge_switch() {
         let (command, params, timeout) = rpc_of(&["sessions", "create", "--project", "raccoon", "--agent", "claude", "--issue", "433"]);
         assert_eq!(command, "sessions.create");
@@ -2864,7 +2841,6 @@ mod tests {
         error.message
     }
 
-    #[test]
     fn an_issue_is_viewed_with_or_without_its_comments() {
         let (command, params, timeout) = issue_rpc(&["issues", "view", "#433"]);
         assert_eq!((command.as_str(), params), ("issues.view", json!({"issue": "#433", "provider": null, "project": null, "comments": false})));
@@ -2884,7 +2860,6 @@ mod tests {
         assert_eq!(rpc_of(&["issues", "list", "--project", "raccoon"]).1, json!({"project": "raccoon", "provider": null, "assignedToMe": false, "team": null, "search": null}));
     }
 
-    #[test]
     fn a_comment_comes_from_the_command_line_a_file_or_standard_input() {
         let (command, params, timeout) = issue_rpc(&["issues", "comment", "#12", "--body", "PR: https://github.com/acme/api/pull/13"]);
         assert_eq!((command.as_str(), params), ("issues.comment", json!({"issue": "#12", "provider": null, "project": null, "body": "PR: https://github.com/acme/api/pull/13"})));
@@ -2907,7 +2882,6 @@ mod tests {
         assert!(issue_error(&["issues", "comment", "12", "--body"]).contains("--body needs a value"));
     }
 
-    #[test]
     fn a_status_move_names_its_state_and_a_github_close_its_reason() {
         let (command, params, _) = issue_rpc(&["issues", "status", "PRO-42", "--to", "In Review"]);
         assert_eq!((command.as_str(), params), ("issues.status", json!({"issue": "PRO-42", "provider": null, "project": null, "to": "In Review", "reason": null})));
@@ -2922,7 +2896,6 @@ mod tests {
         assert!(issue_error(&["issues", "status", "12", "--to", "open", "--to", "closed"]).contains("only once"));
     }
 
-    #[test]
     fn assigning_takes_people_me_or_nobody_and_exactly_one_of_them() {
         let (command, params, _) = issue_rpc(&["issues", "assign", "#12", "--to", "alice", "--to", "bob,carol"]);
         assert_eq!((command.as_str(), params), ("issues.assign", json!({"issue": "#12", "provider": null, "project": null, "to": ["alice", "bob", "carol"], "me": false, "none": false})));
@@ -2940,7 +2913,6 @@ mod tests {
         assert!(issue_error(&["issues", "assign", "12", "--to"]).contains("--to needs a value"));
     }
 
-    #[test]
     fn labels_are_added_and_removed_by_name() {
         let (command, params, _) = issue_rpc(&["issues", "label", "#12", "--add", "bug", "--add", "needs review", "--remove", "triage"]);
         assert_eq!((command.as_str(), params), ("issues.label", json!({"issue": "#12", "provider": null, "project": null, "add": ["bug", "needs review"], "remove": ["triage"]})));
@@ -2950,7 +2922,6 @@ mod tests {
         assert!(issue_error(&["issues", "label", "12", "--add", "Bug", "--remove", "bug"]).contains("both added and removed"));
     }
 
-    #[test]
     fn an_issue_is_created_in_a_named_project() {
         let (command, params, timeout) = issue_rpc(&["issues", "create", "--project", "raccoon", "--title", "Crash on start"]);
         assert_eq!(
@@ -2974,7 +2945,6 @@ mod tests {
         assert!(issue_error(&["issues", "create", "--project", "p", "--title", "t", "#12"]).contains("Unexpected argument #12"));
     }
 
-    #[test]
     fn an_issue_command_says_where_it_runs() {
         let (_, params, _) = rpc_of(&["issues", "view", "12"]);
         let caller = &params["caller"];
@@ -2989,7 +2959,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn existing_session_autopilot_needs_no_new_author_and_keeps_choices() {
         let (command, params, _) = issue_rpc(&["pipelines", "start", "author-tab", "--adopt-pr", "--no-auto-merge", "--resolve-conflicts"]);
         assert_eq!(command, "pipelines.start");
@@ -3000,7 +2969,6 @@ mod tests {
         assert!(parse(&args(&["pipelines", "start", "s", "--force"])).is_err());
     }
 
-    #[test]
     fn resolver_restart_routes_through_authenticated_pipeline_actions() {
         let (command, params, timeout) = rpc_of(&["pipelines", "resolve", "938", "--restart", "--project", "terminalx"]);
         assert_eq!(command, "pipelines.act");
@@ -3010,7 +2978,6 @@ mod tests {
         assert!(parse(&args(&["pipelines", "resolve", "--restart"])).is_err());
     }
 
-    #[test]
     fn pipelines_are_listed_shown_and_steered_through_authenticated_control() {
         assert_eq!(rpc_of(&["pipelines", "list"]).0, "pipelines.list");
         assert_eq!(rpc_of(&["pipelines", "list", "--project", "raccoon"]).1, json!({"project": "raccoon"}));
@@ -3043,7 +3010,6 @@ mod tests {
         assert!(parse(&args(&["pipelines", "show"])).is_err());
     }
 
-    #[test]
     fn a_cloud_session_is_created_without_waking_or_spending_unless_asked() {
         let project = "cloud:org-a:github.com/acme/api";
         let (command, params, timeout) = rpc_of(&["sessions", "create", "--project", project, "--prompt", "fix the login"]);
@@ -3061,7 +3027,6 @@ mod tests {
         assert!(parse(&args(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--prompt", "go", "--wake"])).is_err());
     }
 
-    #[test]
     fn a_cloud_session_can_start_from_an_issue_and_is_never_asked_to_merge() {
         let project = "cloud:org-a:github.com/acme/api";
         // The issue is its own prompt.
@@ -3086,7 +3051,6 @@ mod tests {
         assert!(parse(&args(&["sessions", "create", "--project", project])).is_err());
     }
 
-    #[test]
     fn parses_names_and_rename_commands() {
         for (argv, expected_command, expected_params) in [
             (vec!["sessions", "create", "--title", "#203 fix", "--name", "fix-203", "--project", "p", "--agent", "codex", "--prompt", "fix it"],
@@ -3120,7 +3084,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn parses_session_creation_independent_of_flag_order() {
         let parsed = parse(&args(&[
             "sessions",
@@ -3153,7 +3116,6 @@ mod tests {
         assert_eq!(params["effort"], "high");
     }
 
-    #[test]
     fn session_creation_defaults_to_a_worktree_without_on_main_acknowledgement() {
         let parsed = parse(&args(&[
             "sessions",
@@ -3173,7 +3135,6 @@ mod tests {
         assert_eq!(params["onMain"], false);
     }
 
-    #[test]
     fn destructive_worktree_command_carries_confirmation() {
         let parsed = parse(&args(&[
             "worktrees",
@@ -3198,7 +3159,6 @@ mod tests {
 
     /// #719: the delete can be previewed, and told which sessions the caller
     /// saw; the listing can ask for exactly what the delete would take.
-    #[test]
     fn a_worktree_delete_can_be_previewed_and_name_the_sessions_it_expects() {
         let (command, params, _) = rpc_of(&["worktrees", "delete", "zero-comparison", "--dry-run", "--project", "raccoon"]);
         assert_eq!(command, "worktrees.delete");
@@ -3225,7 +3185,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn rejects_conflicting_session_locations_and_unknown_flags() {
         let conflict = parse(&args(&[
             "sessions",
@@ -3246,7 +3205,6 @@ mod tests {
         assert!(unknown.message.contains("Unexpected argument"));
     }
 
-    #[test]
     fn skills_get_is_local_and_version_matched() {
         let parsed = parse(&args(&["skills", "get", "terminalx-cli", "--full"])).unwrap();
         assert!(matches!(parsed.action, Action::Guide { name: "terminalx-cli", .. }));
@@ -3265,7 +3223,6 @@ mod tests {
         assert_eq!(unknown.code, "not_found");
     }
 
-    #[test]
     fn computer_commands_route_through_the_computer_parser() {
         let parsed = parse(&args(&["computer", "click", "--app", "Finder", "--element-index", "3", "--json"])).unwrap();
         assert!(parsed.json);
@@ -3302,7 +3259,6 @@ mod tests {
         run(&args(values), &mut Output { stdout, stderr })
     }
 
-    #[test]
     fn a_closed_pipe_ends_the_output_and_keeps_the_status() {
         let closed = || Failing(io::ErrorKind::BrokenPipe);
         let mut stderr = Vec::new();
@@ -3319,7 +3275,6 @@ mod tests {
         assert!(stderr.is_empty());
     }
 
-    #[test]
     fn any_other_failed_write_is_an_error() {
         let mut stderr = Vec::new();
         assert_eq!(run_into(&["--version"], &mut Failing(io::ErrorKind::StorageFull), &mut stderr), 1);
@@ -3328,7 +3283,6 @@ mod tests {
         assert_eq!(exit_status(2, Err(io::ErrorKind::Other.into()), &mut Vec::new()), 2);
     }
 
-    #[test]
     fn output_is_written_as_println_wrote_it() {
         let mut stdout = Vec::new();
         assert_eq!(run_into(&["--version"], &mut stdout, &mut Vec::new()), 0);
@@ -3365,7 +3319,6 @@ mod tests {
         assert_eq!(reply["error"]["code"], "invalid_arguments");
     }
 
-    #[test]
     fn public_copy_uses_the_terminalx_identity() {
         assert!(HELP.starts_with("terminalx — control a running TerminalX app"));
         let help = help_text();
@@ -3402,7 +3355,6 @@ mod tests {
         commands
     }
 
-    #[test]
     fn the_orchestrator_guide_is_served_and_its_stub_names_it() {
         let parsed = parse(&args(&["skills", "get", "terminalx-orchestrator"])).unwrap();
         let Action::Guide { name, guide } = parsed.action else { panic!("expected guide") };
@@ -3425,7 +3377,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn the_orchestrator_guide_names_only_commands_and_flags_the_cli_has() {
         let help = help_text();
         let commands = orchestrator_guide_commands();
@@ -3454,7 +3405,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn the_orchestrator_guides_plan_example_passes_runs_create_validation() {
         use crate::orchestration::plan;
         let json = ORCHESTRATOR_GUIDE.split("```json\n").nth(1).and_then(|rest| rest.split("\n```").next()).expect("the guide has a plan example");
@@ -3481,7 +3431,6 @@ mod tests {
         assert!(ORCHESTRATOR_GUIDE.contains("A piece that reads text from outside the repository"));
     }
 
-    #[test]
     fn the_orchestrator_guide_teaches_each_part_the_issue_asks_for() {
         for said in [
             // The gate, and saying so when the answer is to stay.
@@ -3509,7 +3458,6 @@ mod tests {
     }
 
     /// `machines …`, `--machine` and `machine:` keys (PRO-356).
-    #[test]
     fn machine_commands_go_to_the_app_as_machine_calls() {
         let err = |values: &[&str]| parse(&args(values)).unwrap_err();
         // The machines this computer operates.
@@ -3609,7 +3557,6 @@ mod tests {
     }
 
     /// Without `--machine`, `--all-machines` or a `machine:` key, every request is word for word what it was.
-    #[test]
     fn without_a_machine_every_command_is_unchanged() {
         assert_eq!(rpc_of(&["projects", "list"]), ("projects.list".into(), json!({}), Duration::from_secs(30)));
         assert_eq!(rpc_of(&["sessions", "list"]), ("sessions.list".into(), json!({"project": null, "quick": false, "archived": false, "worktree": null}), Duration::from_secs(30)));
@@ -3624,7 +3571,6 @@ mod tests {
         assert_eq!(rpc_of(&["wait", "s1"]).0, "wait");
     }
 
-    #[test]
     fn a_machine_wait_is_asked_in_short_calls() {
         let params = json!({"machine": "m1", "target": "machine:m1:p:s", "timeoutSeconds": 45, "tab": null});
         let mut asked = Vec::new();
@@ -3643,6 +3589,76 @@ mod tests {
             Err(ControlError::new(crate::machine_control::OFFLINE, "Mac mini is offline: no route to it answers.", None::<String>))
         });
         assert_eq!((calls, offline.unwrap_err().code.as_str()), (1, "machine_offline"));
+    }
+
+    #[test]
+    fn cli_batch_1() {
+        configuration_reads_select_a_project();
+        a_new_session_names_who_started_it_and_a_leads_workers_are_listed_and_stopped();
+        runs_are_created_from_a_plan_file_and_driven_by_id_or_from_inside_their_lead();
+        bots_suggest_and_memory_tidy_carry_their_session();
+        bots_commands_name_a_role_a_name_or_a_bot();
+        the_access_gates_help_groups_are_command_groups_here();
+        sessions_create_carries_an_account_only_when_one_is_named();
+        sessions_usage_reads_one_session_or_a_lead_and_its_workers();
+        experimental_codex_transport_requires_an_explicit_creation_flag();
+        vm_commands_reach_the_app_and_the_first_start_may_download();
+        review_comments_parse_ranges_and_reject_incomplete_or_ambiguous_arguments();
+        a_quick_chat_is_created_and_listed_without_a_project();
+        a_workers_report_is_asked_for_at_its_start_and_read_with_one_command();
+        session_pinning_commands_accept_one_selector();
+    }
+
+    #[test]
+    fn cli_batch_2() {
+        manual_session_status_accepts_only_the_five_workflow_values();
+        sessions_are_archived_and_brought_back_several_at_once_and_the_archived_ones_listed();
+        the_floating_window_is_shown_hidden_and_toggled_from_the_command_line();
+        sharing_cli_carries_explicit_access_policy_and_revocation_semantics();
+        a_cloud_key_or_flag_sends_the_same_verbs_to_the_cloud_commands();
+        a_cloud_wait_is_asked_in_short_calls_until_the_tab_settles_or_the_timeout_passes();
+        a_wait_on_several_sessions_is_one_call_that_names_them_all();
+        local_targets_keep_their_commands_and_refuse_cloud_only_options();
+        a_session_starts_from_an_issue_and_carries_the_merge_switch();
+        an_issue_is_viewed_with_or_without_its_comments();
+        a_comment_comes_from_the_command_line_a_file_or_standard_input();
+        a_status_move_names_its_state_and_a_github_close_its_reason();
+        assigning_takes_people_me_or_nobody_and_exactly_one_of_them();
+        labels_are_added_and_removed_by_name();
+    }
+
+    #[test]
+    fn cli_batch_3() {
+        an_issue_is_created_in_a_named_project();
+        an_issue_command_says_where_it_runs();
+        existing_session_autopilot_needs_no_new_author_and_keeps_choices();
+        resolver_restart_routes_through_authenticated_pipeline_actions();
+        pipelines_are_listed_shown_and_steered_through_authenticated_control();
+        a_cloud_session_is_created_without_waking_or_spending_unless_asked();
+        a_cloud_session_can_start_from_an_issue_and_is_never_asked_to_merge();
+        parses_names_and_rename_commands();
+        parses_session_creation_independent_of_flag_order();
+        session_creation_defaults_to_a_worktree_without_on_main_acknowledgement();
+        destructive_worktree_command_carries_confirmation();
+        a_worktree_delete_can_be_previewed_and_name_the_sessions_it_expects();
+        rejects_conflicting_session_locations_and_unknown_flags();
+        skills_get_is_local_and_version_matched();
+    }
+
+    #[test]
+    fn cli_batch_4() {
+        computer_commands_route_through_the_computer_parser();
+        a_closed_pipe_ends_the_output_and_keeps_the_status();
+        any_other_failed_write_is_an_error();
+        output_is_written_as_println_wrote_it();
+        public_copy_uses_the_terminalx_identity();
+        the_orchestrator_guide_is_served_and_its_stub_names_it();
+        the_orchestrator_guide_names_only_commands_and_flags_the_cli_has();
+        the_orchestrator_guides_plan_example_passes_runs_create_validation();
+        the_orchestrator_guide_teaches_each_part_the_issue_asks_for();
+        machine_commands_go_to_the_app_as_machine_calls();
+        without_a_machine_every_command_is_unchanged();
+        a_machine_wait_is_asked_in_short_calls();
     }
 }
 

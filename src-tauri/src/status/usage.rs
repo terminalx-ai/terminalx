@@ -1307,7 +1307,6 @@ mod tests {
         shown.into_values().collect()
     }
 
-    #[test]
     fn changed_percent_is_immediate_but_identical_receipts_are_deduplicated() {
         let store = UsageStore::default();
         assert!(store.ingest_claude_at(&session_sample(10, 100), 1000));
@@ -1317,7 +1316,6 @@ mod tests {
         assert!(store.ingest_claude_at(&session_sample(11, 100), 17_000));
     }
 
-    #[test]
     fn expiration_is_stale_even_after_a_recent_receipt_and_does_not_make_zero() {
         let store = UsageStore::default();
         store.ingest_claude_at(&session_sample(100, 10), 9_000);
@@ -1335,7 +1333,6 @@ mod tests {
     /// #772: a runtime that replaced a long-running one counts from 1 again.
     /// Each snapshot names the store it counts in, so a window compares
     /// revisions only within one.
-    #[test]
     fn each_store_counts_its_own_revisions_and_names_itself_on_every_snapshot() {
         let none = HashSet::new();
         let old = UsageStore::default();
@@ -1357,7 +1354,6 @@ mod tests {
 
     /// #772: a Codex window past its reset is expired as Claude's is, at its
     /// last percentage, however recently it arrived.
-    #[test]
     fn a_codex_window_past_its_reset_is_stale_without_inventing_zero() {
         let store = UsageStore::default();
         let running = HashSet::from(["codex".to_string()]);
@@ -1369,7 +1365,6 @@ mod tests {
         assert_eq!((after.windows[0].used_percent, after.windows[0].stale), (100.0, true));
     }
 
-    #[test]
     fn old_tab_or_oauth_window_cannot_replace_a_confirmed_rollover() {
         let store = UsageStore::default();
         store.ingest_claude_at(&session_sample(1, 200), 11_000);
@@ -1385,7 +1380,6 @@ mod tests {
         assert_eq!(merged[0].resets_at, Some(200_000));
     }
 
-    #[test]
     fn oauth_preserves_omitted_windows_and_live_data_arriving_in_flight() {
         let mut inner = Inner::default();
         apply_claude_live(&mut inner, &json!({"rate_limits": {
@@ -1408,7 +1402,6 @@ mod tests {
         assert_eq!(inner.windows[&("claude".into(), "fable_weekly".into())].used_percent, 72.0);
     }
 
-    #[test]
     fn expiry_bypasses_recent_poll_once_then_gets_one_bounded_followup() {
         let mut inner = Inner::default();
         apply_claude_live(&mut inner, &session_sample(100, 10), 9_000);
@@ -1428,7 +1421,6 @@ mod tests {
         assert!(begin_claude_refresh(&mut inner, 70_000 + BACKGROUND_REFRESH_MS, false, None));
     }
 
-    #[test]
     fn manual_refresh_bypasses_polling_but_respects_retry_after() {
         let mut inner = Inner::default();
         inner.claude.last_attempt = Some(1000);
@@ -1448,7 +1440,6 @@ mod tests {
     /// #664: a credential read that failed on this machine kept the button
     /// from retrying for up to four hours. The timer still backs off; the
     /// button starts the backoff over. A provider's Retry-After holds both.
-    #[test]
     fn manual_refresh_clears_a_local_credential_backoff_but_not_a_provider_one() {
         use claude_oauth::CredentialError;
         let mut inner = Inner::default();
@@ -1488,7 +1479,6 @@ mod tests {
     /// The frontend timer re-arms when a refresh settles, so its next tick
     /// lands one interval after that; the provider request it asks for must
     /// then be allowed, not swallowed by a longer backend throttle.
-    #[test]
     fn a_provider_refresh_is_eligible_at_the_configured_cadence() {
         for (cadence, interval) in [(Some(MINUTE), MINUTE), (Some(2 * MINUTE), 2 * MINUTE), (Some(5 * MINUTE), 5 * MINUTE), (Some(15 * MINUTE), 15 * MINUTE), (None, BACKGROUND_REFRESH_MS)] {
             let mut inner = Inner::default();
@@ -1513,7 +1503,6 @@ mod tests {
         assert!(begin_claude_refresh(&mut inner, MINUTE, false, Some(MINUTE)));
     }
 
-    #[test]
     fn a_slow_request_is_never_overlapped_and_the_next_tick_follows_it() {
         let mut inner = Inner::default();
         assert!(begin_claude_refresh(&mut inner, 0, false, Some(MINUTE)));
@@ -1528,7 +1517,6 @@ mod tests {
         assert!(begin_codex_refresh(&mut inner, 4 * MINUTE, false, Some(MINUTE)));
     }
 
-    #[test]
     fn backoff_outranks_the_interval_and_a_failure_keeps_the_last_known_usage() {
         let store = UsageStore::default();
         let cadence = Some(MINUTE);
@@ -1571,7 +1559,6 @@ mod tests {
         assert!(begin_claude_refresh(&mut inner, 21 * MINUTE + 300, false, cadence));
     }
 
-    #[test]
     fn codex_failures_back_off_keep_the_snapshot_and_recover() {
         let store = UsageStore::default();
         let cadence = Some(MINUTE);
@@ -1603,7 +1590,6 @@ mod tests {
         assert_eq!(recovered.codex_refresh, CodexRefresh { retry_at: None, error: None, last_success_at: Some(3 * MINUTE), skipped: None });
     }
 
-    #[test]
     fn the_codex_button_keeps_its_debounce_but_never_waits_longer_than_the_timer() {
         let mut inner = Inner::default();
         assert!(begin_codex_refresh(&mut inner, 0, true, None));
@@ -1622,7 +1608,6 @@ mod tests {
         assert!(!begin_codex_refresh(&mut inner, 30 * MINUTE, false, Some(MINUTE)));
     }
 
-    #[test]
     fn a_new_account_starts_its_own_cadence_and_freshness() {
         let store = UsageStore::default();
         {
@@ -1639,7 +1624,6 @@ mod tests {
         assert_eq!(snapshot.claude, ClaudeRefresh::default());
     }
 
-    #[test]
     fn account_switch_rejects_old_tabs_unknown_identity_and_inflight_responses() {
         let mut inner = Inner::default();
         let mut a = session_sample(100, 100);
@@ -1668,7 +1652,6 @@ mod tests {
         assert!(inner.windows.is_empty());
     }
 
-    #[test]
     fn changed_live_rollover_is_published_inside_dedup_interval() {
         let store = UsageStore::default();
         let reset = 1_788_757_220;
@@ -1690,7 +1673,6 @@ mod tests {
         assert_eq!(snapshot.windows.iter().find(|w| w.key == "five_hour").unwrap().used_percent, 1.0);
     }
 
-    #[test]
     fn codex_classifies_known_windows_with_one_minute_tolerance() {
         assert_eq!(classify_codex(299), ("five_hour".into(), "5h".into()));
         assert_eq!(classify_codex(300), ("five_hour".into(), "5h".into()));
@@ -1700,13 +1682,11 @@ mod tests {
         assert_eq!(classify_codex(60), ("60_minutes".into(), "60m".into()));
     }
 
-    #[test]
     fn reset_seconds_become_milliseconds_without_overflow() {
         assert_eq!(seconds_to_ms(1_788_757_220), Some(1_788_757_220_000));
         assert_eq!(seconds_to_ms(i64::MAX), None);
     }
 
-    #[test]
     fn codex_primary_and_secondary_parse_as_one_window_list() {
         let windows = parse_codex_windows(
             &json!({"rateLimits": {
@@ -1723,7 +1703,6 @@ mod tests {
         assert_eq!(windows[1].used_percent, 43.0);
     }
 
-    #[test]
     fn codex_drops_per_model_limits_and_keeps_the_account_window() {
         let windows = parse_codex_windows(
             &json!({
@@ -1753,7 +1732,6 @@ mod tests {
         assert_eq!(windows[0].resets_at, Some(1_788_981_737_000));
     }
 
-    #[test]
     fn codex_falls_back_to_the_codex_limit_id_when_the_account_block_is_missing() {
         let windows = parse_codex_windows(
             &json!({
@@ -1772,7 +1750,6 @@ mod tests {
         assert_eq!(windows[0].used_percent, 12.0);
     }
 
-    #[test]
     fn codex_credits_and_next_available_reset_parse_from_the_rpc_payload() {
         let (usage, credit_id) = parse_codex_usage(&json!({
             "rateLimits": {"credits": {"hasCredits": true, "unlimited": false, "balance": "1652.0941250000"}},
@@ -1790,7 +1767,6 @@ mod tests {
         assert_eq!(usage.and_then(|value| value.reset_credits).and_then(|value| value.next_expires_at), Some(1_790_000_000_000));
     }
 
-    #[test]
     fn claude_statusline_accepts_percentage_fields() {
         let windows = parse_claude(
             &json!({"rate_limits": {
@@ -1817,7 +1793,6 @@ mod tests {
         assert_eq!(fable.resets_at, Some(1_788_789_600_000));
     }
 
-    #[test]
     fn statusline_windows_win_while_oauth_fills_missing_windows() {
         let oauth = claude_oauth::parse_response(
             &json!({
@@ -1888,7 +1863,6 @@ mod tests {
     /// #729: the endpoint's fractional deadline for the window the status line
     /// reported in whole seconds, half a second earlier, read as the previous
     /// window and was dropped on every refresh until that window reset.
-    #[test]
     fn an_endpoint_reply_half_a_second_earlier_replaces_the_status_line_window() {
         let mut inner = Inner::default();
         apply_claude_live(&mut inner, &json!({"rate_limits": {"seven_day": {"used_percentage": 24, "resets_at": WEEK_RESET}}}), 1_000);
@@ -1913,7 +1887,6 @@ mod tests {
 
     /// #729: a 5-hour window not yet started has no deadline. It replaces the
     /// expired one, as 0% with no countdown, instead of "awaiting update".
-    #[test]
     fn a_window_not_yet_started_replaces_an_expired_one() {
         for reply in [
             json!({"five_hour": {"utilization": 0.0, "resets_at": null}, "seven_day": {"utilization": 24.0, "resets_at": WEEK_RESET}}),
@@ -1938,7 +1911,6 @@ mod tests {
 
     /// #729: the endpoint answering with the expired window itself: its
     /// deadline had passed before the request, so none of it still counts.
-    #[test]
     fn an_endpoint_reply_with_a_window_already_over_shows_it_not_started() {
         let mut inner = Inner::default();
         apply_claude_live(&mut inner, &session_sample(1, 10), 9_000);
@@ -1963,7 +1935,6 @@ mod tests {
     /// still ahead when the request started. No later window had started then,
     /// so the shown one was wrong, yet the reply was refused as the previous
     /// window until the shown deadline passed.
-    #[test]
     fn an_endpoint_window_still_running_when_asked_replaces_a_later_shown_one() {
         let running = RUNNING_MS;
         let mut inner = week_shown();
@@ -1995,7 +1966,6 @@ mod tests {
     /// running one, any tab's next frame still carrying the old deadline was
     /// taken as the next window, and the old number came back on every turn.
     /// No later window starts before the endpoint's one ends.
-    #[test]
     fn a_status_line_frame_does_not_take_back_a_window_the_endpoint_replaced() {
         let mut inner = week_shown();
         let now = WEEK_SEEN + HOUR;
@@ -2034,7 +2004,6 @@ mod tests {
 
     /// A status line alone, with no endpoint answer, still moves to a later
     /// deadline at once: nothing said the shown window was running.
-    #[test]
     fn a_later_status_line_deadline_is_the_next_window_without_an_endpoint_answer() {
         let mut inner = week_shown();
         assert!(!shown(&inner, "seven_day").endpoint_running);
@@ -2044,7 +2013,6 @@ mod tests {
 
     /// #737: the same earlier window from a status line is still the previous
     /// one. Its time is when it arrived, and an idle tab repeats old samples.
-    #[test]
     fn the_same_earlier_window_from_a_status_line_is_still_refused() {
         let mut inner = week_shown();
         let now = WEEK_SEEN + HOUR;
@@ -2058,7 +2026,6 @@ mod tests {
 
     /// #737: an endpoint window whose deadline had passed when the request
     /// started is over. The later shown window is the next one and stays.
-    #[test]
     fn an_endpoint_window_over_before_the_request_does_not_replace_a_later_one() {
         let now = WEEK_SEEN + HOUR;
         let at_request = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now).unwrap()
@@ -2078,7 +2045,6 @@ mod tests {
     /// #738: within a minute of its deadline the endpoint repeating the
     /// expired window kept that window's old update time, but still counted as
     /// an update: "Last refreshed just now" beside a window awaiting update.
-    #[test]
     fn an_endpoint_reply_repeating_the_window_that_just_ended_is_not_an_update() {
         let store = UsageStore::default();
         let reset = WEEK_RESET * 1000;
@@ -2127,7 +2093,6 @@ mod tests {
 
     /// #729: "Last refreshed just now" came from an answer that replaced
     /// nothing. Such an answer leaves `lastUpdatedAt` alone and says why.
-    #[test]
     fn a_refresh_that_replaces_nothing_says_so_and_why() {
         let store = UsageStore::default();
         let mut inner = store.inner.lock().unwrap();
@@ -2165,7 +2130,6 @@ mod tests {
 
     /// #729: live usage turned away for an account mismatch went stale
     /// silently. The snapshot carries the refusal until a sample is used.
-    #[test]
     fn live_usage_refused_for_an_account_mismatch_is_reported_until_one_is_used() {
         let store = UsageStore::default();
         let sample = |used: u32, account: &str| {
@@ -2205,7 +2169,6 @@ mod tests {
 
     /// #738: a tab that captured no Claude account at launch (Claude Code not
     /// signed in yet) was reported as started under a different account.
-    #[test]
     fn live_usage_from_a_tab_launched_with_no_account_says_the_account_was_unknown() {
         let store = UsageStore::default();
         let mut sample = session_sample(10, 100);
@@ -2229,7 +2192,6 @@ mod tests {
 
     /// #729: within its debounce the Codex button did nothing visible. The
     /// press is now recorded with when it can fetch again.
-    #[test]
     fn a_debounced_codex_press_says_when_it_can_fetch_again() {
         let store = UsageStore::default();
         let running = HashSet::from(["codex".to_string()]);
@@ -2265,7 +2227,6 @@ mod tests {
 
     /// #729: every refresh is logged with what arrived, what became of each
     /// window and the result.
-    #[test]
     fn the_refresh_log_names_each_window_its_fate_and_the_result() {
         let mut shown = HashMap::new();
         let first = merge_claude_windows(parse_claude(&json!({"rate_limits": {
@@ -2287,7 +2248,6 @@ mod tests {
     /// The desktop app reads snapshots from a background runtime that may
     /// predate #729. Its every answer counted as an update; a current
     /// runtime's `null` means none has.
-    #[test]
     fn a_snapshot_from_a_runtime_before_729_keeps_its_last_answer_as_the_update() {
         let old = json!({
             "revision": 3, "claudeAccount": "a", "windows": [],
@@ -2301,5 +2261,61 @@ mod tests {
         assert_eq!(UsageSnapshot::from_runtime(current.clone()).unwrap().claude.last_updated_at, None);
         current["claude"]["lastUpdatedAt"] = json!(4_000);
         assert_eq!(UsageSnapshot::from_runtime(current).unwrap().claude.last_updated_at, Some(4_000));
+    }
+
+    #[test]
+    fn status_usage_batch_1() {
+        changed_percent_is_immediate_but_identical_receipts_are_deduplicated();
+        expiration_is_stale_even_after_a_recent_receipt_and_does_not_make_zero();
+        each_store_counts_its_own_revisions_and_names_itself_on_every_snapshot();
+        a_codex_window_past_its_reset_is_stale_without_inventing_zero();
+        old_tab_or_oauth_window_cannot_replace_a_confirmed_rollover();
+        oauth_preserves_omitted_windows_and_live_data_arriving_in_flight();
+        expiry_bypasses_recent_poll_once_then_gets_one_bounded_followup();
+        manual_refresh_bypasses_polling_but_respects_retry_after();
+        manual_refresh_clears_a_local_credential_backoff_but_not_a_provider_one();
+        a_provider_refresh_is_eligible_at_the_configured_cadence();
+    }
+
+    #[test]
+    fn status_usage_batch_2() {
+        a_slow_request_is_never_overlapped_and_the_next_tick_follows_it();
+        backoff_outranks_the_interval_and_a_failure_keeps_the_last_known_usage();
+        codex_failures_back_off_keep_the_snapshot_and_recover();
+        the_codex_button_keeps_its_debounce_but_never_waits_longer_than_the_timer();
+        a_new_account_starts_its_own_cadence_and_freshness();
+        account_switch_rejects_old_tabs_unknown_identity_and_inflight_responses();
+        changed_live_rollover_is_published_inside_dedup_interval();
+        codex_classifies_known_windows_with_one_minute_tolerance();
+        reset_seconds_become_milliseconds_without_overflow();
+        codex_primary_and_secondary_parse_as_one_window_list();
+    }
+
+    #[test]
+    fn status_usage_batch_3() {
+        codex_drops_per_model_limits_and_keeps_the_account_window();
+        codex_falls_back_to_the_codex_limit_id_when_the_account_block_is_missing();
+        codex_credits_and_next_available_reset_parse_from_the_rpc_payload();
+        claude_statusline_accepts_percentage_fields();
+        statusline_windows_win_while_oauth_fills_missing_windows();
+        an_endpoint_reply_half_a_second_earlier_replaces_the_status_line_window();
+        a_window_not_yet_started_replaces_an_expired_one();
+        an_endpoint_reply_with_a_window_already_over_shows_it_not_started();
+        an_endpoint_window_still_running_when_asked_replaces_a_later_shown_one();
+        a_status_line_frame_does_not_take_back_a_window_the_endpoint_replaced();
+    }
+
+    #[test]
+    fn status_usage_batch_4() {
+        a_later_status_line_deadline_is_the_next_window_without_an_endpoint_answer();
+        the_same_earlier_window_from_a_status_line_is_still_refused();
+        an_endpoint_window_over_before_the_request_does_not_replace_a_later_one();
+        an_endpoint_reply_repeating_the_window_that_just_ended_is_not_an_update();
+        a_refresh_that_replaces_nothing_says_so_and_why();
+        live_usage_refused_for_an_account_mismatch_is_reported_until_one_is_used();
+        live_usage_from_a_tab_launched_with_no_account_says_the_account_was_unknown();
+        a_debounced_codex_press_says_when_it_can_fetch_again();
+        the_refresh_log_names_each_window_its_fate_and_the_result();
+        a_snapshot_from_a_runtime_before_729_keeps_its_last_answer_as_the_update();
     }
 }

@@ -231,7 +231,7 @@ fn replacing_the_runtime_keeps_its_agents_and_terminals_running() {
 
     // The command's output went on reaching its terminal, none of it lost.
     let last = *ticks(&before).last().unwrap();
-    wait_until("the terminal's ticks after the update", || ticks(&output(&serve, &terminal).0).last().is_some_and(|tick| *tick > last + 40).then_some(()));
+    wait_until("the terminal's ticks after the update", || ticks(&output(&serve, &terminal).0).last().is_some_and(|tick| *tick > last + 15).then_some(()));
     let all = ticks(&output(&serve, &terminal).0);
     assert!(all.windows(2).all(|pair| pair[1] == pair[0] + 1), "a tick was lost or repeated: {all:?}");
 

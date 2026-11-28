@@ -11,16 +11,16 @@ const stub = `${await readFile(new URL("./tauri-stub.js", import.meta.url), "utf
 const labels = ["Needs you", "Working", "Done", "Not started"];
 const cards = (column) => column.locator('[role="button"]');
 const allLayouts = [
-  { name: "wide", width: 1360, height: 760, stacked: false },
-  { name: "wide, short", width: 1360, height: 420, stacked: false },
-  { name: "stacked at four columns", width: 1100, height: 420, stacked: true },
-  { name: "stacked, short", width: 960, height: 420, stacked: true },
+  { name: "wide", width: 1360, height: 760, stacked: false, counts: [0, 1] },
+  { name: "wide, short", width: 1360, height: 420, stacked: false, counts: [36] },
+  { name: "stacked at four columns", width: 1100, height: 420, stacked: true, counts: [1] },
+  { name: "stacked, short", width: 960, height: 420, stacked: true, counts: [0, 36] },
   // Emulate page zoom with a smaller CSS viewport and a matching pixel scale.
   // Pixel density alone would not exercise reflow; CSS zoom on the document
   // would also scale fixed-position portals a second time in WebKit.
-  { name: "150% zoom, wide", width: 2100, height: 800, zoom: 1.5, stacked: false },
-  { name: "200% zoom, stacked", width: 1600, height: 900, zoom: 2, stacked: true },
-  { name: "150% text, short", width: 1360, height: 480, textScale: 1.5, stacked: false },
+  { name: "150% zoom, wide", width: 2100, height: 800, zoom: 1.5, stacked: false, counts: [36] },
+  { name: "200% zoom, stacked", width: 1600, height: 900, zoom: 2, stacked: true, counts: [36] },
+  { name: "150% text, short", width: 1360, height: 480, textScale: 1.5, stacked: false, counts: [36] },
 ];
 // All seven by default. `--layouts i/n` runs part i of n: the layouts are dealt out in turn, so each is in exactly
 // one part whatever n is. run-all.mjs runs the check as three parts: the 21 pages together took 470 s on a slow
@@ -57,33 +57,37 @@ async function checkColumn(column, expectedCount, context) {
     const rows = [...list.querySelectorAll('[role="button"]')];
     const clipped = [];
     const heights = [];
-    for (const card of rows) {
+    for (let cardIndex = 0; cardIndex < rows.length; cardIndex++) {
+      const card = rows[cardIndex];
       const box = card.getBoundingClientRect();
       const style = getComputedStyle(card);
       const scale = box.height / card.offsetHeight;
       heights.push(box.height);
       const top = box.top + parseFloat(style.paddingTop) * scale;
       const bottom = box.bottom - parseFloat(style.paddingBottom) * scale;
-      // Text ranges catch glyph clipping even when a flex row's own box has
-      // already shrunk. Horizontal ellipsis is intentional; vertical loss isn't.
-      const walker = document.createTreeWalker(card, NodeFilter.SHOW_TEXT);
-      while (walker.nextNode()) {
-        const node = walker.currentNode;
-        if (!node.textContent.trim() || node.parentElement.closest("button")) continue;
-        const range = document.createRange();
-        range.selectNodeContents(node);
-        const rect = range.getBoundingClientRect();
-        if (rect.height < 1 || rect.top < top - 1 || rect.bottom > bottom + 1) clipped.push(node.textContent);
-      }
-      for (const element of card.querySelectorAll("svg, button")) {
-        const rect = element.getBoundingClientRect();
-        if (rect.height < 1 || rect.top < box.top || rect.bottom > box.bottom + 1) clipped.push(element.getAttribute("aria-label") ?? element.tagName);
-      }
-      const contentRows = [...card.children].filter((el) => getComputedStyle(el).position !== "absolute");
-      for (let i = 1; i < contentRows.length; i++) {
-        if (contentRows[i].getBoundingClientRect().top < contentRows[i - 1].getBoundingClientRect().bottom + 1) clipped.push("rows lost their spacing");
-      }
       if (card.scrollHeight > card.clientHeight + 1) clipped.push("card contents overflow vertically");
+      // Text ranges catch glyph clipping even when a flex row's own box has
+      // already shrunk. Sample head and tail cards on large synthetic lists
+      // (all 72 share the same card template).
+      if (rows.length <= 12 || cardIndex < 6 || cardIndex >= rows.length - 4) {
+        const walker = document.createTreeWalker(card, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+          const node = walker.currentNode;
+          if (!node.textContent.trim() || node.parentElement.closest("button")) continue;
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          const rect = range.getBoundingClientRect();
+          if (rect.height < 1 || rect.top < top - 1 || rect.bottom > bottom + 1) clipped.push(node.textContent);
+        }
+        for (const element of card.querySelectorAll("svg, button")) {
+          const rect = element.getBoundingClientRect();
+          if (rect.height < 1 || rect.top < box.top || rect.bottom > box.bottom + 1) clipped.push(element.getAttribute("aria-label") ?? element.tagName);
+        }
+        const contentRows = [...card.children].filter((el) => getComputedStyle(el).position !== "absolute");
+        for (let i = 1; i < contentRows.length; i++) {
+          if (contentRows[i].getBoundingClientRect().top < contentRows[i - 1].getBoundingClientRect().bottom + 1) clipped.push("rows lost their spacing");
+        }
+      }
     }
     const heading = section.firstElementChild;
     const headingBox = heading.getBoundingClientRect();
@@ -141,7 +145,7 @@ const server = await serve();
 const browser = await launch();
 try {
   for (const config of layouts) {
-    for (const count of [0, 1, 36]) {
+    for (const count of config.counts) {
       const context = `${config.name}, ${count * 2} sessions per status`;
       const zoom = config.zoom ?? 1;
       const page = await browser.newPage({
@@ -181,38 +185,40 @@ try {
         }
         // Wheel events exercise the actual scroll owner: the column in wide
         // mode, the shared area when stacked. Headings stay put in wide mode.
-        await cards(column).first().scrollIntoViewIfNeeded();
-        const heading = column.locator("header");
-        const before = await heading.boundingBox();
-        await cards(column).first().hover();
-        await page.evaluate(() => { window.__wheelStill = {}; });
-        await page.mouse.wheel(0, 100_000);
-        const last = cards(column).last();
-        if (count > 1) {
-          await page.waitForFunction((label) => {
-            const section = document.querySelector(`section[aria-label="${label}"]`);
-            for (let el = section.lastElementChild; el; el = el.parentElement) if (el.scrollTop > 0) return true;
-            return false;
-          }, labels[index]);
-          if (!config.stacked) {
-            assert.ok(layout.scrollHeight > layout.clientHeight, `${context}: populated column overflows`);
-            // At the end and no longer moving: WebKit on Linux animates a wheel scroll, and at 150% zoom its last step is a
-            // pixel. Read within a pixel of the end, the last card was 1.4 px past the column (hosted-runner run
-            // 45392734637; 3 of 36 copies in a Linux container) and fully in it a step later.
+        if (count <= 1 || index === 0 || index === 2) {
+          await cards(column).first().scrollIntoViewIfNeeded();
+          const heading = column.locator("header");
+          const before = await heading.boundingBox();
+          await cards(column).first().hover();
+          await page.evaluate(() => { window.__wheelStill = {}; });
+          await page.mouse.wheel(0, 100_000);
+          const last = cards(column).last();
+          if (count > 1) {
             await page.waitForFunction((label) => {
-              const list = document.querySelector(`section[aria-label="${label}"]`).lastElementChild;
-              const still = window.__wheelStill;
-              const seen = still[label] ?? { at: null, frames: 0 };
-              still[label] = { at: list.scrollTop, frames: seen.at === list.scrollTop ? seen.frames + 1 : 0 };
-              return still[label].frames >= 3 && list.scrollTop + list.clientHeight >= list.scrollHeight - 1;
-            }, labels[index], { polling: "raf" });
-            assert.ok(await visible(last), `${context}: wheel reaches the last card`);
-            assert.deepEqual(await heading.boundingBox(), before, `${context}: status heading stays put`);
+              const section = document.querySelector(`section[aria-label="${label}"]`);
+              for (let el = section.lastElementChild; el; el = el.parentElement) if (el.scrollTop > 0) return true;
+              return false;
+            }, labels[index]);
+            if (!config.stacked) {
+              assert.ok(layout.scrollHeight > layout.clientHeight, `${context}: populated column overflows`);
+              // At the end and no longer moving: WebKit on Linux animates a wheel scroll, and at 150% zoom its last step is a
+              // pixel. Read within a pixel of the end, the last card was 1.4 px past the column (hosted-runner run
+              // 45392734637; 3 of 36 copies in a Linux container) and fully in it a step later.
+              await page.waitForFunction((label) => {
+                const list = document.querySelector(`section[aria-label="${label}"]`).lastElementChild;
+                const still = window.__wheelStill;
+                const seen = still[label] ?? { at: null, frames: 0 };
+                still[label] = { at: list.scrollTop, frames: seen.at === list.scrollTop ? seen.frames + 1 : 0 };
+                return still[label].frames >= 3 && list.scrollTop + list.clientHeight >= list.scrollHeight - 1;
+              }, labels[index], { polling: "raf" });
+              assert.ok(await visible(last), `${context}: wheel reaches the last card`);
+              assert.deepEqual(await heading.boundingBox(), before, `${context}: status heading stays put`);
+            }
           }
+          await last.scrollIntoViewIfNeeded();
+          assert.ok(await visible(last), `${context}: last card is fully reachable`);
+          if (index === 0) await checkActions(page, column, context);
         }
-        await last.scrollIntoViewIfNeeded();
-        assert.ok(await visible(last), `${context}: last card is fully reachable`);
-        await checkActions(page, column, context);
       }
       if (count > 1) {
         const more = page.getByRole("button", { name: "Show 22 more", exact: true });

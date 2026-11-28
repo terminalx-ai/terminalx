@@ -287,7 +287,6 @@ fn end(outcome: &str, category: Option<&str>) -> (String, Option<String>) {
     (outcome.into(), category.map(String::from))
 }
 
-#[test]
 fn a_run_is_started_reported_and_completed() {
     let rig = rig(vec![run("run_1")], FakeAgent::new(&[Turn::Pending, Turn::Running, Turn::Running, Turn::Ended(TurnStatus::Ok)]));
     assert_eq!(rig.runner.pass().unwrap(), Duration::ZERO, "the next run is asked for at once");
@@ -305,7 +304,6 @@ fn a_run_is_started_reported_and_completed() {
     assert_eq!(rig.agent.started.lock().unwrap().len(), 1);
 }
 
-#[test]
 fn the_tab_gets_the_schedules_agent_model_effort_and_mode() {
     let rig = rig(vec![run("run_1")], FakeAgent::new(&[Turn::Ended(TurnStatus::Ok)]));
     rig.runner.pass().unwrap();
@@ -314,7 +312,6 @@ fn the_tab_gets_the_schedules_agent_model_effort_and_mode() {
     assert_eq!((tab.harness.as_str(), tab.model.as_str(), tab.effort.as_deref(), tab.permission_mode.as_deref()), ("claude", "claude-opus", Some("high"), Some("acceptEdits")));
 }
 
-#[test]
 fn a_run_without_a_mode_or_in_bypass_permissions_never_starts_an_agent() {
     // A tab made with no mode runs in bypass permissions.
     assert_eq!(crate::store::index::permission_mode_or_default(None), "bypassPermissions");
@@ -331,7 +328,6 @@ fn a_run_without_a_mode_or_in_bypass_permissions_never_starts_an_agent() {
     }
 }
 
-#[test]
 fn a_prompt_the_cli_would_run_as_a_command_is_not_sent() {
     for (prompt, category) in [("/model opus", "slash-command-forbidden"), ("/permissions", "slash-command-forbidden"), ("!rm -rf .", "shell-command-forbidden"), ("read @/etc/passwd", "file-mention-forbidden")] {
         let rig = rig(vec![Run { prompt: prompt.into(), ..run("run_1") }], FakeAgent::new(&[Turn::Ended(TurnStatus::Ok)]));
@@ -341,7 +337,6 @@ fn a_prompt_the_cli_would_run_as_a_command_is_not_sent() {
     }
 }
 
-#[test]
 fn a_run_that_cannot_start_says_why_and_holds_nothing() {
     type Change = fn(&mut FakeAgent, &mut Run);
     let cases: [(&str, Change); 5] = [
@@ -363,7 +358,6 @@ fn a_run_that_cannot_start_says_why_and_holds_nothing() {
     }
 }
 
-#[test]
 fn a_missing_project_folder_fails_the_run() {
     let rig = rig(vec![run("run_1")], FakeAgent::new(&[Turn::Running]));
     std::fs::remove_dir_all(&rig.runner.root).unwrap();
@@ -373,6 +367,15 @@ fn a_missing_project_folder_fails_the_run() {
 }
 
 #[test]
+fn scheduled_run_start_and_validation() {
+    a_run_is_started_reported_and_completed();
+    the_tab_gets_the_schedules_agent_model_effort_and_mode();
+    a_run_without_a_mode_or_in_bypass_permissions_never_starts_an_agent();
+    a_prompt_the_cli_would_run_as_a_command_is_not_sent();
+    a_run_that_cannot_start_says_why_and_holds_nothing();
+    a_missing_project_folder_fails_the_run();
+}
+
 fn how_a_turn_ends_is_what_is_reported() {
     let cases = [
         (Turn::Ended(TurnStatus::Error), "agent-failed"),
@@ -388,7 +391,6 @@ fn how_a_turn_ends_is_what_is_reported() {
     }
 }
 
-#[test]
 fn a_turn_past_the_limit_is_interrupted_and_reported_timed_out() {
     let timing = Timing { minute: Duration::from_millis(30), ..fast() };
     let rig = rig_in(tempfile::tempdir().unwrap(), FakeApi::with(vec![run("run_1")]), FakeAgent::new(&[Turn::Running]), timing);
@@ -402,7 +404,6 @@ fn a_turn_past_the_limit_is_interrupted_and_reported_timed_out() {
     assert!(rig.runner.store.get().is_none());
 }
 
-#[test]
 fn an_agent_that_ignores_the_interrupt_is_stopped() {
     let timing = Timing { minute: Duration::from_millis(30), ..fast() };
     let agent = FakeAgent { obeys_interrupt: false, ..FakeAgent::new(&[Turn::Running]) };
@@ -414,7 +415,6 @@ fn an_agent_that_ignores_the_interrupt_is_stopped() {
     assert_eq!(rig.api.ends(), [end("failed", Some("timed-out"))]);
 }
 
-#[test]
 fn the_limit_counts_the_schedules_minutes() {
     let timing = Timing { minute: Duration::from_millis(40), ..fast() };
     let rig = rig_in(tempfile::tempdir().unwrap(), FakeApi::with(vec![Run { max_run_minutes: 3, ..run("run_1") }]), FakeAgent::new(&[Turn::Running]), timing);
@@ -424,7 +424,6 @@ fn the_limit_counts_the_schedules_minutes() {
     assert_eq!(rig.api.ends(), [end("failed", Some("timed-out"))]);
 }
 
-#[test]
 fn a_prompt_that_never_opens_a_turn_fails_the_run_and_stops_the_agent() {
     let timing = Timing { start_grace: Duration::from_millis(20), ..fast() };
     let rig = rig_in(tempfile::tempdir().unwrap(), FakeApi::with(vec![run("run_1")]), FakeAgent::new(&[Turn::Pending]), timing);
@@ -433,7 +432,6 @@ fn a_prompt_that_never_opens_a_turn_fails_the_run_and_stops_the_agent() {
     assert_eq!(rig.agent.stops.load(Ordering::SeqCst), 1);
 }
 
-#[test]
 fn a_run_the_server_ended_has_its_turn_ended_and_nothing_more_reported() {
     // The first report (`started`) is taken; the next one is answered `409`.
     let timing = Timing { heartbeat: Duration::from_millis(10), ..fast() };
@@ -447,7 +445,6 @@ fn a_run_the_server_ended_has_its_turn_ended_and_nothing_more_reported() {
     assert!(rig.runner.store.get().is_none());
 }
 
-#[test]
 fn a_run_counts_as_work_until_its_turn_runs_and_not_after() {
     let rig = rig(vec![run("run_1")], FakeAgent::new(&[Turn::Pending, Turn::Pending, Turn::Running, Turn::Running, Turn::Ended(TurnStatus::Ok)]));
     rig.runner.pass().unwrap();
@@ -461,6 +458,16 @@ fn a_run_counts_as_work_until_its_turn_runs_and_not_after() {
 }
 
 #[test]
+fn scheduled_run_turn_outcomes_and_limits() {
+    how_a_turn_ends_is_what_is_reported();
+    a_turn_past_the_limit_is_interrupted_and_reported_timed_out();
+    an_agent_that_ignores_the_interrupt_is_stopped();
+    the_limit_counts_the_schedules_minutes();
+    a_prompt_that_never_opens_a_turn_fails_the_run_and_stops_the_agent();
+    a_run_the_server_ended_has_its_turn_ended_and_nothing_more_reported();
+    a_run_counts_as_work_until_its_turn_runs_and_not_after();
+}
+
 fn the_record_on_disk_names_the_run_and_never_holds_the_prompt() {
     let rig = rig(vec![run("run_1")], FakeAgent::new(&[Turn::Ended(TurnStatus::Ok)]));
     rig.runner.pass().unwrap();
@@ -469,7 +476,6 @@ fn the_record_on_disk_names_the_run_and_never_holds_the_prompt() {
     assert!(!record.contains(PROMPT));
 }
 
-#[test]
 fn a_claim_whose_answer_is_lost_starts_nothing() {
     let rig = rig(vec![run("run_1")], FakeAgent::new(&[Turn::Running]));
     rig.api.lose_claim.store(true, Ordering::SeqCst);
@@ -488,7 +494,6 @@ fn restarted(record: Record, runs: Vec<Run>) -> Rig {
     rig_in(dir, FakeApi::with(runs), FakeAgent::new(&[Turn::Ended(TurnStatus::Ok)]), fast())
 }
 
-#[test]
 fn a_restart_in_the_middle_of_a_run_fails_it_and_never_sends_the_prompt_again() {
     let rig = restarted(Record::Claimed { run_id: "run_1".into() }, Vec::new());
     rig.runner.pass().unwrap();
@@ -503,7 +508,6 @@ fn a_restart_in_the_middle_of_a_run_fails_it_and_never_sends_the_prompt_again() 
     assert!(rig.agent.started.lock().unwrap().is_empty());
 }
 
-#[test]
 fn a_restart_reports_the_old_run_before_it_takes_the_next() {
     let rig = restarted(Record::Claimed { run_id: "run_1".into() }, vec![run("run_2")]);
     rig.runner.pass().unwrap();
@@ -513,7 +517,6 @@ fn a_restart_reports_the_old_run_before_it_takes_the_next() {
     assert_eq!(rig.agent.started.lock().unwrap().len(), 1);
 }
 
-#[test]
 fn an_end_that_could_not_be_reported_is_reported_by_a_later_pass() {
     let rig = rig(vec![run("run_1")], FakeAgent::new(&[Turn::Ended(TurnStatus::Ok)]));
     // `started` and every try of `completed` are lost.
@@ -527,7 +530,6 @@ fn an_end_that_could_not_be_reported_is_reported_by_a_later_pass() {
     assert_eq!(rig.agent.started.lock().unwrap().len(), 1, "the prompt was sent once");
 }
 
-#[test]
 fn a_server_without_scheduled_runs_is_asked_rarely_and_nothing_happens() {
     let rig = rig(vec![run("run_1")], FakeAgent::new(&[Turn::Running]));
     rig.api.not_offered.store(true, Ordering::SeqCst);
@@ -543,6 +545,18 @@ fn a_server_without_scheduled_runs_is_asked_rarely_and_nothing_happens() {
 }
 
 #[test]
+fn scheduled_run_persistence_recovery_and_backoff() {
+    the_record_on_disk_names_the_run_and_never_holds_the_prompt();
+    a_claim_whose_answer_is_lost_starts_nothing();
+    a_restart_in_the_middle_of_a_run_fails_it_and_never_sends_the_prompt_again();
+    a_restart_reports_the_old_run_before_it_takes_the_next();
+    an_end_that_could_not_be_reported_is_reported_by_a_later_pass();
+    a_server_without_scheduled_runs_is_asked_rarely_and_nothing_happens();
+    a_run_handed_out_twice_is_run_once();
+    a_credential_that_is_not_accepted_right_now_is_asked_about_again_soon();
+    a_runtime_about_to_be_archived_takes_no_run();
+}
+
 fn a_turn_waiting_for_an_approval_nobody_can_give_is_ended_and_says_so() {
     // A limit of a minute; the wait for someone to turn up is far shorter.
     let timing = Timing { approval_grace: Duration::from_millis(40), ..fast() };
@@ -560,7 +574,6 @@ fn a_turn_waiting_for_an_approval_nobody_can_give_is_ended_and_says_so() {
     assert!(rig.runner.store.get().is_none());
 }
 
-#[test]
 fn a_turn_waiting_for_an_approval_is_left_alone_while_someone_who_can_give_it_is_attached() {
     let timing = Timing { approval_grace: Duration::from_millis(10), minute: Duration::from_millis(80), ..fast() };
     let agent = FakeAgent::new(&[Turn::Running]);
@@ -572,24 +585,22 @@ fn a_turn_waiting_for_an_approval_is_left_alone_while_someone_who_can_give_it_is
     assert_eq!(rig.api.ends(), [end("failed", Some("timed-out"))]);
 }
 
-#[test]
 fn an_approval_that_is_answered_starts_the_wait_afresh() {
-    // Asked and answered 110 times, each after 10 ms: no wait comes near
+    // Asked and answered 15 times, each after 10 ms: no wait comes near
     // the grace, though together they pass it. Nothing here is timed
     // against another thread or against the run's limit.
-    let timing = Timing { approval_grace: Duration::from_secs(1), ..fast() };
+    let timing = Timing { approval_grace: Duration::from_millis(120), ..fast() };
     let mut agent = FakeAgent::new(&[Turn::Running]);
     agent.awaiting_approval.store(true, Ordering::SeqCst);
-    agent.answered = Some((Duration::from_millis(10), 110));
+    agent.answered = Some((Duration::from_millis(10), 15));
     let rig = rig_in(tempfile::tempdir().unwrap(), FakeApi::with(vec![run("run_1")]), agent, timing.clone());
     let began = Instant::now();
     rig.runner.pass().unwrap();
     assert!(began.elapsed() > timing.approval_grace);
     assert_eq!(rig.api.ends(), [end("completed", None)]);
-    assert_eq!(rig.agent.answers.load(Ordering::SeqCst), 110);
+    assert_eq!(rig.agent.answers.load(Ordering::SeqCst), 15);
 }
 
-#[test]
 fn a_server_from_before_needs_approval_is_told_the_turn_was_stopped() {
     let timing = Timing { approval_grace: Duration::from_millis(10), ..fast() };
     let agent = FakeAgent::new(&[Turn::Running]);
@@ -602,7 +613,6 @@ fn a_server_from_before_needs_approval_is_told_the_turn_was_stopped() {
     assert!(rig.runner.store.get().is_none());
 }
 
-#[test]
 fn scheduled_runs_turned_off_under_a_running_turn_do_not_end_it() {
     // `started` is taken; from then on every report is a `404` that names no run.
     let timing = Timing { heartbeat: Duration::from_millis(5), ..fast() };
@@ -624,6 +634,14 @@ fn scheduled_runs_turned_off_under_a_running_turn_do_not_end_it() {
 }
 
 #[test]
+fn scheduled_run_approvals_and_feature_toggle() {
+    a_turn_waiting_for_an_approval_nobody_can_give_is_ended_and_says_so();
+    a_turn_waiting_for_an_approval_is_left_alone_while_someone_who_can_give_it_is_attached();
+    an_approval_that_is_answered_starts_the_wait_afresh();
+    a_server_from_before_needs_approval_is_told_the_turn_was_stopped();
+    scheduled_runs_turned_off_under_a_running_turn_do_not_end_it();
+}
+
 fn a_run_handed_out_twice_is_run_once() {
     let rig = rig(vec![run("run_1"), run("run_1")], FakeAgent::new(&[Turn::Ended(TurnStatus::Ok)]));
     rig.runner.pass().unwrap();
@@ -639,7 +657,6 @@ fn a_run_handed_out_twice_is_run_once() {
     assert_eq!(rig.api.ends(), [end("failed", Some("runtime-error")), end("completed", None)]);
 }
 
-#[test]
 fn a_credential_that_is_not_accepted_right_now_is_asked_about_again_soon() {
     // The workspace may have been woken for a run: not the five minutes of
     // a server without scheduled runs.
@@ -650,7 +667,6 @@ fn a_credential_that_is_not_accepted_right_now_is_asked_about_again_soon() {
     assert!(rig.agent.started.lock().unwrap().is_empty());
 }
 
-#[test]
 fn a_runtime_about_to_be_archived_takes_no_run() {
     let mut rig = rig(vec![run("run_1")], FakeAgent::new(&[Turn::Running]));
     rig.runner.paused = Arc::new(|| true);
@@ -659,7 +675,6 @@ fn a_runtime_about_to_be_archived_takes_no_run() {
     assert!(rig.dir.path().join("project").is_dir());
 }
 
-#[test]
 fn a_claim_is_read_as_the_server_sends_it() {
     let sent = json!({
         "runId": "csr_1", "scheduleId": "csc_1", "name": "Nightly", "scheduledFor": 1_792_713_600_000u64,
@@ -673,7 +688,6 @@ fn a_claim_is_read_as_the_server_sends_it() {
     assert_eq!(run.mode, None);
 }
 
-#[test]
 fn a_report_carries_only_what_the_server_accepts() {
     let keys = |report: &Report| {
         let mut keys: Vec<String> = serde_json::to_value(report).unwrap().as_object().unwrap().keys().cloned().collect();
@@ -696,7 +710,6 @@ fn a_report_carries_only_what_the_server_accepts() {
     }
 }
 
-#[test]
 fn a_long_schedule_name_is_a_short_title() {
     assert_eq!(title_of(&Run { name: "  Nightly checks\nsecond line".into(), ..run("r") }), "Nightly checks");
     assert_eq!(title_of(&Run { name: String::new(), ..run("r") }), "Scheduled task");
@@ -709,7 +722,6 @@ fn message(id: &str) -> Run {
     Run { target: Some(Target { session_id: "session-7".into(), tab_id: "tab-7".into() }), ..run(id) }
 }
 
-#[test]
 fn a_message_is_typed_into_the_tab_it_names_and_no_tab_is_started() {
     let rig = rig(vec![message("turn_1")], FakeAgent::new(&[Turn::Pending, Turn::Running, Turn::Ended(TurnStatus::Ok)]));
     rig.runner.pass().unwrap();
@@ -724,7 +736,6 @@ fn a_message_is_typed_into_the_tab_it_names_and_no_tab_is_started() {
     assert!(rig.runner.store.get().is_none());
 }
 
-#[test]
 fn an_agent_already_running_in_the_tab_is_left_running() {
     let agent = FakeAgent { target_running: true, ..FakeAgent::new(&[Turn::Running, Turn::Ended(TurnStatus::Ok)]) };
     let rig = rig(vec![message("turn_1")], agent);
@@ -733,7 +744,6 @@ fn an_agent_already_running_in_the_tab_is_left_running() {
     assert_eq!(rig.agent.stops.load(Ordering::SeqCst), 0);
 }
 
-#[test]
 fn a_message_for_a_tab_that_is_gone_or_busy_is_refused_and_nothing_is_typed() {
     for (refusal, category) in [
         ("gone", "canceled"),
@@ -754,7 +764,6 @@ fn a_message_for_a_tab_that_is_gone_or_busy_is_refused_and_nothing_is_typed() {
     }
 }
 
-#[test]
 fn a_message_is_held_to_the_rules_of_an_unattended_run_before_it_is_typed() {
     for mode in [None, Some("bypassPermissions")] {
         let rig = rig(vec![Run { mode: mode.map(String::from), ..message("turn_1") }], FakeAgent::new(&[Turn::Ended(TurnStatus::Ok)]));
@@ -768,7 +777,6 @@ fn a_message_is_held_to_the_rules_of_an_unattended_run_before_it_is_typed() {
     assert_eq!(rig.api.reports(), [end("failed", Some("shell-command-forbidden"))]);
 }
 
-#[test]
 fn a_message_waiting_for_an_approval_nobody_can_give_is_ended_and_says_so() {
     let timing = Timing { approval_grace: Duration::from_millis(40), ..fast() };
     let agent = FakeAgent::new(&[Turn::Running]);
@@ -780,7 +788,6 @@ fn a_message_waiting_for_an_approval_nobody_can_give_is_ended_and_says_so() {
     assert_eq!(rig.agent.interrupts.load(Ordering::SeqCst), 1);
 }
 
-#[test]
 fn a_message_past_its_limit_is_interrupted_and_reported_timed_out() {
     let timing = Timing { minute: Duration::from_millis(30), ..fast() };
     let rig = rig_in(tempfile::tempdir().unwrap(), FakeApi::with(vec![message("turn_1")]), FakeAgent::new(&[Turn::Running]), timing);
@@ -789,7 +796,6 @@ fn a_message_past_its_limit_is_interrupted_and_reported_timed_out() {
     assert_eq!(rig.api.ends(), [end("failed", Some("timed-out"))]);
 }
 
-#[test]
 fn a_claim_names_the_tab_of_a_message_and_a_run_without_one_starts_a_tab() {
     let sent = json!({
         "runId": "turn_1", "name": "Deploy", "scheduledFor": 1_792_713_600_000u64, "agent": "claude", "mode": "acceptEdits",
@@ -800,4 +806,18 @@ fn a_claim_names_the_tab_of_a_message_and_a_run_without_one_starts_a_tab() {
     assert_eq!((target.session_id.as_str(), target.tab_id.as_str()), ("s-1", "t-1"));
     let run: Run = serde_json::from_value(json!({ "runId": "run_1", "agent": "claude", "prompt": "p", "maxRunMinutes": 5 })).unwrap();
     assert!(run.target.is_none());
+}
+
+#[test]
+fn scheduled_run_wire_format_and_targeted_messages() {
+    a_claim_is_read_as_the_server_sends_it();
+    a_report_carries_only_what_the_server_accepts();
+    a_long_schedule_name_is_a_short_title();
+    a_message_is_typed_into_the_tab_it_names_and_no_tab_is_started();
+    an_agent_already_running_in_the_tab_is_left_running();
+    a_message_for_a_tab_that_is_gone_or_busy_is_refused_and_nothing_is_typed();
+    a_message_is_held_to_the_rules_of_an_unattended_run_before_it_is_typed();
+    a_message_waiting_for_an_approval_nobody_can_give_is_ended_and_says_so();
+    a_message_past_its_limit_is_interrupted_and_reported_timed_out();
+    a_claim_names_the_tab_of_a_message_and_a_run_without_one_starts_a_tab();
 }

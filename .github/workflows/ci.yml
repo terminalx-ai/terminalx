@@ -6,14 +6,18 @@ name: CI
 #
 # macOS runners are the scarce ones: a handful run at once for the whole
 # account, and a job that needs one waits behind every other. macos-native,
-# machine-compat and webkit-mac-only take one only when `macos-rust-changes`
-# selects them (docs/CI-RUNNERS.md "macOS runner time"). Everything else runs
-# on Linux, the long suites in parts, the WebKit layout checks among them.
+# machine-compat and webkit-mac-only run only on pushes to main, nightly and
+# manual runs (`github.event_name != 'pull_request'`), gated by `check-macos`,
+# so pull requests use zero macOS runners and never wait in the macOS queue
+# (docs/CI-RUNNERS.md "macOS runner time"). Everything on a pull request runs
+# on Linux (plus fast <1 min Windows render/input-safety checks in
+# `desktop-platforms`), with the long suites sharded so PR CI finishes under
+# five minutes.
 #
 # A pull request runs the jobs its changes need: `macos-rust-changes` answers
-# for the Rust jobs, the frontend jobs, the phone app and macOS, and `check`
-# accepts a skipped job only on that answer (docs/CI-RUNNERS.md "What a pull
-# request runs"). Pushes to main, nightly and manual runs run everything.
+# for the Rust jobs, the frontend jobs and the phone app, and `check` accepts
+# a skipped job only on that answer (docs/CI-RUNNERS.md "What a pull request
+# runs"). Pushes to main, nightly and manual runs run everything.
 
 on:
   push:
@@ -159,18 +163,18 @@ jobs:
       - name: vitest
         run: pnpm vitest run --shard=${{ matrix.part }}/4
 
-  # The WebKit layout checks on Linux, whenever the frontend changed, in four
-  # parts on four runners: `run-all.mjs --shard i/4` deals every check to
+  # The WebKit layout checks on Linux, whenever the frontend changed, in six
+  # parts on six runners: `run-all.mjs --shard i/6` deals every check to
   # exactly one part, and on Linux leaves out the ones in its `macOnly` list
-  # (each with its reason), which `webkit-mac-only` runs. A part takes 4 to 10
-  # minutes; the whole suite on the three-core macOS runner took 30 to 37.
+  # (each with its reason), which `webkit-mac-only` runs on main/nightly/manual
+  # runs. Six parts keep each runner under 5 minutes wall-clock.
   webkit-layout-linux:
     needs: macos-rust-changes
     if: needs.macos-rust-changes.outputs.frontend == 'true'
     strategy:
       fail-fast: false
       matrix:
-        part: [1, 2, 3, 4]
+        part: [1, 2, 3, 4, 5, 6]
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -190,8 +194,8 @@ jobs:
       - name: Install WebKit and the libraries it needs
         timeout-minutes: 10
         run: sudo infra/ci-runners/apt-mirrors.sh && pnpm exec playwright install --with-deps webkit
-      - name: WebKit layout checks, this part of four
-        run: node scripts/webkit/run-all.mjs --shard ${{ matrix.part }}/4
+      - name: WebKit layout checks, this part of six
+        run: node scripts/webkit/run-all.mjs --shard ${{ matrix.part }}/6
         # The machine checks among them also keep their pictures (PRO-360).
         env:
           MACHINE_SIDEBAR_SHOTS: scripts/webkit/output/machines-screens/machine-sidebar
@@ -244,18 +248,12 @@ jobs:
           if-no-files-found: error
 
   # The WebKit checks a Linux runner cannot make (run-all.mjs `macOnly`, each
-  # with its reason), on macOS: every push to main, nightly, manual runs, and a
-  # pull request only when the selector's `mac-webkit` answer is "true": one
-  # that changes a mac-only check, what it loads, or the product it renders
-  # (docs/CI-RUNNERS.md "macOS runner time"). A mac-only check broken by any
-  # other pull request is found on main.
-  #
-  # `check` does not wait for it (the owner's decision, 24 November 2026): on
-  # a pull request it shows its own result without holding the merge. Every
-  # other run is held to it by `check-macos`.
+  # with its reason), on macOS: every push to main, nightly and manual runs
+  # only (`github.event_name != 'pull_request'`). Pull requests burn zero
+  # macOS minutes and are held to all Linux WebKit parts by `webkit-layout`;
+  # main, nightly and manual runs are held to this job by `check-macos`.
   webkit-mac-only:
-    needs: macos-rust-changes
-    if: needs.macos-rust-changes.outputs.mac-webkit == 'true'
+    if: github.event_name != 'pull_request'
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -343,36 +341,41 @@ jobs:
             src-tauri/target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
-  # The full desktop suite in five parts on five runners.
+  # The full desktop suite in ten parts on ten runners.
   #
-  # Parts 1 to 4 are the library's tests under cargo-nextest, which runs each
+  # Parts 1 to 8 are the library's tests under cargo-nextest, which runs each
   # test in a process of its own: about 2,000 of them take a lock that is one
   # per process (`store::temp_home`), and under `cargo test` they queued behind
-  # each other. `--partition count:i/4` deals every test to exactly one part, by
+  # each other. `--partition count:i/8` deals every test to exactly one part, by
   # its place in the sorted list, so a new or renamed test changes which runner
-  # a test is on and never whether it runs. The `ci` profile
-  # (src-tauri/.config/nextest.toml) retries only the known flaky tests it names,
-  # each with its ticket, and writes a JUnit file, which is kept.
+  # a test is on and never whether it runs. Linking uses `lld` via `clang` to
+  # avoid single-threaded GNU `ld` link stalls on the large test binary. The
+  # `ci` profile (src-tauri/.config/nextest.toml) retries only the known flaky
+  # tests it names, each with its ticket, and writes a JUnit file, which is kept.
   #
-  # `binaries` is the rest of `cargo test --locked`: the other test binaries and
-  # the doc tests, then the local owner path built without the desktop features.
-  # infra/ci-runners/test_workflow_security.py holds the five to that shape.
+  # `binaries` is the other test binaries and the doc tests under `cargo test`;
+  # `local-ui` runs the local owner path built without the desktop features in
+  # parallel so it does not extend `binaries` sequentially.
+  # infra/ci-runners/test_workflow_security.py holds all ten parts to that shape.
   linux-rust-tests:
     needs: macos-rust-changes
     if: needs.macos-rust-changes.outputs.rust == 'true'
     strategy:
       fail-fast: false
       matrix:
-        part: [1, 2, 3, 4, binaries]
+        part: [1, 2, 3, 4, 5, 6, 7, 8, binaries, local-ui]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       # No limit of its own, as in linux-rust: the job's bounds it.
       - name: Install Linux build dependencies
-        run: sudo infra/ci-runners/apt-mirrors.sh && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh ripgrep gnome-keyring
+        run: sudo infra/ci-runners/apt-mirrors.sh && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang lld cmake zsh ripgrep gnome-keyring
       # tauri-build needs the folder the frontend builds into; no Rust test
       # reads what is in it, so these jobs do not install or build the frontend.
       - name: Stand in for the frontend build
@@ -384,7 +387,7 @@ jobs:
           echo "rustc=$(rustc --version | tr -c '[:alnum:].\n' '-')" >> "$GITHUB_OUTPUT"
       # One release, by version and by the SHA-256 of its archive.
       - name: Install cargo-nextest
-        if: matrix.part != 'binaries'
+        if: matrix.part != 'binaries' && matrix.part != 'local-ui'
         env:
           NEXTEST_VERSION: "0.9.152"
           NEXTEST_SHA256: d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a
@@ -402,16 +405,16 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             src-tauri/target
-          key: ci-v5-linux-rust-tests-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.rustc }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: ci-v6-linux-rust-tests-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.rustc }}-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
-            ci-v5-linux-rust-tests-main-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.rustc }}-${{ hashFiles('src-tauri/Cargo.lock') }}
-            ci-v5-linux-rust-tests-main-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.rustc }}-
-      - name: The library's tests, this part of four
-        if: matrix.part != 'binaries'
+            ci-v6-linux-rust-tests-main-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.rustc }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+            ci-v6-linux-rust-tests-main-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.rustc }}-
+      - name: The library's tests, this part of eight
+        if: matrix.part != 'binaries' && matrix.part != 'local-ui'
         working-directory: src-tauri
         run: |
           set -o pipefail
-          cargo nextest run --locked --lib --profile ci --partition count:${{ matrix.part }}/4 2>&1 | tee "$RUNNER_TEMP/nextest.log"
+          cargo nextest run --locked --lib --profile ci --partition count:${{ matrix.part }}/8 2>&1 | tee "$RUNNER_TEMP/nextest.log"
       # Linux keeps secrets in the desktop's keyring: one round trip through a real one, GNOME Keyring on a
       # session bus of its own, unlocked with an empty password. Part 1 has the library's tests built.
       - name: The system keyring (Secret Service)
@@ -422,7 +425,7 @@ jobs:
       # A flaky test passed on a retry its override allows; a leaky one left a
       # process or a pipe open. Neither fails the run, so both are said here.
       - name: Name the flaky and leaky tests in the summary
-        if: ${{ !cancelled() && matrix.part != 'binaries' }}
+        if: ${{ !cancelled() && matrix.part != 'binaries' && matrix.part != 'local-ui' }}
         run: |
           {
             echo "### Flaky and leaky tests, part ${{ matrix.part }}"
@@ -431,7 +434,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Keep the JUnit report
-        if: ${{ !cancelled() && matrix.part != 'binaries' }}
+        if: ${{ !cancelled() && matrix.part != 'binaries' && matrix.part != 'local-ui' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: rust-junit-${{ matrix.part }}
@@ -454,10 +457,10 @@ jobs:
           cargo test --locked --doc
       # The local owner path needs no macOS APIs and no desktop features (#786).
       - name: Local issue starts without desktop features
-        if: matrix.part == 'binaries'
+        if: matrix.part == 'local-ui'
         working-directory: src-tauri
         run: cargo test --locked --no-default-features --features local-ui --lib control::issue_tests
-      # `binaries` builds every dependency the four parts do, so it alone
+      # `binaries` builds every dependency the library parts do, so it alone
       # saves: also when a test failed, as long as its build was whole.
       - name: Leave this crate's own output out of the cache
         id: clean
@@ -515,24 +518,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 -I scripts/machine-e2e/relevant.py
 
-  # Runs when the selector asks for it: every push to main, nightly, manual
-  # runs, and a pull request that touches code macOS builds differently.
-  # Skipped otherwise. `check` does not wait for it, on any event: a pull
-  # request shows its result without being held to it, and every other run is
-  # held to it by `check-macos`.
-  #
-  # A selected pull request gets the Swift tests, the icon checks, the helper,
-  # one build of the library's tests, and the tests of the Apple-only and
-  # system-dependent modules (`macos-rust.py --filters`). The whole suite and
-  # macOS Clippy run on main, nightly and manual runs.
+  # Runs only on pushes to main, nightly and manual runs (`github.event_name !=
+  # 'pull_request'`): pull requests use zero macOS runners and are held to
+  # Linux CI by `check`. Every push to main, nightly and manual run is held to
+  # this job by `check-macos`, running the Swift tests, icon checks, helper
+  # build, both macOS Clippy runs, one build of the library's tests, and the
+  # full macOS test suite.
   #
   # Pushes to main share one group: while one runs, only the newest waiting
   # commit keeps its place, and an older one still waiting is cancelled (its
   # `check-macos` fails). Merges land in bursts and each run is long; a commit
   # already superseded does not need the runner more than the newest one does.
   macos-native:
-    needs: macos-rust-changes
-    if: needs.macos-rust-changes.outputs.required == 'true'
+    if: github.event_name != 'pull_request'
     concurrency:
       group: ci-macos-native-${{ github.event_name == 'push' && 'main' || github.run_id }}
       cancel-in-progress: false
@@ -688,11 +686,6 @@ jobs:
           test -d "$RUNNER_TEMP/target"
           rm -rf target && mv "$RUNNER_TEMP/target" target
 
-      - name: cargo test (a pull request, the Apple-only and system-dependent modules)
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'pull_request' }}
-        working-directory: src-tauri
-        run: cargo test --locked --lib -- $(python3 ../infra/ci-runners/macos-rust.py --filters)
-
       - name: cargo test (main, nightly and manual runs, the full macOS suite)
         if: ${{ !cancelled() && steps.build.outcome == 'success' && github.event_name != 'pull_request' }}
         working-directory: src-tauri
@@ -743,31 +736,13 @@ jobs:
       - name: Clippy
         working-directory: src-tauri/serve
         run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Owner hook round trip and lost-transport denial
-        working-directory: src-tauri/serve
-        run: |
-          cargo test --locked --test owner_pretool
-          cargo test --locked --test local_lifetime owner_hook_process_fails_closed_when_its_socket_disappears
-      - name: Replacing an older runtime with the bundled one (#730)
-        working-directory: src-tauri/serve
-        run: |
-          cargo test --locked --test local_lifetime a_runtime_names_what_stopping_it_would_cut_short_and_stops_by_itself_only_without_any
-          cargo test --locked --test local_lifetime a_runtime_says_its_build_and_turns_and_a_retired_one_is_replaced_by_the_next_launch
-      - name: Handing the runtime over without stopping what it runs (#765)
-        working-directory: src-tauri/serve
-        run: cargo test --locked --test local_handover
+      # The other serve integration test binaries (owner_pretool, local_lifetime,
+      # local_handover, session_parent, machine_host, headless_pair, headless_update)
+      # run once in sharded `serve-tests` under cargo-nextest; only `local_issue_start`
+      # needs `--features local-ui` and runs here.
       - name: CLI issue starts in the shipped runtime (#786)
         working-directory: src-tauri/serve
         run: cargo test --locked --features local-ui --test local_issue_start
-      - name: A lead lists and stops the sessions it started (PRO-270)
-        working-directory: src-tauri/serve
-        run: cargo test --locked --test session_parent
-      - name: A headless runtime lets a paired computer operate it (PRO-341)
-        working-directory: src-tauri/serve
-        run: cargo test --locked --test machine_host
-      - name: A person pairs from a headless server's terminal; an update hands the runtime over (PRO-353)
-        working-directory: src-tauri/serve
-        run: cargo test --locked --test headless_pair --test headless_update
       - name: Self-test (start, shell PTY, clean exit)
         working-directory: src-tauri/serve
         run: ../target/debug/terminalx-serve --data-dir "$RUNNER_TEMP/serve" --project-root "$GITHUB_WORKSPACE" --runtime-kind cloud-workspace --self-test
@@ -796,17 +771,20 @@ jobs:
   # It builds what headless-serve builds, so it restores that job's cache and
   # saves none.
   #
-  # They run under cargo-nextest's `ci` profile, as the library's tests do:
-  # every test in a process of its own and the binaries side by side, where
-  # `cargo test` ran the binaries one after another (433 s in run 45442275413).
-  # The slowest test is then the floor. local_supervisor has no libtest
-  # harness (`harness = false`), so nextest cannot list it: it runs under
-  # `cargo test` in a step of its own, as it did before.
+  # They run in two parts under cargo-nextest's `ci` profile, as the library's
+  # tests do: every test in a process of its own and the binaries side by side,
+  # partitioned evenly across two runners so each shard finishes under 5 minutes.
+  # local_supervisor has no libtest harness (`harness = false`), so nextest
+  # cannot list it: it runs under `cargo test` in part 1.
   serve-tests:
     needs: macos-rust-changes
     if: needs.macos-rust-changes.outputs.rust == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2]
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     env:
       # As headless-serve: the binary and the tests share one library build.
       CARGO_PROFILE_DEV_OPT_LEVEL: "0"
@@ -849,7 +827,7 @@ jobs:
       - name: Build the runtime the tests start
         working-directory: src-tauri/serve
         run: cargo build --locked --bin terminalx-serve
-      - name: cargo nextest (every serve test binary without a job of its own)
+      - name: cargo nextest (every serve test binary without a job of its own, this part of two)
         working-directory: src-tauri/serve
         run: |
           set -o pipefail
@@ -862,9 +840,9 @@ jobs:
               *) tests+=(--test "$name") ;;
             esac
           done
-          cargo nextest run --locked --profile ci --bins "${tests[@]}" 2>&1 | tee "$RUNNER_TEMP/nextest.log"
+          cargo nextest run --locked --profile ci --bins "${tests[@]}" --partition count:${{ matrix.part }}/2 2>&1 | tee "$RUNNER_TEMP/nextest.log"
       - name: cargo test (the serve test binaries without libtest's harness)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.part == 1 }}
         working-directory: src-tauri/serve
         run: cargo test --locked --test local_supervisor
       # As in the library's parts: a flaky test passed on a retry its override
@@ -873,7 +851,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           {
-            echo "### Flaky and leaky tests, serve-tests"
+            echo "### Flaky and leaky tests, serve-tests part ${{ matrix.part }}"
             echo '```'
             grep -aE '^[[:space:]]*(FLAKY|LEAK)[[:space:]]' "$RUNNER_TEMP/nextest.log" | sort -u || echo "none"
             echo '```'
@@ -882,7 +860,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: serve-junit
+          name: serve-junit-${{ matrix.part }}
           path: src-tauri/target/nextest/ci/junit.xml
           if-no-files-found: warn
 
@@ -892,12 +870,12 @@ jobs:
   # the headless runtime's (no desktop features), which macos-native does
   # not build, so the job keeps its own cache.
   #
-  # Selected like machines-e2e (every push, schedule and dispatch; a pull
-  # request that touches the machines), and on main only the newest waiting
-  # commit keeps its place, as macos-native.
+  # Runs only on pushes to main, nightly and manual runs (`github.event_name !=
+  # 'pull_request'`), gated by `check-macos`, so pull requests use zero macOS
+  # runners. On main only the newest waiting commit keeps its place, as
+  # macos-native.
   machine-compat:
-    needs: macos-rust-changes
-    if: needs.macos-rust-changes.outputs.machines == 'true'
+    if: github.event_name != 'pull_request'
     concurrency:
       group: ci-machine-compat-${{ github.event_name == 'push' && 'main' || github.run_id }}
       cancel-in-progress: false
@@ -1088,16 +1066,20 @@ jobs:
       - name: Install npm dependencies
         run: pnpm install --frozen-lockfile
       # On Linux this job runs no Rust: linux-rust checks every target and
-      # linux-rust-tests runs the tests, the local owner path among them. The
-      # toolchain and the cache are for the other platforms.
+      # linux-rust-tests runs the tests, the local owner path among them.
+      # On Windows pull requests only the fast (<1 min) off-macOS helper no-op,
+      # script input safety tests, and PowerShell 5.1/7 render tests run so PR
+      # `check` is never blocked behind a ~57-minute Windows Cargo + Vitest run.
+      # Full Windows Rust builds, library nextest, and full Vitest run on pushes
+      # to main, nightly and manual runs (`github.event_name != 'pull_request'`).
       - name: Show the Rust toolchain
-        if: runner.os != 'Linux'
+        if: runner.os != 'Linux' && github.event_name != 'pull_request'
         id: toolchain
         run: |
           rustup show && cargo --version
           echo "rustc=$(rustc --version | tr -c '[:alnum:].\n' '-')" >> "$GITHUB_OUTPUT"
       - name: Restore the cargo cache
-        if: runner.os != 'Linux'
+        if: runner.os != 'Linux' && github.event_name != 'pull_request'
         id: cargo-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -1111,39 +1093,39 @@ jobs:
             ci-v5-desktop-platforms-main-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.rustc }}-${{ hashFiles('src-tauri/Cargo.lock') }}
             ci-v5-desktop-platforms-main-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.rustc }}-
       # `frontend` builds the frontend on Linux; the other platforms build it
-      # here for the Rust steps below.
+      # here for the Rust steps below on non-PR runs.
       - name: Verify the off-macOS helper build is a no-op
         run: pnpm build:computer-macos
       - name: Build the frontend
-        if: runner.os != 'Linux'
+        if: runner.os != 'Linux' && github.event_name != 'pull_request'
         run: pnpm exec vite build
       # On Linux, linux-rust already checks every target (clippy),
       # linux-rust-tests runs these tests in its full suite, and vitest runs
-      # every script test: the steps marked "not Linux" are for the other
-      # platforms.
+      # every script test. On Windows, the heavy Cargo and full Vitest suites
+      # run on main, nightly and manual runs.
       - name: Platform build
-        if: runner.os != 'Linux'
+        if: runner.os != 'Linux' && github.event_name != 'pull_request'
         working-directory: src-tauri
         run: cargo check --all-targets
       - name: Computer contract tests
-        if: runner.os != 'Linux'
+        if: runner.os != 'Linux' && github.event_name != 'pull_request'
         working-directory: src-tauri
         run: "cargo test --lib computer::"
       - name: Windows process exit observation
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && github.event_name != 'pull_request'
         working-directory: src-tauri
         run: cargo test --lib process_probe_distinguishes_running_from_confirmed_exit
       - name: Windows pipe tests
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && github.event_name != 'pull_request'
         working-directory: src-tauri
         run: "cargo test --lib pipe_transport::"
       - name: Windows control and hook integration
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && github.event_name != 'pull_request'
         working-directory: src-tauri
         run: cargo test --lib named_pipe_serves_authenticated_control_and_hook_frames
       # One release, by version and by the SHA-256 of its archive, as linux-rust-tests installs it.
       - name: Install cargo-nextest
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && github.event_name != 'pull_request'
         env:
           NEXTEST_VERSION: "0.9.152"
           NEXTEST_SHA256: cc6bf4b6a7ac18e462cd6c9bae67e26921b888249c2988c6acabf3df387ed9d6
@@ -1157,14 +1139,14 @@ jobs:
       # executable has no application manifest, so the desktop build's
       # common-controls imports do not resolve in one (CONTRIBUTING.md).
       - name: Windows library tests
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && github.event_name != 'pull_request'
         working-directory: src-tauri
         run: cargo nextest run --locked --lib --no-default-features --profile ci
       # The frontend's tests on Windows: paths, line endings and the platform's
       # words. Locale and time zone are pinned (src/test/system.ts), the node
       # tests' platform too (src/test/node-platform.ts).
       - name: Windows frontend tests
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && github.event_name != 'pull_request'
         run: pnpm vitest run
       - name: Desktop script input safety tests
         if: runner.os != 'Linux'
@@ -1184,7 +1166,7 @@ jobs:
         run: ./native/computer-use-windows/runtime-render.test.ps1
       - name: Leave this crate's own output out of the cache
         id: clean
-        if: ${{ runner.os != 'Linux' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
+        if: ${{ runner.os != 'Linux' && github.event_name != 'pull_request' && !endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock')) }}
         working-directory: src-tauri
         run: cargo clean --locked -p raccoon -p terminalx-serve && rm -rf target/debug/incremental
       - name: Save the cargo cache
@@ -1200,12 +1182,10 @@ jobs:
   check:
     # Keep the exact required status and fail closed on failed/cancelled/skipped jobs.
     #
-    # Not macos-native, machine-compat or webkit-mac-only: a pull request is not
-    # held to the macOS Rust suite, to the build against the released runtimes
-    # or to the mac-only WebKit checks (the owner's decisions, 24 and 25
-    # November 2026). On a pull request the selector still runs each when the
-    # change needs it, and it reports there as its own job; `check` does not
-    # wait for it. Every other run is held to all three by `check-macos` below.
+    # Not macos-native, machine-compat or webkit-mac-only: pull requests use
+    # zero macOS runners. All three macOS jobs run only on pushes to main,
+    # nightly and manual runs (`github.event_name != 'pull_request'`), and
+    # `check-macos` below holds every non-PR run to all three.
     if: always()
     needs: [frontend, phone-app, vitest, webkit-layout-linux, webkit-layout, linux-rust, linux-rust-tests, macos-rust-changes, headless-serve, serve-tests, machines-e2e, desktop-platforms, legacy-runtime-probe]
     runs-on: ubuntu-latest

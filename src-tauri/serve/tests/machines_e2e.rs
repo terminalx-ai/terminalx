@@ -339,7 +339,7 @@ async fn replay_until(link: &mut Link, pty: &str, cursor: &Value, since: u64, ma
 /// Revoked: the supervisor ends in "access removed" and retries nothing.
 async fn assert_access_removed(link: &mut Link) {
     link.state("access removed after the revocation", Duration::from_secs(30), |state| *state == MachineConnectionState::AccessRemoved).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(link.supervisor_state(), MachineConnectionState::AccessRemoved, "{}: nothing reconnected after access was removed", link.name);
 }
 

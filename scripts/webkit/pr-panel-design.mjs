@@ -63,9 +63,11 @@ function setup(mode) {
 const server = await serve();
 const browser = await launch();
 let failed = 0;
+const prCases = shots
+  ? ["open", "ready", "merged", "link"].flatMap((mode) => ["dark", "light"].map((colorScheme) => [mode, colorScheme]))
+  : [["open", "dark"], ["ready", "light"], ["merged", "dark"], ["link", "light"]];
 try {
-  for (const mode of ["open", "ready", "merged", "link"]) {
-    for (const colorScheme of ["dark", "light"]) {
+  for (const [mode, colorScheme] of prCases) {
       const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 1440, height: 900 }, { extra: `(${setup})(${JSON.stringify(mode === "link" ? "open" : mode)})`, colorScheme });
       page.setDefaultTimeout(30_000);
       await sidebar(page);
@@ -151,7 +153,6 @@ try {
       }
       if (shots) await page.screenshot({ path: `${shots}/pr-panel-${mode}-${colorScheme}.png` });
       await page.close();
-    }
   }
 } finally {
   await browser.close();

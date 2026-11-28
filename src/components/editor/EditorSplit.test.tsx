@@ -2,6 +2,16 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useRef } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+vi.mock("@/icons", () => new Proxy({}, { has: () => true, get: (_, prop) => (prop === "then" || typeof prop === "symbol" ? undefined : prop === "__esModule" ? true : (props: Record<string, unknown>) => <svg {...props} />) }));
+vi.mock("@/components/ui/tooltip", () => ({
+  TooltipProvider: ({ children }: { children: import("react").ReactNode }) => children,
+  WithTooltip: ({ children }: { children: import("react").ReactNode }) => children,
+  Tooltip: ({ children }: { children: import("react").ReactNode }) => children,
+  TooltipTrigger: ({ children }: { children: import("react").ReactNode }) => children,
+  TooltipContent: () => null,
+  Kbd: ({ children }: { children: import("react").ReactNode }) => <kbd data-slot="kbd">{children}</kbd>,
+  KbdGroup: ({ keys }: { keys: string[] }) => <span data-slot="kbd">{keys.map((k, i) => <kbd key={i}>{k}</kbd>)}</span>,
+}));
 import { api, fs, git } from "@/lib/api";
 import { closeAllEditors, closeEditor, getEditors, openFile, openDiff, setActiveEditor, setLastFocused } from "@/lib/editors";
 import { confirmInApp as ask } from "@/lib/confirm";

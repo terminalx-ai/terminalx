@@ -38,22 +38,22 @@ machine, a pull request's edited workflow included.
 | --- | --- | --- | --- |
 | `macos-rust-changes` | Ubuntu | always | The selector: what this change needs (next section). |
 | `frontend` | Ubuntu | always | Portable icon tests and the CI policy, selector and measurement tests, whatever changed. `tsc` and `vite build` when the frontend changed. The one place `tsc` runs. |
-| `vitest` | Ubuntu, four at once | frontend | The full Vitest run in four parts (`--shard=N/4`): every test file is in exactly one. |
-| `webkit-layout-linux` | Ubuntu, four at once | frontend | The WebKit layout checks after `vite build`, in four parts (`run-all.mjs --shard N/4`): every check is in exactly one part, and on Linux a part leaves out the checks in run-all's `macOnly` list. The machine-screen scripts are among them. |
+| `vitest` | Ubuntu, four at once | frontend | The desktop Vitest run (`src/`, `packages/`, `scripts/`) in four parts (`--shard=N/4`): every test file is in exactly one. Mobile tests run in `phone-app` alone and are excluded from root `vite.config.ts`. |
+| `webkit-layout-linux` | Ubuntu, six at once | frontend | The WebKit layout checks after `vite build`, in six parts (`run-all.mjs --shard N/6`): every check is in exactly one part, and on Linux a part leaves out the checks in run-all's `macOnly` list. The machine-screen scripts are among them. |
 | `webkit-layout` | Ubuntu | always | The required WebKit status. Passes only when every Linux part succeeded, or all were skipped because the selector succeeded and answered "false" for the frontend; a part that failed or was cancelled fails it. Keeps the parts' machine screens as one artifact, `machine-screens`, and fails when there are none. |
-| `webkit-mac-only` | **macOS** | mac-webkit | The checks in `macOnly` alone (`run-all.mjs --only mac-only`), each listed with what Linux lacks. |
+| `webkit-mac-only` | **macOS** | main, nightly, manual | The checks in `macOnly` alone (`run-all.mjs --only mac-only`), each listed with what Linux lacks. Never runs on pull requests (`github.event_name != 'pull_request'`). |
 | `phone-app` | Ubuntu | phone | The phone app's `tsc` and its Vitest run (`pnpm --dir mobile test`). |
 | `linux-rust` | Ubuntu on **every PR** | Rust | `cargo clippy --locked --all-targets -- -D warnings`; GTK/WebKit/audio dependencies installed. Main push/nightly/manual runs alone may use the owner-approved `CI_LINUX_RUNNER` label; unset/empty falls back to Ubuntu. |
-| `linux-rust-tests` | Ubuntu, five at once | Rust | The library's tests under cargo-nextest in four parts, and a fifth with the other test binaries, the doc tests and the local owner path without desktop features (below). Part 1 also runs a secret through a real system keyring (GNOME Keyring on a session bus of its own). |
-| `headless-serve` | Ubuntu | Rust | Headless build, dependency exclusions, Clippy, the named integration tests and the self-tests. |
-| `serve-tests` | Ubuntu | Rust | Every other test binary under `src-tauri/serve/tests`, under cargo-nextest (below). |
-| `macos-native` | **macOS** | macOS | Icon checks, Swift tests, helper build, one build of the library's tests. On a pull request the Apple-only and system-dependent tests; on main, nightly and manual runs macOS Clippy and the full suite. |
-| `machine-compat` | **macOS** | machines | This build against the previous two released runtimes (PRO-354). |
+| `linux-rust-tests` | Ubuntu, ten at once | Rust | The library's tests under cargo-nextest in eight parts (linked with `lld`), `binaries` for the other test binaries and doc tests, and `local-ui` in parallel for the local owner path without desktop features (below). Part 1 also runs a secret through a real system keyring (GNOME Keyring on a session bus of its own). |
+| `headless-serve` | Ubuntu | Rust | Headless build, dependency exclusions, Clippy, `local_issue_start` (`--features local-ui`), and the self-tests. The other serve integration binaries run once in `serve-tests` instead of twice. |
+| `serve-tests` | Ubuntu, two at once | Rust | Every other test binary under `src-tauri/serve/tests`, sharded in two parts under cargo-nextest (`--partition count:N/2`), plus `local_supervisor` (`harness = false`) in part 1. |
+| `macos-native` | **macOS** | main, nightly, manual | Icon checks, Swift tests, helper build, both macOS Clippy runs, one build of the library's tests, and the full macOS suite. Never runs on pull requests (`github.event_name != 'pull_request'`). |
+| `machine-compat` | **macOS** | main, nightly, manual | This build against the previous two released runtimes (PRO-354). Never runs on pull requests (`github.event_name != 'pull_request'`). |
 | `machines-e2e` | Ubuntu | always; decides in a step | Two machines end to end (PRO-358). |
-| `desktop-platforms` | Ubuntu and Windows | always | Off-macOS helper build, Linux renderer and launcher tests. No Rust on Linux: that is `linux-rust` and `linux-rust-tests`. On Windows: the build, the library's tests under cargo-nextest without the desktop feature, the frontend's tests, and the Windows-only pipe, process and renderer tests, with `core.autocrlf` off. |
+| `desktop-platforms` | Ubuntu and Windows | always | On Linux (~25s): off-macOS helper no-op, Linux renderer and launcher tests. On Windows pull requests (~1 min): `core.autocrlf` off, off-macOS helper no-op, desktop script input safety tests, and PowerShell 5.1/7 render tests. On Windows pushes to `main`, nightly and manual runs (`github.event_name != 'pull_request'`): full Windows Rust build, contract/pipe/process tests, full library nextest without desktop features, and full Vitest. |
 | `legacy-runtime-probe` | Ubuntu | always | Legacy AppImage diagnostics. Its tests set the operating system themselves, so one runner covers Linux and macOS. |
-| `check` | Ubuntu | always | The aggregate. Every other job but `macos-native`, `machine-compat`, `webkit-mac-only` and `check-macos` must succeed. A job in the "Runs" column's frontend, phone, Rust or machines rows may be skipped instead, and only when the selector succeeded and answered "false" for it. |
-| `check-macos` | Ubuntu | main, nightly, manual | Needs `check`, `macos-native`, `machine-compat` and `webkit-mac-only`; fails unless all four succeeded. Not a required status: a pull request is not held to the macOS Rust suite, the build against the released runtimes or the mac-only WebKit checks ("macOS Rust coverage"). |
+| `check` | Ubuntu | always | The aggregate. Every other job but `macos-native`, `machine-compat`, `webkit-mac-only` and `check-macos` must succeed. A job in the "Runs" column's frontend, phone or Rust rows may be skipped instead, and only when the selector succeeded and answered "false" for it. |
+| `check-macos` | Ubuntu | main, nightly, manual | Needs `check`, `macos-native`, `machine-compat` and `webkit-mac-only`; fails unless all four succeeded. Not a required status: pull requests burn zero macOS runner minutes and are never blocked on the macOS queue. |
 
 All runners are GitHub-hosted. The WebKit checks run in `ci.yml` alone: the
 trial workflow `webkit-linux.yml` that first ran them on Linux is gone.
@@ -77,10 +77,10 @@ answer "true" to all five.
 | Answer | True when the change touches | Jobs |
 | --- | --- | --- |
 | `rust` | `src-tauri/`, `native/`, the toolchain, and each path outside them that a Rust test or build script reads (`packages/portable/src/`, the shared fixtures under `src/lib/`, `scripts/remote-runtime/`, `skill-guides/`, `schemas/` and others) | `linux-rust`, `linux-rust-tests`, `headless-serve`, `serve-tests` |
-| `frontend` | `src/`, `packages/`, `scripts/`, `mobile/src/` (a desktop test imports from it, and the root Vitest run includes its tests), the package and Vite files, and each Rust or other file a frontend test reads by path (`src-tauri/src/remote/protocol.rs`, `src-tauri/src/fixtures/` and others) | `tsc` and the build in `frontend`, `vitest`, `webkit-layout-linux` |
-| `mac-webkit` | a mac-only check's script, `run-all.mjs`, every file in `scripts/webkit/` one of them names by a `./` path (`harness.mjs` and the stubs it reads), the app's shell and styles (`MAC_WEBKIT_SHELL`), and what each mac-only check renders (`MAC_WEBKIT_RENDERS`) | `webkit-mac-only` |
+| `frontend` | `src/`, `packages/`, `scripts/`, `mobile/src/` (a desktop test imports from it), the package and Vite files, and each Rust or other file a frontend test reads by path (`src-tauri/src/remote/protocol.rs`, `src-tauri/src/fixtures/` and others) | `tsc` and the build in `frontend`, `vitest`, `webkit-layout-linux` |
+| `mac-webkit` | (diagnostic output; `webkit-mac-only` runs only off pull requests) a mac-only check's script, `run-all.mjs`, every file in `scripts/webkit/` one of them names by a `./` path (`harness.mjs` and the stubs it reads), the app's shell and styles (`MAC_WEBKIT_SHELL`), and what each mac-only check renders (`MAC_WEBKIT_RENDERS`) | none on PRs (`webkit-mac-only` runs on main, nightly, manual) |
 | `phone` | `mobile/`, `packages/`, the package files, the desktop types the phone app imports | `phone-app` |
-| `required` | the macOS rules ("macOS Rust coverage" below) | `macos-native` |
+| `required` | (diagnostic output; `macos-native` runs only off pull requests) the macOS rules ("macOS Rust coverage" below) | none on PRs (`macos-native` runs on main, nightly, manual) |
 
 A change to `.github/workflows/ci.yml` or `infra/ci-runners/` answers "true" to
 all five. A documentation-only pull request runs `macos-rust-changes`,
@@ -124,9 +124,7 @@ Linux on the pull request):
 
 macOS Clippy still runs on a selected pull request, both invocations. `tsc`
 runs in `frontend` alone (it ran four times). The serve crate's test binaries
-run for the first time (`serve-tests`). The phone app's tests have a job of
-their own (`phone-app`); the root Vitest run already ran the phone's
-`.test.ts` files and still does, so those run twice.
+run for the first time (`serve-tests`). The phone app's tests have a job of their own (`phone-app`); root `vite.config.ts` excludes `mobile/src/**/*.test.ts` so mobile tests run once in `phone-app` rather than twice.
 
 The Linux build also exposed unused macOS-only secure-dialog and dictation
 code. Those implementations and real-model evaluation types now compile only
@@ -210,10 +208,11 @@ assertions are unchanged.
 that used to fail by timing or shared state, many times in a row on the kind
 of runner CI runs each on: the large-tab send cost and the cloud sections'
 search 20 times, the far-behind terminal view and the checkpoint undo 20
-times, and the Codex capability tests 300 times with every core busy. It runs
-only when one of those tests or the workflow changes, and by hand
+times, and the Codex capability tests 300 times with every core busy. It runs only when one of those tests or the workflow changes, and by hand
 (`gh workflow run repeat-flaky-tests.yml -f runs=50`). It is not a required
-status, and it takes one macOS runner for the search.
+status, and its macOS leg (`repeat-webkit-search`) is gated with
+`github.event_name != 'pull_request'` so pull requests never allocate a macOS
+runner.
 
 The send test no longer holds a time in milliseconds. It measures a send in
 units of a reference workload timed beside it in the same run, so the figure
@@ -268,23 +267,24 @@ this, main's job reached its limit during the doc-tests, after an hour of the
 second compile. `main`'s `cargo test --locked` still builds the ordinary
 library once, which the binary, the integration tests and the doc-tests need.
 
-No macOS runner is taken on a pull request unless the selector asks for one.
-Three jobs take one only when they are selected:
+**Zero macOS runners are taken on pull requests.** All three macOS jobs run
+exclusively on pushes to `main`, nightly and manual runs
+(`github.event_name != 'pull_request'`), gated by `check-macos`:
 
-- `macos-native`: pushes to `main`, nightly, manual runs, and pull requests
-  selected by `infra/ci-runners/macos-rust.py` ("macOS Rust coverage"). An
-  unselected pull request runs no Swift tests or Apple icon checks before
-  merge, and no pull request runs macOS Clippy: they run on `main` after it.
-- `machine-compat`: the same events, and pull requests that touch the machines
-  (`scripts/machine-e2e/relevant.py`, the list `machines-e2e` uses).
-- `webkit-mac-only`: the same events, and pull requests the `mac-webkit` answer
-  selects (below).
+- `macos-native`: pushes to `main`, nightly and manual runs — full macOS suite,
+  both macOS Clippy passes, Swift tests, helper build and compiled Apple icon
+  checks.
+- `machine-compat`: pushes to `main`, nightly and manual runs — compatibility
+  matrix against the previous two released runtimes.
+- `webkit-mac-only`: pushes to `main`, nightly and manual runs — the mac-only
+  WebKit layout checks (`run-all.mjs --only mac-only`).
 
-`macos-rust-changes` decides all three, and `check` waits for none of them.
-On `main`, `macos-native` and `machine-compat` each keep the run in progress
-and the newest waiting commit: an older commit still waiting when a newer one
-arrives is cancelled, and its `check-macos` fails. The newest commit of a burst
-of merges is always tested.
+`check` waits for none of them, and `test_workflow_security.py` fails if any
+workflow with a `pull_request` trigger can allocate a `macos-*` runner on a
+`pull_request` event. On `main`, `macos-native` and `machine-compat` each keep
+the run in progress and the newest waiting commit: an older commit still waiting
+when a newer one arrives is cancelled, and its `check-macos` fails. The newest
+commit of a burst of merges is always tested.
 
 ### The WebKit layout checks
 
@@ -396,18 +396,21 @@ The legacy runtime diagnostic's macOS leg is gone: its tests patch
 
 Linux runners start at once, so the two long suites run in parts on several:
 
-- **Vitest**, four parts: `pnpm vitest run --shard=N/4`. Vitest deals each test
-  file to exactly one part.
-- **The Linux Rust suite**, five parts. Four are the library's tests under
+- **Vitest**, four parts: `pnpm vitest run --shard=N/4`. Vitest deals each
+  desktop test file (`src/`, `packages/`, `scripts/`) to exactly one part;
+  mobile tests run once in `phone-app`.
+- **The Linux WebKit layout suite**, six parts: `node scripts/webkit/run-all.mjs --shard N/6`,
+  keeping each part under 5 minutes wall-clock.
+- **The Linux Rust suite**, ten parts (linked with `lld` via `clang`, cache key
+  `ci-v6-linux-rust-tests-...`). Eight are the library's tests under
   [cargo-nextest](https://nexte.st), `cargo nextest run --locked --lib
-  --profile ci --partition count:N/4`: nextest sorts the tests and deals them
+  --profile ci --partition count:N/8`: nextest sorts the tests and deals them
   out in turn, so every test is in exactly one part and the parts are the same
-  size (on Linux 1,443 a part: 5,791 tests are listed there and 18 are
-  `#[ignore]`d; a Mac lists 5,871 with 26 ignored). The fifth, `binaries`, is the rest of `cargo test
-  --locked`: the other test binaries (`--bins --test '*'`) and the doc tests
-  under `cargo test`, then `control::issue_tests` built without the desktop
-  features. A new or renamed test moves tests between runners; it cannot leave
-  one out.
+  size. `binaries` runs the other test binaries (`--bins --test '*'`) and the
+  doc tests under `cargo test`, and `local-ui` runs `control::issue_tests`
+  built without the desktop features in parallel so it does not extend
+  `binaries` sequentially. A new or renamed test moves tests between runners;
+  it cannot leave one out.
 
 nextest runs each test in a process of its own. About 2,000 of the library's
 tests take `store::temp_home()`'s lock, which is one per process: under `cargo
@@ -429,18 +432,20 @@ race that fails half the time pass seven runs in eight.
 nextest is installed as one release by version, its archive checked against a
 SHA-256 in the workflow before it is opened.
 
-**The serve tests** (`serve-tests`) run under the same `ci` profile: `cargo
-nextest run --locked --profile ci --bins` with a `--test` for every file under
-`src-tauri/serve/tests` but the four other jobs run (`machine_compat`,
-`machines_e2e`, `machine_routes`, `local_issue_start`). Under `cargo test` the
-binaries ran one after another, 433 s in run 45442275413, 186 s of it
-`scheduled_run`; nextest runs them side by side, so the slowest test is the
-floor. The job installs the same nextest release, checked the same way, keeps
-its JUnit report as `serve-junit` and names flaky and leaky tests in its
-summary. `local_supervisor` is built without libtest's harness (`harness =
-false`) and cannot answer nextest's `--list`, so it runs under `cargo test` in
-a step of its own; a policy test takes the binaries without a harness from
-`src-tauri/serve/Cargo.toml` and requires that step for each.
+**The serve tests** (`serve-tests`) run in two parts under the same `ci`
+profile: `cargo nextest run --locked --profile ci --bins "${tests[@]}"
+--partition count:N/2` with a `--test` for every file under
+`src-tauri/serve/tests` except the four other jobs run (`machine_compat`,
+`machines_e2e`, `machine_routes`, `local_issue_start`). `headless-serve` no
+longer re-runs the binaries already covered here (saving ~2.3 min per PR),
+leaving it to build, dependency-tree check, Clippy, `local_issue_start`
+(`--features local-ui`) and both self-tests. `serve-tests` installs the same
+nextest release, checked the same way, keeps its JUnit reports as
+`serve-junit-1`/`serve-junit-2` and names flaky and leaky tests in its summary.
+`local_supervisor` is built without libtest's harness (`harness = false`) and
+cannot answer nextest's `--list`, so it runs under `cargo test` in part 1; a
+policy test takes the binaries without a harness from `src-tauri/serve/Cargo.toml`
+and requires that step for each.
 
 With every test in a process of its own, a reservation one process keeps is no
 longer one: `free_port()` (`tests/common/machine.rs`), which hands a test a

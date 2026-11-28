@@ -82,14 +82,18 @@ try {
   await chat.dispatchEvent('wheel', {deltaY:-100});
   await chat.evaluate(el => { el.scrollTop=0; });
   await page.waitForFunction(() => [...document.querySelectorAll('[data-chat-scroller]')].some(el=>el.clientWidth>0 && el.scrollTop===0));
-  for (const [width,zoom,panel=false] of (floating ? [[1100,1],[360,1],[640,1.5]] : [[1100,1],[1100,1,true],[760,1],[760,1.5]])) {
+  const configs = screenshots
+    ? (floating ? [[1100,1],[360,1],[640,1.5]] : [[1100,1],[1100,1,true],[760,1],[760,1.5]])
+    : (floating ? [[360,1],[640,1.5]] : [[1100,1,true],[760,1.5]]);
+  for (const [configIndex, [width,zoom,panel=false]] of configs.entries()) {
    const label = `${floating?'floating':'main'}-${width}-${zoom}${panel?'-panel':''}`;
    if (panel) await page.getByRole('button',{name:'Toggle panel',exact:true}).click();
    await page.setViewportSize({width,height:800});
    await page.evaluate(zoom => {document.documentElement.style.zoom=String(zoom);},zoom);
    const dl = wrapper.getByRole('button',{name:'Download table',exact:true});
    const expand = wrapper.getByRole('button',{name:'View fullscreen',exact:true});
-   for (let cycle=0;cycle<2;cycle++) {
+   const cycles = configIndex === 0 ? 2 : 1;
+   for (let cycle=0;cycle<cycles;cycle++) {
     await menuGeometry(page,dl,label,cycle===1);
     if (screenshots && cycle===0) await page.screenshot({path:`${screenshots}/${label}-menu.png`});
     // The menu is non-modal: opening the viewer directly must dismiss it.
@@ -148,7 +152,10 @@ try {
     await copy.click();
     await page.waitForFunction(expected=>window.__copies.at(-1)===expected+'\n',expected);
     if (clipboard) assert.equal(paste(),expected+'\n');
-    await page.waitForFunction(({expected,icon})=> [...document.querySelectorAll('[data-streamdown="code-block"]')].filter(el=>el.textContent.includes(expected)).every(el=>el.querySelector('[data-streamdown="code-block-copy-button"] svg')?.innerHTML===icon),{expected,icon});
+    // The copy checkmark reverts on a 2s timer; verifying the revert once avoids sleeping 2s per viewport×block.
+    if (!floating && configIndex === 0 && expected === code) {
+     await page.waitForFunction(({expected,icon})=> [...document.querySelectorAll('[data-streamdown="code-block"]')].filter(el=>el.textContent.includes(expected)).every(el=>el.querySelector('[data-streamdown="code-block-copy-button"] svg')?.innerHTML===icon),{expected,icon});
+    }
     assert.ok(await block.evaluate(el=>{const b=el.getBoundingClientRect();return [...el.querySelectorAll('button')].every(button=>{const r=button.getBoundingClientRect();return r.width>=20 && r.height>=20 && r.top>=b.top && r.bottom<=b.bottom && r.right<=b.right && button.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));});}),`${label}: code controls visible and clickable`);
    }
    assert.ok(await chat.evaluate(el=>el.scrollWidth-el.clientWidth<=1),`${label}: conversation does not overflow`);

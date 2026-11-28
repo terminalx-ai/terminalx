@@ -233,7 +233,7 @@ async fn ended(data: &Path) -> Value {
             return record;
         }
         assert!(tokio::time::Instant::now() < deadline, "the update did not end: {record}");
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 

@@ -90,7 +90,7 @@ const measure = (page) =>
     return { viewport: innerWidth, dialog: Math.round(box.width), fits: box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight, documentScroll: document.scrollingElement.scrollWidth - document.scrollingElement.clientWidth, outside, overlapping };
   });
 
-for (const width of [960, 720]) {
+for (const width of shots ? [960, 720] : [720]) {
   const page = await open(browser, server.url, { cloud: true, localProjects: 3 }, { width, height: 720 });
   const rail = await sidebar(page);
   await page.evaluate(stub);
@@ -141,7 +141,7 @@ for (const width of [960, 720]) {
 }
 
 // A removal that takes a while, in a session whose composer sits under the corner.
-for (const width of [1100, 760]) {
+for (const width of shots ? [1100, 760] : [760]) {
   const page = await open(browser, server.url, { cloud: false, localProjects: 3, localSession: true }, { width, height: 720 });
   const rail = await sidebar(page);
   await openConversation(page, "Local long session");

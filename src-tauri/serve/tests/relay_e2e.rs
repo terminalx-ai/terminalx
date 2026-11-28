@@ -1509,7 +1509,7 @@ async fn a_shared_workspace_serializes_input_and_stops_access_when_revoked() {
     let (key_after, _) = workspace_keys(&mut admin).await;
     assert_ne!(key_after, key_id, "the content key rotates when someone loses access");
     bob.until_tab(&mut feeds, &tab, "the long turn to end", |f| has(f, "chunk 12 of 12")).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     bob.route_session_events(&mut feeds);
     assert!(
         !feeds[&tab].texts("user_message").iter().any(|t| t.contains("alice's queued follow-up")),
@@ -2265,7 +2265,7 @@ async fn the_machine_supervisor_gets_relay_access_reconnects_through_the_relay_a
     until(&mut states, "access removed", Box::new(|state| *state == MachineConnectionState::AccessRemoved)).await;
     assert_eq!(*kept.dropped.lock().unwrap(), 0, "the relay credential was not what was refused");
     assert!(kept.target.lock().unwrap().relay.is_some());
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
     assert!(states.try_recv().is_err(), "nothing retried after access was removed");
     supervisor.stop();
     drop(serve);

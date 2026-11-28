@@ -40,7 +40,7 @@ const server = await createCheckServer({server:{host:'127.0.0.1' },plugins:[{
 let browser;
 try {
  await server.listen();browser=await launch();
- for(const width of [1100,390,320]){
+ for(const width of [1100,320]){
   const page=await browser.newPage({viewport:{width,height:800}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.addInitScript(`window.__PW_FIXTURE__={cloud:true};${stub}`);
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/cloud-automation-test`);

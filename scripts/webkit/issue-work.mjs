@@ -13,9 +13,11 @@ const shots = process.env.ISSUE_WORK_SHOTS;
 const server = await serve();
 const browser = await launch();
 let failed = 0;
+const cases = shots
+  ? ["light", "dark"].flatMap((mode) => [1100, 800].map((width) => ({ mode, width })))
+  : [{ mode: "dark", width: 1100 }, { mode: "light", width: 800 }];
 try {
-  for (const mode of ["light", "dark"]) {
-    for (const width of [1100, 800]) {
+  for (const { mode, width } of cases) {
       const page = await browser.newPage({ viewport: { width, height: 700 } });
       const setup = ({ mode }) => {
         localStorage.setItem("raccoon.mode", mode);
@@ -232,7 +234,6 @@ try {
         "sign-out removes account claims and preserves this Mac's work": remaining.length === 1 && remaining[0] === "You · this Mac",
       }, remaining);
       await page.close();
-    }
   }
 } finally {
   await browser.close();

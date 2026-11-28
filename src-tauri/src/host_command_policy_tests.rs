@@ -33,6 +33,47 @@ fn approved(policy: &Policy) -> Request {
 }
 
 #[test]
+fn host_command_policy_validation_and_origin() {
+    default_and_unknown_context_deny();
+    exact_origin_all_dimensions_and_missing_identity_deny();
+    same_account_other_mac_and_stale_generation_or_rights_deny();
+    malformed_and_bounded_request_rejected();
+    valid_limits_and_exact_text_are_preserved_without_interpretation();
+    missing_trusted_origin_dimension_denies_even_when_proposal_is_complete();
+}
+
+#[test]
+fn host_command_policy_lifecycle_expiry_and_binding() {
+    expiry_is_exclusive_and_late_decision_cannot_resurrect();
+    approved_request_expires_before_ready();
+    one_successful_ready_observation_and_replay_tombstones();
+    deny_is_default_and_terminal();
+    changed_request_binding_cannot_approve_another_request();
+    foreign_policy_same_id_binding_is_rejected();
+    duplicate_and_reordered_transitions_never_make_ready_twice();
+}
+
+#[test]
+fn host_command_policy_revocation_clock_and_capacity() {
+    cancellation_fences_pending_approved_and_ready();
+    every_context_change_revokes_without_resurrection();
+    unchanged_context_does_not_revoke();
+    clock_rollback_disables_and_revokes_instead_of_extending_approval();
+    all_live_phases_block_other_commands_but_terminal_entries_allow_next_id();
+    expiry_releases_busy_slot_without_removing_replay_tombstone();
+    bounded_registry_keeps_terminal_tombstones_and_denies_when_full();
+}
+
+#[test]
+fn host_command_policy_concurrency_and_poisoning() {
+    concurrent_distinct_submission_has_one_winner_across_policy_clones();
+    concurrent_same_id_submission_has_one_winner();
+    cloned_handles_share_one_consumption_gate_under_race();
+    cancelled_or_revoked_request_cannot_win_a_later_take_race();
+    poisoned_registry_fails_closed();
+    cancel_and_revocation_races_are_serialized_and_fence_subsequent_observations();
+}
+
 fn default_and_unknown_context_deny() {
     assert_eq!(Policy::default().submit(input("one"), 10).err(), Some(Rejection::ContextUnavailable));
     let mutations: Vec<Box<dyn Fn(&mut TrustedContext)>> = vec![
@@ -52,7 +93,6 @@ fn default_and_unknown_context_deny() {
     }
 }
 
-#[test]
 fn exact_origin_all_dimensions_and_missing_identity_deny() {
     for dimension in 0..6 {
         for replacement in ["different", ""] {
@@ -68,7 +108,6 @@ fn exact_origin_all_dimensions_and_missing_identity_deny() {
     }
 }
 
-#[test]
 fn same_account_other_mac_and_stale_generation_or_rights_deny() {
     let p = policy();
     let mut c = context(); c.local_mac = Some("mac-b".into());
@@ -81,7 +120,6 @@ fn same_account_other_mac_and_stale_generation_or_rights_deny() {
     }
 }
 
-#[test]
 fn malformed_and_bounded_request_rejected() {
     let mutations: Vec<Box<dyn Fn(&mut RequestInput)>> = vec![
         Box::new(|i| i.id.clear()), Box::new(|i| i.id = "x".repeat(129)),
@@ -105,7 +143,6 @@ fn malformed_and_bounded_request_rejected() {
     }
 }
 
-#[test]
 fn valid_limits_and_exact_text_are_preserved_without_interpretation() {
     let p = policy(); let mut proposal = input("one");
     proposal.arguments.push(String::new());
@@ -120,7 +157,6 @@ fn valid_limits_and_exact_text_are_preserved_without_interpretation() {
     assert_eq!(request.input().arguments, original.arguments);
 }
 
-#[test]
 fn expiry_is_exclusive_and_late_decision_cannot_resurrect() {
     let p = policy(); let request = p.submit(input("one"), 10).unwrap();
     let binding = request.prepare_local_decision(99).unwrap();
@@ -132,13 +168,11 @@ fn expiry_is_exclusive_and_late_decision_cannot_resurrect() {
     assert_eq!(p.submit(input("future"), 9).err(), Some(Rejection::Expired));
 }
 
-#[test]
 fn approved_request_expires_before_ready() {
     let p = policy(); let request = approved(&p);
     assert_eq!(request.take_ready_for_lead_integration(100), Err(Rejection::Expired));
 }
 
-#[test]
 fn one_successful_ready_observation_and_replay_tombstones() {
     let p = policy(); let request = approved(&p);
     assert_eq!(request.take_ready_for_lead_integration(10), Ok(State::ReadyForLeadIntegration));
@@ -148,7 +182,6 @@ fn one_successful_ready_observation_and_replay_tombstones() {
     assert_eq!(p.submit(changed, 10).err(), Some(Rejection::Replay));
 }
 
-#[test]
 fn deny_is_default_and_terminal() {
     let p = policy(); let request = p.submit(input("one"), 10).unwrap();
     let binding = request.prepare_local_decision(10).unwrap();
@@ -157,7 +190,6 @@ fn deny_is_default_and_terminal() {
     assert_eq!(request.take_ready_for_lead_integration(10), Err(Rejection::InvalidTransition));
 }
 
-#[test]
 fn changed_request_binding_cannot_approve_another_request() {
     let p = policy(); let first = p.submit(input("one"), 10).unwrap();
     let binding = first.prepare_local_decision(10).unwrap(); first.cancel(10).unwrap();
@@ -166,7 +198,6 @@ fn changed_request_binding_cannot_approve_another_request() {
     assert_eq!(second.state(10), Ok(State::Denied));
 }
 
-#[test]
 fn foreign_policy_same_id_binding_is_rejected() {
     let p = policy(); let q = policy();
     let first = p.submit(input("one"), 10).unwrap(); let second = q.submit(input("one"), 10).unwrap();
@@ -174,7 +205,6 @@ fn foreign_policy_same_id_binding_is_rejected() {
         Err(Rejection::DecisionMismatch));
 }
 
-#[test]
 fn duplicate_and_reordered_transitions_never_make_ready_twice() {
     let p = policy(); let request = p.submit(input("one"), 10).unwrap();
     assert_eq!(request.take_ready_for_lead_integration(10), Err(Rejection::InvalidTransition));
@@ -185,7 +215,6 @@ fn duplicate_and_reordered_transitions_never_make_ready_twice() {
     assert_eq!(request.prepare_local_decision(10).err(), Some(Rejection::InvalidTransition));
 }
 
-#[test]
 fn cancellation_fences_pending_approved_and_ready() {
     for phase in 0..3 {
         let p = policy(); let request = p.submit(input("one"), 10).unwrap();
@@ -200,7 +229,6 @@ fn cancellation_fences_pending_approved_and_ready() {
     }
 }
 
-#[test]
 fn every_context_change_revokes_without_resurrection() {
     let mutations: Vec<Box<dyn Fn(&mut TrustedContext)>> = vec![
         Box::new(|c| c.enabled = Some(false)), Box::new(|c| c.can_approve = Some(false)),
@@ -230,14 +258,12 @@ fn every_context_change_revokes_without_resurrection() {
     }
 }
 
-#[test]
 fn unchanged_context_does_not_revoke() {
     let p = policy(); let request = approved(&p);
     p.update_trusted_context(context(), 11).unwrap();
     assert_eq!(request.take_ready_for_lead_integration(11), Ok(State::ReadyForLeadIntegration));
 }
 
-#[test]
 fn clock_rollback_disables_and_revokes_instead_of_extending_approval() {
     let p = policy(); let request = approved(&p);
     assert_eq!(request.take_ready_for_lead_integration(9), Err(Rejection::ClockReversed));
@@ -247,7 +273,6 @@ fn clock_rollback_disables_and_revokes_instead_of_extending_approval() {
     assert_eq!(request.take_ready_for_lead_integration(10), Err(Rejection::InvalidTransition));
 }
 
-#[test]
 fn all_live_phases_block_other_commands_but_terminal_entries_allow_next_id() {
     for phase in 0..3 {
         let p = policy(); let request = p.submit(input("one"), 10).unwrap();
@@ -259,7 +284,6 @@ fn all_live_phases_block_other_commands_but_terminal_entries_allow_next_id() {
     }
 }
 
-#[test]
 fn expiry_releases_busy_slot_without_removing_replay_tombstone() {
     let p = policy(); let _request = p.submit(input("one"), 10).unwrap();
     let mut next = input("two"); next.issued_at_ms = 100; next.expires_at_ms = 200;
@@ -267,7 +291,6 @@ fn expiry_releases_busy_slot_without_removing_replay_tombstone() {
     assert_eq!(p.submit(input("one"), 100).err(), Some(Rejection::Replay));
 }
 
-#[test]
 fn bounded_registry_keeps_terminal_tombstones_and_denies_when_full() {
     let p = policy();
     for id in 0..MAX_REQUESTS {
@@ -277,7 +300,6 @@ fn bounded_registry_keeps_terminal_tombstones_and_denies_when_full() {
     assert_eq!(p.submit(input("request-0"), 10).err(), Some(Rejection::Replay));
 }
 
-#[test]
 fn concurrent_distinct_submission_has_one_winner_across_policy_clones() {
     let p = policy(); let barrier = Arc::new(Barrier::new(8));
     let threads: Vec<_> = (0..8).map(|id| {
@@ -289,7 +311,6 @@ fn concurrent_distinct_submission_has_one_winner_across_policy_clones() {
     assert_eq!(results.iter().filter(|r| **r == Err(Rejection::Busy)).count(), 7);
 }
 
-#[test]
 fn concurrent_same_id_submission_has_one_winner() {
     let p = policy(); let barrier = Arc::new(Barrier::new(8));
     let threads: Vec<_> = (0..8).map(|_| {
@@ -301,7 +322,6 @@ fn concurrent_same_id_submission_has_one_winner() {
     assert_eq!(results.iter().filter(|r| **r == Err(Rejection::Replay)).count(), 7);
 }
 
-#[test]
 fn cloned_handles_share_one_consumption_gate_under_race() {
     let p = policy(); let request = approved(&p); let barrier = Arc::new(Barrier::new(16));
     let threads: Vec<_> = (0..16).map(|_| {
@@ -313,7 +333,6 @@ fn cloned_handles_share_one_consumption_gate_under_race() {
     assert_eq!(results.iter().filter(|r| **r == Err(Rejection::InvalidTransition)).count(), 15);
 }
 
-#[test]
 fn cancelled_or_revoked_request_cannot_win_a_later_take_race() {
     for revoke in [false, true] {
         let p = policy(); let request = approved(&p);
@@ -324,7 +343,6 @@ fn cancelled_or_revoked_request_cannot_win_a_later_take_race() {
     }
 }
 
-#[test]
 fn poisoned_registry_fails_closed() {
     let p = policy(); let request = approved(&p); let shared = p.shared.clone();
     assert!(thread::spawn(move || { let _guard = shared.lock().unwrap(); panic!("simulated panic"); }).join().is_err());
@@ -333,7 +351,6 @@ fn poisoned_registry_fails_closed() {
     assert_eq!(p.update_trusted_context(context(), 10), Err(Rejection::Poisoned));
 }
 
-#[test]
 fn missing_trusted_origin_dimension_denies_even_when_proposal_is_complete() {
     for dimension in 0..6 {
         let p = Policy::default(); let mut c = context(); let o = c.origin.as_mut().unwrap();
@@ -344,7 +361,6 @@ fn missing_trusted_origin_dimension_denies_even_when_proposal_is_complete() {
     }
 }
 
-#[test]
 fn cancel_and_revocation_races_are_serialized_and_fence_subsequent_observations() {
     for revoke in [false, true] {
         let p = policy(); let request = approved(&p); let barrier = Arc::new(Barrier::new(2));

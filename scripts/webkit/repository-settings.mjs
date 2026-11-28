@@ -11,9 +11,11 @@ if (shots) await mkdir(shots, { recursive: true });
 const server = await serve();
 const browser = await launch();
 let failed = 0;
+const repoCases = shots
+  ? [720, 1100].flatMap((width) => ["light", "dark"].map((mode) => [width, mode]))
+  : [[720, "dark"], [1100, "light"]];
 try {
-  for (const width of [720, 1100]) {
-    for (const mode of ["light", "dark"]) {
+  for (const [width, mode] of repoCases) {
       const page = await open(browser, server.url, { cloud: true, localProjects: 1 }, { width, height: 800 }, {
         extra: `localStorage.setItem("raccoon.mode", ${JSON.stringify(mode)});
           (() => {
@@ -85,7 +87,6 @@ try {
         "Files to copy sits on General with its cleanup controls": measured.cleanupShown,
       }, { ...measured, navEntries });
       await page.close();
-    }
   }
 } finally {
   await browser.close();
