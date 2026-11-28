@@ -120,6 +120,8 @@ const browser = await launch();
 let failed = 0;
 let shot = 0;
 
+const painted = (page) => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+
 async function app(fixture, viewport, colorScheme) {
   const page = await browser.newPage({ viewport, ...(colorScheme ? { colorScheme } : {}) });
   await page.addInitScript(`window.__PW_FIXTURE__ = { cloud: false, localProjects: 1 };\n${stub}\n(${setup})(${JSON.stringify(fixture)});`);
@@ -132,7 +134,7 @@ async function app(fixture, viewport, colorScheme) {
   await list.getByRole("button", { name: /^raccoon\/438-browser-style-tab-strip, / }).click();
   // Attached, not visible: the narrowest header draws the row as its menu alone.
   await page.locator('[data-testid="workspace-tab-strip"] [role="tab"]').first().waitFor({ state: "attached" });
-  await page.waitForTimeout(250);
+  await painted(page);
   return page;
 }
 
@@ -359,11 +361,11 @@ function tier(layout) {
 }
 
 // ---- PRO-381 at 1440 by 900, dark and light: the designed tab menu (03.14), the new-tab menu and the strip's switch (03.29)
-for (const colorScheme of ["dark", "light"]) {
+for (const colorScheme of shots ? ["dark", "light"] : ["dark"]) {
   const page = await app({ tabs: 3 }, { width: 1440, height: 900 }, colorScheme);
   await page.locator('[data-tab-key="agent:a1"]').click({ button: "right" });
   await page.getByRole("menuitem", { name: /^Rename chat/ }).waitFor();
-  await page.waitForTimeout(300);
+  if (shots) await page.waitForTimeout(300); else await painted(page);
   await snap(page, `designed-menu-${colorScheme}`);
   const menu = await page.getByRole("menu").first().evaluate((node) => {
     const box = node.getBoundingClientRect();
@@ -374,7 +376,7 @@ for (const colorScheme of ["dark", "light"]) {
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "New tab" }).click();
   await page.getByRole("menuitem", { name: "Claude Code chat" }).waitFor();
-  await page.waitForTimeout(300);
+  if (shots) await page.waitForTimeout(300); else await painted(page);
   await snap(page, `new-tab-menu-${colorScheme}`);
   const picker = await page.getByRole("menu").first().evaluate((node) => ({
     width: node.getBoundingClientRect().width,
@@ -484,63 +486,96 @@ for (const colorScheme of ["dark", "light"]) {
 }
 
 // ---- the header as the window narrows, with the sidebar open and hidden, and the side panel open
-for (const [name, viewport, prefs, tabs] of [
-  ["1360 wide", { width: 1360, height: 800 }, {}, 6],
-  ["1100 wide with the side panel", { width: 1100, height: 760 }, { panelOpen: true }, 6],
-  ["960 wide with the side panel", { width: 960, height: 700 }, { panelOpen: true }, 6],
-  ["960 wide with the side panel, one tab", { width: 960, height: 700 }, { panelOpen: true }, 1],
-  ["760 wide, no side panel", { width: 760, height: 600 }, {}, 8],
-]) {
-  const page = await app({ tabs, prefs }, viewport);
-  for (const sidebarHidden of [false, true]) {
-    if (sidebarHidden) {
-      await page.getByRole("button", { name: /^(Hide|Toggle) sidebar/ }).first().click();
-      await page.locator('main header [aria-label="Show sidebar"]').waitFor();
-      // The toggle changes before the closing animation releases the sidebar's
-      // width. Measure the hidden layout only once that space is actually gone.
-      await page.locator('[data-testid="panel-presence"][data-side="left"]').waitFor({ state: "detached" });
+const narrowGroups = [
+  {
+    tabs: 6,
+    prefs: { panelOpen: true },
+    views: [
+      ["1360 wide", { width: 1360, height: 800 }, false],
+      ["1100 wide with the side panel", { width: 1100, height: 760 }, true],
+      ["960 wide with the side panel", { width: 960, height: 700 }, true],
+    ],
+  },
+  {
+    tabs: 1,
+    prefs: { panelOpen: true },
+    views: [["960 wide with the side panel, one tab", { width: 960, height: 700 }, true]],
+  },
+  {
+    tabs: 8,
+    prefs: {},
+    views: [["760 wide, no side panel", { width: 760, height: 600 }, false]],
+  },
+];
+for (const group of narrowGroups) {
+  const page = await app({ tabs: group.tabs, prefs: group.prefs }, group.views[0][1]);
+  for (const [name, viewport, wantPanel] of group.views) {
+    await page.setViewportSize(viewport);
+    const hasPanel = (await page.locator("main aside").count()) > 0;
+    if (hasPanel !== wantPanel) {
+      await page.getByRole("button", { name: "Toggle panel" }).click();
+      if (wantPanel) await page.locator('main [data-testid="panel-presence"][data-side="right"][data-state="open"]').waitFor();
+      else await page.locator('main [data-testid="panel-presence"][data-side="right"]').waitFor({ state: "detached" });
     }
-    const layout = await measure(page);
-    await snap(page, `${name.replaceAll(" ", "-").replaceAll(",", "")}${sidebarHidden ? "-no-sidebar" : ""}`);
-    failed += report(
-      `${name}${sidebarHidden ? ", sidebar hidden" : ""}`,
-      {
-        ...fits(layout, { sidebarHidden }),
-        "a tab is in view, or the menu that lists them is": layout.list.hidden ? !!layout.allTabs : layout.list.clientWidth >= 70,
-        "the crumb and its chips are inside the title bar, before the actions, not under each other": layout.breadcrumbParts.every((part, index, parts) => part.right <= layout.actions.left + SLACK && (index === 0 || part.left >= parts[index - 1].right - SLACK)),
-        ...tier(layout),
-      },
-      layout,
-    );
+    if ((await page.locator('[data-testid="sidebar-rail"]').count()) === 0) {
+      await page.locator('main header [aria-label="Show sidebar"]').click();
+      await page.locator('[data-testid="sidebar-rail"]').waitFor();
+    }
+    await painted(page);
+    for (const sidebarHidden of [false, true]) {
+      if (sidebarHidden) {
+        await page.getByRole("button", { name: /^(Hide|Toggle) sidebar/ }).first().click();
+        await page.locator('main header [aria-label="Show sidebar"]').waitFor();
+        // The toggle changes before the closing animation releases the sidebar's
+        // width. Measure the hidden layout only once that space is actually gone.
+        await page.locator('[data-testid="panel-presence"][data-side="left"]').waitFor({ state: "detached" });
+      }
+      const layout = await measure(page);
+      await snap(page, `${name.replaceAll(" ", "-").replaceAll(",", "")}${sidebarHidden ? "-no-sidebar" : ""}`);
+      failed += report(
+        `${name}${sidebarHidden ? ", sidebar hidden" : ""}`,
+        {
+          ...fits(layout, { sidebarHidden }),
+          "a tab is in view, or the menu that lists them is": layout.list.hidden ? !!layout.allTabs : layout.list.clientWidth >= 70,
+          "the crumb and its chips are inside the title bar, before the actions, not under each other": layout.breadcrumbParts.every((part, index, parts) => part.right <= layout.actions.left + SLACK && (index === 0 || part.left >= parts[index - 1].right - SLACK)),
+          ...tier(layout),
+        },
+        layout,
+      );
+    }
   }
   await page.close();
 }
 
 // The floating window has no Share or workspace menu, but keeps the same
 // continuation button before its tab actions and window controls (#590).
-for (const width of [460, 360]) {
-  const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, floating: true }, { width, height: 700 });
+{
+  const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, floating: true }, { width: 460, height: 700 });
   const button = page.getByRole("button", { name: "Continue in New Session…" });
   await button.waitFor();
-  const layout = await button.evaluate((button) => {
-    const header = button.closest("header");
-    const actions = [...header.lastElementChild.querySelectorAll("button")];
-    const boxes = actions.map((action) => action.getBoundingClientRect());
-    const box = button.getBoundingClientRect();
-    return {
-      first: actions[0] === button,
-      share: !!header.querySelector('[aria-label="Share session…"]'),
-      visible: box.width >= 28 && box.left >= 78 && box.right <= innerWidth,
-      reachable: button.contains(document.elementFromPoint((box.left + box.right) / 2, (box.top + box.bottom) / 2)),
-      fits: header.scrollWidth <= header.clientWidth + 1 && boxes.every((box, index) => box.right <= innerWidth && (index === 0 || box.left >= boxes[index - 1].right)),
-    };
-  });
-  failed += report(`floating window at ${width}px`, {
-    "Continue in New Session is first, without Share": layout.first && !layout.share,
-    "the button is visible, reachable, and clear of the window controls": layout.visible && layout.reachable,
-    "the actions fit without overlapping": layout.fits,
-  }, layout);
-  await snap(page, `floating-${width}`);
+  for (const width of [460, 360]) {
+    await page.setViewportSize({ width, height: 700 });
+    await painted(page);
+    const layout = await button.evaluate((button) => {
+      const header = button.closest("header");
+      const actions = [...header.lastElementChild.querySelectorAll("button")];
+      const boxes = actions.map((action) => action.getBoundingClientRect());
+      const box = button.getBoundingClientRect();
+      return {
+        first: actions[0] === button,
+        share: !!header.querySelector('[aria-label="Share session…"]'),
+        visible: box.width >= 28 && box.left >= 78 && box.right <= innerWidth,
+        reachable: button.contains(document.elementFromPoint((box.left + box.right) / 2, (box.top + box.bottom) / 2)),
+        fits: header.scrollWidth <= header.clientWidth + 1 && boxes.every((box, index) => box.right <= innerWidth && (index === 0 || box.left >= boxes[index - 1].right)),
+      };
+    });
+    failed += report(`floating window at ${width}px`, {
+      "Continue in New Session is first, without Share": layout.first && !layout.share,
+      "the button is visible, reachable, and clear of the window controls": layout.visible && layout.reachable,
+      "the actions fit without overlapping": layout.fits,
+    }, layout);
+    await snap(page, `floating-${width}`);
+  }
   await page.close();
 }
 

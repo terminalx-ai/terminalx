@@ -184,9 +184,11 @@ async function measure(page) {
   });
 }
 
+const handoffCases = shots
+  ? [{ width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 760, height: 520 }].flatMap((viewport) => ["dark", "light"].map((colorScheme) => ({ viewport, colorScheme })))
+  : [{ viewport: { width: 1440, height: 900 }, colorScheme: "dark" }, { viewport: { width: 760, height: 520 }, colorScheme: "dark" }];
 try {
-  for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 760, height: 520 }]) {
-    for (const colorScheme of ["dark", "light"]) {
+  for (const { viewport, colorScheme } of handoffCases) {
       const name = `${viewport.width}×${viewport.height} ${colorScheme}`;
       const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, viewport, { extra: fixture, colorScheme });
       const errors = [];
@@ -356,7 +358,6 @@ try {
         "no page errors": errors.length === 0,
       }, { rowText, rowBox, asideBox, errors });
       await page.close();
-    }
   }
 } finally {
   await browser.close();

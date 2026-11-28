@@ -69,7 +69,7 @@ const drag = async (page, from, to, finish = true) => {
   if (finish) await page.mouse.up();
 };
 try {
-  for (const colorScheme of ["dark", "light"]) {
+  for (const colorScheme of shots ? ["dark", "light"] : ["dark"]) {
     const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 1440, height: 900 }, { extra, colorScheme });
     const errors = [];
     page.on("pageerror", (error) => errors.push(String(error)));

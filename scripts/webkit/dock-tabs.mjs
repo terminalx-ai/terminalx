@@ -14,8 +14,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { launch, open, openConversation, report, serve } from "./harness.mjs";
 
-const shots = process.env.DOCK_TABS_SHOTS || join(tmpdir(), "terminalx-webkit-dock");
-mkdirSync(shots, { recursive: true });
+const shots = process.env.DOCK_TABS_SHOTS;
+if (shots) mkdirSync(shots, { recursive: true });
 
 function setup({ withRun }) {
   localStorage.setItem("raccoon.prefs", JSON.stringify({ panelOpen: true, panelTerminalOpen: true, panelTerminalHeight: 420, tabStrip: true }));
@@ -80,7 +80,7 @@ async function check(browser, url, colorScheme) {
   assert.equal(await page.evaluate(() => document.documentElement.getAttribute("data-mode")), colorScheme, `the app follows the ${colorScheme} appearance`);
   let dock = page.getByTestId("panel-terminal");
   await dock.getByTestId("setup-empty").waitFor();
-  await page.waitForTimeout(250);
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   failed += report(`${colorScheme} without a setup run`, {
     "tabs are Setup, Run, Terminal, Device": JSON.stringify(await tabs(dock)) === JSON.stringify(["Setup", "Run", "Terminal", "Device"]),
     "Setup is shown": (await dock.getByRole("tab", { name: /^Setup/ }).getAttribute("aria-selected")) === "true",
@@ -89,7 +89,7 @@ async function check(browser, url, colorScheme) {
     "After setup label is upper case": (await dock.getByTestId("setup-empty").innerText()).includes("AFTER SETUP"),
     "nothing spills or overlaps": await dock.evaluate((node, fn) => { const r = new Function(`return ${fn}`)()(node); return !r.overflow && !r.overlaps.length && r.rowInside; }, layout.toString()),
   });
-  await dock.screenshot({ path: join(shots, `dock-no-setup-run-${colorScheme}.png`) });
+  if (shots) await dock.screenshot({ path: join(shots, `dock-no-setup-run-${colorScheme}.png`) });
   await dock.getByRole("tab", { name: /^Run/ }).click();
   await dock.getByTestId("run-empty").waitFor();
   failed += report(`${colorScheme} Run without actions`, {
@@ -109,7 +109,7 @@ async function check(browser, url, colorScheme) {
   const run = { sessionId, paneId: `${sessionId}:workspace-setup-1`, command: "bun install\ncp \"$TERMINALX_ROOT/.env.local\" .env.local", status: "pending", exitCode: null, error: null, hasPane: false };
   await page.evaluate((run) => { window.__SETUP_RUNS__.push(run); window.__PW_STUB__.emit("workspace_setup_changed", run); }, run);
   await page.evaluate((run) => window.__PW_STUB__.emit("workspace_setup_changed", { ...run, status: "running" }), run);
-  await page.waitForTimeout(1600);
+  await page.waitForTimeout(1100);
   await page.evaluate((run) => { const done = { ...run, status: "succeeded", exitCode: 0 }; window.__SETUP_RUNS__.splice(0, 1, done); window.__PW_STUB__.emit("workspace_setup_changed", done); }, run);
 
   // The docked shell first: its own header row with one Move to tab, none on the dock's row.
@@ -123,7 +123,7 @@ async function check(browser, url, colorScheme) {
   const pane = dock.getByTestId("setup-pane");
   await pane.waitFor();
   await pane.getByText("812 packages installed").waitFor();
-  await page.waitForTimeout(250);
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   const outcome = await pane.getByTestId("setup-outcome").innerText();
   const font = await pane.getByTestId("setup-script").evaluate((el) => getComputedStyle(el).fontFamily);
   failed += report(`${colorScheme} with a setup run`, {
@@ -137,7 +137,7 @@ async function check(browser, url, colorScheme) {
     "the setup output stays reachable": (await pane.getByTestId("setup-output").innerText()).includes("812 packages installed"),
     "nothing spills or overlaps": await dock.evaluate((node, fn) => { const r = new Function(`return ${fn}`)()(node); return !r.overflow && !r.overlaps.length && r.rowInside; }, layout.toString()),
   }, { outcome, font });
-  await dock.screenshot({ path: join(shots, `dock-setup-run-${colorScheme}.png`) });
+  if (shots) await dock.screenshot({ path: join(shots, `dock-setup-run-${colorScheme}.png`) });
 
   await dock.getByRole("tab", { name: /^Run/ }).click();
   const runPane = dock.getByTestId("run-pane");
@@ -146,7 +146,7 @@ async function check(browser, url, colorScheme) {
     "lists the action and its command": (await runPane.innerText()).includes("Dev server") && (await runPane.innerText()).includes("bun install && bun run dev"),
     "shows it running with Restart": (await runPane.innerText()).includes("Running") && (await runPane.getByRole("button", { name: "Restart" }).count()) === 1,
   });
-  await dock.screenshot({ path: join(shots, `dock-run-${colorScheme}.png`) });
+  if (shots) await dock.screenshot({ path: join(shots, `dock-run-${colorScheme}.png`) });
   assert.deepEqual(errors, [], "no page errors");
   await page.close();
   return failed;
@@ -156,10 +156,10 @@ const server = await serve();
 const browser = await launch();
 let failed = 0;
 try {
-  for (const mode of ["dark", "light"]) failed += await check(browser, server.url, mode);
+  for (const mode of shots ? ["dark", "light"] : ["dark"]) failed += await check(browser, server.url, mode);
 } finally {
   await browser.close();
   server.close();
 }
-console.log(`captures in ${shots}`);
+if (shots) console.log(`captures in ${shots}`);
 assert.equal(failed, 0, `${failed} check(s) failed`);

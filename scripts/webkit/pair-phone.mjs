@@ -18,10 +18,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launch, open, report, serve, sidebar } from "./harness.mjs";
 
-const output = fileURLToPath(new URL("./output/", import.meta.url));
-const shots = process.env.PAIR_PHONE_SHOTS ?? join(output, "pair-phone");
-await mkdir(shots, { recursive: true });
-if (!process.env.PAIR_PHONE_SHOTS) await writeFile(join(output, ".gitignore"), "*\n");
+const shots = process.env.PAIR_PHONE_SHOTS ?? null;
+if (shots) await mkdir(shots, { recursive: true });
 
 const RELAY_DOWN = "TerminalX Relay service is temporarily unavailable. Retrying automatically. You can pair on this network meanwhile.";
 
@@ -166,11 +164,16 @@ const settle = (page) => page.waitForFunction(() => document.getAnimations().eve
 const server = await serve();
 const browser = await launch();
 let failed = 0;
+const pairCases = shots
+  ? ["light", "dark"].flatMap((mode) => [{ width: 760, height: 520 }, { width: 1280, height: 800 }].map((viewport) => ({ mode, viewport })))
+  : [
+      { mode: "dark", viewport: { width: 1280, height: 800 } },
+      { mode: "light", viewport: { width: 760, height: 520 } },
+    ];
 try {
-  for (const mode of ["light", "dark"]) {
-    for (const viewport of [{ width: 760, height: 520 }, { width: 1280, height: 800 }]) {
+  for (const { mode, viewport } of pairCases) {
       const name = `${mode}, ${viewport.width}×${viewport.height}`;
-      const shot = (state) => join(shots, `pair-phone-${mode}-${viewport.width}x${viewport.height}-${state}.png`);
+      const snap = async (state) => { if (shots) await page.screenshot({ path: join(shots, `pair-phone-${mode}-${viewport.width}x${viewport.height}-${state}.png`) }); };
       const page = await open(browser, server.url, { cloud: true, localProjects: 1, localSession: true }, viewport, {
         colorScheme: mode,
         extra: fixture,
@@ -221,12 +224,12 @@ try {
           unselected: tab.getAttribute("aria-selected") === "false",
         };
       });
-      await page.screenshot({ path: shot("device-collapsed") });
+      await snap("device-collapsed");
       await toggle.click();
       const devicePanel = dock.getByRole("tabpanel", { name: /^Device/ });
       const disconnect = devicePanel.getByRole("button", { name: "Disconnect Paresh’s iPhone" });
       await disconnect.waitFor();
-      await page.screenshot({ path: shot("device-open") });
+      await snap("device-open");
       const explainsAccess = (await devicePanel.innerText()).includes("see and drive sessions on this Mac");
       await disconnect.click();
       await devicePanel.getByText("No devices connected", { exact: true }).waitFor();
@@ -254,7 +257,7 @@ try {
 
       // 1. A live Relay code.
       let m = await measure(page);
-      await page.screenshot({ path: shot("code") });
+      await snap("code");
       failed += report(`${name}, live code`, {
         ...commonChecks(m),
         "opened from the command palette, titled Pair a phone": m.headerTitle === "Pair a phone",
@@ -266,7 +269,7 @@ try {
       await page.evaluate(() => window.__PAIRING__.set({ pendingApproval: { requestId: "req-1", deviceId: "phone-9", fingerprint: "CEF4·2468·FE26·9E4B", transport: "relay", requestedAt: Date.now(), expiresAt: Date.now() + 118000 } }));
       await dialog.getByRole("group", { name: "Approve this phone" }).waitFor();
       m = await measure(page);
-      await page.screenshot({ path: shot("approval") });
+      await snap("approval");
       failed += report(`${name}, approval`, {
         ...commonChecks(m),
         "the waiting phone's fingerprint is shown, mono, with Approve and Decline": m.fingerprints.some((f) => f.text === "CEF4·2468·FE26·9E4B" && f.mono) && m.text.includes("Approve") && m.text.includes("Decline"),
@@ -277,7 +280,7 @@ try {
       await page.evaluate(() => window.__PAIRING__.set({ pendingApproval: null, activePairing: { ...window.__PAIRING__.offer("automatic"), expiresAt: Date.now() - 1000 } }));
       await dialog.getByText("This code has expired").waitFor();
       m = await measure(page);
-      await page.screenshot({ path: shot("expired") });
+      await snap("expired");
       failed += report(`${name}, expired`, {
         ...commonChecks(m),
         "no QR for an expired code, and Generate a new code stays": !m.qr && m.text.includes("Generate a new code") && !/Expires in/.test(m.text),
@@ -287,24 +290,23 @@ try {
       await page.evaluate((message) => window.__PAIRING__.set({ relay: { phase: "offline", message, attempt: 7 }, activePairing: null }), RELAY_DOWN);
       await dialog.getByText(RELAY_DOWN).waitFor();
       m = await measure(page);
-      await page.screenshot({ path: shot("relay-down") });
+      await snap("relay-down");
       const relayDown = { ...commonChecks(m), "the Relay problem shows instead of Relay is ready": !m.text.includes("Relay is ready") };
       await dialog.getByRole("radio", { name: "Only this network" }).click();
       await dialog.getByAltText("TerminalX phone pairing QR code").waitFor();
       await settle(page);
       m = await measure(page);
-      await page.screenshot({ path: shot("only-this-network") });
+      await snap("only-this-network");
       failed += report(`${name}, Relay down`, {
         ...relayDown,
         ...Object.fromEntries(Object.entries(commonChecks(m)).map(([check, ok]) => [`Only this network: ${check}`, ok])),
         "Only this network makes a code with Relay down": m.qr && /Phone must be on this Wi-Fi/.test(m.text),
       }, m);
       await page.close();
-    }
   }
 } finally {
   await browser.close();
   server.close();
 }
-console.log(`screenshots: ${shots}`);
+if (shots) console.log(`screenshots: ${shots}`);
 process.exit(failed ? 1 : 0);

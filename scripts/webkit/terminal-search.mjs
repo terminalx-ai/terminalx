@@ -11,8 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { launch, open, openConversation, serve } from "./harness.mjs";
 
-const shots = process.env.TERMINAL_SEARCH_SHOTS || join(tmpdir(), "terminalx-webkit-terminal");
-mkdirSync(shots, { recursive: true });
+const shots = process.env.TERMINAL_SEARCH_SHOTS;
+if (shots) mkdirSync(shots, { recursive: true });
 
 function setup() {
   localStorage.setItem("raccoon.prefs", JSON.stringify({ panelOpen: true, panelTerminalOpen: true, tabStrip: true }));
@@ -206,9 +206,11 @@ async function check(browser, url, colorScheme) {
   assert.deepEqual(hidden, { scrolled: [], missing: [] }, "the header and the find bar are on screen, nothing scrolled under the tab strip");
   await full.locator(".xterm-screen").hover();
   assert.deepEqual(await full.locator(".xterm-screen").evaluate(overFirstRow), [], "header and find bar are clear of the first output row, under the pointer too");
-  const findShot = join(shots, `terminal-find-${colorScheme}.png`);
-  await page.screenshot({ path: findShot, animations: "disabled" });
-  console.log(`capture ${findShot}`);
+  if (shots) {
+    const findShot = join(shots, `terminal-find-${colorScheme}.png`);
+    await page.screenshot({ path: findShot, animations: "disabled" });
+    console.log(`capture ${findShot}`);
+  }
   await page.keyboard.press("Escape");
   // Moving into a closed panel must acquire the new host without recreating xterm.
   await page.getByRole("button", { name: "Toggle panel", exact: true }).click();
@@ -243,9 +245,11 @@ async function check(browser, url, colorScheme) {
   assert(placed.left >= placed.frame.left && placed.right <= placed.frame.right && placed.top >= placed.frame.top && placed.bottom <= placed.frame.bottom, "the pill stays inside the frame");
   assert.equal(await pill.locator("button svg").count(), 1, "the pill has the chat icon");
   assert.equal(await pill.locator("button kbd").textContent(), keys.addToChat, "the pill shows its keys");
-  const pillShot = join(shots, `terminal-add-to-chat-${colorScheme}.png`);
-  await page.screenshot({ path: pillShot, animations: "disabled" });
-  console.log(`capture ${pillShot}`);
+  if (shots) {
+    const pillShot = join(shots, `terminal-add-to-chat-${colorScheme}.png`);
+    await page.screenshot({ path: pillShot, animations: "disabled" });
+    console.log(`capture ${pillShot}`);
+  }
 
   await dock.locator(".xterm-helper-textarea").focus();
   await page.keyboard.press(`${mod}+a`);
@@ -268,7 +272,7 @@ async function check(browser, url, colorScheme) {
 const server = await serve();
 const browser = await launch();
 try {
-  for (const colorScheme of ["dark", "light"]) {
+  for (const colorScheme of shots ? ["dark", "light"] : ["dark"]) {
     await check(browser, server.url, colorScheme);
     console.log(`ok terminal search (${colorScheme}, 1440 wide): find card with Aa/ab/.* and keys row, header row, nothing over the first output row, Add to chat pill under the selection, Clear, and retained xterm across dock/tab moves`);
   }

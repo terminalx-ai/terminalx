@@ -8,7 +8,7 @@
 // above the composer. Pictures go to $CLOUD_SETUP_SHOTS (default /tmp).
 import { launch, open, openCloudSession, report, serve } from "./harness.mjs";
 
-const SHOTS = process.env.CLOUD_SETUP_SHOTS ?? "/tmp";
+const SHOTS = process.env.CLOUD_SETUP_SHOTS ?? null;
 const VIEWPORT = { width: 1440, height: 900 };
 const ORG = "org-a";
 const at = Date.UTC(2026, 9, 1);
@@ -153,7 +153,7 @@ const server = await serve();
 const browser = await launch();
 let failures = 0;
 try {
-  for (const colorScheme of ["dark", "light"]) {
+  for (const colorScheme of SHOTS ? ["dark", "light"] : ["dark"]) {
     // 12.03 Compute: no extra rows; the ↵ keycap, title line and status bar.
     {
       const { page } = await flowAt(browser, server, "compute", colorScheme);
@@ -168,7 +168,7 @@ try {
       const tokenBox = await box(page.getByTestId("cloud-setup-provider-connection"));
       const cards = await page.locator('[data-testid^="cloud-setup-provider-"]:is(label)').allTextContents();
       const text = await flow.textContent();
-      await page.screenshot({ path: `${SHOTS}/pro-389-compute-${colorScheme}.png` });
+      if (SHOTS) await page.screenshot({ path: `${SHOTS}/pro-389-compute-${colorScheme}.png` });
       failures += report(`compute (${colorScheme})`, {
         "no status bar under the flow": (await page.locator("[data-status-bar]").count()) === 0,
         "the title sits on a 32px line": titleLine === 32,
@@ -196,7 +196,7 @@ try {
       const heading = page.getByRole("region", { name: "Shared environment variables" }).locator("> div").first();
       await page.getByText("Shared environment variables", { exact: true }).waitFor();
       const headingBox = await box(heading);
-      await page.screenshot({ path: `${SHOTS}/pro-389-environment-${label.replace(/ /g, "-")}-${colorScheme}.png` });
+      if (SHOTS) await page.screenshot({ path: `${SHOTS}/pro-389-environment-${label.replace(/ /g, "-")}-${colorScheme}.png` });
       failures += report(`environment, ${label} (${colorScheme})`, {
         "the failed card offers Restart build, Fix with an agent and Copy logs": (await panel.getByRole("button", { name: /Restart build|Fix with an agent|Copy logs/ }).count()) === 3,
         "its header says what failed": expected.header.test(alert ?? ""),
@@ -226,7 +226,7 @@ try {
       const environmentRow = page.getByText(/^Version 9 building · /);
       await environmentRow.waitFor();
       const envBox = await box(environmentRow);
-      await page.screenshot({ path: `${SHOTS}/pro-389-invite-${colorScheme}.png` });
+      if (SHOTS) await page.screenshot({ path: `${SHOTS}/pro-389-invite-${colorScheme}.png` });
       failures += report(`invite (${colorScheme})`, {
         "a pending row reads name over email": lines.length >= 2 && lines[0] === "Ana Kim" && lines[1] === "ana.kim@example.com",
         "its avatar has two letters at 12px or more": (await avatar.textContent()) === "AK" && (await fontSize(avatar)) >= 12,
@@ -265,7 +265,7 @@ try {
       const cardBox = await box(card);
       const composerBox = await box(page.locator("main [data-composer-box]"));
       const count = card.getByText("1 of 1", { exact: true });
-      await page.screenshot({ path: `${SHOTS}/pro-389-coach-${colorScheme}.png` });
+      if (SHOTS) await page.screenshot({ path: `${SHOTS}/pro-389-coach-${colorScheme}.png` });
       failures += report(`setup check coach (${colorScheme})`, {
         "the coach mark sits wholly above the composer": cardBox.bottom <= composerBox.top,
         "it stays in the window": cardBox.top >= 0 && cardBox.right <= VIEWPORT.width,

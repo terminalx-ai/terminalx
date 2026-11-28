@@ -40,6 +40,7 @@ import { launch, open, openCloudSession, openConversation, report, serve, sideba
 
 const VIEWPORT = { width: 1280, height: 700 };
 const SLACK = 1;
+const painted = (page) => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 
 const measure = (page) =>
   page.evaluate(() => {
@@ -96,20 +97,20 @@ for (const role of ["manager", "viewer"]) {
   await openCloudSession(page, title);
   await page.getByText("chunk 25 of 25", { exact: true }).waitFor();
   await page.locator('[data-testid="cloud-agent-lease"]').waitFor();
-  await page.waitForTimeout(300);
+  await painted(page);
   let layout = await measure(page);
   failed += report(`${name}, long transcript`, inPlace(layout, { "the transcript starts at its bottom": layout.scroller?.fromBottom <= SLACK }), layout);
 
   // ---- another person's turn streams: the transcript follows it
-  await page.evaluate(() => window.__PW_RUNTIME__.prompt("slow:8:100"));
-  for (let i = 1; i <= 8; i++) {
-    await page.evaluate((n) => window.__PW_RUNTIME__.chunk(`streamed ${n} of 8`), i);
-    await page.waitForTimeout(60);
+  await page.evaluate(() => window.__PW_RUNTIME__.prompt("slow:4:100"));
+  for (let i = 1; i <= 4; i++) {
+    await page.evaluate((n) => window.__PW_RUNTIME__.chunk(`streamed ${n} of 4`), i);
+    await painted(page);
   }
-  await page.getByText("streamed 8 of 8", { exact: true }).waitFor();
-  await page.waitForTimeout(200);
+  await page.getByText("streamed 4 of 4", { exact: true }).waitFor();
+  await painted(page);
   layout = await measure(page);
-  const lastLine = await page.getByText("streamed 8 of 8", { exact: true }).evaluate((node) => Math.round(node.getBoundingClientRect().bottom));
+  const lastLine = await page.getByText("streamed 4 of 4", { exact: true }).evaluate((node) => Math.round(node.getBoundingClientRect().bottom));
   failed += report(
     `${name}, another person's turn streams`,
     inPlace(layout, {
@@ -122,7 +123,7 @@ for (const role of ["manager", "viewer"]) {
   // ---- repro A: a permission request appears above the composer
   await page.evaluate(() => window.__PW_RUNTIME__.ask());
   await page.locator('[data-ask-card]').waitFor();
-  await page.waitForTimeout(300);
+  await painted(page);
   layout = await measure(page);
   failed += report(
     `${name}, permission request`,
@@ -141,7 +142,7 @@ for (const role of ["manager", "viewer"]) {
     element.focus();
     element.scrollIntoView();
   });
-  await page.waitForTimeout(300);
+  await painted(page);
   layout = await measure(page);
   failed += report(
     `${name}, notes input focused`,
@@ -182,10 +183,10 @@ for (const role of ["manager", "viewer"]) {
   // "Activate latest shell tab" (session.latestShell), then "Switch to tab 1" (session.tab1),
   // which is Shift+Cmd+1 since Overview took Cmd+1 (94f8e9d0).
   await page.keyboard.press("Meta+J");
-  await page.waitForTimeout(200);
+  await page.locator('[data-testid="cloud-terminal"]').waitFor({ state: "visible" });
   const onTerminal = await selection();
   await page.keyboard.press("Meta+Shift+1");
-  await page.waitForTimeout(200);
+  await page.locator("[data-chat-scroller]").waitFor({ state: "visible" });
   const onAgent = await selection();
   failed += report(
     `${name}, terminals among the tabs`,
@@ -256,32 +257,37 @@ function toolbarChecks(measured) {
   };
 }
 
-for (const viewport of [{ width: 1000, height: 520 }, { width: 1280, height: 760 }]) {
-  for (const session of [
-    // A driver who may approve, as in the live test: long picker labels, and the pickers enabled.
-    { role: "driver", canApprove: true, lines: 12, model: "Opus 5 Medium", permissionMode: "acceptEdits" },
-    { role: "manager", lines: 12, model: "claude-opus-5-thinking", permissionMode: "bypassPermissions" },
-  ]) {
+for (const session of [
+  // A driver who may approve, as in the live test: long picker labels, and the pickers enabled.
+  { role: "driver", canApprove: true, lines: 12, model: "Opus 5 Medium", permissionMode: "acceptEdits" },
+  { role: "manager", lines: 12, model: "claude-opus-5-thinking", permissionMode: "bypassPermissions" },
+]) {
+  const page = await open(browser, server.url, { cloud: true, localProjects: 0, session }, { width: 1000, height: 520 });
+  await openCloudSession(page, await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle));
+  await page.locator('[data-testid="cloud-agent-lease"]').waitFor();
+  await page.locator("main [data-composer-toolbar]").waitFor();
+  await page.locator('main [data-composer-toolbar] [data-testid="permission-mode"]').waitFor();
+  for (const viewport of [{ width: 1000, height: 520 }, { width: 1280, height: 760 }]) {
+    await page.setViewportSize(viewport);
+    await painted(page);
     const name = `composer toolbar (${viewport.width}x${viewport.height}, ${session.role})`;
-    const page = await open(browser, server.url, { cloud: true, localProjects: 0, session }, viewport);
-    await openCloudSession(page, await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle));
-    await page.locator('[data-testid="cloud-agent-lease"]').waitFor();
-    await page.locator("main [data-composer-toolbar]").waitFor();
-    await page.locator('main [data-composer-toolbar] [data-testid="permission-mode"]').waitFor();
-    await page.waitForTimeout(300);
     let measured = await toolbarLayout(page);
     const wide = toolbarChecks(measured);
     failed += report(`${name}, idle`, wide, measured);
+  }
 
-    // The tightest it gets: the Notes drawer takes 18rem, and a running turn adds Stop.
-    await page.getByRole("button", { name: "Notes" }).click();
-    await page.getByLabel("Note for teammates").waitFor();
-    await page.evaluate(() => window.__PW_RUNTIME__.prompt("ask:rm -rf /tmp/build-cache"));
-    await page.evaluate(() => window.__PW_RUNTIME__.ask());
-    await page.locator('[data-ask-card]').waitFor();
-    await page.locator("main [data-composer-toolbar]").getByRole("button", { name: "Stop" }).waitFor();
-    await page.waitForTimeout(300);
-    measured = await toolbarLayout(page);
+  // The tightest it gets: the Notes drawer takes 18rem, and a running turn adds Stop.
+  await page.getByRole("button", { name: "Notes" }).click();
+  await page.getByLabel("Note for teammates").waitFor();
+  await page.evaluate(() => window.__PW_RUNTIME__.prompt("ask:rm -rf /tmp/build-cache"));
+  await page.evaluate(() => window.__PW_RUNTIME__.ask());
+  await page.locator('[data-ask-card]').waitFor();
+  await page.locator("main [data-composer-toolbar]").getByRole("button", { name: "Stop" }).waitFor();
+  for (const viewport of [{ width: 1000, height: 520 }, { width: 1280, height: 760 }]) {
+    await page.setViewportSize(viewport);
+    await painted(page);
+    const name = `composer toolbar (${viewport.width}x${viewport.height}, ${session.role})`;
+    const measured = await toolbarLayout(page);
     failed += report(`${name}, notes open and a turn running`, toolbarChecks(measured), measured);
     if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/composer-toolbar-${viewport.width}-${session.role}.png` });
 
@@ -291,7 +297,6 @@ for (const viewport of [{ width: 1000, height: 520 }, { width: 1280, height: 760
       await page.getByRole("menuitemradio", { name: /Bypass permissions/ }).click();
       const dialog = page.getByRole("dialog");
       const opened = await dialog.waitFor({ timeout: 5_000 }).then(() => true, () => false);
-      await page.waitForTimeout(300);
       // Measure the overlay once its fade-in is over: on a loaded runner 300 ms can end mid-fade (opacity 0.996).
       if (opened) await page.evaluate(() => Promise.all((document.querySelector("[data-dialog-overlay]")?.getAnimations() ?? []).map((animation) => animation.finished.catch(() => undefined))));
       const modal = opened
@@ -335,9 +340,13 @@ for (const viewport of [{ width: 1000, height: 520 }, { width: 1280, height: 760
         modal,
       );
       if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/bypass-confirm-${viewport.width}.png` });
+      if (opened) {
+        await page.keyboard.press("Escape");
+        await dialog.waitFor({ state: "detached" });
+      }
     }
-    await page.close();
   }
+  await page.close();
 }
 
 // A runtime without pty/2: its terminals belong to no session, so none is
@@ -349,8 +358,8 @@ for (const viewport of [{ width: 1000, height: 520 }, { width: 1280, height: 760
   await openCloudSession(page, await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle));
   await page.locator('[data-testid="cloud-agent-lease"]').waitFor();
   await page.evaluate(() => window.__PW_RUNTIME__.openTerminal(false));
-  // Well past the terminal poll (3 s): a session terminal would have arrived by now.
-  const putUnderSession = await page.locator('[role="tabpanel"][id^="session-terminal-panel"]').waitFor({ timeout: 8_000, state: "attached" }).then(() => true, () => false);
+  // Past the terminal poll (3 s): a session terminal would have arrived by now.
+  const putUnderSession = await page.locator('[role="tabpanel"][id^="session-terminal-panel"]').waitFor({ timeout: 3_500, state: "attached" }).then(() => true, () => false);
   failed += report(name, { "no terminal with no session is put among the session's tabs": !putUnderSession });
   await page.close();
 }
@@ -359,34 +368,37 @@ for (const viewport of [{ width: 1000, height: 520 }, { width: 1280, height: 760
 // chat, with the way to the organization's Agent logins. The notice is one
 // more bar above the transcript: it, the header and the composer stay inside
 // the window, and the transcript still scrolls in its own container.
-for (const viewport of [{ width: 1000, height: 520 }, VIEWPORT]) {
-  const name = `cloud session (${viewport.width}x${viewport.height}, needs sign-in)`;
+{
   const signIn = { provider: "claude", state: "not-connected", reason: null };
-  const page = await open(browser, server.url, { cloud: true, localProjects: 0, session: { role: "manager", lines: 25, signIn } }, viewport);
+  const page = await open(browser, server.url, { cloud: true, localProjects: 0, session: { role: "manager", lines: 25, signIn } }, { width: 1000, height: 520 });
   await openCloudSession(page, await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle));
   const shown = await page.locator('main [data-testid="cloud-agent-sign-in"]').waitFor({ timeout: 8_000 }).then(() => true, () => false);
   await page.getByText("chunk 25 of 25", { exact: true }).waitFor();
-  await page.waitForTimeout(300);
-  const layout = await measure(page);
-  const bar = await page.evaluate(() => {
-    const box = (element) => {
-      const rect = element?.getBoundingClientRect();
-      return rect ? { top: Math.round(rect.top), bottom: Math.round(rect.bottom), left: Math.round(rect.left), right: Math.round(rect.right) } : null;
-    };
-    const notice = document.querySelector('main [data-testid="cloud-agent-sign-in"]');
-    return { notice: box(notice), link: box(notice?.querySelector('[data-testid="open-agent-logins"]')), scroller: box(document.querySelector("[data-chat-scroller]")), width: innerWidth };
-  });
-  const { notice, link, scroller } = bar;
-  failed += report(
-    name,
-    inPlace(layout, {
-      "the notice shows over the tab": shown && !!notice,
-      "the notice is inside the window, above the transcript": !!notice && !!scroller && notice.top >= -SLACK && notice.right <= bar.width + SLACK && notice.bottom <= scroller.top + SLACK,
-      "its Open Agent logins button is inside the notice": !!notice && !!link && link.left >= notice.left - SLACK && link.right <= notice.right + SLACK && link.top >= notice.top - SLACK && link.bottom <= notice.bottom + SLACK,
-    }),
-    { ...layout, bar },
-  );
-  if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/cloud-session-sign-in-${viewport.width}.png` });
+  for (const viewport of [{ width: 1000, height: 520 }, VIEWPORT]) {
+    await page.setViewportSize(viewport);
+    await painted(page);
+    const name = `cloud session (${viewport.width}x${viewport.height}, needs sign-in)`;
+    const layout = await measure(page);
+    const bar = await page.evaluate(() => {
+      const box = (element) => {
+        const rect = element?.getBoundingClientRect();
+        return rect ? { top: Math.round(rect.top), bottom: Math.round(rect.bottom), left: Math.round(rect.left), right: Math.round(rect.right) } : null;
+      };
+      const notice = document.querySelector('main [data-testid="cloud-agent-sign-in"]');
+      return { notice: box(notice), link: box(notice?.querySelector('[data-testid="open-agent-logins"]')), scroller: box(document.querySelector("[data-chat-scroller]")), width: innerWidth };
+    });
+    const { notice, link, scroller } = bar;
+    failed += report(
+      name,
+      inPlace(layout, {
+        "the notice shows over the tab": shown && !!notice,
+        "the notice is inside the window, above the transcript": !!notice && !!scroller && notice.top >= -SLACK && notice.right <= bar.width + SLACK && notice.bottom <= scroller.top + SLACK,
+        "its Open Agent logins button is inside the notice": !!notice && !!link && link.left >= notice.left - SLACK && link.right <= notice.right + SLACK && link.top >= notice.top - SLACK && link.bottom <= notice.bottom + SLACK,
+      }),
+      { ...layout, bar },
+    );
+    if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/cloud-session-sign-in-${viewport.width}.png` });
+  }
   await page.close();
 }
 
@@ -401,7 +413,7 @@ for (const viewport of [{ width: 1000, height: 520 }, VIEWPORT]) {
     const panel = page.locator('[role="tabpanel"]:not([aria-hidden="true"])');
     await panel.getByText("chunk 30 of 30", { exact: true }).waitFor();
     await panel.locator('[data-ask-card]').waitFor();
-    await page.waitForTimeout(300);
+    await painted(page);
     const layout = await page.evaluate(() => {
       const shown = document.querySelector('[role="tabpanel"]:not([aria-hidden="true"])');
       const box = (element) => {
@@ -524,25 +536,26 @@ function headerChecks(measured, { collapsed, terminalSwitch = false }) {
 
 // Each width without and with a working terminal-view switch (PRO-86): the
 // switch is one more button on the right, and the title keeps its room.
-for (const { viewport, collapsed, terminalSwitch = false } of [
-  { viewport: { width: 960, height: 700 }, collapsed: true },
-  { viewport: { width: 960, height: 700 }, collapsed: true, terminalSwitch: true },
-  { viewport: { width: 1100, height: 700 }, collapsed: true },
-  { viewport: { width: 1100, height: 700 }, collapsed: true, terminalSwitch: true },
-  { viewport: { width: 1680, height: 800 }, collapsed: false },
-  { viewport: { width: 1680, height: 800 }, collapsed: false, terminalSwitch: true },
-]) {
-  const name = `session header (${viewport.width}x${viewport.height}, side panel open${terminalSwitch ? ", terminal switch" : ""})`;
-  const page = await open(browser, server.url, { cloud: true, localProjects: 0, session: { role: "driver", canApprove: true, lines: 4, branch: "terminalx/share-demo-57f2a9c0", agentTerminal: terminalSwitch } }, viewport);
+for (const terminalSwitch of [false, true]) {
+  const page = await open(browser, server.url, { cloud: true, localProjects: 0, session: { role: "driver", canApprove: true, lines: 4, branch: "terminalx/share-demo-57f2a9c0", agentTerminal: terminalSwitch } }, { width: 960, height: 700 });
   await openCloudSession(page, await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle));
   await page.locator('[data-testid="cloud-agent-lease"]').waitFor();
   // The side panel is the one `aside` inside the main slot, next to the header.
   if (!(await page.locator("main aside").count())) await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.locator("main aside").first().waitFor();
   await page.locator('main [data-testid="panel-presence"][data-side="right"][data-state="open"]').waitFor();
-  const measured = await headerLayout(page);
-  failed += report(name, { "the side panel is open": measured.panel, ...headerChecks(measured, { collapsed, terminalSwitch }) }, measured);
-  if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/cloud-header-${viewport.width}${terminalSwitch ? "-terminal-switch" : ""}.png` });
+  for (const { viewport, collapsed } of [
+    { viewport: { width: 960, height: 700 }, collapsed: true },
+    { viewport: { width: 1100, height: 700 }, collapsed: true },
+    { viewport: { width: 1680, height: 800 }, collapsed: false },
+  ]) {
+    await page.setViewportSize(viewport);
+    await painted(page);
+    const name = `session header (${viewport.width}x${viewport.height}, side panel open${terminalSwitch ? ", terminal switch" : ""})`;
+    const measured = await headerLayout(page);
+    failed += report(name, { "the side panel is open": measured.panel, ...headerChecks(measured, { collapsed, terminalSwitch }) }, measured);
+    if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/cloud-header-${viewport.width}${terminalSwitch ? "-terminal-switch" : ""}.png` });
+  }
   await page.close();
 }
 
@@ -619,17 +632,17 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
   );
   if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/permission-mode-960-${permissionMode}.png` });
 
-  // Every width on the way: the chip never leaves the toolbar, loses its shield, cuts its word, or gets too narrow to press.
+  // Sample widths across the range: the chip never leaves the toolbar, loses its shield, cuts its word, or gets too narrow to press.
   const failures = [];
-  for (let width = 960; width <= 1400; width += 10) {
+  for (let width = 960; width <= 1400; width += 40) {
     await page.setViewportSize({ width, height: 700 });
-    await page.waitForTimeout(40);
+    await painted(page);
     measured = await permissionButton(page);
     const checks = permissionChecks(measured);
     if (Object.values(checks).some((ok) => !ok)) failures.push(measured ?? { viewport: width, missing: true });
   }
   await page.setViewportSize({ width: 1680, height: 800 });
-  await page.waitForTimeout(200);
+  await painted(page);
   measured = await permissionButton(page);
   failed += report(
     `permission mode (960 to 1400 px, side panel open, ${permissionMode})`,

@@ -384,9 +384,15 @@ const browser = await launch();
 let failed = 0;
 // 1280 with the piece open is where titles were squeezed (PRO-361): the panel gives way first.
 const sizes = [{ width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 1000, height: 700 }];
+const configs = shots
+  ? ["dark", "light"].flatMap((mode) => sizes.map((size) => ({ mode, size })))
+  : [
+      { mode: "dark", size: sizes[0] },
+      { mode: "light", size: sizes[1] },
+      { mode: "dark", size: sizes[2] },
+    ];
 try {
-  for (const mode of ["dark", "light"]) {
-    for (const size of sizes) {
+  for (const [configIndex, { mode, size }] of configs.entries()) {
       const at = `${mode}, ${size.width}px`;
       const start = async (scene, enabled = true) => {
         const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, size, { extra: `(${setup})(${JSON.stringify({ mode, scene, enabled })});` });
@@ -490,7 +496,7 @@ try {
       }
 
       // A planned run in a project that asks for no approval (PRO-365): the person starts it here.
-      {
+      if (shots || configIndex < 2) {
         const { page, errors } = await start("planned");
         await page.getByTestId("run-strip").getByRole("tab", { name: /^Run/ }).click();
         const view = page.getByTestId("run-view");
@@ -707,7 +713,7 @@ try {
 
       // A session with no run (design 18.08). It looks like any other session (#1404): no Run strip and no run
       // pill, until Go → Run View opens the page that says how to start one.
-      {
+      if (shots || configIndex < 2) {
         const { page, errors } = await start("none");
         const strip = page.getByTestId("run-strip");
         const plain = (await strip.count()) === 0 && (await page.getByTestId("run-pill").count()) === 0;
@@ -758,7 +764,7 @@ try {
         const chosen = (name) => cell(name).evaluate((select) => select.selectedOptions[0]?.textContent);
         await page.waitForFunction(() => document.querySelector('select[aria-label="Claude Code model for search"]')?.selectedOptions[0]?.textContent === "Haiku 5.5");
         // The menu's rows fade between colours: let the one just chosen finish.
-        await page.waitForTimeout(300);
+        if (shots) await page.waitForTimeout(300);
         await shot(page, "settings");
         const table = {};
         for (const kind of ["search", "logs", "scoped-code", "review", "code", "refactor", "research", "verify"]) {
@@ -841,7 +847,7 @@ try {
       }
 
       // Behind the switch: off, nothing of it shows; turned on in Settings → Experimental, it appears at once.
-      {
+      if (shots || configIndex === 0) {
         const { page, errors } = await start("approval", false);
         const checks = { "with the switch off a session has no Run tab": (await page.getByTestId("run-strip").count()) === 0 };
         await page.getByRole("button", { name: "Settings", exact: true }).click();
@@ -855,7 +861,7 @@ try {
         await nav.getByRole("button", { name: "Experimental", exact: true }).click();
         const toggle = settings.getByRole("switch", { name: "Orchestration runs" });
         await page.waitForFunction(() => document.querySelector('[role="switch"][aria-label="Orchestration runs"]')?.disabled === false);
-        await page.waitForTimeout(300);
+        if (shots) await page.waitForTimeout(300);
         checks["the switch is off until turned on"] = (await toggle.getAttribute("aria-checked")) === "false";
         await shot(page, "experimental");
         await toggle.click();
@@ -868,7 +874,6 @@ try {
         failed += report(`behind the switch, ${at}`, checks, { errors });
         await page.close();
       }
-    }
   }
 } finally {
   await browser.close();

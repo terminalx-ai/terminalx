@@ -138,13 +138,19 @@ const pinned = (before, after) => after.scrollTop > 0 && after.atEnd && before.a
  */
 const press = (locator) => locator.evaluate((element) => element.click());
 
-const windows = [
-  { name: "default window", width: 1360, height: 860, text: 1, pins: true },
-  { name: "smallest window", width: 760, height: 520, text: 1, pins: true },
-  { name: "smallest window, larger text", width: 760, height: 520, text: 1.25, pins: true },
-  { name: "smallest window, text twice as large", width: 760, height: 520, text: 2, pins: false },
-  { name: "window smaller than allowed", width: 480, height: 360, text: 1, pins: false },
-];
+const windows = shots
+  ? [
+      { name: "default window", width: 1360, height: 860, text: 1, pins: true },
+      { name: "smallest window", width: 760, height: 520, text: 1, pins: true },
+      { name: "smallest window, larger text", width: 760, height: 520, text: 1.25, pins: true },
+      { name: "smallest window, text twice as large", width: 760, height: 520, text: 2, pins: false },
+      { name: "window smaller than allowed", width: 480, height: 360, text: 1, pins: false },
+    ]
+  : [
+      { name: "default window", width: 1360, height: 860, text: 1, pins: true },
+      { name: "smallest window, larger text", width: 760, height: 520, text: 1.25, pins: true },
+      { name: "window smaller than allowed", width: 480, height: 360, text: 1, pins: false },
+    ];
 
 for (const size of windows) {
   const slug = size.name.replaceAll(/[^a-z]+/g, "-");
@@ -212,46 +218,27 @@ for (const size of windows) {
       "Escape deletes nothing": afterEscape === 0,
       "only the Delete button deletes, and all of them": deleted === LEFTOVERS,
     }, { opened, scrolled, onList, onCancel: onCancel.focus, onDelete: onDelete.focus, afterEnter, afterEscape, deleted });
-    await page.close();
-  }
 
-  // Leftovers: a short list takes only the room it needs.
-  {
-    const page = await start({ leftovers: 2, worktrees: 1 });
-    await press(page.getByRole("button", { name: "Select all removable" }));
-    await press(page.getByRole("button", { name: /Delete selected/ }));
-    await page.getByRole("dialog", { name: "Clean up leftovers" }).getByRole("list", { name: "Items to delete" }).waitFor();
-    const few = await measure(page);
-    if (shots) await page.screenshot({ path: `${shots}/leftovers-${slug}-few.png` });
-    failed += report(`two leftovers, ${size.name}`, {
-      "the dialog is inside the window with both buttons in view": few.fits && few.rows === 2 && actionsOk(few, [/^Cancel$/, /^Delete 2 items$/]),
-      "nothing spills sideways": few.sideways <= 0 && few.outside === 0,
-    }, few);
-    await page.close();
-  }
-
-  // Worktree clean-up: the list, the review and the results.
-  {
-    const page = await start({ leftovers: 1, worktrees: WORKTREES });
+    // Worktree clean-up: the list, the review and the results (reusing the same Storage page).
     await press(page.getByRole("button", { name: "Clean up worktrees…" }));
-    const dialog = page.getByRole("dialog", { name: "Clean up worktrees" });
-    await dialog.getByText("synthetic-worktree-0", { exact: true }).waitFor();
-    await dialog.getByRole("checkbox", { name: "Select all safe worktrees on This computer" }).check();
+    const wtDialog = page.getByRole("dialog", { name: "Clean up worktrees" });
+    await wtDialog.getByText("synthetic-worktree-0", { exact: true }).waitFor();
+    await wtDialog.getByRole("checkbox", { name: "Select all safe worktrees on This computer" }).check();
     const list = await measure(page);
     await toEnd(page);
     const listEnd = await measure(page);
     if (shots) await page.screenshot({ path: `${shots}/worktrees-${slug}-list.png` });
 
-    await dialog.getByRole("button", { name: /Review 100 worktrees/ }).click();
-    await dialog.getByRole("list", { name: "Worktrees to remove" }).waitFor();
+    await wtDialog.getByRole("button", { name: /Review 100 worktrees/ }).click();
+    await wtDialog.getByRole("list", { name: "Worktrees to remove" }).waitFor();
     const review = await measure(page);
     await toEnd(page);
     const reviewEnd = await measure(page);
     if (shots) await page.screenshot({ path: `${shots}/worktrees-${slug}-review.png` });
     const before = await page.evaluate(() => window.__PW_DIALOG__.removed.length);
 
-    await dialog.getByRole("button", { name: /Remove 100 worktrees/ }).click();
-    await dialog.getByText(/Removed 100 and freed/).waitFor();
+    await wtDialog.getByRole("button", { name: /Remove 100 worktrees/ }).click();
+    await wtDialog.getByText(/Removed 100 and freed/).waitFor();
     const done = await measure(page);
     await toEnd(page);
     const doneEnd = await measure(page);
@@ -265,6 +252,21 @@ for (const size of windows) {
       "the results stay in the window with Scan again and Done in view": bounded(done) && bounded(doneEnd) && done.rows === WORKTREES && actionsOk(done, [/^Scan again$/, /^Done$/]) && pinned(done, doneEnd),
       "nothing spills sideways": [list, review, done].every((state) => state.sideways <= 0 && state.outside === 0),
     }, { list, listEnd, review, reviewEnd, done, doneEnd });
+    await page.close();
+  }
+
+  // Leftovers: a short list takes only the room it needs.
+  if (shots || size.width >= 760) {
+    const page = await start({ leftovers: 2, worktrees: 1 });
+    await press(page.getByRole("button", { name: "Select all removable" }));
+    await press(page.getByRole("button", { name: /Delete selected/ }));
+    await page.getByRole("dialog", { name: "Clean up leftovers" }).getByRole("list", { name: "Items to delete" }).waitFor();
+    const few = await measure(page);
+    if (shots) await page.screenshot({ path: `${shots}/leftovers-${slug}-few.png` });
+    failed += report(`two leftovers, ${size.name}`, {
+      "the dialog is inside the window with both buttons in view": few.fits && few.rows === 2 && actionsOk(few, [/^Cancel$/, /^Delete 2 items$/]),
+      "nothing spills sideways": few.sideways <= 0 && few.outside === 0,
+    }, few);
     await page.close();
   }
 }

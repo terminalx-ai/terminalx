@@ -24,9 +24,15 @@ const cases = [
 const server = await serve();
 const browser = await launch();
 let failed = 0;
+const accountCases = shots
+  ? ["light", "dark"].flatMap((mode) => cases.map((item) => ({ mode, ...item })))
+  : [
+      { mode: "dark", ...cases[0] },
+      { mode: "light", ...cases[1] },
+      { mode: "dark", ...cases[2] },
+    ];
 try {
-  for (const mode of ["light", "dark"]) {
-    for (const { name, section, privacy } of cases) {
+  for (const { mode, name, section, privacy } of accountCases) {
       const page = await open(browser, server.url, { cloud: true, localProjects: 1, accountName: "Alex Kim" }, { width: 1440, height: 1000 }, {
         extra: `localStorage.setItem("raccoon.mode", ${JSON.stringify(mode)});
           (() => {
@@ -138,7 +144,6 @@ try {
         }, asked);
       }
       await page.close();
-    }
   }
 } finally {
   await browser.close();

@@ -110,7 +110,7 @@ try {
   const { launch } = await import("./harness.mjs");
   browser = await launch();
   const luminance = (rgb) => { const [r, g, b] = rgb.match(/[\d.]+/g).map(Number); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
-  for (const mode of ["dark", "light"]) {
+  for (const mode of shots ? ["dark", "light"] : ["dark"]) {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));

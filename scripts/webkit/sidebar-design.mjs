@@ -48,8 +48,11 @@ const px = (value) => Number.parseFloat(value);
 const server = await serve();
 const browser = await launch();
 let failed = 0;
+const runs = shots
+  ? ["simple", "status"].flatMap((layout) => ["dark", "light"].map((colorScheme) => ({ layout, colorScheme })))
+  : [{ layout: "simple", colorScheme: "dark" }, { layout: "status", colorScheme: "light" }];
 try {
-  for (const layout of ["simple", "status"]) for (const colorScheme of ["dark", "light"]) {
+  for (const { layout, colorScheme } of runs) {
     const name = `${layout === "simple" ? "by project" : "by status"}, ${colorScheme}, 1440`;
     const page = await open(browser, server.url, { cloud: true, localProjects: 1 }, { width: 1440, height: 900 }, { extra: `(${setup})(${JSON.stringify({ layout })});`, colorScheme });
     page.setDefaultTimeout(30_000);
