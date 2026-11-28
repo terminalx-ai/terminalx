@@ -1855,6 +1855,18 @@ impl GrantStore {
         launches.iter().any(|launch| self.organization_route_gone(launch, now).is_some())
     }
 
+    /// Whether any session here started on an organization route.
+    fn any_on_organization_route(&self) -> bool {
+        self.state().launches.values().any(|launched| launched.identity.0.starts_with(ORGANIZATION_ROUTE_PREFIX))
+    }
+
+    /// Whether the last sync leaves the organization routes unanswered: none
+    /// yet, or it failed. A tab marked to move off one keeps its mark.
+    fn routes_unsettled(&self) -> bool {
+        let state = self.state();
+        state.last_sync.is_none() || state.last_error.is_some()
+    }
+
     /// [`route_switch_for_launch`] on this store, with `signed_in_elsewhere`
     /// saying whether the agent can sign in without a grant (a configured
     /// key, a sign-in typed in the workspace's terminal).
@@ -1953,8 +1965,13 @@ pub enum RouteSwitch {
 /// route: everyone viewing the session reads it, so it names logins by
 /// whose they are, never "yours". `after_turn`: a turn was running when the
 /// route went, and finished on it.
+/// What the session's notices call `harness`'s agent.
+pub fn agent_name(harness: &str) -> &'static str {
+    provider_of_harness(harness).map_or("the agent", Provider::label)
+}
+
 pub fn route_switch_notice(harness: &str, switch: RouteSwitch, after_turn: bool) -> String {
-    let agent = provider_of_harness(harness).map_or("the agent", Provider::label);
+    let agent = agent_name(harness);
     let gone = format!("The organization's {agent} route no longer applies to this workspace");
     let finished = if after_turn { ". The turn that was running finished on it" } else { "" };
     match switch {
@@ -2684,7 +2701,10 @@ pub fn spawn_sync_loop(store: Arc<GrantStore>, api: Arc<dyn GrantApi + Send + Sy
             if store.sign_in_answers(Instant::now()) != before {
                 sign_in_may_have_changed();
             }
-            if store.any_organization_route_gone(Instant::now()) {
+            // Every sync while a session runs on an organization route: one
+            // marked to move off it after a failed sync learns whether the
+            // route went, or applies again.
+            if store.any_on_organization_route() || store.any_organization_route_gone(Instant::now()) {
                 if let Some(gone) = ROUTES_GONE.get() {
                     gone();
                 }
@@ -2832,6 +2852,12 @@ pub fn route_switch_for_launch(harness: &str, launch: &str) -> Option<RouteSwitc
     let (store, provider) = (installed()?, provider_of_harness(harness)?);
     let elsewhere = signed_in_by_hand(provider, dirs::home_dir().as_deref()) != Some(false);
     store.route_switch(provider, launch, &crate::cloud_config::configured_env_names(), elsewhere, Instant::now())
+}
+
+/// Whether the organization routes are unanswered for now (no sync yet, or
+/// the last one failed), as opposed to known to apply.
+pub fn routes_unsettled() -> bool {
+    installed().is_some_and(|store| store.routes_unsettled())
 }
 
 static ROUTES_GONE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
@@ -4582,13 +4608,18 @@ mod tests {
         organization_route(&server, 1);
         let store = store(None);
         let t0 = Instant::now();
+        assert!(store.routes_unsettled(), "no sync yet");
         store.sync(&server, t0, NOW).unwrap();
+        assert!(!store.routes_unsettled());
+        assert!(!store.any_on_organization_route());
         launched(&store, "pane-1", t0);
+        assert!(store.any_on_organization_route(), "the sync loop asks the tabs after every sync");
         removed(&server);
-        // A failed sync says nothing about the route.
+        // A failed sync says nothing about the route, and says so.
         *server.fail_fetch.borrow_mut() = true;
         assert!(store.sync(&server, t0, NOW).is_err());
         assert_eq!(store.route_switch(Provider::Claude, "pane-1", &[], false, t0), None);
+        assert!(store.routes_unsettled());
         // A connected login whose grant is on its way: wait for it.
         server.credential("claude", "cred_claude", "connected", 1, 1);
         let _ = store.sync(&server, t0, NOW);
@@ -4596,6 +4627,7 @@ mod tests {
         // Nothing at all.
         removed(&server);
         store.sync(&server, t0, NOW).unwrap();
+        assert!(!store.routes_unsettled());
         assert_eq!(store.sign_in_required(Provider::Claude, &[], t0).unwrap().reason, None, "said before any session is found on the route");
         assert_eq!(store.route_switch(Provider::Claude, "pane-1", &[], false, t0), Some(RouteSwitch::SignIn));
         let required = store.sign_in_required(Provider::Claude, &[], t0).unwrap();
