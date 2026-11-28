@@ -1,5 +1,46 @@
 # TerminalX changelog
 
+## 0.2.43
+
+- Security: a whole-codebase audit's 60 security findings are fixed. Agent
+  tabs get a per-tab capability token bound to their session, tab and
+  permission mode instead of the runtime's master token, and runtime
+  handover, stop-all and attach need the owner's window. Repository agent
+  settings (`.claude/*`, `.mcp.json`, `.codex/*`) are trusted per repository
+  and content hash instead of automatically. Agent file reads and writes stay
+  inside the workspace, bots imported from elsewhere start with their duties
+  off, bot chat tokens move to the Keychain, and the window's content policy
+  loads images only from known avatar hosts. Release builds sign the updater
+  archive in a separate step, so build scripts never see the updater key
+  (#1701, #1714).
+- Performance: the audit's 86 performance findings are fixed across the
+  runtime, Git and worktree handling, networking, the desktop window and the
+  phone app (#1701, #1714).
+- Accessibility: 62 UI fixes. Dialogs and popovers handle Escape and focus
+  correctly, destructive confirmations focus Cancel, the browser and editor
+  no longer trap the keyboard, permission cards no longer take focus onto
+  Allow, sidebars resize from the keyboard, and colours meet WCAG AA
+  contrast. On the phone, sheets have a 44-point Close button and answer the
+  accessibility escape gesture, and Codex sign-in can be left while offline
+  (#1715).
+- Push notifications: the phone registers for APNs and FCM when signed in
+  with notifications allowed, and the Mac, or a headless server, sends a push
+  that carries no session content when no phone is connected over Relay or
+  the local network. Tapping it opens the right tab (#1681, #1682, #1716).
+- Tab strip: the terminal view switch and the way back to chat are icons
+  instead of text, with their tooltips and labels kept (#1687, #1688, #1694,
+  #1695). The macOS menu bar item shows the TerminalX logo instead of "TX"
+  (#1690, #1696).
+- Composer: an attached screenshot is kept when you switch to the terminal
+  view and back (#1689, #1693). The Changes tab no longer flashes "Loading
+  changes…" every few seconds when there are no changes (#1662, #1663).
+- Phone app: a text size change shows on every tab without a relaunch
+  (PRO-601, #1659).
+- Updates: the app reads its update feed from the `terminalx-ai/terminalx`
+  repository's releases (#1714).
+- CI: pull requests no longer run macOS jobs and finish in about 5 minutes;
+  main, nightly and manual runs keep the full macOS coverage (#1713).
+
 ## 0.2.42
 
 - Runtime updates: the runtime picks its own moment to hand over. It waits,
