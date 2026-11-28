@@ -436,6 +436,7 @@ fn process_dirs() -> Vec<PathBuf> {
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Listed {
     pub(crate) path: String,
+    pub(crate) head: Option<String>,
     pub(crate) branch: Option<String>,
     bare: bool,
     locked: bool,
@@ -451,7 +452,12 @@ pub(crate) fn list_worktrees(project: &Path) -> anyhow::Result<Vec<Listed>> {
             continue;
         }
         let Some(entry) = entries.last_mut() else { continue };
-        if let Some(branch) = line.strip_prefix("branch ") {
+        if let Some(head) = line.strip_prefix("HEAD ") {
+            let head = head.trim();
+            if !head.is_empty() && !head.bytes().all(|b| b == b'0') {
+                entry.head = Some(head.to_string());
+            }
+        } else if let Some(branch) = line.strip_prefix("branch ") {
             entry.branch = Some(branch.strip_prefix("refs/heads/").unwrap_or(branch).to_string());
         } else if line == "bare" {
             entry.bare = true;
@@ -629,17 +635,56 @@ fn disposable(entry: &str) -> bool {
 
 /// How far into an ignored folder a nested checkout is looked for.
 const NESTED_CHECKOUT_DEPTH: usize = 4;
+/// Maximum subdirectories inspected inside a disposable dependency folder
+/// (like `node_modules`) so huge dependency trees never cause a walk storm.
+const DISPOSABLE_WALK_BUDGET: usize = 256;
+
+/// Known build/cache/venv directories whose interior never holds user checkouts.
+const SKIP_NESTED_DESCENT: &[&str] = &[
+    "target", "dist", "build", "out", ".next", ".nuxt", ".turbo", ".cache", ".parcel-cache", ".vite", ".svelte-kit", ".angular", ".expo",
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv", ".gradle", ".build", "Pods", "DerivedData",
+    "coverage", ".nyc_output", ".pnpm", ".bin",
+];
 
 /// Whether `dir`, or a folder up to `depth` levels below it, is a Git
-/// checkout (has a `.git`). Links are not followed.
+/// checkout (has a `.git`). Links are not followed. Known disposable build
+/// directories are not walked deeply.
 fn holds_git_dir(dir: &Path, depth: usize) -> bool {
+    let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if SKIP_NESTED_DESCENT.contains(&name) {
+        return std::fs::symlink_metadata(dir.join(".git")).is_ok();
+    }
+    let is_node_modules = name == "node_modules";
+    let max_depth = if is_node_modules { depth.min(2) } else { depth };
+    let mut budget = if is_node_modules { DISPOSABLE_WALK_BUDGET } else { usize::MAX };
+    holds_git_dir_bounded(dir, max_depth, &mut budget, is_node_modules)
+}
+
+fn holds_git_dir_bounded(dir: &Path, depth: usize, budget: &mut usize, inside_node_modules: bool) -> bool {
     if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
         return true;
     }
-    if depth == 0 {
+    if depth == 0 || *budget == 0 {
         return false;
     }
-    std::fs::read_dir(dir).into_iter().flatten().flatten().any(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()) && holds_git_dir(&entry.path(), depth - 1))
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let child_name = entry.file_name();
+        let child_str = child_name.to_str().unwrap_or("");
+        if SKIP_NESTED_DESCENT.contains(&child_str) || (inside_node_modules && child_str == "node_modules") {
+            continue;
+        }
+        if *budget == 0 {
+            break;
+        }
+        *budget -= 1;
+        if holds_git_dir_bounded(&entry.path(), depth - 1, budget, inside_node_modules || child_str == "node_modules") {
+            return true;
+        }
+    }
+    false
 }
 
 fn describe_changes(listing: &str) -> String {
@@ -738,8 +783,8 @@ pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_
             candidate.brief = Some("pull request to verify".into());
             return (Verdict::Unverifiable, Some(why));
         }
-        candidate.head = git::head_commit(&path);
-        candidate.branch = git::current_branch(&path).or(candidate.branch.take());
+        candidate.head = entry.head.clone().or_else(|| git::head_commit(&path));
+        candidate.branch = entry.branch.clone().or_else(|| git::current_branch(&path));
         candidate.last_activity = last_activity(&path, &sessions);
 
         if let Some(session) = candidate.sessions.iter().find(|session| session.live.is_some()) {
@@ -821,14 +866,18 @@ pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_
         let Ok(ignored) = git::run(&path, &["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]) else {
             return unverifiable("Git could not list the ignored files.");
         };
-        let names: Vec<&str> = ignored.split('\0').filter(|name| !name.is_empty()).collect();
+        let mut names: Vec<&str> = ignored.split('\0').filter(|name| !name.is_empty()).collect();
+        // Sort once so container checks are O(N log N) instead of O(N²): in byte
+        // order, any child starting with `dir/` immediately follows `dir/`.
+        names.sort_unstable();
+        names.dedup();
         // An untracked folder that holds only ignored entries is listed as
         // well as each of them (`native/` with `native/helper/.build/`):
         // what it holds is judged by those lines, not by the folder.
-        let container = |name: &str| name.ends_with('/') && names.iter().any(|other| other.len() > name.len() && other.starts_with(name));
         let mut containers = Vec::new();
-        for name in names.iter().copied() {
-            if container(name) {
+        for (idx, name) in names.iter().copied().enumerate() {
+            let is_container = name.ends_with('/') && names.get(idx + 1).is_some_and(|next| next.starts_with(name));
+            if is_container {
                 containers.push(name.to_string());
             } else if disposable(name) || repository.declared().iter().any(|declared| declared.covers(name)) {
                 candidate.disposable.push(name.to_string())
@@ -1135,6 +1184,7 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
         }
         session_ops::notify_workspace_deleted(sink, &repository.project.path, &affected);
         done.sessions_deleted = affected.iter().map(|session| session.id.clone()).collect();
+        let _ = crate::pr_associations::prune_sessions(&done.sessions_deleted);
     } else {
         match session_ops::mark_workspace_sessions_removed(&repository.root, &affected, Some(&removed_workspace)) {
             Ok(moved) => {

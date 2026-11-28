@@ -11,15 +11,22 @@ use std::fs::{self, File};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 
 const RECORD: &str = "terminalx-root-mirror.json";
 const REFS: &str = "refs/terminalx/root-mirror";
+/// Fallback polling interval when filesystem watching is unavailable.
 const INTERVAL: Duration = Duration::from_secs(2);
+/// Infrequent safety-net fallback when filesystem watching is active.
+const IDLE_FALLBACK: Duration = Duration::from_secs(30);
+/// Quiet window for coalescing bursts of filesystem events before syncing.
+const DEBOUNCE: Duration = Duration::from_millis(150);
+const DEBOUNCE_MAX: Duration = Duration::from_millis(600);
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,6 +58,8 @@ struct Mirror {
     stopped: bool,
     // Held for the entire run, across all windows and app processes.
     lease: Option<File>,
+    // Wakes the background watcher thread immediately on stop.
+    wake: Option<mpsc::Sender<bool>>,
 }
 
 type Mirrors = HashMap<PathBuf, Arc<Mutex<Mirror>>>;
@@ -58,6 +67,20 @@ type Mirrors = HashMap<PathBuf, Arc<Mutex<Mirror>>>;
 fn mirrors() -> &'static Mutex<Mirrors> {
     static MIRRORS: OnceLock<Mutex<Mirrors>> = OnceLock::new();
     MIRRORS.get_or_init(Mutex::default)
+}
+
+/// Lock-free-of-I/O status cache so UI `status()` reads never block on Git sync.
+fn status_cache() -> &'static Mutex<HashMap<PathBuf, Status>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Status>>> = OnceLock::new();
+    CACHE.get_or_init(Mutex::default)
+}
+
+fn publish_status(status: &Status) {
+    status_cache().lock().unwrap_or_else(|e| e.into_inner()).insert(status.root.clone(), status.clone());
+}
+
+fn clear_status(root: &Path) {
+    status_cache().lock().unwrap_or_else(|e| e.into_inner()).remove(root);
 }
 
 fn running(root: &Path) -> Option<Arc<Mutex<Mirror>>> {
@@ -84,8 +107,7 @@ fn command(cwd: &Path) -> Command {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_NO_LAZY_FETCH", "1")
-        .env("LC_ALL", "C")
-        .args(["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"]);
+        .env("LC_ALL", "C");
     command
 }
 
@@ -106,25 +128,42 @@ fn git_path(cwd: &Path, args: &[&str]) -> Result<PathBuf> {
     Ok(PathBuf::from(crate::git::path_line(&String::from_utf8(output(command(cwd).args(args))?)?)))
 }
 
+fn rev_parse_paths(cwd: &Path) -> Result<(PathBuf, PathBuf, PathBuf)> {
+    let out = String::from_utf8(output(command(cwd).args([
+        "rev-parse",
+        "--show-toplevel",
+        "--path-format=absolute",
+        "--git-common-dir",
+        "--absolute-git-dir",
+    ]))?)?;
+    let mut lines = out.lines();
+    let top = PathBuf::from(crate::git::path_line(lines.next().context("Missing git toplevel")?));
+    let common = PathBuf::from(crate::git::path_line(lines.next().context("Missing git common dir")?));
+    let own = PathBuf::from(crate::git::path_line(lines.next().context("Missing git dir")?));
+    Ok((top, common, own))
+}
+
 fn repository(project: &Path) -> Result<(PathBuf, PathBuf)> {
     let root = crate::paths::canonicalize(project).context("The repository root is unavailable")?;
-    let top = crate::paths::canonicalize(git_path(&root, &["rev-parse", "--show-toplevel"])?)?;
-    let common = crate::paths::canonicalize(git_path(&root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?)?;
-    let own = crate::paths::canonicalize(git_path(&root, &["rev-parse", "--absolute-git-dir"])?)?;
+    let (top, common, own) = rev_parse_paths(&root)?;
+    let top = crate::paths::canonicalize(top)?;
+    let common = crate::paths::canonicalize(common)?;
+    let own = crate::paths::canonicalize(own)?;
     if root != top || own != common {
         bail!("Mirroring needs the project's main checkout as the repository root.");
     }
     Ok((root, common))
 }
 
-fn source_check(root: &Path, common: &Path, source: &Path) -> Result<PathBuf> {
+fn source_check(root: &Path, common: &Path, source: &Path) -> Result<(PathBuf, PathBuf)> {
     let source = crate::paths::canonicalize(source).context("The local workspace is unavailable")?;
-    let top = crate::paths::canonicalize(git_path(&source, &["rev-parse", "--show-toplevel"])?)?;
-    let source_common = crate::paths::canonicalize(git_path(&source, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?)?;
+    let (top, source_common, own) = rev_parse_paths(&source)?;
+    let top = crate::paths::canonicalize(top)?;
+    let source_common = crate::paths::canonicalize(source_common)?;
     if source == root || source != top || source_common != common {
         bail!("Choose a local worktree of this repository to mirror.");
     }
-    Ok(source)
+    Ok((source, own))
 }
 
 fn lease(common: &Path) -> Result<File> {
@@ -156,6 +195,17 @@ fn read(common: &Path) -> Result<Option<Journal>> {
 
 /// Refuse Git states where a normal snapshot could silently omit work.
 fn ordinary_checkout(cwd: &Path) -> Result<()> {
+    let own = git_path(cwd, &["rev-parse", "--absolute-git-dir"])?;
+    ordinary_checkout_with_git_dir(cwd, &own)
+}
+
+fn ordinary_checkout_with_git_dir(cwd: &Path, own: &Path) -> Result<()> {
+    if ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "index.lock"]
+        .iter()
+        .any(|name| own.join(name).exists())
+    {
+        bail!("Finish the Git operation in {} before mirroring.", cwd.display());
+    }
     let flags = git(cwd, &["ls-files", "-v", "-z"])?;
     if flags
         .split('\0')
@@ -163,19 +213,17 @@ fn ordinary_checkout(cwd: &Path) -> Result<()> {
     {
         bail!("Mirroring does not support sparse checkouts or assume-unchanged files. Clear those flags first.");
     }
+    // `--stage` includes both gitlink modes (`160000`) and unmerged stage numbers (`1`/`2`/`3`).
     let entries = git(cwd, &["ls-files", "--stage", "-z"])?;
-    if entries.split('\0').any(|entry| entry.starts_with("160000 ")) {
-        bail!("Mirroring does not support repositories with submodules.");
-    }
-    let own = git_path(cwd, &["rev-parse", "--absolute-git-dir"])?;
-    if ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "index.lock"]
-        .iter()
-        .any(|name| own.join(name).exists())
-    {
-        bail!("Finish the Git operation in {} before mirroring.", cwd.display());
-    }
-    if !git(cwd, &["ls-files", "--unmerged"])?.is_empty() {
-        bail!("Resolve the conflicts in {} before mirroring.", cwd.display());
+    for entry in entries.split('\0').filter(|entry| !entry.is_empty()) {
+        if entry.starts_with("160000 ") {
+            bail!("Mirroring does not support repositories with submodules.");
+        }
+        if let Some(meta) = entry.split('\t').next() {
+            if meta.split_whitespace().nth(2).is_some_and(|stage| stage != "0") {
+                bail!("Resolve the conflicts in {} before mirroring.", cwd.display());
+            }
+        }
     }
     Ok(())
 }
@@ -359,14 +407,13 @@ impl Mirror {
     }
 
     fn sync(&mut self) -> Result<()> {
-        source_check(&self.root, &self.common, &self.journal.source)?;
-        let source_git = git_path(&self.journal.source, &["rev-parse", "--absolute-git-dir"])?;
+        let (_, source_git) = source_check(&self.root, &self.common, &self.journal.source)?;
         // A routine add/commit in the workspace should defer one tick, not
         // permanently pause mirroring. The root's lock still fails closed.
         if source_git.join("index.lock").exists() {
             return Ok(());
         }
-        ordinary_checkout(&self.journal.source)?;
+        ordinary_checkout_with_git_dir(&self.journal.source, &source_git)?;
         let target = snapshot(&self.journal.source, "INDEX")?;
         self.apply(&target)
     }
@@ -387,10 +434,75 @@ impl Mirror {
     }
 }
 
+/// Filter out mirror-internal Git metadata events so our own journal/ref writes
+/// do not trigger self-looping sync wakes.
+fn is_mirror_internal_event(event: &Event, common: &Path) -> bool {
+    !event.paths.is_empty()
+        && event.paths.iter().all(|path| {
+            let Ok(rel) = path.strip_prefix(common) else { return false };
+            let text = rel.to_string_lossy();
+            text.starts_with("terminalx-root-mirror")
+                || text.starts_with("refs/terminalx/root-mirror")
+                || text.starts_with("objects")
+                || text.starts_with("logs/refs/terminalx")
+        })
+}
+
+/// Compute the source snapshot with `mirror.lock()` dropped, then acquire the
+/// lock only to apply the diff and update journal/error state.
+fn run_background_sync(handle: &Arc<Mutex<Mirror>>, generation: uuid::Uuid) -> bool {
+    let (root, common, source) = {
+        let mirror = handle.lock().unwrap_or_else(|e| e.into_inner());
+        if mirror.generation != generation || mirror.stopped {
+            return false;
+        }
+        if mirror.error.is_some() {
+            return true;
+        }
+        (mirror.root.clone(), mirror.common.clone(), mirror.journal.source.clone())
+    };
+    // Perform source inspection & snapshot outside `mirror.lock()` so `status()` and `stop()` never stall on source I/O.
+    let prepared = (|| -> Result<Option<String>> {
+        let (_, source_git) = source_check(&root, &common, &source)?;
+        if source_git.join("index.lock").exists() {
+            return Ok(None);
+        }
+        ordinary_checkout_with_git_dir(&source, &source_git)?;
+        Ok(Some(snapshot(&source, "INDEX")?))
+    })();
+    let mut mirror = handle.lock().unwrap_or_else(|e| e.into_inner());
+    if mirror.generation != generation || mirror.stopped {
+        return false;
+    }
+    if mirror.error.is_some() {
+        return true;
+    }
+    match prepared {
+        Ok(Some(target)) => {
+            if let Err(error) = mirror.apply(&target) {
+                mirror.error = Some(format!("{error:#}"));
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            mirror.error = Some(format!("{error:#}"));
+        }
+    }
+    publish_status(&mirror.status());
+    true
+}
+
 pub fn status(project: &Path) -> Result<Status> {
     let (root, common) = repository(project)?;
-    if let Some(mirror) = running(&root) {
-        return Ok(mirror.lock().unwrap_or_else(|e| e.into_inner()).status());
+    if running(&root).is_some() {
+        if let Some(cached) = status_cache().lock().unwrap_or_else(|e| e.into_inner()).get(&root).cloned() {
+            return Ok(cached);
+        }
+        if let Some(mirror) = running(&root) {
+            let current = mirror.lock().unwrap_or_else(|e| e.into_inner()).status();
+            publish_status(&current);
+            return Ok(current);
+        }
     }
     let saved = read(&common)?;
     let error = saved.as_ref().map(|_| match lease(&common) {
@@ -410,7 +522,7 @@ pub fn start(project: &Path, source: &Path, confirmed: bool) -> Result<Status> {
         bail!("Confirm mirroring into the repository root before starting.");
     }
     let (root, common) = repository(project)?;
-    let source = source_check(&root, &common, source)?;
+    let (source, source_git) = source_check(&root, &common, source)?;
     if running(&root).is_some() {
         bail!("This repository already has a mirror. Stop mirroring first.");
     }
@@ -418,8 +530,8 @@ pub fn start(project: &Path, source: &Path, confirmed: bool) -> Result<Status> {
     if read(&common)?.is_some() {
         bail!("A previous mirror needs cleanup. Stop mirroring before starting again.");
     }
-    ordinary_checkout(&root)?;
-    ordinary_checkout(&source)?;
+    ordinary_checkout_with_git_dir(&root, &common)?;
+    ordinary_checkout_with_git_dir(&source, &source_git)?;
     let dirty = git(&root, &["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"])?;
     if !dirty.is_empty() {
         bail!(
@@ -429,10 +541,11 @@ pub fn start(project: &Path, source: &Path, confirmed: bool) -> Result<Status> {
     }
     let head = head(&root)?;
     let base = git(&root, &["rev-parse", "HEAD^{tree}"])?;
+    let (wake_tx, wake_rx) = mpsc::channel::<bool>();
     let mut mirror = Mirror {
         generation: uuid::Uuid::new_v4(),
         journal: Journal {
-            source,
+            source: source.clone(),
             head,
             branch: branch(&root)?,
             base: base.clone(),
@@ -440,10 +553,11 @@ pub fn start(project: &Path, source: &Path, confirmed: bool) -> Result<Status> {
             pending: None,
         },
         root: root.clone(),
-        common,
+        common: common.clone(),
         error: None,
         stopped: false,
         lease: Some(lease),
+        wake: Some(wake_tx.clone()),
     };
     // Persist before the first write. Even an initial failure remains visible
     // and stoppable rather than abandoning a possibly partial application.
@@ -453,22 +567,59 @@ pub fn start(project: &Path, source: &Path, confirmed: bool) -> Result<Status> {
     }
     let status = mirror.status();
     let generation = mirror.generation;
+    publish_status(&status);
     mirrors()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(root.clone(), Arc::new(Mutex::new(mirror)));
-    std::thread::spawn(move || loop {
-        std::thread::sleep(INTERVAL);
-        let Some(mirror) = running(&root) else { break };
-        let mut mirror = mirror.lock().unwrap_or_else(|e| e.into_inner());
-        if mirror.generation != generation || mirror.stopped {
-            break;
-        }
-        if mirror.error.is_none() {
-            if let Err(error) = mirror.sync() {
-                mirror.error = Some(format!("{error:#}"));
+    std::thread::spawn(move || {
+        // Watch both source and root checkouts so syncs are event-driven and idle
+        // repositories spawn zero Git processes between safety-net fallbacks.
+        let watcher_common = common.clone();
+        let watcher_tx = wake_tx.clone();
+        let watcher: Option<RecommendedWatcher> = notify::recommended_watcher(move |res: notify::Result<Event>| {
+            if let Ok(event) = res {
+                if !is_mirror_internal_event(&event, &watcher_common) {
+                    let _ = watcher_tx.send(true);
+                }
+            }
+        })
+        .ok()
+        .and_then(|mut w| {
+            let watched_source = w.watch(&source, RecursiveMode::Recursive).is_ok();
+            let _ = w.watch(&root, RecursiveMode::Recursive);
+            watched_source.then_some(w)
+        });
+        let wait_timeout = if watcher.is_some() { IDLE_FALLBACK } else { INTERVAL };
+        loop {
+            match wake_rx.recv_timeout(wait_timeout) {
+                Ok(false) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Ok(true) => {
+                    // Debounce bursty editor/build writes before running a sync pass.
+                    let burst_deadline = Instant::now() + DEBOUNCE_MAX;
+                    let mut stopped = false;
+                    while Instant::now() < burst_deadline {
+                        let rem = burst_deadline.saturating_duration_since(Instant::now());
+                        match wake_rx.recv_timeout(DEBOUNCE.min(rem)) {
+                            Ok(false) | Err(mpsc::RecvTimeoutError::Disconnected) => { stopped = true; break; }
+                            Ok(true) => continue,
+                            Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        }
+                    }
+                    if stopped { break; }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            let Some(handle) = running(&root) else { break };
+            if !run_background_sync(&handle, generation) {
+                break;
+            }
+            // Drain any self-generated FS events emitted while `apply` wrote to `root`.
+            while let Ok(flag) = wake_rx.try_recv() {
+                if !flag { return; }
             }
         }
+        drop(watcher);
     });
     Ok(status)
 }
@@ -488,6 +639,7 @@ pub fn stop(project: &Path) -> Result<Status> {
                 error: Some("Mirroring was interrupted".into()),
                 stopped: false,
                 lease: Some(lease),
+                wake: None,
             }));
             mirrors().lock().unwrap_or_else(|e| e.into_inner()).insert(root.clone(), mirror.clone());
             Some(mirror)
@@ -500,13 +652,18 @@ pub fn stop(project: &Path) -> Result<Status> {
         if !mirror.stopped {
             if let Err(error) = mirror.stop() {
                 mirror.error = Some(format!("{error:#}"));
+                publish_status(&mirror.status());
                 return Err(error);
             }
             // A worker/second Stop that already obtained an Arc must not
             // write after Stop or remove a subsequently started mirror.
             mirror.stopped = true;
             mirror.error = None;
+            if let Some(wake) = mirror.wake.take() {
+                let _ = wake.send(false);
+            }
             mirror.lease.take();
+            clear_status(&root);
             let mut mirrors = mirrors().lock().unwrap_or_else(|e| e.into_inner());
             if mirrors.get(&root).is_some_and(|current| Arc::ptr_eq(current, &handle)) {
                 mirrors.remove(&root);

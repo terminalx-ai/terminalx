@@ -329,3 +329,14 @@ fn a_sparse_workspace_restores_detached_with_its_folders() {
     assert_eq!(git::current_branch(path), None);
     assert!(path.join("keep/f").exists() && !path.join("drop").exists());
 }
+
+#[test]
+fn local_branches_detects_exact_parent_and_child_ref_collisions_in_memory() {
+    let set = LocalBranches::from_lines(["main", "feat/topic", "feat/topic-restored", "feat/topic-restored-2"]);
+    assert!(!set.is_available("main"));
+    assert!(!set.is_available("feat"), "parent of existing ref collides");
+    assert!(!set.is_available("feat/topic/child"), "child of existing ref collides");
+    assert!(!set.is_available("feat/topic-restored"));
+    assert!(!set.is_available("feat/topic-restored-2"));
+    assert!(set.is_available("feat/topic-restored-3"));
+}

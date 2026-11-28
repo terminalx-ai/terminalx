@@ -80,7 +80,12 @@ pub(crate) const ARCHIVES_PER_PASS: usize = 1;
 
 /// One pass at a time on a host: two windows asking at once must not both
 /// remove, or both write the ledger.
+/// Serializes ledger reads/writes (held only for brief disk I/O, never across
+/// network calls, Git fetches, or archive hooks).
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+/// Serializes full sweep passes so two background sweeps do not overlap, while
+/// allowing `hold()` and `with_workspace_restore()` to proceed immediately.
+static SWEEP_SERIALIZE: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -362,6 +367,12 @@ enum Fetched {
     Failed(String),
 }
 
+struct SweepSnapshot {
+    sessions: Vec<SessionEntry>,
+    roots: Roots,
+    live: crate::worktree_cleanup::Live,
+}
+
 struct Pass<'a> {
     run: &'a FallibleSweep<'a>,
     scope: &'a Scope,
@@ -373,9 +384,52 @@ struct Pass<'a> {
     out: Vec<Status>,
     unreadable: Vec<Unreadable>,
     archives_started: usize,
+    /// Cached once per sweep (lazily on first merged workspace) to avoid
+    /// repeating full-OS `Live::observe()` + `index::load()` per worktree.
+    snapshot: Option<SweepSnapshot>,
 }
 
 impl Pass<'_> {
+    fn ensure_snapshot(&mut self) -> Result<&SweepSnapshot, anyhow::Error> {
+        if self.snapshot.is_none() {
+            let sessions = index::load()?;
+            let roots = Roots::of(self.run.host, &sessions);
+            let live = (self.run.host.live)(&sessions);
+            self.snapshot = Some(SweepSnapshot { sessions, roots, live });
+        }
+        Ok(self.snapshot.as_ref().expect("snapshot just initialized"))
+    }
+
+    /// Persist a ledger change under `ONE_AT_A_TIME` without clobbering any
+    /// concurrent `hold()` or `with_workspace_restore()` update made while the
+    /// sweep was doing network/hook I/O.
+    fn save_ledger_locked(&mut self) -> anyhow::Result<()> {
+        let _lock = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Ok(disk) = Ledger::load() {
+            for (path, disk_seen) in disk.seen {
+                if disk_seen.held {
+                    if let Some(local) = self.ledger.seen.get_mut(&path) {
+                        local.held = true;
+                    } else if !self.visited.contains(&path) {
+                        self.ledger.seen.insert(path, disk_seen);
+                    }
+                }
+            }
+            for disk_rec in disk.removed {
+                if let Some(local) = self.ledger.removed.iter_mut().find(|r| r.id == disk_rec.id) {
+                    if local.restored_at.is_none() && disk_rec.restored_at.is_some() {
+                        local.restored_at = disk_rec.restored_at;
+                    }
+                }
+            }
+        }
+        self.ledger.save()
+    }
+
+    fn is_held_on_disk(path: &str) -> bool {
+        let _lock = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ledger::load().ok().and_then(|ledger| ledger.seen.get(path).map(|s| s.held)).unwrap_or(false)
+    }
     fn status(&mut self, repository: &Repository<'_>, path: &str, name: &str, branch: &str, phase: Phase) -> &mut Status {
         let seen = &self.ledger.seen[path];
         self.out.push(Status {
@@ -483,13 +537,14 @@ impl Pass<'_> {
             return;
         }
         self.ledger.seen.get_mut(&key).unwrap().archive_pause = None;
-        let sessions = match index::load() {
-            Ok(sessions) => sessions,
-            Err(error) => return keep(self, Vec::new(), "the session index could not be read".into(), Some(format!("{error:#}"))),
+        let host = self.run.host;
+        let candidate = {
+            let snapshot = match self.ensure_snapshot() {
+                Ok(snapshot) => snapshot,
+                Err(error) => return keep(self, Vec::new(), "the session index could not be read".into(), Some(format!("{error:#}"))),
+            };
+            cleanup::inspect(host, &snapshot.roots, repository, entry, &snapshot.sessions, &snapshot.live, Activity::Engaged)
         };
-        let roots = Roots::of(self.run.host, &sessions);
-        let live = (self.run.host.live)(&sessions);
-        let candidate = cleanup::inspect(self.run.host, &roots, repository, entry, &sessions, &live, Activity::Engaged);
         let ids: Vec<String> = candidate.sessions.iter().map(|session| session.id.clone()).collect();
         if candidate.verdict != Verdict::Eligible {
             return keep(self, ids, brief_of(&candidate), candidate.reason.clone());
@@ -551,6 +606,13 @@ impl Pass<'_> {
         if self.run.now < due {
             return scheduled(self, due, ids);
         }
+        // Re-check whether a concurrent `hold()` or `with_workspace_restore()` marked
+        // this workspace held while network/fetch checks ran outside the ledger lock.
+        if Self::is_held_on_disk(&key) {
+            self.ledger.seen.get_mut(&key).unwrap().held = true;
+            self.status(repository, &key, &name, branch, Phase::Held);
+            return;
+        }
         if let Some(fingerprint) = fingerprint {
             if self.archives_started >= ARCHIVES_PER_PASS {
                 return scheduled(self, self.run.now + chrono::Duration::seconds(120), ids);
@@ -561,7 +623,7 @@ impl Pass<'_> {
                 fingerprint, failure: None,
                 detail: "An automatic archive attempt did not finish removing this workspace. Automatic retries are paused. Review removal to continue.".into(),
             });
-            if let Err(error) = self.ledger.save() {
+            if let Err(error) = self.save_ledger_locked() {
                 return keep(self, ids, "the archive attempt could not be recorded".into(), Some(error.to_string()));
             }
             self.archives_started += 1;
@@ -588,13 +650,15 @@ impl Pass<'_> {
                 } else { keep(self, ids, reason, detail); }
             },
             Ok(record) => {
+                // Invalidate cached sweep snapshot after mutating sessions/worktrees.
+                self.snapshot = None;
                 let status = self.status(repository, &key, &name, branch, Phase::Removed);
                 (status.fresh, status.sessions, status.record) = (fresh, ids, Some(record.clone()));
                 self.ledger.seen.remove(&key);
                 self.ledger.removed.push(record);
                 // Written at once: a pass that fails later must not lose
                 // the record of what is already gone.
-                if let Err(error) = self.ledger.save() {
+                if let Err(error) = self.save_ledger_locked() {
                     log::error!("a workspace was removed but the record could not be saved: {error:#}");
                 }
             }
@@ -669,7 +733,12 @@ fn remove(run: &FallibleSweep<'_>, scope: &Scope, repository: &Repository<'_>, e
         _ => BranchFate::Kept { reason: "the local branch was kept".into() },
     };
     let ids: Vec<String> = removed.sessions.iter().map(|session| session.id.clone()).collect();
-    let (sessions_kept, sessions_deleted) = if scope.delete_sessions && !superseded { (Vec::new(), ids) } else { (ids, Vec::new()) };
+    let (sessions_kept, sessions_deleted) = if scope.delete_sessions && !superseded {
+        let _ = crate::pr_associations::prune_sessions(&ids);
+        (Vec::new(), ids)
+    } else {
+        (ids, Vec::new())
+    };
     Ok(Record {
         id: uuid::Uuid::now_v7().to_string(),
         // Not before the sessions were filed under the project, which is
@@ -734,13 +803,17 @@ pub fn sweep(run: &Sweep<'_>, scope: &Scope) -> anyhow::Result<Swept> {
 
 pub(crate) fn sweep_fallible(run: &FallibleSweep<'_>, scope: &Scope) -> anyhow::Result<Swept> {
     let _github_request = crate::github_process::scope();
-    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _sweep = SWEEP_SERIALIZE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let wanted: Vec<PathBuf> = scope.projects.iter().map(|path| cleanup::canonical(Path::new(path))).collect();
     let on_for = |path: &str| {
         let path = cleanup::canonical(Path::new(path));
         wanted.iter().any(|wanted| cleanup::same_dir(wanted, &path))
     };
-    let mut pass = Pass { run, scope, ledger: Ledger::load()?, visited: HashSet::new(), restarted: HashSet::new(), out: Vec::new(), unreadable: Vec::new(), archives_started: 0 };
+    let initial_ledger = {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ledger::load()?
+    };
+    let mut pass = Pass { run, scope, ledger: initial_ledger, visited: HashSet::new(), restarted: HashSet::new(), out: Vec::new(), unreadable: Vec::new(), archives_started: 0, snapshot: None };
     let before = serde_json::to_value(&pass.ledger.seen)?;
     let watched = pass.ledger.swept_at.as_deref().and_then(parse).is_some_and(|at| (run.now - at).num_seconds() <= WATCH_GAP);
     if !watched {
@@ -760,6 +833,25 @@ pub(crate) fn sweep_fallible(run: &FallibleSweep<'_>, scope: &Scope) -> anyhow::
     // period again. Only the reader's own "keep" outlives that, for as long
     // as the workspace is there.
     let Pass { mut ledger, visited, out, unreadable, .. } = pass;
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Ok(disk) = Ledger::load() {
+        for (path, disk_seen) in disk.seen {
+            if disk_seen.held {
+                if let Some(local) = ledger.seen.get_mut(&path) {
+                    local.held = true;
+                } else {
+                    ledger.seen.insert(path, disk_seen);
+                }
+            }
+        }
+        for disk_rec in disk.removed {
+            if let Some(local) = ledger.removed.iter_mut().find(|r| r.id == disk_rec.id) {
+                if local.restored_at.is_none() && disk_rec.restored_at.is_some() {
+                    local.restored_at = disk_rec.restored_at;
+                }
+            }
+        }
+    }
     ledger.seen.retain(|path, seen| visited.contains(path) || ((seen.held || seen.archive_pause.is_some()) && std::fs::symlink_metadata(path).is_ok()));
     // While anything waits, each pass is noted, so that a gap can be told.
     let waiting = ledger.seen.values().any(|seen| !seen.held);
@@ -785,36 +877,55 @@ pub fn hold(path: &str, held: bool, now: DateTime<Utc>) -> anyhow::Result<()> {
     ledger.save()
 }
 
-/// Session-driven restores share the sweep's lock and hold any checkout it
-/// previously removed. Save before creating files: a failed ledger write must
-/// not leave a restored workspace eligible for immediate automatic removal.
+/// Session-driven restores hold any checkout previously removed by the sweep.
+/// Save before creating files (holding the ledger lock only around disk I/O so
+/// restores never stall on network/hook sweeps): a failed ledger write must not
+/// leave a restored workspace eligible for immediate automatic removal.
 pub(crate) fn with_workspace_restore<T>(path: &str, project: &str, commit: &str, restore: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
-    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut ledger = Ledger::load()?;
-    let before = ledger.clone();
-    let now = stamp(Utc::now());
-    let at_path = |record: &&Record| record.path == path && record.project_path == project;
-    let record = ledger.removed.iter().rev().filter(at_path).find(|record| record.commit == commit)
-        .or_else(|| ledger.removed.iter().rev().find(at_path)).cloned();
-    if let Some(record) = record {
-        // A path can have been reused since this conversation was removed.
-        // Holding it must not mark a different removal's commit as restored.
-        if record.commit == commit {
-            if let Some(saved) = ledger.removed.iter_mut().find(|saved| saved.id == record.id && saved.restored_at.is_none()) {
-                saved.restored_at = Some(now.clone());
+    let (prev_seen, marked_record_id) = {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut ledger = Ledger::load()?;
+        let prev_seen = ledger.seen.get(path).cloned();
+        let now = stamp(Utc::now());
+        let at_path = |record: &&Record| record.path == path && record.project_path == project;
+        let record = ledger.removed.iter().rev().filter(at_path).find(|record| record.commit == commit)
+            .or_else(|| ledger.removed.iter().rev().find(at_path)).cloned();
+        let mut marked_record_id = None;
+        if let Some(record) = record {
+            // A path can have been reused since this conversation was removed.
+            // Holding it must not mark a different removal's commit as restored.
+            if record.commit == commit {
+                if let Some(saved) = ledger.removed.iter_mut().find(|saved| saved.id == record.id && saved.restored_at.is_none()) {
+                    saved.restored_at = Some(now.clone());
+                    marked_record_id = Some(record.id.clone());
+                }
             }
+            let archive_pause = ledger.seen.get(path).and_then(|seen| seen.archive_pause.clone());
+            ledger.seen.insert(path.into(), Seen { project_path: record.project_path, pr: record.pr, first_seen: now, held: true, archive_pause });
+        } else if let Some(seen) = ledger.seen.get_mut(path) {
+            seen.held = true;
         }
-        let archive_pause = ledger.seen.get(path).and_then(|seen| seen.archive_pause.clone());
-        ledger.seen.insert(path.into(), Seen { project_path: record.project_path, pr: record.pr, first_seen: now, held: true, archive_pause });
-    } else if let Some(seen) = ledger.seen.get_mut(path) {
-        seen.held = true;
-    }
-    ledger.save()?;
+        ledger.save()?;
+        (prev_seen, marked_record_id)
+    };
     match restore() {
         Ok(value) => Ok(value),
         Err(error) => {
-            let mut before = before;
-            before.save().map_err(|rollback| anyhow::anyhow!("{error:#}; restoring the cleanup record also failed: {rollback:#}"))?;
+            let rollback = (|| -> anyhow::Result<()> {
+                let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut ledger = Ledger::load()?;
+                match prev_seen {
+                    Some(prev) => { ledger.seen.insert(path.into(), prev); }
+                    None => { ledger.seen.remove(path); }
+                }
+                if let Some(id) = marked_record_id {
+                    if let Some(saved) = ledger.removed.iter_mut().find(|saved| saved.id == id) {
+                        saved.restored_at = None;
+                    }
+                }
+                ledger.save()
+            })();
+            rollback.map_err(|rollback| anyhow::anyhow!("{error:#}; restoring the cleanup record also failed: {rollback:#}"))?;
             Err(error)
         }
     }
@@ -878,9 +989,11 @@ pub struct Restored {
 /// that have not been used since. The workspace is held afterwards.
 pub fn restore(host: &Host<'_>, sink: &dyn EventSink, id: &str, now: DateTime<Utc>) -> anyhow::Result<Restored> {
     let _request = crate::github_process::scope();
-    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut ledger = Ledger::load()?;
-    let record = ledger.removed.iter().find(|record| record.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no such removal is recorded here"))?;
+    let record = {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let ledger = Ledger::load()?;
+        ledger.removed.iter().find(|record| record.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no such removal is recorded here"))?
+    };
     let (project, path) = restorable(host, &record).map_err(|why| anyhow::anyhow!(why))?;
     let root = cleanup::canonical(Path::new(&project.path));
     let target = path.to_str().ok_or_else(|| anyhow::anyhow!("its path is not a name git can be given"))?;
@@ -939,13 +1052,18 @@ pub fn restore(host: &Host<'_>, sink: &dyn EventSink, id: &str, now: DateTime<Ut
 
     // Brought back is kept: its pull request is still merged, and the next
     // pass must not take it again.
-    let pr = record.pr.clone();
-    ledger.seen.insert(path.to_string_lossy().into_owned(), Seen { project_path: project.path.clone(), pr, first_seen: stamp(now), held: true, archive_pause: None });
-    let restored = ledger.removed.iter_mut().find(|record| record.id == id).map(|record| {
-        record.restored_at = Some(stamp(now));
-        record.clone()
-    });
-    ledger.save()?;
+    let restored = {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut ledger = Ledger::load()?;
+        let pr = record.pr.clone();
+        ledger.seen.insert(path.to_string_lossy().into_owned(), Seen { project_path: project.path.clone(), pr, first_seen: stamp(now), held: true, archive_pause: None });
+        let restored = ledger.removed.iter_mut().find(|record| record.id == id).map(|record| {
+            record.restored_at = Some(stamp(now));
+            record.clone()
+        });
+        ledger.save()?;
+        restored
+    };
     Ok(Restored { record: restored.unwrap_or(record), notes })
 }
 

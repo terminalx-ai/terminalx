@@ -75,10 +75,6 @@ fn diffstat(cwd: &Path, args: &[&str]) -> (u32, u32) {
     (add, del)
 }
 
-fn uncommitted(cwd: &Path) -> u32 {
-    git::run(cwd, &["status", "--porcelain", "--untracked-files=normal", "--"]).map(|s| s.lines().count() as u32).unwrap_or(0)
-}
-
 fn unpushed(cwd: &Path, branch: Option<&str>) -> u32 {
     let Some(branch) = branch else { return 0 };
     git::run(cwd, &["rev-list", "--count", "HEAD", "--not", &format!("--exclude={branch}"), "--branches", "--remotes", "--tags"])
@@ -102,45 +98,72 @@ pub fn list(project: &Path) -> Result<Vec<Workspace>> {
     }
     let managed_root = git::worktree_root(project);
     let managed_root = crate::paths::canonicalize(&managed_root).unwrap_or(managed_root);
-    let mut out = Vec::new();
-    let entries = git::list_worktrees(project)?;
+    let entries = git::list_worktrees_detailed(project)?;
     // Read once for the project, not once per worktree.
     let context = crate::landed::list_context(&root);
-    for (path, branch) in entries {
-        let p = PathBuf::from(&path);
+    // Load origin remote branch refs once so worktrees without configured upstream
+    // avoid per-worktree `comparison_ref` / `rev-parse` probes.
+    let origin_refs: std::collections::HashSet<String> = git::run(&root, &["for-each-ref", "--format=%(refname)", "refs/remotes/origin/"])
+        .map(|s| s.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect())
+        .unwrap_or_default();
+    let project_name = crate::store::projects::project_name(&root.to_string_lossy());
+
+    let inspect = |entry: &git::WorktreeEntry| -> Option<Workspace> {
+        let p = PathBuf::from(&entry.path);
         let p = crate::paths::canonicalize(&p).unwrap_or(p);
         if !p.exists() {
-            continue;
+            return None;
         }
         let is_main = p == root;
         let managed = p.parent().map(|parent| parent == managed_root).unwrap_or(false);
-        let branch = branch.or_else(|| git::current_branch(&p));
-        let (additions, deletions) = shortstat(&p);
+        // Single `git status --porcelain=v2 --branch -z` supplies changed count,
+        // branch/head fallback, and configured upstream ahead/behind counts.
+        let v2 = git::run(&p, &["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=normal", "--"])
+            .ok()
+            .map(|s| git::parse_status_v2(&s));
+        let branch = entry.branch.clone().or_else(|| v2.as_ref().and_then(|s| s.branch.clone()));
+        let head = entry.head.clone().or_else(|| v2.as_ref().and_then(|s| s.head.clone()));
+        let changed = v2.as_ref().map(|s| s.changed).unwrap_or(0);
+        let (additions, deletions) = if changed > 0 { shortstat(&p) } else { (0, 0) };
         // The project's own checkout is the default branch, or wherever it was switched: no branch of its own to measure.
         let (branch_additions, branch_deletions) = match context.base() {
             Some(base) if !is_main => branch_shortstat(&p, base),
             _ => (0, 0),
         };
         let placeholder = !is_main && branch.as_deref().is_some_and(placeholder_branch);
-        let (ahead, behind) = git::upstream_counts(&p);
-        let changed = uncommitted(&p);
+        let (ahead, behind) = if let Some(ab) = v2.as_ref().and_then(|s| s.ab) {
+            ab
+        } else if v2.as_ref().is_some_and(|s| s.upstream.is_some()) {
+            (0, 0)
+        } else if let Some(b) = branch.as_deref() {
+            let remote_ref = format!("refs/remotes/origin/{b}");
+            if head.is_some() && origin_refs.contains(&remote_ref) {
+                git::run(&p, &["rev-list", "--left-right", "--count", "--end-of-options", &format!("HEAD...{remote_ref}"), "--"])
+                    .ok()
+                    .and_then(|s| git::parse_upstream_counts(&s))
+                    .unwrap_or((0, 0))
+            } else {
+                (0, 0)
+            }
+        } else {
+            (0, 0)
+        };
         // The project's own checkout is never removed, so only whether it
         // has uncommitted work is worth a word.
-        let head = git::head_commit(&p);
         let state = if is_main {
             if changed > 0 { crate::landed::State::Uncommitted } else { crate::landed::State::Clean }
         } else {
             crate::landed::state_in_list(&context, &p, branch.as_deref(), head.as_deref(), changed)
         };
-        out.push(Workspace {
+        Some(Workspace {
             name: if is_main {
-                crate::store::projects::project_name(&root.to_string_lossy())
+                project_name.clone()
             } else {
-                p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| path.clone())
+                p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| entry.path.clone())
             },
             path: p.to_string_lossy().into_owned(),
+            unpushed: if head.is_some() { unpushed(&p, branch.as_deref()) } else { 0 },
             head,
-            unpushed: unpushed(&p, branch.as_deref()),
             ahead,
             behind,
             branch,
@@ -153,8 +176,32 @@ pub fn list(project: &Path) -> Result<Vec<Workspace>> {
             branch_additions,
             branch_deletions,
             placeholder,
+        })
+    };
+
+    let workers = entries.len().min(4);
+    let mut out: Vec<Workspace> = if workers <= 1 {
+        entries.iter().filter_map(inspect).collect()
+    } else {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let results: Vec<std::sync::Mutex<Option<Workspace>>> = (0..entries.len()).map(|_| std::sync::Mutex::new(None)).collect();
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if idx >= entries.len() {
+                            break;
+                        }
+                        if let Some(ws) = inspect(&entries[idx]) {
+                            *results[idx].lock().unwrap_or_else(|e| e.into_inner()) = Some(ws);
+                        }
+                    }
+                });
+            }
         });
-    }
+        results.into_iter().filter_map(|slot| slot.into_inner().unwrap_or_else(|e| e.into_inner())).collect()
+    };
     out.sort_by_key(|w| (!w.is_main, !w.managed));
     Ok(out)
 }
@@ -212,14 +259,17 @@ pub fn disposition(project: &Path, path: &Path) -> WorkspaceDisposition {
         // project (and report nothing), or a clone that sits at this path.
         return WorkspaceDisposition { exists: true, checked: false, is_main: p == root, ..Default::default() };
     }
-    let branch = git::current_branch(&p);
-    let status = git::work_status(&p);
+    let (status, extra) = match git::work_status_detailed(&p) {
+        Ok(pair) => pair,
+        Err(_) => return WorkspaceDisposition { exists: true, checked: false, is_main: p == root, ..Default::default() },
+    };
+    let branch = status.branch.clone();
     let mut d = WorkspaceDisposition {
         exists: true,
         checked: true,
         is_main: p == root,
-        uncommitted: uncommitted(&p),
-        unpushed: unpushed(&p, branch.as_deref()),
+        uncommitted: extra.changed,
+        unpushed: if status.head.is_some() { unpushed(&p, branch.as_deref()) } else { 0 },
         ahead_of_base: status.ahead_of_base,
         branch: branch.clone(),
         pr: None,
@@ -231,9 +281,9 @@ pub fn disposition(project: &Path, path: &Path) -> WorkspaceDisposition {
     };
     if let Some(b) = branch.as_deref() {
         if git::remote_url(&p).is_some() && crate::github::available() {
-            if let Ok(prs) = crate::github::prs_for_branch(&p, b) {
+            if let Ok(mut prs) = crate::github::branch_prs(&p, &[b.to_string()]) {
                 d.pr_checked = true;
-                d.pr = prs.into_iter().next().map(|pr| WorkspacePr { number: pr.number, title: pr.title, url: pr.url, state: pr.state, is_draft: pr.is_draft });
+                d.pr = prs.remove(b).map(|pr| WorkspacePr { number: pr.number, title: pr.title, url: pr.url, state: pr.state, is_draft: pr.draft });
             }
         }
     }

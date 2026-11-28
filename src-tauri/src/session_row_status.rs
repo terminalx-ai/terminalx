@@ -5,8 +5,10 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use serde_json::json;
 use crate::github::rows::{RowPr, Poll, POLL_INTERVAL, FRESH_FOR};
 
-const LOCAL_INTERVAL: Duration = Duration::from_secs(10);
-const LOCAL_FRESH: Duration = Duration::from_secs(30);
+const LOCAL_INTERVAL: Duration = Duration::from_secs(60);
+const LOCAL_FRESH: Duration = Duration::from_secs(120);
+const WANTED_TTL: Duration = Duration::from_secs(180);
+const WORK_POOL_SIZE: usize = 4;
 type Rows = BTreeMap<String, String>; // session -> observed branch
 
 #[derive(Default)]
@@ -17,6 +19,8 @@ struct Cache {
     wanted: BTreeMap<String, BTreeMap<String, (String, Instant)>>,
     /// Project -> workspace folders whose work state is wanted, and when last asked for.
     wanted_work: BTreeMap<String, BTreeMap<String, Instant>>,
+    /// Tabs last observed in-progress, so turn completion triggers an immediate refresh.
+    active_tabs: HashSet<String>,
     background: HashSet<String>,
     background_at: Option<Instant>,
     busy: bool,
@@ -42,7 +46,7 @@ impl LocalRefs {
     fn eligible(&self, branch: &str) -> bool { self.default.as_deref() != Some(branch) && self.heads.contains_key(branch) }
 }
 
-trait Source: Send + 'static {
+trait Source: Clone + Send + 'static {
     fn background(&self) -> HashSet<String>;
     fn refs(&self, path: &Path) -> anyhow::Result<LocalRefs>;
     fn associations(&self, session: &str) -> anyhow::Result<Vec<String>>;
@@ -50,6 +54,7 @@ trait Source: Send + 'static {
     /// What a workspace holds: uncommitted changes, commits `default` lacks, or neither. None when unreadable.
     fn work(&self, cwd: &Path, default: Option<&str>) -> Option<&'static str>;
 }
+#[derive(Clone)]
 struct LiveSource(SessionManager);
 impl Source for LiveSource {
     fn background(&self) -> HashSet<String> {
@@ -133,6 +138,17 @@ impl SessionManager {
             if let Some(branch) = &session.branch { projects.entry(key.clone()).or_default().insert(session.id.clone(), branch.clone()); }
             if !shared.contains(&session.id) { folders.entry(key.clone()).or_default().insert(session.cwd.clone()); }
         }
+        let mut now_active = HashSet::new();
+        for (session, _) in &mine {
+            for tab in &session.tabs {
+                let tab_key = key_of(&session.id, &tab.id);
+                let status = self.tabs.lock().unwrap().get(&tab_key).map(|rt| rt.lock().unwrap().status).unwrap_or(tab.status);
+                if matches!(status, TabStatus::InProgress | TabStatus::Waiting) {
+                    now_active.insert(tab_key);
+                }
+            }
+        }
+        self.row_prs.observe_turn_activity(&now_active);
         self.row_prs.refresh_with(projects, folders, LiveSource(self.clone()));
         mine.iter().map(|(session, key)| {
             let tabs: Vec<_> = session.tabs.iter().map(|tab| {
@@ -182,6 +198,23 @@ impl Drop for Running {
 }
 
 impl PrCache {
+    /// Wake the next local status refresh immediately (e.g. after turn completion or focus/FS change).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn notify_local_change(&self) {
+        let mut cache = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        cache.next = None;
+    }
+
+    /// Detect when any previously active tab completes a turn and clear the idle throttle.
+    fn observe_turn_activity(&self, now_active: &HashSet<String>) {
+        let mut cache = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let completed = cache.active_tabs.iter().any(|tab| !now_active.contains(tab));
+        cache.active_tabs.clone_from(now_active);
+        if completed {
+            cache.next = None;
+        }
+    }
+
     fn background(&self, key: &str) -> bool {
         let cache = self.0.lock().unwrap_or_else(|e| e.into_inner());
         cache.background_at.is_some_and(|at| at.elapsed() < LOCAL_FRESH) && cache.background.contains(key)
@@ -219,8 +252,8 @@ impl PrCache {
             let wanted = cache.wanted_work.entry(project).or_default();
             for cwd in cwds { wanted.insert(cwd, now); }
         }
-        cache.wanted.retain(|_, rows| { rows.retain(|_, (_, seen)| now.duration_since(*seen) < Duration::from_secs(60)); !rows.is_empty() });
-        cache.wanted_work.retain(|_, cwds| { cwds.retain(|_, seen| now.duration_since(*seen) < Duration::from_secs(60)); !cwds.is_empty() });
+        cache.wanted.retain(|_, rows| { rows.retain(|_, (_, seen)| now.duration_since(*seen) < WANTED_TTL); !rows.is_empty() });
+        cache.wanted_work.retain(|_, cwds| { cwds.retain(|_, seen| now.duration_since(*seen) < WANTED_TTL); !cwds.is_empty() });
         if cache.busy || cache.next.is_some_and(|next| next > now) { return; }
         let mut wanted: BTreeMap<String, (Rows, Vec<String>)> = cache.wanted.iter().map(|(path, rows)| (path.clone(), (rows.iter().map(|(id, (branch, _))| (id.clone(), branch.clone())).collect::<Rows>(), Vec::new()))).collect();
         for (path, cwds) in &cache.wanted_work { wanted.entry(path.clone()).or_default().1 = cwds.keys().cloned().collect(); }
@@ -246,7 +279,7 @@ impl PrCache {
                 let mut project = previous.unwrap_or_else(|| ProjectStatus { failures:0, due:now, checked_at:None, observed:Rows::new(), local:None, local_at:now, associations:HashMap::new(), prs:None, work:HashMap::new() });
                 project.local = source.refs(Path::new(&path)).ok();
                 let default = project.local.as_ref().and_then(|local| local.default.clone());
-                project.work = cwds.into_iter().filter_map(|cwd| source.work(Path::new(&cwd), default.as_deref()).map(|work| (cwd, work))).collect();
+                project.work = inspect_work_parallel(&cwds, default.as_deref(), &source);
                 project.local_at = Instant::now();
                 project.observed = rows;
                 if !paused && project.due <= now {
@@ -266,6 +299,34 @@ impl PrCache {
         }));
         if let Err(error) = spawned { log::warn!("start session row status poll: {error}"); }
     }
+}
+
+/// Inspect workspace working-tree states with a bounded worker pool so many
+/// worktrees do not serialize `git status` + `git rev-list` subprocesses.
+fn inspect_work_parallel(cwds: &[String], default: Option<&str>, source: &impl Source) -> HashMap<String, &'static str> {
+    let workers = cwds.len().min(WORK_POOL_SIZE);
+    if workers <= 1 {
+        return cwds.iter().filter_map(|cwd| source.work(Path::new(cwd), default).map(|work| (cwd.clone(), work))).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results: Mutex<HashMap<String, &'static str>> = Mutex::new(HashMap::with_capacity(cwds.len()));
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let worker_source = source.clone();
+            let next = &next;
+            let results = &results;
+            scope.spawn(move || {
+                loop {
+                    let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(cwd) = cwds.get(idx) else { break };
+                    if let Some(work) = worker_source.work(Path::new(cwd), default) {
+                        results.lock().unwrap_or_else(|e| e.into_inner()).insert(cwd.clone(), work);
+                    }
+                }
+            });
+        }
+    });
+    results.into_inner().unwrap_or_else(|e| e.into_inner())
 }
 
 pub(super) fn activity(rt: &TabRuntime) -> Option<&'static str> {
@@ -646,5 +707,31 @@ mod tests {
         due(&cache, true);
         cache.refresh_rows(rows(&["0"]), Fake { state:"MERGED", ..Default::default() }); await_poll(&cache);
         assert_eq!(selected(&cache, "0"), "merged");
+    }
+    #[test]
+    fn turn_completion_wakes_idle_throttle_and_parallel_work_pool_collects_all() {
+        let cache = Arc::new(PrCache::default());
+        let fake = Fake::default();
+        let folders = [("repo".into(), (0..8).map(|n| format!("/w/{}", if n % 2 == 0 { "dirty" } else { "ahead" })).collect())].into();
+        cache.refresh_with(rows(&["0"]), folders, fake.clone());
+        await_poll(&cache);
+        assert_eq!(fake.scans.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.read_work("repo", "/w/dirty"), "uncommitted");
+        assert_eq!(cache.read_work("repo", "/w/ahead"), "committed");
+        // Without a turn completion, the 60s idle fallback suppresses immediate re-polling.
+        cache.refresh_rows(rows(&["0"]), fake.clone());
+        await_poll(&cache);
+        assert_eq!(fake.scans.load(Ordering::SeqCst), 1);
+        // Transitioning a tab from active to idle clears the throttle.
+        cache.observe_turn_activity(&["s:t1".into()].into());
+        cache.observe_turn_activity(&HashSet::new());
+        cache.refresh_rows(rows(&["0"]), fake.clone());
+        await_poll(&cache);
+        assert_eq!(fake.scans.load(Ordering::SeqCst), 2);
+        // Explicit change notifications also wake the local refresh immediately.
+        cache.notify_local_change();
+        cache.refresh_rows(rows(&["0"]), fake.clone());
+        await_poll(&cache);
+        assert_eq!(fake.scans.load(Ordering::SeqCst), 3);
     }
 }
