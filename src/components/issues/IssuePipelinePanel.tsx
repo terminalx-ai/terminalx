@@ -1,7 +1,7 @@
 import { setCloudPipelineResolveConflicts } from "@/lib/cloudPipelines";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { Check, ChevronRight, CircleAlert, Cloud, CornerUpLeft, ExternalLink, GitMerge, GitPullRequest, Loader2, MessageSquare, Pause, RotateCw } from "@/icons";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { PipelineCheckList, webUrl } from "@/components/changes/PrChecks";
@@ -209,7 +209,7 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
           {checks && checks.counts.total > 0 && <span data-testid="pipeline-checks-count" className="text-xs text-muted-foreground">· {requiredChecksLine(checks)}</span>}
         </span>
         {pipeline.pr && (
-          <button type="button" onClick={() => void openUrl(pipeline.pr!.url)} className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground">
+          <button type="button" onClick={() => void openExternalWebUrl(pipeline.pr!.url)} className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground">
             {done ? <GitMerge className="size-3 text-merged" /> : <GitPullRequest className="size-3" />}
             Pull request #{pipeline.pr.number}
             <ExternalLink className="size-3" />
@@ -339,7 +339,7 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
                   Re-run check
                 </Button>
               )}
-              <Button size="sm" variant="outline" disabled={!runUrl} onClick={() => void openUrl(runUrl!)}>
+              <Button size="sm" variant="outline" disabled={!runUrl} onClick={() => void openExternalWebUrl(runUrl!)}>
                 <ExternalLink />
                 Open the run
               </Button>
@@ -403,7 +403,7 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
                 <span className="min-w-0 text-muted-foreground">
                   {event.message}
                   {event.url && (
-                    <button type="button" aria-label="Open on the web" onClick={() => void openUrl(event.url!)} className="ml-1.5 inline-flex translate-y-0.5 text-faint hover:text-foreground">
+                    <button type="button" aria-label="Open on the web" onClick={() => void openExternalWebUrl(event.url!)} className="ml-1.5 inline-flex translate-y-0.5 text-faint hover:text-foreground">
                       <ExternalLink className="size-3" />
                     </button>
                   )}

@@ -1,4 +1,4 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { AllowNewMachines } from "@/components/cloud/AllowNewMachines";
 import { ProvidersPaused } from "@/lib/hiddenProviders";
 import type { CloudProviderSummary } from "@/lib/api";
@@ -1000,7 +1000,7 @@ export function NewSessionView({
                 <p className="text-xs text-muted-foreground">
                   {harness.installHint
                     ? <>Install {harness.name} by running <code className="font-mono">{harness.installHint}</code></>
-                    : <>Install {harness.name} with its <button type="button" className="underline" onClick={() => void openUrl(harness.installUrl)}>setup guide</button>.</>}
+                    : <>Install {harness.name} with its <button type="button" className="underline" onClick={() => void openExternalWebUrl(harness.installUrl)}>setup guide</button>.</>}
                 </p>
               )}
               {/* Reached with a role that changed meanwhile (demoted while drafting): Create is off, with the reason. */}

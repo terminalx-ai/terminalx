@@ -35,6 +35,7 @@ const app = vi.hoisted(() => ({
   activate: vi.fn(),
   openBrowserTab: vi.fn(async () => "page-1"),
   ask: vi.fn(async () => undefined),
+  confirmInApp: vi.fn(async () => true),
   copy: vi.fn(async () => undefined),
 }));
 vi.mock("@/lib/sessions", () => ({
@@ -44,10 +45,11 @@ vi.mock("@/lib/sessions", () => ({
 }));
 vi.mock("@/lib/sessionTabs", () => ({ activatePeer: app.activate }));
 vi.mock("@/lib/browser", () => ({ openBrowserTab: app.openBrowserTab }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: app.confirmInApp }));
 vi.mock("@/lib/linkSessionStart", () => ({ askToStartFromLink: app.ask }));
 vi.mock("@/lib/clipboard", () => ({ copyText: app.copy }));
 
-const { DESKTOP_LINK_REQUESTED, asDesktopLink, asDesktopLinks, bootDesktopLinks, followDesktopLink } = await import("./desktopLinks");
+const { DESKTOP_LINK_REQUESTED, asDesktopLink, asDesktopLinks, bootDesktopLinks, followDesktopLink, isLoopbackOrPrivateBrowserUrl } = await import("./desktopLinks");
 const { getErrorToasts, dismissError, runErrorAction } = await import("@/lib/errorToasts");
 
 const ping = () => { for (const handler of native.listeners.get(DESKTOP_LINK_REQUESTED) ?? []) handler(); };
@@ -169,10 +171,45 @@ describe("session links", () => {
 });
 
 describe("browser links", () => {
-  it("open the page in a Browser tab of the session on screen", async () => {
+  it("asks explicit confirmation showing full origin and path before opening a public page", async () => {
     app.state.selectedSessionId = "s1";
-    await followDesktopLink({ kind: "browser", url: "http://localhost:61431/o/billing" }, routes());
-    expect(app.openBrowserTab).toHaveBeenCalledExactlyOnceWith("s1", "/code/web", "http://localhost:61431/o/billing");
+    app.confirmInApp.mockResolvedValueOnce(true);
+    await followDesktopLink({ kind: "browser", url: "https://console.example.com/o/billing?tab=invoices" }, routes());
+    expect(app.confirmInApp).toHaveBeenCalledOnce();
+    const request = (app.confirmInApp.mock.calls[0] as unknown as [{ title: string; body?: string }])[0];
+    expect(request.body).toContain("https://console.example.com/o/billing?tab=invoices");
+    expect(app.openBrowserTab).toHaveBeenCalledExactlyOnceWith("s1", "/code/web", "https://console.example.com/o/billing?tab=invoices");
+  });
+
+  it("does not navigate when the user cancels browser link confirmation", async () => {
+    app.state.selectedSessionId = "s1";
+    app.confirmInApp.mockResolvedValueOnce(false);
+    await followDesktopLink({ kind: "browser", url: "https://console.example.com/o/billing" }, routes());
+    expect(app.confirmInApp).toHaveBeenCalledOnce();
+    expect(app.openBrowserTab).not.toHaveBeenCalled();
+  });
+
+  it("blocks loopback and private-network targets without prompting or navigating", async () => {
+    app.state.selectedSessionId = "s1";
+    for (const blocked of [
+      "http://localhost:61431/o/billing",
+      "http://127.0.0.1:9222/json",
+      "http://[::1]:3000/admin",
+      "http://10.0.0.5/internal",
+      "http://192.168.1.1/router",
+      "http://172.16.0.1/metrics",
+      "http://169.254.169.254/latest/meta-data/",
+      "http://sub.localhost/debug",
+      "http://printer.local/config",
+      "http://[::ffff:127.0.0.1]/secret",
+    ]) {
+      expect(isLoopbackOrPrivateBrowserUrl(blocked)).toBe(true);
+      await followDesktopLink({ kind: "browser", url: blocked }, routes());
+    }
+    expect(app.confirmInApp).not.toHaveBeenCalled();
+    expect(app.openBrowserTab).not.toHaveBeenCalled();
+    const toast = getErrorToasts().find((candidate) => candidate.key === "browser-link");
+    expect(toast?.title).toBe("Blocked local or private browser link");
   });
 
   it("open nothing without a session on this Mac on screen, and say what to do", async () => {
@@ -180,10 +217,11 @@ describe("browser links", () => {
       app.state.selectedSessionId = selected;
       await followDesktopLink({ kind: "browser", url: "https://example.com" }, routes());
     }
+    expect(app.confirmInApp).not.toHaveBeenCalled();
     expect(app.openBrowserTab).not.toHaveBeenCalled();
     const toast = getErrorToasts().find((candidate) => candidate.key === "browser-link");
     expect(toast?.title).toBe("Open a session to see that page");
-    expect(toast?.cause).toBe("https://example.com");
+    expect(toast?.cause).toBe("https://example.com/");
   });
 });
 

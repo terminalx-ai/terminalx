@@ -47,7 +47,7 @@ const { closePeer, workspaceRow } = await import("@/lib/sessionTabs");
 const { reopenClosedTab } = await import("@/lib/tabActions");
 const { setPrefs } = await import("@/lib/prefs");
 const { resetTabLayouts } = await import("@/lib/tabLayouts");
-const { dropEditors, getEditors, openFile, restoreReviewTabs, setEditorDirty } = await import("@/lib/editors");
+const { dropEditors, flushReviewTabsPersistence, getEditors, openFile, restoreReviewTabs, setEditorDirty } = await import("@/lib/editors");
 const { getTerminalState } = await import("@/lib/terminal");
 const { runShortcut } = await import("@/lib/hotkeys");
 const { SessionView } = await import("./SessionView");
@@ -167,6 +167,7 @@ describe("a file opened in a local session", () => {
   it("is put back where it was by Reopen Closed Tab, and comes back after a restart", async () => {
     await show();
     const id = await open("docs/scripts.md");
+    flushReviewTabsPersistence();
     // What a restart reads: the tab's place, not its text.
     expect(restoreReviewTabs(localStorage.getItem("terminalx:review-tabs:v1")).editors.map((entry) => entry.id)).toEqual([id]);
     const row = workspaceRow(getSessionStore().sessions.find((entry) => entry.id === "work")!);

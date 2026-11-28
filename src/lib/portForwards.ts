@@ -234,6 +234,7 @@ export const PORT_TOAST_MS = 12_000;
 let toasts: PortToast[] = [];
 let toastSeq = 0;
 const toastListeners = new Set<() => void>();
+const __subscribe_toastListeners = (listener: () => void) => { toastListeners.add(listener); return () => { toastListeners.delete(listener); }; };
 const toastTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function emitToasts() {
@@ -265,10 +266,7 @@ export function dismissPortToast(id: string) {
 /** The toasts for forwards that opened unasked on `connectionId`. */
 export function usePortToasts(connectionId: string | null): PortToast[] {
   const all = useSyncExternalStore(
-    (listener) => {
-      toastListeners.add(listener);
-      return () => toastListeners.delete(listener);
-    },
+    __subscribe_toastListeners,
     () => toasts,
     () => toasts,
   );

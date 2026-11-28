@@ -56,6 +56,7 @@ export const LINK_ARMING_MS = 800;
 let request: LinkSessionRequest | null = null;
 let nextId = 1;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 function set(next: LinkSessionRequest | null) {
   request = next;
@@ -72,7 +73,7 @@ export function getLinkSessionRequest(): LinkSessionRequest | null {
 }
 
 export function useLinkSessionRequest(): LinkSessionRequest | null {
-  return useSyncExternalStore((listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; }, () => request, () => request);
+  return useSyncExternalStore(__subscribe_listeners, () => request, () => request);
 }
 
 const clean = (path: string) => path.replace(/\/+$/, "") || "/";

@@ -23,6 +23,7 @@ export interface LocalRuntimeView {
 
 let current: LocalRuntimeView = { state: null, readAt: 0 };
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 /** The attachment and view connection this window's terminals are on. */
 let attachedOver: { generation: number; view: number } | null = null;
 /** Read unconnected before the first connected read: terminals made then never attached. */
@@ -125,10 +126,7 @@ export async function replaceLocalRuntime(epoch: string, stop: LocalRuntimeWorkI
 
 export function useLocalRuntime(): LocalRuntimeView {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => current,
     () => current,
   );

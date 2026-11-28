@@ -443,6 +443,7 @@ export interface NewSessionSeed {
 let seed: NewSessionSeed | null = null;
 let seeds = 0;
 const seedListeners = new Set<() => void>();
+const __subscribe_seedListeners = (listener: () => void) => { seedListeners.add(listener); return () => { seedListeners.delete(listener); }; };
 
 function publishSeed() {
   for (const listener of [...seedListeners]) listener();
@@ -457,10 +458,7 @@ export function openMachineDraft(machineId: string, draft: { prompt?: string; is
 
 export function useNewSessionSeed(): NewSessionSeed | null {
   return useSyncExternalStore(
-    (listener) => {
-      seedListeners.add(listener);
-      return () => seedListeners.delete(listener);
-    },
+    __subscribe_seedListeners,
     () => seed,
     () => seed,
   );

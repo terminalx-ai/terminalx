@@ -36,6 +36,7 @@ const signedOut: AccountStatus = {
 
 let state: AccountState = { status: signedOut, ready: false, busy: false };
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 let refreshTimer: number | null = null;
 
 function set(patch: Partial<AccountState>) {
@@ -287,10 +288,7 @@ export function subscribeAccount(listener: () => void): () => void {
 
 export function useAccount(): AccountState {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => state,
     () => state,
   );

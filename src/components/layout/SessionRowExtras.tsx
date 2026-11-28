@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { archiveWithUndo } from "@/lib/archiveNotices";
 import { Archive, Pencil } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -88,8 +88,13 @@ export function SessionRowData({ children }: { children: ReactNode }) {
 }
 
 export function useSessionDraft(sessions: readonly SessionEntry[]): string {
+  const tabIdsKey = sessions.map((session) => session.tabs.map((tab) => tab.id).join(",")).join("|");
+  const subscribe = useCallback(
+    (changed: () => void) => subscribeTabDrafts(tabIdsKey ? tabIdsKey.split(/[|,]/).filter(Boolean) : [], changed),
+    [tabIdsKey],
+  );
   return useSyncExternalStore(
-    (changed) => subscribeTabDrafts(sessions.flatMap((session) => session.tabs.map((tab) => tab.id)), changed),
+    subscribe,
     () => {
       for (const session of sessions) {
         const active = getDraft(session.activeTab ?? "");

@@ -9,7 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { thisComputer, fileManager } from "@/lib/platform";
 import { bindingText } from "@/lib/shortcuts";
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { BookOpen, Check, ChevronRight, CircleAlert, CircleCheck, Eye, EyeOff, FileText, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Search, Settings2, Trash2, X } from "@/icons";
 import { AgentSetup } from "@/components/session/AgentSetup";
 import { Button } from "@/components/ui/button";
@@ -132,7 +132,7 @@ export function OpenCodeAgent({ harness, readiness, checking, recheck }: {
         <Button size="xs" variant="ghost" className="text-xs" onClick={() => void opencode.openLogs().catch((e: unknown) => showError("Couldn’t open OpenCode’s logs", e))}>
           <FileText /> View logs
         </Button>
-        <Button size="xs" variant="ghost" className="text-xs" onClick={() => void openUrl(DOCS)}><BookOpen /> Docs</Button>
+        <Button size="xs" variant="ghost" className="text-xs" onClick={() => void openExternalWebUrl(DOCS)}><BookOpen /> Docs</Button>
         <Button size="xs" variant="ghost" className="text-xs" disabled={checking} onClick={() => { recheck(); void load(); }}>
           {checking ? <Loader2 className="animate-spin" /> : <RefreshCw />} Refresh
         </Button>
@@ -405,7 +405,7 @@ function ConnectForm({ provider, take, onCancel, onConnected, replacing }: {
       <Mark provider={provider} />
       <div className="text-[15px] font-semibold">{provider.name}</div>
       <span className="inline-flex h-[18px] items-center rounded bg-veil-strong px-1.5 text-[10.5px] font-medium text-muted-foreground">Not connected</span>
-      {keyPage && <button type="button" onClick={() => void openUrl(keyPage)} className="ml-auto text-[12px] text-muted-foreground underline underline-offset-2 hover:text-foreground">Get a key</button>}
+      {keyPage && <button type="button" onClick={() => void openExternalWebUrl(keyPage)} className="ml-auto text-[12px] text-muted-foreground underline underline-offset-2 hover:text-foreground">Get a key</button>}
     </div>}
     {!replacing && <p className="mt-1 text-[12.5px] text-muted-foreground">{blurb(provider)}</p>}
     {!provider.local && <div className="mt-4 grid gap-1.5">

@@ -53,6 +53,7 @@ export function applyDesktopInboxEvent(event: DesktopInboxEvent) {
 export interface ReassignedNotice { id: string; organizationId: string; workspaceId: string; name: string; actorId: string; previousOwnerId: string; note?: string }
 let notices: ReassignedNotice[] = [];
 const noticeListeners = new Set<() => void>();
+const __subscribe_noticeListeners = (listener: () => void) => { noticeListeners.add(listener); return () => { noticeListeners.delete(listener); }; };
 function publishNotices(next: ReassignedNotice[]) { notices = next; for (const listener of noticeListeners) listener(); }
 function noticeScope() {
   const status = getAccount().status;
@@ -87,7 +88,7 @@ async function takeReassignedNotice(event: ReassignedEvent) {
   if (scope === noticeScope()) flushReassignedNotices();
 }
 export function getReassignedNotices() { return notices; }
-export function useReassignedNotices() { return useSyncExternalStore((listener) => { noticeListeners.add(listener); return () => { noticeListeners.delete(listener); }; }, () => notices); }
+export function useReassignedNotices() { return useSyncExternalStore(__subscribe_noticeListeners, () => notices); }
 export function dismissReassignedNotice(id: string) { publishNotices(notices.filter((notice) => notice.id !== id)); }
 export function bootDesktopInbox() {
   if (stop) return;

@@ -1,7 +1,7 @@
 import { RegisteredSetting } from "./settingsRegistry";
 import { CONVERSATION_DELETION } from "@/lib/conversationRetention";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { Loader2, Undo2 } from "@/icons";
 import type { MergedRemovalView } from "@terminalx/portable/workspace";
 import { openWorkspaceRemove } from "@/lib/dialogs";
@@ -193,7 +193,7 @@ function RemovedList({ changes }: { changes: number }) {
                     {record.branch} at {record.commit.slice(0, 7)}
                   </span>
                   <span className="block text-[11px] text-muted-foreground">
-                    <button type="button" className="rounded-sm underline decoration-dotted underline-offset-2 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40" onClick={() => void openUrl(record.pr.url)}>
+                    <button type="button" className="rounded-sm underline decoration-dotted underline-offset-2 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40" onClick={() => void openExternalWebUrl(record.pr.url)}>
                       Pull request #{record.pr.number}
                     </button>{" "}
                     merged; removed {when(record.removedAt)}. {branchOutcome(record)}

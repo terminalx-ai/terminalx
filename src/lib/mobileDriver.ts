@@ -5,6 +5,7 @@ import { useSyncExternalStore } from "react";
 let driven = new Set<string>();
 let version = 0;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 function publish(next: Set<string>) {
   driven = next;
@@ -33,10 +34,7 @@ void subscribeBackend();
 
 export function useMobileDrivenTabs(): Set<string> {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => driven,
     () => driven,
   );

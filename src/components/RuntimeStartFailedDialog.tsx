@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { exit, relaunch } from "@tauri-apps/plugin-process";
 import { Copy, Cpu, MessageSquareWarning, RotateCw, ScrollText } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -133,7 +133,7 @@ export function RuntimeStartFailedDialog({ failed }: { failed: LocalRuntimeStart
             <Button variant="outline" className="shrink-0 whitespace-nowrap text-[12.5px] text-muted-foreground [&_svg]:size-3.5" onClick={() => void copyLogs()}>
               <Copy />{copied ? "Copied" : "Copy logs"}
             </Button>
-            <Button variant="outline" className="shrink-0 whitespace-nowrap text-[12.5px] text-muted-foreground [&_svg]:size-3.5" onClick={() => void act(() => openUrl(reportUrl(failed)))}>
+            <Button variant="outline" className="shrink-0 whitespace-nowrap text-[12.5px] text-muted-foreground [&_svg]:size-3.5" onClick={() => void act(() => openExternalWebUrl(reportUrl(failed)))}>
               <MessageSquareWarning />Report…
             </Button>
             <Button ref={restart} className="shrink-0 whitespace-nowrap text-[12.5px] font-medium [&_svg]:size-3.5" disabled={busy !== null} onClick={() => void leave("restart")}>

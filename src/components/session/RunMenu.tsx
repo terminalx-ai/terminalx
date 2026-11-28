@@ -97,6 +97,7 @@ export interface RestartOffer {
 
 let offers: Record<string, RestartOffer> = {};
 const offerListeners = new Set<() => void>();
+const __subscribe_offerListeners = (listener: () => void) => { offerListeners.add(listener); return () => { offerListeners.delete(listener); }; };
 function setOffer(sessionId: string, offer: RestartOffer | null) {
   const next = { ...offers };
   if (offer) next[sessionId] = offer;
@@ -107,7 +108,7 @@ function setOffer(sessionId: string, offer: RestartOffer | null) {
 
 export function useRestartOffer(sessionId: string): RestartOffer | null {
   return useSyncExternalStore(
-    (listener) => { offerListeners.add(listener); return () => { offerListeners.delete(listener); }; },
+    __subscribe_offerListeners,
     () => offers[sessionId] ?? null,
     () => offers[sessionId] ?? null,
   );

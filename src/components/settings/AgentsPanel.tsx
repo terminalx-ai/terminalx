@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { secretStoreShort, secretStoreWord } from "@/lib/platform";
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { Check, ChevronRight, CircleAlert, CircleCheck, ExternalLink, Eye, EyeOff, KeyRound, Loader2, RefreshCw, ServerCog, SquareTerminal, Terminal, Trash2 } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { AgentSetup } from "@/components/session/AgentSetup";
@@ -516,7 +516,7 @@ function Radio({ on }: { on: boolean }) {
 function GetKey({ harness, label }: { harness: string; label: string }) {
   const url = KEY_PAGES[harness];
   if (!url) return null;
-  return <button type="button" onClick={() => void openUrl(url)} className="ml-auto flex shrink-0 items-center gap-1 whitespace-nowrap text-[12px] font-normal text-muted-foreground underline underline-offset-2 hover:text-foreground">
+  return <button type="button" onClick={() => void openExternalWebUrl(url)} className="ml-auto flex shrink-0 items-center gap-1 whitespace-nowrap text-[12px] font-normal text-muted-foreground underline underline-offset-2 hover:text-foreground">
     {label}{label === "Get a key" && <ExternalLink aria-hidden className="size-[11px]" />}
   </button>;
 }

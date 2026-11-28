@@ -23,6 +23,7 @@ export interface NotificationsOff {
 let shown: NotificationsOff | null = null;
 let hiddenForRun = false;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 const emit = () => {
   for (const listener of listeners) listener();
 };
@@ -55,10 +56,7 @@ export function resetNotificationsOffForTest() {
 
 export function useNotificationsOff(): NotificationsOff | null {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => shown,
     () => shown,
   );

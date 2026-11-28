@@ -15,6 +15,7 @@ interface ViewerState {
 
 let state: ViewerState | null = null;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 const emit = () => listeners.forEach((listener) => listener());
 
 /** Show `images` in the image viewer, starting at `index`. */
@@ -39,10 +40,7 @@ export function stepImageViewer(by: number) {
 
 export function useImageViewer(): ViewerState | null {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => state,
     () => null,
   );

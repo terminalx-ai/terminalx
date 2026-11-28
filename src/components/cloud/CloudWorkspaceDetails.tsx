@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { Popover } from "radix-ui";
 import { Info } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -41,7 +41,7 @@ export function CloudWorkspaceDetailsCard({ item, initialCopy }: { item: CloudWo
   const logUrl = d?.provisioningLog?.url;
   const openLog = async () => {
     if (!logUrl || currentResult.current !== result || scope !== detailsScope()) return;
-    try { await openUrl(logUrl); }
+    try { await openExternalWebUrl(logUrl); }
     catch { if (currentResult.current === result && scope === detailsScope()) setLogError(true); }
   };
   const resourceText = (resource: { totalBytes: number; availableBytes: number } | null | undefined) => resource && Number.isFinite(resource.totalBytes) && Number.isFinite(resource.availableBytes)

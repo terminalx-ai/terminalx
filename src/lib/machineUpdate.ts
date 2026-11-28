@@ -142,6 +142,7 @@ const EMPTY: MachineUpdateEntry = { status: null, loading: false, requesting: fa
 
 let entries: Record<string, MachineUpdateEntry> = {};
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 function patch(machineId: string, change: Partial<MachineUpdateEntry>) {
   entries = { ...entries, [machineId]: { ...(entries[machineId] ?? EMPTY), ...change } };
@@ -154,10 +155,7 @@ export function getMachineUpdate(machineId: string): MachineUpdateEntry {
 
 export function useMachineUpdateEntry(machineId: string): MachineUpdateEntry {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => getMachineUpdate(machineId),
     () => getMachineUpdate(machineId),
   );

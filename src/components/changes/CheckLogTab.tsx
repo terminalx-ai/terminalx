@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { CircleCheck, CircleX, Copy, ExternalLink, Loader2, RotateCcw, Search, Wrench } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -138,7 +138,7 @@ export function CheckLogTab({ entry, visible }: { entry: CheckLogEditorEntry; vi
         {source.rerunCheck && <Button size="sm" variant="outline" disabled={rerunning || running} onClick={() => void rerun()} title={failed ? "Re-run this run's failed jobs" : "Re-run this run"}>
           {rerunning ? <Loader2 className="animate-spin" /> : <RotateCcw />}Re-run job
         </Button>}
-        {runUrl && <WithTooltip label="Open on GitHub"><Button size="icon-sm" variant="ghost" aria-label="Open on GitHub" onClick={() => void openUrl(runUrl)}><ExternalLink /></Button></WithTooltip>}
+        {runUrl && <WithTooltip label="Open on GitHub"><Button size="icon-sm" variant="ghost" aria-label="Open on GitHub" onClick={() => void openExternalWebUrl(runUrl)}><ExternalLink /></Button></WithTooltip>}
       </span>
     </div>
     <div className="flex h-9 shrink-0 items-center gap-2 border-b border-hairline px-3 text-xs text-muted-foreground">

@@ -623,6 +623,7 @@ export interface ShareTarget {
 
 let shareTarget: ShareTarget | null = null;
 const shareListeners = new Set<() => void>();
+const __subscribe_shareListeners = (listener: () => void) => { shareListeners.add(listener); return () => { shareListeners.delete(listener); }; };
 
 export function openShareDialog(target: ShareTarget | null) {
   shareTarget = target;
@@ -632,10 +633,7 @@ export function openShareDialog(target: ShareTarget | null) {
 /** Mounted once (AppShell): the share dialog for `openShareDialog`. */
 export function CloudShareDialogHost() {
   const target = useSyncExternalStore(
-    (listener) => {
-      shareListeners.add(listener);
-      return () => shareListeners.delete(listener);
-    },
+    __subscribe_shareListeners,
     () => shareTarget,
     () => null,
   );

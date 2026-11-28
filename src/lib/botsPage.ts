@@ -11,6 +11,7 @@ export type BotsPage = { page: "team"; focus?: boolean } | { page: "hire"; roleI
 
 let current: BotsPage = { page: "team" };
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 function set(next: BotsPage) {
   current = next;
@@ -19,10 +20,7 @@ function set(next: BotsPage) {
 
 export function useBotsPage(): BotsPage {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => current,
     () => current,
   );

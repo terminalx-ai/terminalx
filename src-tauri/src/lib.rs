@@ -468,7 +468,6 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_shell::init())
         .plugin(transparency::plugin())
         .plugin(platform_profile::plugin())
         // Size, place and maximized state, but never the frame: that is the build's (none on Windows and Linux,

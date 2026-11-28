@@ -16,6 +16,7 @@ import { thisComputer } from "@/lib/platform";
 import { listen } from "@tauri-apps/api/event";
 import { openBrowserTab } from "@/lib/browser";
 import { copyText } from "@/lib/clipboard";
+import { confirmInApp } from "@/lib/confirm";
 import { showError } from "@/lib/errorToasts";
 import { askToStartFromLink } from "@/lib/linkSessionStart";
 import { getSessionStore, selectSession } from "@/lib/sessions";
@@ -204,21 +205,94 @@ export async function followSessionLink(sessionId: string): Promise<boolean> {
 
 // ---- browser links
 
-/** Open a page from a link in a Browser tab of the session on screen. */
+function isPrivateIpv4(host: string): boolean {
+  const parts = host.split(".");
+  if (parts.length !== 4 || !parts.every((part) => /^\d{1,3}$/.test(part))) return false;
+  const nums = parts.map(Number);
+  if (nums.some((n) => n < 0 || n > 255)) return false;
+  const [a, b] = nums;
+  return (
+    a === 0 || // 0.0.0.0/8
+    a === 10 || // 10.0.0.0/8
+    a === 127 || // 127.0.0.0/8
+    (a === 100 && b >= 64 && b <= 127) || // 100.64.0.0/10 (CGNAT)
+    (a === 169 && b === 254) || // 169.254.0.0/16 (link-local / cloud metadata)
+    (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
+    (a === 192 && b === 168) // 192.168.0.0/16
+  );
+}
+
+function isPrivateIpv6(rawHost: string): boolean {
+  const host = rawHost.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!host.includes(":")) return false;
+  const bare = host.split("%")[0];
+  if (bare === "::" || bare === "::1") return true;
+  if (/^f[cd][0-9a-f]{2}:/.test(bare) || /^fe[89ab][0-9a-f]:/.test(bare)) return true;
+  // IPv4-mapped IPv6: ::ffff:127.0.0.1 or normalized ::ffff:7f00:1
+  if (bare.startsWith("::ffff:")) {
+    const tail = bare.slice("::ffff:".length);
+    if (isPrivateIpv4(tail)) return true;
+    const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail);
+    if (hex) {
+      const hi = parseInt(hex[1], 16);
+      const lo = parseInt(hex[2], 16);
+      const ipv4 = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+      if (isPrivateIpv4(ipv4)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * True when `raw` is malformed, uses a non-web scheme, carries credentials, or
+ * targets a loopback, link-local, or private-network host that an external
+ * `terminalx://browser` deep link must not reach.
+ */
+export function isLoopbackOrPrivateBrowserUrl(raw: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return true;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return true;
+  if (parsed.username || parsed.password || !parsed.hostname) return true;
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
+  if (isPrivateIpv4(host) || isPrivateIpv6(host)) return true;
+  return false;
+}
+
+/** Open a page from a link in a Browser tab of the session on screen, after explicit confirmation. */
 export async function openBrowserLink(url: string): Promise<void> {
+  if (isLoopbackOrPrivateBrowserUrl(url)) {
+    showError("External browser links can't open local or private-network addresses", url, {
+      title: "Blocked local or private browser link", key: "browser-link", tone: "warning", icon: "globe-lock", detail: "line", copy: false,
+    });
+    return;
+  }
+  const parsed = new URL(url);
   await whenSessionsLoaded();
   const store = getSessionStore();
   const session = isLocalKey(store.selectedSessionId)
     ? store.sessions.find((candidate) => candidate.id === store.selectedSessionId && !candidate.archived && !candidate.worktreeRemoved)
     : undefined;
   if (!session) {
-    showError(`Browser links open in the selected session's Browser tab. Select a session on ${thisComputer}, then open the link again`, url, {
+    showError(`Browser links open in the selected session's Browser tab. Select a session on ${thisComputer}, then open the link again`, parsed.href, {
       title: "Open a session to see that page", key: "browser-link", tone: "warning", icon: "globe-lock", detail: "line", copy: false,
     });
     return;
   }
+  const destination = `${parsed.origin}${parsed.pathname}${parsed.search}${parsed.hash}`;
+  const confirmed = await confirmInApp({
+    title: "Open link in TerminalX browser?",
+    body: `An external link wants to open this page in TerminalX's signed-in browser:\n\n${destination}`,
+    action: "Open page",
+    cancel: "Cancel",
+  });
+  if (!confirmed) return;
   try {
-    await openBrowserTab(session.id, session.cwd, url);
+    await openBrowserTab(session.id, session.cwd, parsed.href);
   } catch (error) {
     showError("Couldn't open the page from the link", error, { key: "browser-link" });
   }

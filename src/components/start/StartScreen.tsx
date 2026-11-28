@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { thisComputer } from "@/lib/platform";
 import { getName } from "@tauri-apps/api/app";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { BYPASS_MODE, FIRST_RUN_PERMISSION_MODE, PERMISSION_MODES, pickerMode } from "@terminalx/portable/agentSettings";
 import appMark from "../../../src-tauri/icons/128x128.png";
 import { ArrowUpRight, BookOpen, Check, ChevronsUpDown, Folder, FolderGit2, FolderOpen, Keyboard, Loader2, MousePointerClick, Zap, type LucideIcon } from "@/icons";
@@ -231,7 +231,7 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
               <button type="button" onClick={() => onOpenSettings("shortcuts")} className={cn(LINK, "inline-flex items-center gap-1.5")}>
                 <Keyboard aria-hidden className="size-[13px]" /> Keyboard shortcuts
               </button>
-              <button type="button" onClick={() => void openUrl(repoFile("README.md"))} className={cn(LINK, "inline-flex items-center gap-1.5")}>
+              <button type="button" onClick={() => void openExternalWebUrl(repoFile("README.md"))} className={cn(LINK, "inline-flex items-center gap-1.5")}>
                 <BookOpen aria-hidden className="size-[13px]" /> Read the docs <ArrowUpRight aria-hidden className="size-3" />
               </button>
             </span>

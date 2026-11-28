@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { confirmInApp } from "@/lib/confirm";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import {
   ArrowLeft,
   CalendarClock,
@@ -424,13 +424,13 @@ function RunTableRows({ run, waiting, expanded, duration, sessionTitle, sessionA
         </td>
         <td className="px-3 py-2.5">
           {run.issue ? (
-            <button type="button" onClick={() => void openUrl(run.issue!.url)} className="flex max-w-full items-start gap-1 text-left text-info hover:underline">
+            <button type="button" onClick={() => void openExternalWebUrl(run.issue!.url)} className="flex max-w-full items-start gap-1 text-left text-info hover:underline">
               <span className="shrink-0 font-mono">{run.issue.identifier}</span>
               <span className="truncate text-muted-foreground">{run.issue.title}</span>
               <ExternalLink className="mt-0.5 size-3 shrink-0" />
             </button>
           ) : run.pullRequest ? (
-            <button type="button" onClick={() => void openUrl(run.pullRequest!.url)} className="flex max-w-full items-start gap-1 text-left text-info hover:underline">
+            <button type="button" onClick={() => void openExternalWebUrl(run.pullRequest!.url)} className="flex max-w-full items-start gap-1 text-left text-info hover:underline">
               <span className="shrink-0 font-mono">#{run.pullRequest.number}</span>
               <span className="truncate text-muted-foreground">{PR_EVENT_LABEL[run.pullRequest.event]} · {run.pullRequest.title}</span>
               <ExternalLink className="mt-0.5 size-3 shrink-0" />
@@ -444,7 +444,7 @@ function RunTableRows({ run, waiting, expanded, duration, sessionTitle, sessionA
           {run.worktreeName ? <span className="flex min-w-0 items-center gap-1.5"><GitBranch className="size-3 shrink-0 text-faint" /><span className="truncate font-mono text-[11px]">{run.worktreeName}</span></span> : run.sessionId ? <span className="block truncate text-muted-foreground">{sessionTitle ?? "Session"}</span> : <span className="text-faint">—</span>}
         </td>
         <td className="automation-column-result px-3 py-2.5">
-          {run.reported?.prUrl ? <button type="button" onClick={() => void openUrl(run.reported!.prUrl!)} className="inline-flex items-center gap-1 text-info hover:underline">Open PR <ExternalLink className="size-3" /></button> : run.error ? <span className="text-destructive">Error</span> : run.status === "skippedPrecheck" && run.precheck ? <button type="button" aria-expanded={expanded} onClick={onToggle} className="text-muted-foreground hover:text-foreground hover:underline">Check output</button> : run.finalMessage ? <span className="text-muted-foreground">Output</span> : <span className="text-faint">—</span>}
+          {run.reported?.prUrl ? <button type="button" onClick={() => void openExternalWebUrl(run.reported!.prUrl!)} className="inline-flex items-center gap-1 text-info hover:underline">Open PR <ExternalLink className="size-3" /></button> : run.error ? <span className="text-destructive">Error</span> : run.status === "skippedPrecheck" && run.precheck ? <button type="button" aria-expanded={expanded} onClick={onToggle} className="text-muted-foreground hover:text-foreground hover:underline">Check output</button> : run.finalMessage ? <span className="text-muted-foreground">Output</span> : <span className="text-faint">—</span>}
           {run.changedFiles != null && <div className="text-[10px] text-faint">{run.changedFiles} file{run.changedFiles === 1 ? "" : "s"} changed</div>}
         </td>
       </tr>
@@ -458,8 +458,8 @@ function RunDetails({ run }: { run: AutomationRun }) {
     <div className="min-w-0">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         {run.sessionId && <Button variant="secondary" size="xs" onClick={() => selectSession(run.sessionId!)}>Open run session</Button>}
-        {run.reported?.comment && <button type="button" onClick={() => void openUrl(run.reported!.comment!)} className="text-[11px] text-info hover:underline">View comment</button>}
-        {run.reported?.prUrl && <button type="button" onClick={() => void openUrl(run.reported!.prUrl!)} className="text-[11px] text-info hover:underline">Open pull request</button>}
+        {run.reported?.comment && <button type="button" onClick={() => void openExternalWebUrl(run.reported!.comment!)} className="text-[11px] text-info hover:underline">View comment</button>}
+        {run.reported?.prUrl && <button type="button" onClick={() => void openExternalWebUrl(run.reported!.prUrl!)} className="text-[11px] text-info hover:underline">Open pull request</button>}
         {(run.reported?.labels?.length ?? 0) > 0 && <span className="text-[11px] text-faint">Labels: {run.reported!.labels!.join(", ")}</span>}
       </div>
       {run.status === "skippedPrecheck" ? <div className="text-xs text-muted-foreground">Nothing new: the first check printed nothing, so no session started and no model was called.</div> : run.finalMessage ? <div><div className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-faint">Output snapshot</div><Markdown text={run.finalMessage} webLinksOnly remoteImages={false} /></div> : run.error ? <div className="text-xs leading-relaxed text-destructive">{run.error}</div> : <div className="text-xs text-muted-foreground">{run.status === "running" || run.status === "pending" ? "The agent is still working." : "This run did not produce an assistant message."}</div>}

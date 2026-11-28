@@ -29,6 +29,7 @@ interface State {
 const EMPTY: State = { loaded: false, bots: [], revision: -1, unreadable: 0, error: null, templates: null };
 let state: State = EMPTY;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
@@ -109,10 +110,7 @@ export function shutBots() {
 
 export function useBotStore(): State {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => state,
     () => state,
   );

@@ -32,12 +32,10 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; media-src 'self' http://127.0.0.1:* blob:; img-src 'self' http://127.0.0.1:* data: blob: asset: http://asset.localhost https://avatars.githubusercontent.com https://lh3.googleusercontent.com https://public.linear.app https://www.gravatar.com https://secure.gravatar.com; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:*; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'",
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; media-src 'self' http://127.0.0.1:* blob:; img-src 'self' http://127.0.0.1:* data: blob: asset: http://asset.localhost https://avatars.githubusercontent.com https://lh3.googleusercontent.com https://public.linear.app https://www.gravatar.com https://secure.gravatar.com; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:*; worker-src 'self' blob:; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'",
       "assetProtocol": {
         "enable": true,
-        "scope": [
-          "$HOME/.raccoon/attachments/**"
-        ]
+        "scope": []
       }
     }
   },
@@ -79,7 +77,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE2MDc5RUEyRTgyRDAwNDAKUldSQUFDM29vcDRIRnVsMWZ3THRiTXNVdU0wRHF2d0JQK1FsUDVIc0FGRmR0OEpmSWFYTDhGSXEK",
       "endpoints": [
-        "https://github.com/terminalx-ai/raccoon/releases/latest/download/latest.json"
+        "https://github.com/terminalx-ai/terminalx/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 
 /**
  * Unsent text per tab, module-level so a remount of the composer (switching
@@ -67,8 +67,9 @@ export function subscribeTabDrafts(tabIds: readonly string[], changed: () => voi
 }
 
 export function useDraft(tabId: string): string {
+  const subscribe = useCallback((cb: () => void) => subscribeTabDrafts([tabId], cb), [tabId]);
   return useSyncExternalStore(
-    (cb) => subscribeTabDrafts([tabId], cb),
+    subscribe,
     () => drafts.get(tabId) ?? "",
     () => "",
   );

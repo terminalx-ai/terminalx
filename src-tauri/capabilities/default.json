@@ -22,13 +22,21 @@
       "identifier": "opener:allow-open-url",
       "allow": [
         {
-          "url": "x-apple.systempreferences:*"
+          "url": "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        },
+        {
+          "url": "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
+        },
+        {
+          "url": "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+        },
+        {
+          "url": "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.terminalx.*"
         }
       ]
     },
     "dialog:default",
     "process:default",
-    "shell:allow-open",
     "core:webview:default",
     "core:window:default",
     "core:event:default",

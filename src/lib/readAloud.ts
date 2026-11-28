@@ -7,6 +7,7 @@ import { useSyncExternalStore } from "react";
  */
 let speaking: { key: string; utterance: SpeechSynthesisUtterance } | null = null;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 const notify = () => { for (const listener of [...listeners]) listener(); };
 
 function synth(): SpeechSynthesis | null {
@@ -56,7 +57,7 @@ export function readAloud(key: string, markdown: string) {
 /** Whether the answer under `key` is the one being read now. */
 export function useReadingAloud(key: string): boolean {
   return useSyncExternalStore(
-    (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
+    __subscribe_listeners,
     () => speaking?.key === key,
     () => false,
   );

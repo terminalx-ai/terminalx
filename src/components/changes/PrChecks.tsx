@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { ArrowUpRight, ChevronRight, CircleAlert, CircleCheck, CircleMinus, CircleX, ExternalLink, Loader2, LoaderCircle, RefreshCw, RotateCcw, Wrench, X } from "@/icons";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import type { CheckLog, PrCheck, PullRequest } from "@/lib/api";
 import type { GitSource } from "@/lib/gitSource";
 import { actionsRuns, checkBucket, checkCounts, checkLine, checkMinutes, checkStateLabel, checkSummary, checkTime, isFailingCheck, isRequiredCheck, minutesLabel, RUNNING_CHECKS, webUrl } from "@/lib/checks";
@@ -93,7 +93,7 @@ export function PrChecks({ pr, source, disabled, fixBusy, onRerun, onRerunCheck,
         const inline = selected === key;
         const openLog = () => onOpenLog ? onOpenLog(c) : setSelected(inline ? null : key);
         const logButton = hasLog && finished && <Button size="sm" variant="ghost" className={cn("h-6 px-1.5", !failed && "opacity-0 group-hover/check:opacity-100 focus-visible:opacity-100")} aria-label={`View logs for ${c.name}`} aria-expanded={onOpenLog ? undefined : inline} onClick={openLog}>Logs</Button>;
-        const external = !hasLog && webUrl(c.url) && <Button size="icon-xs" variant="ghost" className="opacity-0 group-hover/check:opacity-100 focus-visible:opacity-100" onClick={() => void openUrl(webUrl(c.url)!)} aria-label={`Open on GitHub: ${c.name}`} title="Open on GitHub"><ExternalLink /></Button>;
+        const external = !hasLog && webUrl(c.url) && <Button size="icon-xs" variant="ghost" className="opacity-0 group-hover/check:opacity-100 focus-visible:opacity-100" onClick={() => void openExternalWebUrl(webUrl(c.url)!)} aria-label={`Open on GitHub: ${c.name}`} title="Open on GitHub"><ExternalLink /></Button>;
         if (!failing) return <li key={key} className={cn("group/check flex min-h-8 min-w-0 items-center gap-2 px-3 text-[13px]", inCentre && "bg-veil-strong")} aria-label={`${c.name}: ${c.state}`}>
           <CheckIcon state={c.state} />
           <CheckName check={c} />
@@ -130,7 +130,7 @@ function CheckName({ check }: { check: PrCheck }) {
   const url = webUrl(check.url);
   const className = "min-w-0 truncate text-left text-foreground";
   return url
-    ? <button type="button" onClick={() => void openUrl(url)} className={cn(className, "hover:underline")} title={`${check.name}: ${check.state}`}>{check.name}</button>
+    ? <button type="button" onClick={() => void openExternalWebUrl(url)} className={cn(className, "hover:underline")} title={`${check.name}: ${check.state}`}>{check.name}</button>
     : <span className={className} title={`${check.name}: ${check.state}`}>{check.name}</span>;
 }
 
@@ -146,7 +146,7 @@ function CheckRow({ check, emphasis, className, children }: { check: PrCheck; em
   return <div aria-label={`${check.name}: ${check.state}`} className={cn("flex min-w-0 items-center gap-2 text-xs", className)}>
     <CheckIcon state={check.state} />
     <span className="flex min-w-0 flex-1 items-baseline gap-2">
-      {url ? <button type="button" onClick={() => void openUrl(url)} className={cn(name, "hover:underline")} title={`${check.name}: ${check.state}`}>{check.name}</button> : <span className={name} title={`${check.name}: ${check.state}`}>{check.name}</span>}
+      {url ? <button type="button" onClick={() => void openExternalWebUrl(url)} className={cn(name, "hover:underline")} title={`${check.name}: ${check.state}`}>{check.name}</button> : <span className={name} title={`${check.name}: ${check.state}`}>{check.name}</span>}
       {check.summary && <span className="min-w-0 truncate text-[11px] text-faint" title={check.summary}>{check.summary}</span>}
     </span>
     {children}
@@ -161,7 +161,7 @@ function TimedCheckRow({ check, now }: { check: PrCheck; now: number }) {
     <span className={cn("w-16 shrink-0", checkBucket(check.state) === "failed" ? "text-destructive" : "text-muted-foreground")}>{checkStateLabel(check.state)}</span>
     <span className="w-12 shrink-0 text-right tabular-nums text-muted-foreground">{minutes == null ? "" : minutesLabel(minutes)}</span>
     {url
-      ? <button type="button" onClick={() => void openUrl(url)} aria-label={`Open the run: ${check.name}`} title="Open the run" className="shrink-0 text-faint hover:text-foreground"><ArrowUpRight className="size-3.5" /></button>
+      ? <button type="button" onClick={() => void openExternalWebUrl(url)} aria-label={`Open the run: ${check.name}`} title="Open the run" className="shrink-0 text-faint hover:text-foreground"><ArrowUpRight className="size-3.5" /></button>
       : <span className="w-3.5 shrink-0" aria-hidden />}
   </CheckRow>;
 }
@@ -233,7 +233,7 @@ function CheckLogView({ pr, check, source, onClose }: { pr: PullRequest; check: 
     <div className="flex flex-wrap gap-1 p-1">
       <Button size="sm" variant="ghost" disabled={!log?.text} onClick={() => void copy(plainLog(log!.text), "Log")}>Copy log</Button>
       <Button size="sm" variant="ghost" onClick={() => void copy(`${check.name}: ${check.state}\nPR: ${pr.url}\nRun: ${check.actions!.runId}${check.actions!.jobId ? ` · Job: ${check.actions!.jobId}` : ""}\n${check.url}`, "Details")}>Copy details</Button>
-      <Button size="sm" variant="ghost" onClick={() => void openUrl(check.url!)}>Open on GitHub</Button>
+      <Button size="sm" variant="ghost" onClick={() => void openExternalWebUrl(check.url!)}>Open on GitHub</Button>
     </div>
     {notice && <p role="status" className="px-2 text-xs text-faint">{notice}</p>}
     {copyError && <p role="alert" className="px-2 py-1 text-xs text-destructive">{copyError}</p>}
@@ -267,7 +267,7 @@ export function Deployments({ pr }: { pr: PullRequest }) {
       return <div key={`${deployment.name}:${index}`} className="flex min-w-0 items-center gap-2 text-xs">
         <CheckIcon state={deployment.state} />
         <span className="truncate text-muted-foreground">{deployment.name}</span>
-        {url && <button type="button" onClick={() => void openUrl(url)} title={url} className="min-w-0 truncate text-faint hover:underline">{url}</button>}
+        {url && <button type="button" onClick={() => void openExternalWebUrl(url)} title={url} className="min-w-0 truncate text-faint hover:underline">{url}</button>}
       </div>;
     })}
   </section>;

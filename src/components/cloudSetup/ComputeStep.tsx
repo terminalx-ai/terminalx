@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CircleCheck, Loader2, TriangleAlert } from "@/icons";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage, type CloudProviderConnection, type CloudProviderSummary, type CloudWorkspaceProviderId, type CloudWorkspaceSetup } from "@/lib/api";
 import { refreshAccount } from "@/lib/account";
@@ -372,7 +372,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
                 copy?.credentialFields
                   .filter((field) => field.helpUrl?.startsWith("https://"))
                   .map((field) => (
-                    <button key={field.name} type="button" className="mb-1 text-[12px] text-accent hover:underline" onClick={() => void openUrl(field.helpUrl!).catch(() => undefined)}>
+                    <button key={field.name} type="button" className="mb-1 text-[12px] text-accent hover:underline" onClick={() => void openExternalWebUrl(field.helpUrl!).catch(() => undefined)}>
                       Where to get the {field.label}
                     </button>
                   ))}

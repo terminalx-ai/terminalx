@@ -16,8 +16,21 @@
     "core:window:allow-is-fullscreen",
     "core:window:allow-set-focus",
     "core:webview:allow-set-webview-zoom",
-    "opener:default",
-    "dialog:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        {
+          "url": "https://*"
+        },
+        {
+          "url": "http://*"
+        }
+      ]
+    },
+    "opener:allow-reveal-item-in-dir",
+    "dialog:allow-message",
+    "dialog:allow-open",
+    "dialog:allow-ask",
     "core:webview:default",
     "core:window:default",
     "core:event:default"

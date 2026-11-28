@@ -9,6 +9,7 @@ import { cachedOrganizationRosters, readOrganizationRoster, resetOrganizationRos
  */
 const known = new Map<string, string>();
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 let version = 0;
 let roster: Promise<OrganizationMember[]> | null = null;
 let epoch = 0;
@@ -115,10 +116,7 @@ export function resetPeople() {
  */
 export function usePeople(load = true): (userId: string | null | undefined) => string {
   useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => version,
     () => version,
   );

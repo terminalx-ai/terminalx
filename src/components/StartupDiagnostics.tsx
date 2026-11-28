@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { thisComputer } from "@/lib/platform";
 import { save } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { AlertTriangle, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { InNoticeColumn } from "@/components/ui/NoticeColumn";
@@ -125,7 +125,7 @@ export function StartupDiagnostics() {
               <Button variant="outline" disabled={busy || !consent || saved} onClick={() => void savePreview()}>Choose destination and save</Button>
               {saved && <p role="status">Report saved locally. Nothing has been uploaded.</p>}
               <p className="text-xs text-muted-foreground">To report it, include this incident ID, steps, command category, elapsed time and last progress, affected-session count, basic-shell result, visible prompts, and recovery outcome. Preview any attachments separately. Use an agreed private channel for sensitive samples or OS logs.</p>
-              <Button variant="ghost" disabled={busy} onClick={() => void run(() => openUrl(ISSUE))}>Open public issue #813 to report manually</Button>
+              <Button variant="ghost" disabled={busy} onClick={() => void run(() => openExternalWebUrl(ISSUE))}>Open public issue #813 to report manually</Button>
             </>}
           </section>
         </div>

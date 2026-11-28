@@ -37,6 +37,7 @@ const DISMISSED_KEY = "raccoon.update.dismissed";
 let state = { kind: "idle" } as UpdateState;
 let dismissed: string | null = readDismissed();
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 /** What React reads: replaced on every change, the corner card's dismissal included. */
 let snapshot: { state: UpdateState; dismissed: string | null } = { state, dismissed };
 
@@ -192,10 +193,7 @@ export function subscribeUpdate(listener: () => void): () => void {
 
 export function useUpdate(): { state: UpdateState; noticeDismissed: boolean } {
   const current = useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => snapshot,
     () => snapshot,
   );

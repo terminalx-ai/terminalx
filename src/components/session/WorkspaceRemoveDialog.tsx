@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Check, FileText, FolderInput, GitMerge, GitPullRequest, Loader2, RotateCcw, Trash2 } from "@/icons";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/controls";
@@ -277,7 +277,7 @@ export function WorkspaceRemoveDialog() {
                   {pr.state === "MERGED" ? <GitMerge className="mt-0.5 size-3.5 shrink-0 text-merged" /> : <GitPullRequest className={`mt-0.5 size-3.5 shrink-0 ${pr.state === "OPEN" ? "text-warning" : "text-faint"}`} />}
                   <span className="min-w-0">
                     Pull request{" "}
-                    <button type="button" className="underline-offset-2 hover:underline" onClick={() => void openUrl(pr.url)}>
+                    <button type="button" className="underline-offset-2 hover:underline" onClick={() => void openExternalWebUrl(pr.url)}>
                       #{pr.number}
                     </button>{" "}
                     is {pr.state === "MERGED" ? "merged" : pr.state === "OPEN" ? (pr.isDraft ? "still an open draft" : "still open") : "closed without merging"}.

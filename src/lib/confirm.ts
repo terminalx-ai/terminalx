@@ -29,6 +29,7 @@ export interface PendingConfirm {
 let queue: (PendingConfirm & { settle: (answer: ConfirmAnswer) => void })[] = [];
 let nextId = 0;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 const emit = () => { for (const listener of listeners) listener(); };
 
 const same = (one: ConfirmRequest, other: ConfirmRequest) =>
@@ -75,10 +76,7 @@ const current = (): PendingConfirm | null => queue[0] ?? null;
 /** The question to draw now, for the one host each window mounts. */
 export function usePendingConfirm(): PendingConfirm | null {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     current,
     current,
   );
