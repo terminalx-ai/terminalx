@@ -1273,7 +1273,7 @@ mod tests {
         let free = |port: u16| tokio::net::TcpSocket::new_v4().and_then(|socket| socket.bind((std::net::Ipv4Addr::LOCALHOST, port).into())).is_ok();
         let port = (0..12_000).map(|i| 20_000 + ((start + i) % 12_000) as u16).find(|&port| free(port)).unwrap();
         let server = std::thread::spawn(move || -> std::io::Result<()> {
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            std::thread::sleep(std::time::Duration::from_millis(250));
             let listener = std::net::TcpListener::bind(("127.0.0.1", port))?;
             // Bounded, so a request that went elsewhere fails the test instead of hanging it.
             listener.set_nonblocking(true)?;

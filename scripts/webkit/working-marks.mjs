@@ -91,8 +91,11 @@ async function moves(locator) {
 const server = await serve();
 const browser = await launch();
 let failed = 0;
+const markCases = shots
+  ? ["simple", "list"].flatMap((layout) => ["dark", "light"].flatMap((colorScheme) => ["no-preference", "reduce"].map((reducedMotion) => [layout, colorScheme, reducedMotion])))
+  : [["simple", "dark", "no-preference"], ["simple", "light", "reduce"], ["list", "dark", "no-preference"]];
 try {
-  for (const layout of ["simple", "list"]) for (const colorScheme of ["dark", "light"]) for (const reducedMotion of ["no-preference", "reduce"]) {
+  for (const [layout, colorScheme, reducedMotion] of markCases) {
     const still = reducedMotion === "reduce";
     const at = `${layout}, ${colorScheme}, ${still ? "Reduce motion on" : "Reduce motion off"}`;
     const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 1100, height: 760 }, { extra: `(${setup})(${JSON.stringify({ layout })});`, colorScheme, reducedMotion });

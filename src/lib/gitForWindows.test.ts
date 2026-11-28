@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 // Missing Git for Windows is said once at start, on Windows only, with where to get it.

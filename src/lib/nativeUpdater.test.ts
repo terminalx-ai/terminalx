@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { expect, it, vi } from "vitest";
 
 // An update is downloaded, then the caller's step runs, then it is installed: three calls, in that order.

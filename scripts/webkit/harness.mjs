@@ -11,17 +11,31 @@ const read = (name) => readFile(new URL(name, import.meta.url), "utf8");
 const stub = `${await read("./tauri-stub.js")}\n${await read("./cloud-runtime-stub.js")}\n${await read("./local-sharing-stub.js")}`;
 const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2", ".wasm": "application/wasm" };
 
-/** Serve `dist/` on a free local port. */
+/** Serve `dist/` on a free local port (or reuse the shared server started by run-all.mjs). */
 export async function serve() {
+  if (process.env.WEBKIT_DIST_URL) {
+    return { url: process.env.WEBKIT_DIST_URL, close: () => {} };
+  }
+  const cache = new Map();
+  let fallbackHtml;
+  const load = async (file) => {
+    const cached = cache.get(file);
+    if (cached) return cached;
+    try {
+      const target = file.startsWith(root) ? file : join(root, "index.html");
+      const entry = { type: types[extname(target)] ?? "application/octet-stream", body: await readFile(target) };
+      cache.set(file, entry);
+      return entry;
+    } catch {
+      fallbackHtml ??= { type: "text/html", body: await readFile(join(root, "index.html")) };
+      return fallbackHtml;
+    }
+  };
   const server = createServer(async (request, response) => {
     const path = normalize(decodeURIComponent(new URL(request.url, "http://x").pathname)).replace(/^([/\\])+/, "");
     const file = join(root, path || "index.html");
-    try {
-      const body = await readFile(file.startsWith(root) ? file : join(root, "index.html"));
-      response.writeHead(200, { "content-type": types[extname(file)] ?? "application/octet-stream" }).end(body);
-    } catch {
-      response.writeHead(200, { "content-type": "text/html" }).end(await readFile(join(root, "index.html")));
-    }
+    const { type, body } = await load(file);
+    response.writeHead(200, { "content-type": type }).end(body);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   return { url: `http://127.0.0.1:${server.address().port}/`, close: () => server.close() };
@@ -62,11 +76,27 @@ const forceMac = `(() => {
  */
 export const FOCUS_NEXT = process.platform === "darwin" ? "Alt+Tab" : "Tab";
 
+/** Probe the macOS-normalized WebKit user agent once per shard on Linux (reused via WEBKIT_MAC_UA). */
+export async function probeMacUserAgent() {
+  if (process.platform === "darwin") return undefined;
+  if (process.env.WEBKIT_MAC_UA) return process.env.WEBKIT_MAC_UA;
+  const browser = await webkit.launch();
+  try {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const agent = await page.evaluate(() => navigator.userAgent);
+    await context.close();
+    return macUserAgent(agent);
+  } finally {
+    await browser.close();
+  }
+}
+
 /** WebKit with every page and context it opens muted and on macOS (above). Takes webkit.launch's options. */
 export async function launch(options) {
   const browser = await webkit.launch(options);
   // Elsewhere the requests carry this WebKit's own user agent with the Mac's in its brackets; on a Mac it is one already.
-  const userAgent = process.platform === "darwin" ? undefined : macUserAgent(await browser.newContext().then(async (context) => {
+  const userAgent = process.platform === "darwin" ? undefined : process.env.WEBKIT_MAC_UA || macUserAgent(await browser.newContext().then(async (context) => {
     const page = await context.newPage();
     const agent = await page.evaluate(() => navigator.userAgent);
     await context.close();

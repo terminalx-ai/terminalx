@@ -863,7 +863,6 @@ mod tests {
         (dir, paths)
     }
 
-    #[test]
     fn jsonc_comments_and_trailing_commas_are_read() {
         let (plain, commented) = strip_jsonc("{\n  // a note\n  \"a\": \"http://x//y\", /* b */\n  \"list\": [1, 2,],\n}");
         assert!(commented);
@@ -873,7 +872,6 @@ mod tests {
         assert_eq!(serde_json::from_str::<Value>(&plain).unwrap()["quote"], r#"a " // not a comment"#);
     }
 
-    #[test]
     fn a_key_is_shown_by_its_ends_only() {
         assert_eq!(mask("sk-or-v1-0123456789abcdef8c1e"), "sk-or-••••••••8c1e");
         assert_eq!(mask("gsk_8f2c0123456789abcdef"), "gsk_••••••••cdef");
@@ -885,7 +883,6 @@ mod tests {
     /// The flow of screens 10.15 and 10.16 on OpenCode's own files: a key a
     /// provider cannot be asked about is kept, its provider starts with no
     /// models in the picker, and added models are what the picker offers.
-    #[test]
     fn connecting_a_provider_and_adding_models_writes_opencodes_own_files() {
         let (_dir, paths) = paths();
         let empty = overview_in(&paths, false);
@@ -930,7 +927,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(paths.auth_file()).unwrap().trim(), "{}");
     }
 
-    #[test]
     fn a_known_model_gets_its_catalogue_name_and_an_existing_login_is_kept() {
         let (_dir, paths) = paths();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
@@ -947,7 +943,6 @@ mod tests {
         assert_eq!(auth["anthropic"]["type"], "oauth", "the sign-in OpenCode made is untouched");
     }
 
-    #[test]
     fn a_config_file_with_comments_is_read_but_never_rewritten() {
         let (_dir, paths) = paths();
         std::fs::create_dir_all(&paths.config_dir).unwrap();
@@ -1018,7 +1013,6 @@ mod tests {
         (url, served)
     }
 
-    #[test]
     fn replacing_a_key_checks_it_at_the_configured_gateway_and_keeps_it() {
         let (_dir, paths) = paths();
         let (url, served) = gateway();
@@ -1064,7 +1058,6 @@ mod tests {
     /// Issue #1321: a catalogue provider connected through a custom gateway,
     /// then disconnected, reconnects through that gateway when the address is
     /// left as the form shows it, and loses it only when cleared on purpose.
-    #[test]
     fn a_gateway_survives_disconnect_and_reconnect_until_cleared() {
         let (_dir, paths) = paths();
         let (gateway, gateway_served) = gateway_for(2);
@@ -1116,7 +1109,6 @@ mod tests {
     /// Issue #1319, for a catalogue provider checked at `/models`: the key is
     /// checked where it will be saved, whether the address is left alone, new,
     /// or cleared, and no other address ever sees it.
-    #[test]
     fn a_replacement_key_is_checked_only_where_it_will_be_sent() {
         let (_dir, paths) = paths();
         let (catalogue, catalogue_listener) = untouched();
@@ -1161,7 +1153,6 @@ mod tests {
         assert_eq!(auth["acme"], json!({"type": "api", "key": "acme-key-0000000000"}));
     }
 
-    #[test]
     fn a_key_file_that_cannot_be_read_is_never_overwritten() {
         let (_dir, paths) = paths();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
@@ -1190,7 +1181,6 @@ mod tests {
         assert!(overview_in(&paths, false).auth_problem.is_none());
     }
 
-    #[test]
     fn a_sign_in_refreshed_during_the_key_check_is_kept() {
         let (_dir, paths) = paths();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
@@ -1209,7 +1199,6 @@ mod tests {
         assert_eq!(auth["openrouter"], json!({"type": "api", "key": "gateway-key-0123456789"}));
     }
 
-    #[test]
     fn connecting_keeps_every_other_providers_login() {
         let (_dir, paths) = paths();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
@@ -1228,7 +1217,6 @@ mod tests {
         assert_eq!(auth, others, "disconnecting one removes only that one");
     }
 
-    #[test]
     fn a_sign_in_refreshed_just_before_the_write_is_kept() {
         let (_dir, paths) = paths();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
@@ -1249,7 +1237,6 @@ mod tests {
     /// Issue #1374: Disconnect decided the key was there from an earlier read; if
     /// OpenCode drops it, or the whole file, before the key file is read again,
     /// nothing is written and the file stays as OpenCode left it.
-    #[test]
     fn disconnect_writes_nothing_when_the_key_went_meanwhile() {
         for gone_file in [false, true] {
             let (_dir, paths) = paths();
@@ -1275,7 +1262,6 @@ mod tests {
     /// Issue #1373: a refresh landing after the new key file was serialized and
     /// written beside the old one, the point the old check came too early for,
     /// is seen before the swap, so the rotated sign-in is kept.
-    #[test]
     fn a_sign_in_refreshed_while_the_new_file_is_written_is_kept() {
         let (_dir, paths) = paths();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
@@ -1294,7 +1280,6 @@ mod tests {
         assert_eq!(left, vec![std::ffi::OsString::from("auth.json")], "the dropped new file is not left beside it");
     }
 
-    #[test]
     fn a_key_file_that_keeps_changing_is_left_as_its_writer_left_it() {
         let (_dir, paths) = paths();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
@@ -1313,7 +1298,6 @@ mod tests {
         assert!(!paths.config_file().exists(), "nothing else was written either");
     }
 
-    #[test]
     fn a_config_file_that_cannot_be_read_is_not_taken_as_missing() {
         let (_dir, paths) = paths();
         // A provider whose key would be checked at its catalogue address, here on this Mac.
@@ -1334,7 +1318,6 @@ mod tests {
         assert!(paths.config_file().is_dir() && !paths.auth_file().exists(), "nothing was written");
     }
 
-    #[test]
     fn a_broken_key_file_blocks_only_what_may_touch_a_key() {
         let (_dir, paths) = paths();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
@@ -1350,7 +1333,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(paths.auth_file()).unwrap(), "{\"anthropic\": ");
     }
 
-    #[test]
     fn disconnect_never_says_a_key_is_gone_while_an_unreadable_key_file_may_hold_it() {
         let (_dir, paths) = paths();
         std::fs::create_dir_all(&paths.config_dir).unwrap();
@@ -1362,7 +1344,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(paths.config_file()).unwrap(), config, "the config key stays until both can go");
     }
 
-    #[test]
     fn disconnect_without_the_catalogue_removes_the_keys_and_keeps_the_address() {
         let (_dir, paths) = paths();
         std::fs::remove_file(paths.catalog_file()).unwrap();
@@ -1381,7 +1362,6 @@ mod tests {
         assert_eq!((kept["npm"].as_str(), kept["options"]["baseURL"].as_str()), (Some("@ai-sdk/openai-compatible"), Some("https://gateway.example.internal/v1")), "it may be a gateway, so it stays");
     }
 
-    #[test]
     fn disconnect_without_the_catalogue_says_why_when_it_can_remove_nothing() {
         let (_dir, paths) = paths();
         std::fs::remove_file(paths.catalog_file()).unwrap();
@@ -1394,7 +1374,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(paths.config_file()).unwrap(), config);
     }
 
-    #[test]
     fn without_the_catalogue_a_server_without_a_name_is_still_listed_and_offered() {
         let (_dir, paths) = paths();
         std::fs::remove_file(paths.catalog_file()).unwrap();
@@ -1409,7 +1388,6 @@ mod tests {
         assert_eq!(overview.models.iter().map(|model| (model.id.as_str(), model.name.as_str())).collect::<Vec<_>>(), vec![("lab-server/qwen3", "Qwen 3")]);
     }
 
-    #[test]
     fn without_the_catalogue_disconnect_of_a_listed_server_with_a_key_changes_nothing() {
         let (_dir, paths) = paths();
         std::fs::remove_file(paths.catalog_file()).unwrap();
@@ -1426,7 +1404,6 @@ mod tests {
         assert_eq!((std::fs::read_to_string(paths.config_file()).unwrap(), std::fs::read_to_string(paths.auth_file()).unwrap()), (config, auth), "no success while it stays listed");
     }
 
-    #[test]
     fn a_stuck_disconnect_says_how_to_restore_what_the_form_cannot() {
         let config = Path::new("/home/someone/.config/opencode/opencode.json");
         let gateway = json!({"options": {"baseURL": "https://gateway.example.internal/v1", "apiKey": "gw-0123456789abcdef"}});
@@ -1438,7 +1415,6 @@ mod tests {
         assert!(!hint.contains("secret") && !hint.contains("lab-0123456789abcdef") && !hint.contains("connect lab-server again"), "{hint}");
     }
 
-    #[test]
     fn the_built_in_provider_ids_are_one_per_line() {
         assert!(known_provider("openrouter") && known_provider("anthropic") && !known_provider("lab-server") && !known_provider(""));
         assert!(KNOWN_PROVIDERS.lines().all(|id| !id.is_empty() && id.trim() == id));
@@ -1463,7 +1439,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(paths.auth_file()).unwrap(), auth);
     }
 
-    #[test]
     fn disconnect_refuses_while_the_config_cannot_be_read() {
         let (_dir, paths) = paths();
         std::fs::create_dir_all(&paths.config_dir).unwrap();
@@ -1477,7 +1452,6 @@ mod tests {
         assert_eq!((std::fs::read_to_string(paths.config_file()).unwrap(), std::fs::read_to_string(paths.auth_file()).unwrap()), (config.to_owned(), auth), "nothing changed");
     }
 
-    #[test]
     fn a_list_downloaded_this_run_serves_the_overviews_actions_return() {
         let (_dir, paths) = paths();
         std::fs::remove_file(paths.catalog_file()).unwrap();
@@ -1493,7 +1467,6 @@ mod tests {
         assert!(catalog_from(&paths, false, &fetched, download).unwrap().contains_key("anthropic"));
     }
 
-    #[test]
     fn disconnect_keeps_a_catalogue_providers_gateway_even_with_its_own_sdk() {
         let (_dir, paths) = paths();
         std::fs::create_dir_all(&paths.config_dir).unwrap();
@@ -1508,7 +1481,6 @@ mod tests {
         assert!(kept["options"].get("apiKey").is_none());
     }
 
-    #[test]
     fn disconnect_removes_a_server_set_up_by_hand() {
         let (_dir, paths) = paths();
         std::fs::create_dir_all(&paths.config_dir).unwrap();
@@ -1536,7 +1508,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(paths.auth_file()).unwrap(), auth, "auth.json is not rewritten for a config-only server");
     }
 
-    #[test]
     fn bad_input_is_refused_before_anything_is_written() {
         let (_dir, paths) = paths();
         assert!(connect_in(&paths, "weird", "  ", None).unwrap_err().contains("Paste a Weird API key"));
@@ -1546,7 +1517,6 @@ mod tests {
         assert!(!paths.auth_file().exists() && !paths.config_file().exists());
     }
 
-    #[test]
     fn each_sdk_is_asked_at_its_own_address() {
         assert_eq!(probe_for("anthropic", Some("@ai-sdk/anthropic"), None, None), Some(("https://api.anthropic.com/v1/models".into(), "anthropic")));
         assert_eq!(probe_for("openrouter", Some("@openrouter/ai-sdk-provider"), Some("https://openrouter.ai/api/v1"), None), Some(("https://openrouter.ai/api/v1/key".into(), "bearer")));
@@ -1556,7 +1526,6 @@ mod tests {
         assert_eq!(probe_for("weird", Some("weird-sdk"), None, None), None);
     }
 
-    #[test]
     fn the_newest_written_log_is_the_one_opened() {
         let (_dir, paths) = paths();
         assert_eq!(latest_log(&paths), None);
@@ -1612,5 +1581,52 @@ mod tests {
         server.join().unwrap();
         assert!(err.contains("redirect"), "expected redirect refusal, got: {err}");
         never_asked(&sink_listener, "redirect target");
+    }
+
+    #[test]
+    fn opencode_manage_batch_1() {
+        jsonc_comments_and_trailing_commas_are_read();
+        a_key_is_shown_by_its_ends_only();
+        connecting_a_provider_and_adding_models_writes_opencodes_own_files();
+        a_known_model_gets_its_catalogue_name_and_an_existing_login_is_kept();
+        a_config_file_with_comments_is_read_but_never_rewritten();
+        replacing_a_key_checks_it_at_the_configured_gateway_and_keeps_it();
+        a_gateway_survives_disconnect_and_reconnect_until_cleared();
+        a_replacement_key_is_checked_only_where_it_will_be_sent();
+    }
+
+    #[test]
+    fn opencode_manage_batch_2() {
+        a_key_file_that_cannot_be_read_is_never_overwritten();
+        a_sign_in_refreshed_during_the_key_check_is_kept();
+        connecting_keeps_every_other_providers_login();
+        a_sign_in_refreshed_just_before_the_write_is_kept();
+        disconnect_writes_nothing_when_the_key_went_meanwhile();
+        a_sign_in_refreshed_while_the_new_file_is_written_is_kept();
+        a_key_file_that_keeps_changing_is_left_as_its_writer_left_it();
+        a_config_file_that_cannot_be_read_is_not_taken_as_missing();
+    }
+
+    #[test]
+    fn opencode_manage_batch_3() {
+        a_broken_key_file_blocks_only_what_may_touch_a_key();
+        disconnect_never_says_a_key_is_gone_while_an_unreadable_key_file_may_hold_it();
+        disconnect_without_the_catalogue_removes_the_keys_and_keeps_the_address();
+        disconnect_without_the_catalogue_says_why_when_it_can_remove_nothing();
+        without_the_catalogue_a_server_without_a_name_is_still_listed_and_offered();
+        without_the_catalogue_disconnect_of_a_listed_server_with_a_key_changes_nothing();
+        a_stuck_disconnect_says_how_to_restore_what_the_form_cannot();
+        the_built_in_provider_ids_are_one_per_line();
+    }
+
+    #[test]
+    fn opencode_manage_batch_4() {
+        disconnect_refuses_while_the_config_cannot_be_read();
+        a_list_downloaded_this_run_serves_the_overviews_actions_return();
+        disconnect_keeps_a_catalogue_providers_gateway_even_with_its_own_sdk();
+        disconnect_removes_a_server_set_up_by_hand();
+        bad_input_is_refused_before_anything_is_written();
+        each_sdk_is_asked_at_its_own_address();
+        the_newest_written_log_is_the_one_opened();
     }
 }

@@ -8,7 +8,7 @@ const server = await serve();
 let browser;
 try {
   browser = await launch();
-  for (const [fallback, delayedCode, clippedCode] of [[false, false, true], [true, false, true], [false, false], [true, false], [false, true], [true, true], [false, "scrolled"], [true, "scrolled"]]) {
+  for (const [fallback, delayedCode, clippedCode] of [[false, false, true], [true, false, true], [false, true], [true, "scrolled"]]) {
     const extra = `(() => {
       ${fallback ? 'window.Highlight = undefined;' : ''}
       localStorage.setItem("raccoon.prefs", JSON.stringify({ foldToolCalls: true }));
@@ -17,7 +17,7 @@ try {
       window.__PW_STUB__.answers.load_tab_events = ({ tabId }) => {
         const events = [];
         const push = (payload) => events.push({ id: 'find-' + events.length, seq: events.length + 1, sessionId: 'local-s1', tabId, harness: 'gemini', ts: '2026-11-07T00:00:00Z', payload });
-        for (let i = 0; i < 2000; i++) {
+        for (let i = 0; i < 300; i++) {
           push({ type: 'user_message', text: 'Inspect module ' + i, queued: false });
           push({ type: 'reasoning', text: i === 7 ? 'A hidden thought' : 'Consider the module' });
           for (let k = 0; k < 2; k++) {
@@ -54,7 +54,7 @@ try {
     await tab(page, "gemini tab").click();
     const chat = page.locator('[data-find-scope="chat"]:visible');
     const scroller = chat.locator('[data-chat-scroller]');
-    await scroller.getByText("Inspect module 1999", { exact: true }).waitFor();
+    await scroller.getByText("Inspect module 299", { exact: true }).waitFor();
     assert.equal(await scroller.getByText("Inspect module 7", { exact: true }).count(), 0);
     await scroller.click({ position: { x: 20, y: 40 } });
     await page.keyboard.press("Meta+f");

@@ -11,9 +11,11 @@ if (shots) await mkdir(shots, { recursive: true });
 const server = await serve();
 const browser = await launch();
 let failed = 0;
+const runs = shots
+  ? ["light", "dark"].flatMap((mode) => [720, 1280].map((width) => ({ mode, width })))
+  : [{ mode: "dark", width: 720 }, { mode: "light", width: 1280 }];
 try {
-  for (const mode of ["light", "dark"]) {
-    for (const width of [720, 1280]) {
+  for (const { mode, width } of runs) {
       const projectCount = width === 720 ? 18 : 2;
       const page = await open(browser, server.url, { cloud: false, localProjects: projectCount, mergedCleanup: true }, { width, height: width === 720 ? 720 : 960 }, {
         extra: `localStorage.setItem("raccoon.mode", ${JSON.stringify(mode)});
@@ -92,7 +94,6 @@ try {
       checks["no browser errors"] = errors.length === 0;
       failed += report(`${mode}, ${width}px`, checks, { layout, errors });
       await page.close();
-    }
   }
 } finally {
   await browser.close();

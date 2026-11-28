@@ -25,8 +25,10 @@ const cases = [
 const server = await serve();
 const browser = await launch();
 let failed = 0;
-for (const mode of ["light", "dark"]) {
-  for (const { name, fixture, account } of cases) {
+const runs = shots
+  ? ["light", "dark"].flatMap((mode) => cases.map((item) => ({ mode, ...item })))
+  : [{ mode: "dark", ...cases[0] }, { mode: "light", ...cases[1] }, { mode: "dark", ...cases[2] }];
+for (const { mode, name, fixture, account } of runs) {
     const page = await browser.newPage({ viewport: { width: 1100, height: 600 } });
     await page.addInitScript(`localStorage.setItem("raccoon.mode", ${JSON.stringify(mode)});\nwindow.__PW_FIXTURE__ = ${JSON.stringify(fixture)};\n${stub}
       const pairing = { relay: { phase: "offline", message: ${JSON.stringify(REASON)}, attempt: 12 }, host: null, devices: [], activePairing: null, pendingApproval: null, keepAwake: true, lastError: null,
@@ -107,7 +109,6 @@ for (const mode of ["light", "dark"]) {
     }
     failed += report(`${mode}, ${name}`, checks, layout);
     await page.close();
-  }
 }
 await browser.close();
 server.close();

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+const waitFor = <T>(cb: () => T | Promise<T>, opts?: { timeout?: number; interval?: number }) => vi.waitFor(cb, { interval: 1, ...opts });
 import { CloudApiError, SUPPORTED_PROVIDERS } from "./api";
 import { CHANGING_POLL_LIMIT_MS, CHANGING_POLL_MS, CloudCatalog, SAVED_LIST, WATCH_POLL_MS, workspaceTitle, type CloudLog } from "./catalog";
 import { keyItemName } from "./keys";
@@ -71,7 +72,7 @@ describe("the phone's cloud catalog", () => {
     await h.catalog.refresh();
     const session = h.catalog.session("org-1", "ws-new");
     expect(h.catalog.session("org-1", "ws-new")).toBe(session);
-    await vi.waitFor(() => expect(h.api.checkpoints).toHaveBeenCalledWith("org-1", "ws-new"));
+    await waitFor(() => expect(h.api.checkpoints).toHaveBeenCalledWith("org-1", "ws-new"));
     await vi.advanceTimersByTimeAsync(60_000);
     expect(session.getSnapshot().connection.state).toBe("suspended");
     expect(h.api.open).not.toHaveBeenCalled();
@@ -94,7 +95,7 @@ describe("the phone's cloud catalog", () => {
     const listed = sections[0].data[0].workspace;
     const release = h.catalog.retain(listed.orgId, listed.id);
     try {
-      await vi.waitFor(() => expect(h.api.open).toHaveBeenCalledWith("org-1", "ws-new-provider", "mobile-1", expect.anything()));
+      await waitFor(() => expect(h.api.open).toHaveBeenCalledWith("org-1", "ws-new-provider", "mobile-1", expect.anything()));
     } finally {
       release();
       h.catalog.close();
@@ -173,7 +174,7 @@ describe("the phone's cloud catalog", () => {
     Object.assign(h.api, { deleteOrganization: vi.fn(async () => {}) });
     h.api.organizations.mockResolvedValue([{ orgId: "org-1", name: "Acme", role: "member" }]);
     const deleting = h.catalog.deleteOrganization("org-2", "Beta");
-    await vi.waitFor(() => expect(h.catalog.getSnapshot().organizations.map((entry) => entry.organization.orgId)).toEqual(["org-1"]));
+    await waitFor(() => expect(h.catalog.getSnapshot().organizations.map((entry) => entry.organization.orgId)).toEqual(["org-1"]));
     answer([{ orgId: "org-1", name: "Acme", role: "member" }, { orgId: "org-2", name: "Beta", role: "owner" }]);
     await stale;
     await deleting;
@@ -204,7 +205,7 @@ describe("the phone's cloud catalog", () => {
     await h.catalog.refresh();
     h.keep("org-1", "ws-new");
     h.catalog.session("org-1", "ws-old");
-    await vi.waitFor(() => expect(h.secrets.get(HELD)).toContain("ws-old"));
+    await waitFor(() => expect(h.secrets.get(HELD)).toContain("ws-old"));
     await h.catalog.signOut();
     expect(h.secrets.size).toBe(0);
     expect(h.blobs.size).toBe(0);
@@ -239,8 +240,8 @@ describe("the phone's cloud catalog", () => {
     h.api.open.mockRejectedValue(new CloudApiError("cloud_workspace_not_found", 404));
     h.api.workspaces.mockImplementation(async () => ({ workspaces: [], tombstones: [] }));
     const release = h.catalog.retain("org-1", "ws-new");
-    await vi.waitFor(() => expect(h.catalog.workspace("org-1", "ws-new")).toBeNull());
-    await vi.waitFor(() => expect(h.keys()).toEqual([]));
+    await waitFor(() => expect(h.catalog.workspace("org-1", "ws-new")).toBeNull());
+    await waitFor(() => expect(h.keys()).toEqual([]));
     expect(h.kept().some((name) => name.includes("ws-new"))).toBe(false);
     release();
   });
@@ -275,7 +276,7 @@ describe("the phone's cloud catalog", () => {
     await h.catalog.refresh();
     const release = h.catalog.retain("org-1", "ws-new");
     const open = h.catalog.opened("org-1", "ws-new")!;
-    await vi.waitFor(() => expect(h.secrets.get(HELD)).toContain("ws-new"));
+    await waitFor(() => expect(h.secrets.get(HELD)).toContain("ws-new"));
     const seen: string[] = [];
     h.catalog.subscribe(() => seen.push(`${h.catalog.access("org-1", "ws-new")}:${h.catalog.opened("org-1", "ws-new") ? "open" : "closed"}`));
 
@@ -346,7 +347,7 @@ describe("the phone's cloud catalog", () => {
     state = "ready";
     await vi.advanceTimersByTimeAsync(WATCH_POLL_MS + 100);
     expect(h.catalog.workspace("org-1", "ws-new")).toMatchObject({ state: "ready" });
-    await vi.waitFor(() => expect(h.api.open).toHaveBeenCalled());
+    await waitFor(() => expect(h.api.open).toHaveBeenCalled());
     release();
     unwatch();
     // Off the screen: nothing is read any more.
@@ -448,7 +449,7 @@ describe("the phone's cloud catalog", () => {
     await h.catalog.refresh();
     h.catalog.session("org-1", "ws-new");
     h.catalog.session("org-1", "ws-old");
-    await vi.waitFor(() => expect(JSON.parse(h.secrets.get(HELD) ?? "[]")).toEqual([["org-1", "ws-new"], ["org-1", "ws-old"]]));
+    await waitFor(() => expect(JSON.parse(h.secrets.get(HELD) ?? "[]")).toEqual([["org-1", "ws-new"], ["org-1", "ws-old"]]));
     h.catalog.close();
   });
 
@@ -462,7 +463,7 @@ describe("the phone's cloud catalog", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(h.api.open).not.toHaveBeenCalled();
     h.catalog.resume();
-    await vi.waitFor(() => expect(h.api.open).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(h.api.open).toHaveBeenCalledTimes(1));
     release();
   });
 
@@ -553,7 +554,7 @@ describe("what the phone keeps of the list between runs (#988)", () => {
       expect(h.catalog.workspace("org-37", "ws-37")).toMatchObject({ state: "suspended" });
       // The stopped detail: its session reads checkpoints and asks for no attachment.
       const release = h.catalog.retain("org-37", "ws-37");
-      await vi.waitFor(() => expect(h.api.checkpoints).toHaveBeenCalledWith("org-37", "ws-37"));
+      await waitFor(() => expect(h.api.checkpoints).toHaveBeenCalledWith("org-37", "ws-37"));
       await h.catalog.refresh();
       expect(h.api.open).not.toHaveBeenCalled();
 
@@ -563,7 +564,7 @@ describe("what the phone keeps of the list between runs (#988)", () => {
       await h.catalog.refresh();
       expect(h.catalog.workspace("org-37", "ws-37")).toMatchObject({ state: "ready" });
       expect(cloudSections(h.catalog.getSnapshot().organizations).sections[0].data[0].workspace.state).toBe("ready");
-      await vi.waitFor(() => expect(h.api.open).toHaveBeenCalledWith("org-37", "ws-37", "mobile-1", expect.anything()));
+      await waitFor(() => expect(h.api.open).toHaveBeenCalledWith("org-37", "ws-37", "mobile-1", expect.anything()));
       // Nothing here asked the server to start, stop or queue anything.
       expect(h.api.resume).not.toHaveBeenCalled();
       expect(h.api.enqueue).not.toHaveBeenCalled();
@@ -625,7 +626,7 @@ describe("what the phone keeps of the list between runs (#988)", () => {
     session.listChanged();
     expect(workspaceTitle(h.catalog.getSnapshot(), h.catalog.workspace("org-1", "ws-new")!)).toBe("Checkout redesign");
     expect(workspaceTitle(h.catalog.getSnapshot(), h.catalog.workspace("org-1", "ws-old")!)).toBe("ws-old");
-    await vi.waitFor(() => expect(JSON.parse(h.secrets.get(TITLES) ?? "{}")).toEqual({ "org-1/ws-new": "Checkout redesign" }));
+    await waitFor(() => expect(JSON.parse(h.secrets.get(TITLES) ?? "{}")).toEqual({ "org-1/ws-new": "Checkout redesign" }));
     // It comes from the encrypted conversation: never in plain storage.
     expect([...h.blobs.values()].some((value) => value.includes("Checkout redesign"))).toBe(false);
 
@@ -686,7 +687,7 @@ describe("starting a stopped workspace from the phone (#988)", () => {
     await vi.advanceTimersByTimeAsync(CHANGING_POLL_MS + 10);
     expect(h.catalog.workspace("org-1", "ws-new")?.state).toBe("ready");
     // Running: the open screen connects by itself, with nothing more asked of the person.
-    await vi.waitFor(() => expect(h.api.open).toHaveBeenCalledWith("org-1", "ws-new", "mobile-1", expect.anything()));
+    await waitFor(() => expect(h.api.open).toHaveBeenCalledWith("org-1", "ws-new", "mobile-1", expect.anything()));
     release();
   });
 

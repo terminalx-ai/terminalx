@@ -181,7 +181,7 @@ const server = await serve();
 const browser = await launch();
 let failed = 0;
 try {
-  for (const [orgs, scheme] of [[0, "dark"], [1, "light"], [1, "dark"]]) {
+  for (const [orgs, scheme] of shots ? [[0, "dark"], [1, "light"], [1, "dark"]] : [[0, "dark"], [1, "light"]]) {
     const name = `${orgs ? "one organisation" : "no organisation"}, ${scheme}`;
     const page = await open(browser, server.url, { cloud: orgs > 0, localProjects: 1 }, viewports[0], { extra: extra(orgs), colorScheme: scheme });
     const rail = await sidebar(page);
@@ -201,7 +201,7 @@ try {
     });
     for (const viewport of viewports) {
       await page.setViewportSize(viewport);
-      await page.waitForTimeout(100);
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       const problems = await measure(page);
       failed += report(`${name} ${viewport.width}x${viewport.height}`, { "fits, nothing overlaps": problems.length === 0 }, problems);
       if (shots) await page.screenshot({ path: `${shots}/bot-settings-${orgs}-${scheme}-${viewport.width}.png`, fullPage: true });

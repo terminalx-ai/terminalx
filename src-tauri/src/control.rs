@@ -3989,17 +3989,13 @@ impl Caller {
         }
         // Only for in-process callers (no socket peer and no scoped token) may
         // `params["caller"]["session"]` further tighten limits.
-        if self.peer.is_none()
+        self.peer.is_none()
             && self.cap.is_none()
             && self.placed.is_none()
             && params["caller"]["session"]
                 .as_str()
                 .and_then(|id| index::get(id).ok())
                 .is_some_and(|entry| crate::orchestration::guard::limited(&entry))
-        {
-            return true;
-        }
-        false
     }
 
     /// Whether the caller cryptographically or via OS kernel placement proves

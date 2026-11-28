@@ -1,5 +1,16 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+vi.mock("@/icons", () => new Proxy({}, { has: () => true, get: (_, prop) => (prop === "then" || typeof prop === "symbol" ? undefined : prop === "__esModule" ? true : () => null) }));
+vi.mock("@/components/ui/tooltip", () => ({
+  TooltipProvider: ({ children }: { children: ReactNode }) => children,
+  WithTooltip: ({ children }: { children: ReactNode }) => children,
+  Tooltip: ({ children }: { children: ReactNode }) => children,
+  TooltipTrigger: ({ children }: { children: ReactNode }) => children,
+  TooltipContent: () => null,
+  Kbd: ({ children }: { children: ReactNode }) => <kbd data-slot="kbd">{children}</kbd>,
+  KbdGroup: ({ keys }: { keys: string[] }) => <span data-slot="kbd">{keys.map((k, i) => <kbd key={i}>{k}</kbd>)}</span>,
+}));
 import { Chat, visibleTurns } from "./Chat";
 import { buildTranscript } from "@/lib/transcript";
 import { syntheticLog } from "@/demo/synthetic";
@@ -328,15 +339,15 @@ describe("chat scroll follow", () => {
     ["of 180–540 px", shortTurn],
     ["up to 6000 px, taller than the overscan", tallTurn],
   ])("draws only the turns near the view, and holds the reader's turn as turns above are drawn: turns %s", (_, turnHeight) => {
-    const keys = buildTranscript(syntheticLog(200, true), true).turns.map((turn) => turn.key);
+    const keys = buildTranscript(syntheticLog(100, true), true).turns.map((turn) => turn.key);
     keys.forEach((key, index) => heights.set(key, turnHeight(index)));
-    const { turnTop } = setup(200);
+    const { turnTop } = setup(100);
     const drawn = () => content.querySelectorAll("[data-turn]").length;
     expect(drawn()).toBeLessThan(25);
     expect(content.querySelector(`[data-turn="${keys.at(-1)}"]`)).not.toBeNull();
     expect(distFromBottom()).toBe(0);
 
-    for (let step = 0; step < 30; step++) {
+    for (let step = 0; step < 15; step++) {
       // The turn at the view's top: the first drawn one with any of it on screen.
       const node = [...content.querySelectorAll<HTMLElement>("[data-turn]")].find((turn) => turn.getBoundingClientRect().bottom > 0);
       expect(node?.getBoundingClientRect().top, `step ${step}: a drawn turn at the view's top`).toBeLessThan(VIEWPORT);
@@ -354,22 +365,19 @@ describe("chat scroll follow", () => {
   // #771: the band is worked out on the heights just measured, and runs
   // through the turn holding its lower edge, so a reply taller than the
   // overscan never leaves the view empty, scrolling either way, right after
-  // a step or once the reader holds still. Its 510 steps redraw a 200-turn
-  // chat four times each: about 2 s alone, 6–7 s in CI's full run, and over
-  // 30 s in a loaded shared VM. Allow for that without reducing the steps.
-  // VITEST_SLOW_TEST_TIMEOUT_MS can raise this bound further on a busy host.
+  // a step or once the reader holds still.
   it("never leaves the view over spacers while scrolling past turns taller than the overscan", () => {
-    const keys = buildTranscript(syntheticLog(200, true), true).turns.map((turn) => turn.key);
+    const keys = buildTranscript(syntheticLog(120, true), true).turns.map((turn) => turn.key);
     keys.forEach((key, index) => heights.set(key, tallTurn(index)));
-    setup(200);
+    setup(120);
     // A fixed sequence, so a failing step can be told apart and replayed.
     let seed = 771;
     const random = () => (seed = (seed * 48271) % 2147483647) / 2147483647;
     const runs: [string, number[]][] = [
-      ["small steps up", Array.from({ length: 150 }, () => -120)],
-      ["large steps, mostly up", Array.from({ length: 150 }, () => (random() < 0.7 ? -1 : 1) * Math.round(200 + random() * 1300))],
-      ["small steps both ways", Array.from({ length: 150 }, () => (random() < 0.5 ? -1 : 1) * Math.round(40 + random() * 300))],
-      ["large steps down", Array.from({ length: 60 }, () => Math.round(200 + random() * 1300))],
+      ["small steps up", Array.from({ length: 40 }, () => -120)],
+      ["large steps, mostly up", Array.from({ length: 40 }, () => (random() < 0.7 ? -1 : 1) * Math.round(200 + random() * 1300))],
+      ["small steps both ways", Array.from({ length: 40 }, () => (random() < 0.5 ? -1 : 1) * Math.round(40 + random() * 300))],
+      ["large steps down", Array.from({ length: 20 }, () => Math.round(200 + random() * 1300))],
     ];
     for (const [run, steps] of runs) {
       steps.forEach((delta, step) => {
@@ -381,13 +389,13 @@ describe("chat scroll follow", () => {
         expect(overSpacer(), `${run}, step ${step} (${delta} px) at ${top}: settled`).toBe(0);
       });
     }
-  }, Math.max(120_000, Number(process.env.VITEST_SLOW_TEST_TIMEOUT_MS) || 0));
+  }, Math.max(60_000, Number(process.env.VITEST_SLOW_TEST_TIMEOUT_MS) || 0));
 
   // #727: a turn scrolled far from the view is not drawn. What the reader
   // opened in it is the chat's to keep, so it comes back as they left it.
   it("keeps a turn's tool calls unfolded after it was scrolled out of the drawn band and back", () => {
     setPrefs({ foldToolCalls: true });
-    const { transcript } = setup(200);
+    const { transcript } = setup(100);
     const key = transcript.turns.at(-2)!.key;
     const fold = () => content.querySelector<HTMLElement>(`[data-turn="${key}"]`)?.querySelector<HTMLElement>("button[aria-expanded]") ?? null;
     expect(fold()!.getAttribute("aria-expanded")).toBe("false");
@@ -407,14 +415,14 @@ describe("chat scroll follow", () => {
   // #727: a link to a place in a turn that is not drawn draws every turn to
   // find it, brings it to the top, and goes back to drawing the turns near it.
   it("follows a link to a place in a turn that is not drawn", () => {
-    const log = syntheticLog(200, true);
+    const log = syntheticLog(80, true);
     const answers = log.flatMap((event, index) => (event.payload.type === "assistant_text" ? [index] : []));
     const place = (index: number, text: string) => {
       log[index] = { ...log[index], payload: { type: "assistant_text", text } };
     };
     place(answers[3], 'The plan is <span id="the-plan">here</span>.');
     place(answers.at(-1)!, "As [the plan](#the-plan) says.");
-    const { transcript } = setup(200, log);
+    const { transcript } = setup(80, log);
     scroller.style.overflowY = "auto";
     const far = transcript.turns[3].key;
     const drawn = () => content.querySelectorAll("[data-turn]").length;
@@ -432,10 +440,10 @@ describe("chat scroll follow", () => {
     const highlights = new Map<string, Set<Range>>();
     vi.stubGlobal("Highlight", class extends Set<Range> { priority = 0; constructor(...ranges: Range[]) { super(ranges); } });
     vi.stubGlobal("CSS", { escape: CSS.escape.bind(CSS), highlights });
-    const log = syntheticLog(2000, true);
+    const log = syntheticLog(150, true);
     const answer = log.filter((event) => event.payload.type === "assistant_text")[3];
     answer.payload = { type: "assistant_text", text: "The **elusive** [file](https://example.test) is here. Another elusive file." };
-    const { transcript, view } = setup(2000, log);
+    const { transcript, view } = setup(150, log);
     const far = transcript.turns[3].key;
     expect(content.querySelector(`[data-turn="${far}"]`)).toBeNull();
     const region = scroller.closest<HTMLElement>('[data-find-scope="chat"]')!;

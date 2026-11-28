@@ -433,7 +433,6 @@ fn started_free() -> (Fake, Run) {
     (host, run)
 }
 
-#[test]
 fn a_valid_plan_is_stored_as_a_run_that_waits_for_approval() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -457,7 +456,6 @@ fn a_valid_plan_is_stored_as_a_run_that_waits_for_approval() {
     assert_eq!(shown["waiting"][5], json!({"piece": "docs", "on": ["session", "pipeline", "cli"]}));
 }
 
-#[test]
 fn a_plan_is_refused_with_the_rule_and_the_piece_and_nothing_is_stored() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -493,7 +491,6 @@ fn a_plan_is_refused_with_the_rule_and_the_piece_and_nothing_is_stored() {
     assert_eq!(engine::create(&plain, &plan(), "other", None).unwrap_err().code, "not_a_repository");
 }
 
-#[test]
 fn no_worker_starts_until_a_person_approves() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -521,7 +518,6 @@ fn no_worker_starts_until_a_person_approves() {
     assert_eq!(host.made(), vec!["map"]);
 }
 
-#[test]
 fn a_project_that_asks_for_no_approval_starts_at_once() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -537,7 +533,6 @@ fn a_project_that_asks_for_no_approval_starts_at_once() {
 /// PRO-365: with approval off, the lead stores a `planned` run and stops. The person starts it
 /// from the Run view: its ready pieces start as `runs start` starts them, the start is recorded
 /// as theirs (not as an approval), and the lead is told as an approval tells it.
-#[test]
 fn a_person_starts_a_planned_run_from_the_run_view() {
     let _home = crate::store::temp_home();
     let host = free_host(|_| {});
@@ -561,7 +556,6 @@ fn a_person_starts_a_planned_run_from_the_run_view() {
     assert_eq!(host.world().told.len(), 1);
 }
 
-#[test]
 fn start_run_is_not_an_approval() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -573,7 +567,6 @@ fn start_run_is_not_an_approval() {
 }
 
 /// What the person last saved is what starts: the plan and the limits, both told to the lead.
-#[test]
 fn a_planned_run_the_person_changed_starts_as_saved_and_the_lead_is_told() {
     let _home = crate::store::temp_home();
     let host = free_host(|_| {});
@@ -598,7 +591,6 @@ fn a_planned_run_the_person_changed_starts_as_saved_and_the_lead_is_told() {
 }
 
 /// The lead's own `runs start` on a `planned` run works as before, and says what the person changed.
-#[test]
 fn the_leads_start_of_a_planned_run_says_what_the_person_changed() {
     let _home = crate::store::temp_home();
     let host = free_host(|_| {});
@@ -620,7 +612,6 @@ fn the_leads_start_of_a_planned_run_says_what_the_person_changed() {
 
 /// The window warning is a warning: Start run starts the run while it shows, and a run past its
 /// level pauses as any run does, with the lead told why nothing started.
-#[test]
 fn a_window_warning_does_not_hold_start_run() {
     let _home = crate::store::temp_home();
     let now = chrono::Utc::now().timestamp_millis();
@@ -644,7 +635,6 @@ fn a_window_warning_does_not_hold_start_run() {
 }
 
 /// PRO-337: a lead started with Orchestrate asks first, even where the project asks for no approval.
-#[test]
 fn a_lead_started_with_orchestrate_waits_for_approval_with_approval_off() {
     let _home = crate::store::temp_home();
     let host = Fake { ask_first: true, ..Fake::new() };
@@ -662,7 +652,6 @@ fn a_lead_started_with_orchestrate_waits_for_approval_with_approval_off() {
     assert_eq!(host.made(), vec!["map"]);
 }
 
-#[test]
 fn a_run_led_by_a_paused_bot_starts_no_worker_until_the_bot_is_resumed_then_each_once() {
     let _home = crate::store::temp_home();
     let (host, run) = started_free();
@@ -688,7 +677,6 @@ fn a_run_led_by_a_paused_bot_starts_no_worker_until_the_bot_is_resumed_then_each
     assert_eq!(host.made(), vec!["map", "store"], "each held piece starts once");
 }
 
-#[test]
 fn a_run_its_paused_lead_starts_before_any_worker_is_started_on_the_resume_and_the_lead_is_told() {
     let _home = crate::store::temp_home();
     let (host, run) = started_free();
@@ -707,7 +695,6 @@ fn a_run_its_paused_lead_starts_before_any_worker_is_started_on_the_resume_and_t
     assert!(host.world().told.iter().any(|text| text.contains("resumed you") && text.contains("map")), "the lead is told: {:?}", host.world().told);
 }
 
-#[test]
 fn start_starts_only_the_pieces_whose_dependencies_are_done() {
     let _home = crate::store::temp_home();
     let (host, run) = started_free();
@@ -766,7 +753,6 @@ fn start_starts_only_the_pieces_whose_dependencies_are_done() {
     assert_eq!(engine::stop(&host, id, By::Cli).unwrap_err().code, "run_ended");
 }
 
-#[test]
 fn each_worker_gets_its_pieces_agent_model_effort_and_mode_and_a_brief_built_from_it() {
     let _home = crate::store::temp_home();
     let (host, run) = started_free();
@@ -798,7 +784,6 @@ fn each_worker_gets_its_pieces_agent_model_effort_and_mode_and_a_brief_built_fro
     }
 }
 
-#[test]
 fn the_projects_mode_is_the_default_of_its_workers_and_a_piece_may_choose_within_it() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -833,7 +818,6 @@ fn the_projects_mode_is_the_default_of_its_workers_and_a_piece_may_choose_within
     assert_eq!(host.world().made.last().map(|made| (made.piece.as_str(), made.mode.as_str())), Some(("b", "bypassPermissions")));
 }
 
-#[test]
 fn a_run_survives_a_restart_with_its_piece_states_intact() {
     let home = crate::store::temp_home();
     let (host, run) = started_free();
@@ -876,7 +860,6 @@ fn a_run_survives_a_restart_with_its_piece_states_intact() {
     drop(home);
 }
 
-#[test]
 fn a_piece_follows_what_its_worker_reports() {
     let _home = crate::store::temp_home();
     let (host, run) = started_free();
@@ -939,7 +922,6 @@ fn tried(run: &Run, piece: &str) -> Vec<(Step, String, Option<String>, Option<Ou
     run.piece(piece).unwrap().tries.iter().map(|attempt| (attempt.step, attempt.model.clone(), attempt.effort.clone(), attempt.outcome)).collect()
 }
 
-#[test]
 fn a_plan_with_kinds_and_no_models_starts_each_worker_on_the_tables_model_and_effort() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -971,7 +953,6 @@ fn a_plan_with_kinds_and_no_models_starts_each_worker_on_the_tables_model_and_ef
     assert_eq!(again.piece("port").unwrap().model, "gpt-6.1-sol", "the Codex column is its own");
 }
 
-#[test]
 fn a_failing_piece_follows_the_ladder_and_is_blocked_after_three_tries() {
     let _home = crate::store::temp_home();
     let (host, id) = one_piece();
@@ -1040,7 +1021,6 @@ fn a_failing_piece_follows_the_ladder_and_is_blocked_after_three_tries() {
     assert_eq!(back.run.piece("cli").unwrap().tries[2].outcome, Some(Outcome::Done));
 }
 
-#[test]
 fn the_next_try_is_asked_for_by_whichever_read_takes_the_ladders_step_and_only_once() {
     let _home = crate::store::temp_home();
     let (host, id) = one_piece();
@@ -1075,7 +1055,6 @@ fn the_next_try_is_asked_for_by_whichever_read_takes_the_ladders_step_and_only_o
     assert!(engine::start_retries(&other, &other_id).unwrap().started.is_empty());
 }
 
-#[test]
 fn a_blocked_report_or_a_silent_worker_is_not_tried_again() {
     let _home = crate::store::temp_home();
     let (host, id) = one_piece();
@@ -1092,7 +1071,6 @@ fn a_blocked_report_or_a_silent_worker_is_not_tried_again() {
     assert_eq!(store::get(&id).unwrap().state, RunState::Running);
 }
 
-#[test]
 fn a_failed_done_check_takes_the_same_ladder_with_the_checks_output() {
     let _home = crate::store::temp_home();
     let (host, id) = one_piece();
@@ -1141,7 +1119,6 @@ fn a_failed_done_check_takes_the_same_ladder_with_the_checks_output() {
     assert!(detail.len() < 6200 && detail.ends_with("FAILED at the very end") && detail.contains("[…the start was left out]"), "{} bytes", detail.len());
 }
 
-#[test]
 fn a_run_keeps_the_ladder_it_was_made_with_when_settings_change_and_a_projects_value_wins() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -1197,7 +1174,6 @@ fn a_run_keeps_the_ladder_it_was_made_with_when_settings_change_and_a_projects_v
     assert_eq!(old.ladder(), super::ladder::Rules::default());
 }
 
-#[test]
 fn a_piece_with_no_tier_above_it_is_blocked_after_two_tries() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -1218,7 +1194,6 @@ fn a_piece_with_no_tier_above_it_is_blocked_after_two_tries() {
     assert_eq!((after.state, after.reason.as_deref()), (RunState::Running, None), "a blocked piece waits on the person");
 }
 
-#[test]
 fn each_try_records_its_model_effort_cost_and_outcome() {
     let _home = crate::store::temp_home();
     let (host, id) = one_piece();
@@ -1263,7 +1238,6 @@ fn each_try_records_its_model_effort_cost_and_outcome() {
     assert_eq!(store::get(id).unwrap().piece("cli").unwrap().tries[0].cost_usd, Some(0.61));
 }
 
-#[test]
 fn stopping_a_run_ends_the_try_under_way() {
     let _home = crate::store::temp_home();
     let (host, id) = one_piece();
@@ -1276,7 +1250,6 @@ fn stopping_a_run_ends_the_try_under_way() {
     assert_eq!(host.made(), vec!["cli"]);
 }
 
-#[test]
 fn a_worker_that_cannot_be_started_fails_its_piece_and_the_next_start_tries_again() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -1308,7 +1281,6 @@ fn a_worker_that_cannot_be_started_fails_its_piece_and_the_next_start_tries_agai
     assert_eq!(host.made(), vec!["b", "c", "a"]);
 }
 
-#[test]
 fn a_session_that_cannot_be_made_safe_is_kept_and_tried_again_never_made_twice() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -1347,7 +1319,6 @@ fn a_session_that_cannot_be_made_safe_is_kept_and_tried_again_never_made_twice()
     assert_eq!(host.world().secured.iter().filter(|session| *session == "w1-a").count(), 3);
 }
 
-#[test]
 fn what_a_worker_reported_stands_when_its_session_is_deleted_afterwards() {
     let _home = crate::store::temp_home();
     let (host, run) = started_free();
@@ -1368,7 +1339,6 @@ fn what_a_worker_reported_stands_when_its_session_is_deleted_afterwards() {
     assert_eq!(engine::refreshed(&host, id).unwrap().piece("session").unwrap().state, PieceState::Blocked);
 }
 
-#[test]
 fn stop_stops_every_running_worker_and_marks_the_run_stopped() {
     let _home = crate::store::temp_home();
     let (host, run) = started_free();
@@ -1405,7 +1375,6 @@ fn stop_stops_every_running_worker_and_marks_the_run_stopped() {
     engine::create(&host, &plan(), "lead", None).unwrap();
 }
 
-#[test]
 fn a_person_may_change_the_plan_before_approving_or_discard_it() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -1439,7 +1408,6 @@ fn a_person_may_change_the_plan_before_approving_or_discard_it() {
     assert_eq!(host.made(), vec!["map"], "the discarded plan started nothing");
 }
 
-#[test]
 fn runs_are_found_by_id_prefix_lead_and_worker() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -1484,7 +1452,6 @@ fn queued_for(run: &Run) -> Vec<(&str, Option<Hold>)> {
     run.pieces.iter().filter(|piece| piece.state == PieceState::Queued).map(|piece| (piece.id.as_str(), piece.queued_for)).collect()
 }
 
-#[test]
 fn with_a_limit_of_two_two_of_five_run_and_each_finish_starts_one_more() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| settings.workers_per_run = 2);
@@ -1519,7 +1486,6 @@ fn with_a_limit_of_two_two_of_five_run_and_each_finish_starts_one_more() {
     assert_eq!(host.made().len(), 5);
 }
 
-#[test]
 fn a_piece_that_becomes_ready_by_a_dependency_starts_without_the_lead() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| settings.workers_per_run = 1);
@@ -1532,7 +1498,6 @@ fn a_piece_that_becomes_ready_by_a_dependency_starts_without_the_lead() {
     assert_eq!(host.made(), vec!["map", "store"]);
 }
 
-#[test]
 fn delayed_dependency_checks_queue_for_global_capacity_then_another_run_wakes_them() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| {
@@ -1568,7 +1533,6 @@ fn delayed_dependency_checks_queue_for_global_capacity_then_another_run_wakes_th
     assert!(store::list().unwrap().iter().all(|run| run.in_turn() <= 2));
 }
 
-#[test]
 fn watch_recovers_a_missed_dependency_turn_end() {
     let _home = crate::store::temp_home();
     let host = free_host(|_| {});
@@ -1579,7 +1543,6 @@ fn watch_recovers_a_missed_dependency_turn_end() {
     assert_eq!(store::get(&run.id).unwrap().piece("store").unwrap().state, PieceState::Running);
 }
 
-#[test]
 fn watch_recovers_an_idle_run_with_unmarked_ready_pieces() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| settings.workers_per_run = 2);
@@ -1596,7 +1559,6 @@ fn watch_recovers_an_idle_run_with_unmarked_ready_pieces() {
     assert_eq!(host.made(), vec!["p1", "p2"], "repeated scheduling never duplicates workers");
 }
 
-#[test]
 fn filling_slots_refreshes_workers_even_in_runs_without_queued_pieces() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| settings.workers_at_once = 1);
@@ -1611,7 +1573,6 @@ fn filling_slots_refreshes_workers_even_in_runs_without_queued_pieces() {
     assert_eq!(store::list().unwrap().iter().map(Run::in_turn).sum::<usize>(), 1);
 }
 
-#[test]
 fn the_app_wide_limit_holds_across_two_runs() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| {
@@ -1639,7 +1600,6 @@ fn the_app_wide_limit_holds_across_two_runs() {
     assert_eq!(store::get(&second.id).unwrap().in_turn(), 2);
 }
 
-#[test]
 fn a_run_on_an_api_key_that_reaches_its_dollar_budget_starts_nothing_new_and_says_why() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| {
@@ -1679,7 +1639,6 @@ fn a_run_on_an_api_key_that_reaches_its_dollar_budget_starts_nothing_new_and_say
     assert!(host.world().told.last().unwrap().contains("running again"));
 }
 
-#[test]
 fn a_run_with_no_dollar_limit_keeps_going_past_ten_thousand_dollars_and_still_records_its_cost() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| {
@@ -1701,7 +1660,6 @@ fn a_run_with_no_dollar_limit_keeps_going_past_ten_thousand_dollars_and_still_re
     assert_eq!(host.made(), vec!["p1", "p2"], "the next piece started");
 }
 
-#[test]
 fn a_subscription_run_stops_when_a_window_passes_its_level_and_names_the_window_and_its_reset() {
     let _home = crate::store::temp_home();
     let resets = chrono::Utc::now().timestamp_millis() + 3 * 3_600_000;
@@ -1729,7 +1687,6 @@ fn a_subscription_run_stops_when_a_window_passes_its_level_and_names_the_window_
     assert_eq!(host.made(), vec!["p1"]);
 }
 
-#[test]
 fn a_run_stops_on_its_own_points_and_the_settings_change_when_the_next_run_stops() {
     let _home = crate::store::temp_home();
     let resets = chrono::Utc::now().timestamp_millis() + 3_600_000;
@@ -1770,7 +1727,6 @@ fn a_run_stops_on_its_own_points_and_the_settings_change_when_the_next_run_stops
     assert_eq!((next.state, next.pause.unwrap().kind), (RunState::NeedsYou, PauseKind::Points));
 }
 
-#[test]
 fn a_run_with_workers_on_both_logins_keeps_both_budgets() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| {
@@ -1794,7 +1750,6 @@ fn a_run_with_workers_on_both_logins_keeps_both_budgets() {
     assert_eq!(store::get(&run.id).unwrap().pause.unwrap().kind, PauseKind::Dollars);
 }
 
-#[test]
 fn a_run_paused_on_a_window_resumes_by_itself_after_the_reset_when_asked() {
     let _home = crate::store::temp_home();
     let now = chrono::Utc::now().timestamp_millis();
@@ -1844,7 +1799,6 @@ fn a_run_paused_on_a_window_resumes_by_itself_after_the_reset_when_asked() {
     assert!(host.world().told.last().unwrap().contains("reset"));
 }
 
-#[test]
 fn a_worker_inside_a_long_build_is_not_stalled_and_an_idle_one_is() {
     let _home = crate::store::temp_home();
     let now = 10 * 3_600_000;
@@ -1891,7 +1845,6 @@ fn a_worker_inside_a_long_build_is_not_stalled_and_an_idle_one_is() {
     assert_eq!(store::get(&run.id).unwrap().piece("p2").unwrap().state, PieceState::Running);
 }
 
-#[test]
 fn a_person_can_change_one_runs_limits_and_a_bad_value_is_refused() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -1907,7 +1860,6 @@ fn a_person_can_change_one_runs_limits_and_a_bad_value_is_refused() {
     assert!(host.world().told.last().unwrap().contains("Queued for a free worker slot"));
 }
 
-#[test]
 fn a_lead_may_ask_for_less_budget_than_the_settings_allow_never_more() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -1933,7 +1885,6 @@ fn a_lead_may_ask_for_less_budget_than_the_settings_allow_never_more() {
     assert_eq!(engine::shown(&after)["limits"], json!({"workers": 4, "dollars": "none", "points": "none", "ceiling": 85.0}));
 }
 
-#[test]
 fn a_held_piece_briefed_in_the_session_it_has_waits_for_a_slot_too() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| settings.workers_per_run = 1);
@@ -1992,7 +1943,6 @@ fn verdict_block(json: &str) -> String {
 
 const PASS: &str = r#"{"verdict": "pass", "evidence": []}"#;
 
-#[test]
 fn a_done_report_is_a_claim_until_its_result_passes_the_gates_and_then_it_is_accepted_with_no_verifier() {
     let _home = crate::store::temp_home();
     let (host, id) = one_piece();
@@ -2038,7 +1988,6 @@ fn a_done_report_is_a_claim_until_its_result_passes_the_gates_and_then_it_is_acc
     assert_eq!(engine::start(&host, id).unwrap().started, vec!["docs"]);
 }
 
-#[test]
 fn a_gate_that_fails_skips_the_later_ones_feeds_the_ladder_and_a_piece_stops_at_three_rounds() {
     let _home = crate::store::temp_home();
     let (host, id) = one_piece();
@@ -2086,7 +2035,6 @@ fn a_gate_that_fails_skips_the_later_ones_feeds_the_ladder_and_a_piece_stops_at_
     assert!(world.verifiers.is_empty());
 }
 
-#[test]
 fn a_worker_that_ends_without_a_report_that_can_be_read_fails_the_first_gate() {
     let _home = crate::store::temp_home();
     let (host, id) = one_piece();
@@ -2108,7 +2056,6 @@ fn a_worker_that_ends_without_a_report_that_can_be_read_fails_the_first_gate() {
     assert!(host.world().checked.is_empty());
 }
 
-#[test]
 fn a_review_is_read_by_a_verifier_on_the_verify_row_that_sees_the_diff_and_none_of_the_workers_words() {
     let _home = crate::store::temp_home();
     let (host, id) = run_of("lead", json!([{"id": "guide", "title": "Write the settings guide", "kind": "code", "model": "opus", "effort": "high", "goal": "The guide documents every settings key.", "why": "WHY-ONLY-THE-WORKER-KNOWS",
@@ -2181,7 +2128,6 @@ fn a_review_is_read_by_a_verifier_on_the_verify_row_that_sees_the_diff_and_none_
     assert_eq!(other.world().verifiers.iter().map(|made| (made.model.clone(), made.effort.clone())).collect::<Vec<_>>(), vec![("opus".to_string(), Some("low".to_string()))]);
 }
 
-#[test]
 fn a_model_reads_a_result_only_where_the_gates_cannot_settle_it() {
     let _home = crate::store::temp_home();
     let piece = |id: &str, kind: &str, owns: &str| json!({"id": id, "title": id, "kind": kind, "model": "sonnet", "owns": [owns], "doneChecks": [{"type": "command", "run": "true"}]});
@@ -2221,7 +2167,6 @@ fn a_model_reads_a_result_only_where_the_gates_cannot_settle_it() {
     assert!(roomy.world().verifiers.is_empty());
 }
 
-#[test]
 fn a_verifier_that_fails_the_result_sends_it_back_with_its_evidence_as_the_failure_text() {
     let _home = crate::store::temp_home();
     let (host, id) = run_of("lead", json!([{"id": "cli", "title": "Tidy the CLI", "kind": "refactor", "model": "sonnet", "effort": "medium", "owns": ["src/cli.rs"], "doneChecks": [{"type": "command", "run": "cargo t cli"}]}]));
@@ -2245,7 +2190,6 @@ fn a_verifier_that_fails_the_result_sends_it_back_with_its_evidence_as_the_failu
     assert_eq!(piece.tries[0].verification.as_ref().unwrap().review.as_ref().unwrap().tokens(), Some(7_000));
 }
 
-#[test]
 fn a_vote_of_three_with_a_threshold_of_two_passes_on_two_agreeing_verdicts() {
     let _home = crate::store::temp_home();
     let vote = json!([{"id": "migrate", "title": "Migrate the settings file", "kind": "code", "model": "opus", "owns": ["src/store/"],
@@ -2298,7 +2242,6 @@ fn a_vote_of_three_with_a_threshold_of_two_passes_on_two_agreeing_verdicts() {
     assert!(piece.tries[0].detail.as_deref().unwrap().ends_with("2 of 3 verifiers that read the diff did not pass the result (2 must pass, 1 did):\n- src/store/migrate.rs:31: drops keys it does not know\n- src/store/migrate.rs:58: writes before it has read"), "{:?}", piece.tries[0].detail);
 }
 
-#[test]
 fn a_review_nobody_can_answer_blocks_the_piece_without_calling_the_result_wrong() {
     let _home = crate::store::temp_home();
     let pieces = json!([{"id": "guide", "title": "Guide", "kind": "scoped-code", "owns": ["docs/"], "reviewOnly": true, "reviewOnlyReason": "Prose.", "doneChecks": [{"type": "review", "text": "Reads well."}]}]);
@@ -2331,7 +2274,6 @@ fn a_review_nobody_can_answer_blocks_the_piece_without_calling_the_result_wrong(
     assert!(piece.note.as_deref().unwrap().contains("It could not be started: the agent is not installed"), "{:?}", piece.note);
 }
 
-#[test]
 fn a_result_is_accepted_as_the_commit_that_was_checked() {
     let _home = crate::store::temp_home();
     let (host, id) = run_of("lead", json!([{"id": "guide", "title": "Guide", "kind": "scoped-code", "owns": ["docs/"], "reviewOnly": true, "reviewOnlyReason": "Prose.", "doneChecks": [{"type": "review", "text": "Reads well."}]}]));
@@ -2353,7 +2295,6 @@ fn a_result_is_accepted_as_the_commit_that_was_checked() {
     assert_eq!(engine::refreshed(&host, id).unwrap().piece("guide").unwrap().state, PieceState::Done);
 }
 
-#[test]
 fn a_check_under_way_ends_with_its_run_and_starts_again_when_its_worker_works_again() {
     let _home = crate::store::temp_home();
     let (host, id) = one_piece();
@@ -2381,7 +2322,6 @@ fn a_check_under_way_ends_with_its_run_and_starts_again_when_its_worker_works_ag
     assert!(host.world().checked.is_empty());
 }
 
-#[test]
 fn a_lead_waiting_on_its_run_is_woken_by_a_piece_settled_not_by_each_turn_that_ends() {
     let _home = crate::store::temp_home();
     let (host, id) = one_piece();
@@ -2488,7 +2428,6 @@ fn conflicts(id: &str, piece_id: &str) -> String {
     commit
 }
 
-#[test]
 fn sent_back_workers_rebase_from_synthetic_dependencies_and_verify_against_trusted_lead_changes() {
     use std::path::Path;
     fn git(cwd: &Path, args: &[&str]) -> String {
@@ -2591,7 +2530,6 @@ fn sent_back_workers_rebase_from_synthetic_dependencies_and_verify_against_trust
     }
 }
 
-#[test]
 fn a_run_whose_results_are_all_accepted_waits_to_be_merged_and_wakes_its_lead_for_it() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -2623,7 +2561,6 @@ fn a_run_whose_results_are_all_accepted_waits_to_be_merged_and_wakes_its_lead_fo
     assert_eq!(engine::refreshed(&host, id).unwrap().reason.as_deref(), Some("A done-check failed on the merged result."));
 }
 
-#[test]
 fn a_piece_whose_merge_conflicts_goes_back_to_its_worker_with_the_conflict_as_its_brief() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -2707,7 +2644,6 @@ fn accepted_pair(lead: &str, workers: u32, spent: f64) -> (Fake, String) {
     (host, run.id)
 }
 
-#[test]
 fn merging_holds_no_worker_slot_and_a_conflict_is_resolved_by_a_model_only_within_the_budget() {
     let _home = crate::store::temp_home();
     let (host, id) = accepted_pair("lead", 2, 1.0);
@@ -2788,7 +2724,6 @@ fn merging_holds_no_worker_slot_and_a_conflict_is_resolved_by_a_model_only_withi
     assert_eq!((accepted.state, accepted.pause.as_ref(), accepted.reason.as_deref()), (RunState::Merging, None, None));
 }
 
-#[test]
 fn the_lead_is_not_asked_to_resolve_a_conflict_past_the_budget_nor_in_a_run_that_has_ended() {
     let _home = crate::store::temp_home();
     // Past the budget the model call is refused, and the run waits for the person (who may merge by hand).
@@ -2824,7 +2759,6 @@ fn the_lead_is_not_asked_to_resolve_a_conflict_past_the_budget_nor_in_a_run_that
     assert_eq!(store::get(&id).unwrap().state, RunState::Done);
 }
 
-#[test]
 fn a_piece_is_sent_back_to_its_worker_only_into_a_free_worker_slot() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| {
@@ -2854,7 +2788,6 @@ fn a_piece_is_sent_back_to_its_worker_only_into_a_free_worker_slot() {
     assert!(host.world().briefs[&worker].contains("src/shared.rs"));
 }
 
-#[test]
 fn a_retry_waits_for_a_slot_like_any_worker_and_every_try_counts_against_the_budget() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| {
@@ -2906,7 +2839,6 @@ fn a_retry_waits_for_a_slot_like_any_worker_and_every_try_counts_against_the_bud
     assert_eq!((after.state, after.piece("p1").unwrap().state, after.pause.as_ref()), (RunState::Merging, PieceState::Done, None));
 }
 
-#[test]
 fn a_result_reported_as_the_budget_runs_out_is_still_checked() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| {
@@ -2931,7 +2863,6 @@ fn a_result_reported_as_the_budget_runs_out_is_still_checked() {
     assert_eq!(host.made(), vec!["p1", "p2"]);
 }
 
-#[test]
 fn a_retry_that_comes_up_as_the_budget_runs_out_starts_when_the_run_is_resumed() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| {
@@ -2963,7 +2894,6 @@ fn a_retry_that_comes_up_as_the_budget_runs_out_starts_when_the_run_is_resumed()
     assert_eq!((p1.state, p1.tries.len(), p1.queued_for), (PieceState::Running, 2, None));
 }
 
-#[test]
 fn a_worker_deleted_mid_turn_frees_its_slot_for_the_next_queued_piece() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| settings.workers_per_run = 1);
@@ -3030,7 +2960,6 @@ fn blocked_cli_for(lead: &str) -> (Fake, String) {
     (host, id)
 }
 
-#[test]
 fn a_blocked_piece_waits_on_the_person_with_its_workers_report_and_the_files_outside_it() {
     let _home = crate::store::temp_home();
     let (host, id) = blocked_cli();
@@ -3052,7 +2981,6 @@ fn a_blocked_piece_waits_on_the_person_with_its_workers_report_and_the_files_out
     assert!(woken["why"][0].as_str().unwrap().contains("the person decides what happens to a blocked piece"), "{woken}");
 }
 
-#[test]
 fn skipping_a_blocked_piece_leaves_it_and_what_waits_on_it_out_and_the_run_merges_without_them() {
     let _home = crate::store::temp_home();
     let (host, id) = blocked_cli();
@@ -3083,7 +3011,6 @@ fn skipping_a_blocked_piece_leaves_it_and_what_waits_on_it_out_and_the_run_merge
     assert_eq!(engine::skip(&host, &id, "cli", engine::By::Cli).unwrap_err().code, "run_ended");
 }
 
-#[test]
 fn widening_a_blocked_piece_adds_the_files_it_needs_and_starts_one_fresh_worker() {
     let _home = crate::store::temp_home();
     let (host, id) = blocked_cli();
@@ -3138,7 +3065,6 @@ fn widening_a_blocked_piece_adds_the_files_it_needs_and_starts_one_fresh_worker(
     assert!(piece.note.as_deref().unwrap().contains("The try after a person widened its files fell short too."), "{:?}", piece.note);
 }
 
-#[test]
 fn a_note_to_a_blocked_pieces_worker_opens_its_try_again_in_the_same_session() {
     let _home = crate::store::temp_home();
     let (host, id) = blocked_cli();
@@ -3190,7 +3116,6 @@ fn a_note_to_a_blocked_pieces_worker_opens_its_try_again_in_the_same_session() {
     assert!(sent.starts_with("A note from the lead of this run") && !sent.contains("from the person"), "{sent}");
 }
 
-#[test]
 fn the_lead_takes_a_blocked_piece_over_and_finishing_checks_what_it_committed() {
     let _home = crate::store::temp_home();
     let (host, id) = blocked_cli();
@@ -3261,7 +3186,6 @@ fn the_lead_takes_a_blocked_piece_over_and_finishing_checks_what_it_committed() 
 }
 
 
-#[test]
 fn a_plan_a_person_approved_is_theirs_to_change_the_lead_takes_over_widens_or_skips_only_from_the_run_view() {
     let _home = crate::store::temp_home();
     let (host, id) = blocked_cli();
@@ -3301,7 +3225,6 @@ fn approved_blocked_cli(lead: &str) -> (Fake, String) {
     (host, id)
 }
 
-#[test]
 fn the_runs_own_lead_takes_a_blocked_piece_of_an_approved_plan_over_itself_and_finishes_it() {
     let _home = crate::store::temp_home();
     let (host, id) = approved_blocked_cli("lead");
@@ -3344,7 +3267,6 @@ fn the_runs_own_lead_takes_a_blocked_piece_of_an_approved_plan_over_itself_and_f
     assert_eq!(finished.run.ready().iter().map(|piece| piece.id.as_str()).collect::<Vec<_>>(), vec!["docs"]);
 }
 
-#[test]
 fn the_persons_own_check_and_finish_of_a_held_piece_takes_the_files_outside_it_as_their_widening() {
     let _home = crate::store::temp_home();
     let (host, id) = approved_blocked_cli("lead");
@@ -3384,7 +3306,6 @@ fn the_persons_own_check_and_finish_of_a_held_piece_takes_the_files_outside_it_a
     assert_eq!(finished.run.ready().iter().map(|piece| piece.id.as_str()).collect::<Vec<_>>(), vec!["docs"]);
 }
 
-#[test]
 fn a_piece_a_person_has_the_lead_take_over_is_not_held_to_its_files() {
     let _home = crate::store::temp_home();
     let (host, id) = approved_blocked_cli("lead");
@@ -3399,7 +3320,6 @@ fn a_piece_a_person_has_the_lead_take_over_is_not_held_to_its_files() {
     assert_eq!(finished.run.piece("cli").unwrap().state, PieceState::Done);
 }
 
-#[test]
 fn a_late_report_from_the_worker_a_lead_took_a_piece_from_never_undoes_the_leads_finish() {
     let _home = crate::store::temp_home();
     let (host, id) = approved_blocked_cli("lead");
@@ -3424,7 +3344,6 @@ fn a_late_report_from_the_worker_a_lead_took_a_piece_from_never_undoes_the_leads
     }
 }
 
-#[test]
 fn a_finish_takes_the_pieces_work_the_lead_brought_in_just_before_it_took_the_piece_over() {
     let _home = crate::store::temp_home();
     let (host, id) = approved_blocked_cli("lead");
@@ -3457,7 +3376,6 @@ fn a_finish_takes_the_pieces_work_the_lead_brought_in_just_before_it_took_the_pi
     assert_eq!(store::get(&other_id).unwrap().piece("cli").unwrap().state, PieceState::Lead);
 }
 
-#[test]
 fn with_its_switch_off_the_lead_may_not_take_a_piece_of_an_approved_plan_over() {
     let _home = crate::store::temp_home();
     let (host, id) = approved_blocked_cli("lead");
@@ -3505,7 +3423,6 @@ fn attempt(step: &str, worker: &str, outcome: Option<&str>) -> serde_json::Value
     json!({"step": step, "worker": {"sessionId": worker, "tabId": "t1"}, "outcome": outcome, "at": "2026-11-13T09:00:00Z"})
 }
 
-#[test]
 fn an_ended_run_stops_the_agents_of_finished_tries_only() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -3541,7 +3458,6 @@ fn an_ended_run_stops_the_agents_of_finished_tries_only() {
     assert_eq!(host.world().running.iter().cloned().collect::<Vec<_>>(), ["lead", "wc", "wf"], "the lead and every try under way go on");
 }
 
-#[test]
 fn a_run_that_fails_stops_its_finished_workers() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -3560,7 +3476,6 @@ fn a_run_that_fails_stops_its_finished_workers() {
     assert!(host.world().running.contains("lead"));
 }
 
-#[test]
 fn stopping_a_run_also_stops_the_idle_agent_of_a_try_that_ended_before() {
     let _home = crate::store::temp_home();
     let (host, id) = one_piece();
@@ -3584,7 +3499,6 @@ fn stopping_a_run_also_stops_the_idle_agent_of_a_try_that_ended_before() {
 }
 
 
-#[test]
 fn superseded_classification_includes_all_earlier_tries_without_outcomes_and_protects_final_sessions() {
     let _home = crate::store::temp_home();
     let run = stored_run("done", json!([
@@ -3602,7 +3516,6 @@ fn superseded_classification_includes_all_earlier_tries_without_outcomes_and_pro
     assert_eq!(run.archival_workers(), run.superseded_workers());
 }
 
-#[test]
 fn ended_worker_archival_requires_stop_and_preservation_and_is_retryable() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -3627,7 +3540,6 @@ fn ended_worker_archival_requires_stop_and_preservation_and_is_retryable() {
     assert!(host.world().running.contains("lead"));
 }
 
-#[test]
 fn unsuccessful_runs_archive_finished_tries_including_interrupted_final_tries() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -3645,7 +3557,6 @@ fn unsuccessful_runs_archive_finished_tries_including_interrupted_final_tries() 
     assert!(host.world().running.contains("lead"));
 }
 
-#[test]
 fn cleanup_stop_runs_normal_handling_for_idle_tabs_and_keeps_manual_tabs() {
     use std::cell::RefCell;
     use crate::store::index::{Front, TabEntry};
@@ -3671,7 +3582,6 @@ fn cleanup_stop_runs_normal_handling_for_idle_tabs_and_keeps_manual_tabs() {
     assert!(engine::stop_worker_agents(&tabs, &|_| false, &|_| anyhow::bail!("transport stop failed")).is_err());
 }
 
-#[test]
 fn verifier_permission_waits_resume_in_the_same_session_and_later_verdicts_are_consumed() {
     let _home = crate::store::temp_home();
     for pass in [true, false] {
@@ -3712,7 +3622,6 @@ fn verifier_permission_waits_resume_in_the_same_session_and_later_verdicts_are_c
     }
 }
 
-#[test]
 fn capacity_queues_are_not_actionable_ready_work_or_wait_wakeups() {
     let _home = crate::store::temp_home();
     let (_, id) = one_piece();
@@ -3744,7 +3653,6 @@ fn capacity_queues_are_not_actionable_ready_work_or_wait_wakeups() {
     }
 }
 
-#[test]
 fn waiting_verifiers_still_fail_meaningfully_when_they_terminate_or_reply_invalidly() {
     let _home = crate::store::temp_home();
     for (number, terminal) in [VerifierNow::Gone, VerifierNow::Stuck("The agent terminated.".into()), VerifierNow::Replied("No verdict.".into())].into_iter().enumerate() {
@@ -3797,7 +3705,6 @@ fn review_piece(id: &str) -> serde_json::Value {
     json!({"id": id, "title": "Phone connection model", "kind": "scoped-code", "owns": ["mobile/src/connection/"], "reviewOnly": true, "reviewOnlyReason": "A state model is read, not run.", "doneChecks": [{"type": "review", "text": "Each connection state has one owner."}]})
 }
 
-#[test]
 fn a_missing_verdict_is_asked_for_twice_in_the_verifiers_own_conversation_then_the_lead_reviews_the_diff() {
     let _home = crate::store::temp_home();
     let (host, id) = approved_run("lead", json!([review_piece("phone-model")]));
@@ -3844,7 +3751,6 @@ fn a_missing_verdict_is_asked_for_twice_in_the_verifiers_own_conversation_then_t
     assert_eq!(engine::skip(&host, id, "phone-model", By::Cli).unwrap_err().code, "person_only");
 }
 
-#[test]
 fn a_verdict_given_when_asked_again_settles_the_review_as_any_verdict_does() {
     let _home = crate::store::temp_home();
     let (host, id) = run_of("lead", json!([review_piece("phone-model")]));
@@ -3859,7 +3765,6 @@ fn a_verdict_given_when_asked_again_settles_the_review_as_any_verdict_does() {
     assert_eq!(steps(&run), vec![super::AutoStep::AskedVerifierAgain]);
 }
 
-#[test]
 fn a_verifier_that_cannot_be_asked_again_hands_the_review_to_the_lead() {
     let _home = crate::store::temp_home();
     let (host, id) = run_of("lead", json!([review_piece("phone-model")]));
@@ -3895,7 +3800,6 @@ fn on_base(output: Option<&str>) -> verify::CommandRun {
     verify::CommandRun { run: "cargo t computer".into(), project: false, exit_code: Some(if output.is_some() { 101 } else { 0 }), passed: output.is_none(), millis: 58_000, output: output.map(str::to_owned), on_base: None }
 }
 
-#[test]
 fn a_done_check_that_fails_on_the_base_as_well_uses_no_try_and_a_reader_judges_what_it_did_not_run() {
     let _home = crate::store::temp_home();
     let (host, id) = run_of("lead", mac_piece());
@@ -3931,7 +3835,6 @@ fn a_done_check_that_fails_on_the_base_as_well_uses_no_try_and_a_reader_judges_w
     assert_eq!((piece.state, piece.tries.len(), piece.tries[0].verification.as_ref().unwrap().outcome), (PieceState::Done, 1, Some(verify::Outcome::Passed)));
 }
 
-#[test]
 fn a_base_failure_on_a_result_that_needs_a_reader_is_passed_over_and_the_reader_decides() {
     let _home = crate::store::temp_home();
     let (host, id) = run_of("lead", mac_piece());
@@ -3943,7 +3846,6 @@ fn a_base_failure_on_a_result_that_needs_a_reader_is_passed_over_and_the_reader_
     assert_eq!(events(&run)[0].2, "Passed over mac's failing check, `cargo t computer`: it also fails on the base. A verifier reads the result next.");
 }
 
-#[test]
 fn a_done_check_that_passes_or_fails_otherwise_on_the_base_is_the_results_own_failure() {
     let _home = crate::store::temp_home();
     // It passes on the base: the change broke it, and the next try is told so.
@@ -3986,7 +3888,6 @@ fn run_out_of_models(host: &Fake, id: &str, piece: &str) {
     engine::worker_turn_ended(host, &host.session_of(piece));
 }
 
-#[test]
 fn a_ladder_with_no_model_above_hands_the_piece_to_the_lead_with_the_workers_partial_report() {
     let _home = crate::store::temp_home();
     let (host, id) = approved_run("lead", json!([titles_piece("titles"), titles_piece("icons")]));
@@ -4029,7 +3930,6 @@ fn a_ladder_with_no_model_above_hands_the_piece_to_the_lead_with_the_workers_par
     assert_eq!(steps(&run), vec![super::AutoStep::HandedToLead, super::AutoStep::HandedToLead]);
 }
 
-#[test]
 fn a_lead_on_the_top_model_is_a_top_model_installed_whatever_the_list_says() {
     // #1533: the list the run read had no `fable`, while the lead itself ran on Fable 5.2.
     let _home = crate::store::temp_home();
@@ -4044,7 +3944,6 @@ fn a_lead_on_the_top_model_is_a_top_model_installed_whatever_the_list_says() {
     assert_eq!((piece.state, piece.to_lead.is_none(), run.events.len()), (PieceState::Queued, true, 0), "{:?}", piece.note);
 }
 
-#[test]
 fn a_ladder_that_used_all_its_tries_still_waits_for_the_person() {
     let _home = crate::store::temp_home();
     let (stuck, stuck_id) = one_piece_for("lead-stuck");
@@ -4059,7 +3958,6 @@ fn a_ladder_that_used_all_its_tries_still_waits_for_the_person() {
     assert_eq!((piece.state, piece.to_lead.is_none(), run.events.len()), (PieceState::Blocked, true, 0), "its tries ran out, not its models: the person decides");
 }
 
-#[test]
 fn with_its_switch_off_a_ladder_with_no_model_above_blocks_the_piece_for_the_person() {
     let _home = crate::store::temp_home();
     let (host, id) = approved_run("lead", json!([titles_piece("titles")]));
@@ -4087,7 +3985,6 @@ fn paused_on_points(host: &Fake, lead: &str, now: i64, resets: i64) -> String {
     run.id
 }
 
-#[test]
 fn a_run_paused_on_its_points_of_a_window_goes_on_by_itself_when_the_window_resets() {
     let _home = crate::store::temp_home();
     let now = chrono::Utc::now().timestamp_millis();
@@ -4117,7 +4014,6 @@ fn a_run_paused_on_its_points_of_a_window_goes_on_by_itself_when_the_window_rese
     assert!(host.world().told.last().unwrap().contains("Its usage window reset, so the run went on by itself: nothing was asked of the person."));
 }
 
-#[test]
 fn a_run_paused_on_its_points_before_it_could_go_on_by_itself_does_once_the_switch_is_on() {
     let _home = crate::store::temp_home();
     let now = chrono::Utc::now().timestamp_millis();
@@ -4147,7 +4043,6 @@ fn a_run_paused_on_its_points_before_it_could_go_on_by_itself_does_once_the_swit
     assert_eq!(engine::refreshed(&late, &late_run).unwrap().pause.unwrap().resume_at, None);
 }
 
-#[test]
 fn a_run_past_the_apps_window_ceiling_still_waits_for_the_person() {
     let _home = crate::store::temp_home();
     let now = chrono::Utc::now().timestamp_millis();
@@ -4161,7 +4056,6 @@ fn a_run_past_the_apps_window_ceiling_still_waits_for_the_person() {
     assert!(engine::refreshed(&host, &run.id).unwrap().events.is_empty());
 }
 
-#[test]
 fn a_late_report_from_a_worker_the_piece_no_longer_belongs_to_changes_nothing_and_is_logged() {
     let _home = crate::store::temp_home();
     // The #989 run's `device-measurements`: its last worker reported partial, and is still in a turn.
@@ -4187,7 +4081,6 @@ fn a_late_report_from_a_worker_the_piece_no_longer_belongs_to_changes_nothing_an
     assert_eq!(engine::refreshed(&host, id).unwrap().events.len(), 2);
 }
 
-#[test]
 fn a_late_report_from_an_earlier_tries_worker_does_not_move_the_newer_try() {
     let _home = crate::store::temp_home();
     let (host, id) = one_piece_for("lead");
@@ -4201,4 +4094,155 @@ fn a_late_report_from_an_earlier_tries_worker_does_not_move_the_newer_try() {
     assert_eq!((piece.state, piece.tries.len(), piece.tries[1].outcome), (PieceState::Running, 2, None));
     assert!(host.world().checked.is_empty(), "nothing of try 1's late result is checked");
     assert_eq!(events(&run), vec![(super::AutoStep::IgnoredStaleReport, Some("cli".into()), "Ignored a late report from an earlier worker of cli: a newer try has the piece now, so it changed nothing.".to_string())]);
+}
+
+#[test]
+fn orchestration_engine_batch_1() {
+    a_valid_plan_is_stored_as_a_run_that_waits_for_approval();
+    a_plan_is_refused_with_the_rule_and_the_piece_and_nothing_is_stored();
+    no_worker_starts_until_a_person_approves();
+    a_project_that_asks_for_no_approval_starts_at_once();
+    a_person_starts_a_planned_run_from_the_run_view();
+    start_run_is_not_an_approval();
+    a_planned_run_the_person_changed_starts_as_saved_and_the_lead_is_told();
+    the_leads_start_of_a_planned_run_says_what_the_person_changed();
+    a_window_warning_does_not_hold_start_run();
+    a_lead_started_with_orchestrate_waits_for_approval_with_approval_off();
+}
+
+#[test]
+fn orchestration_engine_batch_2() {
+    a_run_led_by_a_paused_bot_starts_no_worker_until_the_bot_is_resumed_then_each_once();
+    a_run_its_paused_lead_starts_before_any_worker_is_started_on_the_resume_and_the_lead_is_told();
+    start_starts_only_the_pieces_whose_dependencies_are_done();
+    each_worker_gets_its_pieces_agent_model_effort_and_mode_and_a_brief_built_from_it();
+    the_projects_mode_is_the_default_of_its_workers_and_a_piece_may_choose_within_it();
+    a_run_survives_a_restart_with_its_piece_states_intact();
+    a_piece_follows_what_its_worker_reports();
+    a_plan_with_kinds_and_no_models_starts_each_worker_on_the_tables_model_and_effort();
+    a_failing_piece_follows_the_ladder_and_is_blocked_after_three_tries();
+    the_next_try_is_asked_for_by_whichever_read_takes_the_ladders_step_and_only_once();
+}
+
+#[test]
+fn orchestration_engine_batch_3() {
+    a_blocked_report_or_a_silent_worker_is_not_tried_again();
+    a_failed_done_check_takes_the_same_ladder_with_the_checks_output();
+    a_run_keeps_the_ladder_it_was_made_with_when_settings_change_and_a_projects_value_wins();
+    a_piece_with_no_tier_above_it_is_blocked_after_two_tries();
+    each_try_records_its_model_effort_cost_and_outcome();
+    stopping_a_run_ends_the_try_under_way();
+    a_worker_that_cannot_be_started_fails_its_piece_and_the_next_start_tries_again();
+    a_session_that_cannot_be_made_safe_is_kept_and_tried_again_never_made_twice();
+    what_a_worker_reported_stands_when_its_session_is_deleted_afterwards();
+    stop_stops_every_running_worker_and_marks_the_run_stopped();
+}
+
+#[test]
+fn orchestration_engine_batch_4() {
+    a_person_may_change_the_plan_before_approving_or_discard_it();
+    runs_are_found_by_id_prefix_lead_and_worker();
+    with_a_limit_of_two_two_of_five_run_and_each_finish_starts_one_more();
+    a_piece_that_becomes_ready_by_a_dependency_starts_without_the_lead();
+    delayed_dependency_checks_queue_for_global_capacity_then_another_run_wakes_them();
+    watch_recovers_a_missed_dependency_turn_end();
+    watch_recovers_an_idle_run_with_unmarked_ready_pieces();
+    filling_slots_refreshes_workers_even_in_runs_without_queued_pieces();
+    the_app_wide_limit_holds_across_two_runs();
+    a_run_on_an_api_key_that_reaches_its_dollar_budget_starts_nothing_new_and_says_why();
+}
+
+#[test]
+fn orchestration_engine_batch_5() {
+    a_run_with_no_dollar_limit_keeps_going_past_ten_thousand_dollars_and_still_records_its_cost();
+    a_subscription_run_stops_when_a_window_passes_its_level_and_names_the_window_and_its_reset();
+    a_run_stops_on_its_own_points_and_the_settings_change_when_the_next_run_stops();
+    a_run_with_workers_on_both_logins_keeps_both_budgets();
+    a_run_paused_on_a_window_resumes_by_itself_after_the_reset_when_asked();
+    a_worker_inside_a_long_build_is_not_stalled_and_an_idle_one_is();
+    a_person_can_change_one_runs_limits_and_a_bad_value_is_refused();
+    a_lead_may_ask_for_less_budget_than_the_settings_allow_never_more();
+    a_held_piece_briefed_in_the_session_it_has_waits_for_a_slot_too();
+    a_done_report_is_a_claim_until_its_result_passes_the_gates_and_then_it_is_accepted_with_no_verifier();
+}
+
+#[test]
+fn orchestration_engine_batch_6() {
+    a_gate_that_fails_skips_the_later_ones_feeds_the_ladder_and_a_piece_stops_at_three_rounds();
+    a_worker_that_ends_without_a_report_that_can_be_read_fails_the_first_gate();
+    a_review_is_read_by_a_verifier_on_the_verify_row_that_sees_the_diff_and_none_of_the_workers_words();
+    a_model_reads_a_result_only_where_the_gates_cannot_settle_it();
+    a_verifier_that_fails_the_result_sends_it_back_with_its_evidence_as_the_failure_text();
+    a_vote_of_three_with_a_threshold_of_two_passes_on_two_agreeing_verdicts();
+    a_review_nobody_can_answer_blocks_the_piece_without_calling_the_result_wrong();
+    a_result_is_accepted_as_the_commit_that_was_checked();
+    a_check_under_way_ends_with_its_run_and_starts_again_when_its_worker_works_again();
+    a_lead_waiting_on_its_run_is_woken_by_a_piece_settled_not_by_each_turn_that_ends();
+}
+
+#[test]
+fn orchestration_engine_batch_7() {
+    sent_back_workers_rebase_from_synthetic_dependencies_and_verify_against_trusted_lead_changes();
+    a_run_whose_results_are_all_accepted_waits_to_be_merged_and_wakes_its_lead_for_it();
+    a_piece_whose_merge_conflicts_goes_back_to_its_worker_with_the_conflict_as_its_brief();
+    merging_holds_no_worker_slot_and_a_conflict_is_resolved_by_a_model_only_within_the_budget();
+    the_lead_is_not_asked_to_resolve_a_conflict_past_the_budget_nor_in_a_run_that_has_ended();
+    a_piece_is_sent_back_to_its_worker_only_into_a_free_worker_slot();
+    a_retry_waits_for_a_slot_like_any_worker_and_every_try_counts_against_the_budget();
+    a_result_reported_as_the_budget_runs_out_is_still_checked();
+    a_retry_that_comes_up_as_the_budget_runs_out_starts_when_the_run_is_resumed();
+    a_worker_deleted_mid_turn_frees_its_slot_for_the_next_queued_piece();
+}
+
+#[test]
+fn orchestration_engine_batch_8() {
+    a_blocked_piece_waits_on_the_person_with_its_workers_report_and_the_files_outside_it();
+    skipping_a_blocked_piece_leaves_it_and_what_waits_on_it_out_and_the_run_merges_without_them();
+    widening_a_blocked_piece_adds_the_files_it_needs_and_starts_one_fresh_worker();
+    a_note_to_a_blocked_pieces_worker_opens_its_try_again_in_the_same_session();
+    the_lead_takes_a_blocked_piece_over_and_finishing_checks_what_it_committed();
+    a_plan_a_person_approved_is_theirs_to_change_the_lead_takes_over_widens_or_skips_only_from_the_run_view();
+    the_runs_own_lead_takes_a_blocked_piece_of_an_approved_plan_over_itself_and_finishes_it();
+    the_persons_own_check_and_finish_of_a_held_piece_takes_the_files_outside_it_as_their_widening();
+    a_piece_a_person_has_the_lead_take_over_is_not_held_to_its_files();
+    a_late_report_from_the_worker_a_lead_took_a_piece_from_never_undoes_the_leads_finish();
+}
+
+#[test]
+fn orchestration_engine_batch_9() {
+    a_finish_takes_the_pieces_work_the_lead_brought_in_just_before_it_took_the_piece_over();
+    with_its_switch_off_the_lead_may_not_take_a_piece_of_an_approved_plan_over();
+    an_ended_run_stops_the_agents_of_finished_tries_only();
+    a_run_that_fails_stops_its_finished_workers();
+    stopping_a_run_also_stops_the_idle_agent_of_a_try_that_ended_before();
+    superseded_classification_includes_all_earlier_tries_without_outcomes_and_protects_final_sessions();
+    ended_worker_archival_requires_stop_and_preservation_and_is_retryable();
+    unsuccessful_runs_archive_finished_tries_including_interrupted_final_tries();
+    cleanup_stop_runs_normal_handling_for_idle_tabs_and_keeps_manual_tabs();
+    verifier_permission_waits_resume_in_the_same_session_and_later_verdicts_are_consumed();
+}
+
+#[test]
+fn orchestration_engine_batch_10() {
+    capacity_queues_are_not_actionable_ready_work_or_wait_wakeups();
+    waiting_verifiers_still_fail_meaningfully_when_they_terminate_or_reply_invalidly();
+    a_missing_verdict_is_asked_for_twice_in_the_verifiers_own_conversation_then_the_lead_reviews_the_diff();
+    a_verdict_given_when_asked_again_settles_the_review_as_any_verdict_does();
+    a_verifier_that_cannot_be_asked_again_hands_the_review_to_the_lead();
+    a_done_check_that_fails_on_the_base_as_well_uses_no_try_and_a_reader_judges_what_it_did_not_run();
+    a_base_failure_on_a_result_that_needs_a_reader_is_passed_over_and_the_reader_decides();
+    a_done_check_that_passes_or_fails_otherwise_on_the_base_is_the_results_own_failure();
+    a_ladder_with_no_model_above_hands_the_piece_to_the_lead_with_the_workers_partial_report();
+    a_lead_on_the_top_model_is_a_top_model_installed_whatever_the_list_says();
+}
+
+#[test]
+fn orchestration_engine_batch_11() {
+    a_ladder_that_used_all_its_tries_still_waits_for_the_person();
+    with_its_switch_off_a_ladder_with_no_model_above_blocks_the_piece_for_the_person();
+    a_run_paused_on_its_points_of_a_window_goes_on_by_itself_when_the_window_resets();
+    a_run_paused_on_its_points_before_it_could_go_on_by_itself_does_once_the_switch_is_on();
+    a_run_past_the_apps_window_ceiling_still_waits_for_the_person();
+    a_late_report_from_a_worker_the_piece_no_longer_belongs_to_changes_nothing_and_is_logged();
+    a_late_report_from_an_earlier_tries_worker_does_not_move_the_newer_try();
 }

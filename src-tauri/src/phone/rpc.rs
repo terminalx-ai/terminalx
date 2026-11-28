@@ -3046,7 +3046,6 @@ mod tests {
     /// both transports run first (`allowed_method`): a driver reaches each one,
     /// a viewer reaches each read and none whose handler asks for a driver,
     /// and a name no handler answers is refused to both (PRO-510).
-    #[test]
     fn every_method_the_dispatch_answers_is_admitted_as_its_handler_asks() {
         use super::super::allowed_method;
         let methods = dispatched_methods();
@@ -3081,7 +3080,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn a_phone_is_offered_accounts_only_with_more_than_one_and_never_a_token_or_address() {
         let repo = store::projects::public_id("/repos/raccoon");
         let offered: HashSet<String> = [repo.clone()].into();
@@ -3123,7 +3121,6 @@ mod tests {
     }
 
     /// #730 and #980: accounts are listed only through a runtime that starts the session on the one chosen.
-    #[test]
     fn a_phone_is_listed_accounts_only_through_a_runtime_that_starts_on_them() {
         assert!(!serves_accounts(&runtime_of(Some("0.2.22"), None)), "a released runtime starts every session on the defaults");
         assert!(!serves_accounts(&runtime_of(Some("9.0.0"), Some(json!({ "sessionCreate": 1 })))));
@@ -3132,7 +3129,6 @@ mod tests {
     }
     use crate::events::TurnStatus;
 
-    #[test]
     fn manual_status_changes_notify_the_phone_and_change_its_summary() {
         let _home = store::temp_home();
         let session: SessionEntry = serde_json::from_value(json!({
@@ -3160,7 +3156,6 @@ mod tests {
     /// #1403: each row says whether the Mac pinned it, and where the Pinned
     /// group places it while the sidebar is in its custom order; a change
     /// of either tells the phone to read the list again.
-    #[test]
     fn the_phone_summary_carries_pins_and_the_macs_pinned_order() {
         let _home = store::temp_home();
         let session = |id: &str, pinned: bool, created: &str| -> SessionEntry {
@@ -3214,7 +3209,6 @@ mod tests {
         assert_eq!(cloud_pins_reply().unwrap(), json!({"orgs": {"org-1": ["github.com/acme/web"]}}));
     }
 
-    #[test]
     fn the_phone_summary_names_a_tab_by_its_generated_title_beside_its_own() {
         let _home = store::temp_home();
         let session = |id: &str, title: &str| -> SessionEntry {
@@ -3244,7 +3238,6 @@ mod tests {
         assert!(tab("c")["generatedTitle"].is_null());
     }
 
-    #[test]
     fn summaries_date_each_tab_by_its_own_last_activity() {
         let _home = store::temp_home();
         let session: SessionEntry = serde_json::from_value(json!({
@@ -3261,7 +3254,6 @@ mod tests {
         assert_eq!(tabs[1]["modified"], "2026-01-03T09:30:00Z");
     }
 
-    #[test]
     fn a_prompt_image_is_read_only_from_its_session_attachments() {
         let _home = store::temp_home();
         let session: SessionEntry = serde_json::from_value(json!({
@@ -3296,7 +3288,6 @@ mod tests {
         assert!(super::super::allowed_method(DeviceScope::Viewer, "session.image"));
     }
 
-    #[test]
     fn a_row_is_named_by_its_branch_as_the_project_list_names_it() {
         let session = |branch: Option<&str>| -> SessionEntry {
             serde_json::from_value(json!({
@@ -3395,7 +3386,6 @@ mod tests {
     /// #1338: a prefetch that a newer one replaced stops inside a whole-log
     /// read, parse or hash, at whichever check comes first after it was
     /// replaced, and keeps no checkpoint of the page it gave up.
-    #[test]
     fn a_prefetch_read_stops_at_its_next_check_once_it_is_no_longer_wanted() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let dir = tempfile::tempdir().unwrap();
@@ -3431,7 +3421,6 @@ mod tests {
         assert!(error.is::<Stopped>(), "{error:#}");
     }
 
-    #[test]
     fn a_verified_cursor_continues_from_the_appended_bytes_and_any_other_change_reads_the_whole_log() {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
@@ -3516,7 +3505,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn a_checkpoint_is_kept_per_conversation_and_only_for_the_cursor_last_returned() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.jsonl");
@@ -3534,7 +3522,6 @@ mod tests {
         assert_eq!(again["events"].as_array().unwrap().len(), 1);
     }
 
-    #[test]
     fn a_page_that_says_there_is_more_is_continued_without_another_reconcile_and_a_prefetch_is_not() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.jsonl");
@@ -3558,7 +3545,6 @@ mod tests {
     /// #1381: a phone that names its open conversations, even as none, is
     /// taken at its word: one it read a moment ago and has since closed is
     /// sent its new events. One that names none is judged as before.
-    #[test]
     fn a_named_open_list_replaces_the_recently_read_guess() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.jsonl");
@@ -3586,7 +3572,6 @@ mod tests {
     /// phone drops, leaves the phone reader's checkpoint as it was, so its
     /// next `session.sync` still reads only what was appended; and a prefetch
     /// sends nothing for a conversation the phone reads for itself.
-    #[test]
     fn a_prefetch_while_a_transcript_is_open_keeps_its_next_sync_incremental_and_sends_it_nothing() {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
@@ -3627,7 +3612,6 @@ mod tests {
         assert_eq!(seqs, (301..=310).collect::<Vec<_>>());
     }
 
-    #[test]
     fn a_prefetch_goes_newest_session_first_and_its_newest_tabs_and_skips_archived_ones() {
         let session = |id: &str, modified: &str, tabs: &[(&str, &str)], archived: bool| -> SessionEntry {
             serde_json::from_value(json!({
@@ -3651,7 +3635,6 @@ mod tests {
 
     /// #1339: the phone asks what a prefetch would send before naming its
     /// checkpoints, and is told the very conversations the prefetch sends.
-    #[test]
     fn a_phone_is_told_the_conversations_a_prefetch_would_send() {
         let _home = store::temp_home();
         let session = |id: &str, modified: &str, tabs: &[&str], archived: bool| -> SessionEntry {
@@ -3676,7 +3659,6 @@ mod tests {
         assert_eq!(reply["targets"], json!(sent));
     }
 
-    #[test]
     fn sync_cold_unchanged_and_large_gap_are_contiguous() {
         let mut events: Vec<_> = (1..=100).map(prompt).collect();
         let cold = sync_page(&events, None, "session", "tab", "test", direct()).unwrap();
@@ -3698,7 +3680,6 @@ mod tests {
         assert_eq!(received, (101..=6200).collect::<Vec<_>>());
     }
 
-    #[test]
     fn sync_rewrites_truncations_and_wrong_generation_reset_boundedly() {
         let mut events: Vec<_> = (1..=600).map(prompt).collect();
         let checkpoint = cursor(&sync_page(&events, None, "session", "tab", "test", direct()).unwrap());
@@ -3714,7 +3695,6 @@ mod tests {
         assert_eq!(empty["reset"], true);
     }
 
-    #[test]
     fn sync_pages_bound_the_rpc_response_without_skipping_forward_records() {
         let events: Vec<_> = std::iter::once(prompt(1))
             .chain((2..=17).map(|seq| output(seq, "🦝\n\"".repeat(128 * 1024))))
@@ -3746,7 +3726,6 @@ mod tests {
         assert_eq!(received, (1..=17).collect::<Vec<_>>());
     }
 
-    #[test]
     fn sync_sends_an_oversized_event_alone_cut_down_and_advances_past_it() {
         let initial = cursor(&sync_page(&[], None, "session", "tab", "test", direct()).unwrap());
         let events = vec![prompt(1), output(2, "x".repeat(TAIL_RESPONSE_BYTES_LIMIT)), prompt(3)];
@@ -3776,7 +3755,6 @@ mod tests {
     /// The conversation from #669: 500 recent events, about 0.8 MiB of JSON,
     /// on a phone with nothing cached. On Relay every reply must fit one
     /// 1 MiB cell message, and the history still loads in full.
-    #[test]
     fn a_long_conversation_loads_over_relay_one_frame_at_a_time() {
         let events: Vec<_> = (1..=600).map(|seq| {
             if seq % 25 == 1 { prompt(seq) } else { output(seq, "🦝 tool output \"line\"\n".repeat(80)) }
@@ -3807,7 +3785,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn over_relay_an_event_larger_than_a_page_is_whole_only_when_it_can_be_fragmented() {
         let large = output(2, "y".repeat(2 * 1024 * 1024));
         let events = vec![prompt(1), large.clone()];
@@ -3821,7 +3798,6 @@ mod tests {
         assert_eq!(fragmented["hasEarlier"], true);
     }
 
-    #[test]
     fn fit_event_cuts_the_longest_strings_on_character_boundaries() {
         let large = event(7, Payload::ToolCallStarted {
             call_id: "call-7".into(),
@@ -3855,7 +3831,6 @@ mod tests {
         assert_eq!(fitted["payload"]["input"]["old"], "z".repeat(30_000));
     }
 
-    #[test]
     fn fit_event_falls_back_to_a_status_line_when_no_string_is_large() {
         let many = event(9, Payload::ToolCallCompleted {
             call_id: "call-9".into(),
@@ -3872,7 +3847,6 @@ mod tests {
         assert!(serde_json::from_value::<AgentEvent>(fitted).is_ok());
     }
 
-    #[test]
     fn conditional_lists_return_only_versions_when_unchanged() {
         let initial = conditional(json!({"messages": [{"body": "synthetic"}]}), None).unwrap();
         let version = initial["version"].as_str().unwrap().to_string();
@@ -3881,7 +3855,6 @@ mod tests {
         assert!(conditional(json!({"messages": []}), Some(version)).unwrap().get("messages").is_some());
     }
 
-    #[test]
     fn synthetic_sync_payload_measurement() {
         // 2,000 turns, six events per turn, no private content.
         let events: Vec<_> = (1..=12000).map(|seq| {
@@ -3935,7 +3908,6 @@ mod tests {
         )
     }
 
-    #[test]
     fn paged_tail_keeps_whole_turns_in_sequence_order() {
         let events = vec![
             prompt(1),
@@ -3964,7 +3936,6 @@ mod tests {
         event(seq, Payload::ToolCallCompleted { call_id: format!("call-{seq}"), result: crate::events::ToolResult { text, ..Default::default() } })
     }
 
-    #[test]
     fn tail_counts_serialized_utf8_and_json_escapes_at_the_exact_boundary() {
         let events = vec![prompt(1), output(2, "🦝\n\"\\".repeat(100)), output(3, "tail".into())];
         let file = tail_log(&events);
@@ -3983,7 +3954,6 @@ mod tests {
         assert!(!more);
     }
 
-    #[test]
     fn tail_budget_includes_the_complete_rpc_envelope() {
         let id = "\"\n🦝".repeat(20);
         let budget = tail_event_byte_limit(&id, TAIL_RESPONSE_BYTES_LIMIT).unwrap();
@@ -4000,7 +3970,6 @@ mod tests {
         assert!(serde_json::to_vec(&fitted).unwrap().len() < budget);
     }
 
-    #[test]
     fn tail_sends_a_single_oversized_event_alone_without_skipping_it() {
         let events = vec![prompt(1), output(2, "large tool result".repeat(100)), prompt(3)];
         let file = tail_log(&events);
@@ -4019,7 +3988,6 @@ mod tests {
         assert!(more);
     }
 
-    #[test]
     fn tail_event_limit_can_split_a_single_turn_without_losing_the_prompt() {
         let events: Vec<_> = std::iter::once(prompt(1))
             .chain((2..=TAIL_EVENT_LIMIT as u64 + 1).map(|seq| output(seq, String::new())))
@@ -4035,7 +4003,6 @@ mod tests {
         assert!(!more);
     }
 
-    #[test]
     fn tail_ignores_invalid_lines_and_handles_empty_or_missing_logs() {
         use std::io::Write;
         let mut file = tail_log(&[prompt(1)]);
@@ -4053,7 +4020,6 @@ mod tests {
         assert!(page.is_empty() && !more);
     }
 
-    #[test]
     fn tail_rebounds_events_appended_by_permission_reconciliation() {
         let mut events = vec![prompt(1), output(2, "result".into())];
         let budget = serde_json::to_vec(&events[0]).unwrap().len() + 1 + serde_json::to_vec(&events[1]).unwrap().len();
@@ -4177,7 +4143,6 @@ mod tests {
         assert_eq!(serde_json::from_slice::<Value>(&phone.open(&general_purpose::STANDARD.decode(text.as_bytes()).unwrap(), PayloadKind::Text).unwrap()).unwrap(), small);
     }
 
-    #[test]
     fn notification_text_is_bounded_and_single_line() {
         let text = format!("first\n{}", "word ".repeat(80));
         let collapsed = collapse_notification_text(&text);
@@ -4188,7 +4153,6 @@ mod tests {
 
     /// #979: the answers are a map of text to text and nothing else, and the
     /// method is offered only where the attached runtime serves it.
-    #[test]
     fn question_answers_are_closed_and_offered_only_with_a_runtime_that_takes_them() {
         let parsed: QuestionsRespondParams = serde_json::from_value(json!({
             "sessionId": "session", "tabId": "tab", "requestId": "request",
@@ -4209,7 +4173,6 @@ mod tests {
         assert!(capabilities(&runtime_of(Some("0.2.22"), None)).get("questions").is_none(), "an older runtime has no such operation: the phone shows the question read-only");
     }
 
-    #[test]
     fn permission_response_params_are_closed_and_session_scoped() {
         let parsed: PermissionRespondParams = serde_json::from_value(json!({
             "sessionId": "session",
@@ -4232,20 +4195,17 @@ mod tests {
         .is_err());
     }
 
-    #[test]
     fn explicit_pairing_uses_its_authenticated_device_identity_without_an_account() {
         let author = effective_user_from_mirror(&device(DeviceProvenance::Explicit, None), None).unwrap();
         assert_eq!(author.user_id, "device-1");
         assert_eq!(author.display_name, "Paresh's phone");
     }
 
-    #[test]
     fn account_pairing_still_requires_its_bound_account() {
         assert!(effective_user_from_mirror(&device(DeviceProvenance::Automatic, Some("user-1")), None).is_err());
         assert!(effective_user_from_mirror(&device(DeviceProvenance::Automatic, Some("other-user")), Some(account())).is_err());
     }
 
-    #[test]
     fn session_send_attachments_are_optional_for_old_clients() {
         let old: SessionSendParams = serde_json::from_value(json!({
             "tabId": "tab",
@@ -4281,7 +4241,6 @@ mod tests {
 
     /// #730: the phone is told what the runtime its connection reaches can
     /// serve, not what this app could serve through a runtime of its own build.
-    #[test]
     fn a_phone_is_offered_only_what_the_attached_runtime_serves() {
         let released = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "prefetch": 1, "prefetchOpen": 1, "prefetchTargets": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 });
         let mut every = released.clone();
@@ -4301,7 +4260,6 @@ mod tests {
     }
 
     /// #730: an operation the runtime does not know reads as what to do about it.
-    #[test]
     fn a_runtime_refusing_an_unknown_operation_says_the_mac_needs_updating() {
         use crate::local_runtime::client::Refused;
         let refused = |message: &str| anyhow::Error::from(Refused { code: "internal".into(), message: message.into() });
@@ -4311,7 +4269,6 @@ mod tests {
         assert_eq!(outdated(anyhow!("timed out")).to_string(), "timed out");
     }
 
-    #[test]
     fn the_terminal_view_is_offered_with_the_requests_it_needs() {
         // A phone shows its Terminal view only to a Mac that names this.
         assert_eq!(capabilities(&current_runtime())["terminal"], 1);
@@ -4320,7 +4277,6 @@ mod tests {
         assert!(serde_json::from_value::<TerminalParams>(json!({ "worktreeId": "worktree", "tabId": "tab", "force": true })).is_err());
     }
 
-    #[test]
     fn session_controls_are_named_and_take_only_their_own_fields() {
         // A phone offers the controls only to a Mac that names them.
         assert_eq!(capabilities(&current_runtime())["sessionControls"], 1);
@@ -4338,7 +4294,6 @@ mod tests {
             "tab": { "harness": "codex", "transport": "experimentalCodexStdio" } })).is_err(), "a phone cannot choose a transport");
     }
 
-    #[test]
     fn sends_and_notes_take_a_message_id_only_this_mac_reports_it_understands() {
         // A phone sends the id only after `sync.capabilities` names it (#675).
         assert_eq!(capabilities(&current_runtime())["sendIds"], 1);
@@ -4359,7 +4314,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn a_send_digest_matches_a_repeat_and_changes_with_any_edit() {
         let attachment = |name: &str, data: &[u8]| RemoteAttachmentInput {
             media_type: "image/png".into(),
@@ -4396,7 +4350,6 @@ mod tests {
         })
     }
 
-    #[test]
     fn a_phone_starting_a_session_again_after_a_lost_reply_gets_the_first_one() {
         let dir = tempfile::tempdir().unwrap();
         let ids = SendIds::at(dir.path().join("sends.json"));
@@ -4419,7 +4372,6 @@ mod tests {
         assert_eq!(made.get(), 4);
     }
 
-    #[test]
     fn a_phone_names_projects_by_id_and_never_sends_a_path() {
         let named = capabilities(&current_runtime());
         assert_eq!((named["sessionCreate"].clone(), named["macSettings"].clone()), (json!(1), json!(1)));
@@ -4445,7 +4397,6 @@ mod tests {
         assert_eq!(store::projects::by_public_id(projects[0]["id"].as_str().unwrap()).unwrap().path, repo.path);
     }
 
-    #[test]
     fn a_send_the_agent_has_is_answered_again_without_sending() {
         let dir = tempfile::tempdir().unwrap();
         let ids = SendIds::at(dir.path().join("sends.json"));
@@ -4462,7 +4413,6 @@ mod tests {
         assert_eq!(calls.borrow()[1..], [("tab".into(), "Ship it".into(), 1, None), ("tab".into(), "Ship it".into(), 1, None)]);
     }
 
-    #[test]
     fn a_queued_send_goes_to_the_runtime_on_every_repeat_until_it_is_delivered() {
         let dir = tempfile::tempdir().unwrap();
         let ids = SendIds::at(dir.path().join("sends.json"));
@@ -4486,7 +4436,6 @@ mod tests {
         assert!(calls.borrow().iter().all(|call| *call == ("tab".into(), "Ship it".into(), 1, Some("draft-0001".into()))));
     }
 
-    #[test]
     fn a_note_posted_again_adds_nothing_and_returns_the_first() {
         let _home = store::temp_home();
         let lock = Mutex::new(());
@@ -4517,7 +4466,6 @@ mod tests {
         assert_eq!(saved(), vec!["note-1", "note-3", "note-4", "note-5"]);
     }
 
-    #[test]
     fn a_note_posted_again_is_found_with_its_promotions_and_not_added_twice() {
         let note = |id: &str, body: &str, client: Option<&str>| ChatNote {
             id: id.into(),
@@ -4548,7 +4496,6 @@ mod tests {
         assert_eq!(serde_json::to_value(&notes[1]).unwrap()["clientMessageId"], "draft-1");
     }
 
-    #[test]
     fn notes_saved_before_promotions_were_recorded_still_load_and_list_unchanged() {
         let saved: NotesFile = serde_json::from_value(json!({ "sessions": { "worktree": [{
             "id": "note-1",
@@ -4563,7 +4510,6 @@ mod tests {
         assert_eq!(serde_json::to_value(note).unwrap().get("promotedTo"), None);
     }
 
-    #[test]
     fn promoting_notes_records_one_promotion_per_tab() {
         let note = |id: &str| ChatNote {
             id: id.into(),
@@ -4592,7 +4538,6 @@ mod tests {
         assert!(!mark_promoted(&mut notes, &HashSet::from([&gone]), &promotion("claude", 20)));
     }
 
-    #[test]
     fn remote_attachments_are_type_count_and_size_bounded() {
         let attachment = |media_type: &str, data: String| RemoteAttachmentInput {
             media_type: media_type.into(),
@@ -4655,7 +4600,6 @@ mod tests {
         Payload::GoalUpdated { goal: crate::events::Goal { objective: "Ship".into(), status, token_budget: None, tokens_used: 1 } }
     }
 
-    #[test]
     fn each_agent_event_makes_a_notice_of_its_kind_named_by_its_session() {
         let runtime = MobileRuntime::new();
         let finished = notice(&runtime, ended(TurnStatus::Ok, Some("All\n done."), false)).unwrap();
@@ -4751,7 +4695,6 @@ mod tests {
         assert!(wire.get("question").is_none() && wire.get("approval").is_none());
     }
 
-    #[test]
     fn each_tab_asks_by_its_own_request_ids_and_a_new_turn_asks_anew() {
         let runtime = MobileRuntime::new();
         let in_tab = |tab: &str, payload: Payload| AgentEvent { tab_id: tab.into(), ..event(1, payload) };
@@ -4769,7 +4712,6 @@ mod tests {
         assert!(runtime.agent_notification(&in_tab("two", permission("1", None)), titled).is_none(), "another tab's turn goes on");
     }
 
-    #[test]
     fn a_pull_request_notice_is_sent_once_for_its_session() {
         use crate::issue_pipeline::engine::{PhoneNotice, PhoneNoticeKind};
         let runtime = MobileRuntime::new();
@@ -4801,7 +4743,6 @@ mod tests {
 
     const KINDS: [NoticeKind; 7] = [NoticeKind::Question, NoticeKind::Approval, NoticeKind::Finished, NoticeKind::Failed, NoticeKind::UsageLimit, NoticeKind::PrChecksFailed, NoticeKind::PrMerged];
 
-    #[test]
     fn a_filter_sends_by_kind_scope_and_each_session_override() {
         assert!(KINDS.iter().all(|kind| admitted(None, &of(*kind, "a"))), "no filter: everything");
         assert!(KINDS.iter().all(|kind| admitted(Some(&filter(json!({}))), &of(*kind, "a"))), "an empty filter: everything");
@@ -4830,7 +4771,6 @@ mod tests {
         assert!(!overrides.admits(&of(NoticeKind::Finished, "b")), "out of scope, no override");
     }
 
-    #[test]
     fn subscribing_with_empty_params_still_takes_everything_and_unknown_fields_are_refused() {
         let empty: SubscribeNotificationsParams = parse_params(json!({})).unwrap();
         assert!(empty.filter.is_none());
@@ -4846,7 +4786,6 @@ mod tests {
         assert!(parse_params::<MissedNotificationsParams>(json!({ "lastSeenSeq": 0, "filters": {} })).is_err());
     }
 
-    #[test]
     fn missed_notices_and_each_connection_are_held_to_its_filter() {
         let runtime = MobileRuntime::new();
         let (old_tx, mut old_rx) = mpsc::channel(16);
@@ -4874,7 +4813,6 @@ mod tests {
         assert!(runtime.missed_notifications(Some(&runtime.notification_epoch), missed[0].seq, Some(&chosen)).is_empty());
     }
 
-    #[test]
     fn a_subscription_streams_only_what_its_filter_admits_until_it_ends() {
         let sink = crate::sink::BroadcastSink::new(16);
         let runtime = MobileRuntime::new();
@@ -4910,7 +4848,6 @@ mod tests {
         assert_eq!(pushed(&mut client), ["question", "finished"], "no filter: everything, as before filters");
     }
 
-    #[test]
     fn a_pipeline_written_merged_reaches_the_phone_once() {
         let _home = crate::store::temp_home();
         let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(16));
@@ -4939,7 +4876,6 @@ mod tests {
         assert_eq!(runtime.missed_notifications(None, 0, None).len(), 1, "kept for a phone that missed it");
     }
 
-    #[test]
     fn a_phone_is_told_this_mac_filters_notices() {
         assert_eq!(capabilities(&current_runtime())["notificationFilters"], 1);
     }
@@ -4947,7 +4883,6 @@ mod tests {
     /// PRO-479: the bots are offered only through a runtime that serves them and
     /// only while Bots is on; their params are closed, and only reads are open
     /// to a phone that cannot drive.
-    #[test]
     fn bots_are_offered_only_while_on_and_their_params_are_closed() {
         assert_eq!(capabilities_for(&current_runtime(), true)["bots"], 1);
         assert!(capabilities_for(&current_runtime(), false).get("bots").is_none(), "with Bots off a phone shows nothing of them");
@@ -4963,7 +4898,6 @@ mod tests {
     }
 
     /// PRO-479: a bot's question is sent whatever the session scope says, under the questions a phone chose.
-    #[test]
     fn a_bots_question_is_sent_by_kind_and_needs_the_person() {
         let asked = of(NoticeKind::BotQuestion, "home-chat");
         assert!(filter(json!({ "kinds": ["bot_question"], "sessions": { "scope": "only", "ids": ["other"] } })).admits(&asked), "not one session's");
@@ -5012,7 +4946,6 @@ mod tests {
     }
 
     /// PRO-479: phones read their capabilities again when Bots is switched, and only then.
-    #[test]
     fn switching_bots_tells_phones_to_ask_again() {
         let runtime = MobileRuntime::new();
         let (sender, _receiver) = mpsc::channel(4);
@@ -5035,5 +4968,96 @@ mod tests {
                 .len();
             assert_eq!(stream_event_envelope_len(id), expected, "id={id:?}");
         }
+    }
+
+    #[test]
+    fn phone_rpc_batch_1() {
+        every_method_the_dispatch_answers_is_admitted_as_its_handler_asks();
+        a_phone_is_offered_accounts_only_with_more_than_one_and_never_a_token_or_address();
+        a_phone_is_listed_accounts_only_through_a_runtime_that_starts_on_them();
+        manual_status_changes_notify_the_phone_and_change_its_summary();
+        the_phone_summary_carries_pins_and_the_macs_pinned_order();
+        the_phone_summary_names_a_tab_by_its_generated_title_beside_its_own();
+        summaries_date_each_tab_by_its_own_last_activity();
+        a_prompt_image_is_read_only_from_its_session_attachments();
+        a_row_is_named_by_its_branch_as_the_project_list_names_it();
+        a_prefetch_read_stops_at_its_next_check_once_it_is_no_longer_wanted();
+        a_verified_cursor_continues_from_the_appended_bytes_and_any_other_change_reads_the_whole_log();
+        a_checkpoint_is_kept_per_conversation_and_only_for_the_cursor_last_returned();
+    }
+
+    #[test]
+    fn phone_rpc_batch_2() {
+        a_page_that_says_there_is_more_is_continued_without_another_reconcile_and_a_prefetch_is_not();
+        a_named_open_list_replaces_the_recently_read_guess();
+        a_prefetch_while_a_transcript_is_open_keeps_its_next_sync_incremental_and_sends_it_nothing();
+        a_prefetch_goes_newest_session_first_and_its_newest_tabs_and_skips_archived_ones();
+        a_phone_is_told_the_conversations_a_prefetch_would_send();
+        sync_cold_unchanged_and_large_gap_are_contiguous();
+        sync_rewrites_truncations_and_wrong_generation_reset_boundedly();
+        sync_pages_bound_the_rpc_response_without_skipping_forward_records();
+        sync_sends_an_oversized_event_alone_cut_down_and_advances_past_it();
+        a_long_conversation_loads_over_relay_one_frame_at_a_time();
+        over_relay_an_event_larger_than_a_page_is_whole_only_when_it_can_be_fragmented();
+        fit_event_cuts_the_longest_strings_on_character_boundaries();
+    }
+
+    #[test]
+    fn phone_rpc_batch_3() {
+        fit_event_falls_back_to_a_status_line_when_no_string_is_large();
+        conditional_lists_return_only_versions_when_unchanged();
+        synthetic_sync_payload_measurement();
+        paged_tail_keeps_whole_turns_in_sequence_order();
+        tail_counts_serialized_utf8_and_json_escapes_at_the_exact_boundary();
+        tail_budget_includes_the_complete_rpc_envelope();
+        tail_sends_a_single_oversized_event_alone_without_skipping_it();
+        tail_event_limit_can_split_a_single_turn_without_losing_the_prompt();
+        tail_ignores_invalid_lines_and_handles_empty_or_missing_logs();
+        tail_rebounds_events_appended_by_permission_reconciliation();
+        notification_text_is_bounded_and_single_line();
+        question_answers_are_closed_and_offered_only_with_a_runtime_that_takes_them();
+    }
+
+    #[test]
+    fn phone_rpc_batch_4() {
+        permission_response_params_are_closed_and_session_scoped();
+        explicit_pairing_uses_its_authenticated_device_identity_without_an_account();
+        account_pairing_still_requires_its_bound_account();
+        session_send_attachments_are_optional_for_old_clients();
+        a_phone_is_offered_only_what_the_attached_runtime_serves();
+        a_runtime_refusing_an_unknown_operation_says_the_mac_needs_updating();
+        the_terminal_view_is_offered_with_the_requests_it_needs();
+        session_controls_are_named_and_take_only_their_own_fields();
+        sends_and_notes_take_a_message_id_only_this_mac_reports_it_understands();
+        a_send_digest_matches_a_repeat_and_changes_with_any_edit();
+        a_phone_starting_a_session_again_after_a_lost_reply_gets_the_first_one();
+        a_phone_names_projects_by_id_and_never_sends_a_path();
+    }
+
+    #[test]
+    fn phone_rpc_batch_5() {
+        a_send_the_agent_has_is_answered_again_without_sending();
+        a_queued_send_goes_to_the_runtime_on_every_repeat_until_it_is_delivered();
+        a_note_posted_again_adds_nothing_and_returns_the_first();
+        a_note_posted_again_is_found_with_its_promotions_and_not_added_twice();
+        notes_saved_before_promotions_were_recorded_still_load_and_list_unchanged();
+        promoting_notes_records_one_promotion_per_tab();
+        remote_attachments_are_type_count_and_size_bounded();
+        each_agent_event_makes_a_notice_of_its_kind_named_by_its_session();
+        each_tab_asks_by_its_own_request_ids_and_a_new_turn_asks_anew();
+        a_pull_request_notice_is_sent_once_for_its_session();
+        a_filter_sends_by_kind_scope_and_each_session_override();
+        subscribing_with_empty_params_still_takes_everything_and_unknown_fields_are_refused();
+    }
+
+    #[test]
+    fn phone_rpc_batch_6() {
+        missed_notices_and_each_connection_are_held_to_its_filter();
+        a_subscription_streams_only_what_its_filter_admits_until_it_ends();
+        a_pipeline_written_merged_reaches_the_phone_once();
+        a_phone_is_told_this_mac_filters_notices();
+        bots_are_offered_only_while_on_and_their_params_are_closed();
+        a_bots_question_is_sent_by_kind_and_needs_the_person();
+        switching_bots_tells_phones_to_ask_again();
     }
 }

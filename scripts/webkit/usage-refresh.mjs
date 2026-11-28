@@ -94,7 +94,7 @@ try {
   const noRefreshUntil = async (from, until, expected, message) => {
     await page.clock.pauseAt(from + 30_000);
     try {
-      await page.clock.runFor(until - (from + 30_000));
+      await page.clock.fastForward(until - (from + 30_000));
       assert.equal(await refreshes(), expected, message);
     } finally {
       await page.clock.resume();
@@ -249,7 +249,7 @@ try {
 
   await group.getByRole("radio", { name: "Off", exact: true }).click();
   await page.waitForFunction(() => window.__USAGE_FIXTURE__.patches.at(-1)?.usageRefreshMinutes === 0);
-  await page.clock.runFor(30 * MINUTE);
+  await page.clock.fastForward(30 * MINUTE);
   assert.equal(await refreshes(), count, "Off stops the timer");
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await page.waitForFunction((n) => window.__USAGE_FIXTURE__.refreshes.length === n, ++count);

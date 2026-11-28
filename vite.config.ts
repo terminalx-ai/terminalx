@@ -96,10 +96,12 @@ function pdfAssets(): Plugin {
   };
 }
 
-// Every test file, and the ones that run with no DOM: the `node` project. The rest are `dom`,
-// in jsdom with src/test/setup.ts, so each file is in exactly one project.
+// Every desktop test file, and the ones that run with no DOM: the `node` project. The rest are
+// `dom`, in jsdom with src/test/setup.ts, so each file is in exactly one project. Mobile tests
+// (`mobile/src/**/*.test.{ts,tsx}`) run in `phone-app` via `pnpm --dir mobile test` (with
+// `mobile/vitest.config.ts`) and are intentionally excluded here so they do not run twice.
 //
-// `node` holds every mobile, package and script test, and the src tests below: each is a
+// `node` holds every package and script test, and the src tests below: each is a
 // .test.ts that uses no DOM API itself (window, document, localStorage, navigator, a DOM
 // event or observer, requestAnimationFrame, render or Testing Library), carries no
 // `@vitest-environment jsdom` comment, and passed run by path in node with the same tests
@@ -108,7 +110,7 @@ function pdfAssets(): Plugin {
 // cloudSetupLayout, cloudWorkClaims, settingsLinks, terminalColor and terminalMemory. A new src
 // test is `dom` until it is listed here. A `@vitest-environment` comment still wins over the
 // project's environment, so a file keeps the one it names in either project.
-const TEST_FILES = ["src/**/*.test.{ts,tsx}", "mobile/src/**/*.test.ts", "packages/**/*.test.ts", "scripts/*.test.mjs"];
+const TEST_FILES = ["src/**/*.test.{ts,tsx}", "packages/**/*.test.ts", "scripts/*.test.mjs"];
 const NODE_SRC_TESTS = [
   "src/components/bots/BotItemAskedBy.test.ts",
   "src/components/changes/CheckLogTab.test.ts",
@@ -253,7 +255,7 @@ const NODE_SRC_TESTS = [
   "src/types/target.localVm.test.ts",
   "src/types/target.machine.test.ts",
 ];
-const NODE_TESTS = ["mobile/src/**/*.test.ts", "packages/**/*.test.ts", "scripts/*.test.mjs", ...NODE_SRC_TESTS];
+const NODE_TESTS = ["packages/**/*.test.ts", "scripts/*.test.mjs", ...NODE_SRC_TESTS];
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;

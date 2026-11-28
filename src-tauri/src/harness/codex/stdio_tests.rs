@@ -31,6 +31,47 @@ fn item(method: &str, thread: &str) -> String {
 }
 
 #[test]
+fn codex_stdio_handshake_resume_and_acceptance() {
+    a_prompt_is_accepted_once_by_whichever_of_its_result_or_start_comes_first();
+    a_refused_or_unanswered_prompt_stays_unaccepted_and_compaction_never_waits();
+    the_real_thread_is_bound_before_the_first_prompt_write();
+    a_known_thread_is_resumed_without_its_turns_before_the_first_prompt();
+    a_resume_answered_with_another_thread_sends_no_prompt();
+    codex_releases_from_the_verified_minimum_are_supported();
+    duplicate_responses_never_replay_the_first_prompt();
+    interrupt_during_handshake_fences_the_deferred_input();
+}
+
+#[test]
+fn codex_stdio_compaction_exit_and_turn_lifecycle() {
+    compact_command_is_never_a_user_input_or_a_model_turn();
+    exit_closes_start_admission_but_preserves_buffered_completion();
+    late_turn_start_response_cannot_reopen_a_completed_turn();
+    errors_carry_evidence_without_fabricating_a_compaction_result();
+    buffered_requests_after_exit_do_not_mask_positive_compaction_evidence();
+    queued_interrupt_expires_with_its_turn_and_late_error_cannot_fail_next_turn();
+    a_turn_refused_for_its_sign_in_ends_with_auth_failed();
+}
+
+#[test]
+fn codex_stdio_approvals_and_permissions() {
+    server_request_ids_are_separate_and_decisions_are_exact_and_single_use();
+    resolved_or_ended_requests_cannot_be_answered();
+    unsupported_approval_extensions_fail_closed_without_an_allow();
+    resolved_approval_revokes_its_queued_reply();
+    every_terminal_turn_expires_visible_approval_cards();
+}
+
+#[test]
+fn codex_stdio_streaming_reasoning_and_usage() {
+    a_streamed_reply_is_previewed_piece_by_piece_and_committed_once();
+    a_reasoning_summary_streams_as_thinking_and_is_committed_once();
+    a_turn_that_ends_mid_reply_commits_what_it_streamed_once();
+    a_reply_cut_off_by_the_connection_is_handed_over_once();
+    turn_usage_normalizes_cached_input_and_ignores_late_or_repeated_counters();
+    usage_model_follows_sent_overrides_and_null_keeps_the_threads_latest_model();
+}
+
 fn a_prompt_is_accepted_once_by_whichever_of_its_result_or_start_comes_first() {
     let accepted = |actions: &[Action]| actions.iter().filter(|action| matches!(action, Action::Accepted)).count();
     let (mut client, actions) = ready("hello");
@@ -47,7 +88,6 @@ fn a_prompt_is_accepted_once_by_whichever_of_its_result_or_start_comes_first() {
     assert_eq!(accepted(&client.handle(&result).unwrap()), 0);
 }
 
-#[test]
 fn a_refused_or_unanswered_prompt_stays_unaccepted_and_compaction_never_waits() {
     let mut client = client();
     client.start("hello".into(), vec![]).unwrap();
@@ -61,7 +101,6 @@ fn a_refused_or_unanswered_prompt_stays_unaccepted_and_compaction_never_waits() 
     assert!(!client.unaccepted());
 }
 
-#[test]
 fn the_real_thread_is_bound_before_the_first_prompt_write() {
     let (client, actions) = ready("hello");
     assert_eq!(client.thread.as_deref(), Some("thread"));
@@ -73,7 +112,6 @@ fn the_real_thread_is_bound_before_the_first_prompt_write() {
     assert_eq!(requests[0]["params"]["input"][0]["text"], "hello");
 }
 
-#[test]
 fn a_known_thread_is_resumed_without_its_turns_before_the_first_prompt() {
     let mut client = Stdio::new("/tmp/terminalx-stdio-contract".into(), "".into(), None, "auto".into(), Some("thread".into()));
     let start = wire(&client.start("hello again".into(), vec![]).unwrap());
@@ -90,7 +128,6 @@ fn a_known_thread_is_resumed_without_its_turns_before_the_first_prompt() {
     assert!(matches!(&emitted(turn(&mut client))[..], [Payload::TurnStarted { model: Some(model), .. }] if model == "gpt-5.4"));
 }
 
-#[test]
 fn a_resume_answered_with_another_thread_sends_no_prompt() {
     let mut client = Stdio::new("/tmp/terminalx-stdio-contract".into(), "".into(), None, "auto".into(), Some("thread".into()));
     client.start("hello again".into(), vec![]).unwrap();
@@ -100,7 +137,6 @@ fn a_resume_answered_with_another_thread_sends_no_prompt() {
     assert!(client.thread.is_none() && !client.ready);
 }
 
-#[test]
 fn codex_releases_from_the_verified_minimum_are_supported() {
     for version in ["codex-cli 0.164.0", "codex-cli 0.166.0\n", "codex-cli 0.167.0-alpha.2", "codex-cli 1.0.0"] {
         assert!(supported(version), "{version}");
@@ -110,7 +146,6 @@ fn codex_releases_from_the_verified_minimum_are_supported() {
     }
 }
 
-#[test]
 fn duplicate_responses_never_replay_the_first_prompt() {
     let (mut client, _) = ready("hello");
     for id in [1, 2] {
@@ -119,7 +154,6 @@ fn duplicate_responses_never_replay_the_first_prompt() {
     assert_eq!(client.thread.as_deref(), Some("thread"));
 }
 
-#[test]
 fn interrupt_during_handshake_fences_the_deferred_input() {
     let mut client = client();
     client.start("must not send".into(), vec![]).unwrap();
@@ -129,7 +163,6 @@ fn interrupt_during_handshake_fences_the_deferred_input() {
     assert!(client.first.is_none());
 }
 
-#[test]
 fn compact_command_is_never_a_user_input_or_a_model_turn() {
     let (mut client, actions) = ready("/compact");
     let requests = wire(&actions);
@@ -144,7 +177,6 @@ fn compact_command_is_never_a_user_input_or_a_model_turn() {
     assert!(matches!(&ended[..], [Action::Lifecycle(Observation::TurnEnded { .. }), Action::CompactEnded]));
 }
 
-#[test]
 fn exit_closes_start_admission_but_preserves_buffered_completion() {
     let (mut client, _) = ready("hello");
     turn(&mut client);
@@ -155,7 +187,6 @@ fn exit_closes_start_admission_but_preserves_buffered_completion() {
     assert!(client.prompt("never replay".into(), vec![]).is_err());
 }
 
-#[test]
 fn late_turn_start_response_cannot_reopen_a_completed_turn() {
     let (mut client, actions) = ready("hello");
     let request = wire(&actions).remove(0);
@@ -170,7 +201,6 @@ fn approval() -> String {
     json!({"id":"server-request", "method":"item/commandExecution/requestApproval", "params":{"threadId":"thread","turnId":"turn","itemId":"command","command":"pwd","availableDecisions":["accept","decline","cancel"]}}).to_string()
 }
 
-#[test]
 fn server_request_ids_are_separate_and_decisions_are_exact_and_single_use() {
     let (mut client, _) = ready("hello");
     turn(&mut client);
@@ -184,7 +214,6 @@ fn server_request_ids_are_separate_and_decisions_are_exact_and_single_use() {
     assert!(!client.pending.is_empty(), "server approval must not consume client request IDs");
 }
 
-#[test]
 fn resolved_or_ended_requests_cannot_be_answered() {
     let (mut client, _) = ready("hello");
     turn(&mut client);
@@ -196,7 +225,6 @@ fn resolved_or_ended_requests_cannot_be_answered() {
     assert!(client.answer("\"server-request\"", "allow").is_err());
 }
 
-#[test]
 fn errors_carry_evidence_without_fabricating_a_compaction_result() {
     let (mut client, _) = ready("hello");
     turn(&mut client);
@@ -207,7 +235,6 @@ fn errors_carry_evidence_without_fabricating_a_compaction_result() {
     }
 }
 
-#[test]
 fn unsupported_approval_extensions_fail_closed_without_an_allow() {
     let (mut client, _) = ready("hello");
     turn(&mut client);
@@ -218,7 +245,6 @@ fn unsupported_approval_extensions_fail_closed_without_an_allow() {
     assert!(client.asks.is_empty());
 }
 
-#[test]
 fn buffered_requests_after_exit_do_not_mask_positive_compaction_evidence() {
     for failed in [false, true] {
         let (mut client, _) = ready("hello");
@@ -231,7 +257,6 @@ fn buffered_requests_after_exit_do_not_mask_positive_compaction_evidence() {
     }
 }
 
-#[test]
 fn queued_interrupt_expires_with_its_turn_and_late_error_cannot_fail_next_turn() {
     let (mut client, _) = ready("hello");
     turn(&mut client);
@@ -247,7 +272,6 @@ fn queued_interrupt_expires_with_its_turn_and_late_error_cannot_fail_next_turn()
     assert!(!client.blocked);
 }
 
-#[test]
 fn resolved_approval_revokes_its_queued_reply() {
     let (mut client, _) = ready("hello");
     turn(&mut client);
@@ -264,7 +288,6 @@ fn resolved_approval_revokes_its_queued_reply() {
     assert!(!client.blocked);
 }
 
-#[test]
 fn every_terminal_turn_expires_visible_approval_cards() {
     for status in ["completed", "failed", "interrupted"] {
         let (mut client, _) = ready("hello");
@@ -280,7 +303,6 @@ fn every_terminal_turn_expires_visible_approval_cards() {
 
 /// #667: a failed turn whose model request Codex was refused for ends as a
 /// refused sign-in; any other failure does not.
-#[test]
 fn a_turn_refused_for_its_sign_in_ends_with_auth_failed() {
     let ended = |error: Value| {
         let (mut client, _) = ready("hello");
@@ -330,7 +352,6 @@ fn ended(status: &str) -> String {
 
 /// #644: a reply arrives in many pieces. Each is a live preview of its block;
 /// the reply is committed once, whole, when its item completes.
-#[test]
 fn a_streamed_reply_is_previewed_piece_by_piece_and_committed_once() {
     let (mut client, _) = ready("hello");
     turn(&mut client);
@@ -353,7 +374,6 @@ fn a_streamed_reply_is_previewed_piece_by_piece_and_committed_once() {
 
 /// A reasoning summary streams as thinking and is committed as one block, its
 /// parts a paragraph apart in the preview as in the completed summary.
-#[test]
 fn a_reasoning_summary_streams_as_thinking_and_is_committed_once() {
     let (mut client, _) = ready("hello");
     turn(&mut client);
@@ -374,7 +394,6 @@ fn a_reasoning_summary_streams_as_thinking_and_is_committed_once() {
 
 /// A turn that ends while a reply is still streaming, however it ends, keeps
 /// what the reader saw: committed once, before the turn's end.
-#[test]
 fn a_turn_that_ends_mid_reply_commits_what_it_streamed_once() {
     for status in ["completed", "interrupted", "failed"] {
         let (mut client, _) = ready("hello");
@@ -396,7 +415,6 @@ fn a_turn_that_ends_mid_reply_commits_what_it_streamed_once() {
 
 /// A connection that ends mid-reply (Stop, a crash) leaves the session to
 /// commit what streamed: once, however often it asks.
-#[test]
 fn a_reply_cut_off_by_the_connection_is_handed_over_once() {
     let (mut client, _) = ready("hello");
     turn(&mut client);
@@ -409,7 +427,6 @@ fn a_reply_cut_off_by_the_connection_is_handed_over_once() {
     assert!(client.unfinished().is_empty());
 }
 
-#[test]
 fn turn_usage_normalizes_cached_input_and_ignores_late_or_repeated_counters() {
     let (mut client, actions) = ready("hello");
     assert!(wire(&actions)[0]["params"]["model"].is_null(), "default selection stays implicit");
@@ -430,7 +447,6 @@ fn turn_usage_normalizes_cached_input_and_ignores_late_or_repeated_counters() {
     assert!(emitted(client.handle(&reading("turn", 100, 80, 20)).unwrap()).is_empty());
 }
 
-#[test]
 fn usage_model_follows_sent_overrides_and_null_keeps_the_threads_latest_model() {
     let (mut client, _) = ready("hello");
     turn(&mut client);

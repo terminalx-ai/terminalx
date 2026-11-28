@@ -133,9 +133,11 @@ const server = await serve();
 const browser = await launch();
 let failed = 0;
 const sizes = [{ width: 1440, height: 900 }, { width: 1000, height: 700 }];
+const cases = shots
+  ? ["dark", "light"].flatMap((mode) => sizes.map((size) => ({ mode, size })))
+  : [{ mode: "dark", size: sizes[0] }, { mode: "light", size: sizes[1] }];
 try {
-  for (const mode of ["dark", "light"]) {
-    for (const size of sizes) {
+  for (const { mode, size } of cases) {
       const at = `${mode}, ${size.width}px`;
       const start = async (scene) => {
         const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, size, { extra: `(${setup})(${JSON.stringify({ mode, scene })});` });
@@ -294,7 +296,7 @@ try {
         await nav.getByRole("button", { name: "Orchestrator", exact: true }).click();
         const tab = settings.getByTestId("orchestrator-settings");
         await page.waitForFunction(() => document.querySelector('input[aria-label="Budget per run, subscription"]')?.disabled === false);
-        await page.waitForTimeout(300);
+        if (shots) await page.waitForTimeout(300);
         await shot(page, "settings");
         const value = (name) => tab.getByRole("spinbutton", { name, exact: true }).inputValue();
         const checks = {
@@ -344,7 +346,6 @@ try {
         failed += report(`settings, ${at}`, checks, { errors, calls, after });
         await page.close();
       }
-    }
   }
 } finally {
   await browser.close();

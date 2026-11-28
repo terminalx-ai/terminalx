@@ -43,6 +43,7 @@ const cloudProject = { key: PROJECT, orgId: "org-a", identity: "github.com/acme/
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
+vi.mock("@/icons", () => new Proxy({}, { has: () => true, get: (_, prop) => (prop === "then" || typeof prop === "symbol" ? undefined : prop === "__esModule" ? true : () => null) }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
 vi.mock("@/components/ui/tooltip", () => ({
   WithTooltip: ({ children }: { children: ReactNode }) => children,
@@ -128,7 +129,12 @@ const calls = (command: string) => invoke.mock.calls.filter(([name]) => name ===
 
 let accountNumber = 0;
 
+const nativeSetTimeout = window.setTimeout;
+let timerSpy: ReturnType<typeof vi.spyOn> | null = null;
+
 beforeEach(() => {
+  timerSpy = vi.spyOn(window, "setTimeout").mockImplementation(((fn: TimerHandler, delay?: number, ...args: unknown[]) =>
+    nativeSetTimeout(fn, delay === 250 ? 0 : delay, ...args)) as typeof window.setTimeout);
   invoke.mockReset().mockImplementation(async (command: string, args?: Record<string, unknown>) => {
     if (command === "linear_status") return { connected: false };
     if (command === "gh_available") return true;
@@ -158,6 +164,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  timerSpy?.mockRestore();
+  timerSpy = null;
   cleanup();
   takeOrganizationRequest();
   forgetAgentLoginsRequest();

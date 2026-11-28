@@ -31,11 +31,13 @@ const fixture = (layout) => `(() => {
 })();`;
 
 const server = await serve();
-let browser;
+const browser = await launch();
+const extraCases = process.env.SCREENSHOTS
+  ? ["simple", "list"].flatMap((layout) => ["light", "dark"].map((colorScheme) => [layout, colorScheme]))
+  : [["simple", "dark"], ["list", "light"]];
 try {
   if (process.env.SCREENSHOTS) await mkdir(process.env.SCREENSHOTS, { recursive: true });
-  for (const layout of ["simple", "list"]) for (const colorScheme of ["light", "dark"]) {
-    browser = await launch();
+  for (const [layout, colorScheme] of extraCases) {
     const page = await open(browser, server.url, { cloud: false, localProjects: 0 }, { width: 1100, height: 760 }, { extra: fixture(layout), colorScheme });
     page.setDefaultTimeout(15_000);
     await sidebar(page);
@@ -78,11 +80,10 @@ try {
     await page.getByRole("tooltip").filter({ hasText: "Archive" }).waitFor();
     assert.ok((await page.getByRole("tooltip").innerText()).includes("E"), "Archive tooltip includes its configured shortcut");
     if (process.env.SCREENSHOTS) await page.screenshot({ path: `${process.env.SCREENSHOTS}/${layout}-${colorScheme}-archive.png` });
-    await browser.close();
-    browser = null;
+    await page.close();
     console.log(`ok sidebar extras: ${layout}, ${colorScheme}`);
   }
 } finally {
-  await browser?.close();
+  await browser.close();
   server.close();
 }

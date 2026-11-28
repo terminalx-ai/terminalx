@@ -99,13 +99,13 @@ RUST = EVERYTHING + (
     "packages/portable/src/",
     "src/lib/fixtures/", "src/lib/__fixtures__/", "src/lib/mediaTypes.json", "src/lib/repo.ts",
     "src/lib/reservedAttachmentNames.json", "src/lib/userPreferenceDefaults.json",
+    "resources/icon-source/",
     "docs/MACHINES.md", ".github/ISSUE_TEMPLATE/",
 )
 
 # The frontend: its sources and tooling, the phone app's sources (a desktop
-# test imports from them, and the root Vitest run includes their tests), and
-# every Rust or other file a frontend test reads by path. test_macos_rust.py fails
-# when a test names one that is not here.
+# test imports from them), and every Rust or other file a frontend test reads
+# by path. test_macos_rust.py fails when a test names one that is not here.
 FRONTEND = EVERYTHING + (
     "src/", "packages/", "scripts/", "public/", "patches/", "index.html",
     "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "vite.config.ts", "tsconfig", ".nvmrc",

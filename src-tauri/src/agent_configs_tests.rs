@@ -74,7 +74,6 @@ fn apply_now(homes: &Homes, changes: &[Change]) -> Vec<Written> {
     apply_in(homes, changes, &preview.token).unwrap()
 }
 
-#[test]
 fn the_recorded_homes_compare_item_by_item() {
     let rig = rig();
     let c = compare_in(&rig.homes).unwrap();
@@ -107,7 +106,6 @@ fn the_recorded_homes_compare_item_by_item() {
     assert_eq!(c.codex_file, "~/.codex/config.toml");
 }
 
-#[test]
 fn claude_servers_convert_to_codex_shapes() {
     let codex = |json: &str| {
         let server = parse_claude_server(&serde_json::from_str(json).unwrap());
@@ -126,7 +124,6 @@ fn claude_servers_convert_to_codex_shapes() {
     assert_eq!(oauth.stays, vec!["`oauth` stays in Claude Code only"]);
 }
 
-#[test]
 fn codex_servers_convert_to_claude_shapes() {
     let claude = |toml_text: &str| {
         let server = parse_codex_server(&toml::from_str::<toml::Value>(toml_text).unwrap());
@@ -141,7 +138,6 @@ fn codex_servers_convert_to_claude_shapes() {
     assert_eq!(stays, vec!["turned off in Codex (`enabled = false`); Claude Code starts it"]);
 }
 
-#[test]
 fn a_claude_only_server_lands_in_codex_with_the_rest_of_the_file_untouched() {
     let rig = rig();
     let before = fs::read_to_string(rig.homes.codex_toml()).unwrap();
@@ -171,7 +167,6 @@ fn a_claude_only_server_lands_in_codex_with_the_rest_of_the_file_untouched() {
     assert_eq!(parsed["projects"]["/Users/example/code/app"]["trust_level"].as_str(), Some("trusted"));
 }
 
-#[test]
 fn using_claudes_version_replaces_codexs_in_place_with_its_comment() {
     let rig = rig();
     apply_now(&rig.homes, &[change(Kind::Mcp, "sentry", Direction::ToCodex)]);
@@ -181,7 +176,6 @@ fn using_claudes_version_replaces_codexs_in_place_with_its_comment() {
     assert_eq!(item(&compare_in(&rig.homes).unwrap(), Kind::Mcp, "sentry").status, Status::Same);
 }
 
-#[test]
 fn a_codex_only_server_lands_in_claude_json_keeping_every_other_key() {
     let rig = rig();
     let before = fs::read_to_string(&rig.homes.claude_json).unwrap();
@@ -203,7 +197,6 @@ fn a_codex_only_server_lands_in_claude_json_keeping_every_other_key() {
     assert_eq!(item(&compare_in(&rig.homes).unwrap(), Kind::Mcp, "context7").status, Status::Same);
 }
 
-#[test]
 fn a_preview_writes_nothing() {
     let rig = rig();
     let before = snapshot(&rig.homes.home);
@@ -217,7 +210,6 @@ fn a_preview_writes_nothing() {
     assert_eq!(snapshot(&rig.homes.home), before);
 }
 
-#[test]
 fn apply_refuses_files_that_changed_since_the_preview() {
     let rig = rig();
     let changes = [change(Kind::Mcp, "linear", Direction::ToCodex)];
@@ -228,7 +220,6 @@ fn apply_refuses_files_that_changed_since_the_preview() {
     assert_eq!(fs::read_to_string(rig.homes.codex_toml()).unwrap(), "model = \"other\"\n");
 }
 
-#[test]
 fn a_second_backup_on_one_day_gets_a_number() {
     let rig = rig();
     apply_now(&rig.homes, &[change(Kind::Mcp, "linear", Direction::ToCodex)]);
@@ -236,7 +227,6 @@ fn a_second_backup_on_one_day_gets_a_number() {
     assert_eq!(written[0].backup.as_deref(), Some(format!("~/.codex/config.toml.bak-{}.2", today()).as_str()));
 }
 
-#[test]
 fn commands_keep_the_frontmatter_both_agents_read() {
     let rig = rig();
     let changes = [change(Kind::Command, "review", Direction::ToCodex), change(Kind::Command, "draftpr", Direction::ToClaude)];
@@ -263,7 +253,6 @@ fn commands_keep_the_frontmatter_both_agents_read() {
     assert_eq!(item(&c, Kind::Command, "draftpr").status, Status::Same);
 }
 
-#[test]
 fn a_replaced_command_is_backed_up_beside_itself() {
     let rig = rig();
     let path = rig.homes.codex_dir.join("prompts/changelog.md");
@@ -305,7 +294,6 @@ fn a_skill_copies_over_keeping_files_only_the_target_had() {
     assert_eq!(item(&compare_in(&rig.homes).unwrap(), Kind::Skill, "release-notes").status, Status::Same);
 }
 
-#[test]
 fn missing_files_are_created_and_broken_ones_are_reported() {
     let rig = rig();
     fs::remove_file(rig.homes.codex_toml()).unwrap();
@@ -320,7 +308,6 @@ fn missing_files_are_created_and_broken_ones_are_reported() {
     assert!(preview_in(&rig.homes, &[change(Kind::Mcp, "playwright", Direction::ToCodex)]).is_err());
 }
 
-#[test]
 fn frontmatter_splits_into_keys_with_their_lines() {
     let (blocks, body) = split_frontmatter("---\ndescription: >\n  folded\n  text\nallowed-tools:\n  - Bash\n---\nbody\n").unwrap();
     assert_eq!(blocks, vec![("description".to_string(), "description: >\n  folded\n  text\n".to_string()), ("allowed-tools".to_string(), "allowed-tools:\n  - Bash\n".to_string())]);
@@ -329,7 +316,6 @@ fn frontmatter_splits_into_keys_with_their_lines() {
     assert!(split_frontmatter("no frontmatter").is_none());
 }
 
-#[test]
 fn a_replaced_codex_server_keeps_its_own_settings_and_says_so() {
     let rig = rig();
     let toml_path = rig.homes.codex_toml();
@@ -351,7 +337,6 @@ fn a_replaced_codex_server_keeps_its_own_settings_and_says_so() {
     assert_eq!(sentry["startup_timeout_sec"].as_integer(), Some(30));
 }
 
-#[test]
 fn a_replaced_claude_server_keeps_its_own_settings() {
     let rig = rig();
     let text = fs::read_to_string(&rig.homes.claude_json).unwrap().replace(
@@ -370,7 +355,6 @@ fn a_replaced_claude_server_keeps_its_own_settings() {
     assert_eq!(sentry["oauth"]["clientId"], "abc");
 }
 
-#[test]
 fn a_name_codex_cannot_key_is_refused_even_straight_to_preview() {
     let rig = rig();
     let text = fs::read_to_string(&rig.homes.claude_json).unwrap().replacen("\"mcpServers\": {\n", "\"mcpServers\": {\n    \"my.server\": { \"command\": \"x\" },\n", 1);
@@ -618,7 +602,6 @@ fn a_dangling_linked_target_folder_names_where_it_would_lead() {
 
 /// A link that cannot be read (here: not a link at all, which `read_link`
 /// refuses the same way) is still named as something, never as nothing.
-#[test]
 fn an_unreadable_link_is_never_named_empty() {
     let rig = rig();
     let gone = rig.homes.codex_dir.join("skills/not-there");
@@ -663,7 +646,6 @@ fn copy_of_a_vanished_file(rig: &Rig, target: &Path) -> (Result<Written, Box<Sto
     (apply_one(&rig.homes, &write, &today()), source)
 }
 
-#[test]
 fn a_skill_copy_that_stops_before_its_first_file_takes_back_the_folders_it_made() {
     let rig = rig();
     let skills = rig.homes.codex_dir.join("skills");
@@ -680,7 +662,6 @@ fn a_skill_copy_that_stops_before_its_first_file_takes_back_the_folders_it_made(
     assert_eq!(snapshot(&skills), before);
 }
 
-#[test]
 fn a_stopped_skill_copy_keeps_folders_that_were_already_there() {
     let rig = rig();
     let target = rig.homes.codex_dir.join("skills/new-skill");
@@ -694,7 +675,6 @@ fn a_stopped_skill_copy_keeps_folders_that_were_already_there() {
 
 /// A folder made for a write that could not be taken back is named, so the
 /// receipt never says "nothing" while it is on disk.
-#[test]
 fn a_folder_left_behind_is_named() {
     let rig = rig();
     let made = rig.homes.codex_dir.join("skills/new-skill");
@@ -709,4 +689,32 @@ fn a_folder_left_behind_is_named() {
         stopped_message(&rig.homes, &done, &stopped(vec![made])),
         "Wrote ~/.codex/prompts/review.md, then stopped: boom. Nothing after that was written. The folder ~/.codex/skills/new-skill made for it is still there."
     );
+}
+
+#[test]
+fn agent_configs_batch_1() {
+    the_recorded_homes_compare_item_by_item();
+    claude_servers_convert_to_codex_shapes();
+    codex_servers_convert_to_claude_shapes();
+    a_claude_only_server_lands_in_codex_with_the_rest_of_the_file_untouched();
+    using_claudes_version_replaces_codexs_in_place_with_its_comment();
+    a_codex_only_server_lands_in_claude_json_keeping_every_other_key();
+    a_preview_writes_nothing();
+    apply_refuses_files_that_changed_since_the_preview();
+    a_second_backup_on_one_day_gets_a_number();
+    commands_keep_the_frontmatter_both_agents_read();
+}
+
+#[test]
+fn agent_configs_batch_2() {
+    a_replaced_command_is_backed_up_beside_itself();
+    missing_files_are_created_and_broken_ones_are_reported();
+    frontmatter_splits_into_keys_with_their_lines();
+    a_replaced_codex_server_keeps_its_own_settings_and_says_so();
+    a_replaced_claude_server_keeps_its_own_settings();
+    a_name_codex_cannot_key_is_refused_even_straight_to_preview();
+    an_unreadable_link_is_never_named_empty();
+    a_skill_copy_that_stops_before_its_first_file_takes_back_the_folders_it_made();
+    a_stopped_skill_copy_keeps_folders_that_were_already_there();
+    a_folder_left_behind_is_named();
 }

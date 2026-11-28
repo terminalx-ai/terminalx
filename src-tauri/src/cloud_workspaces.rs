@@ -4637,7 +4637,6 @@ mod tests {
         else { json!({"workspaceId":"workspace-1", "following":action == "put"}) }
     }
 
-    #[test]
     fn phase2_following_contract_exact_paths_empty_delete_auth_inactive_org_and_receipt() {
         let (base, requests) = serve_each(vec![
             response("200 OK", r#"{"workspaceId":"workspace-1","following":true}"#, ""),
@@ -4677,7 +4676,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_following_contract_uuid_versions_variants_and_utf16_boundaries() {
         for version in '1'..='8' {
             for variant in ['8','9','a','b','A','B'] {
@@ -4698,7 +4696,6 @@ mod tests {
         assert!(valid_following_id("a.b:c@d"));
     }
 
-    #[test]
     fn phase2_following_contract_strict_input_path_nulls_and_production_hold_no_http() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -4757,7 +4754,6 @@ mod tests {
         assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
     }
 
-    #[test]
     fn phase2_following_contract_bounded_ids_note_wire_and_server_safety_refusals() {
         let workspace = "w".repeat(128);
         let note = "🦝".repeat(250);
@@ -4793,7 +4789,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_following_contract_response_ids_booleans_and_exact_receipt() {
         let mut bodies = vec![Value::Null, json!([]), json!({}), json!(["workspace-1","target.member:@-1","previous-owner",true])];
         for (key, value) in [("workspaceId", json!("foreign")), ("ownerId", json!("fresh-owner")), ("previousOwnerId", json!("wrong-owner")),
@@ -4822,7 +4817,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_following_contract_all_server_errors_and_no_automatic_retry() {
         for (status, code) in [
             ("401 Unauthorized", "invalid_access_token"), ("403 Forbidden", "active_organization_required"),
@@ -4854,7 +4848,6 @@ mod tests {
         assert!(!request.join().unwrap().extra_request);
     }
 
-    #[test]
     fn phase2_following_contract_bounded_timeout_and_body_capture_no_retry() {
         for action in ["put", "delete", "reassign"] {
             let (base, _, request) = serve_once(response("200 OK", &following_reply(action).to_string(), ""), Duration::from_millis(150));
@@ -4874,7 +4867,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_following_contract_late_account_profile_org_session_and_aba_fenced() {
         for change in ["signout", "account", "profile", "org", "session", "aba", "membership"] {
             for (action, rejected) in [("put", false), ("delete", false), ("reassign", false), ("put", true), ("delete", true), ("reassign", true)] {
@@ -4931,7 +4923,6 @@ mod tests {
                 "activeMembers":[{"userId":"member-1","displayName":null,"photoUrl":"https://example.com/current.png"}]}]})
     }
 
-    #[test]
     fn phase2_presence_contract_exact_paths_auth_bodies_and_nonactive_target() {
         let (base, requests) = serve_each(vec![
             response("200 OK", r#"{"applied":false,"ttlSeconds":45}"#, ""),
@@ -4974,7 +4965,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_presence_contract_invalid_inputs_and_production_hold_never_http() {
         // A bound listener proves no connection was attempted (unlike a dead port).
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -5029,7 +5019,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_presence_contract_subset_omissions_and_invalid_outputs() {
         let mut bodies = vec![presence_read_body()];
         bodies[0]["workspaces"] = json!([]); // Aggregate need not be in requested batch.
@@ -5067,7 +5056,6 @@ mod tests {
         assert_eq!(requests.join().unwrap().len(), bodies.len());
     }
 
-    #[test]
     fn phase2_presence_contract_current_owner_and_no_cached_authorization() {
         let mut first = presence_read_body();
         first["workspaces"][0]["owner"] = json!({"userId":"previous-owner","displayName":"Previous name","photoUrl":"https://example.com/old.png"});
@@ -5098,7 +5086,6 @@ mod tests {
         assert_eq!(requests.join().unwrap().len(), 7);
     }
 
-    #[test]
     fn phase2_presence_contract_error_codes_retry_after_and_no_retry() {
         for (status, code, retry) in [
             ("429 Too Many Requests", "presence_rate_limited", Some(7)),
@@ -5134,7 +5121,6 @@ mod tests {
         assert!(!request.join().unwrap().extra_request);
     }
 
-    #[test]
     fn phase2_presence_contract_bounds_malformed_put_and_bounded_timeout() {
         let ids: Vec<String> = (0..100).map(|i| format!("workspace_{i}-A")).collect();
         let (base, _, request) = serve_once(response("200 OK", r#"{"ttlSeconds":45,"activeMembers":[],"workspaces":[]}"#, ""), Duration::ZERO);
@@ -5161,7 +5147,6 @@ mod tests {
         assert!(!request.join().unwrap().extra_request);
     }
 
-    #[test]
     fn phase2_presence_contract_response_body_capture_is_bounded() {
         for put in [true, false] {
             // Valid JSON with trailing whitespace must still obey the byte cap.
@@ -5178,7 +5163,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_presence_contract_late_account_profile_org_session_and_aba_fenced() {
         for change in ["signout", "account", "profile", "org", "session", "aba", "membership"] {
             for (put, rejected) in [(true, false), (false, false), (true, true), (false, true)] {
@@ -5272,7 +5256,6 @@ mod tests {
         }})
     }
 
-    #[test]
     fn phase2_desktop_contract_production_activation_stays_held() {
         let (_, service) = test_service("http://127.0.0.1:9");
         assert!(!service.phase2_contracts_available());
@@ -5284,7 +5267,6 @@ mod tests {
         assert_eq!(service.details(None, "workspace-1").unwrap_err().code, "cloud_workspace_runtime_not_ready");
     }
 
-    #[test]
     fn phase2_desktop_contract_restart_exact_empty_body_queued_snapshot_and_existing_poll() {
         let mut body: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
         body["operation"]["action"] = json!("restart");
@@ -5322,7 +5304,6 @@ mod tests {
         for request in requests { phase2_headers(&request); }
     }
 
-    #[test]
     fn phase2_desktop_contract_details_integer_versions_epoch_ms_and_no_body() {
         let body = phase2_details_body();
         let (base, requests) = serve_each(vec![response("200 OK", &body.to_string(), "Cache-Control: no-store\r\n")]);
@@ -5345,7 +5326,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_desktop_contract_restart_details_keep_membership_and_existing_errors() {
         for code in ["cloud_workspace_manager_required", "cloud_workspace_runtime_unsupported", "cloud_workspace_runtime_not_ready", "cloud_workspace_member_concurrency_exceeded", "cloud_preparation_workspace_expired"] {
             assert!(known_error_code(code));
@@ -5363,7 +5343,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_desktop_contract_restart_details_allow_inactive_member_org() {
         let mut details = phase2_details_body();
         details["workspace"]["orgId"] = json!("org-2");
@@ -5384,7 +5363,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_desktop_contract_inbox_account_route_bigint_filtered_page_receipts_and_revoke() {
         let id = "9223372036854775807";
         let body = json!({"v":1,"cursor":id,"hasMore":true,"events":[{"id":id,"type":"workspace.share-removed","workspaceId":"workspace-1","createdAt":"2026-11-14T12:00:00Z","organizationId":"must-drop","payload":{"private":"must-drop"}}]});
@@ -5406,7 +5384,6 @@ mod tests {
         for request in requests { phase2_headers(&request); assert!(!request.contains("userId")); }
     }
 
-    #[test]
     fn phase2_desktop_contract_read_marker_inactive_member_iso_and_real_session_id() {
         let timestamp = "2026-11-14T12:00:00.000Z";
         let (base, requests) = serve_each(vec![response("200 OK", &json!({"sessionId":"runtime.session:1@host","readAt":timestamp}).to_string(), ""), response("200 OK", &json!({"sessionId":"","readAt":timestamp}).to_string(), "")]);
@@ -5423,7 +5400,6 @@ mod tests {
         assert_eq!(workspace_body, json!({"readAt":timestamp}));
     }
 
-    #[test]
     fn phase2_desktop_contract_sse_checkpoint_last_event_id_and_poll_fallback() {
         let sse = "event: inbox\nid: 9007199254740993\ndata: {\"id\":\"9007199254740993\",\"type\":\"workspace.share-removed\",\"workspaceId\":\"workspace-1\",\"createdAt\":\"2026-11-14T12:00:00Z\"}\n\nevent: checkpoint\nid: 9007199254740994\ndata: {\"cursor\":\"9007199254740994\"}\n\n";
         let (base, requests) = serve_each(vec![response("200 OK", sse, "Content-Type: text/event-stream\r\n"), response("200 OK", "event: inbox\nid: 2\n", "Content-Type: text/event-stream\r\n"), response("200 OK", r#"{"v":1,"cursor":"9007199254740994","hasMore":false,"events":[]}"#, "")]);
@@ -5439,7 +5415,6 @@ mod tests {
         for request in requests { phase2_headers(&request); }
     }
 
-    #[test]
     fn phase2_desktop_contract_non_machine0_details_and_response_scope_validation() {
         for provider in ["box", "hetzner"] {
             let mut body = phase2_details_body();
@@ -5458,7 +5433,6 @@ mod tests {
         requests.join().unwrap();
     }
 
-    #[test]
     fn phase2_desktop_contract_inbox_auth_and_late_account_membership_fences() {
         let (base, requests) = serve_each(vec![response("401 Unauthorized", r#"{"error":"invalid_access_token"}"#, "")]);
         let (_, service) = phase2_service(&base);
@@ -5478,7 +5452,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_desktop_contract_validation_unavailable_and_catalog_marker_types() {
         let (_, service) = phase2_service("http://127.0.0.1:9");
         for invalid in ["", "01", "-1", "1.0", "9223372036854775808"] {
@@ -5498,7 +5471,6 @@ mod tests {
         assert_eq!(serde_json::to_value(item).unwrap()["readMarkers"][0]["readAt"], "2026-11-14T12:00:00.000Z");
     }
 
-    #[test]
     fn phase2_desktop_contract_marker_and_details_restart_discard_late_scope_changes() {
         for route in ["read-marker", "details", "restart"] {
             let body = match route {
@@ -5537,7 +5509,6 @@ mod tests {
         json!({ "workspaces": [{ "workspace": snapshot["workspace"], "latestOperation": snapshot["operation"] }] }).to_string()
     }
 
-    #[test]
     fn a_member_organization_is_listed_by_its_own_path_only_with_the_capability() {
         // An older server: another Organization is refused before any request.
         let (_, service) = test_service("http://127.0.0.1:9");
@@ -5554,7 +5525,6 @@ mod tests {
         assert_eq!(service.workspaces(Some("org-3")).unwrap_err().code, "cloud_organization_unavailable");
     }
 
-    #[test]
     fn a_default_organization_change_does_not_fence_a_member_organizations_answer() {
         let (base, accepted, request) = serve_once(response("200 OK", &org_2_list_body(), ""), Duration::from_millis(150));
         let (account, service) = test_service(&base);
@@ -5600,7 +5570,6 @@ mod tests {
         json!({ "v": 1, "cursor": "cursor-2", "reset": true, "organizations": organizations, "deletedWorkspaceIds": ["gone-1", "never-listed"] }).to_string()
     }
 
-    #[test]
     fn phase2_presence_catalog_exact_projection_optin_and_independent_following() {
         for enabled in [false, true] {
             let mut item = feed_item("org-1", "workspace-1");
@@ -5633,7 +5602,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn the_catalog_feed_is_only_asked_of_a_server_that_offers_it() {
         // Nothing listens here: a request would fail differently.
         let (account, service) = test_service("http://127.0.0.1:9");
@@ -5647,7 +5615,6 @@ mod tests {
         assert_eq!(service.catalog_feed(None).unwrap_err().code, "account_signed_out");
     }
 
-    #[test]
     fn the_catalog_feed_sends_its_cursor_and_reads_304_as_unchanged() {
         let (base, _, request) = serve_once(response("304 Not Modified", "", "ETag: \"cursor-1\"\r\n"), Duration::ZERO);
         let (_, service) = feed_service(&base, &["org-1", "org-2"]);
@@ -5668,7 +5635,6 @@ mod tests {
         assert!(!request.contains("if-none-match") && !request.contains("x-injected"), "{request}");
     }
 
-    #[test]
     fn the_catalog_feed_keeps_only_member_organizations_and_valid_lists() {
         let body = feed_body(json!([
             { "orgId": "org-1", "workspaces": [feed_item("org-1", "ws-1")], "tombstones": [{ "id": "gone-1", "orgId": "org-1", "deletedAt": 1, "expiresAt": 2 }], "quota": { "used": 1, "limit": 2 } },
@@ -5704,7 +5670,6 @@ mod tests {
         assert!(!text.contains("org-9") && !text.contains("ws-9") && !text.contains("<script>"), "{text}");
     }
 
-    #[test]
     fn a_catalog_feed_answer_is_fenced_by_the_account_and_by_membership_as_of_the_answer() {
         let body = feed_body(json!([
             { "orgId": "org-1", "workspaces": [feed_item("org-1", "ws-1")], "tombstones": [] },
@@ -5739,7 +5704,6 @@ mod tests {
         request.join().unwrap();
     }
 
-    #[test]
     fn a_catalog_feed_failure_is_an_error_and_never_an_empty_catalog() {
         for (status, body, code) in [("503 Service Unavailable", r#"{"error":"cloud_provider_unavailable"}"#, "cloud_provider_unavailable"), ("200 OK", "not json", "cloud_workspace_invalid_response"), ("302 Found", "", "cloud_workspace_invalid_response")] {
             let (base, _, request) = serve_once(response(status, body, ""), Duration::ZERO);
@@ -5749,7 +5713,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn provider_error_code_passes_only_as_a_safe_token() {
         let parse = |code: Value| {
             let mut value: Value = serde_json::from_str(&snapshot_body(Some("cloud_provider_credential_invalid"))).unwrap();
@@ -5775,7 +5738,6 @@ mod tests {
     }
 
     // PRO-52: the detail code and the deletion's provider operation id reach the page, as tokens only.
-    #[test]
     fn a_failed_delete_carries_its_detail_code_and_the_providers_operation_id() {
         let parse = |detail: Value, operation_id: Value| {
             let mut value: Value = serde_json::from_str(&snapshot_body(Some("cloud_provider_state_conflict"))).unwrap();
@@ -5805,7 +5767,6 @@ mod tests {
     // PRO-415: which providers exist is the server's to say. The client reads
     // any id of the registry's shape, one it has never heard of included, and
     // refuses anything that could not go into a path segment as it is.
-    #[test]
     fn a_provider_id_is_any_registry_shaped_string() {
         // Described providers first; the fixed ids only for a server without them.
         assert_eq!(SUPPORTED_PROVIDERS.split(',').next(), Some("described"));
@@ -5825,7 +5786,6 @@ mod tests {
     // PRO-415: a described provider's descriptor reaches the webview whole,
     // fields this client does not type included; an older server's summary,
     // without one, still reads.
-    #[test]
     fn provider_summaries_carry_their_descriptor() {
         let described: CloudProviderSummary = serde_json::from_value(json!({
             "id": "acme-cloud", "displayName": "Acme", "availability": "available", "canManage": true, "connection": null,
@@ -5865,7 +5825,6 @@ mod tests {
     // its descriptor and lists no credential fields. It reads beside the
     // organization ones, reaches the webview as `platform`, and asks for
     // nothing; anything but `platform` is an organization's.
-    #[test]
     fn a_platform_provider_reads_with_no_credential_fields_and_asks_for_none() {
         let summary = |id: &str, descriptor: Value| json!({
             "id": id, "displayName": id, "availability": "available", "canManage": true, "connection": null,
@@ -5912,7 +5871,6 @@ mod tests {
         assert!(listed.credential_fields().is_empty());
     }
 
-    #[test]
     fn sends_provider_contract_and_encodes_native_organization() {
         let body = r#"{"providers":[]}"#;
         let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
@@ -5937,7 +5895,6 @@ mod tests {
         assert!(lower.contains("x-terminalx-cloud-workspace-providers: described,machine0,box,hetzner\r\n"));
     }
 
-    #[test]
     fn provider_detail_uses_connection_dto_and_fixed_path() {
         let body =
             r#"{"provider":"box","state":"not-connected","canManage":false,"ignored":"drop"}"#;
@@ -5958,7 +5915,6 @@ mod tests {
 
     // PRO-111, PRO-415: the key dialog names the provider and asks for its
     // credential as the organization's list describes it.
-    #[test]
     fn provider_summary_for_the_dialog_comes_from_the_organization_list() {
         let summary = |id: &str, name: &str, descriptor: Value| json!({ "id": id, "displayName": name, "availability": "available", "canManage": true, "connection": null, "capabilities": { "suspend": true, "resume": true, "releaseDisposition": "destroyed", "locationSelection": "automatic", "sourceSelection": "optional", "pricing": "provider-rate" }, "descriptor": descriptor });
         let fields = json!([{ "name": "account", "kind": "text", "label": "Account id" }, { "name": "secret", "kind": "secret", "label": "Secret key" }]);
@@ -5993,7 +5949,6 @@ mod tests {
     // PRO-452: connecting a provider TerminalX itself provides is refused
     // from the organization's list, before a dialog could ask for a key; an
     // organization's provider, and one the list does not name, go on.
-    #[test]
     fn a_platform_provider_is_never_connected() {
         let summary = |id: &str, source: &str, fields: Value| json!({ "id": id, "displayName": id, "availability": "available", "canManage": true, "connection": null, "capabilities": { "suspend": true, "resume": true, "releaseDisposition": "destroyed", "locationSelection": "automatic", "sourceSelection": "optional", "pricing": "provider-rate" }, "descriptor": { "id": id, "label": id, "icon": "cloud", "order": 5, "credentialSource": source, "credentialFields": fields } });
         let body = json!({ "providers": [
@@ -6018,7 +5973,6 @@ mod tests {
         assert!(connectable("hetzner").unwrap().is_none());
     }
 
-    #[test]
     fn provider_disconnect_projects_safe_metadata_and_uses_existing_endpoint() {
         let body = r#"{"provider":"box","state":"attention-required","canManage":true,"credentialVersion":4,"providerAccount":"Original account","operationsBlocked":true,"disconnectDisposition":"destroy","resources":[],"credentialCiphertext":"must-not-cross","credential":"must-not-cross"}"#;
         let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
@@ -6035,7 +5989,6 @@ mod tests {
     }
 
     // PRO-79: the "new machines" switch and the key re-check, from the desktop.
-    #[test]
     fn provider_creation_switch_and_recheck_use_their_endpoints_and_project_safe_metadata() {
         let summary = r#"{"id":"box","displayName":"Boat","availability":"disabled-for-create","canManage":true,"connection":null,"capabilities":{"suspend":true,"resume":true,"releaseDisposition":"archived","locationSelection":"automatic","sourceSelection":"optional","pricing":"provider-rate"},"credential":"must-not-cross"}"#;
         let (base, _, request) = serve_once(response("200 OK", summary, ""), Duration::ZERO);
@@ -6063,7 +6016,6 @@ mod tests {
         assert!(!serde_json::to_value(result).unwrap().to_string().contains("must-not-cross"));
     }
 
-    #[test]
     fn provider_creation_switch_and_recheck_deny_members_and_stale_organizations_before_any_mutation() {
         type Call = fn(&CloudWorkspaceService, String) -> Option<CloudWorkspaceClientError>;
         let calls: [Call; 2] = [
@@ -6103,7 +6055,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn a_route_is_saved_with_its_credential_sent_once_and_never_returned() {
         let revision = AccountManager::context_revision(&context());
         let (base, requests) = serve_each(vec![response("200 OK", ROUTES, ""), response("200 OK", ROUTES, "")]);
@@ -6120,7 +6071,6 @@ mod tests {
         assert!(!routes.to_string().contains("sk-gw-native-1"));
     }
 
-    #[test]
     fn a_route_change_without_a_credential_keeps_the_stored_one_and_sends_none() {
         let revision = AccountManager::context_revision(&context());
         let (base, requests) = serve_each(vec![response("200 OK", ROUTES, ""), response("200 OK", ROUTES, "")]);
@@ -6133,7 +6083,6 @@ mod tests {
         assert_eq!(body, json!({ "templateId": "claude-key-helper", "settings": { "helperPath": "./scripts/llm-key" }, "expectedVersion": 0 }));
     }
 
-    #[test]
     fn a_route_change_is_refused_before_anything_is_asked_for() {
         let revision = AccountManager::context_revision(&context());
         // Nothing is sent for a stale page or settings that are not a template's fields.
@@ -6150,7 +6099,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn route_refusals_keep_their_codes_and_switching_back_deletes_the_route() {
         let revision = AccountManager::context_revision(&context());
         for code in ["cloud_agent_route_conflict", "cloud_agent_route_credential_required", "cloud_agent_route_base_url_invalid"] {
@@ -6174,7 +6122,6 @@ mod tests {
     }
 
     // Review of #293: lending a sign-in silently replaced a working API key.
-    #[test]
     fn a_stored_login_is_replaced_only_by_an_explicit_choice_and_the_dialog_is_told_what_it_replaces() {
         let stored = r#"{"credentials":[{"id":"c1","provider":"claude","authKind":"api-key","fingerprint":"sha256:ab","version":1,"updatedAt":5,"state":"connected"},{"id":"c2","provider":"codex","authKind":"api-key","fingerprint":"sha256:cd","version":1,"updatedAt":5,"state":"disconnected"}]}"#;
         let revision = AccountManager::context_revision(&context());
@@ -6194,7 +6141,6 @@ mod tests {
 
     // PRO-79: "Log in with ChatGPT". Once Codex has finished on this Mac, what it wrote is
     // stored like any other login: consent, organization and the replace choice first, then one PUT.
-    #[test]
     fn a_finished_codex_sign_in_is_stored_once_for_its_organization_and_then_let_go() {
         let _one_at_a_time = crate::commands::CODEX_SIGN_IN_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         use crate::codex_device_login::{DeviceLogin, Phase, SignIn};
@@ -6265,7 +6211,6 @@ mod tests {
     }
 
     // Security review of #483: the page is checked against OpenAI's own again when it is opened.
-    #[test]
     fn only_an_openai_page_of_the_open_sign_in_is_ever_opened() {
         let _one_at_a_time = crate::commands::CODEX_SIGN_IN_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         use crate::codex_device_login::{DeviceLogin, Phase};
@@ -6280,7 +6225,6 @@ mod tests {
         assert!(!crate::commands::codex_sign_in_held_for_test());
     }
 
-    #[test]
     fn agent_logins_list_agents_only_and_never_carry_a_login() {
         let body = r#"{"credentials":[
             {"id":"c1","provider":"claude","authKind":"oauth-credentials-json","fingerprint":"sha256:ab","displayIdentity":"ada@example.com","version":2,"updatedAt":5,"state":"connected","sharedUse":"organization","configurerLeft":true,"secret":"must-not-cross","ciphertext":"must-not-cross"},
@@ -6302,7 +6246,6 @@ mod tests {
         assert!(!sent.to_string().contains("must-not-cross"));
     }
 
-    #[test]
     fn nothing_is_asked_for_or_read_before_consent_the_active_organization_and_the_admin_check() {
         // Without both consents: no request at all.
         let (base, _, request) = serve_once(response("200 OK", r#"{"credentials":[]}"#, ""), Duration::from_millis(50));
@@ -6328,7 +6271,6 @@ mod tests {
 
     // PRO-107: agent logins belong to each organization. One the person belongs to is named by id
     // and changed by its own path while another is active; nothing is ever sent to the active one.
-    #[test]
     fn a_named_member_organizations_agent_logins_are_read_and_changed_by_its_own_path() {
         let revision = AccountManager::context_revision(&context());
         let in_org_2 = |replace| AgentLoginConsent { replace_existing: replace, organization_id: Some("org-2".into()), ..consent(&revision, true, true) };
@@ -6388,7 +6330,6 @@ mod tests {
 
     // PRO-107: a request in flight for a named organization is fenced by the membership, not by
     // which organization is active: a default switch does not drop it, leaving the organization does.
-    #[test]
     fn a_named_organizations_login_change_survives_a_default_switch_but_not_leaving_it() {
         let revision = AccountManager::context_revision(&context());
         let saved = r#"{"id":"c2","provider":"codex","authKind":"api-key","fingerprint":"sha256:cd","version":2,"updatedAt":9,"state":"connected"}"#;
@@ -6415,7 +6356,6 @@ mod tests {
         assert_eq!(requests.join().unwrap().len(), 1, "nothing is sent for an organization the person left");
     }
 
-    #[test]
     fn an_agent_login_is_put_once_with_both_confirmations_and_only_its_public_fields_come_back() {
         let body = r#"{"id":"c1","provider":"claude","authKind":"oauth-credentials-json","fingerprint":"sha256:ab","version":3,"updatedAt":9,"state":"connected","sharedUse":"organization","secret":"must-not-cross"}"#;
         let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
@@ -6457,7 +6397,6 @@ mod tests {
 
     // Review of #429: the desktop sent `sharedUse: organization` with every sign-in, which widened a
     // login an admin had narrowed to managers whenever someone logged in again.
-    #[test]
     fn replacing_a_login_sends_no_scope_so_the_service_keeps_the_one_it_has() {
         let narrowed = || AgentLoginAuthorization::for_test(context(), Some(("oauth-credentials-json", Some("managers"))));
         let body_of = |text: &str| serde_json::from_str::<Value>(text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
@@ -6482,7 +6421,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn a_dialog_is_told_who_the_login_will_reach_new_or_kept() {
         let reach = |stored, kind| AgentLoginAuthorization::for_test(context(), stored).reach(kind);
         // Nothing stored: the service's default, said as a default.
@@ -6516,7 +6454,6 @@ mod tests {
     }
 
     // PRO-82 on the desktop: the account service's own sign-in for Claude.
-    #[test]
     fn a_claude_sign_in_starts_completes_and_cancels_on_its_routes_and_opens_only_the_providers_page() {
         let authorization = || AgentLoginAuthorization::for_test(context(), None);
         let (base, _, request) = serve_once(response("200 OK", r#"{"attemptId":"attempt_1","authorizeUrl":"https://claude.com/cai/oauth/authorize?state=s","expiresInSeconds":600,"mode":"paste"}"#, ""), Duration::ZERO);
@@ -6572,7 +6509,6 @@ mod tests {
         assert!(!captured.extra_request);
     }
 
-    #[test]
     fn only_the_providers_https_pages_count_as_a_sign_in_page() {
         for page in ["https://claude.com/cai/oauth/authorize?x=1", "https://claude.ai/oauth/authorize", "https://platform.claude.com/x", "https://console.anthropic.com/oauth"] {
             assert!(claude_login_page(page), "{page}");
@@ -6592,7 +6528,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn an_agent_login_is_removed_with_delete_and_a_rejected_key_says_so() {
         let (base, _, request) = serve_once(response("200 OK", r#"{"ok":true}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -6611,7 +6546,6 @@ mod tests {
         assert!(captured.text.starts_with("PUT ") && !captured.extra_request);
     }
 
-    #[test]
     fn provider_disconnect_denies_members_before_any_mutation() {
         let (base, _, request) = serve_once(response("200 OK", r#"{"provider":"box","state":"connected","canManage":false}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -6622,7 +6556,6 @@ mod tests {
         assert!(!captured.extra_request);
     }
 
-    #[test]
     fn provider_disconnect_fences_stale_organization_before_mutation() {
         let (base, _, request) = serve_once(response("200 OK", r#"{"provider":"box","state":"connected","canManage":true}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -6631,7 +6564,6 @@ mod tests {
         assert!(!request.join().unwrap().extra_request);
     }
 
-    #[test]
     fn setup_accepts_authoritative_selected_location_fixture() {
         let body = json!({
             "provider": "box", "credentialFingerprint": "sha256:0123", "currency": "USD",
@@ -6655,7 +6587,6 @@ mod tests {
         ));
     }
 
-    #[test]
     fn create_uses_exact_body_and_key_once_then_returns_authoritative_snapshot() {
         let body = snapshot_body(None);
         let (base, _, request) = serve_once(response("202 Accepted", &body, ""), Duration::ZERO);
@@ -6683,7 +6614,6 @@ mod tests {
             .contains("ignoredProviderSdkField"));
     }
 
-    #[test]
     fn operation_method_decodes_snapshot_and_allowlists_operation_error() {
         let body = snapshot_body(Some("syntactically_valid_canary"));
         let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
@@ -6699,7 +6629,6 @@ mod tests {
         ));
     }
 
-    #[test]
     fn quote_list_lifecycle_and_cancel_use_their_fixed_contracts() {
         let quote_body = json!({
             "id":"quote-1","provider":"machine0","expiresAt":2,"currency":"USD",
@@ -6771,7 +6700,6 @@ mod tests {
         ));
     }
 
-    #[test]
     fn refuses_redirects_without_forwarding_authorization() {
         let destination = TcpListener::bind("127.0.0.1:0").unwrap();
         destination.set_nonblocking(true).unwrap();
@@ -6797,7 +6725,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn normalizes_rate_limits_and_drops_raw_provider_messages() {
         let body = r#"{"error":"cloud_provider_rate_limited","raw":"provider account secret"}"#;
         let (base, _, request) = serve_once(
@@ -6824,7 +6751,6 @@ mod tests {
             .contains("provider account secret"));
     }
 
-    #[test]
     fn unknown_http_error_code_is_not_disclosed() {
         let body = r#"{"error":"syntactically_valid_canary"}"#;
         let (base, _, request) = serve_once(
@@ -6838,7 +6764,6 @@ mod tests {
         assert!(!serde_json::to_string(&error).unwrap().contains("canary"));
     }
 
-    #[test]
     fn a_valid_key_without_a_permission_is_reported_as_such() {
         let body = r#"{"error":"cloud_provider_permission_denied"}"#;
         let (base, _, request) = serve_once(response("422 Unprocessable Entity", body, ""), Duration::ZERO);
@@ -6850,7 +6775,6 @@ mod tests {
 
     /// terminalx-saas #241: a login the provider no longer accepts is one
     /// code the page turns into "Sign in again", and its list row says so.
-    #[test]
     fn a_login_the_provider_refused_reaches_the_page_as_sign_in_required() {
         let (base, _, request) = serve_once(response("409 Conflict", r#"{"error":"cloud_agent_credential_reauth_required"}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -6865,7 +6789,6 @@ mod tests {
         assert_eq!(serde_json::to_value(&listed).unwrap()["credentials"][0]["state"], "sign-in-required");
     }
 
-    #[test]
     fn create_transport_failure_requires_same_key_reconciliation() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -6887,7 +6810,6 @@ mod tests {
         assert!(error.requires_original_account_context);
     }
 
-    #[test]
     fn possibly_committed_mutations_require_original_context_at_every_boundary() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -6935,7 +6857,6 @@ mod tests {
         assert!(task_error.requires_original_account_context);
     }
 
-    #[test]
     fn request_timeout_is_bounded_and_keeps_create_reconciliation_semantics() {
         for risk in [RequestRisk::Read, RequestRisk::Create] {
             let body = if matches!(risk, RequestRisk::Read) {
@@ -6966,7 +6887,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn malformed_create_response_and_http_500_require_same_key_reconciliation_without_retry() {
         for (status, body) in [
             ("202 Accepted", "{".to_string()),
@@ -7001,7 +6921,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn rejects_oversized_and_cross_organization_responses() {
         let oversized = "x".repeat(RESPONSE_LIMIT_BYTES as usize + 1);
         let (base, _, request) = serve_once(response("200 OK", &oversized, ""), Duration::ZERO);
@@ -7067,7 +6986,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn delayed_success_error_and_create_are_fenced_after_account_replacement() {
         for (status, body, risk, sign_out) in [
             (
@@ -7125,7 +7043,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn validates_dynamic_resource_and_idempotency_identifiers() {
         assert!(valid_resource_id("workspace_1:v2"));
         assert!(!valid_resource_id("../workspace"));
@@ -7140,7 +7057,6 @@ mod tests {
         assert!(join_error.requires_original_account_context);
     }
 
-    #[test]
     fn secure_connect_input_contains_no_credential_field() {
         let input = CloudProviderConnectInput {
             context_revision: "test-context".into(),
@@ -7171,7 +7087,6 @@ mod tests {
         CreateRepository { clone_url: format!("https://github.com/acme/{name}.git"), base_ref: base_ref.map(String::from) }
     }
 
-    #[test]
     fn create_sends_repositories_refs_and_the_launch_intent() {
         let mut body: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
         body["workspace"]["launch"] = json!({
@@ -7211,7 +7126,6 @@ mod tests {
     /// #745: Native Codex at create reaches the launch intent, and a server
     /// from before the field (which refuses unknown keys, recording nothing)
     /// still gets the create, once more without it, under the same key.
-    #[test]
     fn a_native_codex_launch_says_so_and_an_older_server_still_gets_the_create() {
         let body = |request: &str| serde_json::from_str::<Value>(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
         let key = |request: &str| request.lines().find(|line| line.to_ascii_lowercase().starts_with("idempotency-key:")).map(str::to_owned);
@@ -7255,7 +7169,6 @@ mod tests {
         assert!(!serde_json::from_value::<CreateLaunch>(json!({ "agent": "codex" })).unwrap().native_codex);
     }
 
-    #[test]
     fn a_preparation_create_says_so_and_its_stop_time_reaches_the_page() {
         let mut body: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
         body["workspace"]["preparation"] = json!({ "stopAfter": 3_600_000, "somethingNewer": true });
@@ -7280,7 +7193,6 @@ mod tests {
         assert!(serde_json::to_value(&result.workspace).unwrap().get("preparation").is_none());
     }
 
-    #[test]
     fn invalid_names_repositories_refs_and_launches_never_reach_the_server() {
         let (_, service) = test_service("http://127.0.0.1:9");
         let launch = |agent: &str, prompt: Option<String>| Some(CreateLaunch { agent: agent.into(), model: None, effort: None, mode: None, prompt, native_codex: false });
@@ -7305,7 +7217,6 @@ mod tests {
         assert_eq!(service.create(None, unnamed).unwrap_err().code, "cloud_workspace_name_invalid");
     }
 
-    #[test]
     fn policy_and_quota_refusals_are_definite_not_outcome_unknown() {
         for code in ["cloud_workspace_policy_denied", "cloud_workspace_quota_exceeded", "cloud_provisioning_paused", "cloud_environment_repository_not_in_image"] {
             let body = format!(r#"{{"error":"{code}"}}"#);
@@ -7318,7 +7229,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn preflight_checks_the_repositories_and_lists_selected_ones() {
         let body = r#"{"version":1,"ready":false,"checks":[{"kind":"repository","cloneUrl":"https://github.com/acme/app.git","status":"failed","errorCode":"cloud_workspace_repository_ref_not_found","retryable":false}]}"#;
         let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
@@ -7341,7 +7251,6 @@ mod tests {
         assert_eq!(selected.repositories[0].default_branch.as_deref(), Some("main"));
     }
 
-    #[test]
     fn phase2_automation_repository_identity_http_and_serde_compatibility() {
         let body = r#"{"configured":true,"repositories":[{"id":"row-r1","githubRepositoryId":7,"fullName":"acme/app","cloneUrl":"https://github.com/acme/app.git","state":"accessible"},{"fullName":"acme/old","state":"accessible"},{"id":null,"fullName":"acme/null","state":"missing"}]}"#;
         let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
@@ -7363,7 +7272,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn preflight_asks_about_the_agent_of_a_first_prompt() {
         // No repositories: the prompt's agent alone is worth the call, and the
         // setup names no repository rather than an empty list.
@@ -7383,7 +7291,6 @@ mod tests {
         assert_eq!(service.preflight(None, Vec::new(), Some("Not Valid".into())).unwrap_err().code, "cloud_workspace_launch_invalid");
     }
 
-    #[test]
     fn a_failed_preflight_call_is_retryable_not_an_unknown_outcome() {
         let (base, _, request) = serve_once(response("503 Service Unavailable", "oops", ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -7403,7 +7310,6 @@ mod tests {
         .to_string()
     }
 
-    #[test]
     fn diagnostics_uses_the_desktop_contract_and_the_window() {
         let (base, _, request) = serve_once(response("200 OK", &diagnostics_body("org-1"), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -7417,7 +7323,6 @@ mod tests {
         assert_eq!(diagnostics.stage_timings.create.unwrap().total_ms.p50, None);
     }
 
-    #[test]
     fn diagnostics_of_a_member_organization_use_its_own_path() {
         // An older server: another Organization is refused before any request.
         let (_, service) = test_service("http://127.0.0.1:9");
@@ -7452,7 +7357,6 @@ mod tests {
         assert_eq!(service.organization_in(Some("org-3")).unwrap_err().code, "cloud_organization_unavailable");
     }
 
-    #[test]
     fn diagnostics_refusals_old_servers_and_foreign_answers() {
         let (base, _, request) = serve_once(response("403 Forbidden", r#"{"error":"organization_admin_required"}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -7477,7 +7381,6 @@ mod tests {
         assert_eq!(service.diagnostics(None, 31).unwrap_err().code, "cloud_workspace_request_invalid");
     }
 
-    #[test]
     fn archive_and_delete_send_force_only_when_asked_and_read_the_archive_vocabulary() {
         let mut archived: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
         archived["workspace"]["state"] = json!("archived");
@@ -7541,7 +7444,6 @@ mod tests {
         assert!(request.join().unwrap().text.ends_with("{}"));
     }
 
-    #[test]
     fn active_work_and_archived_refusals_keep_their_codes() {
         for code in ["cloud_workspace_active_work", "cloud_workspace_archived", "cloud_teardown_in_progress"] {
             let (base, _, request) = serve_once(response("409 Conflict", &json!({ "error": code }).to_string(), ""), Duration::ZERO);
@@ -7552,7 +7454,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn teardown_is_read_and_requested_for_that_organization_only() {
         let teardown = json!({
             "organizationId": "org-1", "disposition": "archive", "requestedAt": 10, "retentionDeadline": 40,
@@ -7614,7 +7515,6 @@ mod tests {
         ConfirmedTeardown { expected_workspaces: workspaces, preview_token: TOKEN.into() }
     }
 
-    #[test]
     fn a_teardown_is_not_sent_when_the_workspaces_are_not_the_ones_confirmed() {
         let revision = AccountManager::context_revision(&context());
         // Another workspace appeared since the count was shown, or the same number of different ones.
@@ -7642,7 +7542,6 @@ mod tests {
         assert_eq!(service.request_teardown("org-1", &revision, TeardownDisposition::Archive, &bad).unwrap_err().code, "cloud_workspace_request_invalid");
     }
 
-    #[test]
     fn a_teardown_confirmed_for_one_organization_is_never_sent_for_another() {
         // Nothing listens here: any request would fail as a transport error,
         // so `account_context_changed` proves nothing was sent.
@@ -7664,7 +7563,6 @@ mod tests {
         assert_eq!(service.teardown_preview("org-1").unwrap_err().code, "account_context_changed");
     }
 
-    #[test]
     fn the_teardown_preview_counts_are_read_for_the_named_organization() {
         let preview = json!({ "organizationId": "org-1", "workspaces": 7, "othersPrivateWorkspaces": 3, "archivedWorkspaces": 2, "token": TOKEN });
         let (base, _, request) = serve_once(response("200 OK", &preview.to_string(), ""), Duration::ZERO);
@@ -7681,7 +7579,6 @@ mod tests {
         request.join().unwrap();
     }
 
-    #[test]
     fn a_disconnect_may_archive_and_its_deadline_is_read() {
         assert_eq!(json!({ "disposition": DisconnectDisposition::Archive }), json!({ "disposition": "archive" }));
         let connection: CloudProviderConnectionResponse = serde_json::from_value(json!({
@@ -7694,7 +7591,6 @@ mod tests {
         assert_eq!((connection.disconnect_retention.as_deref(), connection.retention_deadline), (Some("archive"), Some(99)));
     }
 
-    #[test]
     fn unarchive_and_the_list_tombstones() {
         let (base, _, request) = serve_once(response("200 OK", &snapshot_body(None), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -7728,7 +7624,6 @@ mod tests {
         serde_json::from_str(ENRICHED_LIST).unwrap()
     }
 
-    #[test]
     fn the_enriched_list_reaches_the_webview_with_every_field() {
         let (base, _, request) = serve_once(response("200 OK", &enriched_list().to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -7755,7 +7650,6 @@ mod tests {
         assert_eq!(sent, serde_json::from_str::<Value>(ENRICHED_LIST_WEBVIEW).unwrap());
     }
 
-    #[test]
     fn an_old_servers_list_still_parses_and_is_passed_on_as_before() {
         let (base, _, request) = serve_once(response("200 OK", &org_2_list_body().replace("org-2", "org-1"), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -7774,7 +7668,6 @@ mod tests {
         assert_eq!(serde_json::to_value(quota).unwrap(), json!({ "used": 1, "limit": 2 }));
     }
 
-    #[test]
     fn a_machine_the_server_says_is_gone_reaches_the_webview() {
         // #1589: the server states it on the workspace, and the page reads it there.
         let mut list: Value = serde_json::from_str(&org_2_list_body().replace("org-2", "org-1")).unwrap();
@@ -7792,7 +7685,6 @@ mod tests {
         assert!(serde_json::to_value(&parsed).unwrap()["workspaces"][0]["workspace"].get("machineMissingAt").is_none());
     }
 
-    #[test]
     fn a_quota_without_a_limit_is_passed_on_without_one() {
         // PRO-371: the server leaves `limit` out where the organization has none.
         let sent = json!({ "used": 3, "running": { "used": 3 }, "total": { "used": 60 } });
@@ -7815,7 +7707,6 @@ mod tests {
         assert!(serde_json::from_value::<CloudWorkspaceList>(list).unwrap().quota.is_none());
     }
 
-    #[test]
     fn a_malformed_new_field_reads_as_absent_but_the_old_fields_stay_strict() {
         let mut list = enriched_list();
         let workspace = &mut list["workspaces"][0]["workspace"];
@@ -7839,7 +7730,6 @@ mod tests {
         assert!(serde_json::from_value::<CloudWorkspaceList>(broken).is_err());
     }
 
-    #[test]
     fn disposition_reads_the_server_facts_for_that_workspace_only() {
         let facts = json!({
             "workspaceId": "workspace-1", "state": "ready", "provider": "box",
@@ -7884,7 +7774,6 @@ mod tests {
         })
     }
 
-    #[test]
     fn phase2_admin_share_contract_get_mixed_nullable_rows_and_effective_you() {
         for effective in ["manager", "driver", "viewer", "none"] {
             let mut manager = share_json("user-2", "manager");
@@ -7908,7 +7797,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_admin_share_contract_enabled_manager_put_and_delete_receipts() {
         for method in ["PUT", "DELETE"] {
             for created in [true, false] {
@@ -7936,7 +7824,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_admin_share_contract_manager_holds_and_invalid_inputs_never_send() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -7972,7 +7859,6 @@ mod tests {
         assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
     }
 
-    #[test]
     fn phase2_admin_share_contract_legacy_production_put_approval_is_independent() {
         for (role, wire) in [(ShareRole::Viewer, "viewer"), (ShareRole::Driver, "driver")] {
             for can_approve in [false, true] {
@@ -7996,7 +7882,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_admin_share_contract_target_member_without_capability_or_active_org() {
         for active_org in ["org-1", ""] {
             let bodies = [
@@ -8029,7 +7914,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_admin_share_contract_nonmembership_and_private_errors_fail_closed() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -8053,7 +7937,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_admin_share_contract_late_context_fences_success_and_error_for_all_routes() {
         for method in ["GET", "PUT", "DELETE"] {
             for success in [false, true] {
@@ -8101,7 +7984,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_admin_share_contract_foreign_user_and_unknown_response_roles_refuse() {
         for method in ["GET", "PUT", "DELETE"] {
             for invalid in ["foreign-user", "unknown-role", "invalid-user-id"] {
@@ -8130,7 +8012,6 @@ mod tests {
         assert!(!request.join().unwrap().extra_request);
     }
 
-    #[test]
     fn phase2_admin_share_contract_safe_errors_status_retry_after_and_no_retry() {
         for (status, number, code) in [
             ("409 Conflict", 409, "cloud_workspace_last_admin"),
@@ -8172,7 +8053,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_admin_share_contract_bounded_timeout_body_and_unknown_error_capture() {
         for method in ["GET", "PUT", "DELETE"] {
             for failure in ["timeout", "body-limit", "error-body-limit", "unknown-error"] {
@@ -8204,7 +8084,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn shares_list_reads_the_caller_standing() {
         let body = json!({
             "shares": [share_json("user-2", "viewer")],
@@ -8225,7 +8104,6 @@ mod tests {
         assert_eq!(value["shares"][0]["userId"], json!("user-2"));
     }
 
-    #[test]
     fn share_put_sends_the_strict_body_with_put() {
         let body = json!({ "share": share_json("user-2", "driver"), "created": true });
         let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
@@ -8239,7 +8117,6 @@ mod tests {
         assert_eq!(changed.share.role, ShareRole::Driver);
     }
 
-    #[test]
     fn share_revoke_uses_delete_and_checks_the_answer_is_that_person() {
         let body = json!({ "share": share_json("user-2", "viewer") });
         let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
@@ -8258,7 +8135,6 @@ mod tests {
         assert_eq!(error.code, "cloud_workspace_request_outcome_unknown");
     }
 
-    #[test]
     fn share_refusals_keep_their_codes() {
         for (status, code) in [
             ("409 Conflict", "cloud_workspace_share_redundant"),
@@ -8278,7 +8154,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn list_items_carry_the_callers_role_and_share_count_leniently() {
         let mut workspace: Value = serde_json::from_str::<Value>(&snapshot_body(None)).unwrap()["workspace"].clone();
         workspace["you"] = json!({ "role": "driver", "canApprove": true });
@@ -8305,7 +8180,6 @@ mod tests {
         assert!(value.get("you").is_none() && value.get("sharedWith").is_none());
     }
 
-    #[test]
     fn set_access_posts_the_mode_and_checks_the_answer_is_that_workspace() {
         let mut workspace: Value = serde_json::from_str::<Value>(&snapshot_body(None)).unwrap()["workspace"].clone();
         workspace["accessMode"] = json!("organization");
@@ -8337,7 +8211,6 @@ mod tests {
         assert_eq!(error.code, "cloud_workspace_request_outcome_unknown");
     }
 
-    #[test]
     fn set_access_keeps_the_refusal_of_a_member_and_checks_the_id_first() {
         let (base, _, request) = serve_once(response("403 Forbidden", r#"{"error":"organization_admin_required"}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -8348,7 +8221,6 @@ mod tests {
         assert_eq!(service.set_access(None, "../x", WorkspaceAccessMode::Private).unwrap_err().code, "cloud_workspace_request_invalid");
     }
 
-    #[test]
     fn set_idle_suspend_posts_the_window_and_checks_the_answer_names_it() {
         let mut workspace: Value = serde_json::from_str::<Value>(&snapshot_body(None)).unwrap()["workspace"].clone();
         workspace["idleSuspendMinutes"] = json!(0);
@@ -8379,7 +8251,6 @@ mod tests {
         assert_eq!(service.set_idle_suspend(None, "workspace-1", -1).unwrap_err().code, "cloud_workspace_request_invalid");
     }
 
-    #[test]
     fn idle_suspend_reads_the_window_and_its_choices_for_that_workspace() {
         let body = json!({
             "workspaceId": "workspace-1", "idleSuspendMinutes": 15,
@@ -8405,7 +8276,6 @@ mod tests {
         request.join().unwrap();
     }
 
-    #[test]
     fn share_identifiers_are_checked_before_sending() {
         let (_, service) = test_service("http://127.0.0.1:9");
         assert_eq!(service.share_put(None, "workspace-1", "../x", ShareRole::Viewer, false).unwrap_err().code, "cloud_workspace_request_invalid");
@@ -8413,7 +8283,6 @@ mod tests {
         assert_eq!(service.shares(None, "a/b").unwrap_err().code, "cloud_workspace_request_invalid");
     }
 
-    #[test]
     fn a_hidden_provider_refuses_setup_and_create_definitely() {
         let body = r#"{"error":"cloud_provider_disabled"}"#;
         let (base, _, request) = serve_once(response("403 Forbidden", body, ""), Duration::ZERO);
@@ -8431,7 +8300,6 @@ mod tests {
         assert!(!error.retry_with_same_idempotency_key, "a hidden provider is a refusal, not outcome unknown");
     }
 
-    #[test]
     fn the_running_limit_refuses_create_and_resume_definitely() {
         let body = r#"{"error":"cloud_workspace_concurrency_exceeded"}"#;
         let (base, _, request) = serve_once(response("409 Conflict", body, ""), Duration::ZERO);
@@ -8478,7 +8346,6 @@ mod tests {
         view
     }
 
-    #[test]
     fn phase2_automation_contract_held_paths_never_reach_an_old_server() {
         let (_, service) = test_service("http://127.0.0.1:1");
         assert!(!service.phase2_contracts_available());
@@ -8503,7 +8370,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_automation_contract_fresh_timer_cleanup_boundaries_and_no_github() {
         for days in [1, 365] {
             let mut input = schedule_input();
@@ -8528,7 +8394,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_automation_contract_body_defaultforkoptin_and_persisted_optin() {
         for fork in [None, Some(false), Some(true)] {
             let mut view = automation_json();
@@ -8553,7 +8418,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_automation_contract_null_response_defaults_retain_current_timer_apis() {
         let mut view = schedule_json(SCHEDULE, "workspace-1");
         for field in ["workspaceMode", "archiveOnPrMerge", "archiveAfterDays", "githubTrigger"] {
@@ -8592,7 +8456,6 @@ mod tests {
         for request in &requests { phase2_headers(request); }
     }
 
-    #[test]
     fn phase2_automation_contract_null_cleanup_preserves_fresh_response_and_strict_types() {
         let mut view = automation_json();
         view["archiveOnPrMerge"] = Value::Null;
@@ -8629,7 +8492,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_automation_contract_invalid_inputs_are_local_even_while_inactive() {
         let (account, service) = test_service("http://127.0.0.1:1");
         account.set_context_for_test(None);
@@ -8679,7 +8541,6 @@ mod tests {
         assert!(serde_json::from_value::<CloudScheduleEstimateInput>(estimate_body).is_err());
     }
 
-    #[test]
     fn phase2_automation_contract_freshrunidentity_is_own_workspace_or_unavailable() {
         for timer in [false, true] {
             let mut view = automation_json();
@@ -8710,7 +8571,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_automation_contract_github_list_pause_resume_have_no_timer() {
         let view = automation_json();
         let (base, requests) = serve_each(vec![
@@ -8734,7 +8594,6 @@ mod tests {
         assert_eq!(serde_json::from_str::<Value>(requests[2].split_once("\r\n\r\n").unwrap().1).unwrap(), json!({"confirmProviderSpend": true}));
     }
 
-    #[test]
     fn phase2_automation_contract_held_fresh_or_github_resume_never_posts() {
         for (fresh, github) in [(true, false), (false, true), (true, true)] {
             let mut view = automation_json();
@@ -8755,7 +8614,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_automation_contract_held_resume_preflight_refusals_never_post() {
         for (status, code) in [("403 Forbidden", "organization_admin_required"), ("404 Not Found", "cloud_workspace_not_found")] {
             let (base, _, request) = serve_once(response(status, &json!({"error": code}).to_string(), ""), Duration::ZERO);
@@ -8767,7 +8625,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_automation_contract_delayed_resume_preflight_context_changes_never_post() {
         for change in ["sign-out", "account", "organization", "profile", "membership"] {
             let answer = json!({"schedule": schedule_json(SCHEDULE, "workspace-1"), "runs": []});
@@ -8801,7 +8658,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_automation_contract_held_automation_safety_controls_need_no_preflight() {
         let (base, _, request) = serve_once(response("200 OK", &json!({"schedule": automation_json()}).to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -8826,7 +8682,6 @@ mod tests {
         assert!(!captured.extra_request);
     }
 
-    #[test]
     fn phase2_automation_contract_numericcosts_fresh_ceiling_and_estimate_body() {
         for keep in [false, true] {
             let monthly = if keep { 62_208_000_000u64 } else { 410_400_000u64 };
@@ -8856,7 +8711,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn phase2_automation_contract_inactive_org_and_server_refusals_are_retained() {
         let (_, service) = phase2_service("http://127.0.0.1:1");
         assert_eq!(service.schedule_create(Some("org-other"), &automation_input(None)).unwrap_err().code, "cloud_organization_unavailable");
@@ -8899,7 +8753,6 @@ mod tests {
         serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap()
     }
 
-    #[test]
     fn phase2_automation_contract_schedules_are_listed_for_one_workspace_and_an_answer_about_another_is_refused() {
         let body = json!({ "schedules": [schedule_json(SCHEDULE, "workspace-1")] });
         let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
@@ -8923,7 +8776,6 @@ mod tests {
         assert_eq!(error.code, "cloud_workspace_invalid_response");
     }
 
-    #[test]
     fn phase2_automation_contract_a_server_with_scheduled_tasks_off_answers_not_found_and_nothing_is_retried() {
         let (base, _, request) = serve_once(response("404 Not Found", "404 Not Found", ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -8932,7 +8784,6 @@ mod tests {
         assert_eq!(error.status, Some(404));
     }
 
-    #[test]
     fn phase2_automation_contract_a_schedule_is_created_with_a_mode_the_confirmed_spend_and_only_the_keys_the_server_takes() {
         let body = json!({ "schedule": schedule_json(SCHEDULE, "workspace-1") });
         let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
@@ -8953,7 +8804,6 @@ mod tests {
         assert!(!captured.extra_request, "a create is never sent twice");
     }
 
-    #[test]
     fn phase2_automation_contract_a_schedule_that_the_server_would_refuse_is_not_sent() {
         let (_, service) = test_service("http://127.0.0.1:1");
         let change = |edit: fn(&mut CloudScheduleCreateInput)| {
@@ -8982,7 +8832,6 @@ mod tests {
         assert!(serde_json::from_value::<CloudScheduleCreateInput>(json!({ "organizationId": "org-2" })).is_err());
     }
 
-    #[test]
     fn phase2_automation_contract_schedule_times_are_sent_as_the_strict_parser_takes_them() {
         let timing = |preset: &str, weekdays: &[&str]| CloudScheduleTiming {
             preset: preset.into(),
@@ -8999,7 +8848,6 @@ mod tests {
         assert_eq!(schedule_timing_body(&timing("weekly", &["funday"])), None);
     }
 
-    #[test]
     fn phase2_automation_contract_an_estimate_is_asked_without_a_prompt_and_read_back() {
         let body = json!({
             "estimate": { "currency": "USD", "hourlyMicros": 120_000, "perRunMaxMicros": 480_000, "monthlyRuns": 30, "monthlyMaxMicros": 86_400_000, "keepsMachineRunning": true, "runningSlots": 1, "maxRunsPerDay": 24 },
@@ -9034,7 +8882,6 @@ mod tests {
         assert_eq!((quote.estimate.per_run_max_minutes, quote.refusal.as_deref()), (Some(265), Some("cloud_workspace_quota_exceeded")));
     }
 
-    #[test]
     fn phase2_automation_contract_an_estimate_from_a_server_without_the_route_is_not_a_server_that_cannot_be_reached() {
         let input: CloudScheduleEstimateInput = serde_json::from_value(json!({
             "workspaceId": "workspace-1", "schedule": { "preset": "daily", "hour": 9, "minute": 0, "timezone": "UTC" }, "completionPolicy": "suspend", "maxRunMinutes": 60
@@ -9053,7 +8900,6 @@ mod tests {
         assert_eq!(error.code, "cloud_workspace_not_found");
     }
 
-    #[test]
     fn phase2_automation_contract_pause_resume_delete_and_pause_all_send_what_the_server_expects() {
         let answer = json!({ "schedule": schedule_json(SCHEDULE, "workspace-1") }).to_string();
         let (base, _, request) = serve_once(response("200 OK", &answer, ""), Duration::ZERO);
@@ -9092,7 +8938,6 @@ mod tests {
         assert_eq!(service.schedule(None, "schedule_1").unwrap_err().code, "cloud_workspace_request_invalid");
     }
 
-    #[test]
     fn phase2_automation_contract_a_refused_schedule_keeps_the_servers_reason() {
         for code in ["cloud_schedule_runtime_unsupported", "cloud_schedule_cleanup_pending", "cloud_schedule_prompt_shell_command", "cloud_schedule_prompt_slash_command", "cloud_schedule_prompt_file_mention"] {
             let (base, _, request) = serve_once(response("409 Conflict", &json!({ "error": code }).to_string(), ""), Duration::ZERO);
@@ -9151,5 +8996,208 @@ mod tests {
         assert_eq!(r2["workspaces"], json!([]));
         server.join().unwrap();
         assert_eq!(accepts.load(Ordering::SeqCst), 1, "Client must pool HTTP keep-alive connections across requests");
+    }
+
+    #[test]
+    fn cloud_workspaces_batch_1() {
+        phase2_following_contract_exact_paths_empty_delete_auth_inactive_org_and_receipt();
+        phase2_following_contract_uuid_versions_variants_and_utf16_boundaries();
+        phase2_following_contract_strict_input_path_nulls_and_production_hold_no_http();
+        phase2_following_contract_bounded_ids_note_wire_and_server_safety_refusals();
+        phase2_following_contract_response_ids_booleans_and_exact_receipt();
+        phase2_following_contract_all_server_errors_and_no_automatic_retry();
+        phase2_following_contract_bounded_timeout_and_body_capture_no_retry();
+        phase2_following_contract_late_account_profile_org_session_and_aba_fenced();
+        phase2_presence_contract_exact_paths_auth_bodies_and_nonactive_target();
+        phase2_presence_contract_invalid_inputs_and_production_hold_never_http();
+        phase2_presence_contract_subset_omissions_and_invalid_outputs();
+        phase2_presence_contract_current_owner_and_no_cached_authorization();
+        phase2_presence_contract_error_codes_retry_after_and_no_retry();
+    }
+
+    #[test]
+    fn cloud_workspaces_batch_2() {
+        phase2_presence_contract_bounds_malformed_put_and_bounded_timeout();
+        phase2_presence_contract_response_body_capture_is_bounded();
+        phase2_presence_contract_late_account_profile_org_session_and_aba_fenced();
+        phase2_desktop_contract_production_activation_stays_held();
+        phase2_desktop_contract_restart_exact_empty_body_queued_snapshot_and_existing_poll();
+        phase2_desktop_contract_details_integer_versions_epoch_ms_and_no_body();
+        phase2_desktop_contract_restart_details_keep_membership_and_existing_errors();
+        phase2_desktop_contract_restart_details_allow_inactive_member_org();
+        phase2_desktop_contract_inbox_account_route_bigint_filtered_page_receipts_and_revoke();
+        phase2_desktop_contract_read_marker_inactive_member_iso_and_real_session_id();
+        phase2_desktop_contract_sse_checkpoint_last_event_id_and_poll_fallback();
+        phase2_desktop_contract_non_machine0_details_and_response_scope_validation();
+        phase2_desktop_contract_inbox_auth_and_late_account_membership_fences();
+    }
+
+    #[test]
+    fn cloud_workspaces_batch_3() {
+        phase2_desktop_contract_validation_unavailable_and_catalog_marker_types();
+        phase2_desktop_contract_marker_and_details_restart_discard_late_scope_changes();
+        a_member_organization_is_listed_by_its_own_path_only_with_the_capability();
+        a_default_organization_change_does_not_fence_a_member_organizations_answer();
+        phase2_presence_catalog_exact_projection_optin_and_independent_following();
+        the_catalog_feed_is_only_asked_of_a_server_that_offers_it();
+        the_catalog_feed_sends_its_cursor_and_reads_304_as_unchanged();
+        the_catalog_feed_keeps_only_member_organizations_and_valid_lists();
+        a_catalog_feed_answer_is_fenced_by_the_account_and_by_membership_as_of_the_answer();
+        a_catalog_feed_failure_is_an_error_and_never_an_empty_catalog();
+        provider_error_code_passes_only_as_a_safe_token();
+        a_failed_delete_carries_its_detail_code_and_the_providers_operation_id();
+        a_provider_id_is_any_registry_shaped_string();
+    }
+
+    #[test]
+    fn cloud_workspaces_batch_4() {
+        provider_summaries_carry_their_descriptor();
+        a_platform_provider_reads_with_no_credential_fields_and_asks_for_none();
+        sends_provider_contract_and_encodes_native_organization();
+        provider_detail_uses_connection_dto_and_fixed_path();
+        provider_summary_for_the_dialog_comes_from_the_organization_list();
+        a_platform_provider_is_never_connected();
+        provider_disconnect_projects_safe_metadata_and_uses_existing_endpoint();
+        provider_creation_switch_and_recheck_use_their_endpoints_and_project_safe_metadata();
+        provider_creation_switch_and_recheck_deny_members_and_stale_organizations_before_any_mutation();
+        a_route_is_saved_with_its_credential_sent_once_and_never_returned();
+        a_route_change_without_a_credential_keeps_the_stored_one_and_sends_none();
+        a_route_change_is_refused_before_anything_is_asked_for();
+        route_refusals_keep_their_codes_and_switching_back_deletes_the_route();
+    }
+
+    #[test]
+    fn cloud_workspaces_batch_5() {
+        a_stored_login_is_replaced_only_by_an_explicit_choice_and_the_dialog_is_told_what_it_replaces();
+        a_finished_codex_sign_in_is_stored_once_for_its_organization_and_then_let_go();
+        only_an_openai_page_of_the_open_sign_in_is_ever_opened();
+        agent_logins_list_agents_only_and_never_carry_a_login();
+        nothing_is_asked_for_or_read_before_consent_the_active_organization_and_the_admin_check();
+        a_named_member_organizations_agent_logins_are_read_and_changed_by_its_own_path();
+        a_named_organizations_login_change_survives_a_default_switch_but_not_leaving_it();
+        an_agent_login_is_put_once_with_both_confirmations_and_only_its_public_fields_come_back();
+        replacing_a_login_sends_no_scope_so_the_service_keeps_the_one_it_has();
+        a_dialog_is_told_who_the_login_will_reach_new_or_kept();
+        a_claude_sign_in_starts_completes_and_cancels_on_its_routes_and_opens_only_the_providers_page();
+        only_the_providers_https_pages_count_as_a_sign_in_page();
+        an_agent_login_is_removed_with_delete_and_a_rejected_key_says_so();
+    }
+
+    #[test]
+    fn cloud_workspaces_batch_6() {
+        provider_disconnect_denies_members_before_any_mutation();
+        provider_disconnect_fences_stale_organization_before_mutation();
+        setup_accepts_authoritative_selected_location_fixture();
+        create_uses_exact_body_and_key_once_then_returns_authoritative_snapshot();
+        operation_method_decodes_snapshot_and_allowlists_operation_error();
+        quote_list_lifecycle_and_cancel_use_their_fixed_contracts();
+        refuses_redirects_without_forwarding_authorization();
+        normalizes_rate_limits_and_drops_raw_provider_messages();
+        unknown_http_error_code_is_not_disclosed();
+        a_valid_key_without_a_permission_is_reported_as_such();
+        a_login_the_provider_refused_reaches_the_page_as_sign_in_required();
+        create_transport_failure_requires_same_key_reconciliation();
+        possibly_committed_mutations_require_original_context_at_every_boundary();
+    }
+
+    #[test]
+    fn cloud_workspaces_batch_7() {
+        request_timeout_is_bounded_and_keeps_create_reconciliation_semantics();
+        malformed_create_response_and_http_500_require_same_key_reconciliation_without_retry();
+        rejects_oversized_and_cross_organization_responses();
+        delayed_success_error_and_create_are_fenced_after_account_replacement();
+        validates_dynamic_resource_and_idempotency_identifiers();
+        secure_connect_input_contains_no_credential_field();
+        create_sends_repositories_refs_and_the_launch_intent();
+        a_native_codex_launch_says_so_and_an_older_server_still_gets_the_create();
+        a_preparation_create_says_so_and_its_stop_time_reaches_the_page();
+        invalid_names_repositories_refs_and_launches_never_reach_the_server();
+        policy_and_quota_refusals_are_definite_not_outcome_unknown();
+        preflight_checks_the_repositories_and_lists_selected_ones();
+        phase2_automation_repository_identity_http_and_serde_compatibility();
+    }
+
+    #[test]
+    fn cloud_workspaces_batch_8() {
+        preflight_asks_about_the_agent_of_a_first_prompt();
+        a_failed_preflight_call_is_retryable_not_an_unknown_outcome();
+        diagnostics_uses_the_desktop_contract_and_the_window();
+        diagnostics_of_a_member_organization_use_its_own_path();
+        diagnostics_refusals_old_servers_and_foreign_answers();
+        archive_and_delete_send_force_only_when_asked_and_read_the_archive_vocabulary();
+        active_work_and_archived_refusals_keep_their_codes();
+        teardown_is_read_and_requested_for_that_organization_only();
+        a_teardown_is_not_sent_when_the_workspaces_are_not_the_ones_confirmed();
+        a_teardown_confirmed_for_one_organization_is_never_sent_for_another();
+        the_teardown_preview_counts_are_read_for_the_named_organization();
+        a_disconnect_may_archive_and_its_deadline_is_read();
+        unarchive_and_the_list_tombstones();
+    }
+
+    #[test]
+    fn cloud_workspaces_batch_9() {
+        the_enriched_list_reaches_the_webview_with_every_field();
+        an_old_servers_list_still_parses_and_is_passed_on_as_before();
+        a_machine_the_server_says_is_gone_reaches_the_webview();
+        a_quota_without_a_limit_is_passed_on_without_one();
+        a_malformed_new_field_reads_as_absent_but_the_old_fields_stay_strict();
+        disposition_reads_the_server_facts_for_that_workspace_only();
+        phase2_admin_share_contract_get_mixed_nullable_rows_and_effective_you();
+        phase2_admin_share_contract_enabled_manager_put_and_delete_receipts();
+        phase2_admin_share_contract_manager_holds_and_invalid_inputs_never_send();
+        phase2_admin_share_contract_legacy_production_put_approval_is_independent();
+        phase2_admin_share_contract_target_member_without_capability_or_active_org();
+        phase2_admin_share_contract_nonmembership_and_private_errors_fail_closed();
+        phase2_admin_share_contract_late_context_fences_success_and_error_for_all_routes();
+    }
+
+    #[test]
+    fn cloud_workspaces_batch_10() {
+        phase2_admin_share_contract_foreign_user_and_unknown_response_roles_refuse();
+        phase2_admin_share_contract_safe_errors_status_retry_after_and_no_retry();
+        phase2_admin_share_contract_bounded_timeout_body_and_unknown_error_capture();
+        shares_list_reads_the_caller_standing();
+        share_put_sends_the_strict_body_with_put();
+        share_revoke_uses_delete_and_checks_the_answer_is_that_person();
+        share_refusals_keep_their_codes();
+        list_items_carry_the_callers_role_and_share_count_leniently();
+        set_access_posts_the_mode_and_checks_the_answer_is_that_workspace();
+        set_access_keeps_the_refusal_of_a_member_and_checks_the_id_first();
+        set_idle_suspend_posts_the_window_and_checks_the_answer_names_it();
+        idle_suspend_reads_the_window_and_its_choices_for_that_workspace();
+        share_identifiers_are_checked_before_sending();
+    }
+
+    #[test]
+    fn cloud_workspaces_batch_11() {
+        a_hidden_provider_refuses_setup_and_create_definitely();
+        the_running_limit_refuses_create_and_resume_definitely();
+        phase2_automation_contract_held_paths_never_reach_an_old_server();
+        phase2_automation_contract_fresh_timer_cleanup_boundaries_and_no_github();
+        phase2_automation_contract_body_defaultforkoptin_and_persisted_optin();
+        phase2_automation_contract_null_response_defaults_retain_current_timer_apis();
+        phase2_automation_contract_null_cleanup_preserves_fresh_response_and_strict_types();
+        phase2_automation_contract_invalid_inputs_are_local_even_while_inactive();
+        phase2_automation_contract_freshrunidentity_is_own_workspace_or_unavailable();
+        phase2_automation_contract_github_list_pause_resume_have_no_timer();
+        phase2_automation_contract_held_fresh_or_github_resume_never_posts();
+        phase2_automation_contract_held_resume_preflight_refusals_never_post();
+        phase2_automation_contract_delayed_resume_preflight_context_changes_never_post();
+    }
+
+    #[test]
+    fn cloud_workspaces_batch_12() {
+        phase2_automation_contract_held_automation_safety_controls_need_no_preflight();
+        phase2_automation_contract_numericcosts_fresh_ceiling_and_estimate_body();
+        phase2_automation_contract_inactive_org_and_server_refusals_are_retained();
+        phase2_automation_contract_schedules_are_listed_for_one_workspace_and_an_answer_about_another_is_refused();
+        phase2_automation_contract_a_server_with_scheduled_tasks_off_answers_not_found_and_nothing_is_retried();
+        phase2_automation_contract_a_schedule_is_created_with_a_mode_the_confirmed_spend_and_only_the_keys_the_server_takes();
+        phase2_automation_contract_a_schedule_that_the_server_would_refuse_is_not_sent();
+        phase2_automation_contract_schedule_times_are_sent_as_the_strict_parser_takes_them();
+        phase2_automation_contract_an_estimate_is_asked_without_a_prompt_and_read_back();
+        phase2_automation_contract_an_estimate_from_a_server_without_the_route_is_not_a_server_that_cannot_be_reached();
+        phase2_automation_contract_pause_resume_delete_and_pause_all_send_what_the_server_expects();
+        phase2_automation_contract_a_refused_schedule_keeps_the_servers_reason();
     }
 }

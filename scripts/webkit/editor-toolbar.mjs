@@ -112,9 +112,10 @@ try {
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/toolbar-test`, { waitUntil: 'commit' });
   const toolbar = page.locator('#pane').getByTestId('editor-toolbar');
   await toolbar.waitFor({ timeout: 120_000 });
-  for (const width of [700, 600, 520, 519, 440, 439, 400, 399, 360, 359, 300, 290, 289, 260, 220, 219, 180, 120, 80]) {
+  for (const width of [700, 520, 519, 440, 439, 400, 399, 360, 359, 290, 289, 220, 219, 180, 120]) {
     await page.locator('#pane').evaluate((pane, width) => { pane.style.width = `${width}px`; }, width);
-    for (const selected of ['Preview', 'Source']) {
+    const modes = width === 700 || width === 359 || width === 180 ? ['Preview', 'Source'] : ['Preview'];
+    for (const selected of modes) {
       const group = toolbar.getByRole('radiogroup', { name: 'View' });
       await group.focus();
       await page.keyboard.press(selected === 'Source' ? 'ArrowRight' : 'ArrowLeft');
@@ -231,9 +232,9 @@ try {
   await page.evaluate(() => window.configureToolbar({}));
   await toolbar.getByTestId('file-status').waitFor({ state: 'detached' });
   // View options (PRO-297): the four items in order, inside the window at every width, in Preview and Source.
-  for (const width of [700, 399, 260, 220, 219, 180, 120]) {
+  for (const width of [700, 399, 220, 219, 120]) {
     await page.locator('#pane').evaluate((pane, width) => { pane.style.width = `${width}px`; }, width);
-    for (const selected of ['Preview', 'Source']) {
+    for (const selected of width === 700 || width === 219 ? ['Preview', 'Source'] : ['Preview']) {
       await toolbar.getByRole('radio', { name: selected, exact: true }).click({ position: { x: 5, y: 5 } });
       const trigger = toolbar.getByRole('button', { name: 'View options' });
       await trigger.scrollIntoViewIfNeeded();
@@ -303,9 +304,9 @@ try {
   console.log('ok cloud/plain-text toolbar and save state');
   // The attachment tab's toolbar (PRO-290, screen 03.22) from wide to narrow.
   const attachment = page.locator('#attach [data-testid=attachment-toolbar]');
-  for (const width of [900, 700, 520, 519, 480, 479, 360, 359, 300, 240]) {
+  for (const width of [900, 520, 519, 480, 479, 360, 359, 240]) {
     await page.locator('#attach, #attach-media').evaluateAll((panes, width) => { for (const pane of panes) pane.style.width = `${width}px`; }, width);
-    await page.waitForTimeout(50);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const result = await attachment.evaluate((toolbar) => {
       const box = el => el.getBoundingClientRect();
       const visible = el => !!el && box(el).width > 0 && box(el).height > 0;

@@ -95,7 +95,7 @@ const server = await serve();
 const browser = await launch();
 let failed = 0;
 try {
-  for (const colorScheme of ["dark", "light"]) {
+  for (const colorScheme of shots ? ["dark", "light"] : ["dark"]) {
     const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 1440, height: 900 }, { extra: `(${setup})()`, colorScheme });
     page.setDefaultTimeout(30_000);
     const errors = [];

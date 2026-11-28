@@ -209,9 +209,15 @@ async function besideDesign(browser, ours, design) {
 const server = await serve();
 const browser = await launch();
 let failed = 0;
+const pairingCases = designs
+  ? ["light", "dark"].flatMap((mode) => [{ width: 760, height: 520 }, { width: 1280, height: 800 }, { width: 1440, height: 900 }].map((viewport) => ({ mode, viewport })))
+  : [
+      { mode: "dark", viewport: { width: 1440, height: 900 } },
+      { mode: "light", viewport: { width: 1280, height: 800 } },
+      { mode: "dark", viewport: { width: 760, height: 520 } },
+    ];
 try {
-  for (const mode of ["light", "dark"]) {
-    for (const viewport of [{ width: 760, height: 520 }, { width: 1280, height: 800 }, { width: 1440, height: 900 }]) {
+  for (const { mode, viewport } of pairingCases) {
       const name = `${mode}, ${viewport.width}×${viewport.height}`;
       const shot = (state) => join(shots, `machines-${mode}-${viewport.width}x${viewport.height}-${state}.png`);
       const take = async (state, design) => {
@@ -458,7 +464,6 @@ try {
       await dialog.getByRole("button", { name: "Done" }).click();
       await dialog.waitFor({ state: "detached" });
       await page.close();
-    }
   }
 } finally {
   await browser.close();

@@ -244,18 +244,22 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
   });
 
   it("asks once before a push publishes from the machine, then pushes directly", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     status = { ...status, upstream: "origin/feature", ahead: 1 };
     prs = [pr()];
     render();
-    fireEvent.click(await screen.findByRole("button", { name: "Push" }));
-    const dialog = await screen.findByRole("dialog");
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    fireEvent.click(screen.getByRole("button", { name: "Push" }));
+    const dialog = screen.getByRole("dialog");
     expect((dialog).textContent).toContain("Push feature to origin. Runs on Mac mini with its Git sign-in.");
     fireEvent.click(within(dialog).getByRole("button", { name: "Push" }));
-    await waitFor(() => expect(git.push).toHaveBeenCalledTimes(1));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(git.push).toHaveBeenCalledTimes(1);
     status = { ...status, ahead: 1 };
-    await act(async () => { watchers.forEach((watch) => watch(["a.ts"])); await new Promise((resolve) => setTimeout(resolve, 900)); });
-    fireEvent.click(await screen.findByRole("button", { name: "Push" }));
-    await waitFor(() => expect(git.push).toHaveBeenCalledTimes(2));
+    await act(async () => { watchers.forEach((watch) => watch(["a.ts"])); await vi.advanceTimersByTimeAsync(900); });
+    fireEvent.click(screen.getByRole("button", { name: "Push" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(git.push).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
@@ -286,14 +290,16 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
   });
 
   it("follows the machine's changes live: a file change there re-reads the branch", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     status = { ...status, upstream: "origin/feature" };
     prs = [pr()];
     render();
-    await screen.findByRole("button", { name: "Merge" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByRole("button", { name: "Merge" })).toBeTruthy();
     status = { ...status, dirty: true };
     git.branchDiffSize.mockResolvedValue({ additions: 150, deletions: 9, aheadOfBase: 2, head: HEAD });
-    await act(async () => { watchers.forEach((watch) => watch(["src/app.ts"])); await new Promise((resolve) => setTimeout(resolve, 900)); });
-    expect((await screen.findByRole("button", { name: "Commit and push" })).hasAttribute("disabled")).toBe(false);
+    await act(async () => { watchers.forEach((watch) => watch(["src/app.ts"])); await vi.advanceTimersByTimeAsync(900); });
+    expect(screen.getByRole("button", { name: "Commit and push" }).hasAttribute("disabled")).toBe(false);
     expect((screen.getByTestId("machine-diff-size")).textContent).toContain("+150 −9");
   });
 
@@ -308,12 +314,14 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
   });
 
   it("reads the new branch and its PRs when the machine changes checkout", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     status = { ...status, upstream: "origin/feature" };
     prs = [pr()];
     render();
-    await screen.findByRole("button", { name: "Merge" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByRole("button", { name: "Merge" })).toBeTruthy();
     status = { ...status, branch: "follow-up", head: MOVED, upstream: "origin/follow-up" };
-    await act(async () => { watchers.forEach((watch) => watch(null)); await new Promise((resolve) => setTimeout(resolve, 900)); });
+    await act(async () => { watchers.forEach((watch) => watch(null)); await vi.advanceTimersByTimeAsync(900); });
     expect(git.prs).toHaveBeenLastCalledWith("follow-up");
     expect(screen.getByTestId("current-branch").textContent).toBe("follow-up");
     expect(screen.getByTestId("pr-count").textContent).toBe("0");

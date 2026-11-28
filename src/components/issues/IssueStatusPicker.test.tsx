@@ -23,6 +23,7 @@ const { invoke, pipelineStore, sessionStore } = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
+vi.mock("@/icons", () => new Proxy({}, { has: () => true, get: (_, prop) => (prop === "then" || typeof prop === "symbol" ? undefined : prop === "__esModule" ? true : () => null) }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/components/chat/Dictation", () => ({
@@ -66,7 +67,12 @@ function rows(provider: IssueProvider): Issue[] {
       ({ provider, id, identifier, number, title, url, state, stateType, labels, assignee, updatedAt, body: provider === "linear" ? body : null, team }));
 }
 
+const nativeSetTimeout = window.setTimeout;
+let timerSpy: ReturnType<typeof vi.spyOn> | null = null;
+
 beforeEach(() => {
+  timerSpy = vi.spyOn(window, "setTimeout").mockImplementation(((fn: TimerHandler, delay?: number, ...args: unknown[]) =>
+    nativeSetTimeout(fn, delay === 250 ? 0 : delay, ...args)) as typeof window.setTimeout);
   tracker = createIssueOpsMock();
   pipelineStore.pipelines = [];
   invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
@@ -84,6 +90,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  timerSpy?.mockRestore();
+  timerSpy = null;
   cleanup();
   invoke.mockReset();
 });
@@ -236,7 +244,7 @@ function holdNext(command: string) {
 
 const shortcut = (target: HTMLElement) => fireEvent.keyDown(target, { key: "S", code: "KeyS", ctrlKey: true, shiftKey: true });
 /** Lets held answers and Radix's timers settle. */
-const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("a status change still on its way", () => {
   it("lands on its own issue's row, not on the issue opened since", async () => {

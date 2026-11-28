@@ -1336,7 +1336,6 @@ mod tests {
     /// it take the tail's two locks in the same order. They once did not, and
     /// then each waited on the other for good: the tab's transcript was never
     /// read again, and everything that reads it before acting hung with it.
-    #[test]
     fn reading_a_tail_and_pointing_it_elsewhere_at_once_never_wait_on_each_other() {
         use std::sync::Arc;
 
@@ -1376,7 +1375,6 @@ mod tests {
     /// The composer waits for this before typing. It used to wait for the
     /// pane to fall quiet instead, which a resumed TUI drawing a spinner never
     /// does, and the prompt was dropped when the wait timed out.
-    #[test]
     fn readiness_flips_when_the_session_starts_and_not_before() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
@@ -1405,7 +1403,6 @@ mod tests {
     /// Codex never fires the hook before the prompt that would create its
     /// session, so waiting on it would wait for ever. That tab is told to
     /// read the screen instead.
-    #[test]
     fn a_cli_that_does_not_announce_its_start_is_never_waited_on_for_one() {
         let ready = Ready::new(false);
         assert!(!ready.announces_start());
@@ -1417,7 +1414,6 @@ mod tests {
         assert!(Ready::new(true).announces_start());
     }
 
-    #[test]
     fn only_the_first_session_start_counts() {
         let ready = Ready::new(true);
         ready.mark();
@@ -1428,7 +1424,6 @@ mod tests {
         assert!(ready.settled());
     }
 
-    #[test]
     fn a_reply_is_published_once_whichever_of_stop_and_the_record_lands_first() {
         // Record first: the hook has nothing to add.
         let mut t = TurnTail::default();
@@ -1444,7 +1439,6 @@ mod tests {
         assert!(t.observe("demo"), "a genuine second one is not");
     }
 
-    #[test]
     fn the_same_reply_in_the_next_turn_is_not_mistaken_for_one_already_seen() {
         let mut t = TurnTail::default();
         t.opened();
@@ -1462,7 +1456,6 @@ mod tests {
     /// first. Only the first publishes the boundary — the second used to land
     /// as a turn with no prompt in front of it, drawing the reply again under
     /// a second "worked for" line.
-    #[test]
     fn a_turn_is_closed_once_whichever_closer_arrives_first() {
         // The hook first, the record second.
         let mut t = TurnTail::default();
@@ -1486,7 +1479,6 @@ mod tests {
         assert!(t.closing());
     }
 
-    #[test]
     fn a_boundary_with_no_prompt_behind_it_is_not_a_turn() {
         // A tab that has not been prompted — one just opened on a resumed
         // conversation, say — starts closed.
@@ -1494,7 +1486,6 @@ mod tests {
         assert!(!t.closing());
     }
 
-    #[test]
     fn trailing_whitespace_does_not_make_a_reply_look_new() {
         let mut t = TurnTail::default();
         t.observe("demo\n");
@@ -1504,7 +1495,6 @@ mod tests {
         assert!(!t.observe(" demo "));
     }
 
-    #[test]
     fn records_keep_source_timestamps_and_never_invent_missing_history() {
         let mut stream = Streamer::at(0, echo);
         let records = stream.push_records(b"{\"timestamp\":\"2026-10-22T23:59:00Z\"}\n{\"timestamp\":\"invalid\"}\n{}\n");
@@ -1513,7 +1503,6 @@ mod tests {
 
     /// Claude Code chains each record to the one before it; Codex's records
     /// name neither (#722).
-    #[test]
     fn records_say_where_they_stand_in_their_conversation() {
         let mut stream = Streamer::at(0, echo);
         let records = stream.push_records(
@@ -1523,7 +1512,6 @@ mod tests {
         assert_eq!(records.into_iter().map(|(_, _, _, lineage)| lineage).collect::<Vec<_>>(), [lineage("u2", Some("u1")), lineage("u1", None), None, None]);
     }
 
-    #[test]
     fn records_already_logged_elsewhere_are_left_out() {
         let mut s = Streamer::skipping(0, echo, HashSet::from(["copied".to_string()]));
         let out = s.push(b"copied\nfresh\n");
@@ -1531,7 +1519,6 @@ mod tests {
         assert!(matches!(&out[0], Payload::Status { text, .. } if text == "fresh"));
     }
 
-    #[test]
     fn a_prompt_is_pasted_and_submitted_separately() {
         let body = body_bytes("hello, look at src/main.rs");
         assert_eq!(String::from_utf8(body.clone()).unwrap(), "\x1b[200~hello, look at src/main.rs\x1b[201~");
@@ -1541,7 +1528,6 @@ mod tests {
         assert!(submit_delay(200_000) > submit_delay(10));
     }
 
-    #[test]
     fn the_enter_waits_for_the_paste_to_be_read_and_no_longer() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         // Read on the third look: the wait ends there, however long is left.
@@ -1561,7 +1547,6 @@ mod tests {
 
     /// Only a draw after the paste was read says the CLI has taken it in: one
     /// from before, the startup screen say, is no answer.
-    #[test]
     fn the_enter_waits_for_the_cli_to_draw_after_reading_the_paste() {
         use std::time::Instant;
         let before = Instant::now();
@@ -1581,13 +1566,11 @@ mod tests {
         });
     }
 
-    #[test]
     fn newlines_become_carriage_returns_and_escapes_lose_their_bite() {
         let s = String::from_utf8(body_bytes("one\ntwo\r\nthree\u{1b}[31m")).unwrap();
         assert_eq!(s, "\x1b[200~one\rtwo\rthree\u{241b}[31m\x1b[201~");
     }
 
-    #[test]
     fn a_prompt_ending_in_a_mention_gets_a_space_so_the_picker_does_not_take_the_enter() {
         // An attached file is sent as its mention, alone or last: the picker would open on it.
         assert_eq!(String::from_utf8(body_bytes("@/Users/x/notes.md")).unwrap(), "\x1b[200~@/Users/x/notes.md \x1b[201~");
@@ -1600,7 +1583,6 @@ mod tests {
         assert!(!ends_in_mention("mail sam@example.com"));
     }
 
-    #[test]
     fn a_prompt_ending_in_a_backslash_gets_a_space_so_the_enter_sends_instead_of_breaking_the_line() {
         assert_eq!(String::from_utf8(body_bytes("yes, \\")).unwrap(), "\x1b[200~yes, \\ \x1b[201~");
         assert_eq!(String::from_utf8(body_bytes("C:\\path\\")).unwrap(), "\x1b[200~C:\\path\\ \x1b[201~");
@@ -1608,7 +1590,6 @@ mod tests {
         assert_eq!(String::from_utf8(body_bytes("a \\ b")).unwrap(), "\x1b[200~a \\ b\x1b[201~");
     }
 
-    #[test]
     fn a_slash_command_is_typed_so_the_palette_opens() {
         assert_eq!(String::from_utf8(body_bytes("/model opus")).unwrap(), "/model opus");
         for command in ["/goal Reduce p95 latency below 120 ms", "/goal", "/goal pause", "/goal resume", "/goal clear"] {
@@ -1619,7 +1600,6 @@ mod tests {
         assert!(String::from_utf8(body_bytes("/tmp/x\nand more")).unwrap().starts_with(BRACKETED_PASTE_START));
     }
 
-    #[test]
     fn the_tail_reads_only_what_was_appended() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
@@ -1640,7 +1620,6 @@ mod tests {
     }
 
 
-    #[test]
     fn a_tail_with_no_file_yet_reads_everything_once_it_is_named() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("later.jsonl");
@@ -1660,7 +1639,6 @@ mod tests {
     /// a conversation it never wrote (#663), then exited.
     const NO_CONVERSATION: &[u8] = b"\x1b7\x1b[r\x1b8\x1b[?25h\x1b[38;2;255;107;128mNo conversation found with session ID: 0d5e7c1a-1111-4222-8333-944455556666\x1b[39m\r\r\n\x1b[?25h\x1b(B\x0f\x1b[?1016l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[>4m\x1b[?1004l\x1b[?2031l\x1b[?2004l\x1b[<u\x1b[?25h\x1b7\x1b[r\x1b8\x1b]0;\x07\x1b[?25h";
 
-    #[test]
     fn a_cli_s_last_words_are_what_it_printed_less_the_terminal_s_controls() {
         // A whole conversation id is as opaque as a token to the redactor (#667).
         assert_eq!(last_words(NO_CONVERSATION).as_deref(), Some("No conversation found with session ID: [redacted]"));
@@ -1674,7 +1652,6 @@ mod tests {
         assert_eq!(last_words(b""), None);
     }
 
-    #[test]
     fn a_long_last_word_keeps_its_end_where_the_reason_is() {
         let long = format!("{} the reason", "x".repeat(LAST_WORDS_CHARS * 2));
         let said = last_words(long.as_bytes()).unwrap();
@@ -1684,7 +1661,6 @@ mod tests {
 
     /// A credential where the cut falls is redacted whole: cut first, its
     /// tail would no longer look like one, and would reach the chat.
-    #[test]
     fn a_credential_the_cut_falls_in_is_redacted_whole() {
         let secret = "API_KEY=sk-ant-api03-Zx9Qw8Er7Ty6Ui5Op4As3Df2";
         let after = format!(" {} the reason", "y".repeat(LAST_WORDS_CHARS - 20));
@@ -1699,7 +1675,6 @@ mod tests {
 
     /// A value one line leaves open is cut to the end of that line only: the
     /// lines after it, with the reason, still reach the chat.
-    #[test]
     fn a_quote_left_open_takes_its_own_line_not_the_reason_after_it() {
         let said = last_words(b"auth: \"chatgpt\r\nError: Failed to refresh token: 401 Unauthorized\r\nPlease run codex login\r\n").unwrap();
         assert_eq!(said, "auth: [redacted] Error: Failed to refresh token: 401 Unauthorized Please run codex login");
@@ -1707,7 +1682,6 @@ mod tests {
 
     /// A value on the line after its label is cut all the same, and the
     /// two count as one line of the window.
-    #[test]
     fn a_secret_on_the_line_after_its_label_is_redacted() {
         assert_eq!(last_words(b"Password:\r\nhunter2\r\n").as_deref(), Some("Password: [redacted]"));
         assert_eq!(last_words(b"proxy refused Authorization: Bearer\r\nabc123\r\n").as_deref(), Some("proxy refused Authorization: [redacted]"));
@@ -1722,7 +1696,6 @@ mod tests {
 
     /// A value that runs on over lines goes whole, up to the line that
     /// closes it, and the reason after it stays.
-    #[test]
     fn a_value_that_runs_over_lines_goes_whole() {
         assert_eq!(last_words(b"password: \"hunter\r\n2 more\" and the reason\r\n").as_deref(), Some("password: [redacted] and the reason"));
         assert_eq!(last_words(b"token=\"hunter\r\n2abc\" rest\r\n").as_deref(), Some("token=[redacted] rest"));
@@ -1777,7 +1750,6 @@ mod tests {
         assert!(tail.drain().is_empty(), "Tail must refuse symlinked transcript files");
     }
 
-    #[test]
     fn a_split_multibyte_character_is_not_decoded_until_it_is_whole() {
         let mut s = Streamer::at(0, echo);
         let text = "café\n".as_bytes();
@@ -1820,5 +1792,49 @@ mod tests {
         assert_eq!(codex_records.len(), 1);
         assert_eq!(codex_records[0].1, Some(TurnMark::Opened));
         assert_eq!(STREAMER_JSON_PARSES.with(|c| c.get()), 1);
+    }
+
+    #[test]
+    fn tui_batch_1() {
+        reading_a_tail_and_pointing_it_elsewhere_at_once_never_wait_on_each_other();
+        readiness_flips_when_the_session_starts_and_not_before();
+        a_cli_that_does_not_announce_its_start_is_never_waited_on_for_one();
+        only_the_first_session_start_counts();
+        a_reply_is_published_once_whichever_of_stop_and_the_record_lands_first();
+        the_same_reply_in_the_next_turn_is_not_mistaken_for_one_already_seen();
+        a_turn_is_closed_once_whichever_closer_arrives_first();
+    }
+
+    #[test]
+    fn tui_batch_2() {
+        a_boundary_with_no_prompt_behind_it_is_not_a_turn();
+        trailing_whitespace_does_not_make_a_reply_look_new();
+        records_keep_source_timestamps_and_never_invent_missing_history();
+        records_say_where_they_stand_in_their_conversation();
+        records_already_logged_elsewhere_are_left_out();
+        a_prompt_is_pasted_and_submitted_separately();
+        the_enter_waits_for_the_paste_to_be_read_and_no_longer();
+    }
+
+    #[test]
+    fn tui_batch_3() {
+        the_enter_waits_for_the_cli_to_draw_after_reading_the_paste();
+        newlines_become_carriage_returns_and_escapes_lose_their_bite();
+        a_prompt_ending_in_a_mention_gets_a_space_so_the_picker_does_not_take_the_enter();
+        a_prompt_ending_in_a_backslash_gets_a_space_so_the_enter_sends_instead_of_breaking_the_line();
+        a_slash_command_is_typed_so_the_palette_opens();
+        the_tail_reads_only_what_was_appended();
+        a_tail_with_no_file_yet_reads_everything_once_it_is_named();
+    }
+
+    #[test]
+    fn tui_batch_4() {
+        a_cli_s_last_words_are_what_it_printed_less_the_terminal_s_controls();
+        a_long_last_word_keeps_its_end_where_the_reason_is();
+        a_credential_the_cut_falls_in_is_redacted_whole();
+        a_quote_left_open_takes_its_own_line_not_the_reason_after_it();
+        a_secret_on_the_line_after_its_label_is_redacted();
+        a_value_that_runs_over_lines_goes_whole();
+        a_split_multibyte_character_is_not_decoded_until_it_is_whole();
     }
 }
