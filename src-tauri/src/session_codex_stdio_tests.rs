@@ -211,7 +211,7 @@ fn owned_stdio_lifecycle_is_process_bounded() {
         "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-slow-start", "share-ended", "host-while-shared",
         "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart", "resend-no-helper-tools",
         "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch", "streamed-reply", "streamed-stopped",
-        "mailbox-after-refusal", "mailbox-route-gone", "mailbox-route-sign-in", "mailbox-route-outage", "mailbox-cli-waiting", "busy-while-working", "queued-while-working", "queued-stop", "queued-interrupt", "queued-share-ended", "queued-overflow", "handover-stop", "handover-exit", "handover-descendant"] {
+        "mailbox-after-refusal", "mailbox-route-gone", "mailbox-route-sign-in", "mailbox-route-outage", "mailbox-route-start-fails", "mailbox-cli-waiting", "busy-while-working", "queued-while-working", "queued-stop", "queued-interrupt", "queued-share-ended", "queued-overflow", "handover-stop", "handover-exit", "handover-descendant"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1903,7 +1903,7 @@ fn child_fixture() {
     if matches!(case.as_str(), "native-fallback-send" | "native-fallback-start" | "native-supported-start") { return first_launch_fixture(&case); }
     if case == "cloud-launch" { return cloud_launch_fixture(); }
     if case.starts_with("bot-approval-") { return bot_approval_fixture(&case); }
-    if matches!(case.as_str(), "mailbox-after-refusal" | "mailbox-route-gone" | "mailbox-route-sign-in" | "mailbox-route-outage" | "mailbox-cli-waiting") { return mailbox_fixture(&case); }
+    if matches!(case.as_str(), "mailbox-after-refusal" | "mailbox-route-gone" | "mailbox-route-sign-in" | "mailbox-route-outage" | "mailbox-route-start-fails" | "mailbox-cli-waiting") { return mailbox_fixture(&case); }
     if matches!(case.as_str(), "streamed-reply" | "streamed-stopped") { return streamed_fixture(&case); }
     if matches!(case.as_str(), "busy-while-working" | "queued-while-working" | "queued-stop" | "queued-interrupt" | "queued-share-ended" | "queued-overflow") { return busy_fixture(); }
     let _home = store::temp_home();
@@ -2777,6 +2777,10 @@ fn a_switched_native_thread_is_brought_into_the_home_it_resumes_in() {
 ///   was queued waits, never sent on a route that may have gone; past
 ///   the wait the tab says so, once. A sync that answers the route applies
 ///   again lets it go, in order, on the same connection.
+/// - `mailbox-route-start-fails`: the carried follow-up's start fails once
+///   the new Codex has spawned. That Codex is ended rather than left with
+///   no turn, what was carried is withdrawn for the person to send again,
+///   and the new login is not announced.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn route_gone(
@@ -2785,7 +2789,7 @@ fn route_gone(
 ) {
     use crate::cloud_grants::{Replacement, RouteSwitch};
     let switch = if case == "mailbox-route-sign-in" { RouteSwitch::SignIn } else { RouteSwitch::Login(Replacement::OrganizationLogin) };
-    *manager.route_stand_in.lock().unwrap() = Some(super::RouteStandIn { switch: Some(switch), ..Default::default() });
+    *manager.route_stand_in.lock().unwrap() = Some(super::RouteStandIn { switch: Some(switch), fail_carried_start: case == "mailbox-route-start-fails", ..Default::default() });
     let events = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap();
     let notices = || events().into_iter()
         .filter_map(|event| match event.payload { Payload::Status { text, .. } if text.contains("organization's Codex route") => Some(text), _ => None }).collect::<Vec<_>>();
@@ -2814,6 +2818,24 @@ fn route_gone(
             assert_eq!(threads(), ["thread/start -", "thread/resume thread-1"]);
             assert_eq!(withdrawn(), 0, "nothing to send again");
             assert_eq!(notices(), ["The organization's Codex route no longer applies to this workspace. The turn that was running finished on it; Codex in this session now uses the organization's login."]);
+        }
+        "mailbox-route-start-fails" => {
+            std::fs::remove_file(bin.join("hold")).unwrap();
+            settled(1);
+            let until = Instant::now() + WAIT;
+            loop {
+                let ended = {
+                    let rt = rt.lock().unwrap();
+                    !rt.switching_route() && matches!(rt.engine, Engine::None) && rt.child.is_none() && !rt.stdio_starting
+                };
+                if ended { break; }
+                assert!(Instant::now() < until, "the spawned Codex was not ended");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(starts(), ["on the route"], "no turn reached the new Codex");
+            assert_eq!(withdrawn(), 2, "both carried follow-ups are offered to send again");
+            assert!(notices().is_empty(), "no new login announced: {:?}", notices());
+            return;
         }
         "mailbox-route-sign-in" => {
             std::fs::remove_file(bin.join("hold")).unwrap();
@@ -2865,4 +2887,44 @@ fn route_gone(
     }
     assert!(!manager.switching_route("stdio-owner", "tab"));
     manager.stop("stdio-owner", "tab").unwrap();
+}
+
+/// PRO-310: while a Codex connection is being let go (a refused sign-in's
+/// retire), a sync that finds the route applying again must not clear the
+/// tab's mark to move: the follow-up queued behind it would otherwise start
+/// a turn on that connection, still on the route.
+#[test]
+fn a_connection_being_let_go_keeps_the_route_mark() {
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(),
+        "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "created":index::now()}]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
+        Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    *manager.route_stand_in.lock().unwrap() = Some(super::RouteStandIn::default());
+    let rt_arc = manager.runtime("stdio-owner", "tab").unwrap();
+    let mut engine = Stdio::new(root.to_string_lossy().into_owned(), String::new(), None, "auto".into(), None);
+    engine.thread = Some("thread".into());
+    engine.ready = true;
+    let launch = engine.launch.clone();
+    {
+        let mut rt = rt_arc.lock().unwrap();
+        rt.engine = Engine::CodexStdio(engine);
+        rt.route_switch_after_turn = true;
+        rt.stdio_retiring = Some(launch);
+        rt.queued.push(PendingMessage { message: QueuedMessage { id: "1".into(), text: "queued".into(), images: Vec::new() }, privacy: None, seq: 1 });
+    }
+    manager.switch_organization_routes();
+    let mut rt = rt_arc.lock().unwrap();
+    assert!(rt.switching_route(), "the mark stays until the connection has ended");
+    assert!(!rt.turn_open && rt.queued.len() == 1, "nothing reached the connection being let go");
+    // Once it has ended, the answer counts again.
+    rt.stdio_retiring = None;
+    assert_eq!(manager.route_switch_now(&mut rt), None);
+    assert!(!rt.switching_route());
 }

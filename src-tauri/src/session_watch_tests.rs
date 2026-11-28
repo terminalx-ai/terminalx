@@ -4293,7 +4293,7 @@ impl Rig {
     fn route(&self, switch: Option<RouteSwitch>, hold: bool) {
         let mut stand_in = self.manager.route_stand_in.lock().unwrap();
         let taken = stand_in.take().map(|stand_in| stand_in.taken).unwrap_or_default();
-        *stand_in = Some(super::RouteStandIn { switch, record: true, hold, taken, unsettled: false });
+        *stand_in = Some(super::RouteStandIn { switch, record: true, hold, taken, ..Default::default() });
     }
 
     /// The moves recorded so far, once there are `count` of them.

@@ -1180,9 +1180,12 @@ impl SessionManager {
                     moved = false;
                 }
             }
+            // A refused sign-in's retire (no move off a route): the held
+            // queue, which waited on a mark its end cleared, looks again. A
+            // move decides that itself, keeping it held for a sign-in.
+            let routed = rt.route_notice.is_some();
             self.route_switch_done(&mut rt, RouteAction::Retire, moved);
-            // The held queue, which waited on the mark, looks again.
-            self.schedule_held(&rt);
+            if !routed { self.schedule_held(&rt); }
             rt.status
         };
         drop(fenced);
