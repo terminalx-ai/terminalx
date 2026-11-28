@@ -135,23 +135,60 @@ fn build(app: &AppHandle, groups: &[Group]) -> tauri::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchTarget {
+    Focused,
+    Main { bring_forward: bool },
+}
+
+/// Choose the destination window and whether to show/focus it first.
+/// Focused commands target the currently focused window, falling back to
+/// `"main"` (and bringing it forward) when no window is focused (e.g. macOS
+/// menu bar clicks while all windows are unfocused or minimized).
+fn resolve_target(focused: bool, has_focused: bool, has_main: bool) -> Option<DispatchTarget> {
+    if focused {
+        if has_focused {
+            Some(DispatchTarget::Focused)
+        } else if has_main {
+            Some(DispatchTarget::Main { bring_forward: true })
+        } else {
+            None
+        }
+    } else if has_main {
+        Some(DispatchTarget::Main { bring_forward: true })
+    } else {
+        None
+    }
+}
+
 /// A menu event goes to exactly one webview. Session/window commands belong
-/// to the focused window; workbench commands bring the main window forward.
+/// to the focused window (falling back to `"main"` if none is focused);
+/// workbench commands bring the main window forward.
 pub fn dispatch(app: &AppHandle, id: &str) {
     let Some((focused, action)) = destination(id) else { return };
-    let window = if focused {
+    let focused_window = if focused {
         app.webview_windows().into_values().find(|window| window.is_focused().unwrap_or(false))
     } else {
-        app.get_webview_window("main")
+        None
     };
-    if let Some(window) = window {
-        if !focused {
-            let _ = window.show();
-            let _ = window.unminimize();
-            let _ = window.set_focus();
-        }
-        let _ = window.emit_to(window.label(), "native-menu-action", action);
+    let main_window = app.get_webview_window("main");
+    let Some(target) = resolve_target(focused, focused_window.is_some(), main_window.is_some()) else { return };
+    let (window, bring_forward) = match target {
+        DispatchTarget::Focused => match focused_window {
+            Some(win) => (win, false),
+            None => return,
+        },
+        DispatchTarget::Main { bring_forward } => match main_window {
+            Some(win) => (win, bring_forward),
+            None => return,
+        },
+    };
+    if bring_forward {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
     }
+    let _ = window.emit_to(window.label(), "native-menu-action", action);
 }
 
 fn destination(id: &str) -> Option<(bool, &str)> {
@@ -207,5 +244,15 @@ mod tests {
         assert_eq!(destination("recent:/path:with:colons"), Some((false, "recent:/path:with:colons")));
         assert_eq!(destination(crate::quit::MENU_ID), None);
         assert_eq!(destination(crate::status::MENU_ID), None);
+    }
+
+    #[test]
+    fn focused_commands_fall_back_to_main_when_unfocused() {
+        assert_eq!(resolve_target(true, true, true), Some(DispatchTarget::Focused));
+        assert_eq!(resolve_target(true, false, true), Some(DispatchTarget::Main { bring_forward: true }));
+        assert_eq!(resolve_target(true, false, false), None);
+        assert_eq!(resolve_target(false, true, true), Some(DispatchTarget::Main { bring_forward: true }));
+        assert_eq!(resolve_target(false, false, true), Some(DispatchTarget::Main { bring_forward: true }));
+        assert_eq!(resolve_target(false, false, false), None);
     }
 }

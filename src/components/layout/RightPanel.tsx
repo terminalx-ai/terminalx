@@ -26,6 +26,37 @@ import { onPrLinksChanged } from "@/lib/prLinks";
 import { WindowControls } from "./WindowControls";
 
 export type { PanelTab };
+export const PANEL_MIN = 300;
+export const PANEL_MAX = 760;
+export const PANEL_DEFAULT = 400;
+const PANEL_MIN_NARROW = 200;
+const MIN_MAIN_WIDTH = 320;
+const KEY_STEP = 16;
+const KEY_STEP_LARGE = 40;
+
+function readSidebarWidth(): number {
+  if (typeof document === "undefined") return 0;
+  const sidebar = document.querySelector<HTMLElement>("[data-sidebar]");
+  if (!sidebar) return 0;
+  const rectWidth = sidebar.getBoundingClientRect().width;
+  if (rectWidth > 0) return Math.round(rectWidth);
+  const cssWidth = Number.parseInt(document.documentElement.style.getPropertyValue("--sidebar-w"), 10);
+  return Number.isFinite(cssWidth) && cssWidth > 0 ? cssWidth : 200;
+}
+
+export function panelBounds(viewportWidth = typeof window === "undefined" ? 0 : window.innerWidth, sidebarWidth = readSidebarWidth()) {
+  if (viewportWidth <= 0) return { min: PANEL_MIN, max: PANEL_MAX };
+  const available = Math.round(viewportWidth - MIN_MAIN_WIDTH - sidebarWidth);
+  const min = available < PANEL_MIN ? Math.max(PANEL_MIN_NARROW, Math.min(PANEL_MIN, available)) : PANEL_MIN;
+  const max = Math.max(min, Math.min(PANEL_MAX, available));
+  return { min, max };
+}
+
+export function clampPanelWidth(width: number, viewportWidth?: number, sidebarWidth?: number) {
+  const { min, max } = panelBounds(viewportWidth, sidebarWidth);
+  return Math.max(min, Math.min(max, Math.round(width)));
+}
+
 const TABS: { id: PanelTab; label: string; shortcut?: ShortcutId }[] = [
   // Changes (committing and history) and Checks (the pull request, its checks and the branch's next step) are tabs
   // of their own (PRO-394, design 05.02). Checks keeps the "branch" id, so every link and shortcut to it still lands.
@@ -216,9 +247,14 @@ export const RightPanel = memo(function RightPanel({
   });
   useShortcut("panel.files", () => setTab("files"));
 
+  const [viewportTick, setViewportTick] = useState(0);
+  const bounds = panelBounds();
+  const clampedPanelWidth = clampPanelWidth(prefs.panelWidth);
+  void viewportTick;
+
   const onDown = useCallback(
     (e: React.PointerEvent) => {
-      dragging.current = { x: e.clientX, w: prefs.panelWidth };
+      dragging.current = { x: e.clientX, w: clampPanelWidth(prefs.panelWidth) };
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
     },
     [prefs.panelWidth],
@@ -226,65 +262,106 @@ export const RightPanel = memo(function RightPanel({
   const onMove = useCallback((e: React.PointerEvent) => {
     const d = dragging.current;
     if (!d) return;
-    const w = Math.max(300, Math.min(760, d.w - (e.clientX - d.x)));
+    const w = clampPanelWidth(d.w - (e.clientX - d.x));
     document.documentElement.style.setProperty("--panel-w", `${w}px`);
   }, []);
   const onUp = useCallback((e: React.PointerEvent) => {
     const d = dragging.current;
     if (!d) return;
     dragging.current = null;
-    const w = Math.max(300, Math.min(760, d.w - (e.clientX - d.x)));
+    const w = clampPanelWidth(d.w - (e.clientX - d.x));
     setPrefs({ panelWidth: w });
   }, []);
+  const onCancel = useCallback(() => {
+    if (!dragging.current) return;
+    dragging.current = null;
+    document.documentElement.style.setProperty("--panel-w", `${clampPanelWidth(prefs.panelWidth)}px`);
+  }, [prefs.panelWidth]);
+  const onResizeKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const step = e.shiftKey ? KEY_STEP_LARGE : KEY_STEP;
+    const { min, max } = panelBounds();
+    const current = clampPanelWidth(prefs.panelWidth);
+    let next: number | null = null;
+    // Right panel's handle is on its left edge: ArrowLeft widens, ArrowRight narrows.
+    if (e.key === "ArrowLeft") next = clampPanelWidth(current + step);
+    else if (e.key === "ArrowRight") next = clampPanelWidth(current - step);
+    else if (e.key === "Home") next = min;
+    else if (e.key === "End") next = max;
+    else if (e.key === "Enter") next = clampPanelWidth(PANEL_DEFAULT);
+    if (next === null) return;
+    e.preventDefault();
+    document.documentElement.style.setProperty("--panel-w", `${next}px`);
+    setPrefs({ panelWidth: next });
+  }, [prefs.panelWidth]);
+
   useEffect(() => {
-    document.documentElement.style.setProperty("--panel-w", `${prefs.panelWidth}px`);
+    const sync = () => {
+      document.documentElement.style.setProperty("--panel-w", `${clampPanelWidth(prefs.panelWidth)}px`);
+      setViewportTick((n) => n + 1);
+    };
+    document.documentElement.style.setProperty("--panel-w", `${clampPanelWidth(prefs.panelWidth)}px`);
+    window.addEventListener("resize", sync);
+    return () => window.removeEventListener("resize", sync);
   }, [prefs.panelWidth]);
 
   return (
-    <aside className="relative flex h-full w-(--panel-w) shrink-0 flex-col border-l border-hairline">
+    <aside data-right-panel="" className="relative flex h-full w-(--panel-w) shrink-0 flex-col border-l border-hairline">
       <div
         role="separator"
+        tabIndex={0}
         aria-orientation="vertical"
+        aria-label="Resize right panel"
+        aria-valuenow={clampedPanelWidth}
+        aria-valuemin={bounds.min}
+        aria-valuemax={bounds.max}
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}
-        className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-ring/30"
+        onPointerCancel={onCancel}
+        onKeyDown={onResizeKeyDown}
+        onDoubleClick={() => setPrefs({ panelWidth: clampPanelWidth(PANEL_DEFAULT) })}
+        className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize outline-none hover:bg-ring/30 focus-visible:bg-ring/50 focus-visible:ring-1 focus-visible:ring-ring"
+        data-testid="right-panel-resize"
       />
-      <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-0.5 border-b border-hairline px-2">
-        {TABS.filter((t) => (t.id === "ports" ? !!ports : t.id === "computer" ? computer : t.id === "browser" ? browser && !!sessionId : isGit || t.id === "files")).map((t) => (
-          <WithTooltip key={t.id} label={t.id === "branch" && checksMark === "failed" ? "Checks · failing" : t.label} shortcut={t.shortcut}>
-            <button
-              type="button"
-              onClick={() => setTab(t.id)}
-              aria-pressed={tab === t.id}
-              className={cn(
-                // Tabs as the design's pills (05.02): the open one filled.
-                "flex h-7 shrink-0 items-center rounded-md px-2 text-[12.5px] whitespace-nowrap transition-colors",
-                tab === t.id ? "bg-veil-strong text-foreground" : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {t.label}
-              {t.id === "ports" && portsCount > 0 && (
-                <span className="ml-1 font-normal tabular-nums text-faint" data-testid="panel-ports-count">
-                  {portsCount}
-                </span>
-              )}
-              {t.id === "changes" && changesCount != null && changesCount > 0 && <span className="ml-1 font-mono text-xs text-faint" data-testid="panel-changes-count">{changesCount}</span>}
-              {t.id === "branch" && checksMark === "failed" && <span className="ml-1.5 inline-block size-1.5 rounded-full bg-destructive" role="img" aria-label="failing" data-testid="panel-checks-failing" />}
-            </button>
+      <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-1 border-b border-hairline px-2">
+        <div role="tablist" aria-label="Panel views" className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto scrollbar-none">
+          {TABS.filter((t) => (t.id === "ports" ? !!ports : t.id === "computer" ? computer : t.id === "browser" ? browser && !!sessionId : isGit || t.id === "files")).map((t) => (
+            <WithTooltip key={t.id} label={t.id === "branch" && checksMark === "failed" ? "Checks · failing" : t.label} shortcut={t.shortcut}>
+              <button
+                type="button"
+                onClick={() => setTab(t.id)}
+                aria-pressed={tab === t.id}
+                className={cn(
+                  // Tabs as the design's pills (05.02): the open one filled.
+                  "flex h-7 shrink-0 items-center rounded-md px-2 text-[12.5px] whitespace-nowrap transition-colors",
+                  tab === t.id ? "bg-veil-strong text-foreground" : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {t.label}
+                {t.id === "ports" && portsCount > 0 && (
+                  <span className="ml-1 font-normal tabular-nums text-faint" data-testid="panel-ports-count">
+                    {portsCount}
+                  </span>
+                )}
+                {t.id === "changes" && changesCount != null && changesCount > 0 && <span className="ml-1 font-mono text-xs text-faint" data-testid="panel-changes-count">{changesCount}</span>}
+                {t.id === "branch" && checksMark === "failed" && <span className="ml-1.5 inline-block size-1.5 rounded-full bg-destructive" role="img" aria-label="failing" data-testid="panel-checks-failing" />}
+              </button>
+            </WithTooltip>
+          ))}
+        </div>
+        <div className="flex shrink-0 items-center gap-0.5">
+          {targetLabel && (
+            <span className="max-w-28 truncate px-1 font-mono text-[10px] text-faint" title={targetLabel}>
+              {targetLabel}
+            </span>
+          )}
+          <WithTooltip label="Refresh">
+            <Button variant="ghost" size="icon-xs" aria-label="Refresh" onClick={() => setRefreshTick((t) => t + 1)}>
+              <RefreshCw />
+            </Button>
           </WithTooltip>
-        ))}
-        {targetLabel && (
-          <span className="ml-auto min-w-0 truncate px-1 font-mono text-[10px] text-faint" title={targetLabel}>
-            {targetLabel}
-          </span>
-        )}
-        <WithTooltip label="Refresh">
-          <Button variant="ghost" size="icon-xs" aria-label="Refresh" className={targetLabel ? undefined : "ml-auto"} onClick={() => setRefreshTick((t) => t + 1)}>
-            <RefreshCw />
-          </Button>
-        </WithTooltip>
-        <WindowControls />
+          <WindowControls />
+        </div>
       </div>
       {repositories && (
         <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-2 py-1">

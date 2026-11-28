@@ -50,4 +50,33 @@ describe("the sidebar's width", () => {
     expect(prefs.getPrefs().sidebarWidth).toBe(560);
     expect(document.documentElement.style.getPropertyValue("--sidebar-w")).toBe("560px");
   });
+
+  it("resizes via keyboard arrows, Home/End/Enter, cancels on pointerCancel, and clamps at 760px", async () => {
+    const { fireEvent } = await import("@testing-library/react");
+    const prefs = await import("@/lib/prefs");
+    const { clampSidebarWidth, SIDEBAR_DEFAULT, SIDEBAR_MIN } = await import("./Sidebar");
+    expect(clampSidebarWidth(400, 760, 240)).toBe(200);
+
+    prefs.setPrefs({ sidebarWidth: 268 });
+    render(
+      <Sidebar onToggle={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} />,
+    );
+    const handle = screen.getByRole("separator", { name: "Resize sidebar" });
+    expect(handle.tabIndex).toBe(0);
+
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    expect(prefs.getPrefs().sidebarWidth).toBe(284);
+    fireEvent.keyDown(handle, { key: "ArrowLeft", shiftKey: true });
+    expect(prefs.getPrefs().sidebarWidth).toBe(244);
+    fireEvent.keyDown(handle, { key: "Home" });
+    expect(prefs.getPrefs().sidebarWidth).toBe(SIDEBAR_MIN);
+    fireEvent.keyDown(handle, { key: "Enter" });
+    expect(prefs.getPrefs().sidebarWidth).toBe(SIDEBAR_DEFAULT);
+
+    handle.setPointerCapture = () => {};
+    fireEvent.pointerDown(handle, { clientX: 268, pointerId: 2 });
+    fireEvent.pointerMove(handle, { clientX: 350, pointerId: 2 });
+    fireEvent.pointerCancel(handle, { pointerId: 2 });
+    expect(document.documentElement.style.getPropertyValue("--sidebar-w")).toBe(`${SIDEBAR_DEFAULT}px`);
+  });
 });

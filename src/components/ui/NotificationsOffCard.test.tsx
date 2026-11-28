@@ -10,7 +10,8 @@ const { NotificationsOffCard, showNotificationsOff, notificationsOffHidden, rese
 afterEach(() => {
   cleanup();
   act(() => resetNotificationsOffForTest());
-  mocks.openUrl.mockClear();
+  mocks.openUrl.mockReset().mockResolvedValue(undefined);
+  delete window.__TERMINALX_PLATFORM__;
 });
 
 const raise = (sessionTitle = "Show the diff inside edit approvals") => act(() => showNotificationsOff({ sessionId: "s1", sessionTitle }));
@@ -27,13 +28,34 @@ describe("Notifications are off for TerminalX", () => {
     expect(card.querySelector("[data-notifications-off-icon]")!.getAttribute("class")).toContain("text-warning");
   });
 
-  it("opens the app's own page under System Settings › Notifications", async () => {
+  it("opens the app's own page under System Settings › Notifications on macOS", async () => {
+    window.__TERMINALX_PLATFORM__ = "macos";
     render(<NotificationsOffCard />);
     raise();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Open System Settings" })); });
     expect(mocks.openUrl).toHaveBeenCalledWith("x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.terminalx.next");
     // Opening System Settings is not an answer: the card stays until they are allowed.
     expect(screen.getByRole("alert")).toBeTruthy();
+  });
+
+  it("opens Windows notification settings on Windows and surfaces opener errors", async () => {
+    window.__TERMINALX_PLATFORM__ = "windows";
+    render(<NotificationsOffCard />);
+    raise();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Open Notification Settings" })); });
+    expect(mocks.openUrl).toHaveBeenCalledWith("ms-settings:notifications");
+
+    mocks.openUrl.mockRejectedValueOnce(new Error("blocked"));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Open Notification Settings" })); });
+    expect(screen.getByRole("status").textContent).toContain("Could not open Windows Settings");
+  });
+
+  it("shows desktop guidance instead of a macOS URL button on Linux", () => {
+    window.__TERMINALX_PLATFORM__ = "linux";
+    render(<NotificationsOffCard />);
+    raise();
+    expect(screen.queryByRole("button", { name: /Open .*Settings/ })).toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("desktop environment’s Settings › Notifications");
   });
 
   it("\"Not now\" hides it for the rest of the run", () => {

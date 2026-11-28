@@ -1,5 +1,6 @@
 import { ArrowDownToLine, Loader2, X } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { chooseUpdate, dismissUpdateNotice, installUpdate, useUpdate, type UpdateState } from "@/lib/updates";
 
@@ -35,11 +36,11 @@ export function UpdateNotice() {
   if (state.kind !== "available" || noticeDismissed) return null;
   const version = state.update.version;
   return (
-    <div
-      role="dialog"
+    <aside
+      role="status"
       aria-label="Update available"
       data-testid="update-notice"
-      className="fixed bottom-10 right-4 z-(--z-menu) w-[20rem] max-w-[calc(100vw-2rem)] rounded-xl bg-popover p-3.5 text-popover-foreground shadow-surface hairline animate-fade-in"
+      className="pointer-events-auto relative rounded-xl bg-popover p-3.5 text-popover-foreground shadow-surface hairline animate-fade-in"
     >
       <button type="button" aria-label="Close" onClick={() => dismissUpdateNotice(version)} className="absolute right-2 top-2 rounded-md p-1 text-faint hover:bg-veil-raised hover:text-foreground">
         <X className="size-3.5" />
@@ -59,7 +60,7 @@ export function UpdateNotice() {
           Update and relaunch
         </Button>
       </div>
-    </div>
+    </aside>
   );
 }
 
@@ -72,35 +73,40 @@ export function UpdateNotice() {
 function UpdateChoiceCard({ state }: { state: Extract<UpdateState, { kind: "choosing" }> }) {
   const { update, work } = state;
   return (
-    <div
-      role="dialog"
-      aria-label="Update and restart work in progress?"
-      data-testid="update-choice"
-      className="fixed bottom-10 right-4 z-(--z-menu) w-[24rem] max-w-[calc(100vw-2rem)] rounded-xl bg-popover p-3.5 text-popover-foreground shadow-surface hairline animate-fade-in"
-    >
-      <button type="button" aria-label="Not now" onClick={() => void chooseUpdate(null)} className="absolute right-2 top-2 rounded-md p-1 text-faint hover:bg-veil-raised hover:text-foreground">
-        <X className="size-3.5" />
-      </button>
-      <div className="flex items-start gap-2.5 pr-5">
-        <ArrowDownToLine className="mt-0.5 size-4 shrink-0 text-accent" aria-hidden />
-        <div className="min-w-0 text-xs leading-relaxed text-muted-foreground">
-          <p className="text-sm font-medium text-foreground">Update to TerminalX {update.version}</p>
-          <p className="mt-0.5">The update comes with a new runtime, the background process your agents and terminals run in. Moving to it now stops:</p>
-          <ul className="mt-1 max-h-32 list-disc overflow-y-auto pl-4">
-            {work.map((item, index) => <li key={index}>{item}</li>)}
-          </ul>
-          <p className="mt-1.5"><span className="text-foreground">Update now</span> restarts {work.length === 1 ? "it" : "them"}: each agent picks up its conversation again when its tab starts.</p>
-          <p className="mt-1"><span className="text-foreground">Update when they're done</span> installs the app now, and moves to the new runtime by itself once nothing would be cut short.</p>
+    <Dialog open onOpenChange={(next) => { if (!next) void chooseUpdate(null); }}>
+      <DialogContent
+        showClose={false}
+        width="max-w-[26rem]"
+        aria-label="Update and restart work in progress?"
+        data-testid="update-choice"
+        className="p-4"
+      >
+        <button type="button" aria-label="Not now" onClick={() => void chooseUpdate(null)} className="absolute right-2 top-2 rounded-md p-1 text-faint hover:bg-veil-raised hover:text-foreground">
+          <X className="size-3.5" />
+        </button>
+        <div className="flex items-start gap-2.5 pr-5">
+          <ArrowDownToLine className="mt-0.5 size-4 shrink-0 text-accent" aria-hidden />
+          <div className="min-w-0 text-xs leading-relaxed text-muted-foreground">
+            <DialogTitle className="text-sm font-medium text-foreground">Update to TerminalX {update.version}</DialogTitle>
+            <DialogDescription className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+              The update comes with a new runtime, the background process your agents and terminals run in. Moving to it now stops:
+            </DialogDescription>
+            <ul className="mt-1 max-h-32 list-disc overflow-y-auto pl-4">
+              {work.map((item, index) => <li key={index}>{item}</li>)}
+            </ul>
+            <p className="mt-1.5"><span className="text-foreground">Update now</span> restarts {work.length === 1 ? "it" : "them"}: each agent picks up its conversation again when its tab starts.</p>
+            <p className="mt-1"><span className="text-foreground">Update when they're done</span> installs the app now, and moves to the new runtime by itself once nothing would be cut short.</p>
+          </div>
         </div>
-      </div>
-      <div className="mt-3 flex flex-wrap justify-end gap-2">
-        <Button size="sm" variant="ghost" onClick={() => void chooseUpdate("whenDone")}>
-          Update when they're done
-        </Button>
-        <Button size="sm" variant="accent" onClick={() => void chooseUpdate("now")}>
-          Update now
-        </Button>
-      </div>
-    </div>
+        <div className="mt-3 flex flex-wrap justify-end gap-2">
+          <Button size="sm" variant="ghost" onClick={() => void chooseUpdate("whenDone")}>
+            Update when they're done
+          </Button>
+          <Button size="sm" variant="accent" onClick={() => void chooseUpdate("now")}>
+            Update now
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

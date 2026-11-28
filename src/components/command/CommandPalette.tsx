@@ -1094,8 +1094,24 @@ export function CommandPalette({
       if (!group.rows.length && !group.note) return [];
       // The Actions tab is the whole list, scrolled (design 07.04); elsewhere a group shows its first few.
       const cap = expanded[group.id] || scope === "actions" ? group.rows.length : (GROUP_CAPS[group.id] ?? 8);
-      const rows = group.rows.slice(0, cap);
-      const rendered = { ...group, rows, offset, more: group.rows.length - rows.length };
+      const sliced = group.rows.slice(0, cap);
+      const more = group.rows.length - sliced.length;
+      const rows: PaletteRow[] = more > 0
+        ? [
+            ...sliced,
+            {
+              id: `palette:more:${group.id}`,
+              kind: "command",
+              primary: `${more} more`,
+              secondary: "",
+              primaryRanges: [],
+              secondaryRanges: [],
+              closeBefore: false,
+              run: () => setExpanded((current) => ({ ...current, [group.id]: true })),
+            },
+          ]
+        : sliced;
+      const rendered = { ...group, rows, offset, more };
       offset += rows.length;
       return rendered;
     });
@@ -1167,9 +1183,10 @@ export function CommandPalette({
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent
         showClose={false}
+        layout="pinned"
         width="max-w-[42.5rem]"
-        // A fixed top (design 07.04: 96px), not centred in what is left: the palette stays where it is whatever it lists.
-        className="bottom-auto top-24 max-h-[calc(100dvh-7rem)] gap-0 overflow-hidden p-0"
+        // Near the top of the window (design 07.04), clamped on short windows so the footer never clips.
+        className="bottom-auto top-[min(6rem,4dvh)] max-h-[min(42rem,calc(100dvh-2rem))] gap-0 overflow-hidden p-0"
         onOpenAutoFocus={(event) => {
           event.preventDefault();
           previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -1182,10 +1199,14 @@ export function CommandPalette({
       >
         <DialogTitle className="sr-only">Command palette</DialogTitle>
         <DialogDescription className="sr-only">Search sessions, workspaces, projects, files, settings, views and commands</DialogDescription>
-        <div className="flex h-12 items-center gap-2.5 border-b border-hairline px-4">
+        <div className="flex h-12 shrink-0 items-center gap-2.5 border-b border-hairline px-4">
           <Search className="size-4 shrink-0 text-muted-foreground" />
           <input
             ref={inputRef}
+            role="combobox"
+            aria-expanded={open}
+            aria-autocomplete="list"
+            aria-haspopup="listbox"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={onInputKeyDown}
@@ -1203,7 +1224,7 @@ export function CommandPalette({
 
         {subview ? (
           // A view of one action (design 07.13): the way back, and what it acts on.
-          <div className="flex h-10 items-center gap-2 border-b border-hairline px-3 text-[12.5px]">
+          <div className="flex h-10 shrink-0 items-center gap-2 border-b border-hairline px-3 text-[12.5px]">
             <button
               type="button"
               className="flex h-6 shrink-0 items-center gap-1 rounded-md bg-veil-strong px-2 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
@@ -1217,7 +1238,7 @@ export function CommandPalette({
             {subview === "move" && <span className="shrink-0 text-faint">to a section</span>}
           </div>
         ) : (
-          <div role="tablist" aria-label="Search in" className="flex h-10 items-center gap-1 border-b border-hairline px-2.5">
+          <div role="tablist" aria-label="Search in" className="flex h-10 shrink-0 items-center gap-1 border-b border-hairline px-2.5">
             {PALETTE_TABS.map((item) => (
               <button
                 key={item.id}
@@ -1241,9 +1262,9 @@ export function CommandPalette({
           </div>
         )}
 
-        {error && <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
+        {error && <div role="alert" className="mx-3 mt-2 max-h-24 shrink-0 overflow-y-auto rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
 
-        <div ref={listRef} id="command-palette-results" role="listbox" aria-label="Results" className={cn("max-h-[min(35rem,calc(100dvh-15rem))] overflow-y-auto px-1.5 pb-1.5 scrollbar-thin", subview && "pt-1.5")}>
+        <div ref={listRef} id="command-palette-results" role="listbox" aria-label="Results" className={cn("min-h-0 flex-1 overflow-y-auto px-1.5 pb-1.5 scrollbar-thin", subview && "pt-1.5")}>
           {renderedGroups.map((group, at) => (
             <section key={group.id} role="group" {...(group.label ? { "aria-labelledby": `palette-group-${group.id}` } : { "aria-label": group.id === "sections" ? "Sections" : "More" })}>
               {group.note && (
@@ -1273,18 +1294,6 @@ export function CommandPalette({
                   />
                 );
               })}
-              {group.more > 0 && (
-                <button
-                  type="button"
-                  className="mx-2 mt-1 rounded-md px-2 py-1 text-xs text-faint outline-none hover:bg-veil-raised hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
-                  onClick={() => {
-                    setExpanded((current) => ({ ...current, [group.id]: true }));
-                    inputRef.current?.focus();
-                  }}
-                >
-                  {group.more} more
-                </button>
-              )}
             </section>
           ))}
           {empty && (
@@ -1343,6 +1352,26 @@ function PaletteResultRow({
   onHover: (index: number) => void;
   onSelect: (row: PaletteRow) => void;
 }) {
+  if (row.id.startsWith("palette:more:")) {
+    return (
+      <button
+        id={row.id}
+        type="button"
+        role="option"
+        aria-selected={selected}
+        data-palette-index={index}
+        onMouseMove={() => onHover(index)}
+        onFocus={() => onHover(index)}
+        onClick={() => onSelect(row)}
+        className={cn(
+          "mt-1 flex w-full items-center rounded-md px-2.5 py-1.5 text-left text-xs outline-none",
+          selected ? "bg-selected text-foreground shadow-button" : "text-faint hover:bg-veil-raised hover:text-foreground",
+        )}
+      >
+        {row.primary}
+      </button>
+    );
+  }
   const Icon = row.icon ?? (
     row.kind === "workspace" || row.kind === "smart-workspace" ? GitBranch
       : row.kind === "file" ? FileText

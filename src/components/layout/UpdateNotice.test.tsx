@@ -48,7 +48,8 @@ describe("an update the app found by itself", () => {
     expect(screen.queryByTestId("sidebar-update")).toBeNull();
     await act(() => checkForUpdate({ quiet: true }));
     expect(screen.getByTestId("sidebar-update").textContent).toContain("Update");
-    expect(screen.getByRole("dialog", { name: "Update available" }).textContent).toContain("TerminalX 9.9.9");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("status", { name: "Update available" }).textContent).toContain("TerminalX 9.9.9");
 
     // Later: the card goes, the button stays.
     fireEvent.click(screen.getByRole("button", { name: "Later" }));
@@ -114,7 +115,7 @@ describe("the runtime the update comes with (#766)", () => {
     // From the sidebar's button, with the corner card closed for this version.
     fireEvent.click(screen.getByRole("button", { name: "Later" }));
     await act(async () => { fireEvent.click(screen.getByTestId("sidebar-update")); });
-    const card = screen.getByRole("dialog", { name: "Update and restart work in progress?" });
+    const card = screen.getByRole("dialog", { name: "Update to TerminalX 9.9.9" });
     expect(card.textContent).toContain("Update to TerminalX 9.9.9");
     expect(card.textContent).toContain("Moving to it now stops:");
     expect(screen.getAllByRole("listitem").map((item) => item.textContent)).toEqual([turn, terminal]);
@@ -164,6 +165,16 @@ describe("the runtime the update comes with (#766)", () => {
     expect(screen.getByTestId("update-notice")).toBeTruthy();
     expect(updater.install).not.toHaveBeenCalled();
     expect(runtime.planUpdate).not.toHaveBeenCalled();
+  });
+
+  it("dismisses the update choice dialog on Escape", async () => {
+    runtime.work.mockResolvedValue({ epoch: "owner", work: [terminal], readAt: 1_000 });
+    await found();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Update and relaunch" })); });
+    const dialog = screen.getByRole("dialog", { name: "Update to TerminalX 9.9.9" });
+    await act(async () => { fireEvent.keyDown(dialog, { key: "Escape" }); });
+    expect(screen.queryByTestId("update-choice")).toBeNull();
+    expect(screen.getByTestId("update-notice")).toBeTruthy();
   });
 
   it("updates when the runtime cannot be read, or the plan cannot be left: the relaunched app then waits by itself, and says so", async () => {
