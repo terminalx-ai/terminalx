@@ -11,7 +11,7 @@ it("discards only after confirmation using the displayed base and both rename pa
   const onClose = vi.fn(), onDiscarded = vi.fn();
   render(<DiscardDialog source={source} file={{ path: "new.ts", oldPath: "old.ts" }} base="start-tree" onClose={onClose} onDiscarded={onDiscarded} />);
   expect(discard).not.toHaveBeenCalled();
-  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }));
+  fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Discard" }));
   await vi.waitFor(() => expect(onDiscarded).toHaveBeenCalledOnce());
   expect(discard).toHaveBeenCalledWith("new.ts", "start-tree", "old.ts");
   expect(onClose).toHaveBeenCalledOnce();
@@ -28,7 +28,7 @@ it("reports failures without closing the dialog", async () => {
 // PRO-400, design 17.01: the dialog names the file and says how many lines go back, and where to.
 it("names the file and counts the lines that go back", () => {
   render(<DiscardDialog source={{ discard: vi.fn(), errorMessage: String } as unknown as GitSource} file={{ path: "src/slug.js", status: "modified", additions: 4, deletions: 1 }} onClose={vi.fn()} onDiscarded={vi.fn()} />);
-  const dialog = screen.getByRole("dialog", { name: "Discard changes to src/slug.js?" });
+  const dialog = screen.getByRole("alertdialog", { name: "Discard changes to src/slug.js?" });
   expect(dialog.textContent).toContain("4 added and 1 removed line go back to the last commit. This can’t be undone.");
   expect(within(dialog).getAllByRole("button").map((button) => button.textContent)).toEqual(["Cancel", "Discard"]);
   expect(within(dialog).getByRole("button", { name: "Discard" }).className).toContain("bg-destructive");

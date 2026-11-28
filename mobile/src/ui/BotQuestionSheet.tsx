@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { KeyboardAvoidingView, Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ArrowUp } from "lucide-react-native";
 import { answerOrder, type Bot, type BotItem } from "../data/bots";
@@ -43,31 +43,35 @@ export function BotQuestionSheet({ bot, item, connected, busy, error, onAnswer, 
     <KeyboardAvoidingView style={styles.fill} behavior={keyboardAvoidingBehavior()}>
       {/* The chat it came from stays in sight behind, dimmed: a tap there closes the sheet. */}
       <Pressable testID="bot-question-backdrop" accessibilityRole="button" accessibilityLabel="Close the question" onPress={onClose} style={[styles.fill, styles.backdrop]} />
-      <View testID="bot-question-sheet" accessibilityViewIsModal style={[styles.sheet, { backgroundColor: palette.card, borderColor: palette.border, paddingBottom: insets.bottom + 16 }]}>
-        <View style={[styles.handle, { backgroundColor: palette.faint }]} />
-        <Asker bot={bot} />
-        {question ? <>
-          <Text accessibilityRole="header" style={[styles.question, { color: palette.ink }]}>{question.text}</Text>
-          {item?.summary ? <Text style={[styles.summary, { color: palette.muted }]}>{item.summary}</Text> : <Text style={[styles.summary, { color: palette.muted }]}>{`#${item?.number} · ${item?.title}`}</Text>}
-          {note ? <Text accessibilityLiveRegion="polite" style={[styles.note, { color: palette.muted }]}>{note}</Text> : <>
-            <View style={styles.answers}>
-              {answerOrder(question).map((answer) => <Button key={answer.index} testID={`bot-answer-${answer.index}`} label={answer.recommended ? `${answer.label} · recommended` : answer.label} kind={answer.recommended ? "primary" : "secondary"} disabled={blocked} accessibilityState={{ disabled: blocked, busy }} onPress={() => void send({ answer: answer.index })} />)}
-            </View>
-            <View style={[styles.reply, { backgroundColor: palette.raised, borderColor: palette.border }]}>
-              <TextInput value={typed} onChangeText={setTyped} placeholder="Or type a reply" placeholderTextColor={palette.faint} accessibilityLabel={`Your own reply to ${bot.name}`} multiline editable={!busy} style={[styles.input, { color: palette.ink }]} />
-              <Pressable accessibilityRole="button" accessibilityLabel="Send reply" accessibilityState={{ disabled: blocked || !reply }} disabled={blocked || !reply} onPress={() => void send({ text: reply })} style={[styles.send, { backgroundColor: reply && !blocked ? palette.accent : palette.selected }]}>
-                <ArrowUp size={18} color={reply && !blocked ? palette.accentInk : palette.faint} strokeWidth={2.2} />
-              </Pressable>
-            </View>
+      <View testID="bot-question-sheet" accessibilityViewIsModal onAccessibilityEscape={onClose} style={[styles.sheet, { backgroundColor: palette.card, borderColor: palette.border, paddingBottom: insets.bottom + 16 }]}>
+        <Pressable testID="bot-question-close" accessibilityRole="button" accessibilityLabel="Close" onPress={onClose} style={styles.handleTarget}>
+          <View style={[styles.handle, { backgroundColor: palette.faint }]} />
+        </Pressable>
+        <ScrollView style={styles.scroll} keyboardShouldPersistTaps="handled" bounces={false} contentContainerStyle={styles.sheetContent}>
+          <Asker bot={bot} />
+          {question ? <>
+            <Text accessibilityRole="header" style={[styles.question, { color: palette.ink }]}>{question.text}</Text>
+            {item?.summary ? <Text style={[styles.summary, { color: palette.muted }]}>{item.summary}</Text> : <Text style={[styles.summary, { color: palette.muted }]}>{`#${item?.number} · ${item?.title}`}</Text>}
+            {note ? <Text accessibilityLiveRegion="polite" style={[styles.note, { color: palette.muted }]}>{note}</Text> : <>
+              <View style={styles.answers}>
+                {answerOrder(question).map((answer) => <Button key={answer.index} testID={`bot-answer-${answer.index}`} label={answer.recommended ? `${answer.label} · recommended` : answer.label} kind={answer.recommended ? "primary" : "secondary"} disabled={blocked} accessibilityState={{ disabled: blocked, busy }} onPress={() => void send({ answer: answer.index })} />)}
+              </View>
+              <View style={[styles.reply, { backgroundColor: palette.raised, borderColor: palette.border }]}>
+                <TextInput value={typed} onChangeText={setTyped} placeholder="Or type a reply" placeholderTextColor={palette.faint} accessibilityLabel={`Your own reply to ${bot.name}`} multiline editable={!busy} style={[styles.input, { color: palette.ink }]} />
+                <Pressable accessibilityRole="button" accessibilityLabel="Send reply" accessibilityState={{ disabled: blocked || !reply }} disabled={blocked || !reply} hitSlop={6} onPress={() => void send({ text: reply })} style={[styles.send, { backgroundColor: reply && !blocked ? palette.accent : palette.selected }]}>
+                  <ArrowUp size={18} color={reply && !blocked ? palette.accentInk : palette.faint} strokeWidth={2.2} />
+                </Pressable>
+              </View>
+            </>}
+            {!connected ? <Text style={[styles.hint, { color: palette.warning }]}>Reconnect before answering.</Text> : null}
+            {error ? <Text accessibilityLiveRegion="polite" style={[styles.hint, { color: palette.danger }]}>{error}</Text> : null}
+            {note ? <Button label="Done" kind="secondary" onPress={onClose} /> : null}
+          </> : <>
+            <Text style={[styles.question, { color: palette.ink }]}>{`${bot.name} no longer asks this.`}</Text>
+            <Text style={[styles.summary, { color: palette.muted }]}>It was answered, or the bot moved on.</Text>
+            <Button label="Close" kind="secondary" onPress={onClose} />
           </>}
-          {!connected ? <Text style={[styles.hint, { color: palette.warning }]}>Reconnect before answering.</Text> : null}
-          {error ? <Text accessibilityLiveRegion="polite" style={[styles.hint, { color: palette.danger }]}>{error}</Text> : null}
-          {note ? <Button label="Done" kind="secondary" onPress={onClose} /> : null}
-        </> : <>
-          <Text style={[styles.question, { color: palette.ink }]}>{`${bot.name} no longer asks this.`}</Text>
-          <Text style={[styles.summary, { color: palette.muted }]}>It was answered, or the bot moved on.</Text>
-          <Button label="Close" kind="secondary" onPress={onClose} />
-        </>}
+        </ScrollView>
       </View>
     </KeyboardAvoidingView>
   </Modal>;
@@ -76,8 +80,11 @@ export function BotQuestionSheet({ bot, item, connected, busy, error, onAnswer, 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
   backdrop: { backgroundColor: "#00000080" },
-  sheet: { borderTopLeftRadius: 24, borderTopRightRadius: 24, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 18, paddingTop: 10, gap: 12 },
-  handle: { alignSelf: "center", width: 40, height: 4, borderRadius: 2, marginBottom: 4, opacity: 0.6 },
+  sheet: { maxHeight: "88%", borderTopLeftRadius: 24, borderTopRightRadius: 24, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 18, paddingTop: 10 },
+  handleTarget: { alignSelf: "center", minWidth: 88, minHeight: 44, marginTop: -10, marginBottom: -8, alignItems: "center", justifyContent: "center" },
+  handle: { width: 40, height: 4, borderRadius: 2, opacity: 0.6 },
+  scroll: { flexGrow: 0, flexShrink: 1 },
+  sheetContent: { gap: 12 },
   question: { fontSize: 18, fontWeight: "700", lineHeight: 24 },
   summary: { fontSize: 14, lineHeight: 20 },
   answers: { gap: 8, marginTop: 2 },

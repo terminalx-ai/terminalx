@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { useSettingsLeaveGuard } from "./settingsLeaveGuard";
 import {
   IMPACT_LABEL,
   configErrorMessage,
@@ -94,7 +96,33 @@ export function OrganizationWorkspaceConfig({ contextRevision }: { contextRevisi
   const [secretValue, setSecretValue] = useState("");
   const [secretAccess, setSecretAccess] = useState<SecretRuntimeAccess>("private-workspaces");
   const [binding, setBinding] = useState<{ name: string; scope: ConfigScope; target: string; envName: string }>({ name: "", scope: "organization", target: "", envName: "" });
+  const [confirmAction, setConfirmAction] = useState<
+    | { kind: "delete"; name: string }
+    | { kind: "unbind"; id: string; label: string }
+    | { kind: "discard-refresh" }
+    | { kind: "discard-repo"; layer: ConfigLayer }
+    | null
+  >(null);
   const contextEpoch = useRef(0);
+
+  const savedOrg = view ? layerDraft(view.organization) : null;
+  const savedOverrides = view?.organization.memberOverrides ?? { env: true, prompt: true, mcpServers: false };
+  const savedLocked = view ? view.organization.lockedEnvKeys.join(", ") : "";
+  const orgDirty = Boolean(
+    savedOrg
+      && (orgDraft.env !== savedOrg.env
+        || orgDraft.prompt !== savedOrg.prompt
+        || orgDraft.mcp !== savedOrg.mcp
+        || overrides.env !== savedOverrides.env
+        || overrides.prompt !== savedOverrides.prompt
+        || overrides.mcpServers !== savedOverrides.mcpServers
+        || locked !== savedLocked),
+  );
+  const repoSavedLayer = view && repoBase ? view.repositories.find((layer) => layer.scopeKey === repoBase.key) : null;
+  const repoSaved = repoSavedLayer ? layerDraft(repoSavedLayer) : { env: "", prompt: "", mcp: "" };
+  const repoDirty = repoDraft.env !== repoSaved.env || repoDraft.prompt !== repoSaved.prompt || repoDraft.mcp !== repoSaved.mcp;
+  const dirty = orgDirty || repoDirty || Boolean(secretValue);
+  useSettingsLeaveGuard(dirty);
 
   // A reload after a failed save keeps the admin's unsaved drafts.
   const load = useCallback(async (resetDrafts = true) => {
@@ -152,7 +180,16 @@ export function OrganizationWorkspaceConfig({ contextRevision }: { contextRevisi
     return (
       <div className="rounded-lg border border-hairline p-3">
         <div className="text-sm font-medium">Workspace configuration</div>
-        {error ? <p className="mt-1 text-[11px] text-destructive">{error}</p> : <Loader2 className="mt-2 size-4 animate-spin" aria-label="Loading workspace configuration" />}
+        {error ? (
+          <div className="mt-1 flex items-center gap-2">
+            <p className="text-[11px] text-destructive" role="alert">{error}</p>
+            <Button size="xs" variant="outline" onClick={() => { setError(null); void load(true); }}>
+              Retry
+            </Button>
+          </div>
+        ) : (
+          <Loader2 className="mt-2 size-4 animate-spin" aria-label="Loading workspace configuration" />
+        )}
       </div>
     );
   }
@@ -208,7 +245,7 @@ export function OrganizationWorkspaceConfig({ contextRevision }: { contextRevisi
     <div className="rounded-lg border border-hairline p-3">
       <div className="flex items-center justify-between">
         <div className="text-sm font-medium">Workspace configuration</div>
-        <Button variant="ghost" size="icon-xs" aria-label="Refresh workspace configuration" disabled={loading} onClick={() => void load(true)}>
+        <Button variant="ghost" size="icon-xs" aria-label="Refresh workspace configuration" disabled={loading} onClick={() => (dirty ? setConfirmAction({ kind: "discard-refresh" }) : void load(true))}>
           <RefreshCw className={loading ? "animate-spin" : undefined} />
         </Button>
       </div>
@@ -280,6 +317,10 @@ export function OrganizationWorkspaceConfig({ contextRevision }: { contextRevisi
                     className="h-6"
                     aria-label={`Edit ${layer.scopeKey}`}
                     onClick={() => {
+                      if (repoDirty && repoBase?.key !== layer.scopeKey) {
+                        setConfirmAction({ kind: "discard-repo", layer });
+                        return;
+                      }
                       setRepository(layer.scopeKey);
                       setRepoDraft(layerDraft(layer));
                       setRepoBase({ key: layer.scopeKey, version: layer.version });
@@ -319,10 +360,7 @@ export function OrganizationWorkspaceConfig({ contextRevision }: { contextRevisi
                 </span>
                 <span className="text-muted-foreground">{secret.runtimeAccess === "all-workspaces" ? "all workspaces" : "private workspaces only"}</span>
                 {canEdit && (
-                  <Button size="sm" variant="ghost" className="h-6" aria-label={`Delete ${secret.name}`} disabled={Boolean(busy)} onClick={() => void run("delete", async () => {
-                    setSecrets(await workspaceConfig.deleteSecret(secret.name, revision));
-                    return "Secret deleted.";
-                  })}>
+                  <Button size="sm" variant="ghost" className="h-6" aria-label={`Delete ${secret.name}`} disabled={Boolean(busy)} onClick={() => setConfirmAction({ kind: "delete", name: secret.name })}>
                     Delete
                   </Button>
                 )}
@@ -337,10 +375,7 @@ export function OrganizationWorkspaceConfig({ contextRevision }: { contextRevisi
                         {scopeLabel(item.scope, item.scopeKey)} → {item.envName}
                       </span>
                       {canEdit && (
-                        <Button size="sm" variant="ghost" className="h-6" aria-label={`Unbind ${item.envName} from ${scopeLabel(item.scope, item.scopeKey)}`} disabled={Boolean(busy)} onClick={() => void run("unbind", async () => {
-                          setSecrets(await workspaceConfig.unbindSecret(item.id, revision));
-                          return "Binding removed. Running sessions keep the value until they are restarted.";
-                        })}>
+                        <Button size="sm" variant="ghost" className="h-6" aria-label={`Unbind ${item.envName} from ${scopeLabel(item.scope, item.scopeKey)}`} disabled={Boolean(busy)} onClick={() => setConfirmAction({ kind: "unbind", id: item.id, label: `${item.envName} from ${scopeLabel(item.scope, item.scopeKey)}` })}>
                           Unbind
                         </Button>
                       )}
@@ -410,6 +445,54 @@ export function OrganizationWorkspaceConfig({ contextRevision }: { contextRevisi
           </>
         )}
       </section>
+      <ConfirmDialog
+        open={confirmAction !== null}
+        title={
+          confirmAction?.kind === "delete"
+            ? `Delete secret ${confirmAction.name}?`
+            : confirmAction?.kind === "unbind"
+              ? `Unbind ${confirmAction.label}?`
+              : "Discard unsaved workspace configuration?"
+        }
+        action={
+          confirmAction?.kind === "delete"
+            ? "Delete secret"
+            : confirmAction?.kind === "unbind"
+              ? "Unbind"
+              : "Discard changes"
+        }
+        destructive
+        busy={Boolean(busy)}
+        onAction={() => {
+          const next = confirmAction;
+          setConfirmAction(null);
+          if (!next) return;
+          if (next.kind === "delete") {
+            void run("delete", async () => {
+              setSecrets(await workspaceConfig.deleteSecret(next.name, revision));
+              return "Secret deleted.";
+            });
+          } else if (next.kind === "unbind") {
+            void run("unbind", async () => {
+              setSecrets(await workspaceConfig.unbindSecret(next.id, revision));
+              return "Binding removed. Running sessions keep the value until they are restarted.";
+            });
+          } else if (next.kind === "discard-refresh") {
+            void load(true);
+          } else if (next.kind === "discard-repo") {
+            setRepository(next.layer.scopeKey);
+            setRepoDraft(layerDraft(next.layer));
+            setRepoBase({ key: next.layer.scopeKey, version: next.layer.version });
+          }
+        }}
+        onCancel={() => setConfirmAction(null)}
+      >
+        {confirmAction?.kind === "delete"
+          ? "Secret values are write-only and cannot be recovered after deletion."
+          : confirmAction?.kind === "unbind"
+            ? "New sessions will stop receiving this secret. Running sessions keep the value until restarted."
+            : "Your unsaved edits will be lost."}
+      </ConfirmDialog>
     </div>
   );
 }

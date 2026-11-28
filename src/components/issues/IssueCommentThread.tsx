@@ -7,6 +7,7 @@ import { Markdown } from "@/components/chat/Markdown";
 import { MarkdownEditor } from "@/components/issues/MarkdownEditor";
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { confirmInApp } from "@/lib/confirm";
 import { readAllComments, type IssueThread } from "@/lib/issueComments";
 import { issueOps, type IssueComment, type IssueProvider, type IssueUser } from "@/lib/issueOps";
 import { relativeTime } from "@/lib/time";
@@ -71,6 +72,17 @@ export function IssueCommentItem({
     if (draft === comment.body) return setDraft(null);
     void run(() => onEdit(draft), () => setDraft(null));
   };
+  const removeComment = async () => {
+    if (!onDelete || busy) return;
+    const yes = await confirmInApp({
+      title: "Delete comment?",
+      body: "This permanently deletes the comment from the issue tracker.",
+      action: "Delete",
+      destructive: true,
+    });
+    if (!yes) return;
+    await run(onDelete, () => {});
+  };
 
   return (
     <li className="flex min-w-0 gap-2.5 py-2.5" aria-label={`Comment by ${author}`} data-comment-id={comment.id}>
@@ -106,7 +118,7 @@ export function IssueCommentItem({
                   </DropdownMenuItem>
                 )}
                 {canDelete && (
-                  <DropdownMenuItem className="text-destructive" disabled={busy} onSelect={() => onDelete && void run(onDelete, () => {})}>
+                  <DropdownMenuItem className="text-destructive" disabled={busy} onSelect={() => void removeComment()}>
                     <Trash2 /> Delete
                   </DropdownMenuItem>
                 )}

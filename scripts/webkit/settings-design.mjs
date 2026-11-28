@@ -163,12 +163,12 @@ try {
     // 09.01: search results with one-line descriptions and live controls.
     const search = settings.getByRole("combobox", { name: "Search settings" });
     await search.fill("read-only");
-    const result = settings.getByRole("option", { name: /Allow read-only commands/ });
+    const result = settings.getByRole("row", { name: /Allow read-only commands/ });
     await result.waitFor();
     checks["result description is one line"] = await result.locator("[title]").evaluate((node) => node.getBoundingClientRect().height <= 20);
     checks["result rows are about 50px"] = (await result.boundingBox()).height <= 60;
     await search.fill("link actions");
-    const linkResult = settings.getByRole("option", { name: /Link actions/ });
+    const linkResult = settings.getByRole("row", { name: /Link actions/ });
     await linkResult.getByRole("switch").waitFor();
     checks["result row carries its live switch"] = await linkResult.getByRole("switch").isVisible();
     const before = await linkResult.getByRole("switch").getAttribute("aria-checked");
@@ -176,8 +176,8 @@ try {
     checks["the switch changes the setting in place"] = await linkResult.getByRole("switch").getAttribute("aria-checked") !== before
       && await settings.getByRole("heading", { level: 2, name: "Results for “link actions”" }).isVisible();
     await search.fill("text size");
-    await settings.getByRole("option", { name: /Text size/ }).locator("[data-result-control] > *").first().waitFor();
-    checks["a select result carries its control"] = await settings.getByRole("option", { name: /Text size/ }).locator("[data-result-control] > *").count() > 0;
+    await settings.getByRole("row", { name: /Text size/ }).locator("[data-result-control] > *").first().waitFor();
+    checks["a select result carries its control"] = await settings.getByRole("row", { name: /Text size/ }).locator("[data-result-control] > *").count() > 0;
     await shoot("09.01-search");
     checks["no horizontal overflow"] = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
 

@@ -142,7 +142,7 @@ export function RecipeDetails({ definition, observations, current }: { definitio
       })}
 
       {comparison.removed.length > 0 && (
-        <p className="text-xs text-amber-600 dark:text-amber-400">
+        <p className="text-xs text-warning">
           Applying removes {comparison.removed.map((repository) => `${repository.owner}/${repository.name}`).join(", ")} from the template.
         </p>
       )}
@@ -198,7 +198,7 @@ function RecipeCard({
           {recipe.state === "proposed" && (
             <div className="flex flex-col gap-1.5">
               {stale && (
-                <p className="text-xs text-amber-600 dark:text-amber-400">
+                <p className="text-xs text-warning">
                   The template has changed since this was proposed (it was made against revision {recipe.baseRevision}; the template is at {currentRevision}), so it can no longer be applied. Dismiss it and configure again.
                 </p>
               )}

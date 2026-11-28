@@ -511,9 +511,9 @@ it("discards from the list against the displayed base and opens the row's diff i
   render(<ChangesPanel source={source} sessionId="discard" events={events} version={2} active live={false} />);
   fireEvent.click(await screen.findByRole("button", { name: "Discard changes to src/turn.ts" }));
   expect(source.discard).not.toHaveBeenCalled();
-  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+  fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Cancel" }));
   fireEvent.click(screen.getByRole("button", { name: "Discard changes to src/turn.ts" }));
-  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }));
+  fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Discard" }));
   await waitFor(() => expect(source.discard).toHaveBeenCalledWith("src/turn.ts", "merge-base", undefined));
   expect(document.querySelector("button button")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: /Modified.*turn.ts/ }));
@@ -660,7 +660,7 @@ it("keeps the current discard dialog and Viewed controls together in All changes
   expect(screen.getByText("1 of 1 viewed")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Discard changes to edited.ts" }));
   expect(source.discard).not.toHaveBeenCalled();
-  const dialog = await screen.findByRole("dialog");
+  const dialog = await screen.findByRole("alertdialog");
   source.changesBetween.mockResolvedValue([]);
   fireEvent.click(within(dialog).getByRole("button", { name: /^Discard$/ }));
   await waitFor(() => expect(source.discard).toHaveBeenCalledWith("edited.ts", "merge-base", undefined));

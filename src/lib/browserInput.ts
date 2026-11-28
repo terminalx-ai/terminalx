@@ -99,8 +99,15 @@ export function editingCommand(e: Key, mac: boolean): string | null {
   }
 }
 
+/** Escape chord that always releases keyboard focus from the embedded browser surface. */
+export function isFocusEscapeKey(e: Pick<Key, "key" | "shiftKey" | "ctrlKey">): boolean {
+  return e.key === "Escape" && (e.shiftKey || e.ctrlKey);
+}
+
 /** Whether a key press belongs to the page rather than to the app's own shortcuts. */
-export function keyForPage(e: Key, mac: boolean): boolean {
+export function keyForPage(e: Key, mac: boolean, options?: { captureTab?: boolean }): boolean {
+  if (isFocusEscapeKey(e)) return false;
+  if (e.key === "Tab" && !options?.captureTab) return false;
   if (editingCommand(e, mac)) return true;
   // Other ⌘ / Ctrl chords are the app's (new tab, palette, close…), and ⌘V is the paste event's.
   return mac ? !e.metaKey : !e.ctrlKey;

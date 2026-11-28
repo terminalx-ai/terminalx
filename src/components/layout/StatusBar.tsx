@@ -219,9 +219,10 @@ function ResourceCluster({ narrow }: { narrow: boolean }) {
             side="top"
             align="end"
             sideOffset={5}
+            collisionPadding={8}
             data-status-context-exempt
             onContextMenu={(event) => { suppressNativeContextMenu(event); event.stopPropagation(); }}
-            className="z-(--z-menu) w-[26rem] rounded-xl bg-popover p-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
+            className="z-(--z-menu) flex max-h-[min(36rem,var(--radix-popover-content-available-height))] w-[26rem] max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-xl bg-popover p-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
           >
             <div className="mb-2.5 flex items-center gap-2">
               <div>
@@ -258,7 +259,7 @@ function ResourceCluster({ narrow }: { narrow: boolean }) {
             <div className="grid grid-cols-[1fr_48px_62px_24px] gap-2 border-b border-hairline px-2 pb-1 text-[9.5px] uppercase tracking-wide text-faint">
               <span>Process</span><span className="text-right">CPU</span><span className="text-right">RSS</span><span />
             </div>
-            <div className="h-[420px] overflow-y-auto py-1 scrollbar-thin">
+            <div className="min-h-0 max-h-[420px] flex-1 overflow-y-auto py-1 scrollbar-thin">
               {groups.map((project) => (
                 <div key={project.key} className="mb-1.5">
                   <div className="truncate px-2 py-1 text-[11px] font-medium text-foreground">{project.name}</div>
@@ -650,6 +651,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
   };
 
   return (
+    <>
     <PopoverPrimitive.Root
       open={open}
       onOpenChange={(nextOpen) => {
@@ -717,10 +719,11 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
           side="top"
           align="start"
           sideOffset={5}
+          collisionPadding={8}
           data-usage-popover
           data-status-context-exempt
           onContextMenu={(event) => { suppressNativeContextMenu(event); event.stopPropagation(); }}
-          className="relative z-(--z-menu) w-[380px] rounded-xl bg-popover p-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
+          className="relative z-(--z-menu) flex max-h-[var(--radix-popover-content-available-height)] w-[380px] max-w-[calc(100vw-1rem)] flex-col overflow-y-auto rounded-xl bg-popover p-3 text-popover-foreground shadow-surface hairline outline-none scrollbar-thin data-[state=open]:animate-fade-in"
         >
           <div className="flex items-center gap-2 px-1 pb-3">
             <div className="min-w-0 flex-1">
@@ -879,27 +882,28 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
               onOpenAgentSettings={() => closeAnd(onOpenAgentSettings)}
             />
           ) : null}
-          <Dialog open={resetConfirmOpen} onOpenChange={setResetConfirmOpen}>
-            <DialogContent width="max-w-[26rem]" data-status-context-exempt>
-              <DialogHeader>
-                <DialogTitle>Reset Codex limits?</DialogTitle>
-                <DialogDescription>
-                  This uses one rate-limit reset and immediately resets every eligible Codex usage window.
-                </DialogDescription>
-              </DialogHeader>
-              {resetError ? <div role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{resetError}</div> : null}
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setResetConfirmOpen(false)} disabled={resetting}>Cancel</Button>
-                <Button onClick={() => void confirmReset()} disabled={resetting}>
-                  {resetting ? <Loader2 className="animate-spin" /> : <RotateCcw />}
-                  {resetting ? "Resetting…" : "Reset now"}
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
         </PopoverPrimitive.Content>
       </PopoverPrimitive.Portal>
     </PopoverPrimitive.Root>
+    <Dialog open={resetConfirmOpen} onOpenChange={setResetConfirmOpen}>
+      <DialogContent width="max-w-[26rem]" data-status-context-exempt>
+        <DialogHeader>
+          <DialogTitle>Reset Codex limits?</DialogTitle>
+          <DialogDescription>
+            This uses one rate-limit reset and immediately resets every eligible Codex usage window.
+          </DialogDescription>
+        </DialogHeader>
+        {resetError ? <div role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{resetError}</div> : null}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setResetConfirmOpen(false)} disabled={resetting}>Cancel</Button>
+          <Button onClick={() => void confirmReset()} disabled={resetting}>
+            {resetting ? <Loader2 className="animate-spin" /> : <RotateCcw />}
+            {resetting ? "Resetting…" : "Reset now"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
   );
 }
 
@@ -945,7 +949,7 @@ function AgentUsageDetail({
   const stuck = (refresh?.refused ?? []).filter((refused) => refused.reason !== "olderObservation"
     && windows.some((window) => window.key === refused.key && window.updatedAt <= answeredAt));
   return (
-    <aside data-usage-detail={agent} className="absolute bottom-0 left-[calc(100%+6px)] w-[300px] rounded-xl bg-popover p-3 text-popover-foreground shadow-surface hairline max-[760px]:static max-[760px]:mt-2 max-[760px]:w-full">
+    <aside data-usage-detail={agent} className="absolute bottom-0 left-[calc(100%+6px)] max-h-[var(--radix-popover-content-available-height)] w-[300px] overflow-y-auto rounded-xl bg-popover p-3 text-popover-foreground shadow-surface hairline scrollbar-thin max-[760px]:static max-[760px]:mt-2 max-[760px]:w-full">
       <div className="flex items-center gap-2">
         <AgentMark id={agent} className="size-4 text-muted-foreground" decorative brand />
         <span className="text-[13px] font-medium">{agentName(agent)}</span>

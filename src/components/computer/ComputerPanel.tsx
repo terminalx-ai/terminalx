@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Ellipsis, LoaderCircle, Monitor } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { api, errorMessage, type LocalVmStatus } from "@/lib/api";
 import { cn } from "@/lib/cn";
@@ -96,6 +97,7 @@ function LocalVm({ active, target }: { active: boolean; target?: ComputerTarget 
   const [control, setControl] = useState(false);
   const [view, setView] = useState<VncState>("connecting");
   const [attempt, setAttempt] = useState(0);
+  const [confirmReset, setConfirmReset] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -159,7 +161,20 @@ function LocalVm({ active, target }: { active: boolean; target?: ComputerTarget 
       </div>,
     );
   }
-  if (!status) return failure || null;
+  if (!status) {
+    if (!error) return null;
+    return (
+      <div className="flex h-full flex-col">
+        <div className="min-h-0">
+          <Screen>
+            <Message title="Couldn’t check the Local VM" actions={<Button size="sm" variant="outline" onClick={() => void refresh()}>Try again</Button>}>
+              <span role="alert" className="text-destructive">{error}</span>
+            </Message>
+          </Screen>
+        </div>
+      </div>
+    );
+  }
 
   if (status.state === "no_runtime") {
     return idle(
@@ -220,7 +235,7 @@ function LocalVm({ active, target }: { active: boolean; target?: ComputerTarget 
       </div>
       {failure}
       <div className="flex shrink-0 items-center gap-2 border-t border-hairline px-3 py-1.5 text-xs">
-        <span className="size-1.5 shrink-0 rounded-full bg-success" aria-hidden />
+        <span className="size-1.5 shrink-0 rounded-full bg-add" aria-hidden />
         <span className="min-w-0 flex-1 truncate text-muted-foreground" title="Dev servers on this machine are at host.docker.internal:<port> inside the VM.">
           {control ? "You have control" : "Linux desktop · host.docker.internal"}
         </span>
@@ -236,10 +251,24 @@ function LocalVm({ active, target }: { active: boolean; target?: ComputerTarget 
           <DropdownMenuContent align="end">
             <DropdownMenuItem onSelect={() => void act("stop", api.localVm.stop)}>Stop</DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => void act("reset", api.localVm.reset)}>Reset (start fresh)</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setConfirmReset(true)}>Reset (start fresh)</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>}
       </div>
+      <ConfirmDialog
+        open={confirmReset}
+        title="Reset the Local VM?"
+        action="Reset Local VM"
+        destructive
+        busy={busy === "reset"}
+        onAction={() => {
+          setConfirmReset(false);
+          void act("reset", api.localVm.reset);
+        }}
+        onCancel={() => setConfirmReset(false)}
+      >
+        This removes the Local VM container and any files or apps installed inside it, then starts fresh next time.
+      </ConfirmDialog>
     </div>
   );
 }

@@ -29,7 +29,7 @@ vi.mock("react-native", () => {
     AppState: { currentState: "active" },
     // No launch arguments: the Cloud tab reads `-openWorkspace` from them on iOS.
     Settings: { get: () => undefined },
-    View: Box, Text: Box, ScrollView: Box, Platform: { get OS() { return mocks.os; }, select: ({ default: fallback }: any) => fallback },
+    View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box, Platform: { get OS() { return mocks.os; }, select: ({ default: fallback }: any) => fallback },
     // The spinner of the connection line, drawn so a test can see it.
     ActivityIndicator: () => <i data-spinner />,
     // The pull to refresh, drawn as a button: clicking it is the person pulling.

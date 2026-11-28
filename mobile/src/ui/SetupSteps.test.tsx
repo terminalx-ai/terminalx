@@ -79,7 +79,7 @@ it("takes the light palette: the accent's own ink on the next step, the raised g
   appearance.scheme = "light";
   await page.show(<SetupSteps testID="steps" steps={steps(["done", "next", "waiting", "waiting"])} />);
   expect(page.styleOf(page.byId("steps")).backgroundColor).toBe("#ffffff");
-  expect(page.styleOf(mark("org")).backgroundColor).toBe("#55b97929");
+  expect(page.styleOf(mark("org")).backgroundColor).toBe("#14532d29");
   expect(page.styleOf(mark("compute")).backgroundColor).toBe("#a96f27");
   expect(page.styleOf(mark("compute").firstElementChild).color).toBe("#ffffff");
   expect(page.styleOf(mark("agents"))).toMatchObject({ backgroundColor: "#f2f0ec", borderColor: "#706d7035" });

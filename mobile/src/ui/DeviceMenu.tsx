@@ -67,14 +67,18 @@ function DeviceMenu({ machine, options, onClose }: { machine: Machine; options: 
   // The name itself, without the ending that tells two of the same name apart.
   const [draft, setDraft] = useState(machine.customName ?? machine.ownName ?? machine.name);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const act = async (work: () => Promise<unknown>, after?: () => void) => {
     if (busy) return;
     setBusy(true);
+    setError(null);
     try {
       await work();
       onClose();
       after?.();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(false);
     }
@@ -95,6 +99,7 @@ function DeviceMenu({ machine, options, onClose }: { machine: Machine; options: 
             {machine.kind === "paired" && machine.active && app.connectionStage === "connected" ? " It is also asked to remove this phone from its paired devices." : ""}
             {machine.kind === "paired" && machine.account ? " It stays on your account, hidden on this phone; you can show it again from the list of machines." : ""}
           </Text>
+          {error ? <Text accessibilityRole="alert" style={[styles.detail, styles.errorText, { color: palette.danger }]}>{error}</Text> : null}
           <View style={styles.pair}>
             <Button label="Cancel" kind="secondary" style={styles.flex} disabled={busy} onPress={onClose} />
             <Button label="Forget" kind="danger" style={styles.flex} disabled={busy} onPress={() => void act(() => app.forgetHost(machine.id), options.onRemoved)} />
@@ -113,9 +118,10 @@ function DeviceMenu({ machine, options, onClose }: { machine: Machine; options: 
             <Text numberOfLines={2} accessibilityRole="header" style={[styles.title, styles.sheetTitle, { color: palette.ink }]}>{machine.name}</Text>
             <Text style={[styles.detail, styles.sheetDetail, { color: palette.muted }]}>{machine.state}</Text>
             <View style={[styles.list, { borderColor: palette.border }]}>
-              <MenuItem icon={<Pencil size={18} color={palette.ink} />} label="Rename" first disabled={busy} onPress={() => setMode("rename")} />
-              {machine.kind === "paired" ? <PairedItems machine={machine} busy={busy} options={options} act={act} onForget={() => setMode("forget")} onClose={onClose} /> : <AvailableItems machine={machine} busy={busy} act={act} onScan={options.onScanServer && (() => { onClose(); options.onScanServer?.(); })} />}
+              <MenuItem icon={<Pencil size={18} color={palette.ink} />} label="Rename" first disabled={busy} onPress={() => { setError(null); setMode("rename"); }} />
+              {machine.kind === "paired" ? <PairedItems machine={machine} busy={busy} options={options} act={act} onForget={() => { setError(null); setMode("forget"); }} onClose={onClose} /> : <AvailableItems machine={machine} busy={busy} act={act} onScan={options.onScanServer && (() => { onClose(); options.onScanServer?.(); })} />}
             </View>
+            {error ? <Text accessibilityRole="alert" style={[styles.detail, styles.errorText, { color: palette.danger }]}>{error}</Text> : null}
           </> : <>
             <Text accessibilityRole="header" style={[styles.title, styles.renameTitle, { color: palette.ink }]}>Rename machine</Text>
             <TextInput
@@ -130,6 +136,7 @@ function DeviceMenu({ machine, options, onClose }: { machine: Machine; options: 
               style={[styles.input, { color: palette.ink, borderColor: palette.accent }]}
             />
             <Text style={[styles.detail, styles.renameNote, { color: palette.muted }]}>The name is saved on this phone. It works while the machine is offline.</Text>
+            {error ? <Text accessibilityRole="alert" style={[styles.detail, styles.errorText, { color: palette.danger }]}>{error}</Text> : null}
             {machine.custom ? <Button label={machine.ownName ? `Use its own name (${machine.ownName})` : "Remove my name for it"} kind="secondary" style={styles.ownName} disabled={busy} onPress={() => void act(() => rename(""))} /> : null}
             <View style={styles.pair}>
               <Button label="Cancel" kind="secondary" style={styles.flex} disabled={busy} onPress={onClose} />
@@ -212,9 +219,10 @@ const styles = StyleSheet.create({
   backdrop: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(0,0,0,0.5)" },
   centred: { justifyContent: "center", paddingHorizontal: 28 },
   sheet: { borderTopLeftRadius: 26, borderTopRightRadius: 26, borderCurve: "continuous", borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 10, paddingHorizontal: 16 },
-  // The grabber where 22.05 draws it (10 pt down, 14 pt above the title), in a target that fills that band instead of adding to it.
-  grabTarget: { alignSelf: "center", width: 88, height: 29, marginTop: -10, paddingTop: 10, alignItems: "center" },
+  // Grabber with a >=44pt touch target for U-60.
+  grabTarget: { alignSelf: "center", minWidth: 88, minHeight: 44, marginTop: -10, marginBottom: -8, alignItems: "center", justifyContent: "center" },
   grab: { width: 38, height: 5, borderRadius: 3 },
+  errorText: { marginTop: 8, marginBottom: 4 },
   dialog: { borderRadius: 20, borderCurve: "continuous", borderWidth: StyleSheet.hairlineWidth, padding: 20 },
   dialogText: { fontSize: 14, lineHeight: 20, marginTop: 8, marginBottom: 16 },
   title: { fontSize: 17, fontWeight: "600" },

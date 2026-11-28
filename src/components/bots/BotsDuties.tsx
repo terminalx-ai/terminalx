@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
-import { CalendarClock, ChevronRight, Loader2 } from "@/icons";
+import { ChevronRight, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { useAutomationStore } from "@/lib/automations";
 import { relativeNext } from "@/lib/automationSchedule";
 import { WEEKDAYS, clock, dutyAt } from "@/lib/botCalendar";
-import { clockOf, dutiesOf, runAt, runOutcome, wakesOn } from "@/lib/botDuties";
+import { clockOf, dutiesOf, runAt, runOutcome, wakeOf, wakesOn } from "@/lib/botDuties";
 import { useBotStore } from "@/lib/bots";
 import { showBotsTeam } from "@/lib/botsPage";
 import type { Automation } from "@/types/automations";
@@ -12,7 +12,7 @@ import type { Bot } from "@/types/bots";
 import type { DutyInput } from "@/types/botDuties";
 import { BotAvatar } from "./BotAvatar";
 import { BotDutyEditor } from "./BotDutyEditor";
-import { useDutyRuns, useDutyState } from "./BotDuties";
+import { useDutyRuns, useDutyState, wakeIcon } from "./BotDuties";
 import { DutiesCalendar, DutiesViewSwitch, type DutiesView, type Slot } from "./DutiesCalendar";
 
 /** The view last chosen here, kept while the app runs. */
@@ -135,14 +135,27 @@ function AllDuties({ bots, onOpen }: { bots: readonly Bot[]; onOpen: (bot: Bot, 
         <tbody>
           {rows.map(({ bot, duty }) => {
             const last = (runs[duty.id] ?? [])[0] ?? null;
+            const WakeIcon = wakeIcon(duty);
+            const wakes = wakesOn(duty, lead);
             return (
-              <tr key={duty.id} className="cursor-pointer border-b border-hairline hover:bg-veil" onClick={() => onOpen(bot, duty.id)} data-testid="bots-duties-row">
+              <tr key={duty.id} className="group cursor-pointer border-b border-hairline hover:bg-veil" onClick={() => onOpen(bot, duty.id)} data-testid="bots-duties-row">
                 <td className="px-2 py-2.5"><span className="flex min-w-0 items-center gap-2"><BotAvatar roleTemplateId={bot.roleTemplateId} size="xs" paused={!!bot.paused} /><span className="truncate">{bot.name}</span></span></td>
-                <td className="px-2 py-2.5"><span className="block truncate text-foreground">{duty.name}</span></td>
-                <td className="px-2 py-2.5 text-muted-foreground"><span className="block truncate"><CalendarClock className="mr-1.5 inline size-3.5 align-[-2px]" />{wakesOn(duty)}</span></td>
+                <td className="px-2 py-2.5">
+                  <button
+                    type="button"
+                    className="block max-w-full truncate text-left text-foreground outline-none group-hover:underline focus-visible:ring-2 focus-visible:ring-ring/40"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onOpen(bot, duty.id);
+                    }}
+                  >
+                    {duty.name}
+                  </button>
+                </td>
+                <td className="px-2 py-2.5 text-muted-foreground"><span className="block truncate" title={wakes}><WakeIcon className="mr-1.5 inline size-3.5 align-[-2px]" />{wakes}</span></td>
                 <td className="px-2 py-2.5">
                   <span className="block truncate text-foreground">{last ? `${runOutcome(last, lead)} · ${clockOf(runAt(last))}` : "Never ran"}</span>
-                  <span className="block truncate text-[11.5px] text-faint">{duty.enabled ? (bot.paused ? "Paused with its bot" : `Next: ${relativeNext(duty.nextRunAt) || "soon"}`) : "Off"}</span>
+                  <span className="block truncate text-[11.5px] text-faint">{duty.enabled ? (bot.paused ? (wakeOf(duty) ? "Paused: events wait" : "Paused with its bot") : wakeOf(duty) ? "Next: on event" : `Next: ${relativeNext(duty.nextRunAt) || "soon"}`) : "Off"}</span>
                 </td>
               </tr>
             );

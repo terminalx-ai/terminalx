@@ -1,6 +1,7 @@
 import "@testing-library/dom";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { answerConfirm, pendingConfirm } from "@/lib/confirm";
 vi.mock("@/icons", () => new Proxy({}, { has: () => true, get: (_, prop) => (prop === "then" || typeof prop === "symbol" ? undefined : prop === "__esModule" ? true : (props: Record<string, unknown>) => <svg {...props} />) }));
 vi.mock("@/components/ui/tooltip", () => ({
   TooltipProvider: ({ children }: { children: import("react").ReactNode }) => children,
@@ -146,12 +147,21 @@ describe.each(["github", "linear"] as const)("the %s comment thread", (provider)
     expect((within(mine).getByRole("textbox", { name: "Edit comment" }) as HTMLTextAreaElement).value).toBe("Changed");
   });
 
-  it("deletes the viewer's comment directly without an issue-deletion approval", async () => {
+  it("confirms before deleting the viewer's comment, and keeps it when canceled", async () => {
     renderThread(provider);
     const mine = (await screen.findAllByRole("listitem"))[1];
     mouseClick(within(mine).getByRole("button", { name: /Actions for comment/ }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
-    expect(screen.queryByRole("group", { name: "Confirm delete" })).toBeNull();
+    await waitFor(() => expect(pendingConfirm()?.request.title).toBe("Delete comment?"));
+    act(() => answerConfirm(pendingConfirm()!.id, "cancel"));
+    await act(async () => {});
+    expect(bodies()).toEqual([`${provider}-c1`, `${provider}-c2`]);
+    expect(issues.calls.filter((call) => call.command === "issue_comment_delete")).toHaveLength(0);
+
+    mouseClick(within(mine).getByRole("button", { name: /Actions for comment/ }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    await waitFor(() => expect(pendingConfirm()?.request.title).toBe("Delete comment?"));
+    act(() => answerConfirm(pendingConfirm()!.id, "action"));
     await waitFor(() => expect(bodies()).toEqual([`${provider}-c1`]));
     expect(issues.calls.find((call) => call.command === "issue_comment_delete")?.args).toMatchObject({ commentId: `${provider}-c2` });
   });

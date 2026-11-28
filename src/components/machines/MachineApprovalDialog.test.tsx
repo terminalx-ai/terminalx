@@ -112,6 +112,20 @@ describe("Let a computer operate this Mac (screen 21.05)", () => {
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_decline", { requestId: "req-7" }));
   });
 
+  it("blocks Escape decline while an approval is in flight (U-39)", async () => {
+    let finishApprove: (v: unknown) => void = () => {};
+    mocks.invoke.mockImplementation((cmd: string) => {
+      if (cmd === "machines_approve") return new Promise((resolve) => { finishApprove = resolve; });
+      return Promise.resolve(view);
+    });
+    const dialog = await shown();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Allow" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_approve", { requestId: "req-7" }));
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(mocks.invoke).not.toHaveBeenCalledWith("machines_decline", expect.anything());
+    finishApprove(hostView());
+  });
+
   it("disappears when the request ends elsewhere (it expired, or the computer went away)", async () => {
     await shown();
     emit(hostView());

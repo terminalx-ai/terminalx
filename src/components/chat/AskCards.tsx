@@ -21,7 +21,11 @@ import { LinkedText } from "./LinkedText";
 export function typingElsewhere(card: Element | null): boolean {
   const active = document.activeElement;
   if (!active || active === document.body || card?.contains(active)) return false;
-  return isEditable(active) || inTerminal(active) || !!active.closest(".editor-pane");
+  return (
+    isEditable(active) ||
+    inTerminal(active) ||
+    !!active.closest('.editor-pane, [data-testid="browser-surface"], [role="tree"], [role="dialog"], [role="menu"], .diff-pane, [data-testid="conflict-view"]')
+  );
 }
 
 /**
@@ -77,7 +81,7 @@ const AskShell = forwardRef<HTMLDivElement, { icon: ReactNode; label: string; to
       // A toast rising off the composer rises past this card too, never onto its Allow and Deny (PRO-386).
       // Its ground is the popover's, which glass mode never veils: --card turns near-transparent there, and a card
       // drawn over the transcript let the reply's words show through its own (#1293).
-      <div ref={ref} data-ask-card data-toast-avoid="" className="animate-fade-in overflow-hidden rounded-xl border border-hairline-strong bg-popover">
+      <div ref={ref} tabIndex={-1} data-ask-card data-toast-avoid="" className="animate-fade-in overflow-hidden rounded-xl border border-hairline-strong bg-popover outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
         {heading ? (
           <>
             <div className="flex min-w-0 items-center gap-2.5 px-4 py-2.5" data-testid="ask-header">
@@ -170,11 +174,13 @@ export function PermissionCard({
   const escKeys = useShortcutKeys("session.interrupt");
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    // The card is shown by its own scroller; focus alone would scroll every box above it too, the window included.
-    // The primary answer, not Deny before it nor a control in the diff above it: Return still answers.
-    const primary = ref.current?.querySelector<HTMLButtonElement>("[data-ask-actions] button[data-primary]");
-    if (primary && !typingElsewhere(ref.current)) primary.focus({ preventScroll: true });
-    if (primary) revealInOwnScroller(primary);
+    // Focus the card container rather than the affirmative Allow button so an
+    // unintended Enter/Space never approves an uninspected action.
+    const card = ref.current;
+    if (!card) return;
+    const primary = card.querySelector<HTMLButtonElement>("[data-ask-actions] button[data-primary]");
+    if (!typingElsewhere(card)) card.focus({ preventScroll: true });
+    revealInOwnScroller(primary ?? card);
   }, []);
   // Escape denies, ahead of the interrupt it otherwise is: the turn is held on this card anyway.
   const denyKey = useCallback(() => {
@@ -304,16 +310,25 @@ export function QuestionCard({
   }, []);
   const questions = ask.questions ?? [];
 
-  const toggle = (question: number, option: number, multi: boolean) => setChosen((c) => toggleQuestionChoice(c, question, option, multi));
+  const disabled = !!busy || blocked;
+
+  const toggle = (question: number, option: number, multi: boolean) => {
+    if (disabled) return;
+    setChosen((c) => toggleQuestionChoice(c, question, option, multi));
+  };
 
   // The phone's card sends the same (`questionAnswers`), so the agent reads one format from either device.
-  const submit = () => onAnswer(questionAnswers(questions, chosen, free));
+  const submit = () => {
+    if (disabled) return;
+    onAnswer(questionAnswers(questions, chosen, free));
+  };
 
   return (
     <form
       ref={ref}
       onSubmit={(e) => {
         e.preventDefault();
+        if (disabled) return;
         submit();
       }}
     >
@@ -349,7 +364,8 @@ export function QuestionCard({
                         key={oi}
                         onClick={() => toggle(qi, oi, q.multiSelect)}
                         className={cn(
-                          "group flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors",
+                          "group flex items-start gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors",
+                          disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer",
                           on ? "border-accent/50 bg-accent/[0.07]" : "border-hairline hover:border-hairline-strong hover:bg-veil-card",
                         )}
                       >
@@ -357,6 +373,7 @@ export function QuestionCard({
                         <button
                           type="button"
                           data-choice
+                          disabled={disabled}
                           aria-label={o.label}
                           aria-pressed={on}
                           onClick={(event) => { event.stopPropagation(); toggle(qi, oi, q.multiSelect); }}
@@ -378,10 +395,12 @@ export function QuestionCard({
                   {q.freeText && (
                     <input
                       {...textProps}
+                      disabled={disabled}
+                      aria-label={`Custom answer for: ${q.question}`}
                       value={free[qi] ?? ""}
                       onChange={(e) => setFree((f) => ({ ...f, [qi]: e.target.value }))}
                       placeholder="Or type your own answer"
-                      className="mt-1 h-9 rounded-lg border border-hairline bg-well px-3 text-[13px] outline-none placeholder:text-faint focus:border-ring/60"
+                      className="mt-1 h-9 rounded-lg border border-hairline bg-well px-3 text-[13px] outline-none placeholder:text-faint focus:border-ring/60 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-60"
                     />
                   )}
                 </div>

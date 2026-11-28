@@ -81,7 +81,7 @@ export const EditorSplit = memo(function EditorSplit({ sessionId, active, fill =
   // Leave enough space for the composer in side-by-side mode.
   const maxWidth = useCallback(() => {
     const parent = root.current?.parentElement;
-    return parent ? Math.max(MIN_W, parent.clientWidth - 360) : 1200;
+    return parent && parent.clientWidth > 0 ? Math.max(MIN_W, parent.clientWidth - 360) : 1200;
   }, []);
   const clamp = (w: number, max: number) => Math.max(MIN_W, Math.min(max, w));
   const onDown = useCallback(
@@ -149,11 +149,30 @@ export const EditorSplit = memo(function EditorSplit({ sessionId, active, fill =
     >
       {!fullWidth && <div
         role="separator"
+        aria-label="Resize editor pane"
         aria-orientation="vertical"
+        aria-valuemin={MIN_W}
+        aria-valuemax={maxWidth()}
+        aria-valuenow={Math.round(prefs.editorPaneWidth)}
+        tabIndex={0}
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}
-        className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-ring/30"
+        onKeyDown={(e) => {
+          const max = maxWidth();
+          const step = e.shiftKey ? 80 : 32;
+          const next =
+            e.key === "ArrowLeft" ? clamp(prefs.editorPaneWidth + step, max)
+            : e.key === "ArrowRight" ? clamp(prefs.editorPaneWidth - step, max)
+            : e.key === "Home" ? MIN_W
+            : e.key === "End" ? max
+            : null;
+          if (next !== null) {
+            e.preventDefault();
+            setPrefs({ editorPaneWidth: next });
+          }
+        }}
+        className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize outline-none hover:bg-ring/30 focus-visible:bg-ring/50 focus-visible:ring-2 focus-visible:ring-ring/40"
       />}
       <div className="flex h-8 shrink-0 items-center gap-0.5 border-b border-hairline bg-well/40 pl-1 pr-1" role="tablist" aria-label="Open files">
         <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto scrollbar-thin">
@@ -162,30 +181,30 @@ export const EditorSplit = memo(function EditorSplit({ sessionId, active, fill =
             return (
               <div
                 key={e.id}
-                role="tab"
-                aria-selected={isActive}
-                tabIndex={0}
-                title={"attachment" in e && e.attachment ? shortPath(e.attachment.path) : e.rel}
                 data-attachment={"attachment" in e && e.attachment ? "" : undefined}
-                onClick={() => setActiveEditor(sessionId, e.id)}
-                onKeyDown={(k) => k.key === "Enter" && setActiveEditor(sessionId, e.id)}
                 onAuxClick={(k) => k.button === 1 && void closeEditor(e.id)}
                 className={cn(
-                  "group/tab flex h-6 shrink-0 items-center gap-1.5 rounded-[5px] pl-1.5 pr-1 text-xs transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                  "group/tab flex h-6 shrink-0 items-center gap-0.5 rounded-[5px] pl-1.5 pr-1 text-xs transition-colors",
                   isActive ? "bg-(--surface-thumb) text-foreground shadow-button" : "text-muted-foreground hover:text-foreground",
                 )}
               >
-                <FileTypeIcon name={e.name} isDir={false} size={14} />
-                <span className="max-w-[10rem] truncate">{e.name}</span>
-                {e.dirty && <span className="size-1.5 shrink-0 rounded-full bg-warning" aria-label="Unsaved" />}
                 <button
                   type="button"
-                  aria-label="Close file"
-                  onClick={(k) => {
-                    k.stopPropagation();
-                    void closeEditor(e.id);
-                  }}
-                  className="ml-0.5 rounded-sm p-0.5 text-faint opacity-0 hover:bg-veil-strong hover:text-foreground group-hover/tab:opacity-100 focus-visible:opacity-100"
+                  role="tab"
+                  aria-selected={isActive}
+                  title={"attachment" in e && e.attachment ? shortPath(e.attachment.path) : e.rel}
+                  onClick={() => setActiveEditor(sessionId, e.id)}
+                  className="flex h-full min-w-0 items-center gap-1.5 rounded-[4px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                >
+                  <FileTypeIcon name={e.name} isDir={false} size={14} />
+                  <span className="max-w-[10rem] truncate">{e.name}</span>
+                  {e.dirty && <span className="size-1.5 shrink-0 rounded-full bg-warning" aria-label="Unsaved" />}
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Close ${e.name}`}
+                  onClick={() => void closeEditor(e.id)}
+                  className="ml-0.5 rounded-sm p-0.5 text-faint opacity-0 outline-none hover:bg-veil-strong hover:text-foreground group-hover/tab:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40"
                 >
                   <X className="size-3" />
                 </button>

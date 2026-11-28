@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { editingCommand, keyEvents, keyForPage, modifiersOf, mouseEvent, nextClickCount, toPagePoint, viewportEvent, wheelPixels } from "./browserInput";
+import { editingCommand, isFocusEscapeKey, keyEvents, keyForPage, modifiersOf, mouseEvent, nextClickCount, toPagePoint, viewportEvent, wheelPixels } from "./browserInput";
 
 const none = { altKey: false, ctrlKey: false, metaKey: false, shiftKey: false };
 const key = (k: string, code: string, keyCode: number, mods: Partial<typeof none> = {}) => ({ ...none, ...mods, key: k, code, keyCode });
@@ -43,6 +43,13 @@ describe("the reader's input on a page preview", () => {
     expect(keyForPage(key("t", "KeyT", 84, { metaKey: true }), true)).toBe(false);
     expect(keyForPage(key("v", "KeyV", 86, { metaKey: true }), true)).toBe(false);
     expect(keyForPage(key("a", "KeyA", 65), true)).toBe(true);
+    // U-02: Tab leaves the browser surface unless capture is engaged, and Shift+Esc / Ctrl+Esc always escapes.
+    expect(keyForPage(key("Tab", "Tab", 9), true)).toBe(false);
+    expect(keyForPage(key("Tab", "Tab", 9), true, { captureTab: true })).toBe(true);
+    expect(isFocusEscapeKey(key("Escape", "Escape", 27, { shiftKey: true }))).toBe(true);
+    expect(isFocusEscapeKey(key("Escape", "Escape", 27, { ctrlKey: true }))).toBe(true);
+    expect(isFocusEscapeKey(key("Escape", "Escape", 27))).toBe(false);
+    expect(keyForPage(key("Escape", "Escape", 27, { shiftKey: true }), true, { captureTab: true })).toBe(false);
   });
 });
 

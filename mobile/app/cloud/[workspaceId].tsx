@@ -26,6 +26,7 @@ import { HeaderLine, ScreenHeader } from "@mobile/ui/SessionChrome";
 import { workspaceActions } from "@mobile/ui/workspace-actions";
 import { WorkspaceActionsButton } from "@mobile/ui/WorkspaceActionsButton";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
+import { useLargeText } from "@mobile/ui/text-size";
 import { useTheme } from "@mobile/ui/theme";
 import { CompactingLine, PermissionCard, QuestionCard, TurnCard } from "@mobile/ui/transcript";
 import { useIncrementalTranscript } from "@mobile/ui/useIncrementalTranscript";
@@ -158,7 +159,10 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
   const wake = () => {
     setWaking(true);
     setWakeFailure(null);
-    void catalog.start(orgId, workspaceId).catch((error: unknown) => setWakeFailure(resumeFailure(error).text));
+    void catalog.start(orgId, workspaceId).catch((error: unknown) => {
+      setWaking(false);
+      setWakeFailure(resumeFailure(error).text);
+    });
   };
   if (waking && live) setWaking(false);
   const openSheet = (kind: "conversation" | "tab", text?: string, replaces?: string) => {
@@ -214,13 +218,13 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
     {line.tone === "warn" ? <View accessibilityRole="summary" style={[styles.banner, { backgroundColor: `${palette.warning}18` }]}>
       <StatusDot color={palette.warning} />
       <Text style={[styles.bannerText, { color: palette.ink }]}>{line.text}</Text>
-      {canReconnect ? <Pressable accessibilityRole="button" accessibilityLabel="Reconnect" onPress={() => { session.reconnect(); void catalog.refresh(); }} style={[styles.reconnect, { backgroundColor: palette.raised }]}><Text style={[styles.reconnectText, { color: palette.ink }]}>Reconnect</Text></Pressable> : null}
+      {canReconnect ? <Pressable accessibilityRole="button" accessibilityLabel="Reconnect" hitSlop={6} onPress={() => { session.reconnect(); void catalog.refresh(); }} style={[styles.reconnect, { backgroundColor: palette.raised }]}><Text style={[styles.reconnectText, { color: palette.ink }]}>Reconnect</Text></Pressable> : null}
     </View> : null}
     {presence && !unshared ? <Text accessibilityLabel={presence} style={[styles.presence, { color: palette.muted }]}>{presence}</Text> : null}
     {snapshot.error ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.warning }]}>{codeText(snapshot.error)}</Text> : null}
     {/* The person's bots that live here ask here (PRO-482): answered without the Mac. */}
     {!unshared ? <CloudBotQuestions client={session.client} live={live} /> : null}
-    {snapshot.tabs.length > 1 && !unshared ? <ScrollView ref={strip} horizontal showsHorizontalScrollIndicator={false} style={styles.tabs} contentContainerStyle={styles.tabsContent}>{snapshot.tabs.map((entry, index) => <Pressable key={entry.tabId} accessibilityRole="tab" accessibilityState={{ selected: entry.tabId === tabId }} onPress={() => setChosen(entry.tabId)} style={[styles.tab, { backgroundColor: entry.tabId === tabId ? palette.selected : palette.raised }]}><Text numberOfLines={1} style={[styles.tabText, { color: palette.ink }]}>{entry.title ?? `Agent ${index + 1}`}</Text></Pressable>)}</ScrollView> : null}
+    {snapshot.tabs.length > 1 && !unshared ? <View accessibilityRole="tablist" style={styles.tabs}><ScrollView ref={strip} horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabsContent}>{snapshot.tabs.map((entry, index) => <Pressable key={entry.tabId} accessibilityRole="tab" accessibilityState={{ selected: entry.tabId === tabId }} hitSlop={{ top: 4, bottom: 4 }} onPress={() => setChosen(entry.tabId)} style={[styles.tab, { backgroundColor: entry.tabId === tabId ? palette.selected : palette.raised }]}><Text numberOfLines={1} style={[styles.tabText, { color: palette.ink }]}>{entry.title ?? `Agent ${index + 1}`}</Text></Pressable>)}</ScrollView></View> : null}
     {unshared ? <EmptyState title={accessText("not-shared").title} detail={accessText("not-shared").detail} />
       : tab ? <Conversation key={tab.tabId} catalog={catalog} session={session} scope={scope} orgId={orgId} workspaceId={workspaceId} tabId={tab.tabId} live={live} listedState={listedState} stop={stop}
         goneHelp={goneHelp} promptNotSent={promptNotSent === tab.tabId} />
@@ -273,6 +277,7 @@ function startBarShown(listedState: string | null, starting: boolean, live: bool
  */
 function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { catalog: CloudCatalog; orgId: string; workspaceId: string; role: CloudRole | null; creatorId: string | null; starting: boolean }) {
   const { palette } = useTheme();
+  const large = useLargeText();
   const insets = useSafeAreaInsets();
   const nameOf = useNames(catalog);
   const [asking, setAsking] = useState(false);
@@ -311,13 +316,13 @@ function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { 
     <Text style={[styles.startTitle, { color: palette.ink }]}>{MACHINE_GONE_TITLE}</Text>
     <Text style={[styles.startDetail, { color: palette.muted }]}>{MACHINE_GONE_TEXT} {MACHINE_GONE_KEPT}</Text>
     {mayStart
-      ? <View style={styles.goneActions}>
+      ? <View style={[styles.goneActions, large && styles.goneActionsStacked]}>
         <Button testID="machine-gone-delete" label="Delete workspace…" kind="secondary" size="small" onPress={() => router.push({ pathname: "/cloud/delete", params: { orgId, workspaceId } })} />
         <Button testID="machine-gone-new" label="New workspace" size="small" onPress={() => router.push({ pathname: "/cloud/new", params: repository ? { orgId, repository } : { orgId } })} />
       </View>
       : <Text style={[styles.startDetail, { color: palette.muted }]}>{creatorId ? `${nameOf(creatorId)}, its creator, or an organization owner or admin` : "Its creator or an organization owner or admin"} can delete it.</Text>}
   </View>;
-  if (stop) return <View testID="stop-bar" style={[styles.startBar, { backgroundColor: palette.card, borderColor: palette.border, marginBottom: insets.bottom + 8 }]}>
+  if (stop) return <View testID="stop-bar" style={[styles.startBar, large && styles.goneBar, { backgroundColor: palette.card, borderColor: palette.border, marginBottom: insets.bottom + 8 }]}>
     <View style={styles.flex}>
       <Text style={[styles.startTitle, { color: palette.ink }]}>{stop === "stopping" ? "Stopping the workspace…" : "It did not stop"}</Text>
       <Text style={[styles.startDetail, { color: palette.muted }]}>{stop === "stopping" ? "Saving the workspace, then suspending the machine." : `${failureCause({ errorCode: operation?.errorCode ?? undefined })} It may still be running, and billing.`}</Text>
@@ -344,7 +349,7 @@ function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { 
     : mayStart ? "Start it to send a message." : whoCanStart(creatorId ? nameOf(creatorId) : null);
   const label = changing ? "Starting…" : retryResume ? "Retry resume" : failure?.retry ? "Try again" : "Start";
   // In the composer's place, as a card like it (22.06).
-  return <View testID="start-bar" style={[styles.startBar, { backgroundColor: palette.card, borderColor: palette.border, marginBottom: insets.bottom + 8 }]}>
+  return <View testID="start-bar" style={[styles.startBar, large && styles.goneBar, { backgroundColor: palette.card, borderColor: palette.border, marginBottom: insets.bottom + 8 }]}>
     <View style={styles.flex}>
       <Text style={[styles.startTitle, { color: palette.ink }]}>{changing ? "Starting the workspace…" : needsAttention ? "This workspace needs attention" : failure ? "The workspace did not start" : "This workspace is stopped"}</Text>
       <Text style={[styles.startDetail, { color: palette.muted }]}>{detail}</Text>
@@ -480,7 +485,7 @@ function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live
     void run(() => session.postNote(tabId, text), () => setNote(""));
   };
 
-  return <KeyboardAvoidingView style={styles.flex} behavior={keyboardAvoidingBehavior()} keyboardVerticalOffset={92}>
+  return <KeyboardAvoidingView style={styles.flex} behavior={keyboardAvoidingBehavior()}>
     {shared ? <View style={[styles.wheel, { borderBottomColor: palette.border }]}>
       <Text accessibilityLabel={wheel.text} numberOfLines={1} style={[styles.wheelText, { color: wheel.mine ? palette.accent : palette.muted }]}>{wheel.text}</Text>
       {wheel.canTake ? <Pressable accessibilityRole="button" disabled={sending} onPress={() => void run(() => session.takeWheel(tabId))} style={styles.wheelAction}><Text style={[styles.wheelActionText, { color: palette.accent }]}>Take the wheel</Text></Pressable> : null}
@@ -551,6 +556,7 @@ const styles = StyleSheet.create({
   reconnectText: { fontSize: 12, fontWeight: "600" },
   goneBar: { flexDirection: "column", alignItems: "stretch", gap: 6 },
   goneActions: { flexDirection: "row", gap: 8, marginTop: 4 },
+  goneActionsStacked: { flexDirection: "column" },
   startBar: { flexDirection: "row", alignItems: "center", gap: 10, marginHorizontal: 12, marginTop: 8, borderWidth: StyleSheet.hairlineWidth, borderRadius: 18, borderCurve: "continuous", paddingHorizontal: 14, paddingVertical: 12 },
   startTitle: { fontSize: 15, fontWeight: "600", lineHeight: 20 },
   startDetail: { fontSize: 13, lineHeight: 18, marginTop: 2 },
@@ -567,7 +573,7 @@ const styles = StyleSheet.create({
   notice: { fontSize: 13, lineHeight: 18, paddingHorizontal: 16, paddingVertical: 6 },
   tabs: { flexGrow: 0 },
   tabsContent: { paddingHorizontal: 16, paddingVertical: 8, gap: 8 },
-  tab: { minHeight: 36, maxWidth: 220, paddingHorizontal: 13, borderRadius: 10, justifyContent: "center" },
+  tab: { minHeight: 36, maxWidth: 220, paddingHorizontal: 13, paddingVertical: 8, borderRadius: 10, justifyContent: "center" },
   tabText: { fontSize: 14, fontWeight: "600" },
   pending: { alignItems: "flex-end", gap: 4, marginTop: 12 },
   pendingText: { maxWidth: "88%", borderRadius: 17, borderBottomRightRadius: 5, paddingHorizontal: 14, paddingVertical: 11, fontSize: 15, lineHeight: 22, overflow: "hidden", opacity: 0.7 },
@@ -577,7 +583,7 @@ const styles = StyleSheet.create({
   input: { flex: 1, maxHeight: 120, minHeight: 42, paddingHorizontal: 10, paddingVertical: 9, fontSize: 16 },
   round: { width: 44, height: 44, borderRadius: 12, alignItems: "center", justifyContent: "center" },
   disabled: { opacity: 0.4 },
-  reconnect: { minHeight: 32, paddingHorizontal: 11, borderRadius: 9, justifyContent: "center" },
+  reconnect: { minHeight: 36, paddingHorizontal: 11, borderRadius: 9, justifyContent: "center" },
   cancel: { minHeight: 44, minWidth: 44, justifyContent: "center", alignItems: "flex-end" },
   held: { marginTop: 10 },
   emptyAction: { paddingHorizontal: 24, marginTop: 4 },

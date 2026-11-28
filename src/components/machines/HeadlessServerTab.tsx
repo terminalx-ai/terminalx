@@ -206,10 +206,17 @@ function CodeStatus({ pairing, name, failure }: { pairing: MachinePairing; name:
   return (
     <div className="grid gap-1.5">
       {inspected && step.kind !== "paired" && (
-        <p className={soft} aria-live="polite">
-          From <span className="text-foreground">{inspected.machine.name}</span>. {expiry}
-          {inspected.alreadyPaired && ` ${ThisComputer} is already paired with ${name}. Pairing again replaces its credential.`}
-        </p>
+        <>
+          <p className={soft} aria-live={remaining <= 0 ? "polite" : undefined}>
+            From <span className="text-foreground">{inspected.machine.name}</span>. {expiry}
+            {inspected.alreadyPaired && ` ${ThisComputer} is already paired with ${name}. Pairing again replaces its credential.`}
+          </p>
+          <span className="sr-only" aria-live="polite">
+            {remaining > 0 && remaining <= 60_000
+              ? "The code expires in less than a minute."
+              : ""}
+          </span>
+        </>
       )}
       {step.kind === "ready" && remaining > 0 && <p className={soft}>Continue, then compare the fingerprint on the server and answer y there.</p>}
       {step.kind === "waiting" && (

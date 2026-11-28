@@ -71,7 +71,7 @@ async function openReview() {
 }
 function expectDismissedWithoutReply() {
   expect(screen.queryByRole("dialog")).toBeNull();
-  expect(screen.getByRole("complementary", { name: "Pending issue request" })).toBeTruthy();
+  expect(screen.getByRole("alert", { name: "Pending issue request" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Review" })).toBeTruthy();
   expect(mocks.invoke).not.toHaveBeenCalledWith("issue_confirmation_reply", expect.anything());
 }

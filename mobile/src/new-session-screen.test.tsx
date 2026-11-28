@@ -29,7 +29,7 @@ vi.mock("react-native", () => {
   return {
     useWindowDimensions: () => ({ width: 375, height: 667, scale: 2, fontScale: 1 }),
     AppState: { currentState: "active" },
-    View: Box, Text: Box, RefreshControl: () => null, Platform: { OS: "ios" }, Alert: { alert: vi.fn() }, useColorScheme: () => "dark",
+    View: Box, Text: Box, KeyboardAvoidingView: Box, RefreshControl: () => null, Platform: { OS: "ios" }, Alert: { alert: vi.fn() }, useColorScheme: () => "dark",
     Modal: ({ visible, children }: any) => visible ? <div>{children}</div> : null,
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
     Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,

@@ -72,17 +72,58 @@ export function startNativeMenu(): () => void {
   return () => { stopped = true; cleanups.forEach((cleanup) => cleanup()); };
 }
 
+export const ZOOM_STORAGE_KEY = "terminalx.zoom";
+
+function clampZoom(value: number): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(0.5, Math.min(2, Math.round(value * 10) / 10));
+}
+
+function readStoredZoom(): number {
+  try {
+    const raw = localStorage.getItem(ZOOM_STORAGE_KEY);
+    if (!raw) return 1;
+    return clampZoom(Number(raw));
+  } catch {
+    return 1;
+  }
+}
+
+function writeStoredZoom(zoom: number) {
+  try {
+    localStorage.setItem(ZOOM_STORAGE_KEY, String(zoom));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
 /** Window actions share the ordinary shortcut dispatcher, in both shells. */
 export function useNativeMenus() {
   useEffect(() => {
     if (!isTauri()) return;
-    let zoom = 1;
+    let zoom = readStoredZoom();
     const failed = (error: unknown) => console.error("Window action failed", error);
-    const changeZoom = (delta: number | null) => {
-      zoom = delta === null ? 1 : Math.max(0.5, Math.min(2, Math.round((zoom + delta) * 10) / 10));
-      void getCurrentWebviewWindow().setZoom(zoom).catch(failed);
+    const applyZoom = (next: number) => {
+      zoom = clampZoom(next);
+      const win = getCurrentWebviewWindow();
+      if (typeof win.setZoom === "function") {
+        void win.setZoom(zoom).catch(failed);
+      }
     };
+    const changeZoom = (delta: number | null) => {
+      const next = delta === null ? 1 : clampZoom(zoom + delta);
+      writeStoredZoom(next);
+      applyZoom(next);
+    };
+    if (zoom !== 1) applyZoom(zoom);
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== ZOOM_STORAGE_KEY) return;
+      const next = event.newValue === null ? 1 : clampZoom(Number(event.newValue));
+      if (next !== zoom) applyZoom(next);
+    };
+    window.addEventListener("storage", onStorage);
     const cleanups = [
+      () => window.removeEventListener("storage", onStorage),
       // Main exists even when every window is minimized. Compact windows
       // forward this action just like any other main-owned menu command.
       ...(!isCompactWindow() ? [registerShortcut("app.newWindow", () => { void invoke("new_chat_window").catch(failed); })] : []),

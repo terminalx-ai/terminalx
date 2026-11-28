@@ -50,7 +50,7 @@ const status = () => getSessionStore().sessions.find((s) => s.id === session.id)
 const event = (payload: Payload): AgentEvent => ({ id: `e${++seq}`, seq, sessionId: session.id, tabId: tab(), harness: "codex", ts: new Date().toISOString(), payload });
 const emit = (payload: Payload) => act(() => applyEvent(event(payload)));
 const showStatus = (next: TabStatus) => act(() => setTabStatus(session.id, tab(), next));
-const banner = () => screen.queryByRole("status", { name: "Session recovery" });
+const banner = () => screen.queryByRole("region", { name: "Session recovery" });
 /** What was shown on `surface`: its exposures, not the actions pressed there. */
 const of = (surface: UiReport["surface"]) => reports.filter((report) => report.kind === "exposure" && report.surface === surface);
 const send = (text: string) => {

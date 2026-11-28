@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { AgentCard, AgentCardSkeleton, CloudAgentCard, MachineAgentCard } from "@/components/dashboard/AgentCard";
 import { MachineIcon, MachineStateMark } from "@/components/machines/connectionStatus";
-import { useHotkey } from "@/lib/hotkeys";
+import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { openNewSession, selectSession, useSessionStore } from "@/lib/sessions";
 import { useSessionSummaries } from "@/lib/summaries";
 import {
@@ -87,6 +87,7 @@ export function AgentDashboard() {
   const tableRef = useRef<HTMLDivElement>(null);
   const tableNavigation = useRef<SessionTableHandle>(null);
   const [cursor, setCursor] = useState<string | null>(null);
+  const [boardFocusSignal, setBoardFocusSignal] = useState(0);
   const [preferences, setPreferences] = usePref("dashboard");
   const personName = usePeople(false);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -162,7 +163,7 @@ export function AgentDashboard() {
     () => filterSessions(sessions, { query, filters: pathFilters, projectName }),
     [sessions, query, pathFilters, projectName],
   );
-  const team = useTeamOverview(baseFiltered, selectedOrganization ?? null, owners);
+  const team = useTeamOverview(baseFiltered, selectedOrganization ?? null, owners, { ownerFilter: "external" });
   const hiddenWorkingAutomations = (filters.automations ?? "hide") === "hide" && bucketSessions(everywhere).working.some((session) => !!session.automation);
   const scoped = !!query.trim() || hasFilters(filters) || preferences.owners.length > 0 || place !== "all" || team.scoped || filters.automations === "only" || filters.archived === "only" || hiddenWorkingAutomations;
   const clearScope = () => {
@@ -181,11 +182,12 @@ export function AgentDashboard() {
   const boardColumns = filters.archived === "only" ? archivedState : filters.archived === "show" ? [...COLUMNS, ...archivedState] : COLUMNS;
   const shown = useMemo(() => ({ ...buckets, done: buckets.done.slice(0, doneLimit) }), [buckets, doneLimit]);
   // Everyone with a session here, and how recently they worked: the people picker and Active now.
-  const people = useMemo<OverviewPerson[]>(() => [...owners].map(([id, name]) => {
+  const allOwners = team.owners ?? owners;
+  const people = useMemo<OverviewPerson[]>(() => [...allOwners].map(([id, name]) => {
     const theirs = sessions.filter((session) => session.ownerId === id && !session.archived);
     const activeAt = theirs.map((session) => session.lastMessageAt ?? session.modified).sort().at(-1) ?? null;
     return { id, name, you: id === localOwner, activeAt, working: theirs.some((session) => session.tabs.some((tab) => tab.status === "in_progress")) };
-  }).sort((a, b) => Number(b.you) - Number(a.you) || a.name.localeCompare(b.name)), [owners, sessions, localOwner]);
+  }).sort((a, b) => Number(b.you) - Number(a.you) || a.name.localeCompare(b.name)), [allOwners, sessions, localOwner]);
   const orgs = JSON.stringify([...new Set(visibleCloud.map((session) => session.orgId))].sort());
   useEffect(() => {
     for (const orgId of JSON.parse(orgs) as string[]) void loadRosterIn(orgId).catch(() => undefined);
@@ -249,7 +251,7 @@ export function AgentDashboard() {
 
   // Keep selection by identity when rows reorder, filters change, or the view switches.
   const move = (dColumn: number, dRow: number) => {
-    if (menuIsOpen()) return false;
+    if (overlayIsOpen()) return false;
     if (preferences.view === "table") {
       if (!dRow) return false;
       const index = tableRows.findIndex((row) => row.id === cursor);
@@ -261,15 +263,24 @@ export function AgentDashboard() {
     }
     const currentColumn = boardColumns.find(({ id }) => shown[id].some((s) => s.id === cursor))?.id;
     if (!currentColumn) {
-      setCursor(boardColumns.flatMap(({ id }) => shown[id])[0]?.id ?? null);
+      const firstId = boardColumns.flatMap(({ id }) => shown[id])[0]?.id ?? null;
+      setCursor(firstId);
+      if (firstId) setBoardFocusSignal((n) => n + 1);
       return true;
     }
     const row = shown[currentColumn].findIndex((s) => s.id === cursor);
-    if (dRow) setCursor(shown[currentColumn][Math.max(0, Math.min(shown[currentColumn].length - 1, row + dRow))]?.id ?? null);
-    else {
+    if (dRow) {
+      const nextId = shown[currentColumn][Math.max(0, Math.min(shown[currentColumn].length - 1, row + dRow))]?.id ?? null;
+      setCursor(nextId);
+      if (nextId) setBoardFocusSignal((n) => n + 1);
+    } else {
       for (let i = boardColumns.findIndex(({ id }) => id === currentColumn) + dColumn; i >= 0 && i < boardColumns.length; i += dColumn) {
         const next = shown[boardColumns[i].id];
-        if (next.length) { setCursor(next[Math.min(row, next.length - 1)].id); break; }
+        if (next.length) {
+          setCursor(next[Math.min(row, next.length - 1)].id);
+          setBoardFocusSignal((n) => n + 1);
+          break;
+        }
       }
     }
     return true;
@@ -279,19 +290,22 @@ export function AgentDashboard() {
   useHotkey("right", () => move(1, 0));
   useHotkey("left", () => move(-1, 0));
   useHotkey("/", () => {
-    if (menuIsOpen()) return false;
+    if (overlayIsOpen()) return false;
     searchRef.current?.focus();
     return true;
   });
   useHotkey("enter", (event) => {
     // Native buttons (sort, view, links) retain Enter even with a row selected.
-    if (menuIsOpen() || (event.target instanceof Element && event.target.closest("button, a"))) return false;
+    if (overlayIsOpen() || (event.target instanceof Element && event.target.closest("button, a"))) return false;
     const candidates = preferences.view === "table" ? filtered : boardColumns.flatMap(({ id }) => shown[id]);
     const session = candidates.find((s) => s.id === cursor);
     if (!session) return false;
     openCard(session);
     return true;
   });
+
+  const boardCards = boardColumns.flatMap(({ id }) => shown[id]);
+  const tabbableCardId = boardCards.some((s) => s.id === cursor) ? cursor : (boardCards[0]?.id ?? null);
 
   const total = localLive.length + remoteLive.length + (archivedShown ? sessions.filter((s) => s.archived && s.tabs.length).length : 0);
   const loading = !store.loaded || (preferences.view === "board" && summaries.loading && total > 0);
@@ -394,9 +408,9 @@ export function AgentDashboard() {
           )}
         </FilterChip>
         <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center gap-x-3 gap-y-1.5 @min-[1100px]:shrink-0 @min-[1100px]:flex-nowrap">
-          {[...visibleIds].map((orgId) => <PresenceFaces key={orgId} orgId={orgId} />)}
-          {team.controls}
-          <ActiveNow people={people} />
+          {visibleIds.size > 0
+            ? [...visibleIds].map((orgId) => <PresenceFaces key={orgId} orgId={orgId} />)
+            : <ActiveNow people={people} />}
           <NewSessionButton onClick={() => openNewSession()} />
         </div>
       </header>
@@ -426,6 +440,8 @@ export function AgentDashboard() {
                     column={c.id}
                     agentName={agentName(s)}
                     focused={cursor === s.id}
+                    tabbable={tabbableCardId === s.id}
+                    focusSignal={boardFocusSignal}
                     onFocus={() => setCursor(s.id)}
                     onOpen={() => openCard(s)}
                   />
@@ -436,6 +452,8 @@ export function AgentDashboard() {
                     column={c.id}
                     agentName={agentName(s)}
                     focused={cursor === s.id}
+                    tabbable={tabbableCardId === s.id}
+                    focusSignal={boardFocusSignal}
                     onFocus={() => setCursor(s.id)}
                     onOpen={() => openCard(s)}
                   />
@@ -448,6 +466,8 @@ export function AgentDashboard() {
                     project={store.projects.find((p) => p.path === s.projectPath)}
                     agentName={agentName(s)}
                     focused={cursor === s.id}
+                    tabbable={tabbableCardId === s.id}
+                    focusSignal={boardFocusSignal}
                     onFocus={() => setCursor(s.id)}
                   />
                 ),
@@ -495,12 +515,13 @@ function PlaceItem({ label, icon, mark, count, selected, onSelect }: { label: st
 }
 
 /**
- * A card menu or the filter menu takes the arrows and Enter for its own
- * navigation while it is open, so the cursor stands still and the chord falls
- * through to Radix.
+ * A card menu, filter menu, dialog, or image viewer takes the arrows, slash,
+ * and Enter for its own navigation while it is open, so the cursor stands
+ * still and the chord falls through to the active overlay.
  */
-function menuIsOpen(): boolean {
-  return typeof document !== "undefined" && !!document.querySelector('[role="menu"][data-state="open"]');
+function overlayIsOpen(): boolean {
+  if (typeof document === "undefined") return false;
+  return !!document.querySelector('[role="menu"][data-state="open"]') || hasEscapeOverlay();
 }
 
 const EMPTY: Record<DashboardState, string> = {

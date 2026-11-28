@@ -1,4 +1,5 @@
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useState } from "react";
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import { ChevronRight } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -23,10 +24,29 @@ export default function AccountScreen() {
   const insets = useSafeAreaInsets();
   const organizations = useCatalogSnapshot(useCloudCatalog()).organizations.map((entry) => entry.organization);
   const user = app.session?.user;
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
   const signOut = async () => {
-    await app.signOut();
-    router.back();
+    if (signingOut) return;
+    setSigningOut(true);
+    setSignOutError(null);
+    try {
+      await app.signOut();
+      router.back();
+    } catch (cause) {
+      setSignOutError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSigningOut(false);
+    }
   };
+  const askSignOut = () => Alert.alert(
+    "Sign out?",
+    "Signing out removes the machines this phone paired through your account, and the conversations it saved. Machines you paired with a QR code stay.",
+    [
+      { text: "Cancel", style: "cancel" },
+      { text: "Sign out", style: "destructive", onPress: () => void signOut() },
+    ],
+  );
   return <ScrollView contentInsetAdjustmentBehavior="automatic" style={{ backgroundColor: palette.page }} contentContainerStyle={[styles.page, { paddingBottom: insets.bottom + 24 }]}>
     {user ? <>
       <Card style={styles.block}>
@@ -48,7 +68,8 @@ export default function AccountScreen() {
           </Pressable>)}</Card>
       </> : null}
       <Text style={[styles.note, { color: palette.muted }]}>Signing out removes the machines this phone paired through your account, and the conversations it saved. Machines you paired with a QR code stay.</Text>
-      <Button label="Sign out" kind="danger" onPress={() => void signOut()} />
+      {signOutError ? <Text accessibilityRole="alert" style={[styles.note, { color: palette.danger }]}>{signOutError}</Text> : null}
+      <Button label={signingOut ? "Signing out…" : "Sign out"} kind="danger" disabled={signingOut} accessibilityState={{ disabled: signingOut, busy: signingOut }} onPress={askSignOut} />
       {/* PRO-584: a row below Sign out, not a second red button beside it as an equal. */}
       <Card>
         <Pressable testID="account-delete-row" accessibilityRole="button" accessibilityLabel={`${accountDeletionText.rowTitle}. ${accountDeletionText.rowHint}`}

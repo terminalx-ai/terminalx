@@ -92,7 +92,7 @@ afterEach(cleanup);
 
 const called = (command: string) => mocks.invoke.mock.calls.filter(([name]) => name === command).map(([, args]) => args);
 const option = (number: number) => screen.getAllByRole("option").find((row) => row.getAttribute("data-pr") === String(number))!;
-const search = () => screen.getByRole("textbox", { name: "Search open PRs" });
+const search = () => screen.getByRole("combobox", { name: "Search open PRs" });
 /** The dialog's description, whole: the repository name is a span of its own so it never breaks. */
 const description = async () => (await screen.findByText(/^Show an open PR’s checks and review in this session\./)).textContent;
 

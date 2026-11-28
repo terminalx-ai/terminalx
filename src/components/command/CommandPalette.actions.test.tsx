@@ -256,4 +256,18 @@ describe("Move to section (design 07.13)", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
     await waitFor(() => expect(local.getLocalSections().dialog).toEqual({ kind: "create", sessionIds: ["fix"] }));
   });
+
+  it("exposes combobox ARIA semantics and makes 'N more' keyboard-reachable", () => {
+    const { input } = palette();
+    expect(input.getAttribute("role")).toBe("combobox");
+    expect(input.getAttribute("aria-expanded")).toBe("true");
+    expect(input.getAttribute("aria-controls")).toBe("command-palette-results");
+    const more = screen.getAllByRole("option", { name: /^\d+ more$/ })[0];
+    expect(more).toBeTruthy();
+    const index = Number(more.getAttribute("data-palette-index"));
+    for (let i = 0; i < index; i++) fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(more.id);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(document.getElementById(more.id)).toBeNull();
+  });
 });

@@ -715,7 +715,7 @@ export function NewSessionView({
           <DictationStatus dictation={dictation} />
 
           {/* Everything the form says is drawn inside this box: over a dimmed session there is nothing behind it to read text against. */}
-          <div className={cn("relative overflow-hidden rounded-[12px] bg-composer shadow-surface hairline", modal && "border border-border shadow-2xl", attach.dragging && "ring-2 ring-accent/60")} data-composer-box {...attach.dropZoneProps}>
+          <div className={cn("relative overflow-hidden rounded-[12px] bg-composer shadow-surface hairline focus-within:ring-2 focus-within:ring-ring/40", modal && "border border-border shadow-2xl", attach.dragging && "ring-2 ring-accent/60")} data-composer-box {...attach.dropZoneProps}>
             <DropHint dragging={attach.dragging} />
 
             <div className="flex h-11 items-center gap-1 border-b border-hairline px-3" data-testid="new-session-header">
@@ -878,6 +878,8 @@ export function NewSessionView({
               <textarea
                 ref={ref}
                 autoFocus
+                aria-label="Prompt"
+                disabled={busy}
                 data-new-session-prompt
                 {...textProps}
                 value={text}
@@ -940,8 +942,8 @@ export function NewSessionView({
                     </Button>
                   </WithTooltip>
                 )}
-                {!remote && <AttachButton attach={attach} />}
-                <MicButton dictation={dictation} />
+                {!remote && <AttachButton attach={attach} disabled={busy} />}
+                <MicButton dictation={dictation} disabled={busy} />
                 {/* One button in two parts: Create, and the other ways to start behind the chevron. */}
                 <div className={cn("ml-1.5 flex h-8 items-stretch overflow-hidden rounded-md", canSend ? "bg-accent text-accent-foreground shadow-button" : "bg-veil-strong text-muted-foreground")} data-testid="create-button">
                   <button
@@ -1000,7 +1002,7 @@ export function NewSessionView({
                 <p className="text-xs text-muted-foreground">
                   {harness.installHint
                     ? <>Install {harness.name} by running <code className="font-mono">{harness.installHint}</code></>
-                    : <>Install {harness.name} with its <button type="button" className="underline" onClick={() => void openUrl(harness.installUrl)}>setup guide</button>.</>}
+                    : <>Install {harness.name} with its <button type="button" className="underline" onClick={() => void openUrl(harness.installUrl).catch((e) => setError(errorMessage(e)))}>setup guide</button>.</>}
                 </p>
               )}
               {/* Reached with a role that changed meanwhile (demoted while drafting): Create is off, with the reason. */}

@@ -49,7 +49,7 @@ function Heading({ children }: { children: React.ReactNode }) {
 /** One choice: icon, name, a second line, a check on the chosen one. */
 function Option({ icon, name, detail, chosen, onSelect, title, disabled }: { icon: React.ReactNode; name: React.ReactNode; detail?: React.ReactNode; chosen: boolean; onSelect: () => void; title?: string; disabled?: boolean }) {
   return <button type="button" aria-current={chosen || undefined} title={title} disabled={disabled} onClick={onSelect}
-    className={cn("flex w-full items-start gap-2.5 rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-foreground outline-none hover:bg-veil-strong focus-visible:bg-veil-strong disabled:opacity-50", chosen && "bg-selected")}>
+    className={cn("flex w-full items-start gap-2.5 rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-foreground outline-none hover:bg-veil-strong focus-visible:bg-veil-strong focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-50", chosen && "bg-selected")}>
     <span aria-hidden className="mt-[2px] shrink-0 text-muted-foreground [&_svg]:size-3.5">{icon}</span>
     <span className="min-w-0 flex-1">
       <span className="block truncate">{name}</span>
@@ -165,7 +165,7 @@ export function ScopePicker({ source, choice, onChoose, checkpoints, showTurn, l
 
 function CommitOption({ sha, subject, chosen, onSelect }: { sha: string; subject: string; chosen: boolean; onSelect: () => void }) {
   return <button type="button" aria-current={chosen || undefined} title={subject || undefined} onClick={onSelect}
-    className={cn("flex h-8 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-[12.5px] outline-none hover:bg-veil-strong focus-visible:bg-veil-strong", chosen && "bg-selected")}>
+    className={cn("flex h-8 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-[12.5px] outline-none hover:bg-veil-strong focus-visible:bg-veil-strong focus-visible:ring-2 focus-visible:ring-ring/40", chosen && "bg-selected")}>
     <GitCommitHorizontal aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
     <span className="shrink-0 font-mono text-[12px]">{short(sha)}</span>
     <span className="min-w-0 flex-1 truncate text-muted-foreground">{subject}</span>
@@ -221,7 +221,7 @@ export function TargetPicker({ open, onOpenChange, label, value, branches, busy,
 
 function BranchOption({ name, detail, chosen, onSelect, mono, disabled }: { name: string; detail?: string; chosen: boolean; onSelect: () => void; mono?: boolean; disabled?: boolean }) {
   return <button type="button" aria-current={chosen || undefined} disabled={disabled} onClick={onSelect}
-    className={cn("flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2.5 text-left text-[12.5px] outline-none hover:bg-veil-strong focus-visible:bg-veil-strong disabled:opacity-50", chosen && "bg-selected")}>
+    className={cn("flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2.5 text-left text-[12.5px] outline-none hover:bg-veil-strong focus-visible:bg-veil-strong focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-50", chosen && "bg-selected")}>
     <GitBranch aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
     <span className={cn("min-w-0 truncate", mono && "font-mono text-[12px]")}>{name}</span>
     {detail && <span className="ml-auto shrink-0 pl-2 text-[11px] text-faint">{detail}</span>}

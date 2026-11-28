@@ -670,10 +670,14 @@ describe("mobile conversation navigation", () => {
     expect(mocks.app.api.respondPermission).toHaveBeenLastCalledWith("worktree", "claude", "claude-ask", "allow");
     await select("codex"); await click("Allow");
     expect(mocks.app.api.respondPermission).toHaveBeenLastCalledWith("worktree", "codex", "codex-ask", "allow");
+    await type("Draft before deletion");
     mocks.app.sessions[0].tabs = [mocks.app.sessions[0].tabs[0]];
     await render();
     expect(container.textContent).toContain("no longer available");
     expect(button("Allow").disabled).toBe(true);
+    // U-59: unavailable/deleted session disables Send and never claims "Sends when connected."
+    expect(button("Send").disabled).toBe(true);
+    expect(container.textContent).not.toContain("Sends when connected.");
     expect(mocks.params.tabId).toBe("codex");
   });
 

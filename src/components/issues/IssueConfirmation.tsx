@@ -27,9 +27,13 @@ export function IssueConfirmation() {
   const [review, setReview] = useState<{ id: string; navigation: number; context: string } | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
+  const [now, setNow] = useState(() => Date.now());
   const cancel = useRef<HTMLButtonElement>(null);
   const store = useSessionStore();
   const context = JSON.stringify([store.selectedSessionId, store.view, store.selectedProject, store.selectedCloudWorkspace]);
+  const open = !!request && review?.id === request.id && review.navigation === store.navigationVersion && review.context === context;
+  const openRef = useRef(open);
+  openRef.current = open;
   useEffect(() => setReview(null), [store.navigationVersion, context]);
   useEffect(() => {
     let disposed = false;
@@ -38,7 +42,14 @@ export function IssueConfirmation() {
       const current = ++revision;
       try {
         const next = await invoke<IssueConfirmationRequest | null>("issue_confirmation_pending");
-        if (!disposed && current === revision) setRequest(next);
+        if (!disposed && current === revision) {
+          setRequest((prev) => {
+            if (next) return next;
+            // If the user is actively reviewing a request that just expired, keep it open to show the Expired notice.
+            if (prev && openRef.current && prev.expiresAt <= Date.now()) return prev;
+            return null;
+          });
+        }
       } catch { /* The native deadline still refuses an unavailable window. */ }
     };
     const unlisten = listen("issue-confirmation-changed", refresh);
@@ -49,13 +60,29 @@ export function IssueConfirmation() {
     setReview(null);
     setError("");
     setSending(false);
+    setNow(Date.now());
     if (!request) return;
-    const timer = setTimeout(() => setRequest(null), Math.max(0, request.expiresAt - Date.now()));
-    return () => clearTimeout(timer);
+    const remaining = Math.max(0, request.expiresAt - Date.now());
+    const timer = setTimeout(() => {
+      setNow(Date.now());
+      if (!openRef.current) setRequest((current) => (current?.id === request.id ? null : current));
+    }, remaining);
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      clearTimeout(timer);
+      clearInterval(tick);
+    };
   }, [request?.id, request?.expiresAt]);
-  if (!request || request.expiresAt <= Date.now()) return null;
+  if (!request) return null;
+  const remainingMs = Math.max(0, request.expiresAt - now);
+  const remainingSeconds = Math.ceil(remainingMs / 1000);
+  const expired = remainingMs <= 0;
+  if (expired && !open) return null;
   const q = request.question;
-  const open = review?.id === request.id && review.navigation === store.navigationVersion && review.context === context;
+  const dismiss = () => {
+    setReview(null);
+    if (expired) setRequest(null);
+  };
   const answer = async (approved: boolean) => {
     if (sending || Date.now() >= request.expiresAt) return;
     setSending(true);
@@ -68,18 +95,23 @@ export function IssueConfirmation() {
     } finally { setSending(false); }
   };
   return <>
-    <aside aria-label="Pending issue request" className="fixed bottom-10 right-4 z-40 flex max-w-[calc(100vw-2rem)] items-center gap-3 rounded-lg border bg-popover p-3 text-sm shadow-lg">
-      <div className="min-w-0 max-w-64">
-        <p className="truncate font-medium">{q.title}</p>
-        <p className="truncate text-muted-foreground">{q.sessionTitle ?? "Unknown session"} · {q.project}</p>
-      </div>
-      <Button size="sm" onClick={() => setReview({ id: request.id, navigation: store.navigationVersion, context })}>Review</Button>
-    </aside>
-    <Dialog open={open} onOpenChange={(next) => { if (!next) setReview(null); }}>
+    {!expired && (
+      <aside role="alert" aria-label="Pending issue request" className="fixed bottom-10 right-4 z-(--z-notice) flex max-w-[calc(100vw-2rem)] items-center gap-3 rounded-lg border bg-popover p-3 text-sm shadow-lg">
+        <div className="min-w-0 max-w-64">
+          <p className="truncate font-medium">{q.title}</p>
+          <p className="truncate text-muted-foreground">{q.sessionTitle ?? "Unknown session"} · {q.project}</p>
+          <p className="text-xs tabular-nums text-muted-foreground" data-testid="issue-confirmation-countdown">Expires in {remainingSeconds}s</p>
+        </div>
+        <Button size="sm" onClick={() => setReview({ id: request.id, navigation: store.navigationVersion, context })}>Review</Button>
+      </aside>
+    )}
+    <Dialog open={open} onOpenChange={(next) => { if (!next) dismiss(); }}>
       <DialogContent layout="pinned" showClose={false} className="overflow-hidden" onOpenAutoFocus={(event) => { event.preventDefault(); cancel.current?.focus(); }}>
         <DialogHeader>
           <DialogTitle>{q.title}</DialogTitle>
-          <DialogDescription>Review before approving. Unanswered requests expire after 40 seconds.</DialogDescription>
+          <DialogDescription>
+            {expired ? "This request has expired." : `Review before approving. Expires in ${remainingSeconds}s.`}
+          </DialogDescription>
         </DialogHeader>
         <DialogScrollArea aria-label="Issue request details" className="min-h-0 [overflow-wrap:anywhere] [&_pre]:whitespace-pre-wrap">
           <dl className="mb-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-sm">
@@ -101,10 +133,17 @@ export function IssueConfirmation() {
           </div>}
           <p className="mt-3 text-sm text-muted-foreground">This changes the issue tracker and may notify other people. Cancel if you did not request it.</p>
         </DialogScrollArea>
-        {error && <p role="alert" className="mt-2 text-sm text-destructive">{error}</p>}
+        {expired && <p role="alert" className="mt-2 text-sm text-destructive" data-testid="issue-confirmation-expired">Expired. This request can no longer be approved.</p>}
+        {error && !expired && <p role="alert" className="mt-2 text-sm text-destructive">{error}</p>}
         <DialogFooter>
-          <Button ref={cancel} variant="outline" disabled={sending} onClick={() => void answer(false)}>Cancel request</Button>
-          <Button disabled={sending} onClick={() => void answer(true)}>{q.agree}</Button>
+          {expired ? (
+            <Button ref={cancel} variant="outline" onClick={dismiss}>Close</Button>
+          ) : (
+            <>
+              <Button ref={cancel} variant="outline" disabled={sending} onClick={() => void answer(false)}>Cancel request</Button>
+              <Button disabled={sending} onClick={() => void answer(true)}>{q.agree}</Button>
+            </>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

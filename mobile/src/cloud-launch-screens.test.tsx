@@ -25,7 +25,7 @@ vi.mock("react-native", async () => {
   return { ...native, KeyboardAvoidingView: native.View, ActivityIndicator: () => <i data-busy="true" />, Modal: ({ children }: { children?: unknown }) => <div role="dialog">{children as never}</div> };
 });
 vi.mock("@mobile/ui/theme", async (actual) => (await import("@mobile/ui/testing/kit")).boardTheme(await actual()));
-vi.mock("expo-router", () => ({ Stack: { Screen: () => null }, useLocalSearchParams: () => mocks.params, useRouter: () => mocks.router, useFocusEffect: (run: () => void) => { mocks.focus.push(run); } }));
+vi.mock("expo-router", () => ({ Stack: { Screen: () => null }, useLocalSearchParams: () => mocks.params, useRouter: () => mocks.router, useFocusEffect: (run: () => void) => { mocks.focus.push(run); }, usePreventRemove: () => undefined }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => ({}) }));
 vi.mock("expo-crypto", () => ({ randomUUID: () => globalThis.crypto.randomUUID() }));
 vi.mock("expo-clipboard", () => ({ getStringAsync: async () => "", hasStringAsync: async () => false }));
@@ -790,5 +790,37 @@ describe("the delete page", () => {
     appearance.scheme = "light";
     await page.show(<DeleteWorkspaceScreen />);
     expect(page.styleOf(page.byId("delete-title")).color).not.toBe(dark);
+  });
+});
+
+describe("U-61: system back handling and launch idempotency guard", () => {
+  it("intercepts hardware Back on review to return to form, and blocks dismissal while a launch is unanswered", async () => {
+    const { BackHandler } = await import("@mobile/ui/testing/native");
+    const service = await signedIn({}, (made) => {
+      made.state.answer = (call) => (call.method === "POST" && call.path.endsWith("/cloud-workspaces") ? "offline" : undefined);
+    });
+    await page.show(<NewWorkspaceScreen />);
+    await pass();
+    await page.type(field("workspace-name"), "Checkout redesign");
+    await page.press(page.byId("review-price"));
+    await pass();
+    expect(page.byId("review-facts")).not.toBeNull();
+    // Hardware Back from review returns to form (does not pop the screen).
+    let handled = false;
+    await act(async () => { handled = BackHandler.emit(); });
+    expect(handled).toBe(true);
+    expect(page.byId("review-facts")).toBeNull();
+    expect(field("workspace-name")!.value).toBe("Checkout redesign");
+    // Go back to review and attempt launch that gets no answer.
+    await page.press(page.byId("review-price"));
+    await pass();
+    await page.press(page.byId("launch"));
+    await answer("Launch");
+    expect(page.byId("launch-unanswered")).not.toBeNull();
+    // Hardware Back while unanswered MUST stay on review so the idempotency key is preserved.
+    await act(async () => { handled = BackHandler.emit(); });
+    expect(handled).toBe(true);
+    expect(page.byId("review-facts")).not.toBeNull();
+    expect(service.sent("POST", "/cloud-workspaces")).toHaveLength(1);
   });
 });

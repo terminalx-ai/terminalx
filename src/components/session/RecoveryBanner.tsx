@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { RecoveryKind } from "@/types/events";
 import { recoveryOffer } from "@/lib/recovery";
 import type { PendingAsk } from "@/lib/transcript";
@@ -69,6 +70,10 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
     onPressed?.(inputOf(event));
     run();
   };
+  const [selectedModel, setSelectedModel] = useState("");
+  useEffect(() => {
+    setSelectedModel("");
+  }, [kind]);
   const now = useCountdownNow([kind === "usage_limit" ? limit?.resetsAt ?? null : null]);
   if (!kind && !waiting) return null;
   const reset = kind === "usage_limit" && limit ? usageLimitText(limit, now) : null;
@@ -77,7 +82,7 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   // Only a request to answer: the request's own card says it all, with stopping in its action bar.
   if (!kind && asks.length) {
     const stop = <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={pressed(onStop)}>Stop session</Button>;
-    return <section aria-label="Session recovery" role="status" className={placement === "composer"
+    return <section aria-label="Session recovery" className={placement === "composer"
       ? "mx-auto mb-2 flex max-h-[60vh] w-[calc(100%-2rem)] max-w-3xl shrink-0 flex-col gap-2 overflow-auto"
       : "flex max-h-[50vh] shrink-0 flex-col gap-2 overflow-auto border-b border-hairline p-3"}>
       {asks.map((ask, i) => {
@@ -91,13 +96,13 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   // Above the composer it floats over the transcript's foot, so its ground is solid (the warning tint mixed into the
   // chat's own colour, not laid over what scrolls behind), and it is exactly as wide as the composer under it.
   const card = (
-    <section aria-label="Session recovery" role="status" className={placement === "composer"
+    <section aria-label="Session recovery" className={placement === "composer"
       ? "max-h-[50vh] overflow-auto rounded-xl border border-warning/30 bg-[color-mix(in_oklab,var(--color-warning)_10%,var(--color-chat))] p-3 text-xs shadow-surface"
       : "max-h-[50vh] shrink-0 overflow-auto border-b border-warning/30 bg-warning/10 p-3 text-xs"}>
     <p className="font-medium">{offer.title}</p>
     <p className="mt-1">{signInPending && kind === "signed_out" ? "Finish signing in in the terminal. After sign-in is verified, the interrupted turn will retry once." : offer.message}</p>
     {reset && <p className="mt-1 text-muted-foreground" data-testid="usage-limit-reset">{reset}</p>}
-    {accounts?.error && (kind === "usage_limit" || kind === "signed_out") && <p className="mt-1 text-warning" data-testid="account-switch-error">{accounts.error}</p>}
+    {accounts?.error && (kind === "usage_limit" || kind === "signed_out") && <p role="alert" className="mt-1 text-warning" data-testid="account-switch-error">{accounts.error}</p>}
     {asks.map(ask => <div key={ask.requestId} className="mt-2">{ask.kind === "permission"
       ? <PermissionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={option => onPermission(ask.requestId, option)} />
       : <QuestionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} onAnswer={answers => onQuestions(ask.requestId, answers)} />}</div>)}
@@ -112,10 +117,23 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
       {offer.resend && onResend && <Button size="sm" disabled={busy} onClick={pressed(onResend)}>Resend last prompt</Button>}
       {offer.retry && <Button size="sm" variant={kind === "signed_out" ? "outline" : undefined} disabled={busy} onClick={pressed(() => onRetry())}>{offer.retry}</Button>}
       {offer.sendContinue && onSendContinue && <Button size="sm" variant="outline" disabled={busy} title={'Send "continue" to the agent in this conversation'} onClick={pressed(onSendContinue)}>Continue here</Button>}
-      {offer.chooseModel && <select onFocus={onOpenModels} onPointerDown={onOpenModels} aria-label="Choose another model" disabled={busy} value="" onChange={e => onRetry(e.target.value)} className="rounded border border-hairline bg-background px-2">
-        <option value="" disabled>Choose another model</option>
-        {models.map(model => <option key={model.id} value={model.id}>{modelOptionText(model, models)}</option>)}
-      </select>}
+      {offer.chooseModel && (
+        <div className="flex items-center gap-1.5">
+          <select onFocus={onOpenModels} onPointerDown={onOpenModels} aria-label="Choose another model" disabled={busy} value={selectedModel} onChange={e => setSelectedModel(e.target.value)} className="h-7 rounded border border-hairline bg-background px-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
+            <option value="" disabled>Choose another model</option>
+            {models.map(model => <option key={model.id} value={model.id}>{modelOptionText(model, models)}</option>)}
+          </select>
+          {selectedModel && (
+            <Button size="sm" variant="outline" disabled={busy} onClick={pressed(() => {
+              const next = selectedModel;
+              setSelectedModel("");
+              onRetry(next);
+            })}>
+              Switch &amp; retry
+            </Button>
+          )}
+        </div>
+      )}
       <Button size="sm" variant="outline" disabled={busy} onClick={pressed(onStop)}>Stop session</Button>
       {offer.continueInNewSession && <Button size="sm" variant="ghost" disabled={busy} onClick={pressed(onContinue)}>Continue in new session</Button>}
     </div>

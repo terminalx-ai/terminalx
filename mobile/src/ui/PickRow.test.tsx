@@ -50,10 +50,10 @@ it("marks a value that stops a launch in the danger colour, in dark and in light
   appearance.scheme = "light";
   await page.show(<PickRow label="Agent" value="Claude Code" onPress={() => undefined} bad />);
   const light = page.styleOf(page.byText("Claude Code")).color;
-  // Ember and Den share their danger colour.
+  // Dark uses bright danger; light uses WCAG AA darker danger.
   expect(dark).toBe("#db695f");
-  expect(light).toBe("#db695f");
-  expect(page.styleOf(page.byText("Agent")).color).not.toBe("#db695f");
+  expect(light).toBe("#991b1b");
+  expect(page.styleOf(page.byText("Agent")).color).not.toBe("#991b1b");
 });
 
 it("draws Agent, Model, Effort and Permission mode as one card, each opening its own choice", async () => {

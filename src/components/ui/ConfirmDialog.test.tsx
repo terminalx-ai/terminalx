@@ -33,31 +33,38 @@ const labels = (dialog: HTMLElement) => within(dialog).getAllByRole("button").ma
 describe("the app's confirmation dialog", () => {
   it("asks with the question as its title, what happens below, the safe choice left and the red action right", async () => {
     render(<ConfirmDialogHost />);
-    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
     const { answer: answer } = await asking(() => confirmInApp({ title: 'Delete "Fix login"?', body: "Its transcript is removed.\n\nThere is no undo.", action: "Delete", destructive: true }));
-    const dialog = screen.getByRole("dialog", { name: 'Delete "Fix login"?' });
+    const dialog = screen.getByRole("alertdialog", { name: 'Delete "Fix login"?' });
     expect(dialog.textContent).toContain("Its transcript is removed.");
     expect(labels(dialog)).toEqual(["Cancel", "Delete"]);
+    const cancel = within(dialog).getByRole("button", { name: "Cancel" });
     const action = within(dialog).getByRole("button", { name: "Delete" });
     expect(action.className).toContain("bg-destructive");
-    // Return picks the right-most: the action holds the focus when the card opens.
-    expect(document.activeElement).toBe(action);
+    expect(action.className).toContain("text-destructive-foreground");
+    expect(action.className).toContain("disabled:cursor-not-allowed");
+    expect(action.className).not.toContain("disabled:pointer-events-none");
+    // Destructive confirmations auto-focus Cancel to prevent accidental deletion on Return.
+    expect(document.activeElement).toBe(cancel);
     await act(async () => { fireEvent.click(action); });
     expect(await answer).toBe(true);
-    expect(screen.queryByRole("dialog", { name: 'Delete "Fix login"?' })).toBeNull();
+    expect(screen.queryByRole("alertdialog", { name: 'Delete "Fix login"?' })).toBeNull();
   });
 
   it("cancels from its button and on Escape, and an action that destroys nothing is not red", async () => {
     render(<ConfirmDialogHost />);
     const { answer: first } = await asking(() => confirmInApp({ title: "Switch the default organization to Beta?", action: "Switch", cancel: "Stay" }));
-    const dialog = screen.getByRole("dialog");
+    const dialog = screen.getByRole("alertdialog");
     expect(labels(dialog)).toEqual(["Stay", "Switch"]);
-    expect(within(dialog).getByRole("button", { name: "Switch" }).className).not.toContain("bg-destructive");
+    const switchBtn = within(dialog).getByRole("button", { name: "Switch" });
+    expect(switchBtn.className).not.toContain("bg-destructive");
+    // Non-destructive confirmations focus the primary action.
+    expect(document.activeElement).toBe(switchBtn);
     await act(async () => { fireEvent.click(within(dialog).getByRole("button", { name: "Stay" })); });
     expect(await first).toBe(false);
 
     const { answer: second } = await asking(() => confirmInApp({ title: "Replace 2 matches?", action: "Replace" }));
-    await act(async () => { fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" }); });
+    await act(async () => { fireEvent.keyDown(screen.getByRole("alertdialog"), { key: "Escape" }); });
     expect(await second).toBe(false);
     expect(pendingConfirm()).toBeNull();
   });
@@ -65,7 +72,7 @@ describe("the app's confirmation dialog", () => {
   it("offers a second way forward between the two, and says which was chosen", async () => {
     render(<ConfirmDialogHost />);
     const { answer: answer } = await asking(() => chooseInApp({ title: 'Delete "Fix login"?', action: "Delete session", alternative: "Also delete the workspace…", destructive: true }));
-    const dialog = screen.getByRole("dialog");
+    const dialog = screen.getByRole("alertdialog");
     expect(labels(dialog)).toEqual(["Cancel", "Also delete the workspace…", "Delete session"]);
     await act(async () => { fireEvent.click(within(dialog).getByRole("button", { name: "Also delete the workspace…" })); });
     expect(await answer).toBe("alternative");
@@ -78,13 +85,13 @@ describe("the app's confirmation dialog", () => {
     const { answer: first } = await asking(() => confirmInApp(request));
     const { answer: repeat } = await asking(() => confirmInApp({ ...request }));
     expect(await repeat).toBe(false);
-    expect(screen.getAllByRole("dialog")).toHaveLength(1);
-    await act(async () => { fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" })); });
+    expect(screen.getAllByRole("alertdialog")).toHaveLength(1);
+    await act(async () => { fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Discard" })); });
     expect(await first).toBe(true);
     // Nothing came back for the repeat, and the same question can be asked afresh once it is answered.
     expect(pendingConfirm()).toBeNull();
     const { answer: later } = await asking(() => confirmInApp(request));
-    await act(async () => { fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Keep editing" })); });
+    await act(async () => { fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Keep editing" })); });
     expect(await later).toBe(false);
   });
 
@@ -92,10 +99,10 @@ describe("the app's confirmation dialog", () => {
     render(<ConfirmDialogHost />);
     const { answer: first } = await asking(() => confirmInApp({ title: "First?", action: "Yes" }));
     const { answer: second } = await asking(() => confirmInApp({ title: "Second?", action: "Yes" }));
-    expect(screen.getAllByRole("dialog")).toHaveLength(1);
-    await act(async () => { fireEvent.click(within(screen.getByRole("dialog", { name: "First?" })).getByRole("button", { name: "Yes" })); });
+    expect(screen.getAllByRole("alertdialog")).toHaveLength(1);
+    await act(async () => { fireEvent.click(within(screen.getByRole("alertdialog", { name: "First?" })).getByRole("button", { name: "Yes" })); });
     expect(await first).toBe(true);
-    await act(async () => { fireEvent.click(within(screen.getByRole("dialog", { name: "Second?" })).getByRole("button", { name: "Cancel" })); });
+    await act(async () => { fireEvent.click(within(screen.getByRole("alertdialog", { name: "Second?" })).getByRole("button", { name: "Cancel" })); });
     expect(await second).toBe(false);
   });
 
@@ -117,10 +124,10 @@ describe("the app's confirmation dialog", () => {
       cancel: "Cancel",
     };
     await act(() => receive({ payload: ["expired", request] }));
-    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
 
     const { answer } = await asking(() => receive({ payload: ["current", request] }));
-    const dialog = screen.getByRole("dialog", { name: request.title });
+    const dialog = screen.getByRole("alertdialog", { name: request.title });
     expect(labels(dialog)).toEqual(["Cancel", "Quit and Stop All", "Quit and Keep Running"]);
     await act(async () => { fireEvent.click(within(dialog).getByRole("button", { name: "Quit and Stop All" })); });
     await answer;
@@ -140,14 +147,14 @@ describe("the app's confirmation dialog", () => {
     const { answer } = await asking(() => receive({
       payload: ["current", { title: "Quit TerminalX?", action: "Quit Anyway", cancel: "Keep Running" }],
     }));
-    expect(screen.getByRole("dialog", { name: "Quit TerminalX?" })).toBeTruthy();
+    expect(screen.getByRole("alertdialog", { name: "Quit TerminalX?" })).toBeTruthy();
     await act(() => receive({ payload: ["older", null] }));
-    expect(screen.getByRole("dialog", { name: "Quit TerminalX?" })).toBeTruthy();
+    expect(screen.getByRole("alertdialog", { name: "Quit TerminalX?" })).toBeTruthy();
     await act(() => vi.advanceTimersByTimeAsync(2_000));
     rust.withdraw();
     await act(() => receive({ payload: ["current", null] }));
     await answer;
-    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
     await act(() => vi.advanceTimersByTimeAsync(4_000));
     expect(desktop.invoke.mock.calls).toEqual([
       ["reply_to_quit_prompt", { id: "current", reply: "opened" }],
@@ -166,12 +173,12 @@ describe("the app's confirmation dialog", () => {
     const { answer } = await asking(() => receive({ payload: ["current", request] }));
 
     await act(() => receive({ payload: ["forged", { title: "Something else?", action: "Yes" }] }));
-    expect(screen.getByRole("dialog", { name: "Quit TerminalX?" })).toBeTruthy();
-    expect(screen.queryByRole("dialog", { name: "Something else?" })).toBeNull();
+    expect(screen.getByRole("alertdialog", { name: "Quit TerminalX?" })).toBeTruthy();
+    expect(screen.queryByRole("alertdialog", { name: "Something else?" })).toBeNull();
     await act(() => vi.advanceTimersByTimeAsync(2_000));
     expect(rust.heartbeats).toBe(1);
 
-    await act(async () => { fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Quit Anyway" })); });
+    await act(async () => { fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Quit Anyway" })); });
     await answer;
     expect(rust.answer).toBe("action");
     expect(desktop.invoke.mock.calls).toEqual([
@@ -192,15 +199,15 @@ describe("the app's confirmation dialog", () => {
     }));
 
     await act(() => receive({ payload: ["current", null] }));
-    expect(screen.getByRole("dialog", { name: "Quit TerminalX?" })).toBeTruthy();
+    expect(screen.getByRole("alertdialog", { name: "Quit TerminalX?" })).toBeTruthy();
     // The probe failing over IPC says nothing either way: the card stays.
     desktop.invoke.mockRejectedValueOnce(new Error("lost IPC reply"));
     await act(() => receive({ payload: ["current", null] }));
-    expect(screen.getByRole("dialog", { name: "Quit TerminalX?" })).toBeTruthy();
+    expect(screen.getByRole("alertdialog", { name: "Quit TerminalX?" })).toBeTruthy();
     await act(() => vi.advanceTimersByTimeAsync(2_000));
     expect(rust.heartbeats).toBe(2);
 
-    await act(async () => { fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Keep Running" })); });
+    await act(async () => { fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Keep Running" })); });
     await answer;
     expect(rust.answer).toBe("cancel");
   });
@@ -218,8 +225,8 @@ describe("the app's confirmation dialog", () => {
       payload: ["second", { title: "Keep work running?", action: "Quit and Keep Running", alternative: "Quit and Stop All", cancel: "Cancel" }],
     }));
     await first;
-    expect(screen.queryByRole("dialog", { name: "Quit TerminalX?" })).toBeNull();
-    const dialog = screen.getByRole("dialog", { name: "Keep work running?" });
+    expect(screen.queryByRole("alertdialog", { name: "Quit TerminalX?" })).toBeNull();
+    const dialog = screen.getByRole("alertdialog", { name: "Keep work running?" });
     await act(() => vi.advanceTimersByTimeAsync(2_000));
     await act(async () => { fireEvent.click(within(dialog).getByRole("button", { name: "Quit and Stop All" })); });
     await second;

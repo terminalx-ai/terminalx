@@ -191,7 +191,7 @@ export function IssueTitle({ edits, title }: { edits: IssueEdits; title: string 
           <button
             ref={trigger}
             type="button"
-            aria-label="Edit title"
+            aria-label={`Edit title: ${title}`}
             title="Click to edit the title"
             onClick={() => setDraft(title)}
             className="-mx-1 w-[calc(100%+0.5rem)] cursor-text rounded px-1 text-left hover:bg-veil-raised"
@@ -205,7 +205,15 @@ export function IssueTitle({ edits, title }: { edits: IssueEdits; title: string 
     );
   }
   return (
-    <div ref={box} className="flex min-w-0 flex-1 items-center gap-1.5">
+    <div
+      ref={box}
+      className="flex min-w-0 flex-1 items-center gap-1.5"
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+          void save();
+        }
+      }}
+    >
       <input
         autoFocus
         aria-label="Title"
@@ -223,6 +231,12 @@ export function IssueTitle({ edits, title }: { edits: IssueEdits; title: string 
         className="min-w-0 flex-1 rounded-md bg-well px-2 py-1 text-[15px] font-semibold leading-snug outline-none focus-visible:ring-2 focus-visible:ring-ring/30 read-only:opacity-60"
       />
       {saving && <Loader2 className="size-3.5 shrink-0 animate-spin text-faint" />}
+      <Button type="button" variant="accent" size="xs" disabled={saving || !draft.trim()} onClick={() => void save()}>
+        Save
+      </Button>
+      <Button type="button" variant="ghost" size="xs" disabled={saving} onClick={close}>
+        Cancel
+      </Button>
     </div>
   );
 }

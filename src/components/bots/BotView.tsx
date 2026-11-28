@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { MachineHostError } from "@/components/machines/MachineHostError";
 import { BotDuties } from "@/components/bots/BotDuties";
 import { Bot as BotIcon, Brain, CircleDot, Home, LayoutGrid, ListChecks, Loader2, MessageSquare, MessageSquarePlus, PanelLeft, Pause, Play, ShieldOff, Settings2, Sparkles } from "@/icons";
@@ -78,6 +78,12 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
   const [startedId, setStartedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const activeBotId = useRef(botId);
+  activeBotId.current = botId;
+  useEffect(() => {
+    setError(null);
+    setBusy(false);
+  }, [botId]);
   useEffect(() => setStartedId(null), [chatId]);
   // The team brief, open where a chat would be (PRO-475).
   const [briefOpen, setBriefOpen] = useState(false);
@@ -146,8 +152,14 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
   }
 
   const act = (action: () => Promise<unknown>) => {
+    const forBot = bot.id;
     setBusy(true);
-    action().then(() => setError(null), (cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
+    action()
+      .then(
+        () => { if (activeBotId.current === forBot) setError(null); },
+        (cause) => { if (activeBotId.current === forBot) setError(errorMessage(cause)); },
+      )
+      .finally(() => { if (activeBotId.current === forBot) setBusy(false); });
   };
   const newChat = (org?: string) => act(async () => {
     const chat = await startBotChat(bot.id, org);
@@ -180,7 +192,7 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
       </div>
       {error && <MachineHostError error={error} onRestarted={() => setError(null)} onFailed={setError} className="shrink-0 px-5 py-2 text-xs" />}
       {tab === "chat" ? (
-        <div role="tabpanel" aria-label="Chat" className="flex min-h-0 flex-1">
+        <div role="tabpanel" aria-label="Chat" className="@container/bot-chat flex min-h-0 flex-1 flex-col @2xl/bot-chat:flex-row">
           <ChatList bot={bot} chats={chats} startedBy={startedBy} dutyRuns={dutyRuns} openId={briefOpen ? null : open?.id ?? null} onOpen={select} onNewChat={newChat} busy={busy} briefOpen={briefOpen} onOpenBrief={() => setBriefOpen(true)} />
           <section className="flex min-h-0 min-w-0 flex-1 flex-col">
             {bot.paused && (
@@ -221,7 +233,7 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
       ) : (
         <div role="tabpanel" aria-label="Settings" className="min-h-0 flex-1 overflow-y-auto scrollbar-thin" data-testid="bot-view-settings">
           <div className="px-8 py-4">
-            <BotSettings bot={bot} />
+            <BotSettings key={bot.id} bot={bot} />
           </div>
         </div>
       )}
@@ -363,7 +375,7 @@ function ChatList({ bot, chats, startedBy, dutyRuns = [], openId, onOpen, onNewC
     return key === null ? "No longer works here" : places.find((place) => place.key === key)?.name;
   };
   return (
-    <nav aria-label={`${bot.name}'s chats`} className="flex w-[236px] shrink-0 flex-col gap-4 overflow-y-auto border-r border-hairline px-2 py-3">
+    <nav aria-label={`${bot.name}'s chats`} className="flex max-h-[35%] w-full shrink-0 flex-col gap-4 overflow-y-auto border-b border-hairline px-2 py-3 @2xl/bot-chat:max-h-none @2xl/bot-chat:w-[236px] @2xl/bot-chat:border-r @2xl/bot-chat:border-b-0">
       <ChatGroup label={`Chats with ${bot.name}`} action={places.length > 1 ? <NewChatIn bot={bot} places={places} busy={busy} onNewChat={onNewChat} /> : (
         <WithTooltip label="New chat">
           <Button variant="ghost" size="icon-xs" aria-label={`New chat with ${bot.name}`} disabled={busy} onClick={() => onNewChat()}><MessageSquarePlus /></Button>

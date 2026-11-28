@@ -175,7 +175,7 @@ function LocalTabActions({ session, selected, newTabs }: { session: SessionEntry
   }, []);
   const moveLeft = useCallback(() => move("left"), [move]);
   const moveRight = useCallback(() => move("right"), [move]);
-  const reopen = useCallback(() => void reopenClosedTab(now.current.row).catch((error) => console.error("reopening the tab failed", error)), []);
+  const reopen = useCallback(() => void reopenClosedTab(now.current.row).catch((error) => showError("Couldn’t reopen the tab", error)), []);
   const positions = useMemo(() => TAB_POSITION_SHORTCUTS.map((action, index) => ({ action, open: () => void openTabAt(now.current.row, index + 1) })), []);
   useShortcut("session.newTab", openMenu, { enabled: newTabs });
   useShortcut("session.closeTab", closeActive);
@@ -188,7 +188,7 @@ function LocalTabActions({ session, selected, newTabs }: { session: SessionEntry
   useShortcut("session.newBrowserTab", useCallback(() => void openLocalTab(now.current.row.session, "browser"), []), { enabled: newTabs });
   useShortcut("session.forkTab", useCallback(() => {
     const active = shown();
-    if (active?.kind === "agent" && !isShellPeer(active)) void forkSession(sessionOfPeer(now.current.row.session.id, active), active.id).catch((error) => console.error("forking the conversation failed", error));
+    if (active?.kind === "agent" && !isShellPeer(active)) void forkSession(sessionOfPeer(now.current.row.session.id, active), active.id).catch((error) => showError("Couldn’t fork the conversation", error));
   }, []));
 
   const positionKeys = positions.map(({ action, open }) => <TabPositionShortcut key={action} action={action} open={open} />);
@@ -359,9 +359,13 @@ function CloudTabActions({ session, selected, cloud, onShowPorts, newTabs }: { s
   // A stopped workspace this attachment may manage: Terminal is the one item that wakes it, and only when chosen.
   // Not for a viewer or a driver (PRO-30): terminals are a manager's, so their wake would end in a refusal.
   const wakesForTerminal = cloud.canWakeForTerminal;
-  const run = (action: () => Promise<unknown>) => {
+  const run = (label: string, action: () => Promise<unknown>) => {
     setError(null);
-    void action().catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+    void action().catch((e: unknown) => {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+      showError(label, e);
+    });
   };
   const prefs = getPrefs();
   const positionKeys = positions.map(({ action, open }) => <TabPositionShortcut key={action} action={action} open={open} />);
@@ -377,7 +381,7 @@ function CloudTabActions({ session, selected, cloud, onShowPorts, newTabs }: { s
           <DropdownMenuItem
             key={agent.id}
             disabled={!!blocked || !cloud.canAddTabs}
-            onSelect={() => run(() => cloud.addAgentTab({ agent: agent.id, ...cloudTabModel(models, foreign, agent.id, prefs), mode: prefs.lastMode }))}
+            onSelect={() => run(`Couldn’t open a new ${agent.name} tab`, () => cloud.addAgentTab({ agent: agent.id, ...cloudTabModel(models, foreign, agent.id, prefs), mode: prefs.lastMode }))}
           >
             <AgentMark id={agent.id} decorative /><span>{agent.name}</span>
             {!blocked && !cloud.canAddTabs ? <span className="ml-auto pl-3 text-[12px] text-faint">update the runtime</span> : null}
@@ -385,11 +389,11 @@ function CloudTabActions({ session, selected, cloud, onShowPorts, newTabs }: { s
         ))}
         <DropdownMenuSeparator />
         {wakesForTerminal ? (
-          <DropdownMenuItem onSelect={() => run(() => cloud.openTerminal({ wake: true }))} aria-label="Terminal on the VM: wakes the workspace">
+          <DropdownMenuItem onSelect={() => run("Couldn’t open a new terminal", () => cloud.openTerminal({ wake: true }))} aria-label="Terminal on the VM: wakes the workspace">
             <TerminalSquare /><span>Terminal</span><span className="ml-auto pl-3 text-[12px] text-warning">wakes the workspace</span>
           </DropdownMenuItem>
         ) : (
-          <DropdownMenuItem disabled={!!blocked} onSelect={() => run(() => cloud.openTerminal())}>
+          <DropdownMenuItem disabled={!!blocked} onSelect={() => run("Couldn’t open a new terminal", () => cloud.openTerminal())}>
             <TerminalSquare /><span>Terminal</span><span className="ml-auto pl-3 text-[12px] text-faint">{cloud.machine ? `on ${cloud.machine.name}` : "on the VM"}</span>
           </DropdownMenuItem>
         )}

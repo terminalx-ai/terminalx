@@ -11,12 +11,13 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn().mockResolvedValue(undefined),
   listen: vi.fn(),
   unlisten: vi.fn(),
+  setZoom: vi.fn().mockResolvedValue(undefined),
   openProject: vi.fn(),
   projects: [{ path: "/repo", name: "Project" }],
   changes: new Set<() => void>(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke, isTauri: () => true }));
-vi.mock("@tauri-apps/api/webviewWindow", () => ({ getCurrentWebviewWindow: () => ({ listen: mocks.listen }) }));
+vi.mock("@tauri-apps/api/webviewWindow", () => ({ getCurrentWebviewWindow: () => ({ listen: mocks.listen, setZoom: mocks.setZoom }) }));
 vi.mock("./sessions", () => ({
   getSessionStore: () => ({ projects: mocks.projects }),
   openProjectOverview: mocks.openProject,
@@ -182,5 +183,25 @@ describe("native menu integration", () => {
     await waitFor(() => expect(mocks.unlisten).toHaveBeenCalledOnce());
     expect(mocks.invoke).not.toHaveBeenCalled();
     expect(mocks.changes.size).toBe(0);
+  });
+
+  it("persists zoom level across mounts and syncs zoom changes across windows", async () => {
+    const { ZOOM_STORAGE_KEY } = await import("./nativeMenuBridge");
+    localStorage.setItem(ZOOM_STORAGE_KEY, "1.2");
+    const { unmount } = renderHook(useNativeMenus);
+    cleanups.push(unmount);
+    expect(mocks.setZoom).toHaveBeenCalledWith(1.2);
+
+    dispatchNativeMenu("app.zoomIn");
+    expect(localStorage.getItem(ZOOM_STORAGE_KEY)).toBe("1.3");
+    expect(mocks.setZoom).toHaveBeenLastCalledWith(1.3);
+
+    window.dispatchEvent(new StorageEvent("storage", { key: ZOOM_STORAGE_KEY, newValue: "0.9", storageArea: localStorage }));
+    expect(mocks.setZoom).toHaveBeenLastCalledWith(0.9);
+
+    dispatchNativeMenu("app.zoomReset");
+    expect(localStorage.getItem(ZOOM_STORAGE_KEY)).toBe("1");
+    expect(mocks.setZoom).toHaveBeenLastCalledWith(1);
+    localStorage.removeItem(ZOOM_STORAGE_KEY);
   });
 });

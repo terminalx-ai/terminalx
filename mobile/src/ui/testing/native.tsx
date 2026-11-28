@@ -11,7 +11,7 @@ type Props = Record<string, any>;
 const flatten = (style: unknown): Record<string, unknown> => Array.isArray(style) ? Object.assign({}, ...style.map(flatten)) : style && typeof style === "object" ? style as Record<string, unknown> : {};
 
 /** What a view says to the screen and to assistive technology, as attributes. */
-function attributes({ testID, style, accessibilityRole, accessibilityLabel, accessibilityHint, accessibilityState, accessibilityValue, accessibilityElementsHidden, importantForAccessibility }: Props, pressed = false) {
+function attributes({ testID, style, accessibilityRole, accessibilityLabel, accessibilityHint, accessibilityState, accessibilityValue, accessibilityElementsHidden, importantForAccessibility, accessibilityViewIsModal, onAccessibilityEscape, hitSlop }: Props, pressed = false) {
   const flat = flatten(typeof style === "function" ? style({ pressed }) : style);
   return {
     "data-testid": testID,
@@ -24,6 +24,9 @@ function attributes({ testID, style, accessibilityRole, accessibilityLabel, acce
     "aria-selected": accessibilityState?.selected ? true : undefined,
     "aria-busy": accessibilityState?.busy ? true : undefined,
     "aria-hidden": accessibilityElementsHidden || importantForAccessibility === "no-hide-descendants" ? true : undefined,
+    "aria-modal": accessibilityViewIsModal ? true : undefined,
+    "data-has-escape": onAccessibilityEscape ? "true" : undefined,
+    "data-hit-slop": hitSlop !== undefined ? JSON.stringify(hitSlop) : undefined,
   };
 }
 
@@ -89,5 +92,19 @@ export const AppState = {
   emit: (state: string) => { for (const listener of [...appStateListeners]) listener(state); },
 };
 export const Keyboard = { addListener: () => ({ remove: () => undefined }), dismiss: vi.fn(), isVisible: () => false };
+const backListeners: (() => boolean)[] = [];
+export const BackHandler = {
+  addEventListener: (_event: string, listener: () => boolean) => {
+    backListeners.push(listener);
+    return { remove: () => { const at = backListeners.lastIndexOf(listener); if (at >= 0) backListeners.splice(at, 1); } };
+  },
+  /** Trigger Android hardware back (LIFO, matching React Native). */
+  emit: (): boolean => {
+    for (let i = backListeners.length - 1; i >= 0; i--) {
+      if (backListeners[i]!()) return true;
+    }
+    return false;
+  },
+};
 /** An iPhone SE at the standard text size: tab pages read it to lay themselves out again at a new size (PRO-601). */
 export const useWindowDimensions = () => ({ width: 375, height: 667, scale: 2, fontScale: 1 });

@@ -38,6 +38,7 @@ vi.mock("@/lib/machines", () => ({
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 
 const { BotDuties } = await import("./BotDuties");
+const { BotsDuties } = await import("./BotsDuties");
 
 const argus: Bot = {
   id: "b1", slug: "argus", name: "Argus", roleTitle: "Watcher", roleTemplateId: "watcher", harness: "claude", model: "", access: "full", runsOn: "thisMac",
@@ -450,5 +451,37 @@ describe("a duty's page after review (PRO-492)", () => {
     expect(page.textContent).not.toContain("an-old-model");
     const lastRunCard = within(page).getAllByTestId("duty-stat").find((card) => card.textContent?.startsWith("Last run"))!;
     expect(lastRunCard.textContent).toContain("Looking…");
+  });
+
+  it("wraps disabled wake tiles in hoverable spans for tooltips (U-47)", () => {
+    mocks.bots = { ...mocks.bots, bots: [argus, atlas] };
+    mocks.automations = { ...mocks.automations, automations: [] };
+    render(<BotDuties bot={argus} onOpenSession={() => {}} />);
+    const disabledTiles = screen.getAllByTestId("duty-wake").filter((el) => (el as HTMLButtonElement).disabled);
+    expect(disabledTiles.length).toBeGreaterThan(0);
+    for (const tile of disabledTiles) {
+      expect(tile.parentElement?.tagName).toBe("SPAN");
+    }
+  });
+
+  it("renders keyboard-focusable buttons and event-driven states in BotsDuties list (U-45)", () => {
+    const eventDuty = duty("d-ev", "PR check watcher", {
+      eventTrigger: {
+        source: { kind: "githubPullRequest", repo: "acme/app", events: ["opened"], base: null, author: null, labels: [], draft: null, fromForks: false },
+        pollIntervalMinutes: 5,
+        maxRunsPerTick: 1,
+      },
+    });
+    mocks.bots = { ...mocks.bots, bots: [argus, atlas] };
+    mocks.automations = { ...mocks.automations, automations: [eventDuty], runs: {} };
+    render(<BotsDuties />);
+    fireEvent.click(screen.getByRole("radio", { name: "List" }));
+    const row = screen.getByTestId("bots-duties-row");
+    const button = within(row).getByRole("button", { name: "PR check watcher" });
+    expect(button.tagName).toBe("BUTTON");
+    expect(row.textContent).toContain("Next: on event");
+    expect(row.textContent).not.toContain("Next: soon");
+    fireEvent.click(button);
+    expect(screen.getByTestId("duty-editor")).toBeTruthy();
   });
 });

@@ -48,7 +48,7 @@ describe("Settings search", () => {
     render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
     expect(screen.getAllByRole("alert")).toHaveLength(1);
     fireEvent.change(search(), { target: { value: "text size" } });
-    expect(screen.getByRole("option", { name: /Text size/ })).toBeTruthy();
+    expect(screen.getByRole("row", { name: /Text size/ })).toBeTruthy();
     expect(screen.getAllByRole("alert")).toHaveLength(1);
     expect(screen.getByRole("alert").textContent).toContain("preferences.sounds, line 3");
   });
@@ -57,14 +57,17 @@ describe("Settings search", () => {
   it("puts each row's live control on its result, and using it does not open the page", async () => {
     render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
     fireEvent.change(search(), { target: { value: "link actions" } });
-    const option = screen.getByRole("option", { name: /Link actions/ });
-    const control = await within(option).findByRole("switch");
+    const resultRow = screen.getByRole("row", { name: /Link actions/ });
+    // U-42: live interactive controls must not live inside role="option".
+    expect(screen.queryByRole("option")).toBeNull();
+    const control = await within(resultRow).findByRole("switch");
+    expect(control.closest('[role="option"]')).toBeNull();
     const before = control.getAttribute("aria-checked");
     fireEvent.click(control);
     await waitFor(() => expect(control.getAttribute("aria-checked")).not.toBe(before));
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Results for “link actions”");
     // The description is one line; the full text is its tooltip.
-    expect(option.querySelector("[title]")?.className).toContain("truncate");
+    expect(resultRow.querySelector("[title]")?.className).toContain("truncate");
   });
 
   // Review of PRO-374: typing a query must not start a page's disk or network work.
@@ -72,7 +75,7 @@ describe("Settings search", () => {
     const scan = vi.spyOn(api, "scanLeftovers").mockResolvedValue([] as never);
     render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
     fireEvent.change(search(), { target: { value: "leftovers" } });
-    expect(screen.getAllByRole("option").length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("row").length).toBeGreaterThan(0);
     await act(async () => {});
     expect(scan).not.toHaveBeenCalled();
   });
@@ -85,7 +88,7 @@ describe("Settings search", () => {
     await act(async () => {});
     const before = settings.mock.calls.length;
     fireEvent.change(search(), { target: { value: "session cost" } });
-    await within(screen.getByRole("option", { name: /Session cost/ })).findByRole("switch");
+    await within(screen.getByRole("row", { name: /Session cost/ })).findByRole("switch");
     await act(async () => {});
     expect(settings.mock.calls.length).toBe(before);
   });
@@ -95,7 +98,7 @@ describe("Settings search", () => {
     vi.spyOn(experimental, "setSessionCost").mockRejectedValue(new Error("refused by the runtime"));
     render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
     fireEvent.change(search(), { target: { value: "session cost" } });
-    const control = await within(screen.getByRole("option", { name: /Session cost/ })).findByRole("switch");
+    const control = await within(screen.getByRole("row", { name: /Session cost/ })).findByRole("switch");
     await waitFor(() => expect(control.hasAttribute("disabled")).toBe(false));
     fireEvent.click(control);
     // The page's own alert is hidden with the page; the results say it.
@@ -109,17 +112,17 @@ describe("Settings search", () => {
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Results for “text size”");
     const expected = groupSettingsByPage(searchSettings("text size"));
     expect(screen.getByText(`${settingsSearchSummary(searchSettings("text size"))} · ↑↓ to move · ↵ opens the setting · esc clears`)).toBeTruthy();
-    const listbox = screen.getByRole("listbox", { name: "Settings search results" });
-    const pages = within(listbox).getAllByRole("group");
+    const grid = screen.getByRole("grid", { name: "Settings search results" });
+    const pages = within(grid).getAllByRole("rowgroup");
     expect(pages.map((page) => document.getElementById(page.getAttribute("aria-labelledby")!)?.textContent)).toEqual(expected.map((page) => page.title));
     expect(pages[0].textContent).toContain("General");
-    pages.forEach((page, index) => expect(within(page).getAllByRole("option")).toHaveLength(expected[index].matches.length));
-    const first = within(pages[0]).getByRole("option");
+    pages.forEach((page, index) => expect(within(page).getAllByRole("row")).toHaveLength(expected[index].matches.length));
+    const first = within(pages[0]).getByRole("row");
     expect(first.textContent).toContain("Text size");
     expect(first.textContent).toContain("Scales the transcript and composer.");
     expect(first.querySelector("mark")?.textContent).toBe("Text");
     // Rows, not sections: the old section results are gone.
-    expect(within(listbox).queryByRole("option", { name: /^General/ })).toBeNull();
+    expect(within(grid).queryByRole("row", { name: /^General/ })).toBeNull();
   });
 
   it("lists what 'font' finds by page with its count, marks the matched text, and Enter opens and highlights the first row", () => {
@@ -132,15 +135,15 @@ describe("Settings search", () => {
     expect(found.length).toBeLessThanOrEqual(SETTINGS_SEARCH_LIMIT);
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Results for “font”");
     // The app's font setting is General › Text size (PRO-377); it is listed under its page.
-    expect(within(screen.getByRole("group", { name: "General" })).getByRole("option", { name: /Text size/ })).toBeTruthy();
+    expect(within(screen.getByRole("rowgroup", { name: "General" })).getByRole("row", { name: /Text size/ })).toBeTruthy();
     expect(screen.getByText(/^\d+ settings? on \d+ pages? · /)).toBeTruthy();
     expect(screen.getByText(`${settingsSearchSummary(found)} · ↑↓ to move · ↵ opens the setting · esc clears`)).toBeTruthy();
-    const listbox = screen.getByRole("listbox", { name: "Settings search results" });
-    const pages = within(listbox).getAllByRole("group");
+    const grid = screen.getByRole("grid", { name: "Settings search results" });
+    const pages = within(grid).getAllByRole("rowgroup");
     expect(pages.map((page) => page.getAttribute("aria-labelledby") && document.getElementById(page.getAttribute("aria-labelledby")!)?.textContent)).toEqual(expected.map((page) => page.title));
     // Each page lists its rows in ranked order, the matched characters marked.
     pages.forEach((page, index) => {
-      const options = within(page).getAllByRole("option");
+      const options = within(page).getAllByRole("row");
       expect(options.map((option) => option.id)).toEqual(expected[index].matches.map((match) => `settings-result-${match.id}`));
       options.forEach((option, row) => {
         const match = expected[index].matches[row];
@@ -154,7 +157,7 @@ describe("Settings search", () => {
     const first = expected[0].matches[0];
     expect(input.getAttribute("aria-activedescendant")).toBe(`settings-result-${first.id}`);
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(screen.queryByRole("grid")).toBeNull();
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe(first.sectionTitle);
     const target = row(first.id)!;
     expect(document.activeElement).toBe(target);
@@ -169,14 +172,14 @@ describe("Settings search", () => {
       fireEvent.keyDown(document.body, { key: "f", metaKey: isMac, ctrlKey: !isMac });
       expect(document.activeElement).toBe(input);
       fireEvent.change(input, { target: { value: "text size" } });
-      const result = screen.getByRole("option", { name: /Text size/ });
+      const result = screen.getByRole("row", { name: /Text size/ });
       expect(input.getAttribute("aria-activedescendant")).toBe(result.id);
       result.closest("section")!.scrollTop = 400;
       const scrolled = vi.mocked(Element.prototype.scrollIntoView);
       scrolled.mockClear();
       fireEvent.keyDown(input, { key: "Enter" });
       expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
-      expect(screen.queryByRole("listbox")).toBeNull();
+      expect(screen.queryByRole("grid")).toBeNull();
       expect(input.value).toBe("");
       const target = row("general.textSize")!;
       expect(document.activeElement).toBe(target);
@@ -218,7 +221,7 @@ describe("Settings search", () => {
   it("opens a repository row on the repositories page, which asks for a repository when none is added", () => {
     render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
     fireEvent.change(search(), { target: { value: "worktreeinclude" } });
-    fireEvent.click(screen.getByRole("option", { name: /Files to copy/ }));
+    fireEvent.click(screen.getByRole("row", { name: /Files to copy/ }));
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Projects");
     const navigation = screen.getByRole("navigation", { name: "Settings sections" });
     expect(within(navigation).getByRole("group", { name: "Projects" })).toBeTruthy();
@@ -229,7 +232,7 @@ describe("Settings search", () => {
     render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
     const input = search();
     fireEvent.change(input, { target: { value: "theme" } });
-    const results = screen.getAllByRole("option");
+    const results = screen.getAllByRole("row");
     const active = () => input.getAttribute("aria-activedescendant");
     const selectedIds = () => results.filter((result) => result.getAttribute("aria-selected") === "true").map((result) => result.id);
     expect(active()).toBe(results[0].id);
@@ -250,7 +253,7 @@ describe("Settings search", () => {
     expect(index).toBe(0);
     fireEvent.keyDown(input, { key: "ArrowUp" });
     fireEvent.change(input, { target: { value: "text size" } });
-    const result = screen.getAllByRole("option")[0];
+    const result = screen.getAllByRole("row")[0];
     expect(result.textContent).toContain("Text size");
     expect(active()).toBe(result.id);
     fireEvent.click(result);
@@ -261,7 +264,7 @@ describe("Settings search", () => {
   it("opens a clicked result on its row", () => {
     render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
     fireEvent.change(search(), { target: { value: "theme" } });
-    const theme = screen.getAllByRole("option")[0];
+    const theme = screen.getAllByRole("row")[0];
     expect(theme.textContent).toContain("Theme");
     fireEvent.click(theme);
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Appearance");
@@ -276,7 +279,7 @@ describe("Settings search", () => {
     const empty = screen.getByRole("status");
     expect(within(empty).getByText("No settings match “zzqx”")).toBeTruthy();
     expect(empty.textContent).toContain("Try fewer letters, or search keyboard shortcuts.");
-    expect(screen.queryByRole("option")).toBeNull();
+    expect(screen.queryByRole("row")).toBeNull();
     expect(screen.queryByText(/↑↓ to move/)).toBeNull();
     fireEvent.keyDown(input, { key: "ArrowDown" });
     fireEvent.keyDown(input, { key: "Enter" });
@@ -293,14 +296,23 @@ describe("Settings search", () => {
     const onBack = vi.fn();
     render(<SettingsPage initialTab="appearance" onBack={onBack} />);
     fireEvent.change(search(), { target: { value: "theme" } });
-    expect(screen.getAllByRole("option").length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("row").length).toBeGreaterThan(0);
     fireEvent.keyDown(search(), { key: "Escape" });
     expect(search().value).toBe("");
-    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(screen.queryByRole("grid")).toBeNull();
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Appearance");
     expect(onBack).not.toHaveBeenCalled();
     fireEvent.keyDown(search(), { key: "Escape" });
     expect(onBack).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not close Settings on Escape when focus is inside an inline editable field (U-05)", () => {
+    const onBack = vi.fn();
+    render(<SettingsPage initialTab="general" onBack={onBack} />);
+    const textarea = screen.getByRole("textbox", { name: "Fix errors instructions" });
+    textarea.focus();
+    fireEvent.keyDown(textarea, { key: "Escape" });
+    expect(onBack).not.toHaveBeenCalled();
   });
 
   it("opens Shortcuts from the empty state's keyboard shortcuts link", () => {
@@ -356,7 +368,7 @@ describe("Settings search", () => {
     const input = search();
     fireEvent.change(input, { target: { value: "theme" } });
     fireEvent.keyDown(input, { key: "Enter", isComposing: true });
-    expect(screen.getAllByRole("option")[0].textContent).toContain("Theme");
+    expect(screen.getAllByRole("row")[0].textContent).toContain("Theme");
     rerender(<SettingsPage initialTab="general" openRequest={2} onBack={vi.fn()} />);
     expect(input.value).toBe("");
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
@@ -556,13 +568,13 @@ describe("grouped settings navigation and row links (PRO-123)", () => {
     const input = screen.getByRole("combobox", { name: "Search settings" });
     input.focus();
     fireEvent.change(input, { target: { value: "theme" } });
-    expect(screen.getAllByRole("option").length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("row").length).toBeGreaterThan(0);
     expect(view.container.querySelector("[data-setting-highlight]")).toBeNull();
 
     view.rerender(<SettingsPage initialTab="general.textSize" openRequest={2} onBack={vi.fn()} />);
 
     expect((input as HTMLInputElement).value).toBe("");
-    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(screen.queryByRole("grid")).toBeNull();
     expect(document.activeElement).toBe(view.container.querySelector('[data-setting-id="general.textSize"]'));
     expect(view.container.querySelector<HTMLElement>('[data-setting-id="general.textSize"]')!.dataset.settingHighlight).toBe("on");
   });

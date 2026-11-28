@@ -1,4 +1,4 @@
-import { cloneElement, createContext, useContext, type ComponentProps, type ReactElement, type ReactNode } from "react";
+import { cloneElement, createContext, isValidElement, useContext, type ComponentProps, type ReactElement, type ReactNode } from "react";
 import { ThisComputer, thisComputer, profile, secretStore, secretStoreShort, secretStoreThe, secretStoreWord } from "@/lib/platform";
 import { createPortal } from "react-dom";
 import { SETTING_ROW_CLASS, type SettingRow } from "@/components/ui/controls";
@@ -107,19 +107,26 @@ function defineSetting<const T extends SettingDefinition>(definition: T): T & Se
     }
     // SettingRow's own structure and classes (controls.tsx), with the row's “…” actions beside the title (design 09.04, 09.23).
     const { label = definition.title, description = definition.hideDescription ? undefined : definition.description, control = null, stacked, disabled, id, titleAccessory } = props;
+    const labelId = id ?? `setting-label-${definition.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+    const labelledControl = isValidElement<Record<string, unknown>>(control)
+      && !control.props["aria-label"]
+      && !control.props["aria-labelledby"]
+      && (control.props.children === undefined || control.type === "select")
+      ? cloneElement(control, { "aria-labelledby": labelId })
+      : control;
     return <div {...anchor} className="group/setting min-w-0 outline-none">
       <div className={cn(SETTING_ROW_CLASS, disabled && "opacity-60")}>
         <div className={cn("flex gap-4", stacked ? "flex-col" : "items-center justify-between")}>
           <div className="min-w-0">
             <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[13px] font-medium">
-              <span id={id} className="min-w-0">{label}</span>
+              <span id={labelId} className="min-w-0">{label}</span>
               {accessory}
               {titleAccessory}
               {!definition.hideRowMenu && <SettingRowActions id={definition.id as SettingId} title={definition.title} label={label} userKeys={keys.length ? keys : undefined} />}
             </div>
             {description && <div className="text-xs leading-relaxed text-muted-foreground">{description}</div>}
           </div>
-          <div className={cn(stacked ? "" : "shrink-0")}>{control}</div>
+          <div className={cn(stacked ? "" : "shrink-0")}>{labelledControl}</div>
         </div>
       </div>
     </div>;
@@ -1167,8 +1174,17 @@ type RegisteredProps = Omit<RowProps, "children" | "control"> & (
 export const SettingControlSlots = createContext<ReadonlyMap<string, HTMLElement> | null>(null);
 export function RegisteredSetting({ setting, ...props }: RegisteredProps) {
   const slots = useContext(SettingControlSlots);
-  const slot = slots && byId.get(setting)!.layout !== "content" && !props.instance ? slots.get(setting) : undefined;
-  return <>{byId.get(setting)!.render(props)}{slot && props.control ? createPortal(props.control, slot) : null}</>;
+  const definition = byId.get(setting)!;
+  const slot = slots && definition.layout !== "content" && !props.instance ? slots.get(setting) : undefined;
+  const portalControl = slot && props.control
+    ? (isValidElement<Record<string, unknown>>(props.control)
+      && !props.control.props["aria-label"]
+      && !props.control.props["aria-labelledby"]
+      && (props.control.props.children === undefined || props.control.type === "select")
+      ? cloneElement(props.control, { "aria-label": props.label ?? definition.title })
+      : props.control)
+    : null;
+  return <>{definition.render(props)}{slot && portalControl ? createPortal(portalControl, slot) : null}</>;
 }
 /** Whether a link names one row (by its id, or a moved row's old id) rather than a section or nothing known. */
 export function isRowLink(target: unknown): boolean {

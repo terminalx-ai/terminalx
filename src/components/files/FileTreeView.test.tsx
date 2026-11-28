@@ -250,7 +250,7 @@ describe("FileTreeView", () => {
       render(<FileTreeView sessionId="f" root="/repos/alpha" rootName="alpha" active />);
       fireEvent.contextMenu(await screen.findByText("a.ts"));
       fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Discard changes" }));
-      const dialog = await screen.findByRole("dialog");
+      const dialog = await screen.findByRole("alertdialog");
       // The dialog names the file (PRO-400). The tree has no line counts for it, so it says what goes back without them.
       expect(within(dialog).getByText("Discard changes to a.ts?")).toBeTruthy();
       expect(dialog.textContent).toContain("go back to the last commit. This can’t be undone.");
@@ -265,7 +265,7 @@ describe("FileTreeView", () => {
       const view = render(<FileTreeView sessionId="f" root="/repos/alpha" rootName="alpha" active />);
       fireEvent.contextMenu(await screen.findByText("a.ts"));
       fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Discard changes" }));
-      expect((await screen.findByRole("dialog")).textContent).toContain("The file is not in that version, so it is deleted.");
+      expect((await screen.findByRole("alertdialog")).textContent).toContain("The file is not in that version, so it is deleted.");
       view.unmount();
 
       // The tree's own status is the unstaged one ("modified"); the index knows the file is new.
@@ -275,7 +275,7 @@ describe("FileTreeView", () => {
       render(<FileTreeView sessionId="f" root="/repos/alpha" rootName="alpha" active />);
       fireEvent.contextMenu(await screen.findByText("a.ts"));
       fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Discard changes" }));
-      expect((await screen.findByRole("dialog")).textContent).toContain("The file is not in that version, so it is deleted.");
+      expect((await screen.findByRole("alertdialog")).textContent).toContain("The file is not in that version, so it is deleted.");
     });
 
     it("greys out View diff and Discard for a file with no changes", async () => {
