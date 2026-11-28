@@ -210,7 +210,7 @@ fn owned_stdio_lifecycle_is_process_bounded() {
     for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread", "settings", "to-terminal",
         "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-slow-start", "share-ended", "host-while-shared",
         "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart", "resend-no-helper-tools",
-        "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch", "streamed-reply", "streamed-stopped",
+        "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch", "local-launch", "streamed-reply", "streamed-stopped",
         "mailbox-after-refusal", "mailbox-route-gone", "mailbox-route-sign-in", "mailbox-route-outage", "mailbox-cli-waiting", "busy-while-working", "queued-while-working", "queued-stop", "queued-interrupt", "queued-share-ended", "queued-overflow", "handover-stop", "handover-exit", "handover-descendant"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
@@ -1011,7 +1011,7 @@ here=$(dirname "$0")
 [ -n "${CODEX_HOME-}" ] && mkdir -p "$CODEX_HOME/tmp/arg0"
 if [ "$1" = "--version" ]; then printf '%s\n' "${CODEX_HOME-}" >> "$here/probes"; echo "codex-cli 0.166.0"; exit 0; fi
 printf '%s\n' "$@" > "$here/argv"
-printf 'CODEX_HOME=%s\nCODEX_API_KEY=%s\nNODE_ENV=%s\nOPENAI_API_KEY=%s\n' "${CODEX_HOME-}" "${CODEX_API_KEY-}" "${NODE_ENV-}" "${OPENAI_API_KEY-unset}" > "$here/env"
+printf 'CODEX_HOME=%s\nCODEX_API_KEY=%s\nNODE_ENV=%s\nOPENAI_API_KEY=%s\nRACCOON_HOOK_SOCKET=%s\n' "${CODEX_HOME-}" "${CODEX_API_KEY-}" "${NODE_ENV-}" "${OPENAI_API_KEY-unset}" "${RACCOON_HOOK_SOCKET-unset}" > "$here/env"
 while read -r line; do
   printf '%s\n' "$line" >> "$here/received"
   id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
@@ -1031,12 +1031,14 @@ done
 /// route, configuration and credential in a hook-free home, the variable the
 /// grant clears cleared, and the route's model; its thread is then picked up
 /// by the terminal engine when the reader opens the terminal view.
-fn cloud_launch_fixture() {
+fn cloud_launch_fixture(local: bool) {
     use std::os::unix::fs::PermissionsExt;
     let _home = store::temp_home();
     let root = store::root().unwrap();
     std::env::set_var("CODEX_HOME", root.join("user-codex"));
     std::env::set_var("OPENAI_API_KEY", "inherited");
+    // Not this app's own socket, if the tests run inside a TerminalX terminal.
+    std::env::remove_var("RACCOON_HOOK_SOCKET");
     std::fs::write(root.join("grant-auth.json"), "{\"workspace\":true}").unwrap();
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -1052,6 +1054,10 @@ fn cloud_launch_fixture() {
     let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
         Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
         Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    // The cloud browser switched off while the desktop is up (PRO-209):
+    // nothing of it reaches the launch.
+    crate::cloud_browser::set_desktop(true);
+    crate::cloud_browser::set_switch(false);
     manager.send("stdio-owner", "tab", "hello".into(), Vec::new()).unwrap();
     let events = || -> Vec<AgentEvent> { store::read_lines(&store::log_path("stdio-owner", "tab").unwrap()).unwrap_or_default() };
     let until = Instant::now() + WAIT;
@@ -1060,10 +1066,19 @@ fn cloud_launch_fixture() {
         std::thread::sleep(Duration::from_millis(20));
     }
     let argv: Vec<String> = std::fs::read_to_string(bin.join("argv")).unwrap().lines().map(str::to_owned).collect();
+    if local {
+        // Outside a workspace: the app server alone, and no browser hook socket.
+        assert_eq!(argv, ["app-server", "--listen", "stdio://"]);
+        let env = std::fs::read_to_string(bin.join("env")).unwrap();
+        assert!(env.lines().any(|line| line == "RACCOON_HOOK_SOCKET=unset"), "{env}");
+        assert!(!env.contains("cloud_browser"));
+        manager.stop("stdio-owner", "tab").unwrap();
+        return;
+    }
     assert_eq!(argv, ["-c", "model_provider=\"route\"", "-c", "developer_instructions=\"brief\"", "app-server", "--listen", "stdio://"]);
     let native = root.join("codex-native");
     let env = std::fs::read_to_string(bin.join("env")).unwrap();
-    assert_eq!(env.lines().collect::<Vec<_>>(), [format!("CODEX_HOME={}", native.display()).as_str(), "CODEX_API_KEY=grant-secret", "NODE_ENV=test", "OPENAI_API_KEY=unset"]);
+    assert_eq!(env.lines().collect::<Vec<_>>(), [format!("CODEX_HOME={}", native.display()).as_str(), "CODEX_API_KEY=grant-secret", "NODE_ENV=test", "OPENAI_API_KEY=unset", "RACCOON_HOOK_SOCKET=unset"]);
     assert_eq!(std::fs::read_link(native.join("auth.json")).unwrap(), root.join("grant-auth.json"), "the workspace's credential");
     let hooks: serde_json::Value = serde_json::from_slice(&std::fs::read(native.join("hooks.json")).unwrap()).unwrap();
     assert_eq!(hooks, json!({"hooks": {}}), "no Raccoon hook runs for an app-server session");
@@ -1901,7 +1916,8 @@ fn child_fixture() {
     if matches!(case.as_str(), "phone-input" | "phone-compact" | "phone-revoked" | "phone-reconcile-race" | "share-input" | "share-slow-start" | "share-ended" | "host-while-shared") { return remote_input_fixture(&case); }
     if matches!(case.as_str(), "continuation-delivered" | "continuation-undelivered" | "continuation-stopped" | "resend-after-restart" | "resend-no-helper-tools") { return continuation_fixture(&case); }
     if matches!(case.as_str(), "native-fallback-send" | "native-fallback-start" | "native-supported-start") { return first_launch_fixture(&case); }
-    if case == "cloud-launch" { return cloud_launch_fixture(); }
+    if case == "cloud-launch" { return cloud_launch_fixture(false); }
+    if case == "local-launch" { return cloud_launch_fixture(true); }
     if case.starts_with("bot-approval-") { return bot_approval_fixture(&case); }
     if matches!(case.as_str(), "mailbox-after-refusal" | "mailbox-route-gone" | "mailbox-route-sign-in" | "mailbox-route-outage" | "mailbox-cli-waiting") { return mailbox_fixture(&case); }
     if matches!(case.as_str(), "streamed-reply" | "streamed-stopped") { return streamed_fixture(&case); }

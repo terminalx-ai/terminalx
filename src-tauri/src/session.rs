@@ -53,6 +53,17 @@ static ACP_FULL_PIPE: Mutex<Option<std::sync::mpsc::Sender<()>>> = Mutex::new(No
 /// id: the waiting hook's answer. Codex never sees these cards.
 static BROWSER_ASKS: std::sync::LazyLock<Mutex<HashMap<String, std::sync::mpsc::Sender<bool>>>> = std::sync::LazyLock::new(Default::default);
 #[cfg(test)]
+static BROWSER_ASK_WAIT: Mutex<Option<Duration>> = Mutex::new(None);
+
+/// How long a browser card waits: until just before the hook's own wait ends.
+fn browser_ask_wait() -> Duration {
+    #[cfg(test)]
+    if let Some(wait) = *BROWSER_ASK_WAIT.lock().unwrap() {
+        return wait;
+    }
+    crate::cloud_browser::HOOK_WAIT.saturating_sub(Duration::from_secs(10))
+}
+#[cfg(test)]
 static COLLABORATION_PTY_CAPACITY: Mutex<Option<std::sync::mpsc::Sender<()>>> = Mutex::new(None);
 
 #[path = "session_follow.rs"]
@@ -5710,15 +5721,17 @@ impl SessionManager {
         let mut rt = rt_arc.lock().unwrap();
         // A cloud browser card in a Codex app-server tab (PRO-209): its hook
         // waits for the answer, which never goes to Codex.
-        if rt.pending.contains_key(request_id) && BROWSER_ASKS.lock().unwrap().contains_key(request_id) {
+        // Known by its BROWSER_ASKS entry first: a card whose entry or card is
+        // gone has lapsed, and is never answered through Codex.
+        if BROWSER_ASKS.lock().unwrap().contains_key(request_id) {
             let allow = match option_id {
                 "allow" => true,
                 "deny" => false,
                 _ => bail!("unknown option"),
             };
-            let tx = BROWSER_ASKS.lock().unwrap().remove(request_id).ok_or_else(|| anyhow!("the agent stopped waiting for that request"))?;
+            let tx = BROWSER_ASKS.lock().unwrap().remove(request_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
+            anyhow::ensure!(rt.pending.remove(request_id).is_some(), "that request is no longer open");
             tx.send(allow).map_err(|_| anyhow!("the agent stopped waiting for that request"))?;
-            rt.pending.remove(request_id);
             let label = if allow { "Allowed for this browser session" } else { "Denied" };
             self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: None, allowed: allow, label: label.into(), automatic: false }, None);
             if rt.pending.is_empty() {
@@ -9456,7 +9469,7 @@ impl SessionManager {
             self.apply(&mut rt, payload, None);
         }
         // Answered, or lapsed: the hook's own wait ends first, or the launch is gone.
-        let deadline = std::time::Instant::now() + crate::cloud_browser::HOOK_WAIT.saturating_sub(Duration::from_secs(10));
+        let deadline = std::time::Instant::now() + browser_ask_wait();
         loop {
             match rx.recv_timeout(Duration::from_millis(500)) {
                 Ok(allow) => return allow,
@@ -9468,10 +9481,19 @@ impl SessionManager {
                 Err(_) => break,
             }
         }
-        BROWSER_ASKS.lock().unwrap().remove(&request_id);
+        // Entry and card go together under the tab's lock, so a click never
+        // finds one without the other; an answer sent just now still counts.
         let mut rt = rt_arc.lock().unwrap();
+        if let Ok(allow) = rx.try_recv() {
+            return allow;
+        }
+        BROWSER_ASKS.lock().unwrap().remove(&request_id);
         if rt.pending.remove(&request_id).is_some() {
             self.publish(&mut rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true }, None);
+            // The agent goes on with a denial: no card left to wait on.
+            if rt.pending.is_empty() && rt.status == TabStatus::Waiting && current(&rt) {
+                self.set_status(&mut rt, TabStatus::InProgress);
+            }
         }
         false
     }

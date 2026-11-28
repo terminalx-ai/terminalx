@@ -173,3 +173,36 @@ fn a_codex_app_server_tab_that_runs_without_asking_is_not_asked_and_strangers_ar
     assert!(rig.rt().lock().unwrap().pending.is_empty());
     crate::cloud_browser::offering(None);
 }
+
+#[test]
+fn a_lapsed_browser_card_puts_the_tab_back_to_work_and_cannot_be_answered_later() {
+    let _lock = crate::cloud_browser::TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    crate::cloud_browser::runtime_for_tests();
+    let rig = started();
+    crate::cloud_browser::offering(Some("on"));
+    let (launch, _) = stdio_tab(&rig, "auto");
+    *BROWSER_ASK_WAIT.lock().unwrap() = Some(Duration::from_secs(1));
+    let manager = rig.manager.clone();
+    let call = std::thread::spawn(move || {
+        crate::cloud_browser::offering(Some("on"));
+        manager.on_hook(HookFrame { session: SESSION.into(), tab: TAB.into(), token: launch, event: crate::cloud_browser::HOOK_EVENT.into(), payload: open_call() })
+    });
+    rig.wait("the browser card", || !rig.rt().lock().unwrap().pending.is_empty());
+    let request_id = rig.rt().lock().unwrap().pending.keys().next().unwrap().clone();
+    assert_eq!(rig.rt().lock().unwrap().status, TabStatus::Waiting);
+    let result = call.join().unwrap().output.unwrap();
+    *BROWSER_ASK_WAIT.lock().unwrap() = None;
+    assert!(result["content"][0]["text"].as_str().unwrap().contains("denied the browser session"), "{result}");
+    {
+        let rt_arc = rig.rt();
+        let rt = rt_arc.lock().unwrap();
+        assert!(rt.pending.is_empty());
+        assert_eq!(rt.status, TabStatus::InProgress, "no card left to wait on");
+    }
+    let events = store::read_lines::<AgentEvent>(&store::log_path(SESSION, TAB).unwrap()).unwrap_or_default();
+    assert!(events.iter().any(|event| matches!(&event.payload, Payload::PermissionDecided { request_id: id, label, .. } if *id == request_id && label == "Lapsed")));
+    // A late click is refused here, never sent to Codex as an id it never issued.
+    let late = rig.manager.respond_permission(SESSION, TAB, &request_id, "allow").unwrap_err().to_string();
+    assert!(late.contains("no longer open") || late.contains("lapsed"), "{late}");
+    crate::cloud_browser::offering(None);
+}
