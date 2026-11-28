@@ -221,6 +221,7 @@ impl SessionManager {
         let mut queue = rt.held_queue.clone();
         let mut interrupt = false;
         let mut deliver = false;
+        let mut withdrawn = None;
         match change {
             Change::Enqueue { .. } => unreachable!("new follow-ups are routed above"),
             Change::Edit { id, text } => {
@@ -230,7 +231,9 @@ impl SessionManager {
             }
             Change::Delete { id } => {
                 let pos = queue.position(&id)?;
-                queue.items.remove(pos);
+                // A message held back from a move off an organization route
+                // (PRO-310): the chat's copy of it is not sent either.
+                withdrawn = queue.items.remove(pos).replaces;
                 if queue.next.as_deref() == Some(&id) { queue.next = None; }
             }
             Change::Move { id, before_id } => {
@@ -257,6 +260,9 @@ impl SessionManager {
             }
         }
         let event = self.save_held(&mut rt, queue)?;
+        if let Some(prompt_seq) = withdrawn {
+            self.publish(&mut rt, Payload::PromptWithdrawn { prompt_seq, unconfirmed: false }, None);
+        }
         drop(rt);
         // Keep admission until Escape is sent: an automatic dispatch cannot
         // overtake the selected item while the interrupted turn settles.

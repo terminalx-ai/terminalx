@@ -1259,6 +1259,11 @@ pub enum Engine {
 
 /// How a tab's agent leaves an organization route that no longer applies
 /// (PRO-310), between turns. Each keeps the conversation.
+/// How long a tab marked to move off an organization route waits on grant
+/// syncs that fail before it says so (PRO-310). Said at the first sync
+/// attempt after it, which backs off up to five minutes.
+const ROUTE_ANSWER_WAIT: Duration = Duration::from_secs(2 * 60);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RouteAction {
     /// A CLI starts again at once, on the next login.
@@ -1381,6 +1386,13 @@ pub struct TabRuntime {
     /// A switch off an organization route under way, and the one line the
     /// session is told once it worked.
     route_notice: Option<String>,
+    /// That switch is to the "Sign in to continue" stop: what waited on it
+    /// stays held, as for a stopped CLI.
+    route_sign_in: bool,
+    /// Since when the mark has waited on grant syncs that failed, and
+    /// whether the tab was told it is waiting ([`ROUTE_ANSWER_WAIT`]).
+    route_unsettled_since: Option<Instant>,
+    route_unsettled_told: bool,
     pub stopping: bool,
     pub stop_in_flight: bool,
     pub stopping_pid: Option<u32>,
@@ -1541,6 +1553,14 @@ impl TabRuntime {
     /// [`SessionManager::switching_route`].
     fn switching_route(&self) -> bool {
         self.route_switch_after_turn || self.route_notice.is_some()
+    }
+
+    /// Whatever starts next starts on the login there is then (PRO-310).
+    fn clear_route_mark(&mut self) {
+        self.route_switch_after_turn = false;
+        self.route_turn_unfinished = false;
+        self.route_unsettled_since = None;
+        self.route_unsettled_told = false;
     }
 
     fn launch_key(&self) -> String {
@@ -2858,6 +2878,9 @@ impl SessionManager {
                 route_switch_after_turn: false,
                 route_turn_unfinished: false,
                 route_notice: None,
+                route_sign_in: false,
+                route_unsettled_since: None,
+                route_unsettled_told: false,
                 stopping: false,
                 stop_in_flight: false,
                 stopping_pid: None,
@@ -7217,9 +7240,7 @@ impl SessionManager {
     /// settle: a stop for idleness keeps a reply nobody has read unread.
     fn let_go_of_cli(&self, rt: &mut TabRuntime) -> Option<String> {
         rt.restart_claim = None;
-        // Whatever starts next starts on the login there is then.
-        rt.route_switch_after_turn = false;
-        rt.route_turn_unfinished = false;
+        rt.clear_route_mark();
         rt.background = None;
         let Engine::Cli(p) = &rt.engine else { return None };
         let pane = p.pane_id.clone();
@@ -9067,7 +9088,8 @@ impl SessionManager {
         } else {
             log::warn!("[{}] the move off an organization route did not happen", rt.key());
         }
-        if !(done && action == RouteAction::Stop) {
+        let for_sign_in = action == RouteAction::Stop || (action == RouteAction::Retire && rt.route_sign_in);
+        if !(done && for_sign_in) {
             self.schedule_held(rt);
         }
         // No longer busy for it: a cloud message waiting on it looks again.
@@ -9095,6 +9117,19 @@ impl SessionManager {
         HookReply { output: Some(serde_json::json!({ "decision": "block", "reason": reason })), refused: None }
     }
 
+    /// The host's own message at `seq` in the tab's log, as a held follow-up
+    /// that stands for it ([`held::Item::replaces`]), with its images and
+    /// files. `None` for anyone else's (a share author's, a bot's).
+    pub(super) fn held_item_of_message(&self, rt: &TabRuntime, seq: u64) -> Option<held::Item> {
+        let events = store::read_lines::<AgentEvent>(&rt.log_path).ok()?;
+        match events.into_iter().find(|event| event.seq == seq)?.payload {
+            Payload::UserMessage { text, images, files, author: None, bot: None, .. } => {
+                Some(held::Item { id: uuid::Uuid::now_v7().to_string(), text, images, files, replaces: Some(seq) })
+            }
+            _ => None,
+        }
+    }
+
     /// Hold the prompt [`Self::refuse_prompt_off_route`] refused: whether it is.
     /// One the app typed into the CLI is in the chat already: its message is
     /// held with its images and files, and joins the one it is delivered as.
@@ -9112,16 +9147,8 @@ impl SessionManager {
                     if p.awaiting_delivery == Some(echo.seq) { p.awaiting_delivery = None; }
                     forget_taken(p);
                 }
-                let logged = store::read_lines::<AgentEvent>(&rt.log_path).ok()
-                    .and_then(|events| events.into_iter().find(|event| event.seq == echo.seq));
-                let message = logged.and_then(|event| match event.payload {
-                    Payload::UserMessage { text, images, files, author: None, bot: None, .. } => Some((text, images, files)),
-                    _ => None,
-                });
-                match message {
-                    Some((text, images, files)) if echo.receipt.is_none() && !echo.continuation && !echo.collaboration_required => {
-                        held::Item { id: uuid::Uuid::now_v7().to_string(), text, images, files, replaces: Some(echo.seq) }
-                    }
+                match self.held_item_of_message(rt, echo.seq) {
+                    Some(item) if echo.receipt.is_none() && !echo.continuation && !echo.collaboration_required => item,
                     _ => {
                         self.prompt_withdrawn(rt, echo.seq, echo.receipt.take());
                         return false;
@@ -9155,12 +9182,14 @@ impl SessionManager {
         // known while the last sync failed: a mark stays, and the next sync
         // that gets through asks again.
         let Some((stdio, switch)) = stdio.zip(self.route_switch_of(rt)) else {
-            if stdio.is_none() || !self.routes_unsettled() {
-                rt.route_switch_after_turn = false;
-                rt.route_turn_unfinished = false;
+            if stdio.is_some() && self.routes_unsettled() {
+                self.route_answer_awaited(rt);
+            } else if rt.route_switch_after_turn {
+                self.route_mark_released(rt, stdio.is_some());
             }
             return None;
         };
+        rt.route_unsettled_since = None;
         if rt.turn_open || !rt.pending.is_empty() {
             rt.route_switch_after_turn = true;
             return None;
@@ -9168,11 +9197,47 @@ impl SessionManager {
         let after_turn = std::mem::take(&mut rt.route_switch_after_turn) && !std::mem::take(&mut rt.route_turn_unfinished);
         rt.route_turn_unfinished = false;
         rt.route_notice = Some(crate::cloud_grants::route_switch_notice(&rt.harness, switch, after_turn));
+        rt.route_sign_in = switch == crate::cloud_grants::RouteSwitch::SignIn;
+        rt.route_unsettled_told = false;
         Some(match (stdio, switch) {
             (true, _) => RouteAction::Retire,
             (false, crate::cloud_grants::RouteSwitch::Login(_)) => RouteAction::Restart,
             (false, crate::cloud_grants::RouteSwitch::SignIn) => RouteAction::Stop,
         })
+    }
+
+    /// A tab marked to move while the grant syncs fail: it keeps waiting,
+    /// never sending on a route that may have gone, and past
+    /// [`ROUTE_ANSWER_WAIT`] it says so, once, and what the person can do.
+    fn route_answer_awaited(&self, rt: &mut TabRuntime) {
+        if !rt.route_switch_after_turn || rt.turn_open || rt.route_unsettled_told { return; }
+        let since = *rt.route_unsettled_since.get_or_insert_with(Instant::now);
+        if since.elapsed() < ROUTE_ANSWER_WAIT { return; }
+        rt.route_unsettled_told = true;
+        let agent = crate::cloud_grants::agent_name(&rt.harness);
+        let text = format!("TerminalX can't reach the cloud to confirm whether the organization's {agent} route still applies to this workspace. {agent} waits, and so does anything sent to it, rather than run on a route that may have been removed. Stop the agent to start it again on the login the workspace had last, or keep waiting.");
+        self.publish(rt, Payload::Status { text, handoff: None }, None);
+    }
+
+    /// The mark to move is cleared without a move: the route applies again,
+    /// or nothing runs on it now. What waited on it goes, in order (Codex's
+    /// queued follow-ups, then the held ones), and a cloud message waiting
+    /// on the tab looks again.
+    fn route_mark_released(&self, rt: &mut TabRuntime, applies: bool) {
+        let told = rt.route_unsettled_told;
+        rt.clear_route_mark();
+        if told && applies {
+            let agent = crate::cloud_grants::agent_name(&rt.harness);
+            let text = format!("The cloud answered: the organization's {agent} route still applies to this workspace, so {agent} stays on it, and what waited goes now.");
+            self.publish(rt, Payload::Status { text, handoff: None }, None);
+        }
+        if matches!(rt.engine, Engine::CodexStdio(_)) {
+            if let Err(error) = self.deliver_codex_followup(rt) {
+                log::warn!("[{}] send what waited on the organization route: {error:#}", rt.key());
+            }
+        }
+        self.schedule_held(rt);
+        self.sink.emit("tab_status", &TabStatusEvent { session_id: rt.session_id.clone(), tab_id: rt.tab_id.clone(), status: rt.status });
     }
 
     /// [`crate::cloud_grants::route_switch_for_launch`] for the tab's agent.

@@ -446,7 +446,7 @@ impl SessionManager {
 
     /// The same runtime lock orders sends and turn completion. Claim exactly
     /// one queue entry before writing it; subsequent sends queue behind it.
-    fn deliver_codex_followup(&self, rt: &mut TabRuntime) -> Result<()> {
+    pub(super) fn deliver_codex_followup(&self, rt: &mut TabRuntime) -> Result<()> {
         if rt.turn_open || !rt.pending.is_empty() || rt.stopping || rt.queued.is_empty() { return Ok(()); }
         if rt.recovery.is_some() {
             self.withdraw_codex_followups(rt);
@@ -487,15 +487,54 @@ impl SessionManager {
         rt.stdio_followups.active = Some((pending.seq, false));
         rt.stdio_authority = rt.stdio_followups.authorities.remove(&pending.seq);
         let Engine::CodexStdio(engine) = &mut rt.engine else { bail!("Codex owner was replaced") };
-        let actions = engine.start(pending.message.text, pending.message.images)?;
-        rt.open_turn();
-        rt.turn_started_at = Some(Instant::now());
-        self.set_status(rt, TabStatus::InProgress);
-        if let Err(error) = self.apply_codex_actions(rt, actions) {
+        let started = engine.start(pending.message.text, pending.message.images);
+        let applied = started.and_then(|actions| {
+            rt.open_turn();
+            rt.turn_started_at = Some(Instant::now());
+            self.set_status(rt, TabStatus::InProgress);
+            self.apply_codex_actions(rt, actions)
+        });
+        if let Err(error) = applied {
+            // The Codex just spawned has no turn to run: it is ended, not
+            // left behind the tab.
             self.codex_stdio_failed(rt, &error, None);
+            self.end_spawned_codex_later(rt, rt_arc);
             return Err(error);
         }
         Ok(())
+    }
+
+    /// End the Codex connection [`Self::deliver_carried_followup`] started
+    /// and could not use, off this thread, which holds the tab.
+    fn end_spawned_codex_later(&self, rt: &TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>) {
+        let Engine::CodexStdio(engine) = &rt.engine else { return };
+        let launch = engine.launch.clone();
+        let (manager, rt_arc) = (self.clone(), rt_arc.clone());
+        std::thread::spawn(move || {
+            if !same_launch(&rt_arc.lock().unwrap(), &launch) { return; }
+            if let Err(error) = manager.end_codex_stdio(&rt_arc, false, true) {
+                log::warn!("end a Codex connection with no turn to run: {error:#}");
+            }
+        });
+    }
+
+    /// Codex's queued follow-ups moved to the held queue, each standing for
+    /// its message (PRO-310). One that came with authority of its own (a
+    /// phone's, a share's, a collaborator's) is withdrawn instead, never sent
+    /// again under the host's.
+    fn hold_codex_followups(&self, rt: &mut TabRuntime) {
+        for pending in std::mem::take(&mut rt.queued) {
+            let own = !rt.stdio_followups.authorities.contains_key(&pending.seq);
+            let item = own.then(|| self.held_item_of_message(rt, pending.seq)).flatten();
+            let held = item.is_some_and(|item| match self.hold_item(rt, item) {
+                Ok(()) => true,
+                Err(error) => { log::warn!("[{}] hold a queued Codex follow-up: {error:#}", rt.key()); false }
+            });
+            if !held {
+                self.publish(rt, Payload::PromptWithdrawn { prompt_seq: pending.seq, unconfirmed: false }, None);
+            }
+        }
+        rt.stdio_followups.authorities.clear();
     }
 
     /// Retain all text in the event log with a retry action. A request whose
@@ -1125,6 +1164,10 @@ impl SessionManager {
                 rt.stdio_followups.authorities = authorities;
                 if retired.is_err() {
                     self.withdraw_codex_followups(&mut rt);
+                } else if rt.route_sign_in {
+                    // "Sign in to continue": Codex has no login to start on.
+                    // What was queued waits, held, as it does for Claude Code.
+                    self.hold_codex_followups(&mut rt);
                 } else if let Err(error) = self.deliver_carried_followup(&mut rt, rt_arc) {
                     log::warn!("[{}] send what was queued to the new Codex connection: {error:#}", key_of(&session, &tab));
                     self.withdraw_codex_followups(&mut rt);
@@ -1158,8 +1201,7 @@ impl SessionManager {
             engine.exited = true;
             let launch = engine.launch.clone();
             rt.stop_in_flight = true; rt.stopping = true;
-            rt.route_switch_after_turn = false;
-            rt.route_turn_unfinished = false;
+            rt.clear_route_mark();
             self.withdraw_codex_followups(&mut rt);
             rt.stdio_writer = None;
             self.codex_stdio_loss(&mut rt, CompactionLoss::Exited);

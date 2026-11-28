@@ -211,7 +211,7 @@ fn owned_stdio_lifecycle_is_process_bounded() {
         "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-slow-start", "share-ended", "host-while-shared",
         "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart", "resend-no-helper-tools",
         "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch", "streamed-reply", "streamed-stopped",
-        "mailbox-after-refusal", "mailbox-route-gone", "mailbox-cli-waiting", "busy-while-working", "queued-while-working", "queued-stop", "queued-interrupt", "queued-share-ended", "queued-overflow", "handover-stop", "handover-exit", "handover-descendant"] {
+        "mailbox-after-refusal", "mailbox-route-gone", "mailbox-route-sign-in", "mailbox-route-outage", "mailbox-cli-waiting", "busy-while-working", "queued-while-working", "queued-stop", "queued-interrupt", "queued-share-ended", "queued-overflow", "handover-stop", "handover-exit", "handover-descendant"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1272,7 +1272,7 @@ fn mailbox_fixture(case: &str) {
     std::env::set_var("CODEX_HOME", root.join("user-codex"));
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let native = matches!(case, "mailbox-after-refusal" | "mailbox-route-gone");
+    let native = case == "mailbox-after-refusal" || case.starts_with("mailbox-route-");
     std::fs::write(bin.join("codex"), if native { SIGNED_OUT_CODEX } else { FIRST_LAUNCH_CODEX }).unwrap();
     std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(bin.join("version"), "codex-cli 0.166.0\n").unwrap();
@@ -1326,8 +1326,8 @@ fn mailbox_fixture(case: &str) {
     let launches = || std::fs::read_to_string(bin.join("launches")).unwrap_or_default().lines().count();
     let threads = || frames().iter().filter(|frame| matches!(frame["method"].as_str(), Some("thread/start" | "thread/resume")))
         .map(|frame| format!("{} {}", frame["method"].as_str().unwrap(), frame["params"]["threadId"].as_str().unwrap_or("-"))).collect::<Vec<_>>();
-    if case == "mailbox-route-gone" {
-        return route_gone(&manager, &agents, &rt, &bin, &starts, &settled, &launches, &threads);
+    if case.starts_with("mailbox-route-") {
+        return route_gone(case, &manager, &agents, &rt, &bin, &starts, &settled, &launches, &threads);
     }
     const REFUSED: (TurnStatus, bool) = (TurnStatus::Error, true);
     const LIMITED: (TurnStatus, bool) = (TurnStatus::Error, false);
@@ -1897,7 +1897,7 @@ fn child_fixture() {
     if matches!(case.as_str(), "native-fallback-send" | "native-fallback-start" | "native-supported-start") { return first_launch_fixture(&case); }
     if case == "cloud-launch" { return cloud_launch_fixture(); }
     if case.starts_with("bot-approval-") { return bot_approval_fixture(&case); }
-    if matches!(case.as_str(), "mailbox-after-refusal" | "mailbox-route-gone" | "mailbox-cli-waiting") { return mailbox_fixture(&case); }
+    if matches!(case.as_str(), "mailbox-after-refusal" | "mailbox-route-gone" | "mailbox-route-sign-in" | "mailbox-route-outage" | "mailbox-cli-waiting") { return mailbox_fixture(&case); }
     if matches!(case.as_str(), "streamed-reply" | "streamed-stopped") { return streamed_fixture(&case); }
     if matches!(case.as_str(), "busy-while-working" | "queued-while-working" | "queued-stop" | "queued-interrupt" | "queued-share-ended" | "queued-overflow") { return busy_fixture(); }
     let _home = store::temp_home();
@@ -2757,20 +2757,33 @@ fn a_switched_native_thread_is_brought_into_the_home_it_resumes_in() {
 }
 
 /// PRO-310, the Codex stdio branch: the organization route Codex runs on
-/// goes while a turn runs. The turn finishes on it. A message queued behind
-/// that turn before the removal was known is carried across: the turn's end
-/// lets the connection go, and that message starts Codex again (on the login
-/// there is then) on the same thread, once, nothing withdrawn. A message the
-/// cloud mailbox gets after the removal waits, never reaching the old
-/// connection, and follows on the new one. The session is told once.
+/// goes while a turn runs, and the turn finishes on it.
+///
+/// - `mailbox-route-gone`: two messages queued behind that turn before the
+///   removal was known are carried across. The turn's end lets the
+///   connection go, and they start Codex again (on the login there is then)
+///   on the same thread, once each, in order, nothing withdrawn. A message
+///   the cloud mailbox gets after the removal waits, never reaching the old
+///   connection, and follows on the new one. The session is told once.
+/// - `mailbox-route-sign-in`: there is no other login. Nothing starts Codex
+///   on none: what was queued is held, each standing for its message.
+/// - `mailbox-route-outage`: the turn ends while the grant syncs fail. What
+///   was queued waits, never sent on a route that may have gone; past
+///   the wait the tab says so, once. A sync that answers the route applies
+///   again lets it go, in order, on the same connection.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn route_gone(
-    manager: &SessionManager, agents: &crate::cloud_agents::CloudAgents, rt: &Arc<Mutex<TabRuntime>>, bin: &std::path::Path,
+    case: &str, manager: &SessionManager, agents: &crate::cloud_agents::CloudAgents, rt: &Arc<Mutex<TabRuntime>>, bin: &std::path::Path,
     starts: &dyn Fn() -> Vec<String>, settled: &dyn Fn(usize), launches: &dyn Fn() -> usize, threads: &dyn Fn() -> Vec<String>,
 ) {
     use crate::cloud_grants::{Replacement, RouteSwitch};
-    *manager.route_stand_in.lock().unwrap() = Some(super::RouteStandIn { switch: Some(RouteSwitch::Login(Replacement::OrganizationLogin)), ..Default::default() });
+    let switch = if case == "mailbox-route-sign-in" { RouteSwitch::SignIn } else { RouteSwitch::Login(Replacement::OrganizationLogin) };
+    *manager.route_stand_in.lock().unwrap() = Some(super::RouteStandIn { switch: Some(switch), ..Default::default() });
+    let events = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap();
+    let notices = || events().into_iter()
+        .filter_map(|event| match event.payload { Payload::Status { text, .. } if text.contains("organization's Codex route") => Some(text), _ => None }).collect::<Vec<_>>();
+    let withdrawn = || events().iter().filter(|event| matches!(event.payload, Payload::PromptWithdrawn { .. })).count();
     std::fs::write(bin.join("hold"), "").unwrap();
     assert_eq!(mailbox_send(agents, "c1", "on the route").1["queued"], false);
     let until = Instant::now() + WAIT;
@@ -2779,22 +2792,71 @@ fn route_gone(
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(manager.send("stdio-owner", "tab", "queued before the removal".into(), Vec::new()).unwrap().queued);
-    assert_eq!(rt.lock().unwrap().queued.len(), 1);
+    assert!(manager.send("stdio-owner", "tab", "and another before it".into(), Vec::new()).unwrap().queued);
+    assert_eq!(rt.lock().unwrap().queued.len(), 2);
     manager.switch_organization_routes();
     assert!(rt.lock().unwrap().turn_open, "the running turn is left alone");
     assert!(manager.switching_route("stdio-owner", "tab"));
-    let (outcome, receipt) = mailbox_send(agents, "c2", "after the removal");
-    assert_eq!((outcome.as_str(), &receipt["queued"]), ("applied", &json!(true)));
-    std::fs::remove_file(bin.join("hold")).unwrap();
-    settled(3);
-    assert_eq!(starts(), ["on the route", "queued before the removal", "after the removal"]);
-    assert_eq!(launches(), 2, "both messages went to the new connection");
-    assert_eq!(threads(), ["thread/start -", "thread/resume thread-1"]);
-    let events = store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap();
-    assert!(!events.iter().any(|event| matches!(event.payload, Payload::PromptWithdrawn { .. })), "nothing to send again");
-    let notices: Vec<String> = events.into_iter()
-        .filter_map(|event| match event.payload { Payload::Status { text, .. } if text.starts_with("The organization's") => Some(text), _ => None }).collect();
-    assert_eq!(notices, ["The organization's Codex route no longer applies to this workspace. The turn that was running finished on it; Codex in this session now uses the organization's login."]);
+    match case {
+        "mailbox-route-gone" => {
+            let (outcome, receipt) = mailbox_send(agents, "c2", "after the removal");
+            assert_eq!((outcome.as_str(), &receipt["queued"]), ("applied", &json!(true)));
+            std::fs::remove_file(bin.join("hold")).unwrap();
+            settled(4);
+            assert_eq!(starts(), ["on the route", "queued before the removal", "and another before it", "after the removal"]);
+            assert_eq!(launches(), 2, "all three went to the new connection");
+            assert_eq!(threads(), ["thread/start -", "thread/resume thread-1"]);
+            assert_eq!(withdrawn(), 0, "nothing to send again");
+            assert_eq!(notices(), ["The organization's Codex route no longer applies to this workspace. The turn that was running finished on it; Codex in this session now uses the organization's login."]);
+        }
+        "mailbox-route-sign-in" => {
+            std::fs::remove_file(bin.join("hold")).unwrap();
+            settled(1);
+            let until = Instant::now() + WAIT;
+            while manager.switching_route("stdio-owner", "tab") {
+                assert!(Instant::now() < until, "the move did not end");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(launches(), 1, "no Codex started on no login");
+            assert_eq!(starts(), ["on the route"]);
+            let held: Vec<(String, bool)> = rt.lock().unwrap().held_queue.items.iter().map(|item| (item.text.clone(), item.replaces.is_some())).collect();
+            assert_eq!(held, [("queued before the removal".to_string(), true), ("and another before it".to_string(), true)]);
+            assert!(rt.lock().unwrap().queued.is_empty());
+            assert_eq!(withdrawn(), 0, "held, not withdrawn");
+            assert_eq!(notices(), ["The organization's Codex route no longer applies to this workspace. The turn that was running finished on it, and Codex has no other login in this workspace. Sign in to continue."]);
+        }
+        _ => {
+            {
+                let mut stand_in = manager.route_stand_in.lock().unwrap();
+                let stand_in = stand_in.as_mut().unwrap();
+                stand_in.switch = None;
+                stand_in.unsettled = true;
+            }
+            std::fs::remove_file(bin.join("hold")).unwrap();
+            settled(1);
+            manager.switch_organization_routes();
+            assert!(manager.switching_route("stdio-owner", "tab"), "no answer is not the route back");
+            assert_eq!((starts().len(), rt.lock().unwrap().queued.len()), (1, 2), "nothing sent on a route that may have gone");
+            assert!(notices().is_empty(), "not yet");
+            // Past the wait: said once, and still nothing sent.
+            let since = rt.lock().unwrap().route_unsettled_since.expect("the wait is timed");
+            rt.lock().unwrap().route_unsettled_since = since.checked_sub(super::ROUTE_ANSWER_WAIT);
+            manager.switch_organization_routes();
+            manager.switch_organization_routes();
+            let waiting = "TerminalX can't reach the cloud to confirm whether the organization's Codex route still applies to this workspace. Codex waits, and so does anything sent to it, rather than run on a route that may have been removed. Stop the agent to start it again on the login the workspace had last, or keep waiting.";
+            assert_eq!(notices(), [waiting]);
+            assert_eq!(starts().len(), 1);
+            // A sync answers: the route applies. What waited goes, in order.
+            manager.route_stand_in.lock().unwrap().as_mut().unwrap().unsettled = false;
+            manager.switch_organization_routes();
+            assert!(!manager.switching_route("stdio-owner", "tab"));
+            settled(3);
+            assert_eq!(starts(), ["on the route", "queued before the removal", "and another before it"]);
+            assert_eq!(launches(), 1, "the same connection");
+            assert_eq!(withdrawn(), 0);
+            assert_eq!(notices(), [waiting, "The cloud answered: the organization's Codex route still applies to this workspace, so Codex stays on it, and what waited goes now."]);
+        }
+    }
     assert!(!manager.switching_route("stdio-owner", "tab"));
     manager.stop("stdio-owner", "tab").unwrap();
 }

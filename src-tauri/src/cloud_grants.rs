@@ -1910,8 +1910,13 @@ pub enum RouteSwitch {
 /// route: everyone viewing the session reads it, so it names logins by
 /// whose they are, never "yours". `after_turn`: a turn was running when the
 /// route went, and finished on it.
+/// What the session's notices call `harness`'s agent.
+pub fn agent_name(harness: &str) -> &'static str {
+    provider_of_harness(harness).map_or("the agent", Provider::label)
+}
+
 pub fn route_switch_notice(harness: &str, switch: RouteSwitch, after_turn: bool) -> String {
-    let agent = provider_of_harness(harness).map_or("the agent", Provider::label);
+    let agent = agent_name(harness);
     let gone = format!("The organization's {agent} route no longer applies to this workspace");
     let finished = if after_turn { ". The turn that was running finished on it" } else { "" };
     match switch {

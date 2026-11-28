@@ -440,6 +440,9 @@ impl Rig {
             route_switch_after_turn: false,
             route_turn_unfinished: false,
             route_notice: None,
+            route_sign_in: false,
+            route_unsettled_since: None,
+            route_unsettled_told: false,
             stopping: false,
             stop_in_flight: false,
             stopping_pid: None,
@@ -4569,4 +4572,68 @@ fn a_restart_under_way_moves_the_agent_and_a_failed_move_lets_held_go() {
     let rt = rig.rt.lock().unwrap();
     assert!(!rt.switching_route());
     assert!(rt.held_queue.blocked(&rt).is_none(), "nothing holds it back from the agent still there");
+}
+
+/// The CLI side of a grant-sync outage: a tab marked to move keeps what is
+/// sent to it held, says once past the wait that it is waiting and what the
+/// person can do, and once a sync answers that the route applies again it
+/// lets what waited go and says so.
+#[test]
+fn a_tab_waiting_on_failed_syncs_says_so_and_lets_go_when_answered() {
+    let rig = Rig::new();
+    rig.save_entry();
+    rig.start_turn();
+    rig.route(Some(RouteSwitch::Login(Replacement::OrganizationLogin)), false);
+    rig.manager.switch_organization_routes();
+    assert!(rig.manager.send(SESSION, TAB, "while it waits".into(), Vec::new()).unwrap().queued);
+    rig.route(None, false);
+    rig.manager.route_stand_in.lock().unwrap().as_mut().unwrap().unsettled = true;
+    rig.end_turn_in_transcript();
+    rig.advance(PATIENCE.settle);
+    rig.tick();
+    rig.manager.switch_organization_routes();
+    let waiting = "TerminalX can't reach the cloud to confirm whether the organization's Claude Code route still applies to this workspace. Claude Code waits, and so does anything sent to it, rather than run on a route that may have been removed. Stop the agent to start it again on the login the workspace had last, or keep waiting.";
+    assert!(!rig.notices().iter().any(|text| text == waiting), "not before the wait");
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        let since = rt.route_unsettled_since.expect("the wait is timed");
+        rt.route_unsettled_since = since.checked_sub(ROUTE_ANSWER_WAIT);
+    }
+    rig.manager.switch_organization_routes();
+    rig.manager.switch_organization_routes();
+    assert_eq!(rig.notices().iter().filter(|text| *text == waiting).count(), 1);
+    {
+        let rt = rig.rt.lock().unwrap();
+        assert!(rt.switching_route());
+        assert!(matches!(rt.held_queue.blocked(&rt), Some(held::Block::WaitingForCli)), "never sent on a route that may have gone");
+        assert_eq!(rt.held_queue.items.len(), 1);
+    }
+    rig.manager.route_stand_in.lock().unwrap().as_mut().unwrap().unsettled = false;
+    rig.manager.switch_organization_routes();
+    let rt = rig.rt.lock().unwrap();
+    assert!(!rt.switching_route());
+    assert!(rt.held_queue.blocked(&rt).is_none(), "what waited goes");
+    drop(rt);
+    assert!(rig.notices().iter().any(|text| text == "The cloud answered: the organization's Claude Code route still applies to this workspace, so Claude Code stays on it, and what waited goes now."));
+    assert!(rig.moves(0).is_empty());
+}
+
+/// Deleting a held follow-up that stands for a message in the chat says
+/// that message was not sent either.
+#[test]
+fn deleting_a_held_stand_in_withdraws_its_message() {
+    let rig = Rig::new();
+    rig.save_entry();
+    rig.start_turn();
+    let seq = {
+        let mut rt = rig.rt.lock().unwrap();
+        let event = rig.manager.publish(&mut rt, Payload::UserMessage { author: None, bot: None, text: "typed before".into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: true, cwd: None }, None);
+        let item = rig.manager.held_item_of_message(&rt, event.seq).expect("the host's own message");
+        rig.manager.hold_item(&mut rt, item).unwrap();
+        event.seq
+    };
+    let id = rig.rt.lock().unwrap().held_queue.items[0].id.clone();
+    rig.manager.change_held(SESSION, TAB, held::Change::Delete { id }).unwrap();
+    assert!(rig.rt.lock().unwrap().held_queue.items.is_empty());
+    assert!(rig.events().iter().any(|event| matches!(event.payload, Payload::PromptWithdrawn { prompt_seq, .. } if prompt_seq == seq)));
 }
