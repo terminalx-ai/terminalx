@@ -365,3 +365,17 @@ it("shows the actual byte size and opens the workspace file from a local Changes
   fireEvent.click(screen.getByRole("button", { name: "Open file" }));
   expect(getEditors().editors.some((entry) => entry.kind === "text" && entry.rel === "large.ts" && entry.root === "/workspace")).toBe(true);
 });
+
+it("exposes keyboard-accessible resize separator and un-nested close buttons on editor tabs (U-32, U-34)", () => {
+  act(() => { openFile(CHECKOUT, "/workspace", "alpha.ts"); });
+  const { container } = render(<TooltipProvider><EditorSplit sessionId={CHECKOUT} active /></TooltipProvider>);
+  const sep = screen.getByRole("separator", { name: "Resize editor pane" });
+  expect(sep.tabIndex).toBe(0);
+  expect(sep.getAttribute("aria-valuemin")).toBe("320");
+  const before = Number(sep.getAttribute("aria-valuenow"));
+  fireEvent.keyDown(sep, { key: "ArrowLeft" });
+  expect(Number(sep.getAttribute("aria-valuenow"))).toBeGreaterThanOrEqual(before);
+  // Close button is a sibling of role="tab", never nested inside it.
+  expect(container.querySelector('[role="tab"] button')).toBeNull();
+  expect(screen.getByRole("button", { name: "Close alpha.ts" })).toBeTruthy();
+});

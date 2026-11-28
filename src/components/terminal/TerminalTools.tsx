@@ -225,7 +225,7 @@ export function TerminalTools({ id, shown, frame }: { id: string; shown: boolean
   return <>
     {/* A row of its own above the output: the card never covers a line of it. */}
     {open && <div className="flex shrink-0 justify-end px-2 pt-2 pb-1" data-testid="terminal-find-row">
-      <div role="search" aria-label="Find in terminal" data-testid="terminal-find" className="flex w-[475px] max-w-full flex-col gap-1 rounded-lg border border-hairline bg-popover px-2 pt-1.5 pb-1.5 text-xs shadow-md"
+      <div role="search" aria-label="Find in terminal" data-testid="terminal-find" className="flex w-[475px] max-w-full flex-col gap-1 rounded-lg border border-hairline bg-popover px-2 pt-1.5 pb-1.5 text-xs shadow-md focus-within:ring-2 focus-within:ring-ring/40"
         onKeyDown={(event) => {
           if (event.key === "Enter" && event.target === input.current) { event.preventDefault(); run(event.shiftKey ? "previous" : "next"); }
         }}>
@@ -236,12 +236,12 @@ export function TerminalTools({ id, shown, frame }: { id: string; shown: boolean
           <div className="flex shrink-0 items-center gap-0.5" role="group" aria-label="Search options">
             {TOGGLES.map((toggle) => <button key={toggle.key} type="button" aria-label={toggle.label} title={toggle.key === "caseSensitive" ? `${toggle.label} (${TERMINAL_KEYS.matchCase.label})` : toggle.label} aria-pressed={options[toggle.key]}
               onClick={() => setOptions((current) => ({ ...current, [toggle.key]: !current[toggle.key] }))}
-              className="h-6 min-w-6 rounded px-1 font-mono text-[11px] text-muted-foreground hover:bg-veil-raised hover:text-foreground aria-pressed:bg-veil-strong aria-pressed:text-foreground">{toggle.text}</button>)}
+              className="h-6 min-w-6 rounded px-1 font-mono text-[11px] text-muted-foreground outline-none hover:bg-veil-raised hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 aria-pressed:bg-veil-strong aria-pressed:text-foreground">{toggle.text}</button>)}
           </div>
           <span className="mx-0.5 h-4 w-px shrink-0 bg-hairline" aria-hidden />
-          <button type="button" aria-label="Previous match" disabled={!query} onClick={() => run("previous")} className="rounded p-1 hover:bg-veil-raised disabled:opacity-40"><ChevronUp className="size-3.5" /></button>
-          <button type="button" aria-label="Next match" disabled={!query} onClick={() => run("next")} className="rounded p-1 hover:bg-veil-raised disabled:opacity-40"><ChevronDown className="size-3.5" /></button>
-          <button type="button" aria-label="Close terminal search" onClick={close} className="rounded p-1 hover:bg-veil-raised"><X className="size-3.5" /></button>
+          <button type="button" aria-label="Previous match" disabled={!query} onClick={() => run("previous")} className="rounded p-1 outline-none hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-40"><ChevronUp className="size-3.5" /></button>
+          <button type="button" aria-label="Next match" disabled={!query} onClick={() => run("next")} className="rounded p-1 outline-none hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-40"><ChevronDown className="size-3.5" /></button>
+          <button type="button" aria-label="Close terminal search" onClick={close} className="rounded p-1 outline-none hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-ring/40"><X className="size-3.5" /></button>
         </div>
         <ul aria-label="Find keys" data-testid="terminal-find-keys" className="flex flex-wrap items-center gap-x-3 gap-y-0.5 border-t border-hairline px-1 pt-1 text-[11px] text-muted-foreground">
           <li><kbd className={kbd}>↵</kbd> next</li>

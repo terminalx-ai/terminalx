@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { BrowserPage } from "@/lib/api";
 import { navigateBrowserPage, sendPageInput, setScreencast, subscribeFrames, useBrowser, watchScreencast } from "@/lib/browser";
-import { insertText, keyEvents, keyForPage, mouseEvent, nextClickCount, toPagePoint, viewportEvent, wheelEvent, wheelPixels, modifiersOf, type PageInputEvent } from "@/lib/browserInput";
+import { insertText, isFocusEscapeKey, keyEvents, keyForPage, mouseEvent, nextClickCount, toPagePoint, viewportEvent, wheelEvent, wheelPixels, modifiersOf, type PageInputEvent } from "@/lib/browserInput";
 
 const modifiersFrom = (e: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) => ({ altKey: e.altKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey });
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -36,8 +36,10 @@ export function BrowserView({ page, active, compact }: { session: Pick<SessionEn
   const [error, setError] = useState<string | null>(null);
   const [hasFrame, setHasFrame] = useState(false);
   const [focused, setFocused] = useState(false);
+  const [captureKeys, setCaptureKeys] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const addressRef = useRef<HTMLInputElement>(null);
   /** The page's size in CSS pixels, from the last frame: what preview points scale to. */
   const pageSize = useRef({ width: 0, height: 0 });
   const live = active && !paused;
@@ -56,7 +58,7 @@ export function BrowserView({ page, active, compact }: { session: Pick<SessionEn
     if (!live || cast?.state !== "ended" || restarts.current >= 3) return;
     const id = window.setTimeout(() => {
       restarts.current += 1;
-      void setScreencast(page.id, true);
+      void setScreencast(page.id, true).catch((e) => setError(errorMessage(e)));
     }, 500 * (restarts.current + 1));
     return () => window.clearTimeout(id);
   }, [live, cast?.state, page.id]);
@@ -138,6 +140,7 @@ export function BrowserView({ page, active, compact }: { session: Pick<SessionEn
   const held = useRef<{ point: { x: number; y: number }; button: number; count: number } | null>(null);
   const lastPress = useRef<{ at: number; x: number; y: number; button: number; count: number } | null>(null);
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
+    setCaptureKeys(true);
     surfaceRef.current?.focus({ preventScroll: true });
     const point = pointAt(e.clientX, e.clientY);
     if (!interactive || !point) return;
@@ -188,13 +191,27 @@ export function BrowserView({ page, active, compact }: { session: Pick<SessionEn
   }, []);
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (!interactive || e.nativeEvent.isComposing || !keyForPage(e, isMac)) return;
+    if (isFocusEscapeKey(e)) {
+      e.preventDefault();
+      e.stopPropagation();
+      setCaptureKeys(false);
+      addressRef.current?.focus();
+      return;
+    }
+    if (!interactive || e.nativeEvent.isComposing) return;
+    if (!captureKeys && (e.key === "Enter" || e.key === " ")) {
+      e.preventDefault();
+      e.stopPropagation();
+      setCaptureKeys(true);
+      return;
+    }
+    if (!keyForPage(e, isMac, { captureTab: captureKeys })) return;
     e.preventDefault();
     e.stopPropagation();
     send(keyEvents("down", e, isMac));
   };
   const onKeyUp = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (!interactive || !keyForPage(e, isMac)) return;
+    if (!interactive || !keyForPage(e, isMac, { captureTab: captureKeys })) return;
     e.preventDefault();
     send(keyEvents("up", e, isMac));
   };
@@ -246,9 +263,10 @@ export function BrowserView({ page, active, compact }: { session: Pick<SessionEn
             <RotateCw className={cn(busy === "reload" && "animate-spin")} />
           </Button>
         </WithTooltip>
-        <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md bg-well px-2">
+        <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md bg-well px-2 focus-within:ring-2 focus-within:ring-ring/40">
           <Globe className="size-3.5 shrink-0 text-faint" aria-hidden />
           <input
+            ref={addressRef}
             aria-label="Address"
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
@@ -279,6 +297,11 @@ export function BrowserView({ page, active, compact }: { session: Pick<SessionEn
         role="application"
         aria-label={page.title ? `Page: ${page.title}` : "Page"}
         aria-roledescription="browser page"
+        aria-description={
+          captureKeys
+            ? "Keyboard input is captured by the page. Press Shift+Escape to return to the address bar."
+            : "Press Enter to capture Tab keys inside the page, Tab to move past it, or Shift+Escape to return to the address bar."
+        }
         onPointerDown={onPointerDown}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerCancel}
@@ -289,8 +312,11 @@ export function BrowserView({ page, active, compact }: { session: Pick<SessionEn
         onKeyUp={onKeyUp}
         onPaste={onPaste}
         onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
-        className="relative flex min-h-0 flex-1 items-start justify-center overflow-hidden bg-well/60 outline-none"
+        onBlur={() => {
+          setFocused(false);
+          setCaptureKeys(false);
+        }}
+        className="relative flex min-h-0 flex-1 items-start justify-center overflow-hidden bg-well/60 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40"
         data-testid="browser-surface"
       >
         <PrivacyImage
@@ -311,7 +337,7 @@ export function BrowserView({ page, active, compact }: { session: Pick<SessionEn
             <Globe className="size-6 text-faint" aria-hidden />
             <span>{status}</span>
             {cast?.state === "error" && (
-              <Button size="xs" variant="outline" onClick={() => void setScreencast(page.id, true)}>
+              <Button size="xs" variant="outline" onClick={() => void run("retry", () => setScreencast(page.id, true))}>
                 Retry
               </Button>
             )}
@@ -322,6 +348,11 @@ export function BrowserView({ page, active, compact }: { session: Pick<SessionEn
         <span className="min-w-0 flex-1 truncate" title={page.title || page.url}>
           {page.title || page.url}
         </span>
+        {focused && interactive && (
+          <span className="shrink-0 text-faint" data-testid="browser-focus-hint">
+            {captureKeys ? "Shift+Esc to leave page" : "Enter to capture Tab · Tab to leave"}
+          </span>
+        )}
         {error && <span role="alert" className="max-w-[40%] truncate text-destructive" title={error}>{error}</span>}
         {!compact && <span className="shrink-0 font-mono text-faint" title="Pass this id with --page to target the page from the CLI">{page.browserPageId}</span>}
         {!compact && <span className="shrink-0 rounded-sm bg-veil-raised px-1 text-[11px] text-faint">{page.profileId}</span>}

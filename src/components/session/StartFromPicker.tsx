@@ -439,7 +439,7 @@ export function StartFromPicker({
               </div>
             </div>
             <Tabs.Content value={tab} tabIndex={-1}>
-              <div className="flex h-9 items-center gap-2 border-b border-hairline px-3">
+              <div className="flex h-9 items-center gap-2 border-b border-hairline px-3 focus-within:ring-2 focus-within:ring-inset focus-within:ring-ring/40">
                 <Search className="size-3.5 shrink-0 text-faint" aria-hidden />
                 <input
                   ref={input}
@@ -462,8 +462,8 @@ export function StartFromPicker({
                       e.preventDefault();
                       if (rows[active]) choose(rows[active]);
                     }
-                    // Tab goes to the next list; Shift+Tab still walks back to the tabs and the tracker.
-                    if (e.key === "Tab" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+                    // Tab cycles lists only when no interactive panel (like ConnectLinear or a retry action) sits below the input.
+                    if (e.key === "Tab" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !(tab === "issues" && needsLinear) && !state) {
                       e.preventDefault();
                       setTab(TABS[(TABS.findIndex(([value]) => value === tab) + 1) % TABS.length][0]);
                     }

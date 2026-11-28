@@ -1,5 +1,5 @@
 import { revealInFileManager } from "@/lib/platform";
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   AppWindow, AtSign, ChevronDown, ChevronRight, Copy, ExternalLink, Eye, FileDiff, FilePlus, FileSearch, Folder, FolderOpen, FolderSearch, FolderTree,
   ListFilter, Search, Undo2, X,
@@ -178,6 +178,8 @@ function RootedFileTreeView({
   const [tick, setTick] = useState(0);
   const container = useRef<HTMLDivElement>(null);
   const filterInput = useRef<HTMLInputElement>(null);
+  const treeId = useId();
+  const rowId = (index: number) => `${treeId}-row-${index}`;
   const [filter, setFilter] = useState("");
   // The filter field shows only while the header's filter button is on.
   const [filterOpen, setFilterOpen] = useState(false);
@@ -397,7 +399,8 @@ function RootedFileTreeView({
   );
 
   const abs = (rel: string) => (rel ? `${root}/${rel}` : root);
-  const copy = (text: string) => void copyText(text).catch(() => {});
+  const copy = (text: string) => void copyText(text).catch((e) => showError("Couldn’t copy path", e));
+  const focusedIndex = useMemo(() => (focus ? rows.findIndex((r) => r.path === focus) : -1), [rows, focus]);
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.defaultPrevented) return;
@@ -602,7 +605,7 @@ function RootedFileTreeView({
       </div>
       {canFilter && filterOpen && (
         <div className="shrink-0 border-b border-hairline px-3 py-2" data-testid="file-tree-filter">
-          <div className="flex h-8 min-w-0 items-center gap-2 rounded-md border border-hairline bg-well px-2.5 text-[12.5px] focus-within:border-primary/60">
+          <div className="flex h-8 min-w-0 items-center gap-2 rounded-md border border-hairline bg-well px-2.5 text-[12.5px] focus-within:border-primary/60 focus-within:ring-2 focus-within:ring-ring/40">
             <ListFilter className="size-3.5 shrink-0 text-faint" />
             <input
               ref={filterInput}
@@ -649,7 +652,7 @@ function RootedFileTreeView({
       )}
       {creating && (
         <div className="shrink-0 border-b border-hairline px-3 py-2" data-testid="file-tree-new-file">
-          <div className="flex h-8 min-w-0 items-center gap-2 rounded-md border border-hairline bg-well px-2.5 text-[12.5px] focus-within:border-primary/60">
+          <div className="flex h-8 min-w-0 items-center gap-2 rounded-md border border-hairline bg-well px-2.5 text-[12.5px] focus-within:border-primary/60 focus-within:ring-2 focus-within:ring-ring/40">
             <FilePlus className="size-3.5 shrink-0 text-faint" />
             {creating.parent && <span className="max-w-[40%] shrink-0 truncate font-mono text-faint">{creating.parent}/</span>}
             <input
@@ -688,6 +691,7 @@ function RootedFileTreeView({
         ref={container}
         role="tree"
         aria-label={`Files in ${rootName}`}
+        aria-activedescendant={focusedIndex >= 0 ? rowId(focusedIndex) : undefined}
         tabIndex={0}
         onKeyDown={onKeyDown}
         onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
@@ -738,7 +742,7 @@ function RootedFileTreeView({
                 }}
               >
                 {topSpacer > 0 && <div aria-hidden style={{ height: topSpacer }} />}
-                {visibleRows.map((row) => {
+                {visibleRows.map((row, idx) => {
                   const open = row.isDir && (filtered ? !!row.open : expanded.has(row.path));
                   const status = row.isDir ? undefined : fileStatus.get(row.path);
                   const dirty = row.isDir && dirsWithChanges.has(row.path);
@@ -748,6 +752,7 @@ function RootedFileTreeView({
                   return (
                     <div
                       key={row.path}
+                      id={rowId(visibleStart + idx)}
                       role="treeitem"
                       aria-expanded={row.isDir ? open : undefined}
                       aria-selected={isActive}
@@ -844,7 +849,7 @@ function RootedFileTreeView({
                     <Copy /> Copy relative path
                   </ContextMenuItem>
                   {!source && (
-                    <ContextMenuItem onSelect={() => void revealItemInDir(abs(row.path)).catch(() => {})}>
+                    <ContextMenuItem onSelect={() => void revealItemInDir(abs(row.path)).catch((e) => showError(`Couldn’t reveal ${row.name}`, e))}>
                       <FolderSearch /> {revealInFileManager}
                     </ContextMenuItem>
                   )}

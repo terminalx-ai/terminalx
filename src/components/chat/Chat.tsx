@@ -253,11 +253,11 @@ export const Chat = memo(function Chat({
   const turnTops = topsOf(turns, heights.current);
   tops.current = turnTops;
   turnList.current = turns;
-  // A new prompt is followed from the render it arrives in, not one later;
-  // so is the reader's own message while it is being sent.
-  const lastPrompt = `${turns[turns.length - 1]?.prompt?.seq ?? ""}:${sending?.pressedAt ?? ""}`;
-  const followedPrompt = useRef(lastPrompt);
-  const tail = pinned.current || (!find.hasMatch && followedPrompt.current !== lastPrompt);
+  // Re-pin only when the local reader explicitly submits a new prompt, not when
+  // a remote turn arrives or an earlier send finishes landing in `turns`.
+  const localSendAt = sending?.pressedAt ?? null;
+  const followedSend = useRef<number | null>(localSendAt);
+  const tail = pinned.current || (!find.hasMatch && localSendAt !== null && followedSend.current !== localSendAt);
   // Off the bottom, the band the view last asked for; one not worked out yet (or for a list since cut short) is the tail's.
   const known = band.end > band.start && band.end <= turns.length;
   const soughtTurn = seeking?.turnKey ? turns.findIndex((turn) => turn.key === seeking.turnKey) : -1;
@@ -357,8 +357,9 @@ export const Chat = memo(function Chat({
       else if (moved < 0 && pinned.current && dist >= 1) pinToBottom();
       readView();
     };
+    const keyHost = root.current ?? el;
     el.addEventListener("wheel", onWheel, { passive: true });
-    el.addEventListener("keydown", onKeyDown);
+    keyHost.addEventListener("keydown", onKeyDown);
     el.addEventListener(READER_SCROLL_EVENT, onReaderScroll);
     el.addEventListener(SEEK_ANCHOR_EVENT, onSeek);
     el.addEventListener("pointerdown", onPointerDown);
@@ -367,7 +368,7 @@ export const Chat = memo(function Chat({
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => {
       el.removeEventListener("wheel", onWheel);
-      el.removeEventListener("keydown", onKeyDown);
+      keyHost.removeEventListener("keydown", onKeyDown);
       el.removeEventListener(READER_SCROLL_EVENT, onReaderScroll);
       el.removeEventListener(SEEK_ANCHOR_EVENT, onSeek);
       el.removeEventListener("pointerdown", onPointerDown);
@@ -399,12 +400,12 @@ export const Chat = memo(function Chat({
   }, [turns, stream, sending, pending, firstMessage, transcript.pendingAsks.length, transcript.compacting, footerHeight, pinToBottom]);
 
   useLayoutEffect(() => {
-    if (followedPrompt.current === lastPrompt) return;
-    followedPrompt.current = lastPrompt;
+    if (localSendAt === null || followedSend.current === localSendAt) return;
+    followedSend.current = localSendAt;
     if (find.hasMatch) return;
     follow(true);
     pinToBottom();
-  }, [lastPrompt, follow, pinToBottom, find.hasMatch]);
+  }, [localSendAt, follow, pinToBottom, find.hasMatch]);
 
   // The requested turn(s) are drawn and measured now. Bring the anchor to the
   // top, then work out the band around it using the updated measurements.
