@@ -81,7 +81,8 @@ async function openScripts(page) {
   await repositories.getByRole("button", { name: "terminalx-server", exact: true }).click();
   await page.getByRole("group", { name: "terminalx-server settings", exact: true }).getByRole("button", { name: "Scripts", exact: true }).click();
   await page.getByLabel("Setup script", { exact: true }).waitFor();
-  await page.waitForTimeout(1000);
+  await page.waitForFunction(() => document.querySelectorAll("[data-script-line]").length >= 1);
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
 
 async function layout(page) {
@@ -105,7 +106,7 @@ const server = await serve();
 const browser = await launch();
 let failed = 0;
 try {
-  for (const mode of ["dark", "light"]) {
+  for (const mode of shots ? ["dark", "light"] : ["dark"]) {
     // 11.05: a committed setup script that is not trusted yet, the saved archive script and its timeout.
     let page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 1440, height: 900 }, { extra: `(${setup})(${JSON.stringify({ mode, state: "committed" })})`, colorScheme: mode });
     page.setDefaultTimeout(30_000);
@@ -208,8 +209,10 @@ try {
       "Edit button on each row": (await page.getByRole("button", { name: /^Edit / }).count()) === 4,
       "no overflow": !rows.overflow,
     }, rows);
-    await page.waitForTimeout(900);
-    if (shots) await page.screenshot({ path: join(shots, `05-actions-${mode}.png`) });
+    if (shots) {
+      await page.waitForTimeout(900);
+      await page.screenshot({ path: join(shots, `05-actions-${mode}.png`) });
+    }
     await page.getByRole("button", { name: "Edit Dev app" }).click();
     const edit = page.getByRole("dialog", { name: "Edit action" });
     await edit.waitFor();

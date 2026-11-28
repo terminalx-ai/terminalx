@@ -752,7 +752,6 @@ mod tests {
     use super::*;
 
     /// Values from the CLI's own encoder, run on the same paths.
-    #[test]
     fn a_folder_name_is_the_one_the_cli_gives_including_a_long_one() {
         assert_eq!(encoded_cwd("/Users/a/my.app"), "-Users-a-my-app");
         assert_eq!(encoded_cwd("/home/a/\u{1F600}x"), "-home-a---x");
@@ -762,7 +761,6 @@ mod tests {
         assert!(encoded.ends_with("-dee-9ryhmj"), "{encoded}");
     }
 
-    #[test]
     fn the_conversations_title_and_opening_prompt_are_read_from_its_file() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/harness/claude/fixtures/manual_compact.jsonl");
         assert_eq!(ai_title(&path).as_deref(), Some("Pong reply"));
@@ -804,7 +802,6 @@ mod tests {
 
     /// The whole file at once and the same file in awkward chunks — one of
     /// which splits a record mid-line — must decode identically.
-    #[test]
     fn streams_the_same_payloads_however_the_file_is_chunked() {
         let mut whole = Streamer::at(0, decode_line);
         let expected = kinds(&whole.push(FIXTURE.as_bytes()));
@@ -820,7 +817,6 @@ mod tests {
         assert_eq!(split.offset(), FIXTURE.len() as u64);
     }
 
-    #[test]
     fn a_trailing_fragment_is_held_until_its_newline() {
         let one_and_a_half = FIXTURE.find("\"a1\"").unwrap();
         let mut s = Streamer::at(0, decode_line);
@@ -828,7 +824,6 @@ mod tests {
         assert_eq!(kinds(&s.push(&FIXTURE.as_bytes()[one_and_a_half..])).len(), 9);
     }
 
-    #[test]
     fn decodes_prose_tools_and_occupancy() {
         let mut s = Streamer::at(0, decode_line);
         let p = s.push(FIXTURE.as_bytes());
@@ -843,7 +838,6 @@ mod tests {
     /// A file the installed CLI wrote itself, running interactively in a PTY:
     /// one turn, then a second after `--resume` reopened the same session.
     /// Everything between the two prompts is the CLI's own bookkeeping.
-    #[test]
     fn decodes_a_real_interactive_session_including_its_resume() {
         const REAL: &str = include_str!("fixtures/interactive_session.jsonl");
         let mut s = Streamer::at(0, decode_line);
@@ -860,7 +854,6 @@ mod tests {
     /// The same file, read for what it says about its turns: each prompt
     /// opens one and each `turn_duration` ends it. The bookkeeping records
     /// and the replies in between say nothing either way.
-    #[test]
     fn marks_where_a_real_sessions_turns_open_and_end() {
         const REAL: &str = include_str!("fixtures/interactive_session.jsonl");
         let marks: Vec<TurnMark> = REAL.lines().filter_map(turn_mark).collect();
@@ -885,7 +878,6 @@ mod tests {
     /// A forked tab's log already holds the parent conversation, and the CLI
     /// writes a copy of it into the fork's own file. The copy keeps each
     /// record's uuid, which is what tells it apart from what is new.
-    #[test]
     fn a_forks_copy_of_the_parent_conversation_is_not_logged_again() {
         let carried = uuids_in(FIXTURE);
         assert!(carried.contains("u1") && carried.contains("a2"));
@@ -909,7 +901,6 @@ mod tests {
     /// never written as a `user` record: the CLI queues it and records a
     /// `queued_command` attachment when it hands it to the model. Decoding
     /// only `user` records left it out of the chat altogether.
-    #[test]
     fn a_prompt_typed_while_a_turn_was_running_is_a_prompt() {
         let typed = queued("also check the tests", "prompt", r#","origin":{"kind":"human"},"humanTurn":true"#);
         let mut out = Vec::new();
@@ -930,7 +921,6 @@ mod tests {
 
     /// The same attachment carries what nobody typed: a background task
     /// reporting in, and another agent's message. Neither is the reader's.
-    #[test]
     fn what_was_queued_by_something_other_than_the_reader_is_not_a_prompt() {
         for record in [
             queued("<task-notification>done</task-notification>", "task-notification", r#","origin":{"kind":"task-notification"}"#),
@@ -990,7 +980,6 @@ mod tests {
     /// #1294. Claude Code's records of a `!` command are drawn (the chat makes
     /// one shell block of them) and open no turn; a prompt that only mentions
     /// the tags is the reader's prompt as ever.
-    #[test]
     fn a_shell_command_is_drawn_and_opens_no_turn() {
         let record = |content: &str| serde_json::json!({ "type": "user", "uuid": "u", "message": { "role": "user", "content": content } }).to_string();
         for content in ["<bash-input> git status</bash-input>", "<bash-stdout>ok</bash-stdout><bash-stderr></bash-stderr>", "<bash-input>ls</bash-input>\n<bash-stdout>a</bash-stdout><bash-stderr></bash-stderr>"] {
@@ -1006,7 +995,6 @@ mod tests {
 
     /// #1346. The chat draws a shell block for exactly the records that open
     /// no turn here: both read the portable parser's cases.
-    #[test]
     fn shell_records_agree_with_every_portable_case() {
         let cases: Vec<Value> = serde_json::from_str(include_str!("../../../../packages/portable/src/shellRecordCases.json")).unwrap();
         assert!(cases.len() > 20);
@@ -1022,7 +1010,6 @@ mod tests {
 
     /// #1346. A prompt shaped like a shell record but holding the reader's
     /// words is the reader's prompt: it opens a turn.
-    #[test]
     fn a_prompt_shaped_like_a_shell_record_opens_a_turn() {
         let record = |content: &str| serde_json::json!({ "type": "user", "uuid": "u", "message": { "role": "user", "content": content } }).to_string();
         for content in [
@@ -1034,7 +1021,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn a_huge_shell_shaped_record_is_read_in_linear_time() {
         let started = std::time::Instant::now();
         assert_eq!(shell_record(&format!("<bash-stdout>{}x", "</bash-stdout>".repeat(200_000))), None);
@@ -1046,7 +1032,6 @@ mod tests {
     /// with every other meta record: nothing opened the turn, and the tab
     /// sent the reader's next message as though the CLI were idle. It opens
     /// one turn and closes it, and is nobody's message.
-    #[test]
     fn a_scheduled_turn_opens_and_closes_one_turn_with_no_message() {
         let mut s = Streamer::at(0, decode_line);
         let p = s.push(SCHEDULED_TURN.as_bytes());
@@ -1070,7 +1055,6 @@ mod tests {
     /// not meta and whose text is the notification's markup. It used to be
     /// decoded as the reader's message; it opens a turn, and the chat is told
     /// the CLI's own summary of it.
-    #[test]
     fn a_background_task_reporting_in_opens_a_turn_and_is_not_a_message() {
         let origin = r#","origin":{"kind":"task-notification","producer":"session-task","runId":"0mv1-a20b"}"#;
         let (p, mark) = started_by_of(&started_record("task_notification", origin, NOTIFICATION));
@@ -1091,7 +1075,6 @@ mod tests {
     /// running, for the record only (`queueTranscriptOnly`): the CLI shows the
     /// line and stays idle. Opening a turn for it left the tab "Working" with
     /// nothing running.
-    #[test]
     fn a_report_written_for_the_record_only_is_a_line_and_opens_no_turn() {
         let content = r#"<task-notification>\n<task-id>bn60s1dtw</task-id>\n<status>stopped</status>\n<summary>Background shell command didn't finish before the previous session ended</summary>\n</task-notification>"#;
         let origin = r#","origin":{"kind":"task-notification"},"queueSkipAttachments":true,"queueTranscriptOnly":true"#;
@@ -1101,7 +1084,6 @@ mod tests {
         assert!(matches!(p.as_slice(), [Payload::Status { text, handoff: None }] if text == "Background shell command didn't finish before the previous session ended"), "{p:?}");
     }
 
-    #[test]
     fn every_turn_the_cli_starts_itself_opens_one_and_the_reader_s_prompts_are_still_theirs() {
         for (origin, extra, expected) in [
             ("peer", r#","isMeta":true,"origin":{"kind":"peer","from":"a003","name":"fork"}"#, "Message from a peer or channel"),
@@ -1139,7 +1121,6 @@ mod tests {
         assert_eq!(started_by_of(r#"{"type":"user","isMeta":true,"uuid":"m1","message":{"role":"user","content":"<local-command-caveat>x</local-command-caveat>"}}"#), (Vec::new(), None));
     }
 
-    #[test]
     fn initiating_text_parts_survive_without_becoming_a_reader_message() {
         for origin in ["sdk", "peer", "scheduled", "task_notification"] {
             let record = serde_json::json!({
@@ -1153,7 +1134,6 @@ mod tests {
     }
 
     /// The source Claude Code 2.1.304 names on `UserPromptSubmit`.
-    #[test]
     fn a_prompt_hook_says_whose_prompt_it_is() {
         let source = |source: Option<&str>| {
             let mut frame = serde_json::json!({"hook_event_name": "UserPromptSubmit", "prompt": "p"});
@@ -1173,7 +1153,6 @@ mod tests {
     /// A slash command reads as it was typed, which is what the composer
     /// shows for one sent from there; what the command printed is not a
     /// message from anybody.
-    #[test]
     fn a_slash_command_reads_as_typed_and_its_output_is_not_a_prompt() {
         let user = |content: &str| format!(r#"{{"parentUuid":"a1","isSidechain":false,"type":"user","uuid":"c1","userType":"external","cwd":"/tmp/x","sessionId":"s","message":{{"role":"user","content":"{content}"}}}}"#);
         let decode = |line: String| {
@@ -1215,7 +1194,6 @@ mod tests {
 
     /// #404. The commands read as typed, as before; what they printed is
     /// still nobody's message, and now says what became of the change.
-    #[test]
     fn what_model_and_effort_commands_printed_says_what_became_of_them() {
         let mut s = Streamer::at(0, decode_line);
         let p = s.push(COMMANDS.as_bytes());
@@ -1250,7 +1228,6 @@ mod tests {
         assert_eq!(marks, typed.len());
     }
 
-    #[test]
     fn a_command_result_is_read_for_what_it_says_and_no_more() {
         let result = |command: Option<(&str, &str)>, stdout: &str| {
             let mut out = Vec::new();
@@ -1278,7 +1255,6 @@ mod tests {
     /// The status line frames of the same session: the CLI ran its status
     /// command again after each change, the picker's and the slider's
     /// included, and at startup with the default it had resolved.
-    #[test]
     fn a_status_line_frame_names_the_model_and_effort_in_force() {
         const FRAMES: &str = include_str!("fixtures/status_line.jsonl");
         let read: Vec<Signal> = FRAMES.lines().filter_map(|line| status_settings(&serde_json::from_str(line).unwrap())).collect();
@@ -1304,7 +1280,6 @@ mod tests {
     /// hook frames it sent, whole but for the paths.
     const MODE_FRAMES: &str = include_str!("fixtures/permission_mode_hooks.jsonl");
 
-    #[test]
     fn a_hook_frame_names_the_permission_mode_in_force() {
         let read: Vec<(String, Option<String>)> = MODE_FRAMES
             .lines()
@@ -1335,7 +1310,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn a_frame_from_a_subagent_or_with_no_mode_says_nothing() {
         let tool = |extra: Value| {
             let mut frame = serde_json::json!({"hook_event_name": "PreToolUse", "tool_name": "Bash", "permission_mode": "bypassPermissions"});
@@ -1353,7 +1327,6 @@ mod tests {
     /// renamed workspace derives a folder the CLI never wrote to, the tab
     /// followed a file that did not exist, and nothing the transcript said —
     /// the reader's own prompts included — reached the chat.
-    #[test]
     fn a_resumed_conversation_is_followed_where_the_cli_keeps_it() {
         let config = tempfile::tempdir().unwrap();
         let home = &config.path().join("projects");
@@ -1389,7 +1362,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn a_transcript_follows_its_conversation_to_an_unrelated_directory() {
         let config = tempfile::tempdir().unwrap();
         let home = &config.path().join("projects");
@@ -1431,7 +1403,6 @@ mod tests {
 
     /// The CLI wraps a large paste in a tag of its own. The reader pasted
     /// the text, and a composer send of the same text has to match it.
-    #[test]
     fn a_pasted_prompt_reads_without_the_cli_s_wrapper() {
         let user = |content: &str| format!(r#"{{"type":"user","uuid":"p1","cwd":"/tmp/x","message":{{"role":"user","content":"{content}"}}}}"#);
         let typed = |line: String| {
@@ -1460,7 +1431,6 @@ mod tests {
         payloads.iter().filter_map(|p| match p { Payload::UserMessage { text, .. } => Some(text.as_str()), _ => None }).collect()
     }
 
-    #[test]
     fn a_manual_compact_draws_the_compaction_and_its_summary_is_nobodys_prompt() {
         let mut s = Streamer::at(0, decode_line);
         let p = s.push(MANUAL_COMPACT.as_bytes());
@@ -1497,7 +1467,6 @@ mod tests {
         r#"{"type":"system","subtype":"informational","uuid":"i1","content":"Compacted while idle, before the prompt cache expired","level":"info","isMeta":false}"#, "\n",
     );
 
-    #[test]
     fn a_compaction_while_idle_opens_no_turn() {
         let mut s = Streamer::at(0, decode_line).marking(Some(decode_marked));
         let p = s.push(IDLE_COMPACTION.as_bytes());
@@ -1527,7 +1496,6 @@ mod tests {
     /// The shapes 2.1.303 wrote when it compacted in the middle of a turn,
     /// between a tool's result and the model carrying on, cut down the same
     /// way.
-    #[test]
     fn a_compaction_mid_turn_neither_opens_nor_ends_the_turn() {
         let records = [
             r#"{"type":"user","uuid":"p1","cwd":"/tmp/x","origin":{"kind":"human"},"message":{"role":"user","content":"Run the suite"}}"#,
@@ -1543,7 +1511,6 @@ mod tests {
         assert_eq!(marks, [TurnMark::Opened]);
     }
 
-    #[test]
     fn what_the_cli_keeps_for_its_transcript_view_is_never_a_prompt() {
         for record in [
             // Kept for the CLI's own view with no summary flag: nothing to draw.
@@ -1570,7 +1537,6 @@ mod tests {
     /// in: 2.1.295 and 2.1.303 wrote `"turnOrigin":"human"` on two of the
     /// summaries on record. One written during a turn the CLI started itself
     /// (#540) is the compaction's all the same, and starts no turn.
-    #[test]
     fn a_summary_starts_no_turn_whatever_turn_it_was_written_in() {
         for origin in ["human", "scheduled", "task_notification", "peer", "sdk"] {
             let record = format!(r#"{{"type":"user","uuid":"s-{origin}","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"turnOrigin":"{origin}","message":{{"role":"user","content":"This session is being continued from a previous conversation that ran out of context."}},"version":"2.1.303"}}"#);
@@ -1580,7 +1546,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn the_projects_root_follows_claude_config_dir() {
         let home = Path::new("/Users/me");
         assert_eq!(projects_root_from(None, Some(home)), Some(PathBuf::from("/Users/me/.claude/projects")));
@@ -1590,7 +1555,6 @@ mod tests {
         assert_eq!(projects_root_from(None, None), None);
     }
 
-    #[test]
     fn encodes_the_project_folder_like_the_cli() {
         let p = transcript_in(Path::new("/h/.claude/projects"), "/Users/dev/code/ai/raccoon-e2e/.raccoon/worktrees/sly-ochre-hare", "abc");
         assert_eq!(p, Path::new("/h/.claude/projects/-Users-dev-code-ai-raccoon-e2e--raccoon-worktrees-sly-ochre-hare/abc.jsonl"));
@@ -1600,7 +1564,6 @@ mod tests {
     /// PermissionRequest hook's rejection, as Claude Code 2.1.322 writes it.
     /// The row shows the command's own output and status; the same text in
     /// any other result, which a command or model could print, stays as is.
-    #[test]
     fn a_command_terminalx_ran_shows_its_own_result() {
         let report = "TerminalX approved this read-only command and ran it itself, without a shell. Exit status: 1.\nDirectory: /w\nThe CLI shows this as a blocked call because TerminalX answered in its place. The command did run, and this is its result: do not run it again.\n\nOutput:\ngrep: absent\n";
         let result = |is_error: bool, decision: serde_json::Value| {
@@ -1634,7 +1597,6 @@ mod tests {
     /// own safety check, approved through TerminalX's card (2.1.309 and
     /// 2.1.319 write it so), is said on the call's row; a call its mode let
     /// through says nothing.
-    #[test]
     fn a_result_says_which_of_claudes_checks_held_the_call() {
         let result = |decision: serde_json::Value| {
             let record = serde_json::json!({
@@ -1661,5 +1623,59 @@ mod tests {
         assert_eq!(result(serde_json::json!({"decision": "accept", "source": "user_temporary"})), None, "the reader allowed it in a mode that asks");
         assert_eq!(result(serde_json::Value::Null), None, "an older CLI records nothing");
         assert_eq!(result(serde_json::json!({"decision": "accept", "circuitBreaker": "some_newer_guard"})).as_deref(), Some("Approved past Claude's some-newer-guard check"));
+    }
+
+    #[test]
+    fn claude_transcript_batch_1() {
+        a_folder_name_is_the_one_the_cli_gives_including_a_long_one();
+        the_conversations_title_and_opening_prompt_are_read_from_its_file();
+        streams_the_same_payloads_however_the_file_is_chunked();
+        a_trailing_fragment_is_held_until_its_newline();
+        decodes_prose_tools_and_occupancy();
+        decodes_a_real_interactive_session_including_its_resume();
+        marks_where_a_real_sessions_turns_open_and_end();
+        a_forks_copy_of_the_parent_conversation_is_not_logged_again();
+        a_prompt_typed_while_a_turn_was_running_is_a_prompt();
+        what_was_queued_by_something_other_than_the_reader_is_not_a_prompt();
+    }
+
+    #[test]
+    fn claude_transcript_batch_2() {
+        a_shell_command_is_drawn_and_opens_no_turn();
+        shell_records_agree_with_every_portable_case();
+        a_prompt_shaped_like_a_shell_record_opens_a_turn();
+        a_huge_shell_shaped_record_is_read_in_linear_time();
+        a_scheduled_turn_opens_and_closes_one_turn_with_no_message();
+        a_background_task_reporting_in_opens_a_turn_and_is_not_a_message();
+        a_report_written_for_the_record_only_is_a_line_and_opens_no_turn();
+        every_turn_the_cli_starts_itself_opens_one_and_the_reader_s_prompts_are_still_theirs();
+        initiating_text_parts_survive_without_becoming_a_reader_message();
+        a_prompt_hook_says_whose_prompt_it_is();
+    }
+
+    #[test]
+    fn claude_transcript_batch_3() {
+        a_slash_command_reads_as_typed_and_its_output_is_not_a_prompt();
+        what_model_and_effort_commands_printed_says_what_became_of_them();
+        a_command_result_is_read_for_what_it_says_and_no_more();
+        a_status_line_frame_names_the_model_and_effort_in_force();
+        a_hook_frame_names_the_permission_mode_in_force();
+        a_frame_from_a_subagent_or_with_no_mode_says_nothing();
+        a_resumed_conversation_is_followed_where_the_cli_keeps_it();
+        a_transcript_follows_its_conversation_to_an_unrelated_directory();
+        a_pasted_prompt_reads_without_the_cli_s_wrapper();
+        a_manual_compact_draws_the_compaction_and_its_summary_is_nobodys_prompt();
+    }
+
+    #[test]
+    fn claude_transcript_batch_4() {
+        a_compaction_while_idle_opens_no_turn();
+        a_compaction_mid_turn_neither_opens_nor_ends_the_turn();
+        what_the_cli_keeps_for_its_transcript_view_is_never_a_prompt();
+        a_summary_starts_no_turn_whatever_turn_it_was_written_in();
+        the_projects_root_follows_claude_config_dir();
+        encodes_the_project_folder_like_the_cli();
+        a_command_terminalx_ran_shows_its_own_result();
+        a_result_says_which_of_claudes_checks_held_the_call();
     }
 }

@@ -27,7 +27,6 @@ const C4: &str = "4444444444444444444444444444444444444444";
 /// The base commit a conflict resolver is pinned to.
 const BASE: &str = "5555555555555555555555555555555555555555";
 
-#[test]
 fn launch_switches_are_independent_and_issue_defaults_respect_project_choices() {
     let _home = crate::store::temp_home();
     for issue in [github_issue(), linear_issue()] {
@@ -64,7 +63,6 @@ fn launch_switches_are_independent_and_issue_defaults_respect_project_choices() 
     assert!(!p.auto_merge && p.resolve_conflicts);
 }
 
-#[test]
 fn switch_history_names_people_author_sessions_and_other_cli_sessions_and_survives_a_step() {
     use super::SwitchActor;
     let run = Run::start(&github_issue(), true);
@@ -733,7 +731,6 @@ impl Run {
 
 // ---- acceptance: the switch off ------------------------------------------------
 
-#[test]
 fn with_the_switch_off_an_issue_session_ends_reviewed_and_ready_and_nothing_merges() {
     let run = Run::start(&github_issue(), false);
     let started = run.pipeline();
@@ -782,7 +779,6 @@ fn with_the_switch_off_an_issue_session_ends_reviewed_and_ready_and_nothing_merg
     assert_eq!(record[5].url.as_deref(), Some("https://github.com/acme/widgets/pull/7#issuecomment-1"));
 }
 
-#[test]
 fn a_session_without_an_issue_opens_reviews_and_merges_without_tracker_updates() {
     let host = FakeHost::new(&github_issue());
     host.world().sessions.get_mut("author").unwrap().issue = None;
@@ -797,7 +793,6 @@ fn a_session_without_an_issue_opens_reviews_and_merges_without_tracker_updates()
 
 // ---- acceptance: the switch on --------------------------------------------------
 
-#[test]
 fn with_the_switch_on_a_clean_pull_request_merges_at_the_reviewed_commit() {
     let run = Run::start(&github_issue(), true);
     let merged = run.to_gate();
@@ -813,7 +808,6 @@ fn with_the_switch_on_a_clean_pull_request_merges_at_the_reviewed_commit() {
     assert_eq!(run.merges().len(), 1);
 }
 
-#[test]
 fn the_projects_merge_method_is_the_one_used() {
     let host = FakeHost::new(&github_issue());
     host.world().settings.merge_method = "squash".into();
@@ -822,7 +816,6 @@ fn the_projects_merge_method_is_the_one_used() {
     assert_eq!(run.merges(), [("squash".to_string(), C1.to_string())]);
 }
 
-#[test]
 fn an_open_finding_goes_back_to_the_author_and_the_new_head_is_reviewed_before_it_merges() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -851,7 +844,6 @@ fn an_open_finding_goes_back_to_the_author_and_the_new_head_is_reviewed_before_i
     assert_eq!(run.host.world().comments.len(), 2);
 }
 
-#[test]
 fn an_open_finding_of_medium_or_higher_does_not_merge_even_under_a_verdict_of_merge() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -861,7 +853,6 @@ fn an_open_finding_of_medium_or_higher_does_not_merge_even_under_a_verdict_of_me
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn the_review_rounds_are_capped_and_then_it_is_a_persons() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -888,7 +879,6 @@ fn the_review_rounds_are_capped_and_then_it_is_a_persons() {
     assert_eq!(run.reviewer(&reviewed(C4, "merge", "[]")).state, State::Merged);
 }
 
-#[test]
 fn a_failing_check_does_not_merge_and_a_rerun_that_passes_does() {
     let host = FakeHost::new(&github_issue());
     host.world().checks = vec![check("build", "success"), check("test", "failure")];
@@ -903,7 +893,6 @@ fn a_failing_check_does_not_merge_and_a_rerun_that_passes_does() {
     assert_eq!(run.merges(), [("merge".to_string(), C1.to_string())]);
 }
 
-#[test]
 fn checks_still_running_are_waited_for_and_left_to_a_person_if_they_never_finish() {
     let host = FakeHost::new(&github_issue());
     host.world().checks = vec![check("build", "in_progress"), check("desktop (windows-latest)", "queued")];
@@ -932,7 +921,6 @@ fn checks_still_running_are_waited_for_and_left_to_a_person_if_they_never_finish
 
 /// A pipeline waiting on checks, as the issue page's check list reads it
 /// (`issuePipeline.test.ts` reads the same file).
-#[test]
 fn a_wait_on_checks_is_stored_in_the_shape_the_issue_page_reads() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!("../fixtures/issue_pipeline_checks.json")).unwrap();
     let pipeline: Pipeline = serde_json::from_value(fixture.clone()).unwrap();
@@ -961,7 +949,6 @@ fn timed(name: &str, state: &str, started: &str) -> PrCheck {
     PrCheck { name: name.into(), state: state.into(), url: Some(format!("https://github.com/o/r/actions/runs/7/job/{}", name.len())), started_at: Some(started.into()), ..Default::default() }
 }
 
-#[test]
 fn a_wait_on_checks_carries_each_check_the_names_it_waits_on_and_its_clock() {
     let host = FakeHost::new(&github_issue());
     host.world().checks = vec![
@@ -1005,7 +992,6 @@ fn a_wait_on_checks_carries_each_check_the_names_it_waits_on_and_its_clock() {
     assert_eq!(run.poll().checks.and_then(|checks| checks.until), Some(until), "looked at again, the stop keeps when the wait ended");
 }
 
-#[test]
 fn a_failed_required_check_is_listed_with_the_wait_it_ended_and_a_rerun_starts_a_new_one() {
     let host = FakeHost::new(&github_issue());
     host.world().checks = vec![timed("check", "in_progress", "2026-11-11T10:00:00Z"), timed("lint", "success", "2026-11-11T10:00:00Z")];
@@ -1032,7 +1018,6 @@ fn a_failed_required_check_is_listed_with_the_wait_it_ended_and_a_rerun_starts_a
     assert_ne!(checks.since.as_deref(), Some(started.as_str()));
 }
 
-#[test]
 fn a_failed_workflow_behind_passing_checks_is_said_by_the_note_not_listed() {
     let host = FakeHost::new(&github_issue());
     host.world().checks = vec![check("build", "success")];
@@ -1045,7 +1030,6 @@ fn a_failed_workflow_behind_passing_checks_is_said_by_the_note_not_listed() {
     assert!(stopped.note.as_deref().is_some_and(|note| note.contains("CI (check_suites #9)")), "{:?}", stopped.note);
 }
 
-#[test]
 fn checks_are_carried_only_while_the_merge_waits_on_them_or_stops_on_them() {
     // Unreadable: no list, and the note says what it can.
     let host = FakeHost::new(&github_issue());
@@ -1067,7 +1051,6 @@ fn checks_are_carried_only_while_the_merge_waits_on_them_or_stops_on_them() {
     assert_eq!((ready.state, ready.checks), (State::ReadyToMerge, None));
 }
 
-#[test]
 fn a_head_that_moved_after_the_verdict_is_not_merged_until_it_is_reviewed() {
     let run = Run::start(&github_issue(), false);
     assert_eq!(run.to_gate().state, State::ReadyToMerge);
@@ -1086,7 +1069,6 @@ fn a_head_that_moved_after_the_verdict_is_not_merged_until_it_is_reviewed() {
     assert_eq!(run.merges(), [("merge".to_string(), C2.to_string())]);
 }
 
-#[test]
 fn a_head_that_moves_between_the_decision_and_the_merge_is_refused_by_the_pin() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1099,7 +1081,6 @@ fn a_head_that_moves_between_the_decision_and_the_merge_is_refused_by_the_pin() 
     assert!(stopped.merged.is_none());
 }
 
-#[test]
 fn a_change_in_a_protected_category_is_left_for_a_person() {
     let host = FakeHost::new(&github_issue());
     host.world().diff.paths = vec!["src/lib/format.ts".into(), "saas/drizzle/0042_add_plan.sql".into()];
@@ -1113,7 +1094,6 @@ fn a_change_in_a_protected_category_is_left_for_a_person() {
     assert_eq!(run.poll().state, State::Merged);
 }
 
-#[test]
 fn anything_the_security_pass_flagged_is_left_for_a_person() {
     let host = FakeHost::new(&github_issue());
     host.world().diff = Diff { paths: vec!["src-tauri/src/auth.rs".into()], patch: String::new() };
@@ -1129,7 +1109,6 @@ fn anything_the_security_pass_flagged_is_left_for_a_person() {
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn a_required_security_pass_is_asked_for_once_and_then_it_is_a_persons() {
     let host = FakeHost::new(&github_issue());
     host.world().diff = Diff { paths: vec!["saas/src/billing/plans.ts".into()], patch: String::new() };
@@ -1147,7 +1126,6 @@ fn a_required_security_pass_is_asked_for_once_and_then_it_is_a_persons() {
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn a_required_security_pass_that_comes_back_clean_merges() {
     let host = FakeHost::new(&github_issue());
     host.world().diff = Diff { paths: vec!["saas/src/billing/plans.ts".into()], patch: String::new() };
@@ -1156,7 +1134,6 @@ fn a_required_security_pass_that_comes_back_clean_merges() {
     assert_eq!(run.reviewer(&reviewed_with(C1, "merge", "[]", "clean")).state, State::Merged);
 }
 
-#[test]
 fn a_project_that_requires_a_person_never_merges_whatever_the_switch_says() {
     let host = FakeHost::new(&github_issue());
     host.world().settings.require_person = true;
@@ -1171,7 +1148,6 @@ fn a_project_that_requires_a_person_never_merges_whatever_the_switch_says() {
     assert_eq!(run.merges(), [("merge".to_string(), C1.to_string())]);
 }
 
-#[test]
 fn a_person_pressing_merge_cannot_merge_what_the_gate_refuses() {
     let run = Run::start(&github_issue(), false);
     assert_eq!(run.to_gate().state, State::ReadyToMerge);
@@ -1193,7 +1169,6 @@ fn a_person_pressing_merge_cannot_merge_what_the_gate_refuses() {
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn conflicts_and_branch_protection_stop_it_and_github_refusing_is_reported_in_its_words() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1231,7 +1206,6 @@ fn conflicts_and_branch_protection_stop_it_and_github_refusing_is_reported_in_it
 
 // ---- the switch, turned off and on ----------------------------------------------
 
-#[test]
 fn turning_the_switch_off_stops_the_pipeline_before_the_merge() {
     let host = FakeHost::new(&github_issue());
     host.world().checks = vec![check("build", "in_progress")];
@@ -1253,7 +1227,6 @@ fn turning_the_switch_off_stops_the_pipeline_before_the_merge() {
     assert_eq!(run.kinds().iter().filter(|kind| *kind == "autoMerge").count(), 3);
 }
 
-#[test]
 fn the_switch_turned_off_while_the_merge_step_is_reading_github_still_stops_it() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1270,7 +1243,6 @@ fn the_switch_turned_off_while_the_merge_step_is_reading_github_still_stops_it()
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn stopping_while_the_merge_step_is_reading_github_still_stops_it() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1283,7 +1255,6 @@ fn stopping_while_the_merge_step_is_reading_github_still_stops_it() {
     assert!(stopped.stopped && run.merges().is_empty());
 }
 
-#[test]
 fn a_stopped_pipeline_does_nothing_until_it_is_resumed() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1302,7 +1273,6 @@ fn a_stopped_pipeline_does_nothing_until_it_is_resumed() {
 
 // ---- the author's side ------------------------------------------------------------
 
-#[test]
 fn work_that_is_not_reported_done_opens_no_pull_request() {
     let run = Run::start(&github_issue(), true);
     // A reply with no status block: asked for it, once.
@@ -1322,7 +1292,6 @@ fn work_that_is_not_reported_done_opens_no_pull_request() {
     assert_eq!(run.author(&done("Done after all.")).stage, Stage::Review);
 }
 
-#[test]
 fn failing_local_checks_open_no_pull_request() {
     let run = Run::start(&github_issue(), true);
     for checks in ["failed", "not_run"] {
@@ -1336,7 +1305,6 @@ fn failing_local_checks_open_no_pull_request() {
     assert_eq!(run.host.world().created[0].1, "#433 Open a pull request\n\nCloses #433");
 }
 
-#[test]
 fn uncommitted_work_and_an_empty_branch_open_no_pull_request() {
     let run = Run::start(&github_issue(), true);
     run.host.world().workspace.dirty = vec!["src/lib/format.ts".into(), "notes.txt".into()];
@@ -1354,7 +1322,6 @@ fn uncommitted_work_and_an_empty_branch_open_no_pull_request() {
     assert_eq!(act(&run.host, &run.id, Action::Advance).unwrap().stage, Stage::Review);
 }
 
-#[test]
 fn a_pull_request_that_could_not_be_opened_is_tried_again_when_the_author_next_says_done() {
     let run = Run::start(&github_issue(), true);
     run.host.world().workspace.dirty = vec!["notes.txt".into()];
@@ -1369,7 +1336,6 @@ fn a_pull_request_that_could_not_be_opened_is_tried_again_when_the_author_next_s
     assert_eq!(run.host.world().created.len(), 1);
 }
 
-#[test]
 fn a_push_that_is_refused_is_reported_and_can_be_tried_again() {
     let run = Run::start(&github_issue(), true);
     run.host.world().push_error = Some("remote: Permission to acme/widgets denied".into());
@@ -1380,7 +1346,6 @@ fn a_push_that_is_refused_is_reported_and_can_be_tried_again() {
     assert_eq!(act(&run.host, &run.id, Action::Advance).unwrap().stage, Stage::Review);
 }
 
-#[test]
 fn a_person_can_take_unreported_work_as_done() {
     let run = Run::start(&github_issue(), false);
     let reviewing = act(&run.host, &run.id, Action::Advance).unwrap();
@@ -1389,7 +1354,6 @@ fn a_person_can_take_unreported_work_as_done() {
     assert_eq!(run.host.world().created.len(), 1);
 }
 
-#[test]
 fn an_author_who_changes_nothing_in_answer_to_the_review_is_not_reviewed_again() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1401,7 +1365,6 @@ fn an_author_who_changes_nothing_in_answer_to_the_review_is_not_reviewed_again()
     assert_eq!(stopped.round, 1);
 }
 
-#[test]
 fn a_pull_request_the_session_opened_itself_is_used_and_linked_to_the_issue() {
     let host = FakeHost::new(&github_issue());
     {
@@ -1432,7 +1395,6 @@ fn a_pull_request_the_session_opened_itself_is_used_and_linked_to_the_issue() {
 
 // ---- the reviewer's side ----------------------------------------------------------
 
-#[test]
 fn a_reply_that_is_not_a_verdict_is_asked_for_once_and_never_taken_as_approval() {
     let run = Run::start(&github_issue(), true);
     let reviewer = run.to_review().reviewer.unwrap();
@@ -1448,7 +1410,6 @@ fn a_reply_that_is_not_a_verdict_is_asked_for_once_and_never_taken_as_approval()
     assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::Merged);
 }
 
-#[test]
 fn a_verdict_on_another_commit_is_not_a_verdict_on_this_one() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1460,7 +1421,6 @@ fn a_verdict_on_another_commit_is_not_a_verdict_on_this_one() {
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn a_reviewer_that_changes_the_checkout_voids_its_review() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1500,7 +1460,6 @@ impl Run {
     }
 }
 
-#[test]
 fn a_commit_pushed_mid_review_is_reviewed_again_in_the_same_round_with_no_person() {
     let run = Run::start(&github_issue(), true);
     let first = run.to_review();
@@ -1521,7 +1480,6 @@ fn a_commit_pushed_mid_review_is_reviewed_again_in_the_same_round_with_no_person
     assert!(!run.kinds().iter().any(|kind| kind == "needsYou"), "{:?}", run.kinds());
 }
 
-#[test]
 fn a_commit_pushed_during_the_last_round_does_not_use_up_the_round_limit() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1538,7 +1496,6 @@ fn a_commit_pushed_during_the_last_round_does_not_use_up_the_round_limit() {
     assert_eq!(run.reviewer(&reviewed(C4, "merge", "[]")).state, State::Merged);
 }
 
-#[test]
 fn a_head_that_keeps_moving_is_waited_on_until_still_and_then_left_to_a_person() {
     const C6: &str = "6666666666666666666666666666666666666666";
     const C7: &str = "7777777777777777777777777777777777777777";
@@ -1584,7 +1541,6 @@ fn a_head_that_keeps_moving_is_waited_on_until_still_and_then_left_to_a_person()
     assert_eq!((asked.state, asked.round, asked.moved_reviews, asked.review_commit.as_deref()), (State::Working, 2, 0, Some(C7)));
 }
 
-#[test]
 fn a_branch_that_never_holds_still_is_left_to_a_person() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1605,7 +1561,6 @@ fn a_branch_that_never_holds_still_is_left_to_a_person() {
     assert_eq!(stopped.review_commit.as_deref(), Some(C2), "never reviewed while it moved");
 }
 
-#[test]
 fn a_commit_the_reviewer_pushed_itself_is_not_reviewed_as_the_authors() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1627,7 +1582,6 @@ fn a_commit_the_reviewer_pushed_itself_is_not_reviewed_as_the_authors() {
     assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).review_commit.as_deref(), Some(C2));
 }
 
-#[test]
 fn a_commit_made_only_in_the_checkout_while_waiting_is_left_to_a_person() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1644,7 +1598,6 @@ fn a_commit_made_only_in_the_checkout_while_waiting_is_left_to_a_person() {
     assert_eq!(run.host.world().pushes, [C1], "nothing made in the checkout is pushed");
 }
 
-#[test]
 fn the_author_session_is_never_asked_to_review() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1666,7 +1619,6 @@ fn the_author_session_is_never_asked_to_review() {
     assert!(unmoved.verdict.is_none() && run.merges().is_empty());
 }
 
-#[test]
 fn a_deleted_reviewer_is_replaced_by_a_new_one_given_the_whole_brief() {
     let run = Run::start(&github_issue(), true);
     let first = run.to_review().reviewer.unwrap();
@@ -1679,7 +1631,6 @@ fn a_deleted_reviewer_is_replaced_by_a_new_one_given_the_whole_brief() {
     assert!(run.host.prompts_to(&second.session_id)[0].contains("You are reviewing a pull request you did not write."));
 }
 
-#[test]
 fn a_session_that_stops_mid_turn_leaves_the_stage_to_a_person() {
     let run = Run::start(&github_issue(), true);
     turn_failed(&run.host, "author", "t1", "Its turn was interrupted.");
@@ -1697,7 +1648,6 @@ fn a_session_that_stops_mid_turn_leaves_the_stage_to_a_person() {
 
 // ---- Linear, and what happens outside ---------------------------------------------
 
-#[test]
 fn a_linear_issue_is_linked_by_its_key_and_moved_to_review() {
     let run = Run::start(&linear_issue(), false);
     let reviewing = run.to_review();
@@ -1713,7 +1663,6 @@ fn a_linear_issue_is_linked_by_its_key_and_moved_to_review() {
     assert!(run.host.world().moved_to_review.is_empty() && !run.kinds().contains(&"tracker".to_string()));
 }
 
-#[test]
 fn a_merge_made_elsewhere_is_noticed_and_recorded_as_such() {
     let run = Run::start(&github_issue(), false);
     run.to_gate();
@@ -1725,7 +1674,6 @@ fn a_merge_made_elsewhere_is_noticed_and_recorded_as_such() {
     assert_eq!(merged.events.last().unwrap().message, "Merged outside this pipeline: pull request #7 at 1111111111 into main.");
 }
 
-#[test]
 fn a_pull_request_closed_without_merging_is_reported() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1734,7 +1682,6 @@ fn a_pull_request_closed_without_merging_is_reported() {
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn a_merge_queue_that_accepts_the_merge_is_waited_for_not_asked_twice() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1753,7 +1700,6 @@ fn a_merge_queue_that_accepts_the_merge_is_waited_for_not_asked_twice() {
     assert_eq!((merged.state, merged.merged.unwrap().by), (State::Merged, MergedBy::Pipeline));
 }
 
-#[test]
 fn a_merge_the_queue_never_completes_is_brought_to_a_person_and_still_noticed_if_it_lands() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1768,7 +1714,6 @@ fn a_merge_the_queue_never_completes_is_brought_to_a_person_and_still_noticed_if
     assert_eq!(run.poll().merged.unwrap().by, MergedBy::Pipeline);
 }
 
-#[test]
 fn a_merge_github_refused_is_not_put_to_it_again_until_someone_asks_or_the_head_changes() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1784,7 +1729,6 @@ fn a_merge_github_refused_is_not_put_to_it_again_until_someone_asks_or_the_head_
     assert_eq!(run.merges().len(), 2);
 }
 
-#[test]
 fn a_merge_whose_answer_was_lost_is_settled_from_the_pull_request() {
     // The request went through; only the reply did not come back.
     let run = Run::start(&github_issue(), true);
@@ -1823,7 +1767,6 @@ fn a_merge_whose_answer_was_lost_is_settled_from_the_pull_request() {
     assert_eq!(run.merges().len(), 2);
 }
 
-#[test]
 fn stop_pressed_while_github_is_merging_does_not_unmerge_the_record() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1851,7 +1794,6 @@ fn stop_pressed_while_github_is_merging_does_not_unmerge_the_record() {
     assert_eq!(run.merges().len(), 1);
 }
 
-#[test]
 fn a_review_that_passed_is_not_repeated_because_github_could_not_be_read_afterwards() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -1867,7 +1809,6 @@ fn a_review_that_passed_is_not_repeated_because_github_could_not_be_read_afterwa
     assert_eq!((run.pipeline().round, run.host.world().reviewers), (1, 1));
 }
 
-#[test]
 fn an_action_the_pipeline_is_in_no_position_for_is_refused_and_changes_nothing() {
     let run = Run::start(&github_issue(), true);
     let working = run.pipeline();
@@ -1907,7 +1848,6 @@ fn an_action_the_pipeline_is_in_no_position_for_is_refused_and_changes_nothing()
     assert_eq!(run.pipeline(), merged);
 }
 
-#[test]
 fn github_being_unreachable_for_a_look_changes_nothing() {
     let run = Run::start(&github_issue(), false);
     let ready = run.to_gate();
@@ -1922,7 +1862,6 @@ fn github_being_unreachable_for_a_look_changes_nothing() {
 
 // ---- starting, and starting again -------------------------------------------------
 
-#[test]
 fn a_pipeline_starts_for_any_session_on_a_branch_of_its_own() {
     let _home = crate::store::temp_home();
     let host = FakeHost::new(&github_issue());
@@ -1953,7 +1892,6 @@ fn a_pipeline_starts_for_any_session_on_a_branch_of_its_own() {
 
 /// What `terminalx sessions create --issue` with no merge flag, and an issue
 /// started from the palette, get: the switches as the project leaves them (#700).
-#[test]
 fn a_session_from_an_issue_starts_set_to_resolve_and_merge_unless_the_project_says_otherwise() {
     /// The issue session "author"'s new pipeline, in a store of its own.
     fn started(host: &FakeHost, auto_merge: Option<bool>) -> Pipeline {
@@ -1996,7 +1934,6 @@ fn a_session_from_an_issue_starts_set_to_resolve_and_merge_unless_the_project_sa
     assert!(!pipeline.auto_merge && pipeline.resolve_conflicts);
 }
 
-#[test]
 fn a_turn_ending_in_a_session_outside_any_pipeline_does_nothing() {
     let run = Run::start(&github_issue(), true);
     turn_completed(&run.host, "someone-else", "t1", Some(&done("Done.")));
@@ -2007,7 +1944,6 @@ fn a_turn_ending_in_a_session_outside_any_pipeline_does_nothing() {
     assert!(run.host.world().pushes.is_empty());
 }
 
-#[test]
 fn after_a_restart_a_stage_that_was_in_flight_says_so() {
     let run = Run::start(&github_issue(), true);
     recover(&run.host);
@@ -2024,7 +1960,6 @@ fn after_a_restart_a_stage_that_was_in_flight_says_so() {
     assert_eq!(run.pipeline(), merged);
 }
 
-#[test]
 fn a_step_that_changes_nothing_writes_and_announces_nothing() {
     let run = Run::start(&github_issue(), false);
     let ready = run.to_gate();
@@ -2033,7 +1968,6 @@ fn a_step_that_changes_nothing_writes_and_announces_nothing() {
     assert_eq!((again.modified, run.host.world().announced), (ready.modified, announced));
 }
 
-#[test]
 fn a_prompt_that_cannot_be_delivered_does_not_use_up_a_review_round() {
     let run = Run::start(&github_issue(), true);
     run.host.world().send_error = Some("the agent is not running".into());
@@ -2048,7 +1982,6 @@ fn a_prompt_that_cannot_be_delivered_does_not_use_up_a_review_round() {
 /// `src/lib/issuePipeline.test.ts` loads the same one. A field added here
 /// changes what is written, this test fails until the file says so too, and
 /// then that test fails until the page knows the field.
-#[test]
 fn a_pipeline_is_stored_in_the_shape_the_issue_page_reads() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!("../fixtures/issue_pipeline.json")).unwrap();
     let pipeline: Pipeline = serde_json::from_value(fixture.clone()).unwrap();
@@ -2078,7 +2011,6 @@ fn a_pipeline_is_stored_in_the_shape_the_issue_page_reads() {
 
 // ---- what the review of this change found ------------------------------------------
 
-#[test]
 fn missing_validation_never_becomes_success_with_age_and_no_ci_requires_opt_in() {
     let host = FakeHost::new(&github_issue());
     host.world().checks = Vec::new();
@@ -2092,7 +2024,6 @@ fn missing_validation_never_becomes_success_with_age_and_no_ci_requires_opt_in()
     assert_eq!(run.poll().state, State::Merged);
 }
 
-#[test]
 fn queued_workflows_partial_checks_and_pending_reruns_hold_the_pipeline() {
     for checks in [vec![], vec![check("build", "success")], vec![check("build", "success"), check("test", "success")]] {
         let run = Run::start(&github_issue(), true);
@@ -2116,7 +2047,6 @@ fn queued_workflows_partial_checks_and_pending_reruns_hold_the_pipeline() {
     }
 }
 
-#[test]
 fn only_the_pipelines_own_branch_is_ever_pushed() {
     // The author's session was moved to the project's own checkout, on main, and commits there.
     let run = Run::start(&github_issue(), true);
@@ -2142,7 +2072,6 @@ fn only_the_pipelines_own_branch_is_ever_pushed() {
     assert_eq!(run.host.world().pushes, [C1]);
 }
 
-#[test]
 fn a_pull_request_that_still_shows_the_old_head_after_a_push_is_given_a_moment() {
     // The review's own reads are counted: the conflict watcher, which reads the
     // pull request too, is off as the project turned it off.
@@ -2167,7 +2096,6 @@ fn a_pull_request_that_still_shows_the_old_head_after_a_push_is_given_a_moment()
     assert_eq!(stuck.round, 2);
 }
 
-#[test]
 fn a_pull_request_merged_or_closed_by_hand_is_noticed_at_any_stage() {
     // The author disputes the finding and changes nothing; the person agrees and merges on GitHub.
     let run = Run::start(&github_issue(), true);
@@ -2190,7 +2118,6 @@ fn a_pull_request_merged_or_closed_by_hand_is_noticed_at_any_stage() {
     assert_eq!(run.poll().reason, Some(StopReason::PullRequestClosed));
 }
 
-#[test]
 fn findings_that_never_reached_the_author_are_sent_again_not_skipped() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -2204,7 +2131,6 @@ fn findings_that_never_reached_the_author_are_sent_again_not_skipped() {
     assert!(run.host.prompts_to("author")[0].contains("Off by one"));
 }
 
-#[test]
 fn settings_that_cannot_be_read_never_let_a_merge_through() {
     // The project keeps the merge for a person; then its settings become unreadable.
     let host = FakeHost::new(&github_issue());
@@ -2227,7 +2153,6 @@ fn settings_that_cannot_be_read_never_let_a_merge_through() {
     assert!(start(&other, "second", "t1", None, None).unwrap_err().to_string().contains("settings could not be read"));
 }
 
-#[test]
 fn the_record_keeps_its_newest_lines() {
     let mut pipeline = {
         let run = Run::start(&github_issue(), false);
@@ -2251,7 +2176,6 @@ fn cloud_host(issue: &IssueRef) -> FakeHost {
     host
 }
 
-#[test]
 fn in_a_cloud_workspace_a_clean_pull_request_stops_at_ready_to_merge_whatever_the_switch_said() {
     // Asked for on, as a desktop that knows no better might: it stays off.
     let run = Run::start_in(cloud_host(&github_issue()), true);
@@ -2272,7 +2196,6 @@ fn in_a_cloud_workspace_a_clean_pull_request_stops_at_ready_to_merge_whatever_th
     assert!(!run.pipeline().auto_merge);
 }
 
-#[test]
 fn a_cloud_pipeline_stops_for_the_same_reasons_as_one_on_this_computer() {
     // A failing check on the reviewed commit.
     let host = cloud_host(&github_issue());
@@ -2296,7 +2219,6 @@ fn a_cloud_pipeline_stops_for_the_same_reasons_as_one_on_this_computer() {
     assert!(matches!(limited.reason, Some(StopReason::RoundLimit { rounds: 1, count: 1, .. })), "{:?}", limited.reason);
 }
 
-#[test]
 fn a_cloud_workspace_that_may_not_read_the_checks_stops_at_ready_to_merge_saying_so() {
     let run = Run::start_in(cloud_host(&github_issue()), false);
     run.to_review();
@@ -2313,7 +2235,6 @@ fn a_cloud_workspace_that_may_not_read_the_checks_stops_at_ready_to_merge_saying
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn a_cloud_workspaces_linear_issue_is_moved_to_review_by_a_desktop_and_recorded_once() {
     let run = Run::start_in(cloud_host(&linear_issue()), false);
     // No pull request yet: nothing to have moved it for.
@@ -2332,7 +2253,6 @@ fn a_cloud_workspaces_linear_issue_is_moved_to_review_by_a_desktop_and_recorded_
     assert!(note_tracker(&run.host, &run.id, "Moved.").unwrap_err().to_string().contains("not a Linear issue"));
 }
 
-#[test]
 fn a_cloud_reviewer_reads_the_issue_as_the_session_was_started_with_it() {
     let run = Run::start_with(cloud_host(&linear_issue()), None, Some("  Login times out after 30s.\n  "));
     assert_eq!(run.pipeline().issue_body.as_deref(), Some("Login times out after 30s."));
@@ -2348,7 +2268,6 @@ fn a_cloud_reviewer_reads_the_issue_as_the_session_was_started_with_it() {
     assert!(kept.len() < long.len() && kept.len() <= 16 * 1024 + 8 && kept.ends_with("[…]"));
 }
 
-#[test]
 fn a_merge_made_from_the_desktop_is_recorded_as_the_persons_once_the_runtime_reads_it() {
     let run = Run::start_in(cloud_host(&github_issue()), false);
     run.to_gate();
@@ -2364,7 +2283,6 @@ fn a_merge_made_from_the_desktop_is_recorded_as_the_persons_once_the_runtime_rea
     assert_eq!(note_merge(&run.host, &run.id, C1).unwrap().events.len(), merged.events.len());
 }
 
-#[test]
 fn a_desktop_merge_github_has_only_queued_is_waited_for_and_stays_the_persons() {
     let run = Run::start_in(cloud_host(&github_issue()), false);
     run.to_gate();
@@ -2378,7 +2296,6 @@ fn a_desktop_merge_github_has_only_queued_is_waited_for_and_stays_the_persons() 
     assert_eq!(engine::holding_at(run.host.now()), 0);
 }
 
-#[test]
 fn a_pipeline_waiting_on_checks_holds_a_cloud_workspace_awake_until_they_finish() {
     let host = cloud_host(&github_issue());
     host.world().checks = vec![check("build", "in_progress")];
@@ -2400,7 +2317,6 @@ fn a_pipeline_waiting_on_checks_holds_a_cloud_workspace_awake_until_they_finish(
     assert_eq!(engine::holding_at(run.host.now()), 0);
 }
 
-#[test]
 fn a_wait_on_github_holds_a_cloud_workspace_no_longer_than_its_limit_even_when_github_cannot_be_read() {
     let host = cloud_host(&github_issue());
     host.world().checks = vec![check("build", "in_progress")];
@@ -2422,7 +2338,6 @@ fn a_wait_on_github_holds_a_cloud_workspace_no_longer_than_its_limit_even_when_g
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn a_report_whose_step_the_restart_lost_is_taken_when_the_runtime_wakes_and_an_older_one_is_not() {
     // The author reported the work done; the runtime stopped before the step that opens the pull request wrote anything.
     let run = Run::start_in(cloud_host(&github_issue()), false);
@@ -2447,7 +2362,6 @@ fn a_report_whose_step_the_restart_lost_is_taken_when_the_runtime_wakes_and_an_o
     assert_eq!(run.host.world().created.len(), 1, "one pull request, however often the runtime wakes");
 }
 
-#[test]
 fn a_stages_work_holds_a_cloud_workspace_awake_and_a_look_at_a_parked_pipeline_does_not() {
     let run = Run::start_in(cloud_host(&github_issue()), false);
     let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -2466,7 +2380,6 @@ fn a_stages_work_holds_a_cloud_workspace_awake_and_a_look_at_a_parked_pipeline_d
     assert_eq!(engine::holding(), 0);
 }
 
-#[test]
 fn a_cloud_workspace_that_wakes_picks_its_pipelines_up_where_they_were() {
     // Waiting for the author to report: still waiting once the runtime is back.
     let run = Run::start_in(cloud_host(&github_issue()), false);
@@ -2495,7 +2408,6 @@ fn a_cloud_workspace_that_wakes_picks_its_pipelines_up_where_they_were() {
     assert_eq!(run.pipeline().state, State::ReadyToMerge);
 }
 
-#[test]
 fn pr_associations_migrate_only_author_evidence_and_outlive_pipeline_history() {
     let run = Run::start(&github_issue(), false);
     let first = run.to_review();
@@ -2518,7 +2430,6 @@ fn pr_associations_migrate_only_author_evidence_and_outlive_pipeline_history() {
     assert!(crate::pr_associations::for_session("unrelated", vec![]).unwrap().is_empty());
 }
 
-#[test]
 fn reviewer_tabs_are_independent_and_reused_after_a_changed_head() {
     let host = FakeHost::new(&github_issue());
     host.world().reviewer_tabs = true;
@@ -2544,7 +2455,6 @@ fn reviewer_tabs_are_independent_and_reused_after_a_changed_head() {
     assert_eq!(run.reviewer(&reviewed(C2, "merge", "[]")).state, State::ReadyToMerge);
 }
 
-#[test]
 fn automatic_head_review_waits_for_idle_clean_current_checkout_and_respects_limits() {
     for obstacle in ["active", "waiting", "dirty", "stale", "stopped", "limit"] {
         let run = Run::start(&github_issue(), false);
@@ -2567,7 +2477,6 @@ fn automatic_head_review_waits_for_idle_clean_current_checkout_and_respects_limi
     }
 }
 
-#[test]
 fn agent_merge_uses_the_gate_without_person_authority() {
     for hold in ["none", "person", "protected", "security", "ci", "workflow", "unread", "findings", "stale", "unpublished", "dirty", "stopped", "cloud"] {
         let run = Run::start(&github_issue(), false);
@@ -2597,7 +2506,6 @@ fn agent_merge_uses_the_gate_without_person_authority() {
     }
 }
 
-#[test]
 fn failed_local_checks_cannot_be_advanced_to_merge_by_an_agent() {
     let run = Run::start(&github_issue(), false);
     run.author("```terminalx-status\n{\"status\":\"done\",\"checks\":\"failed\"}\n```");
@@ -2605,7 +2513,6 @@ fn failed_local_checks_cannot_be_advanced_to_merge_by_an_agent() {
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn legacy_separate_reviewer_is_reused_without_migrating_history() {
     let run = Run::start(&github_issue(), false);
     let ready = run.to_gate();
@@ -2621,7 +2528,6 @@ fn legacy_separate_reviewer_is_reused_without_migrating_history() {
     assert_eq!(run.host.world().reviewers, 1);
 }
 
-#[test]
 fn stop_during_head_review_preparation_sends_no_review() {
     let run = Run::start(&github_issue(), false);
     run.to_gate();
@@ -2635,7 +2541,6 @@ fn stop_during_head_review_preparation_sends_no_review() {
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn a_missing_reviewer_can_be_replaced_when_the_head_moves() {
     let host = FakeHost::new(&github_issue());
     host.world().reviewer_tabs = true;
@@ -2671,7 +2576,6 @@ fn session_tab(id: &str) -> crate::store::index::TabEntry {
     tab
 }
 
-#[test]
 fn a_pipeline_whose_author_tab_is_replaced_goes_on_to_review_findings_and_merge() {
     let host = FakeHost::new(&github_issue());
     host.world().reviewer_tabs = true;
@@ -2703,7 +2607,6 @@ fn a_pipeline_whose_author_tab_is_replaced_goes_on_to_review_findings_and_merge(
     assert_eq!(merged.events.iter().filter(|event| event.kind == "authorMoved").count(), 1);
 }
 
-#[test]
 fn the_successor_is_never_a_reviewer_tab_and_a_report_from_another_tab_is_ignored() {
     let host = FakeHost::new(&github_issue());
     host.world().reviewer_tabs = true;
@@ -2727,7 +2630,6 @@ fn the_successor_is_never_a_reviewer_tab_and_a_report_from_another_tab_is_ignore
     assert!(reviewing.events.iter().any(|event| event.kind == "authorMoved" && event.message.contains("most recent agent tab")));
 }
 
-#[test]
 fn a_pipeline_stuck_on_a_gone_author_moves_on_when_asked_again() {
     let host = FakeHost::new(&github_issue());
     host.world().reviewer_tabs = true;
@@ -2743,7 +2645,6 @@ fn a_pipeline_stuck_on_a_gone_author_moves_on_when_asked_again() {
     assert_eq!((reviewing.stage, reviewing.state, reviewing.author.tab_id.as_str()), (Stage::Review, State::Working, "t2"), "{:?}", reviewing.note);
 }
 
-#[test]
 fn start_adopt_pr_takes_over_a_pipeline_whose_author_tab_is_gone() {
     use super::SwitchActor;
     let host = FakeHost::new(&github_issue());
@@ -2787,7 +2688,6 @@ fn stuck_without_author(run: &Run) -> Pipeline {
     stuck
 }
 
-#[test]
 fn adopt_pr_corrects_a_successor_terminalx_chose_wrongly() {
     use super::SwitchActor;
     let host = FakeHost::new(&github_issue());
@@ -2818,7 +2718,6 @@ fn adopt_pr_corrects_a_successor_terminalx_chose_wrongly() {
     assert!(engine::start_existing(&run.host, "author", "t3", None, None, true, other).is_err());
 }
 
-#[test]
 fn adopt_pr_from_the_tab_already_chosen_takes_the_stopped_step_again() {
     use super::SwitchActor;
     let host = FakeHost::new(&github_issue());
@@ -2836,7 +2735,6 @@ fn adopt_pr_from_the_tab_already_chosen_takes_the_stopped_step_again() {
     assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::Merged);
 }
 
-#[test]
 fn a_changed_heads_failed_local_checks_survive_polling_and_require_a_pass_for_that_head() {
     for status in ["done", "blocked"] {
         let run = Run::start(&github_issue(), false);
@@ -2869,7 +2767,6 @@ fn a_changed_heads_failed_local_checks_survive_polling_and_require_a_pass_for_th
     }
 }
 
-#[test]
 fn a_clean_verdict_cannot_override_a_local_failure_reported_during_review() {
     let run = Run::start(&github_issue(), false);
     run.to_gate();
@@ -2890,7 +2787,6 @@ fn a_clean_verdict_cannot_override_a_local_failure_reported_during_review() {
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn conflict_resolution_waits_for_author_then_reviews_and_checks_the_new_head() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -2924,7 +2820,6 @@ fn conflict_resolution_waits_for_author_then_reviews_and_checks_the_new_head() {
     assert_eq!(run.merges()[0].1, C2);
 }
 
-#[test]
 fn a_resolution_limit_dirty_checkout_and_remote_writer_stop_without_push() {
     for stop in ["limit", "dirty", "writer", "failed"] {
         let run = Run::start(&github_issue(), false);
@@ -2956,7 +2851,6 @@ fn a_resolution_limit_dirty_checkout_and_remote_writer_stop_without_push() {
     }
 }
 
-#[test]
 fn a_conflict_github_finds_and_git_does_not_is_resolved_not_left_to_a_person() {
     // Criss-crossed history (#748): GitHub merges from one of two merge
     // bases and finds a conflict, git merges the two bases first and none.
@@ -2983,7 +2877,6 @@ fn a_conflict_github_finds_and_git_does_not_is_resolved_not_left_to_a_person() {
     assert_eq!(run.merges()[0].1, C2);
 }
 
-#[test]
 fn conflicts_are_watched_before_a_pull_request_exists() {
     let run = Run::start(&github_issue(), false);
     set_resolve_conflicts(&run.host, &run.id, true).unwrap();
@@ -2996,7 +2889,6 @@ fn conflicts_are_watched_before_a_pull_request_exists() {
     assert!(run.pipeline().pr.is_none());
 }
 
-#[test]
 fn local_checks_are_run_by_terminalx_again_for_each_head_and_policy_change() {
     let run = Run::start(&github_issue(), false);
     run.host.world().settings.local_check_command = Some("project-check".into());
@@ -3015,7 +2907,6 @@ fn local_checks_are_run_by_terminalx_again_for_each_head_and_policy_change() {
     assert_eq!(run.host.world().local_runs.last(), Some(&(C2.into(), "new-project-check".into())));
 }
 
-#[test]
 fn failed_local_command_does_not_merge_even_with_successful_hosted_checks() {
     let run = Run::start(&github_issue(), true);
     run.host.world().settings.local_check_command = Some("project-check".into());
@@ -3026,7 +2917,6 @@ fn failed_local_command_does_not_merge_even_with_successful_hosted_checks() {
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn host_startup_blockers_escalate_author_work_without_a_pr_or_changed_tab_metadata() {
     let run = Run::start(&github_issue(), true);
     run.host.world().startup_blocker = Some("Incident a is unresolved; recorder pending".into());
@@ -3045,7 +2935,6 @@ fn host_startup_blockers_escalate_author_work_without_a_pr_or_changed_tab_metada
     assert!(run.host.world().sent.is_empty());
 }
 
-#[test]
 fn host_incident_admits_no_new_local_check_even_with_successful_ci() {
     let run = Run::start(&github_issue(), true);
     run.host.world().settings.local_check_command = Some("project-check".into());
@@ -3059,7 +2948,6 @@ fn host_incident_admits_no_new_local_check_even_with_successful_ci() {
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn a_check_finishing_during_an_incident_requires_a_fresh_retry() {
     let run = Run::start(&github_issue(), true);
     run.host.world().settings.local_check_command = Some("project-check".into());
@@ -3081,7 +2969,6 @@ fn a_check_finishing_during_an_incident_requires_a_fresh_retry() {
     assert_eq!(run.host.world().local_runs.len(), 2, "the late result was not cached");
 }
 
-#[test]
 fn pending_recorders_survive_restart_without_certifying_or_repeating_a_check() {
     let run = Run::start(&github_issue(), false);
     run.host.world().settings.local_check_command = Some("project-check".into());
@@ -3111,7 +2998,6 @@ fn pending_recorders_survive_restart_without_certifying_or_repeating_a_check() {
     assert_eq!(run.host.world().local_runs.len(), 2);
 }
 
-#[test]
 fn a_successful_observer_cannot_certify_a_still_pending_recorder() {
     let run = Run::start(&github_issue(), true);
     run.host.world().settings.local_check_command = Some("project-check".into());
@@ -3131,7 +3017,6 @@ fn a_successful_observer_cannot_certify_a_still_pending_recorder() {
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn pending_validation_owns_the_checkout_even_when_policy_is_disabled_or_a_check_is_cached() {
     for disabled in [false, true] {
         let run = Run::start(&github_issue(), false);
@@ -3158,7 +3043,6 @@ fn pending_validation_owns_the_checkout_even_when_policy_is_disabled_or_a_check_
     }
 }
 
-#[test]
 fn interrupted_recorder_details_survive_polling_and_restart_without_duplicate_alerts() {
     let run = Run::start(&github_issue(), true);
     run.host.world().settings.local_check_command = Some("project-check".into());
@@ -3183,7 +3067,6 @@ fn interrupted_recorder_details_survive_polling_and_restart_without_duplicate_al
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn fresh_health_does_not_release_a_pending_recorder_or_accept_its_late_result() {
     let run = Run::start(&github_issue(), true);
     run.host.world().settings.local_check_command = Some("project-check".into());
@@ -3204,7 +3087,6 @@ fn fresh_health_does_not_release_a_pending_recorder_or_accept_its_late_result() 
     assert_eq!(run.host.world().local_runs.len(), 2, "only a fresh check certifies the head");
 }
 
-#[test]
 fn a_real_check_failure_is_not_erased_by_incident_recovery() {
     let run = Run::start(&github_issue(), true);
     run.host.world().settings.local_check_command = Some("project-check".into());
@@ -3224,7 +3106,6 @@ fn a_real_check_failure_is_not_erased_by_incident_recovery() {
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn a_successful_check_on_an_old_head_does_not_certify_the_final_head() {
     let run = Run::start(&github_issue(), false);
     run.host.world().settings.local_check_command = Some("project-check".into());
@@ -3244,7 +3125,6 @@ fn a_successful_check_on_an_old_head_does_not_certify_the_final_head() {
     assert_eq!(run.host.world().local_runs, [(C1.into(), "project-check".into()), (C2.into(), "project-check".into())]);
 }
 
-#[test]
 fn local_checks_wait_for_an_active_author_then_resume_on_the_next_poll() {
     let run = Run::start(&github_issue(), false);
     run.host.world().settings.local_check_command = Some("project-check".into());
@@ -3258,7 +3138,6 @@ fn local_checks_wait_for_an_active_author_then_resume_on_the_next_poll() {
     assert_eq!(run.host.world().local_runs.len(), 1);
 }
 
-#[test]
 fn a_resolver_never_runs_beside_a_reviewer_or_discards_its_security_findings() {
     let run = Run::start(&github_issue(), false);
     run.to_review();
@@ -3288,7 +3167,6 @@ fn a_resolver_never_runs_beside_a_reviewer_or_discards_its_security_findings() {
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn an_author_handoff_requires_an_idle_resumed_pipeline_and_preserves_review_evidence() {
     let run = Run::start(&github_issue(), false);
     let reviewed = run.to_gate().verdict;
@@ -3313,7 +3191,6 @@ fn an_author_handoff_requires_an_idle_resumed_pipeline_and_preserves_review_evid
     assert_eq!(run.host.world().sessions.get("author").unwrap().tabs[0].id, "t1");
 }
 
-#[test]
 fn a_continuation_persists_its_explicit_merge_choice_without_merging() {
     for (before, choice, cloud, expected) in [(true, false, false, false), (false, true, false, true), (false, true, true, false)] {
         let run = Run::start(&github_issue(), before);
@@ -3337,7 +3214,6 @@ fn a_continuation_persists_its_explicit_merge_choice_without_merging() {
     }
 }
 
-#[test]
 fn resolver_termination_releases_a_stopped_pipelines_checkout() {
     for interrupted in [true, false] {
         let run = Run::start(&github_issue(), false);
@@ -3358,7 +3234,6 @@ fn resolver_termination_releases_a_stopped_pipelines_checkout() {
     }
 }
 
-#[test]
 fn all_off_continuation_revokes_both_permissions_and_hands_over_the_existing_pipeline() {
     let run = Run::start(&github_issue(), true);
     set_resolve_conflicts(&run.host, &run.id, true).unwrap();
@@ -3382,7 +3257,6 @@ fn all_off_continuation_revokes_both_permissions_and_hands_over_the_existing_pip
     assert!(!run.pipeline().auto_merge && !run.pipeline().resolve_conflicts);
 }
 
-#[test]
 fn all_off_continuation_does_not_create_a_pipeline_and_read_errors_are_not_absence() {
     let _home = crate::store::temp_home();
     let host = FakeHost::new(&github_issue());
@@ -3392,7 +3266,6 @@ fn all_off_continuation_does_not_create_a_pipeline_and_read_errors_are_not_absen
     assert!(engine::continue_launch(&host, "author", "t1", &super::LaunchOptions::default()).is_err());
 }
 
-#[test]
 fn all_off_continuation_preserves_a_merged_pipeline_even_after_workspace_cleanup() {
     for cleaned in [false, true] {
         let run = Run::start(&github_issue(), true);
@@ -3424,7 +3297,6 @@ fn all_off_continuation_preserves_a_merged_pipeline_even_after_workspace_cleanup
     }
 }
 
-#[test]
 fn refused_continuation_still_revokes_explicit_off_permissions() {
     for stopped in [false, true] {
         let run = Run::start(&github_issue(), true);
@@ -3447,7 +3319,6 @@ fn refused_continuation_still_revokes_explicit_off_permissions() {
 
 // ---- the end of a pipeline, for the conversations in it (#689) ----------------------
 
-#[test]
 fn a_merge_made_elsewhere_stops_the_idle_reviewer_and_author_and_a_later_reply_changes_nothing() {
     // The reviewer gave its verdict with its tests still running in the background, and went on waking up after the merge.
     let host = FakeHost::new(&github_issue());
@@ -3488,7 +3359,6 @@ fn a_merge_made_elsewhere_stops_the_idle_reviewer_and_author_and_a_later_reply_c
     assert!(run.host.prompts_to("author").is_empty());
 }
 
-#[test]
 fn a_conversation_still_in_a_turn_when_the_pipeline_ends_is_told_and_stopped_once_the_turn_ends() {
     let run = Run::start(&github_issue(), false);
     let reviewer = run.to_review().reviewer.unwrap();
@@ -3518,7 +3388,6 @@ fn a_conversation_still_in_a_turn_when_the_pipeline_ends_is_told_and_stopped_onc
     assert_eq!(done.state, State::Merged);
 }
 
-#[test]
 fn stopping_a_pipeline_releases_its_reviewer_and_leaves_the_authors_work_alone() {
     let run = Run::start(&github_issue(), true);
     let reviewer = run.to_review().reviewer.unwrap();
@@ -3545,7 +3414,6 @@ fn stopping_a_pipeline_releases_its_reviewer_and_leaves_the_authors_work_alone()
     assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::Merged);
 }
 
-#[test]
 fn a_pull_request_closed_without_merging_releases_its_conversations_once() {
     let run = Run::start(&github_issue(), false);
     let reviewer = run.to_review().reviewer.unwrap();
@@ -3564,7 +3432,6 @@ fn a_pull_request_closed_without_merging_releases_its_conversations_once() {
 
 // ---- a reviewer whose own checks are still running (#689) ---------------------------
 
-#[test]
 fn a_reviewer_still_running_its_checks_is_waited_for_and_then_asked_once_for_its_verdict() {
     let run = Run::start(&github_issue(), true);
     let reviewer = run.to_review().reviewer.unwrap();
@@ -3603,7 +3470,6 @@ fn a_reviewer_still_running_its_checks_is_waited_for_and_then_asked_once_for_its
     assert!(run.host.world().comments[0].contains("Reviewed by reading only, tests not run: the build waits on a file lock."));
 }
 
-#[test]
 fn a_reviewer_that_still_gives_no_verdict_once_its_time_ran_out_is_left_to_a_person() {
     let run = Run::start(&github_issue(), true);
     let reviewer = run.to_review().reviewer.unwrap();
@@ -3625,7 +3491,6 @@ fn a_reviewer_that_still_gives_no_verdict_once_its_time_ran_out_is_left_to_a_per
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn a_reviewer_reminded_of_its_verdict_may_answer_that_its_checks_are_still_running() {
     let run = Run::start(&github_issue(), true);
     let reviewer = run.to_review().reviewer.unwrap();
@@ -3637,7 +3502,6 @@ fn a_reviewer_reminded_of_its_verdict_may_answer_that_its_checks_are_still_runni
     assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::Merged);
 }
 
-#[test]
 fn a_reviewer_waiting_on_its_own_checks_holds_a_cloud_workspace_awake() {
     let run = Run::start_in(cloud_host(&github_issue()), false);
     run.to_review();
@@ -3650,7 +3514,6 @@ fn a_reviewer_waiting_on_its_own_checks_holds_a_cloud_workspace_awake() {
 
 // ---- what the reviewer's checks came to (#689) ---------------------------------------
 
-#[test]
 fn a_review_by_reading_alone_does_not_merge_a_project_without_ci_by_itself() {
     let host = FakeHost::new(&github_issue());
     host.world().checks = Vec::new();
@@ -3675,7 +3538,6 @@ fn a_review_by_reading_alone_does_not_merge_a_project_without_ci_by_itself() {
     assert_eq!(run.reviewer(&reviewed_checks(C1, "merge", "passed", "cargo test")).state, State::Merged);
 }
 
-#[test]
 fn checks_that_failed_for_the_reviewer_are_a_persons_to_judge_whatever_its_verdict() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -3686,7 +3548,6 @@ fn checks_that_failed_for_the_reviewer_are_a_persons_to_judge_whatever_its_verdi
     assert!(run.host.world().comments[0].contains("The reviewer's checks failed: status::usage tests fail."));
 }
 
-#[test]
 fn an_author_in_a_turn_when_its_pull_request_merges_is_left_to_finish_and_never_told_to_stop() {
     let run = Run::start(&github_issue(), false);
     let reviewer = run.to_review().reviewer.unwrap();
@@ -3707,7 +3568,6 @@ fn an_author_in_a_turn_when_its_pull_request_merges_is_left_to_finish_and_never_
     assert_eq!(run.host.stopped_agents(), [key(&reviewer)]);
 }
 
-#[test]
 fn an_overdue_verdict_that_cannot_be_asked_for_is_left_to_a_person() {
     let run = Run::start(&github_issue(), true);
     let reviewer = run.to_review().reviewer.unwrap();
@@ -3779,17 +3639,14 @@ fn an_answer_to_an_author_that_is_not_done_is_working_before_its_turn_ends(issue
     assert_eq!((reviewing.stage, reviewing.state, reviewing.answered), (Stage::Review, State::Working, None));
 }
 
-#[test]
 fn a_message_to_an_author_that_is_not_done_puts_a_github_issues_pipeline_to_work_at_once() {
     an_answer_to_an_author_that_is_not_done_is_working_before_its_turn_ends(&github_issue());
 }
 
-#[test]
 fn a_message_to_an_author_that_is_not_done_puts_a_linear_issues_pipeline_to_work_at_once() {
     an_answer_to_an_author_that_is_not_done_is_working_before_its_turn_ends(&linear_issue());
 }
 
-#[test]
 fn an_answered_turn_that_ends_not_done_stops_for_a_person_again() {
     let run = Run::start(&github_issue(), false);
     run.author(&not_done("Which table holds the plans?"));
@@ -3803,7 +3660,6 @@ fn an_answered_turn_that_ends_not_done_stops_for_a_person_again() {
     assert_eq!(run.answered_turn(&done("Added the column.")).stage, Stage::Review);
 }
 
-#[test]
 fn a_message_to_the_author_does_not_clear_a_required_review() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
@@ -3827,7 +3683,6 @@ fn a_message_to_the_author_does_not_clear_a_required_review() {
     assert_eq!(run.poll().state, State::Merged);
 }
 
-#[test]
 fn only_the_authors_answer_to_a_stop_of_its_own_puts_the_pipeline_back_to_work() {
     let run = Run::start(&github_issue(), false);
     let blocked = run.author(&not_done("Which table holds the plans?"));
@@ -3867,7 +3722,6 @@ fn only_the_authors_answer_to_a_stop_of_its_own_puts_the_pipeline_back_to_work()
     assert_eq!(run.answer(), closed);
 }
 
-#[test]
 fn a_pull_request_that_could_not_be_opened_is_working_once_its_author_is_answered() {
     let run = Run::start(&github_issue(), true);
     run.host.world().workspace.dirty = vec!["notes.txt".into()];
@@ -3895,7 +3749,6 @@ fn a_pull_request_that_could_not_be_opened_is_working_once_its_author_is_answere
     assert_eq!(run.answered_turn(&done("The remote is fixed.")).stage, Stage::Review);
 }
 
-#[test]
 fn conflicts_answered_by_a_person_are_left_to_the_authors_turn_not_put_back_by_the_poller() {
     let run = Run::start(&github_issue(), false);
     run.to_review();
@@ -3933,7 +3786,6 @@ fn conflicts_answered_by_a_person_are_left_to_the_authors_turn_not_put_back_by_t
     assert_eq!(run.poll().state, State::Merged);
 }
 
-#[test]
 fn a_message_sent_while_the_author_works_answers_the_stop_its_turn_ends_on() {
     let run = Run::start(&github_issue(), false);
     // A person sends a message while the author works; it waits for the turn's end.
@@ -3948,7 +3800,6 @@ fn a_message_sent_while_the_author_works_answers_the_stop_its_turn_ends_on() {
     assert_eq!(run.answered_turn(&done("Found it.")).stage, Stage::Review);
 }
 
-#[test]
 fn an_answered_turn_cut_short_or_lost_to_a_restart_is_a_persons_again() {
     let interrupted = StopReason::SessionStopped { role: "author".into(), detail: "Its turn was interrupted.".into() };
     let closed = StopReason::SessionStopped { role: "author".into(), detail: "TerminalX was closed before it finished.".into() };
@@ -4020,7 +3871,6 @@ fn resolving(run: &Run) -> Pipeline {
 
 const ABORTED: &str = "Aborted the conflict resolver's unfinished merge of main at 5555555555; the checkout is back at 1111111111.";
 
-#[test]
 fn a_resolver_that_stops_short_of_its_merge_commit_has_its_unfinished_merge_aborted() {
     let failed = |message: &str| StopReason::Failed { step: "Resolving conflicts".into(), message: message.into() };
     let checks_failed = "Red.\n\n```terminalx-status\n{\"status\": \"done\", \"checks\": \"failed\", \"summary\": \"cargo test fails\"}\n```".to_string();
@@ -4054,7 +3904,6 @@ fn a_resolver_that_stops_short_of_its_merge_commit_has_its_unfinished_merge_abor
     }
 }
 
-#[test]
 fn a_merge_the_pipeline_did_not_ask_for_is_left_as_it_is() {
     for moved in ["head", "merging"] {
         let run = Run::start(&github_issue(), false);
@@ -4074,7 +3923,6 @@ fn a_merge_the_pipeline_did_not_ask_for_is_left_as_it_is() {
     }
 }
 
-#[test]
 fn a_merge_a_person_may_be_looking_at_or_git_will_not_undo_is_left_as_it_is() {
     for case in ["interrupted", "stopped", "in use", "refused"] {
         let run = Run::start(&github_issue(), false);
@@ -4109,7 +3957,6 @@ fn a_merge_a_person_may_be_looking_at_or_git_will_not_undo_is_left_as_it_is() {
     }
 }
 
-#[test]
 fn a_resolver_whose_agent_went_mid_merge_has_the_merge_aborted() {
     let run = Run::start(&github_issue(), false);
     resolving(&run);
@@ -4120,7 +3967,6 @@ fn a_resolver_whose_agent_went_mid_merge_has_the_merge_aborted() {
     assert_eq!(stopped.events.last().unwrap().message, ABORTED);
 }
 
-#[test]
 fn a_pull_request_merged_or_closed_while_the_resolver_works_stops_it_at_once_and_its_merge_is_aborted_when_its_turn_ends() {
     for outcome in ["MERGED", "CLOSED"] {
         let run = Run::start(&github_issue(), false);
@@ -4161,7 +4007,6 @@ fn a_pull_request_merged_or_closed_while_the_resolver_works_stops_it_at_once_and
     }
 }
 
-#[test]
 fn a_resolver_found_idle_when_its_pull_request_merges_has_its_merge_aborted_at_once() {
     let run = Run::start(&github_issue(), false);
     resolving(&run);
@@ -4177,7 +4022,6 @@ fn a_resolver_found_idle_when_its_pull_request_merges_has_its_merge_aborted_at_o
     assert_eq!(run.host.prompts_to("resolver").len(), 1, "an idle agent is not typed to");
 }
 
-#[test]
 fn a_resolver_turn_cut_short_after_the_merge_leaves_the_pipeline_merged() {
     for interrupted in [true, false] {
         let run = Run::start(&github_issue(), false);
@@ -4196,7 +4040,6 @@ fn a_resolver_turn_cut_short_after_the_merge_leaves_the_pipeline_merged() {
     }
 }
 
-#[test]
 fn a_poll_while_the_resolver_works_on_an_open_pull_request_changes_nothing() {
     let run = Run::start(&github_issue(), false);
     let resolving = resolving(&run);
@@ -4226,7 +4069,6 @@ impl Run {
     }
 }
 
-#[test]
 fn a_resolver_that_ends_its_turn_to_wait_for_its_own_checks_is_judged_on_the_turn_they_wake() {
     let run = Run::start(&github_issue(), false);
     resolving(&run);
@@ -4265,7 +4107,6 @@ fn a_resolver_that_ends_its_turn_to_wait_for_its_own_checks_is_judged_on_the_tur
     assert_eq!(engine::holding_at(run.host.now()), 0);
 }
 
-#[test]
 fn a_resolver_that_ends_its_turn_without_a_report_and_nothing_running_is_asked_once_more() {
     let run = Run::start(&github_issue(), false);
     resolving(&run);
@@ -4287,7 +4128,6 @@ fn a_resolver_that_ends_its_turn_without_a_report_and_nothing_running_is_asked_o
     assert_eq!(run.host.world().pushes, [C1, C2]);
 }
 
-#[test]
 fn a_resolver_still_waiting_after_its_time_is_asked_for_its_report_and_then_left_to_a_person() {
     let run = Run::start(&github_issue(), false);
     resolving(&run);
@@ -4322,7 +4162,6 @@ fn a_resolver_still_waiting_after_its_time_is_asked_for_its_report_and_then_left
     assert_eq!(stopped.events.last().unwrap().message, "The conflict resolver's merge of main at 5555555555 is unfinished, and the resolver is still waiting on a background command it has not heard back from. It is left as it is.");
 }
 
-#[test]
 fn stopping_a_pipeline_whose_resolver_waits_on_its_checks_hands_over_the_checkout() {
     let run = Run::start(&github_issue(), false);
     resolving(&run);
@@ -4340,7 +4179,6 @@ fn stopping_a_pipeline_whose_resolver_waits_on_its_checks_hands_over_the_checkou
     assert_eq!(stopped.events.last().unwrap().message, "The conflict resolver's merge of main at 5555555555 is unfinished. It is left as it is for you to inspect: commit or abort it from the Changes panel.");
 }
 
-#[test]
 fn carrying_on_from_a_failed_resolution_compares_the_head_with_the_base_before_pushing() {
     for case in ["conflicts", "clean", "switch off"] {
         let run = Run::start(&github_issue(), false);
@@ -4375,7 +4213,6 @@ fn carrying_on_from_a_failed_resolution_compares_the_head_with_the_base_before_p
     }
 }
 
-#[test]
 fn carrying_on_from_an_aborted_resolution_resolves_a_conflict_only_github_finds() {
     // Its merge aborted, the checkout is the pull request's head again, and
     // GitHub's conflict is about it, though git merges cleanly (#748).
@@ -4404,7 +4241,6 @@ fn existing_pr_host() -> FakeHost {
 fn cli_actor() -> super::SwitchActor {
     super::SwitchActor::Cli { session_id: Some("author".into()), tab_id: Some("t1".into()) }
 }
-#[test]
 fn existing_session_start_is_idempotent_and_sends_the_brief_once() {
     let _home = crate::store::temp_home();
     let host = FakeHost::new(&github_issue());
@@ -4419,7 +4255,6 @@ fn existing_session_start_is_idempotent_and_sends_the_brief_once() {
     assert_eq!(host.prompts_to("author").len(), 1);
     assert_eq!(store::list().unwrap().len(), 1);
 }
-#[test]
 fn adoption_waits_for_idle_and_reviews_the_same_pr_without_push_or_history_changes() {
     let _home = crate::store::temp_home();
     let host = existing_pr_host();
@@ -4447,7 +4282,6 @@ fn adoption_waits_for_idle_and_reviews_the_same_pr_without_push_or_history_chang
     assert!(world.pushes.is_empty() && world.created.is_empty() && world.edited.is_empty());
     assert_eq!(world.pr.as_ref().unwrap().body, "Keep this body");
 }
-#[test]
 fn adoption_refuses_unmatched_or_dirty_work_without_creating_a_pipeline() {
     let _home = crate::store::temp_home();
     for condition in ["dirty", "head", "branch", "missing", "merging", "stdio"] {
@@ -4469,7 +4303,6 @@ fn adoption_refuses_unmatched_or_dirty_work_without_creating_a_pipeline() {
         assert!(host.world().sent.is_empty());
     }
 }
-#[test]
 fn adoption_preserves_person_only_merge_and_existing_author_ownership() {
     let _home = crate::store::temp_home();
     let host = existing_pr_host();
@@ -4489,7 +4322,6 @@ fn adoption_preserves_person_only_merge_and_existing_author_ownership() {
     assert_eq!(p.author.tab_id, "t1");
 }
 
-#[test]
 fn adoption_is_initialized_before_completion_events_and_polling_can_see_it() {
     let _home = crate::store::temp_home();
     let host = std::sync::Arc::new(existing_pr_host());
@@ -4520,7 +4352,6 @@ fn adoption_is_initialized_before_completion_events_and_polling_can_see_it() {
     assert_eq!(world.reviewers, 1);
 }
 
-#[test]
 fn adoption_association_failure_does_not_publish_a_work_pipeline() {
     let _home = crate::store::temp_home();
     let host = existing_pr_host();
@@ -4532,7 +4363,6 @@ fn adoption_association_failure_does_not_publish_a_work_pipeline() {
     assert!(host.world().pushes.is_empty());
 }
 
-#[test]
 fn adoption_does_not_overwrite_a_stopped_pipeline() {
     let _home = crate::store::temp_home();
     let host = existing_pr_host();
@@ -4542,7 +4372,6 @@ fn adoption_does_not_overwrite_a_stopped_pipeline() {
     assert!(store::get(&p.id).unwrap().stopped);
 }
 
-#[test]
 fn adopted_fork_identity_reaches_resolution_detection_and_the_push() {
     let _home = crate::store::temp_home();
     let host = existing_pr_host();
@@ -4568,7 +4397,6 @@ fn adopted_fork_identity_reaches_resolution_detection_and_the_push() {
     assert_eq!(store::get(&p.id).unwrap().stage, Stage::Review);
 }
 
-#[test]
 fn closed_or_terminal_recovery_resolvers_release_author_admission_without_reminders() {
     for detail in ["The conflict resolver tab was closed.", crate::recovery::RecoveryKind::SignedOut.message(), crate::recovery::RecoveryKind::Failed.message()] {
         let run = Run::start(&github_issue(), false);
@@ -4589,7 +4417,6 @@ fn closed_or_terminal_recovery_resolvers_release_author_admission_without_remind
     }
 }
 
-#[test]
 fn restart_replaces_the_resolver_and_ignores_late_events_even_at_round_limits() {
     let run = Run::start(&github_issue(), false);
     let mut pipeline = resolving(&run);
@@ -4622,7 +4449,6 @@ fn restart_replaces_the_resolver_and_ignores_late_events_even_at_round_limits() 
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn advance_accepts_a_remotely_resolved_head_and_requires_a_fresh_review() {
     for resolver in ["closed", "live", "no resolver"] {
         let run = Run::start(&github_issue(), false);
@@ -4655,7 +4481,6 @@ fn advance_accepts_a_remotely_resolved_head_and_requires_a_fresh_review() {
     }
 }
 
-#[test]
 fn remote_advance_preserves_process_ownership_local_changes_and_failed_check_gates() {
     for gate in ["process exit", "local changes", "failed checks"] {
         let run = Run::start(&github_issue(), true);
@@ -4701,7 +4526,6 @@ fn remote_advance_preserves_process_ownership_local_changes_and_failed_check_gat
     }
 }
 
-#[test]
 fn handover_preserves_a_live_resolvers_checkout_ownership() {
     let run = Run::start(&github_issue(), false);
     let resolving = resolving(&run);
@@ -4712,7 +4536,6 @@ fn handover_preserves_a_live_resolvers_checkout_ownership() {
     assert_eq!((after.stage, after.state), (Stage::Resolve, State::Working));
 }
 
-#[test]
 fn stopped_resolution_can_be_restarted_explicitly_with_automation_disabled() {
     let run = Run::start(&github_issue(), false);
     resolving(&run);
@@ -4725,7 +4548,6 @@ fn stopped_resolution_can_be_restarted_explicitly_with_automation_disabled() {
     assert_ne!(restarted.resolver, Some(resolver_tab()));
 }
 
-#[test]
 fn an_unconfirmed_resolver_exit_keeps_its_reservation_and_identity() {
     for action in [None, Some(Action::RestartResolve)] {
         let run = Run::start(&github_issue(), false);
@@ -4744,7 +4566,6 @@ fn an_unconfirmed_resolver_exit_keeps_its_reservation_and_identity() {
 }
 
 
-#[test]
 fn a_closed_resolver_restarts_its_pinned_merge_without_discarding_manual_edits() {
     let run = Run::start(&github_issue(), false);
     let before = resolving(&run);
@@ -4767,7 +4588,6 @@ fn a_closed_resolver_restarts_its_pinned_merge_without_discarding_manual_edits()
     assert_eq!(run.host.world().workspace.dirty, dirty);
 }
 
-#[test]
 fn restart_without_resolver_identity_retains_the_reservation() {
     let run = Run::start(&github_issue(), false);
     let mut before = resolving(&run);
@@ -4781,7 +4601,6 @@ fn restart_without_resolver_identity_retains_the_reservation() {
     assert!(run.host.aborts().is_empty());
 }
 
-#[test]
 fn remote_advance_and_recovery_keep_reservations_without_resolver_identity() {
     for action in ["advance", "recover", "handover"] {
         let run = Run::start(&github_issue(), false);
@@ -4812,7 +4631,6 @@ fn remote_advance_and_recovery_keep_reservations_without_resolver_identity() {
     }
 }
 
-#[test]
 fn restart_can_retry_delivery_without_losing_the_preserved_merge() {
     let run = Run::start(&github_issue(), false);
     let before = resolving(&run);
@@ -4879,7 +4697,6 @@ fn moved_after_final_review(diff: Option<Diff>, security: &str, carry: Option<Ca
     run
 }
 
-#[test]
 fn a_clean_merge_of_main_after_the_final_review_carries_the_verdict_and_merges() {
     let run = moved_after_final_review(None, "not_needed", Some(clean_merges()));
     let reviewer = run.pipeline().reviewer.unwrap();
@@ -4903,7 +4720,6 @@ fn a_clean_merge_of_main_after_the_final_review_carries_the_verdict_and_merges()
     assert!(comments.last().unwrap().starts_with("### TerminalX review of `1111111111` carries forward to `2222222222`"), "{comments:?}");
 }
 
-#[test]
 fn a_merge_of_main_that_resolved_a_conflict_gets_a_light_check_that_is_not_a_round() {
     let run = moved_after_final_review(None, "not_needed", Some(resolved_merge()));
     let reviewer = run.pipeline().reviewer.unwrap();
@@ -4936,7 +4752,6 @@ fn a_merge_of_main_that_resolved_a_conflict_gets_a_light_check_that_is_not_a_rou
     assert!(run.host.world().comments.last().unwrap().starts_with("### TerminalX check of the merge in `2222222222` — no blocking findings"));
 }
 
-#[test]
 fn a_light_check_that_finds_a_bad_resolution_stops_on_what_it_found() {
     let run = moved_after_final_review(None, "not_needed", Some(resolved_merge()));
     run.poll();
@@ -4946,7 +4761,6 @@ fn a_light_check_that_finds_a_bad_resolution_stops_on_what_it_found() {
     assert!(run.merges().is_empty());
 }
 
-#[test]
 fn a_light_check_with_rounds_left_sends_its_findings_to_the_author() {
     let run = moved_after_final_review(None, "not_needed", Some(resolved_merge()));
     { let mut p = run.pipeline(); p.max_rounds = 3; store::commit(&mut p).unwrap(); }
@@ -4956,7 +4770,6 @@ fn a_light_check_with_rounds_left_sends_its_findings_to_the_author() {
     assert!(run.host.prompts_to("author").last().unwrap().contains("Off by one"));
 }
 
-#[test]
 fn a_real_commit_after_the_final_review_still_needs_a_review_and_says_so() {
     let run = moved_after_final_review(None, "not_needed", None);
     let stopped = run.poll();
@@ -4977,7 +4790,6 @@ fn a_real_commit_after_the_final_review_still_needs_a_review_and_says_so() {
     assert_eq!(run.merges(), [("merge".to_string(), C2.to_string())]);
 }
 
-#[test]
 fn with_rounds_left_a_real_commit_gets_a_full_round_and_a_clean_merge_spends_none() {
     for (carry, round) in [(None, 2), (Some(clean_merges()), 1)] {
         let run = moved_after_final_review(None, "not_needed", carry.clone());
@@ -4988,7 +4800,6 @@ fn with_rounds_left_a_real_commit_gets_a_full_round_and_a_clean_merge_spends_non
     }
 }
 
-#[test]
 fn a_carried_verdict_keeps_the_security_pass_rule() {
     let billing = || Some(Diff { paths: vec!["saas/src/billing/plans.ts".into()], patch: String::new() });
     // A flagged pass, even with nothing blocking, is not carried: the new head is reviewed.
@@ -5031,7 +4842,6 @@ fn a_carried_verdict_keeps_the_security_pass_rule() {
     assert_eq!(run.reviewer(&reviewed_with(C2, "merge", "[]", "clean")).state, State::Merged);
 }
 
-#[test]
 fn a_conflict_the_pipelines_resolver_merged_after_the_final_review_gets_the_light_check() {
     let run = moved_after_final_review(None, "not_needed", None);
     // Undo the move: this time GitHub reports the conflict and the resolver merges main.
@@ -5061,7 +4871,6 @@ fn a_conflict_the_pipelines_resolver_merged_after_the_final_review_gets_the_ligh
     assert_eq!(run.merges(), [("merge".to_string(), C2.to_string())]);
 }
 
-#[test]
 fn a_stale_base_ref_does_not_count_the_bases_own_changes_against_a_carry() {
     // The checkout's origin/main lags behind the main that was merged: a
     // three-dot diff against it holds main's own billing change. Against the
@@ -5074,7 +4883,6 @@ fn a_stale_base_ref_does_not_count_the_bases_own_changes_against_a_carry() {
     assert_eq!(merged.verdict.unwrap().carried_from.as_deref(), Some(C1));
 }
 
-#[test]
 fn a_comparison_that_cannot_be_made_is_said_as_the_reason_not_new_work() {
     let run = moved_after_final_review(None, "not_needed", Some(clean_merges()));
     run.host.world().carry_error = Some("Fetching the pull request base failed: timed out".into());
@@ -5086,7 +4894,6 @@ fn a_comparison_that_cannot_be_made_is_said_as_the_reason_not_new_work() {
     assert!(stopped.events.iter().any(|event| event.kind == "note" && event.message.contains("timed out")));
 }
 
-#[test]
 fn agent_resolver_actions_cannot_grant_more_automation() {
     for limit in ["review", "resolution", "remote advance"] {
         let run = Run::start(&github_issue(), false);
@@ -5116,7 +4923,6 @@ fn agent_resolver_actions_cannot_grant_more_automation() {
     }
 }
 
-#[test]
 fn agent_resolver_restart_within_limits_consumes_a_resolution() {
     let run = Run::start(&github_issue(), false);
     let p = resolving(&run);
@@ -5130,7 +4936,6 @@ fn agent_resolver_restart_within_limits_consumes_a_resolution() {
     assert_eq!(refused.resolver, after.resolver);
 }
 
-#[test]
 fn signed_out_resolver_retry_restores_ownership_before_delivery() {
     for outcome in ["sent", "failed", "unconfirmed exit"] {
         let failure = outcome != "sent";
@@ -5161,7 +4966,6 @@ fn signed_out_resolver_retry_restores_ownership_before_delivery() {
     }
 }
 
-#[test]
 fn resolver_retry_does_not_reclaim_a_changed_checkout_or_stopped_pipeline() {
     for stopped in [false, true] {
         let run = Run::start(&github_issue(), false);
@@ -5177,7 +4981,6 @@ fn resolver_retry_does_not_reclaim_a_changed_checkout_or_stopped_pipeline() {
 
 // ---- a paired phone's news (#990) ------------------------------------------------
 
-#[test]
 fn a_phone_is_told_once_that_checks_failed_and_once_that_it_merged() {
     let host = FakeHost::new(&github_issue());
     host.world().checks = vec![check("build", "success"), check("test", "failure")];
@@ -5205,7 +5008,6 @@ fn a_phone_is_told_once_that_checks_failed_and_once_that_it_merged() {
     assert!(notice.detail.contains("merged pull request"), "{}", notice.detail);
 }
 
-#[test]
 fn a_pull_request_without_an_issue_is_named_by_its_session() {
     let host = FakeHost::new(&github_issue());
     host.world().sessions.get_mut("author").unwrap().issue = None;
@@ -5216,4 +5018,254 @@ fn a_pull_request_without_an_issue_is_named_by_its_session() {
     let notice = engine::phone_notice(&merged, Some("Work"), run.host.now()).unwrap();
     assert_eq!((notice.kind, notice.pull_request.as_str()), (engine::PhoneNoticeKind::Merged, "Work"));
     assert_eq!(engine::phone_notice(&merged, None, run.host.now()).unwrap().pull_request, merged.branch, "the branch, as the pipeline would title it");
+}
+
+#[test]
+fn issue_pipeline_engine_batch_1() {
+    launch_switches_are_independent_and_issue_defaults_respect_project_choices();
+    switch_history_names_people_author_sessions_and_other_cli_sessions_and_survives_a_step();
+    with_the_switch_off_an_issue_session_ends_reviewed_and_ready_and_nothing_merges();
+    a_session_without_an_issue_opens_reviews_and_merges_without_tracker_updates();
+    with_the_switch_on_a_clean_pull_request_merges_at_the_reviewed_commit();
+    the_projects_merge_method_is_the_one_used();
+    an_open_finding_goes_back_to_the_author_and_the_new_head_is_reviewed_before_it_merges();
+    an_open_finding_of_medium_or_higher_does_not_merge_even_under_a_verdict_of_merge();
+    the_review_rounds_are_capped_and_then_it_is_a_persons();
+    a_failing_check_does_not_merge_and_a_rerun_that_passes_does();
+    checks_still_running_are_waited_for_and_left_to_a_person_if_they_never_finish();
+    a_wait_on_checks_is_stored_in_the_shape_the_issue_page_reads();
+    a_wait_on_checks_carries_each_check_the_names_it_waits_on_and_its_clock();
+    a_failed_required_check_is_listed_with_the_wait_it_ended_and_a_rerun_starts_a_new_one();
+    a_failed_workflow_behind_passing_checks_is_said_by_the_note_not_listed();
+    checks_are_carried_only_while_the_merge_waits_on_them_or_stops_on_them();
+}
+
+#[test]
+fn issue_pipeline_engine_batch_2() {
+    a_head_that_moved_after_the_verdict_is_not_merged_until_it_is_reviewed();
+    a_head_that_moves_between_the_decision_and_the_merge_is_refused_by_the_pin();
+    a_change_in_a_protected_category_is_left_for_a_person();
+    anything_the_security_pass_flagged_is_left_for_a_person();
+    a_required_security_pass_is_asked_for_once_and_then_it_is_a_persons();
+    a_required_security_pass_that_comes_back_clean_merges();
+    a_project_that_requires_a_person_never_merges_whatever_the_switch_says();
+    a_person_pressing_merge_cannot_merge_what_the_gate_refuses();
+    conflicts_and_branch_protection_stop_it_and_github_refusing_is_reported_in_its_words();
+    turning_the_switch_off_stops_the_pipeline_before_the_merge();
+    the_switch_turned_off_while_the_merge_step_is_reading_github_still_stops_it();
+    stopping_while_the_merge_step_is_reading_github_still_stops_it();
+    a_stopped_pipeline_does_nothing_until_it_is_resumed();
+    work_that_is_not_reported_done_opens_no_pull_request();
+    failing_local_checks_open_no_pull_request();
+    uncommitted_work_and_an_empty_branch_open_no_pull_request();
+}
+
+#[test]
+fn issue_pipeline_engine_batch_3() {
+    a_pull_request_that_could_not_be_opened_is_tried_again_when_the_author_next_says_done();
+    a_push_that_is_refused_is_reported_and_can_be_tried_again();
+    a_person_can_take_unreported_work_as_done();
+    an_author_who_changes_nothing_in_answer_to_the_review_is_not_reviewed_again();
+    a_pull_request_the_session_opened_itself_is_used_and_linked_to_the_issue();
+    a_reply_that_is_not_a_verdict_is_asked_for_once_and_never_taken_as_approval();
+    a_verdict_on_another_commit_is_not_a_verdict_on_this_one();
+    a_reviewer_that_changes_the_checkout_voids_its_review();
+    a_commit_pushed_mid_review_is_reviewed_again_in_the_same_round_with_no_person();
+    a_commit_pushed_during_the_last_round_does_not_use_up_the_round_limit();
+    a_head_that_keeps_moving_is_waited_on_until_still_and_then_left_to_a_person();
+    a_branch_that_never_holds_still_is_left_to_a_person();
+    a_commit_the_reviewer_pushed_itself_is_not_reviewed_as_the_authors();
+    a_commit_made_only_in_the_checkout_while_waiting_is_left_to_a_person();
+    the_author_session_is_never_asked_to_review();
+    a_deleted_reviewer_is_replaced_by_a_new_one_given_the_whole_brief();
+}
+
+#[test]
+fn issue_pipeline_engine_batch_4() {
+    a_session_that_stops_mid_turn_leaves_the_stage_to_a_person();
+    a_linear_issue_is_linked_by_its_key_and_moved_to_review();
+    a_merge_made_elsewhere_is_noticed_and_recorded_as_such();
+    a_pull_request_closed_without_merging_is_reported();
+    a_merge_queue_that_accepts_the_merge_is_waited_for_not_asked_twice();
+    a_merge_the_queue_never_completes_is_brought_to_a_person_and_still_noticed_if_it_lands();
+    a_merge_github_refused_is_not_put_to_it_again_until_someone_asks_or_the_head_changes();
+    a_merge_whose_answer_was_lost_is_settled_from_the_pull_request();
+    stop_pressed_while_github_is_merging_does_not_unmerge_the_record();
+    a_review_that_passed_is_not_repeated_because_github_could_not_be_read_afterwards();
+    an_action_the_pipeline_is_in_no_position_for_is_refused_and_changes_nothing();
+    github_being_unreachable_for_a_look_changes_nothing();
+    a_pipeline_starts_for_any_session_on_a_branch_of_its_own();
+    a_session_from_an_issue_starts_set_to_resolve_and_merge_unless_the_project_says_otherwise();
+    a_turn_ending_in_a_session_outside_any_pipeline_does_nothing();
+    after_a_restart_a_stage_that_was_in_flight_says_so();
+}
+
+#[test]
+fn issue_pipeline_engine_batch_5() {
+    a_step_that_changes_nothing_writes_and_announces_nothing();
+    a_prompt_that_cannot_be_delivered_does_not_use_up_a_review_round();
+    a_pipeline_is_stored_in_the_shape_the_issue_page_reads();
+    missing_validation_never_becomes_success_with_age_and_no_ci_requires_opt_in();
+    queued_workflows_partial_checks_and_pending_reruns_hold_the_pipeline();
+    only_the_pipelines_own_branch_is_ever_pushed();
+    a_pull_request_that_still_shows_the_old_head_after_a_push_is_given_a_moment();
+    a_pull_request_merged_or_closed_by_hand_is_noticed_at_any_stage();
+    findings_that_never_reached_the_author_are_sent_again_not_skipped();
+    settings_that_cannot_be_read_never_let_a_merge_through();
+    the_record_keeps_its_newest_lines();
+    in_a_cloud_workspace_a_clean_pull_request_stops_at_ready_to_merge_whatever_the_switch_said();
+    a_cloud_pipeline_stops_for_the_same_reasons_as_one_on_this_computer();
+    a_cloud_workspace_that_may_not_read_the_checks_stops_at_ready_to_merge_saying_so();
+    a_cloud_workspaces_linear_issue_is_moved_to_review_by_a_desktop_and_recorded_once();
+    a_cloud_reviewer_reads_the_issue_as_the_session_was_started_with_it();
+}
+
+#[test]
+fn issue_pipeline_engine_batch_6() {
+    a_merge_made_from_the_desktop_is_recorded_as_the_persons_once_the_runtime_reads_it();
+    a_desktop_merge_github_has_only_queued_is_waited_for_and_stays_the_persons();
+    a_pipeline_waiting_on_checks_holds_a_cloud_workspace_awake_until_they_finish();
+    a_wait_on_github_holds_a_cloud_workspace_no_longer_than_its_limit_even_when_github_cannot_be_read();
+    a_report_whose_step_the_restart_lost_is_taken_when_the_runtime_wakes_and_an_older_one_is_not();
+    a_stages_work_holds_a_cloud_workspace_awake_and_a_look_at_a_parked_pipeline_does_not();
+    a_cloud_workspace_that_wakes_picks_its_pipelines_up_where_they_were();
+    pr_associations_migrate_only_author_evidence_and_outlive_pipeline_history();
+    reviewer_tabs_are_independent_and_reused_after_a_changed_head();
+    automatic_head_review_waits_for_idle_clean_current_checkout_and_respects_limits();
+    agent_merge_uses_the_gate_without_person_authority();
+    failed_local_checks_cannot_be_advanced_to_merge_by_an_agent();
+    legacy_separate_reviewer_is_reused_without_migrating_history();
+    stop_during_head_review_preparation_sends_no_review();
+    a_missing_reviewer_can_be_replaced_when_the_head_moves();
+    a_pipeline_whose_author_tab_is_replaced_goes_on_to_review_findings_and_merge();
+}
+
+#[test]
+fn issue_pipeline_engine_batch_7() {
+    the_successor_is_never_a_reviewer_tab_and_a_report_from_another_tab_is_ignored();
+    a_pipeline_stuck_on_a_gone_author_moves_on_when_asked_again();
+    start_adopt_pr_takes_over_a_pipeline_whose_author_tab_is_gone();
+    adopt_pr_corrects_a_successor_terminalx_chose_wrongly();
+    adopt_pr_from_the_tab_already_chosen_takes_the_stopped_step_again();
+    a_changed_heads_failed_local_checks_survive_polling_and_require_a_pass_for_that_head();
+    a_clean_verdict_cannot_override_a_local_failure_reported_during_review();
+    conflict_resolution_waits_for_author_then_reviews_and_checks_the_new_head();
+    a_resolution_limit_dirty_checkout_and_remote_writer_stop_without_push();
+    a_conflict_github_finds_and_git_does_not_is_resolved_not_left_to_a_person();
+    conflicts_are_watched_before_a_pull_request_exists();
+    local_checks_are_run_by_terminalx_again_for_each_head_and_policy_change();
+    failed_local_command_does_not_merge_even_with_successful_hosted_checks();
+    host_startup_blockers_escalate_author_work_without_a_pr_or_changed_tab_metadata();
+    host_incident_admits_no_new_local_check_even_with_successful_ci();
+    a_check_finishing_during_an_incident_requires_a_fresh_retry();
+}
+
+#[test]
+fn issue_pipeline_engine_batch_8() {
+    pending_recorders_survive_restart_without_certifying_or_repeating_a_check();
+    a_successful_observer_cannot_certify_a_still_pending_recorder();
+    pending_validation_owns_the_checkout_even_when_policy_is_disabled_or_a_check_is_cached();
+    interrupted_recorder_details_survive_polling_and_restart_without_duplicate_alerts();
+    fresh_health_does_not_release_a_pending_recorder_or_accept_its_late_result();
+    a_real_check_failure_is_not_erased_by_incident_recovery();
+    a_successful_check_on_an_old_head_does_not_certify_the_final_head();
+    local_checks_wait_for_an_active_author_then_resume_on_the_next_poll();
+    a_resolver_never_runs_beside_a_reviewer_or_discards_its_security_findings();
+    an_author_handoff_requires_an_idle_resumed_pipeline_and_preserves_review_evidence();
+    a_continuation_persists_its_explicit_merge_choice_without_merging();
+    resolver_termination_releases_a_stopped_pipelines_checkout();
+    all_off_continuation_revokes_both_permissions_and_hands_over_the_existing_pipeline();
+    all_off_continuation_does_not_create_a_pipeline_and_read_errors_are_not_absence();
+    all_off_continuation_preserves_a_merged_pipeline_even_after_workspace_cleanup();
+    refused_continuation_still_revokes_explicit_off_permissions();
+}
+
+#[test]
+fn issue_pipeline_engine_batch_9() {
+    a_merge_made_elsewhere_stops_the_idle_reviewer_and_author_and_a_later_reply_changes_nothing();
+    a_conversation_still_in_a_turn_when_the_pipeline_ends_is_told_and_stopped_once_the_turn_ends();
+    stopping_a_pipeline_releases_its_reviewer_and_leaves_the_authors_work_alone();
+    a_pull_request_closed_without_merging_releases_its_conversations_once();
+    a_reviewer_still_running_its_checks_is_waited_for_and_then_asked_once_for_its_verdict();
+    a_reviewer_that_still_gives_no_verdict_once_its_time_ran_out_is_left_to_a_person();
+    a_reviewer_reminded_of_its_verdict_may_answer_that_its_checks_are_still_running();
+    a_reviewer_waiting_on_its_own_checks_holds_a_cloud_workspace_awake();
+    a_review_by_reading_alone_does_not_merge_a_project_without_ci_by_itself();
+    checks_that_failed_for_the_reviewer_are_a_persons_to_judge_whatever_its_verdict();
+    an_author_in_a_turn_when_its_pull_request_merges_is_left_to_finish_and_never_told_to_stop();
+    an_overdue_verdict_that_cannot_be_asked_for_is_left_to_a_person();
+    a_message_to_an_author_that_is_not_done_puts_a_github_issues_pipeline_to_work_at_once();
+    a_message_to_an_author_that_is_not_done_puts_a_linear_issues_pipeline_to_work_at_once();
+    an_answered_turn_that_ends_not_done_stops_for_a_person_again();
+    a_message_to_the_author_does_not_clear_a_required_review();
+}
+
+#[test]
+fn issue_pipeline_engine_batch_10() {
+    only_the_authors_answer_to_a_stop_of_its_own_puts_the_pipeline_back_to_work();
+    a_pull_request_that_could_not_be_opened_is_working_once_its_author_is_answered();
+    conflicts_answered_by_a_person_are_left_to_the_authors_turn_not_put_back_by_the_poller();
+    a_message_sent_while_the_author_works_answers_the_stop_its_turn_ends_on();
+    an_answered_turn_cut_short_or_lost_to_a_restart_is_a_persons_again();
+    a_resolver_that_stops_short_of_its_merge_commit_has_its_unfinished_merge_aborted();
+    a_merge_the_pipeline_did_not_ask_for_is_left_as_it_is();
+    a_merge_a_person_may_be_looking_at_or_git_will_not_undo_is_left_as_it_is();
+    a_resolver_whose_agent_went_mid_merge_has_the_merge_aborted();
+    a_pull_request_merged_or_closed_while_the_resolver_works_stops_it_at_once_and_its_merge_is_aborted_when_its_turn_ends();
+    a_resolver_found_idle_when_its_pull_request_merges_has_its_merge_aborted_at_once();
+    a_resolver_turn_cut_short_after_the_merge_leaves_the_pipeline_merged();
+    a_poll_while_the_resolver_works_on_an_open_pull_request_changes_nothing();
+    a_resolver_that_ends_its_turn_to_wait_for_its_own_checks_is_judged_on_the_turn_they_wake();
+    a_resolver_that_ends_its_turn_without_a_report_and_nothing_running_is_asked_once_more();
+    a_resolver_still_waiting_after_its_time_is_asked_for_its_report_and_then_left_to_a_person();
+}
+
+#[test]
+fn issue_pipeline_engine_batch_11() {
+    stopping_a_pipeline_whose_resolver_waits_on_its_checks_hands_over_the_checkout();
+    carrying_on_from_a_failed_resolution_compares_the_head_with_the_base_before_pushing();
+    carrying_on_from_an_aborted_resolution_resolves_a_conflict_only_github_finds();
+    existing_session_start_is_idempotent_and_sends_the_brief_once();
+    adoption_waits_for_idle_and_reviews_the_same_pr_without_push_or_history_changes();
+    adoption_refuses_unmatched_or_dirty_work_without_creating_a_pipeline();
+    adoption_preserves_person_only_merge_and_existing_author_ownership();
+    adoption_is_initialized_before_completion_events_and_polling_can_see_it();
+    adoption_association_failure_does_not_publish_a_work_pipeline();
+    adoption_does_not_overwrite_a_stopped_pipeline();
+    adopted_fork_identity_reaches_resolution_detection_and_the_push();
+    closed_or_terminal_recovery_resolvers_release_author_admission_without_reminders();
+    restart_replaces_the_resolver_and_ignores_late_events_even_at_round_limits();
+    advance_accepts_a_remotely_resolved_head_and_requires_a_fresh_review();
+    remote_advance_preserves_process_ownership_local_changes_and_failed_check_gates();
+    handover_preserves_a_live_resolvers_checkout_ownership();
+}
+
+#[test]
+fn issue_pipeline_engine_batch_12() {
+    stopped_resolution_can_be_restarted_explicitly_with_automation_disabled();
+    an_unconfirmed_resolver_exit_keeps_its_reservation_and_identity();
+    a_closed_resolver_restarts_its_pinned_merge_without_discarding_manual_edits();
+    restart_without_resolver_identity_retains_the_reservation();
+    remote_advance_and_recovery_keep_reservations_without_resolver_identity();
+    restart_can_retry_delivery_without_losing_the_preserved_merge();
+    a_clean_merge_of_main_after_the_final_review_carries_the_verdict_and_merges();
+    a_merge_of_main_that_resolved_a_conflict_gets_a_light_check_that_is_not_a_round();
+    a_light_check_that_finds_a_bad_resolution_stops_on_what_it_found();
+    a_light_check_with_rounds_left_sends_its_findings_to_the_author();
+    a_real_commit_after_the_final_review_still_needs_a_review_and_says_so();
+    with_rounds_left_a_real_commit_gets_a_full_round_and_a_clean_merge_spends_none();
+    a_carried_verdict_keeps_the_security_pass_rule();
+    a_conflict_the_pipelines_resolver_merged_after_the_final_review_gets_the_light_check();
+    a_stale_base_ref_does_not_count_the_bases_own_changes_against_a_carry();
+    a_comparison_that_cannot_be_made_is_said_as_the_reason_not_new_work();
+}
+
+#[test]
+fn issue_pipeline_engine_batch_13() {
+    agent_resolver_actions_cannot_grant_more_automation();
+    agent_resolver_restart_within_limits_consumes_a_resolution();
+    signed_out_resolver_retry_restores_ownership_before_delivery();
+    resolver_retry_does_not_reclaim_a_changed_checkout_or_stopped_pipeline();
+    a_phone_is_told_once_that_checks_failed_and_once_that_it_merged();
+    a_pull_request_without_an_issue_is_named_by_its_session();
 }

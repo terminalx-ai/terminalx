@@ -30,7 +30,8 @@ describe("fragments", () => {
   });
 
   it("rebuild the message, then the next one", () => {
-    const message = Uint8Array.from({ length: 3 * RELAY_MESSAGE_BYTES_LIMIT + 17 }, (_, index) => index % 251);
+    const message = new Uint8Array(3 * RELAY_MESSAGE_BYTES_LIMIT + 17);
+    for (let index = 0; index < message.length; index++) message[index] = index % 251;
     const assembler = new FragmentAssembler();
     const fragments = encodeFragments(message, "relay");
     expect(fragments).toHaveLength(4);

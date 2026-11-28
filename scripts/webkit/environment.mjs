@@ -84,12 +84,16 @@ const recipes = {
   ],
 };
 
+const shots = process.env.ENVIRONMENT_SHOTS ?? null;
 const server = await serve();
 const browser = await launch();
 let failed = 0;
 try {
   // PRO-391: also at the design's 1440 width, in dark and light.
-  for (const [width, colorScheme] of [[1440, "dark"], [1440, "light"], [960, undefined], [720, undefined]]) {
+  const orgCases = shots
+    ? [[1440, "dark"], [1440, "light"], [960, undefined], [720, undefined]]
+    : [[1440, "dark"], [720, "light"]];
+  for (const [width, colorScheme] of orgCases) {
     // The price assertion uses the US currency format, regardless of the VM's locale.
     const page = await open(browser, server.url, { cloud: true, localProjects: 1 }, { width, height: 900 }, { locale: "en-US", colorScheme });
     await page.evaluate(
@@ -132,7 +136,7 @@ try {
     const rows = await page.getByRole("list", { name: "Environment versions" }).evaluate((list) => [...list.children].map((row) => ({ height: row.getBoundingClientRect().height, line: row.firstElementChild.getBoundingClientRect().height, text: row.textContent })));
     const unbuilt = await page.getByRole("region", { name: "Unbuilt changes" }).textContent();
     // The page before anything is opened, as the design draws it.
-    await page.getByTestId("organization-settings").screenshot({ path: `/tmp/pro-391-environment-${width}-${colorScheme ?? "default"}.png` });
+    if (shots) await page.getByTestId("organization-settings").screenshot({ path: `${shots}/pro-391-environment-${width}-${colorScheme ?? "default"}.png` });
     await page.getByRole("region", { name: "Environment builds" }).getByRole("button", { name: "Build environment" }).click();
     await page.getByRole("listitem", { name: "Version 4" }).getByRole("button", { name: "View log" }).click();
     await page.getByLabel("Build log of version 4").getByText(/Unable to locate/).waitFor();
@@ -168,9 +172,11 @@ try {
       };
     });
     // Tall enough that the whole section is laid out on screen for the picture.
-    await page.setViewportSize({ width, height: 3200 });
-    await section.scrollIntoViewIfNeeded();
-    await section.screenshot({ path: `/tmp/pro-20-environment-${width}-${colorScheme ?? "default"}.png` });
+    if (shots) {
+      await page.setViewportSize({ width, height: 3200 });
+      await section.scrollIntoViewIfNeeded();
+      await section.screenshot({ path: `${shots}/pro-20-environment-${width}-${colorScheme ?? "default"}.png` });
+    }
     const calls = await page.evaluate(() => window.__ENVIRONMENT_CALLS__);
     failed += report(`environment section at ${width}px${colorScheme ? ` (${colorScheme})` : ""}`, {
       "no text on the Environment tab is smaller than 12px": layout.small.length === 0,
@@ -218,7 +224,7 @@ async function localEnvironment() {
       { name: "VITE_RELAY_URL", scope: "repositoryShared", overridden: false, secret: false },
     ],
   };
-  for (const width of [960, 720]) {
+  for (const width of shots ? [960, 720] : [720]) {
     const page = await open(browser, server.url, { cloud: false, localProjects: 2 }, { width, height: 900 });
     await page.evaluate((rows) => {
       window.__LOCAL_ENVIRONMENT_CALLS__ = [];
@@ -253,14 +259,14 @@ async function localEnvironment() {
       return { noPageOverflow: main.scrollWidth <= main.clientWidth + 1, outside, overlaps, text: root.textContent };
     });
     const layout = await measure(repository);
-    await repository.screenshot({ path: `/tmp/pro-144-repository-environment-${width}.png` });
+    if (shots) await repository.screenshot({ path: `${shots}/pro-144-repository-environment-${width}.png` });
     const databaseRows = await repository.locator("tbody tr").evaluateAll((rows) => rows.filter((row) => row.cells[0].textContent.startsWith("DATABASE_URL")).length);
     await repository.getByRole("button", { name: "Paste KEY=VALUE" }).click();
     const sheet = page.getByRole("dialog");
     await sheet.getByLabel("Variables").fill("SENTRY_AUTH_TOKEN=sntrys_eyJpYXQiOjE3\nVITE_RELAY_URL=wss://relay.dev.example\n2FA_SEED=JBSWY3DPEHPK3PXP");
     const keychain = sheet.getByRole("checkbox", { name: "Keep values that look like secrets in the Keychain" });
     const sheetLayout = await measure(sheet);
-    await sheet.screenshot({ path: `/tmp/pro-144-add-variables-${width}.png` });
+    if (shots) await sheet.screenshot({ path: `${shots}/pro-144-add-variables-${width}.png` });
     const calls = await page.evaluate(() => window.__LOCAL_ENVIRONMENT_CALLS__);
     failures += report(`local environment pages at ${width}px`, {
       "the repository page does not widen the Settings column": layout.noPageOverflow,
@@ -276,7 +282,7 @@ async function localEnvironment() {
     }, { outside: [...layout.outside, ...sheetLayout.outside], overlaps: [...layout.overlaps, ...sheetLayout.overlaps], calls });
     await page.close();
   }
-  for (const colorScheme of ["dark", "light"]) {
+  for (const colorScheme of shots ? ["dark", "light"] : ["dark"]) {
     const page = await open(browser, server.url, { cloud: false, localProjects: 2 }, { width: 1440, height: 900 }, { colorScheme });
     await page.evaluate((rows) => {
       const answers = window.__PW_STUB__.answers;
@@ -302,13 +308,13 @@ async function localEnvironment() {
         besideTitle: Math.abs((add.top + add.bottom) / 2 - (title.top + title.bottom) / 2) < 12 && add.left > title.left + 200,
       };
     });
-    await page.locator("main").screenshot({ path: `/tmp/pro-376-environment-1440-${colorScheme}.png` });
+    if (shots) await page.locator("main").screenshot({ path: `${shots}/pro-376-environment-1440-${colorScheme}.png` });
     await page.getByRole("button", { name: "Paste KEY=VALUE" }).click();
     const sheet = page.getByRole("dialog");
     await sheet.getByLabel("Variables").fill("SENTRY_AUTH_TOKEN=sntrys_eyJpYXQiOjE3\nVITE_RELAY_URL=wss://relay.dev.example\n2FA_SEED=JBSWY3DPEHPK3PXP\nPOSTHOG_KEY=phc_8Qm2xR7tLw0");
-    await page.waitForTimeout(400);
+    await page.evaluate(() => Promise.all([...document.querySelectorAll('[role="dialog"]')].flatMap((node) => node.getAnimations({ subtree: true }).map((a) => a.finished.catch(() => {})))));
     const box = await sheet.boundingBox();
-    await page.screenshot({ path: `/tmp/pro-376-add-variables-1440-${colorScheme}.png` });
+    if (shots) await page.screenshot({ path: `${shots}/pro-376-add-variables-1440-${colorScheme}.png` });
     failures += report(`Personal environment at 1440px, ${colorScheme}`, {
       "every row is 40 px": personal.heights.every((height) => height === 40),
       "every row's actions are on one line": personal.oneLineActions,

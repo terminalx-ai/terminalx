@@ -1231,7 +1231,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn manual_status_defaults_and_survives_index_updates() {
         let _home = crate::store::temp_home();
         let mut legacy = serde_json::to_value(entry("one")).unwrap();
@@ -1254,7 +1253,6 @@ mod tests {
         assert!(serde_json::from_value::<crate::session_ops::SessionPatch>(serde_json::json!({"manualStatus":"broken"})).is_err());
     }
 
-    #[test]
     fn an_unknown_manual_status_does_not_cost_the_index_or_block_writes() {
         let _home = crate::store::temp_home();
         let mut rows = Vec::new();
@@ -1294,7 +1292,6 @@ mod tests {
         get(session_id).unwrap().tabs.into_iter().map(|tab| tab.id).collect()
     }
 
-    #[test]
     fn sidebar_order_survives_updates_and_new_sessions_lead_even_while_off() {
         let _home = crate::store::temp_home();
         let mut sessions = vec![entry("a"), entry("b"), entry("c")];
@@ -1323,7 +1320,6 @@ mod tests {
         assert_eq!(sidebar_order().unwrap().sessions, ["new", "b", "c"]);
     }
 
-    #[test]
     fn sidebar_seeds_project_order_from_sessions_outside_personal_sections() {
         let _home = crate::store::temp_home();
         let mut sessions = vec![entry("a"), entry("b"), entry("sectioned")];
@@ -1342,7 +1338,6 @@ mod tests {
         assert_eq!(order.sessions, ["sectioned", "b", "a"]);
     }
 
-    #[test]
     fn sidebar_order_and_section_memberships_survive_each_others_writes() {
         use local_sections::SectionEdit;
         let _home = crate::store::temp_home();
@@ -1364,7 +1359,6 @@ mod tests {
         assert_eq!(local_sections::load().unwrap().sections[0].sessions, ["a", "new"]);
     }
 
-    #[test]
     fn sidebar_order_remains_readable_when_the_project_catalog_is_unavailable() {
         let _home = crate::store::temp_home();
         let projects_path = crate::store::root().unwrap().join("projects.json");
@@ -1390,7 +1384,6 @@ mod tests {
         assert!(restored.custom);
     }
 
-    #[test]
     fn sidebar_project_reorder_keeps_other_groups_and_index_fields() {
         let _home = crate::store::temp_home();
         let mut sessions = vec![entry("a"), entry("hidden"), entry("b")];
@@ -1420,7 +1413,6 @@ mod tests {
         assert_eq!(sidebar_order().unwrap().projects, ["/linked"]);
     }
 
-    #[test]
     fn sidebar_starts_in_display_order_and_reconciles_projects_before_filtered_drops() {
         let _home = crate::store::temp_home();
         let mut sessions = vec![entry("pinned"), entry("newest"), entry("active")];
@@ -1449,7 +1441,6 @@ mod tests {
         assert_eq!(restored.projects, ["/z", "/b"]);
     }
 
-    #[test]
     fn a_tab_layout_is_saved_and_puts_each_sessions_tabs_in_the_same_order() {
         let _home = crate::store::temp_home();
         let (mut a, mut b) = (entry("a"), entry("b"));
@@ -1484,7 +1475,6 @@ mod tests {
         assert_eq!(tab_ids("a"), ["a3", "a1", "a2"], "the sessions keep the order they were given");
     }
 
-    #[test]
     fn writing_sessions_keeps_the_layouts_and_an_untouched_index_gains_no_field() {
         let _home = crate::store::temp_home();
         save(&[entry("a")]).unwrap();
@@ -1503,7 +1493,6 @@ mod tests {
         assert_eq!(load().unwrap().len(), 2);
     }
 
-    #[test]
     fn a_layout_field_a_newer_build_wrote_survives() {
         let _home = crate::store::temp_home();
         let raw = r#"{"sessions":[],"futureTop":1,"workspaceTabs":{"/p":{"order":["agent:t1"],"groups":[["agent:t1"]]}}}"#;
@@ -1514,7 +1503,6 @@ mod tests {
         assert_eq!(stored["workspaceTabs"]["/p"]["groups"][0][0], "agent:t1");
     }
 
-    #[test]
     fn shell_tabs_are_forgotten_when_the_app_starts() {
         let _home = crate::store::temp_home();
         save(&[entry("a")]).unwrap();
@@ -1537,7 +1525,6 @@ mod tests {
 
     /// A shell an agent is started in becomes that agent's tab (#437), and
     /// what the reader arranged for the shell goes with it.
-    #[test]
     fn a_shell_that_became_a_tab_keeps_its_place_pin_mute_and_title() {
         let _home = crate::store::temp_home();
         save(&[entry("a")]).unwrap();
@@ -1576,7 +1563,6 @@ mod tests {
     /// The pane a tab lived in is killed when the tab is closed (#437): it
     /// comes back in a pane of its own, with its conversation for the app to
     /// resume, and one that was a terminal is still a terminal.
-    #[test]
     fn a_reopened_tab_does_not_come_back_to_the_pane_it_lived_in() {
         let _home = crate::store::temp_home();
         let mut a = entry("a");
@@ -1597,7 +1583,6 @@ mod tests {
         assert_eq!(get("a").unwrap().tab("typed").unwrap().follow.pane, None);
     }
 
-    #[test]
     fn a_closed_tab_is_kept_and_comes_back_as_it_was() {
         let _home = crate::store::temp_home();
         let mut a = entry("a");
@@ -1634,7 +1619,6 @@ mod tests {
         assert!(close_tab("a", "t2", true).unwrap().is_empty());
     }
 
-    #[test]
     fn a_session_keeps_its_last_closed_tabs_and_they_go_with_it() {
         let _home = crate::store::temp_home();
         let (mut a, mut b) = (entry("a"), entry("b"));
@@ -1662,7 +1646,6 @@ mod tests {
         assert_eq!(closed.iter().map(|c| c.session_id.as_str()).collect::<Vec<_>>(), ["b"]);
     }
 
-    #[test]
     fn unknown_fields_survive_a_round_trip() {
         let _home = crate::store::temp_home();
         let raw = r#"{"sessions":[{"id":"a","projectPath":"/p","cwd":"/p","title":"t","created":"x","modified":"y","futureField":{"deep":true},"tabs":[{"id":"t1","harness":"claude","created":"x","extra":1}]}]}"#;
@@ -1676,7 +1659,6 @@ mod tests {
         assert!(text.contains("\"extra\": 1"));
     }
 
-    #[test]
     fn transport_is_opt_in_and_survives_persistence_without_migrating_legacy_tabs() {
         let _home = crate::store::temp_home();
         let session: SessionEntry = serde_json::from_value(serde_json::json!({
@@ -1697,7 +1679,6 @@ mod tests {
         assert_eq!(experimental["transport"], "experimentalCodexStdio");
     }
 
-    #[test]
     fn tabs_without_a_permission_mode_use_the_product_default() {
         let tab: TabEntry = serde_json::from_value(serde_json::json!({
             "id": "t1",
@@ -1721,7 +1702,6 @@ mod tests {
         assert_eq!(requested_mode(Some("plan".into())), Some("plan".into()));
     }
 
-    #[test]
     fn the_first_run_mode_is_ask_every_time_on_both_sides() {
         // The desktop's new chats and the phone's form must open in the same mode.
         let portable = include_str!("../../../packages/portable/src/agentSettings.ts");
@@ -1730,7 +1710,6 @@ mod tests {
         assert_ne!(FIRST_RUN_PERMISSION_MODE, DEFAULT_PERMISSION_MODE);
     }
 
-    #[test]
     fn a_tab_that_only_ever_ran_its_own_agent_is_written_as_before_and_what_it_follows_round_trips() {
         let plain: TabEntry = serde_json::from_value(serde_json::json!({ "id": "t1", "harness": "claude", "created": "x" })).unwrap();
         assert_eq!(plain.follow, Follow::default());
@@ -1759,7 +1738,6 @@ mod tests {
         assert_eq!(newer.follow.front, Front::Agent);
     }
 
-    #[test]
     fn a_quick_chat_is_stored_with_its_kind_and_an_ordinary_session_is_written_as_before() {
         let _home = crate::store::temp_home();
         let mut quick = entry("quick");
@@ -1785,7 +1763,6 @@ mod tests {
 
     /// What a build from before quick chats does with the index: it has no
     /// `kind` field, requires `projectPath`, and keeps what it does not know.
-    #[test]
     fn an_older_build_reads_a_quick_chat_as_a_session_and_keeps_its_kind() {
         #[derive(Serialize, Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -1817,7 +1794,6 @@ mod tests {
     }
 
     /// PRO-270: the field is additive in both directions.
-    #[test]
     fn a_parent_is_stored_only_where_there_is_one_and_older_and_newer_indexes_both_load() {
         let _home = crate::store::temp_home();
         // An index written before the field existed loads with it empty.
@@ -1871,7 +1847,6 @@ mod tests {
         assert!(load().unwrap().iter().all(|session| session.started_by("lead")));
     }
 
-    #[test]
     fn a_parent_this_build_cannot_read_does_not_cost_the_whole_index() {
         let _home = crate::store::temp_home();
         let mut rows = Vec::new();
@@ -1887,7 +1862,6 @@ mod tests {
         assert_eq!(loaded[4].parent, Some(ParentRef { session_id: "lead".into(), tab_id: None }));
     }
 
-    #[test]
     fn a_kind_this_build_does_not_know_does_not_cost_the_whole_index() {
         let _home = crate::store::temp_home();
         let raw = r#"{"sessions":[{"id":"a","kind":"hologram","projectPath":"/p","cwd":"/p","title":"t","created":"x","modified":"y"},{"id":"b","kind":null,"projectPath":"/p","cwd":"/p","title":"t","created":"x","modified":"y"}]}"#;
@@ -1897,7 +1871,6 @@ mod tests {
         assert!(loaded.iter().all(|session| session.kind == SessionKind::Project));
     }
 
-    #[test]
     fn a_quick_chat_whose_borrowed_workspace_is_removed_goes_back_to_no_branch() {
         let mut session = entry("quick");
         session.kind = SessionKind::Quick;
@@ -1909,7 +1882,6 @@ mod tests {
         assert_eq!(session.branch, None);
     }
 
-    #[test]
     fn update_session_touches_modified() {
         let _home = crate::store::temp_home();
         save(&[entry("a")]).unwrap();
@@ -1922,7 +1894,6 @@ mod tests {
         assert!(get("zzz").is_err());
     }
 
-    #[test]
     fn removed_workspace_transition_preserves_provenance_and_transcripts() {
         let mut session = entry("removed");
         session.cwd = "/p/.raccoon/worktrees/feature-one".into();
@@ -1971,7 +1942,6 @@ mod tests {
         assert!(claimed_worktree_names(&[session]).is_empty());
     }
 
-    #[test]
     fn removed_workspace_transition_names_sessions_opened_in_an_existing_checkout() {
         let mut session = entry("external");
         session.cwd = "/worktrees/existing-feature".into();
@@ -1989,7 +1959,6 @@ mod tests {
             })
         );
     }
-    #[test]
     fn unread_reminders_round_trip_per_tab_without_changing_activity_or_live_status() {
         let _home = crate::store::temp_home();
         let mut session = entry("s");
@@ -2019,4 +1988,51 @@ mod tests {
         assert!(!get("s").unwrap().tabs.iter().any(|tab| tab.marked_unread));
     }
 
+
+    #[test]
+    fn store_index_batch_1() {
+        manual_status_defaults_and_survives_index_updates();
+        an_unknown_manual_status_does_not_cost_the_index_or_block_writes();
+        sidebar_order_survives_updates_and_new_sessions_lead_even_while_off();
+        sidebar_seeds_project_order_from_sessions_outside_personal_sections();
+        sidebar_order_and_section_memberships_survive_each_others_writes();
+        sidebar_order_remains_readable_when_the_project_catalog_is_unavailable();
+        sidebar_project_reorder_keeps_other_groups_and_index_fields();
+        sidebar_starts_in_display_order_and_reconciles_projects_before_filtered_drops();
+    }
+
+    #[test]
+    fn store_index_batch_2() {
+        a_tab_layout_is_saved_and_puts_each_sessions_tabs_in_the_same_order();
+        writing_sessions_keeps_the_layouts_and_an_untouched_index_gains_no_field();
+        a_layout_field_a_newer_build_wrote_survives();
+        shell_tabs_are_forgotten_when_the_app_starts();
+        a_shell_that_became_a_tab_keeps_its_place_pin_mute_and_title();
+        a_reopened_tab_does_not_come_back_to_the_pane_it_lived_in();
+        a_closed_tab_is_kept_and_comes_back_as_it_was();
+        a_session_keeps_its_last_closed_tabs_and_they_go_with_it();
+    }
+
+    #[test]
+    fn store_index_batch_3() {
+        unknown_fields_survive_a_round_trip();
+        transport_is_opt_in_and_survives_persistence_without_migrating_legacy_tabs();
+        tabs_without_a_permission_mode_use_the_product_default();
+        the_first_run_mode_is_ask_every_time_on_both_sides();
+        a_tab_that_only_ever_ran_its_own_agent_is_written_as_before_and_what_it_follows_round_trips();
+        a_quick_chat_is_stored_with_its_kind_and_an_ordinary_session_is_written_as_before();
+        an_older_build_reads_a_quick_chat_as_a_session_and_keeps_its_kind();
+        a_parent_is_stored_only_where_there_is_one_and_older_and_newer_indexes_both_load();
+    }
+
+    #[test]
+    fn store_index_batch_4() {
+        a_parent_this_build_cannot_read_does_not_cost_the_whole_index();
+        a_kind_this_build_does_not_know_does_not_cost_the_whole_index();
+        a_quick_chat_whose_borrowed_workspace_is_removed_goes_back_to_no_branch();
+        update_session_touches_modified();
+        removed_workspace_transition_preserves_provenance_and_transcripts();
+        removed_workspace_transition_names_sessions_opened_in_an_existing_checkout();
+        unread_reminders_round_trip_per_tab_without_changing_activity_or_live_status();
+    }
 }

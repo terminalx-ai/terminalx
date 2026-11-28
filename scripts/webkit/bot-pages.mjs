@@ -10,6 +10,9 @@ import { launch, open, openSession, report, serve, sidebar } from "./harness.mjs
 const server = await serve();
 const browser = await launch();
 let failed = 0;
+const matrix = (shots) => shots
+  ? [{ width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 760, height: 520 }].flatMap((viewport) => ["dark", "light"].map((colorScheme) => ({ viewport, colorScheme })))
+  : [{ viewport: { width: 1440, height: 900 }, colorScheme: "dark" }, { viewport: { width: 760, height: 520 }, colorScheme: "light" }];
 
 // ---- bot-items ----
 // PRO-469: a bot's Home tab (design 23.01) and a work item's page (23.09), and the Bots page's Needs you queue (23.02),
@@ -108,8 +111,7 @@ async function botItems() {
     }, root);
   }
 
-  for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 760, height: 520 }]) {
-    for (const colorScheme of ["dark", "light"]) {
+  for (const { viewport, colorScheme } of matrix(shots)) {
       const name = `${viewport.width}×${viewport.height} ${colorScheme}`;
       const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, viewport, { extra: fixture, colorScheme });
       const errors = [];
@@ -188,7 +190,6 @@ async function botItems() {
       const reads = await queue.getByTestId("needs-you-read").count();
       failed += report(`needs you queue ${name}`, { "fits the main slot": queueProblems.length === 0, "the cut question offers Read and answer": reads >= 1 }, queueProblems);
       await page.close();
-    }
   }
   return failed;
 }
@@ -318,8 +319,7 @@ async function botHandoffs() {
     }, root);
   }
 
-  for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 760, height: 520 }]) {
-    for (const colorScheme of ["dark", "light"]) {
+  for (const { viewport, colorScheme } of matrix(shots)) {
       const name = `${viewport.width}×${viewport.height} ${colorScheme}`;
       const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, viewport, { extra: fixture, colorScheme });
       const errors = [];
@@ -412,7 +412,6 @@ async function botHandoffs() {
         "no page errors": errors.length === 0,
       }, { handProblems, formBox, titleBox, errors });
       await page.close();
-    }
   }
   return failed;
 }
@@ -543,8 +542,7 @@ async function botRuns() {
     }, root);
   }
 
-  for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 760, height: 520 }]) {
-    for (const colorScheme of ["dark", "light"]) {
+  for (const { viewport, colorScheme } of matrix(shots)) {
       const name = `${viewport.width}×${viewport.height} ${colorScheme}`;
       const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, viewport, { extra: fixture, colorScheme });
       const errors = [];
@@ -593,7 +591,6 @@ async function botRuns() {
         "no page errors": errors.length === 0,
       }, { itemProblems, errors });
       await page.close();
-    }
   }
   return failed;
 }
@@ -702,8 +699,7 @@ async function botSuggestions() {
     }, root);
   }
 
-  for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 760, height: 520 }]) {
-    for (const colorScheme of ["dark", "light"]) {
+  for (const { viewport, colorScheme } of matrix(shots)) {
       const name = `${viewport.width}×${viewport.height} ${colorScheme}`;
       const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, viewport, { extra: fixture, colorScheme });
       const errors = [];
@@ -750,7 +746,6 @@ async function botSuggestions() {
         "no page errors": errors.length === 0,
       }, { after, errors });
       await page.close();
-    }
   }
   return failed;
 }

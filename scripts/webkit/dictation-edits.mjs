@@ -35,7 +35,7 @@ const browser = await launch();
 let failed = 0;
 
 /** Long enough for a write the dictation still had in hand to land. */
-const SETTLE_MS = 150;
+const SETTLE_MS = 50;
 const VIEWPORT = { width: 1280, height: 760 };
 
 /** A page of the app with the recogniser stubbed: the microphone opens and closes, and the script says what is heard. */
@@ -180,9 +180,23 @@ for (const [name, surface] of Object.entries(SURFACES)) {
   await page.close();
 }
 
+// Reset the shared session composer between sequential scenarios: close mic if open, clear draft and undo state.
+async function resetComposer(page, field) {
+  if (await page.getByText(/^Listening\./).count()) await closeMic(page, "");
+  await page.evaluate(() => {
+    window.__settled = "";
+    window.__settledRaw = undefined;
+  });
+  await field.click();
+  await field.fill("");
+}
+
+const shared = await sessionComposer();
+try {
 // Delete over the last word: the draft is then one the dictation wrote a moment earlier.
 {
-  const { page, field } = await sessionComposer();
+  const { page, field } = shared;
+  await resetComposer(page, field);
   await field.fill("Notes:");
   await openMic(page);
   await hear(page, "Fix");
@@ -206,12 +220,12 @@ for (const [name, surface] of Object.entries(SURFACES)) {
     },
     { dictated, afterDelete, afterSettled, afterSpeech },
   );
-  await page.close();
 }
 
 // Cut in the middle, then a second edit straight after it.
 {
-  const { page, field } = await sessionComposer();
+  const { page, field } = shared;
+  await resetComposer(page, field);
   await openMic(page);
   await hear(page, "Fix the build please");
   const dictated = await settled(page, field);
@@ -236,12 +250,12 @@ for (const [name, surface] of Object.entries(SURFACES)) {
     },
     { dictated, afterCut, afterSecond, afterSettled, afterSpeech },
   );
-  await page.close();
 }
 
 // A local model says nothing until the mic closes: what the reader does before then is kept.
 {
-  const { page, field } = await sessionComposer();
+  const { page, field } = shared;
+  await resetComposer(page, field);
   await field.fill("Old notes");
   await openMic(page);
   await page.keyboard.press("ControlOrMeta+A");
@@ -258,10 +272,97 @@ for (const [name, surface] of Object.entries(SURFACES)) {
     },
     { edited, afterFinal },
   );
-  await page.close();
 }
 
-// Once the mic has closed.
+// Sending a dictated message, with the mic open and with it closed.
+for (const close of [false, true]) {
+  const { page, field } = shared;
+  await resetComposer(page, field);
+  await openMic(page);
+  await hear(page, "Fix the build");
+  if (close) await closeMic(page);
+  const dictated = await settled(page, field);
+  await field.press("Enter");
+  const afterSend = await settled(page, field);
+  const checks = {
+    "the words were dictated": dictated === "Fix the build",
+    "the composer is empty once it is sent": afterSend === "",
+  };
+  const detail = { dictated, afterSend };
+  if (!close) {
+    // The sent utterance settles, and the next message is dictated into the empty composer.
+    await hear(page, "Fix the build.");
+    detail.afterSettled = await settled(page, field);
+    await hear(page, "Then run the tests", 1);
+    detail.afterSpeech = await settled(page, field);
+    checks["the sent utterance settling does not bring it back"] = detail.afterSettled === "";
+    checks["the next message is dictated into the empty composer"] = detail.afterSpeech === "Then run the tests";
+  }
+  failed += report(`sending a dictated message, mic ${close ? "closed" : "still open"}`, checks, detail);
+}
+
+// A local model that streams (#754): the deleted word stays deleted through
+// the partials after it and the final that replaces them all.
+{
+  const { page, field } = shared;
+  await resetComposer(page, field);
+  await openMic(page);
+  await hearStreamed(page, "Please add a settings");
+  await hearStreamed(page, "Please add a settings page for notifications");
+  const dictated = await settled(page, field);
+  await selectBack(page, " notifications".length);
+  await page.keyboard.press("Delete");
+  const afterDelete = await settled(page, field);
+  await hearStreamed(page, "Please add a settings page for notifications, then write the unit tests");
+  const afterSpeech = await settled(page, field);
+  const final = "Please add a settings page for notifications, then write the unit tests for it.";
+  await page.evaluate((final) => {
+    window.__settledRaw = final;
+  }, final);
+  await closeMic(page, final);
+  const afterFinal = await settled(page, field);
+  failed += report(
+    "a word deleted while a local model streams",
+    {
+      "the streamed words are in the composer while listening": dictated === "Please add a settings page for notifications",
+      "the word is removed": afterDelete === "Please add a settings page for",
+      "the next partial adds only the new words": afterSpeech === "Please add a settings page for then write the unit tests",
+      "the final adds its last words and brings nothing back": afterFinal === "Please add a settings page for then write the unit tests for it.",
+    },
+    { dictated, afterDelete, afterSpeech, afterFinal },
+  );
+}
+
+// A local model that cannot stream says when its words will come, then delivers them.
+{
+  const { page, field } = shared;
+  await resetComposer(page, field);
+  await page.evaluate(() => {
+    const { answers, emit } = window.__PW_STUB__;
+    answers.dictation_start = () => {
+      setTimeout(() => emit("dictation", { kind: "listening", live: false }), 0);
+      return null;
+    };
+  });
+  await page.keyboard.press("Meta+Shift+D");
+  await page.getByText("Listening. Words appear when you stop.", { exact: true }).waitFor();
+  const listening = await settled(page, field);
+  await closeMic(page, "Fix the build.");
+  const afterFinal = await settled(page, field);
+  failed += report(
+    "a local model that cannot stream",
+    {
+      "nothing is written while listening": listening === "",
+      "its words arrive when the mic closes": afterFinal === "Fix the build.",
+    },
+    { listening, afterFinal },
+  );
+}
+} finally {
+  await shared.page.close();
+}
+
+// Once the mic has closed (fresh page for clean WebKit native Undo stack).
 {
   const { page, field } = await sessionComposer();
   await openMic(page);
@@ -290,33 +391,6 @@ for (const [name, surface] of Object.entries(SURFACES)) {
   await page.close();
 }
 
-// Sending a dictated message, with the mic open and with it closed.
-for (const close of [false, true]) {
-  const { page, field } = await sessionComposer();
-  await openMic(page);
-  await hear(page, "Fix the build");
-  if (close) await closeMic(page);
-  const dictated = await settled(page, field);
-  await field.press("Enter");
-  const afterSend = await settled(page, field);
-  const checks = {
-    "the words were dictated": dictated === "Fix the build",
-    "the composer is empty once it is sent": afterSend === "",
-  };
-  const detail = { dictated, afterSend };
-  if (!close) {
-    // The sent utterance settles, and the next message is dictated into the empty composer.
-    await hear(page, "Fix the build.");
-    detail.afterSettled = await settled(page, field);
-    await hear(page, "Then run the tests", 1);
-    detail.afterSpeech = await settled(page, field);
-    checks["the sent utterance settling does not bring it back"] = detail.afterSettled === "";
-    checks["the next message is dictated into the empty composer"] = detail.afterSpeech === "Then run the tests";
-  }
-  failed += report(`sending a dictated message, mic ${close ? "closed" : "still open"}`, checks, detail);
-  await page.close();
-}
-
 // Undo, then more speech. One ⌘Z in Playwright's WebKit undoes every step the
 // field remembers, in any page, so each Undo here follows a single edit.
 {
@@ -341,64 +415,6 @@ for (const close of [false, true]) {
       "what is said next goes after it, not over it": afterSpeech === "Fix the build Then run the tests",
     },
     { afterDelete, afterUndo, afterSettled, afterSpeech },
-  );
-  await page.close();
-}
-
-// A local model that streams (#754): the deleted word stays deleted through
-// the partials after it and the final that replaces them all.
-{
-  const { page, field } = await sessionComposer();
-  await openMic(page);
-  await hearStreamed(page, "Please add a settings");
-  await hearStreamed(page, "Please add a settings page for notifications");
-  const dictated = await settled(page, field);
-  await selectBack(page, " notifications".length);
-  await page.keyboard.press("Delete");
-  const afterDelete = await settled(page, field);
-  await hearStreamed(page, "Please add a settings page for notifications, then write the unit tests");
-  const afterSpeech = await settled(page, field);
-  const final = "Please add a settings page for notifications, then write the unit tests for it.";
-  await page.evaluate((final) => {
-    window.__settledRaw = final;
-  }, final);
-  await closeMic(page, final);
-  const afterFinal = await settled(page, field);
-  failed += report(
-    "a word deleted while a local model streams",
-    {
-      "the streamed words are in the composer while listening": dictated === "Please add a settings page for notifications",
-      "the word is removed": afterDelete === "Please add a settings page for",
-      "the next partial adds only the new words": afterSpeech === "Please add a settings page for then write the unit tests",
-      "the final adds its last words and brings nothing back": afterFinal === "Please add a settings page for then write the unit tests for it.",
-    },
-    { dictated, afterDelete, afterSpeech, afterFinal },
-  );
-  await page.close();
-}
-
-// A local model that cannot stream says when its words will come, then delivers them.
-{
-  const { page, field } = await sessionComposer();
-  await page.evaluate(() => {
-    const { answers, emit } = window.__PW_STUB__;
-    answers.dictation_start = () => {
-      setTimeout(() => emit("dictation", { kind: "listening", live: false }), 0);
-      return null;
-    };
-  });
-  await page.keyboard.press("Meta+Shift+D");
-  await page.getByText("Listening. Words appear when you stop.", { exact: true }).waitFor();
-  const listening = await settled(page, field);
-  await closeMic(page, "Fix the build.");
-  const afterFinal = await settled(page, field);
-  failed += report(
-    "a local model that cannot stream",
-    {
-      "nothing is written while listening": listening === "",
-      "its words arrive when the mic closes": afterFinal === "Fix the build.",
-    },
-    { listening, afterFinal },
   );
   await page.close();
 }

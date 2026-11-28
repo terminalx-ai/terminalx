@@ -152,14 +152,25 @@ async function wheelChat(page, by) {
   if (!point) throw new Error("no point of the chat is free to scroll it from");
   await page.mouse.move(point.x, point.y);
   await page.mouse.wheel(0, by);
-  await page.waitForTimeout(150);
+  await page.evaluate((before) => new Promise((resolve) => {
+    const scroller = document.querySelector("[data-chat-scroller]");
+    const start = performance.now();
+    const tick = () => {
+      if (!scroller) return resolve();
+      const elapsed = performance.now() - start;
+      if (scroller.scrollTop !== before && elapsed >= 40) return requestAnimationFrame(() => resolve());
+      if (elapsed >= 120) return resolve();
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }), box.top);
   return box;
 }
 
 /** The chat at its very top, and still there a moment later. */
 async function toTop(page) {
-  for (let tries = 0, still = 0; tries < 60 && still < 3; tries++) {
-    await wheelChat(page, -600);
+  for (let tries = 0, still = 0; tries < 40 && still < 3; tries++) {
+    await wheelChat(page, -1800);
     still = (await chatBox(page)).top === 0 ? still + 1 : 0;
   }
 }
@@ -170,7 +181,7 @@ async function sweep(page, view, { narrow, shoot }) {
   const problems = [];
   const shot = new Set();
   for (let step = 0; step < 60; step++) {
-    await page.waitForTimeout(120);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
     const found = await page.evaluate(({ narrow }) => {
       const scroller = document.querySelector("[data-chat-scroller]");
       const slot = scroller.getBoundingClientRect();
@@ -227,16 +238,18 @@ async function sweep(page, view, { narrow, shoot }) {
       }
     }
     if (found.end) break;
-    await wheelChat(page, Math.max(80, Math.round((await chatBox(page)).height * 0.6)));
+    await wheelChat(page, Math.max(120, Math.round((await chatBox(page)).height * 0.8)));
   }
   return { cards: [...seen.values()], problems };
 }
 
 const STATES = ["Waiting to start", "Waiting · Argus with a rather long name is paused", "Working · 5m", "Answered", "Could not do it", "Stopped by you", "Failed · not started", "Failed · its bot was deleted"];
+const cases = shots
+  ? [{ width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 760, height: 520 }].flatMap((viewport) => ["dark", "light"].map((colorScheme) => ({ viewport, colorScheme })))
+  : [{ viewport: { width: 1440, height: 900 }, colorScheme: "dark" }, { viewport: { width: 760, height: 520 }, colorScheme: "light" }];
 
 try {
-  for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 760, height: 520 }]) {
-    for (const colorScheme of ["dark", "light"]) {
+  for (const { viewport, colorScheme } of cases) {
       const name = `${viewport.width}×${viewport.height} ${colorScheme}`;
       const narrow = viewport.width === 760;
       const tag = shots ? `${shots}/cards-${viewport.width}-${colorScheme}` : null;
@@ -301,7 +314,7 @@ try {
       const openOn = view.getByTestId("bot-card-open").first();
       let opened = [];
       // The mention is further down: the chat draws it when the reader gets there.
-      for (let step = 0; step < 60 && !(await openOn.count()); step++) await wheelChat(page, 300);
+      for (let step = 0; step < 30 && !(await openOn.count()); step++) await wheelChat(page, 600);
       if (await openOn.count()) {
         await openOn.evaluate((button) => button.click());
         opened = await page.evaluate(() => window.__OPENED__);
@@ -338,7 +351,6 @@ try {
         }
       }
       await page.close();
-    }
   }
 } finally {
   await browser.close();

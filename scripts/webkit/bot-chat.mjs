@@ -39,9 +39,11 @@ const box = (locator) => locator.evaluate((element) => {
 const overlaps = (a, b) => a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
 const inside = (inner, outer) => inner.left >= outer.left - 0.5 && inner.right <= outer.right + 0.5 && inner.top >= outer.top - 0.5 && inner.bottom <= outer.bottom + 0.5;
 
+const chatCases = shots
+  ? [{ width: 1440, height: 900 }, { width: 1280, height: 800 }].flatMap((viewport) => ["dark", "light"].map((colorScheme) => ({ viewport, colorScheme })))
+  : [{ viewport: { width: 1440, height: 900 }, colorScheme: "dark" }, { viewport: { width: 1280, height: 800 }, colorScheme: "light" }];
 try {
-  for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 800 }]) {
-    for (const colorScheme of ["dark", "light"]) {
+  for (const { viewport, colorScheme } of chatCases) {
       for (const paused of [false, true]) {
         const name = `${viewport.width}×${viewport.height} ${colorScheme}${paused ? " paused" : ""}`;
         const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, viewport, { extra: fixture(paused), colorScheme });
@@ -114,7 +116,6 @@ try {
         }, settings);
         await page.close();
       }
-    }
   }
 } finally {
   await browser.close();

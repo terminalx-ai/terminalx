@@ -343,7 +343,8 @@ describe("connecting", () => {
     const service = await repositories("admin");
     await press("connect-github");
     await endSheet({ type: "dismiss" });
-    await pass(15 * 60_000 + ATTEMPT_POLL_MS);
+    vi.setSystemTime(Date.now() + 15 * 60_000);
+    await pass(ATTEMPT_POLL_MS);
     expect(text("github-outcome")).toBe("The connection attempt expired before it was confirmed. Connect again, then finish on GitHub and confirm on the TerminalX page within 15 minutes.");
     const asked = service.sent("GET", "/github-app/connect-attempts/ghattempt_1").length;
     await pass(ATTEMPT_POLL_MS * 2);

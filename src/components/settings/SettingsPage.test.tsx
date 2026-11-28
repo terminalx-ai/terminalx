@@ -20,6 +20,16 @@ vi.mock("@/lib/settingsFile", () => ({
   useSettingsFile: () => ({ error: settingsFile.error, file: null, revision: 0 }),
   createSettingsFile: vi.fn(async () => {}),
 }));
+vi.mock("@/icons", () => new Proxy({}, { has: () => true, get: (_, prop) => (prop === "then" || typeof prop === "symbol" ? undefined : prop === "__esModule" ? true : (props: Record<string, unknown>) => <svg {...props} />) }));
+vi.mock("@/components/ui/tooltip", () => ({
+  TooltipProvider: ({ children }: { children: React.ReactNode }) => children,
+  WithTooltip: ({ children }: { children: React.ReactNode }) => children,
+  Tooltip: ({ children }: { children: React.ReactNode }) => children,
+  TooltipTrigger: ({ children }: { children: React.ReactNode }) => children,
+  TooltipContent: () => null,
+  Kbd: ({ children }: { children: React.ReactNode }) => <kbd data-slot="kbd">{children}</kbd>,
+  KbdGroup: ({ keys }: { keys: string[] }) => <span data-slot="kbd">{keys.map((k, i) => <kbd key={i}>{k}</kbd>)}</span>,
+}));
 
 beforeEach(() => {
   settingsFile.error = null;
@@ -611,7 +621,7 @@ describe("light/dark shortcut hints", () => {
     const assertHint = (binding: string) => {
       const text = bindingText(binding);
       expect(screen.getByText(`${text} switches light and dark`)).toBeTruthy();
-      expect(screen.getByRole("button", { name: `Switch light and dark: ${text}. Change` })).toBeTruthy();
+      expect(document.querySelector(`button[aria-label="Switch light and dark: ${text}. Change"]`)).toBeTruthy();
     };
     assertHint(shipped);
     expect(screen.queryByText(`${bindingText(other)} switches light and dark`)).toBeNull();
@@ -620,7 +630,7 @@ describe("light/dark shortcut hints", () => {
     expect(screen.queryByText(`${bindingText(shipped)} switches light and dark`)).toBeNull();
     act(() => { expect(saveShortcut("app.toggleMode", [])).toEqual({ ok: true }); });
     expect(screen.queryByText(/switches light and dark/)).toBeNull();
-    expect(screen.queryByRole("button", { name: /^Switch light and dark: .*Change$/ })).toBeNull();
+    expect([...document.querySelectorAll("button[aria-label]")].some((b) => /^Switch light and dark: .*Change$/.test(b.getAttribute("aria-label") ?? ""))).toBe(false);
     act(() => { expect(resetShortcut("app.toggleMode")).toEqual({ ok: true }); });
     assertHint(shipped);
   });

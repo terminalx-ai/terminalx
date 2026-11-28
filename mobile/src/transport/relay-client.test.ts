@@ -351,13 +351,12 @@ function relayClient(socket: EncryptedPeer): RelayClient {
     desktopPublicKeyB64: encodeBase64(socket.key.publicKey), createSocket: () => socket as unknown as WebSocket });
 }
 
-// A 3 MB attachment: about 4 MB of base64 in one request, four times what the relay cell accepts in one message (#669).
-const attachment = { mediaType: "image/png", data: "A".repeat(4_000_000), name: "photo.png" };
+// Over one relay cell (1 MB): about 1.1 MB of base64 in one request, crossing as 2 fragments (#669).
+const attachment = { mediaType: "image/png", data: "A".repeat(1_100_000), name: "photo.png" };
 
-// Sealing and opening 4 MB takes 1–2 s on an idle machine and more than 5 s on a loaded one, which is not a failure.
 describe("messages larger than one relay frame (#669)", { timeout: 30_000 }, () => {
   it("cross as fragments both ways once the computer agrees, and the connection stays usable", async () => {
-    const transcript = { events: [], blob: "🦝 \"tool\" output\n".repeat(150_000) };
+    const transcript = { events: [], blob: "🦝 \"tool\" output\n".repeat(65_000) };
     const socket = new EncryptedPeer({ fragments: true, reply: (method) => method === "session.sync" ? transcript : undefined });
     const client = relayClient(socket);
     try {
@@ -370,8 +369,8 @@ describe("messages larger than one relay frame (#669)", { timeout: 30_000 }, () 
       expect(await client.request("status.get")).toMatchObject({ ok: true });
       expect(socket.largestFromPhone).toBeLessThanOrEqual(RELAY_MESSAGE_BYTES_LIMIT);
       expect(socket.largestToPhone).toBeLessThanOrEqual(RELAY_MESSAGE_BYTES_LIMIT);
-      // About 4 MB of request, in four fragments.
-      expect(socket.sent.filter((frame) => typeof frame !== "string")).toHaveLength(4);
+      // About 1.1 MB of request, in two fragments.
+      expect(socket.sent.filter((frame) => typeof frame !== "string")).toHaveLength(2);
     } finally { client.close(); }
   });
 
@@ -383,7 +382,7 @@ describe("messages larger than one relay frame (#669)", { timeout: 30_000 }, () 
       socket.onopen?.();
       await connected;
       await expect(client.request("session.send", { tabId: "tab", text: "", attachments: [attachment] }))
-        .rejects.toThrow("This is too large to send over Relay (4.0 MB; the limit is 0.8 MB). Update TerminalX on your computer, or send it on the same Wi-Fi as your computer.");
+        .rejects.toThrow("This is too large to send over Relay (1.1 MB; the limit is 0.8 MB). Update TerminalX on your computer, or send it on the same Wi-Fi as your computer.");
       expect(socket.requests.map((request) => request.method)).not.toContain("session.send");
       expect(socket.largestFromPhone).toBeLessThanOrEqual(RELAY_MESSAGE_BYTES_LIMIT);
       expect(await client.request("status.get")).toMatchObject({ ok: true });

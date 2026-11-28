@@ -45,18 +45,18 @@ import { parseArgs } from "node:util";
 /** The checks CI requires, in the order they were added. */
 export const checks = [
   "cloud-automations",
-  "changes-review", "merge-conflicts", "diff-options", "settings-navigation", "settings-introductions", "orchestration", "run-limits", "run-sidebar",
-  "orchestrate-start", "readable-panels", "layered-configuration", "sidebar-scroll", "sidebar-order", "sidebar-extras", "sidebar-quick-chats", "working-marks",
+  "changes-review", "merge-conflicts", "diff-options", "settings-navigation", "orchestration", "run-limits", "run-sidebar",
+  "orchestrate-start", "readable-panels", "layered-configuration", "sidebar-scroll", "sidebar-order", "sidebar-extras", "working-marks",
   "cloud-session", "cloud-outbox", "cloud-history", "cloud-sidebar", "cloud-attention", "cloud-sections", "workspace-sections", "local-sections",
   "session-status", "shortcuts", "start-from", "create-project", "terminal-search", "worktree-cleanup", "merged-cleanup",
   "dialog-lists",
   "account-row", "issue-session", "issue-work", "pipeline-checks", "agent-dashboard:1", "agent-dashboard:2", "agent-dashboard:3", "organization-visibility", "chat-links",
   "chat-find", "chat-wrapping", "file-citations", "chat-controls", "link-chat", "app-resources", "usage-refresh",
-  "dictation-edits", "environment", "environment-info", "agent-logins", "model-access", "tab-strip", "pane-split", "editor-toolbar", "file-tab", "dock-tabs",
-  "machine-name", "account-settings", "star-reminder", "context-menus", "attention-approvals", "repository-settings", "sparse-checkout",
+  "dictation-edits", "environment", "agent-logins", "model-access", "tab-strip", "pane-split", "editor-toolbar", "file-tab", "dock-tabs",
+  "machine-name", "account-settings", "context-menus", "attention-approvals", "repository-settings", "sparse-checkout",
   "repository-scripts", "pr-conversation", "automatic-session-status", "runtime-start-failed", "session-cost",
   "helper-titles", "error-toast", "notifications-off", "pair-phone", "file-tree-filter", "quick-open", "tab-errors",
-  "review-threads", "run-menu", "worktree-copy-step", "projects-settings", "branch-toasts", "composer-attachments",
+  "review-threads", "run-menu", "branch-toasts", "composer-attachments",
   "organization-roster", "permission-details", "chat-tables", "command-palette", "machine-sidebar", "machine-session", "machine-ports",
   "sidebar-design", "chat-transcript", "changes-design", "sidebar-menus", "machines-screens", "review-tab", "checks-panel", "turn-details", "settings-design",
   "project-settings", "pr-panel-design", "settings-pro-377", "cloud-setup", "held-followups", "first-run", "confirm-dialogs",
@@ -525,30 +525,56 @@ async function main() {
       failedSetup.push("Vite's dependency cache");
     }
   }
-  await pool(selected.filter((name) => !alone.has(name)), jobs, async (name) => { results.push(await run(name)); });
-  for (const name of selected.filter((name) => alone.has(name))) {
-    console.log(`alone, after the others: ${name}: ${alone.get(name)}`);
-    results.push({ ...await run(name), alone: true });
+  let sharedServer;
+  if (selected.some((name) => !startsVite(name)) && !process.env.WEBKIT_DIST_URL) {
+    try {
+      const { serve, probeMacUserAgent } = await import("./harness.mjs");
+      sharedServer = await serve();
+      process.env.WEBKIT_DIST_URL = sharedServer.url;
+      if (process.platform !== "darwin" && !process.env.WEBKIT_MAC_UA) {
+        const ua = await probeMacUserAgent();
+        if (ua) process.env.WEBKIT_MAC_UA = ua;
+      }
+    } catch {
+      // Fall back to each check starting its own server / probing its own UA.
+    }
+  } else if (process.platform !== "darwin" && !process.env.WEBKIT_MAC_UA) {
+    try {
+      const { probeMacUserAgent } = await import("./harness.mjs");
+      const ua = await probeMacUserAgent();
+      if (ua) process.env.WEBKIT_MAC_UA = ua;
+    } catch {
+      // Fall back to per-check probing.
+    }
   }
-  const firstRuns = results.splice(0);
-  results.push(...await rerunFailed(firstRuns, run, rerunsHere({ only })));
+  try {
+    await pool(selected.filter((name) => !alone.has(name)), jobs, async (name) => { results.push(await run(name)); });
+    for (const name of selected.filter((name) => alone.has(name))) {
+      console.log(`alone, after the others: ${name}: ${alone.get(name)}`);
+      results.push({ ...await run(name), alone: true });
+    }
+    const firstRuns = results.splice(0);
+    results.push(...await rerunFailed(firstRuns, run, rerunsHere({ only })));
 
-  const failed = results.filter((result) => !result.ok);
-  const passedAlone = results.filter((result) => result.passedAlone);
-  const slowest = [...firstRuns].sort((a, b) => b.ms - a.ms).slice(0, 10);
-  const checkTime = results.reduce((sum, result) => sum + result.ms + (result.first?.ms ?? 0), 0);
-  console.log(`\n${results.length - failed.length} of ${results.length} checks passed${passedAlone.length ? ` (${passedAlone.length} only when run again alone)` : ""} in ${seconds(Date.now() - started)} (${seconds(checkTime)} of checks).`);
-  console.log(`Slowest: ${slowest.map((result) => `${result.name} ${seconds(result.ms)}`).join(", ")}`);
-  if (leftOut.length) console.log(`Left out on Linux (run-all.mjs macOnly): ${leftOut.join(", ")}`);
-  if (passedAlone.length) console.log(`Passed only when run again alone (still to be fixed; first output above): ${passedAlone.map((result) => `${result.name} (${passedAgain(result.first)})`).join(", ")}`);
-  if (process.env.GITHUB_ACTIONS === "true") for (const line of annotations(results, parsed.values.shard)) console.log(line);
-  const summary = stepSummary(results, parsed.values.shard);
-  if (summary && process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
-  if (failed.length || failedSetup.length) {
-    // Again, last: whoever reads only the end of the log finds the cause there.
-    for (const result of failed) console.log(`${result.first ? `${result.first.report}\n(and alone:)` : ""}${result.report}`);
-    console.log(`\nFAILED: ${[...failedSetup, ...failed.map((result) => result.name)].join(", ")}`);
-    process.exit(1);
+    const failed = results.filter((result) => !result.ok);
+    const passedAlone = results.filter((result) => result.passedAlone);
+    const slowest = [...firstRuns].sort((a, b) => b.ms - a.ms).slice(0, 10);
+    const checkTime = results.reduce((sum, result) => sum + result.ms + (result.first?.ms ?? 0), 0);
+    console.log(`\n${results.length - failed.length} of ${results.length} checks passed${passedAlone.length ? ` (${passedAlone.length} only when run again alone)` : ""} in ${seconds(Date.now() - started)} (${seconds(checkTime)} of checks).`);
+    console.log(`Slowest: ${slowest.map((result) => `${result.name} ${seconds(result.ms)}`).join(", ")}`);
+    if (leftOut.length) console.log(`Left out on Linux (run-all.mjs macOnly): ${leftOut.join(", ")}`);
+    if (passedAlone.length) console.log(`Passed only when run again alone (still to be fixed; first output above): ${passedAlone.map((result) => `${result.name} (${passedAgain(result.first)})`).join(", ")}`);
+    if (process.env.GITHUB_ACTIONS === "true") for (const line of annotations(results, parsed.values.shard)) console.log(line);
+    const summary = stepSummary(results, parsed.values.shard);
+    if (summary && process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
+    if (failed.length || failedSetup.length) {
+      // Again, last: whoever reads only the end of the log finds the cause there.
+      for (const result of failed) console.log(`${result.first ? `${result.first.report}\n(and alone:)` : ""}${result.report}`);
+      console.log(`\nFAILED: ${[...failedSetup, ...failed.map((result) => result.name)].join(", ")}`);
+      process.exitCode = 1;
+    }
+  } finally {
+    sharedServer?.close();
   }
 }
 

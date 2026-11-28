@@ -2,6 +2,7 @@ import "@testing-library/dom";
 import type { ReactNode } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+vi.mock("@/icons", () => new Proxy({}, { has: () => true, get: (_, prop) => (prop === "then" || typeof prop === "symbol" ? undefined : prop === "__esModule" ? true : (props: Record<string, unknown>) => <svg {...props} />) }));
 import type { Automation, AutomationRun } from "@/types/automations";
 
 const { automationStore, createAutomation, updateAutomation, runAutomationNow, selectSession, openUrl } = vi.hoisted(() => ({

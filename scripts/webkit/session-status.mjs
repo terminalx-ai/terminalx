@@ -74,7 +74,7 @@ try {
   await page.reload();
   await rail.getByRole("button", { name: "In review 1", exact: true }).waitFor();
   assert.equal(await rail.getByRole("button", { name: "In review 1", exact: true }).getAttribute("aria-expanded"), "false");
-  await page.screenshot({ path: "/tmp/pro164-sidebar.png" });
+  if (process.env.SHOTS) await page.screenshot({ path: "/tmp/pro164-sidebar.png" });
   console.log("PASS: status menu, counts, collapse, project search, sort and window preferences in headless WebKit");
   await page.close();
 

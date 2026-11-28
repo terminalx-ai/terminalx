@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
 import type { Bot } from "@/types/bots";
 import { cloudPlace, machinePlace, runsOnPlace } from "@/types/bots";

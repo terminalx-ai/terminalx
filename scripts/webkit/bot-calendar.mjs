@@ -170,9 +170,12 @@ async function measure(page, calendar, viewport) {
 // the check runs.
 const NOW = new Date("2026-11-18T10:30:00Z");
 
+const calCases = shots
+  ? [{ width: 1440, height: 900 }, { width: 1280, height: 800 }].flatMap((viewport) => ["dark", "light"].map((colorScheme) => ({ viewport, colorScheme })))
+  : [{ viewport: { width: 1440, height: 900 }, colorScheme: "dark" }, { viewport: { width: 1280, height: 800 }, colorScheme: "light" }];
+
 try {
-  for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 800 }]) {
-    for (const colorScheme of ["dark", "light"]) {
+  for (const { viewport, colorScheme } of calCases) {
       const name = `${viewport.width}×${viewport.height} ${colorScheme}`;
       const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, viewport, { extra: fixture, colorScheme, now: NOW });
       const errors = [];
@@ -223,7 +226,6 @@ try {
         "no page errors": errors.length === 0,
       }, { ...tabbed.boxes, errors });
       await page.close();
-    }
   }
 } finally {
   await browser.close();

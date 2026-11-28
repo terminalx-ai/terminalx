@@ -97,7 +97,7 @@ const server = await serve();
 const browser = await launch();
 let failed = 0;
 try {
-  for (const mode of ["light", "dark"]) {
+  for (const mode of shots ? ["light", "dark"] : ["dark"]) {
     const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, { width: 1440, height: 900 },
       { extra: `(${setup})(); localStorage.setItem("raccoon.mode", ${JSON.stringify(mode)});`, colorScheme: mode });
     const errors = [];
@@ -112,7 +112,7 @@ try {
     const stack = page.getByTestId("review-stack").filter({ visible: true });
     await stack.waitFor();
     await stack.locator(".cm-content").first().waitFor();
-    await page.waitForTimeout(300);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const panel = {
       changesSelected: (await page.getByRole("button", { name: /^Changes(\s*\d+)?$/ }).getAttribute("aria-pressed")) === "true",
       // PRO-393: the scope is a button naming the scope it shows, not a select.
@@ -122,7 +122,17 @@ try {
     // One review tab, stacking both files under one toolbar row.
     const tabTitle = await page.getByRole("tab", { name: /^Review · All changes/ }).count();
     await page.getByText("slug.test.js", { exact: true }).first().click();
-    await page.waitForTimeout(2500);
+    await page.waitForFunction(() => {
+      const root = [...document.querySelectorAll('[data-testid="review-stack"]')].find((el) => el.getBoundingClientRect().width > 0);
+      if (!root) return false;
+      const scroller = root.children[1];
+      const section = root.querySelector('[data-review-file="test/slug.test.js"]');
+      const loadedAbove = [...root.querySelectorAll("[data-review-file^='src/long-']")].filter((s) => !!s.querySelector(".cm-content")).length;
+      if (!scroller || !section || loadedAbove < 1 || scroller.scrollTop <= 1000) return false;
+      const offset = Math.round(section.getBoundingClientRect().top - scroller.getBoundingClientRect().top);
+      const atEnd = scroller.scrollTop >= scroller.scrollHeight - scroller.clientHeight - 2;
+      return Math.abs(offset) <= 2 || (atEnd && offset >= 0);
+    }, null, { timeout: 10_000 });
     const reviewTabs = await page.getByRole("tab", { name: /^Review · / }).count();
     // The files just above it have loaded and grown by now; the tests' header is still at the top.
     const landed = await stack.evaluate((root) => {

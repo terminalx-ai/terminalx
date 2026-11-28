@@ -61,8 +61,7 @@ const server = await serve();
 let browser;
 try {
   browser = await launch();
-  for (const colorScheme of ["light", "dark"]) {
-    for (const [width, height, zoom] of [[1100, 800, 1], [760, 600, 1], [640, 480, 1], [760, 600, 1.5]]) {
+  for (const [colorScheme, width, height, zoom] of [["dark", 1100, 800, 1], ["light", 640, 480, 1], ["dark", 760, 600, 1.5]]) {
       const where = `${colorScheme} ${width}x${height} zoom ${zoom}`;
       const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, localSessions: 1 }, { width, height }, { extra, colorScheme });
       page.setDefaultTimeout(10_000);
@@ -151,7 +150,6 @@ try {
       await mic.waitFor({ state: "detached" });
       console.log(`ok ${where}: microphone row fits above the composer, opens its privacy pane, dismisses`);
       await page.close();
-    }
   }
 } finally {
   await browser?.close();

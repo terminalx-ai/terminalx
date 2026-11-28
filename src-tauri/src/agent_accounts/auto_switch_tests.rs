@@ -52,6 +52,34 @@ fn to(decision: &Decision) -> Option<&str> {
 type Windows<'a> = &'a [(&'a str, f32)];
 
 #[test]
+fn auto_switch_selection_and_cooldown_rules() {
+    thresholds_per_window();
+    model_scoped_windows_count_only_for_their_model();
+    accounts_that_are_never_chosen();
+    an_api_key_is_a_last_resort_when_checked();
+    an_account_just_left_waits_for_the_margin_or_its_reset();
+    one_switch_per_tab_per_five_minutes();
+    most_room_against_my_order();
+}
+
+#[test]
+fn auto_switch_fallback_and_limit_rules() {
+    every_account_above_the_threshold_stops_switching();
+    a_usage_limit_error_outranks_the_numbers();
+    several_tabs_at_once_spread_over_the_accounts();
+    a_plan_without_the_model_is_not_chosen();
+    a_reason_reads_as_a_sentence();
+}
+
+#[test]
+fn auto_switch_settings_log_and_memory() {
+    the_setting_orders_accounts_and_keys_start_unchecked();
+    the_setting_is_off_by_default_and_reads_old_files();
+    the_log_keeps_thirty_days();
+    hot_accounts_are_near_the_threshold();
+    a_plan_seen_lacking_a_model_is_forgotten_after_a_while();
+}
+
 fn thresholds_per_window() {
     // (current's windows, expected target)
     let rows: &[(Windows, Option<&str>)] = &[
@@ -72,7 +100,6 @@ fn thresholds_per_window() {
     }
 }
 
-#[test]
 fn model_scoped_windows_count_only_for_their_model() {
     let candidates = [account("a", &[("five_hour", 20.0), ("seven_day_opus", 97.0)]), account("b", &[("five_hour", 20.0)])];
     let mut sonnet = ask(Why::Between, "a", &candidates);
@@ -84,7 +111,6 @@ fn model_scoped_windows_count_only_for_their_model() {
     assert_eq!(window_name("seven_day_opus"), "weekly Opus limit");
 }
 
-#[test]
 fn accounts_that_are_never_chosen() {
     let full = account("a", &[("five_hour", 95.0)]);
     let mut stale = account("stale", &[("five_hour", 5.0)]);
@@ -102,7 +128,6 @@ fn accounts_that_are_never_chosen() {
     assert!(matches!(decide(&ask(Why::Between, "a", &candidates)), Decision::Stay(Stay::NoneAvailable { .. })));
 }
 
-#[test]
 fn an_api_key_is_a_last_resort_when_checked() {
     let mut key = account("key", &[]);
     key.kind = Kind::ApiKey;
@@ -112,7 +137,6 @@ fn an_api_key_is_a_last_resort_when_checked() {
     assert_eq!(to(&decide(&ask(Why::Between, "a", &candidates))), Some("key"));
 }
 
-#[test]
 fn an_account_just_left_waits_for_the_margin_or_its_reset() {
     let mut left = account("b", &[("five_hour", 85.0)]);
     left.left = Some(Left { at: NOW - 60_000, resets_at: Some(NOW + HOUR) });
@@ -127,7 +151,6 @@ fn an_account_just_left_waits_for_the_margin_or_its_reset() {
     assert_eq!(to(&decide(&ask(Why::Between, "a", &candidates))), Some("b"), "its window reset since");
 }
 
-#[test]
 fn one_switch_per_tab_per_five_minutes() {
     let candidates = [account("a", &[("five_hour", 95.0)]), account("b", &[("five_hour", 10.0)])];
     let mut asked = ask(Why::Between, "a", &candidates);
@@ -142,7 +165,6 @@ fn one_switch_per_tab_per_five_minutes() {
     assert_eq!(to(&decide(&asked)), Some("b"), "a launch interrupts nothing");
 }
 
-#[test]
 fn most_room_against_my_order() {
     let candidates = [account("a", &[("five_hour", 95.0)]), account("b", &[("five_hour", 60.0)]), account("c", &[("five_hour", 20.0)])];
     let mut asked = ask(Why::Between, "a", &candidates);
@@ -154,7 +176,6 @@ fn most_room_against_my_order() {
     assert_eq!(to(&decide(&ask(Why::Between, "a", &tie))), Some("b"));
 }
 
-#[test]
 fn every_account_above_the_threshold_stops_switching() {
     let candidates = [account("a", &[("five_hour", 93.0)]), account("b", &[("five_hour", 91.0)])];
     assert_eq!(decide(&ask(Why::Between, "a", &candidates)), Decision::Stay(Stay::AllAboveThreshold));
@@ -191,7 +212,6 @@ fn every_account_above_the_threshold_stops_switching() {
     assert_eq!(earliest_reset, Some(NOW + HOUR));
 }
 
-#[test]
 fn a_usage_limit_error_outranks_the_numbers() {
     let mut a = account("a", &[("five_hour", 40.0)]);
     a.limited = Some(Limited { at: NOW - 30_000, resets_at: Some(NOW + HOUR) });
@@ -207,7 +227,6 @@ fn a_usage_limit_error_outranks_the_numbers() {
     assert!(full(&a, None, 90.0, NOW).is_none());
 }
 
-#[test]
 fn several_tabs_at_once_spread_over_the_accounts() {
     let mut b = account("b", &[("five_hour", 20.0)]);
     let c = account("c", &[("five_hour", 25.0)]);
@@ -219,7 +238,6 @@ fn several_tabs_at_once_spread_over_the_accounts() {
     assert_eq!(to(&decide(&ask(Why::Between, "a", &candidates))), Some("c"));
 }
 
-#[test]
 fn a_plan_without_the_model_is_not_chosen() {
     let mut b = account("b", &[("five_hour", 10.0)]);
     b.lacks_model = true;
@@ -227,7 +245,6 @@ fn a_plan_without_the_model_is_not_chosen() {
     assert!(matches!(decide(&ask(Why::Between, "a", &candidates)), Decision::Stay(Stay::NoneAvailable { lacking_model: true, .. })));
 }
 
-#[test]
 fn a_reason_reads_as_a_sentence() {
     let candidates = [account("work", &[("five_hour", 91.4)]), account("home", &[("five_hour", 10.0)])];
     let Decision::Switch { reason, .. } = decide(&ask(Why::Between, "work", &candidates)) else { panic!("switch") };
@@ -235,7 +252,6 @@ fn a_reason_reads_as_a_sentence() {
     assert_eq!(reason.text(true), "WORK is at 91% of its 5-hour limit");
 }
 
-#[test]
 fn the_setting_orders_accounts_and_keys_start_unchecked() {
     let mk = |id: &str, kind: Kind| super::super::Account {
         id: id.into(), agent: "claude", kind, label: id.into(), email: None, plan: None, organization: None,
@@ -252,7 +268,6 @@ fn the_setting_orders_accounts_and_keys_start_unchecked() {
     assert_eq!(kept.accounts, [Pick { id: "aaaa".into(), used: true }]);
 }
 
-#[test]
 fn the_setting_is_off_by_default_and_reads_old_files() {
     let setting: Setting = serde_json::from_str("{}").unwrap();
     assert!(!setting.enabled);
@@ -265,7 +280,6 @@ fn the_setting_is_off_by_default_and_reads_old_files() {
     assert!(kept.switches_in(Some("/q")));
 }
 
-#[test]
 fn the_log_keeps_thirty_days() {
     let dir = tempfile::tempdir().unwrap();
     let entry = |at: i64| LogEntry {
@@ -279,13 +293,11 @@ fn the_log_keeps_thirty_days() {
     assert_eq!(std::fs::read_to_string(log_path(dir.path())).unwrap().lines().count(), 1, "the old line is gone from the file too");
 }
 
-#[test]
 fn hot_accounts_are_near_the_threshold() {
     let candidates = [account("a", &[("five_hour", 74.0)]), account("b", &[("five_hour", 76.0)]), account("c", &[("seven_day", 99.0)])];
     assert_eq!(hot(&candidates, 90.0, NOW), ["b", "c"]);
 }
 
-#[test]
 fn a_plan_seen_lacking_a_model_is_forgotten_after_a_while() {
     let mut memory = Memory::default();
     memory.lacks("claude", "b", "Claude-Opus-4-1", NOW);

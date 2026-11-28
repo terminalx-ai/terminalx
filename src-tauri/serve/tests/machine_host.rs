@@ -31,7 +31,7 @@ async fn a_paired_computer_operates_a_local_runtime_directly_and_only_while_allo
     let serve = Serve::start(command, &world.data);
 
     // Off by default: nothing listens, and no key is made.
-    std::thread::sleep(Duration::from_secs(2));
+    std::thread::sleep(Duration::from_millis(300));
     let off = status(&serve);
     assert_eq!(off["enabled"], false);
     assert_eq!(off["takesPort"], false, "the window keeps the port");
@@ -131,7 +131,7 @@ fn a_runtime_hosting_computers_does_not_exit_when_idle() {
     command.env("TERMINALX_MACHINE_HOST_PORT", port.to_string()).args(["--idle-grace-seconds", "1"]);
     let mut serve = Serve::start(command, &world.data);
     listening(&serve);
-    std::thread::sleep(Duration::from_secs(3));
+    std::thread::sleep(Duration::from_millis(1600));
     assert!(serve.child.try_wait().unwrap().is_none(), "a standing service with the switch on");
     allow(&world.data, false);
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -291,7 +291,7 @@ async fn the_machine_supervisor_connects_directly_survives_a_restart_and_ends_in
     heard.state("access removed", Duration::from_secs(30), |state| *state == MachineConnectionState::AccessRemoved).await;
     let (_, _) = heard.drain();
     supervisor.nudge();
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(heard.states.try_recv().is_err(), "nothing retried after access was removed");
     assert_eq!(supervisor.state(), MachineConnectionState::AccessRemoved);
     supervisor.stop();

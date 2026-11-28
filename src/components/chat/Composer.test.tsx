@@ -2,6 +2,7 @@ import "@testing-library/dom";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+vi.mock("@/icons", () => new Proxy({}, { has: () => true, get: (_, prop) => (prop === "then" || typeof prop === "symbol" ? undefined : prop === "__esModule" ? true : (props: Record<string, unknown>) => <svg {...props} />) }));
 import { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { FakeAgentRuntime } from "@/test/fakeAgentRuntime";
 import type { TabEntry } from "@/types/session";

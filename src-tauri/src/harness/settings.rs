@@ -598,6 +598,37 @@ mod tests {
     }
 
     #[test]
+    fn harness_settings_request_and_launch_lifecycle() {
+        every_harness_says_how_it_takes_a_change();
+        a_change_with_no_process_running_is_simply_the_setting();
+        a_change_to_a_running_process_waits_for_its_answer();
+        a_refused_change_reverts_to_what_is_running();
+        an_accepted_change_becomes_current_without_a_report();
+        asking_for_what_is_already_running_cancels_the_wait();
+        a_change_made_in_the_terminal_shows_while_another_is_pending();
+        a_waiting_change_rides_with_the_next_launch();
+        no_effort_in_particular_is_a_launch_setting();
+    }
+
+    #[test]
+    fn canonical_model_resolution_rules() {
+        a_report_keeps_the_alias_the_tab_is_on();
+        a_model_changed_in_the_terminal_is_found_in_the_list();
+        an_unknown_model_is_kept_exactly_as_reported();
+        an_alias_the_cli_could_not_resolve_still_matches_its_family();
+    }
+
+    #[test]
+    fn permission_mode_stance_labels_and_signals() {
+        a_mode_asked_for_mid_turn_waits_for_the_restart();
+        a_mode_asked_for_with_no_turn_open_is_the_setting();
+        a_mode_changed_in_the_terminal_shows_while_another_is_pending();
+        a_stance_is_read_by_the_harness_that_reported_it();
+        a_share_takes_every_mode_the_host_chooses();
+        a_mode_with_no_entry_is_named_as_reported();
+        a_signal_with_nothing_in_it_is_no_signal();
+    }
+
     fn every_harness_says_how_it_takes_a_change() {
         assert_eq!(HarnessId::parse("claude").settings(), Support { model: Apply::Live, effort: Apply::Live });
         assert_eq!(HarnessId::parse("codex").settings(), Support { model: Apply::Restart, effort: Apply::Restart });
@@ -611,7 +642,6 @@ mod tests {
 
     /// With nothing running there is nobody to confirm anything: the choice
     /// is what the next launch gets, and that is what "current" means.
-    #[test]
     fn a_change_with_no_process_running_is_simply_the_setting() {
         let mut s = on("opus", Some("high"));
         s.request_model("sonnet", false);
@@ -619,7 +649,6 @@ mod tests {
         assert_eq!(s, on("sonnet", Some("low")));
     }
 
-    #[test]
     fn a_change_to_a_running_process_waits_for_its_answer() {
         let mut s = on("opus", Some("high"));
         s.request_model("sonnet", true);
@@ -639,7 +668,6 @@ mod tests {
         assert_eq!(s, on("sonnet", Some("low")));
     }
 
-    #[test]
     fn a_refused_change_reverts_to_what_is_running() {
         let mut s = on("opus", Some("high"));
         s.request_model("claude-nope-9", true);
@@ -653,7 +681,6 @@ mod tests {
         assert_eq!(s.refused(Setting::Effort, None), None);
     }
 
-    #[test]
     fn an_accepted_change_becomes_current_without_a_report() {
         let mut s = on("opus", None);
         s.request_model("sonnet", true);
@@ -667,7 +694,6 @@ mod tests {
         assert_eq!(s, on("sonnet", Some("max")));
     }
 
-    #[test]
     fn asking_for_what_is_already_running_cancels_the_wait() {
         let mut s = on("opus", Some("high"));
         s.request_model("sonnet", true);
@@ -680,7 +706,6 @@ mod tests {
     /// The reader changed it in the terminal while a change from the chat was
     /// still on its way: the terminal's is what is running, and the chat's is
     /// still to be answered.
-    #[test]
     fn a_change_made_in_the_terminal_shows_while_another_is_pending() {
         let mut s = on("opus", Some("high"));
         s.request_model("sonnet", true);
@@ -690,7 +715,6 @@ mod tests {
 
     /// A restart-only harness (Codex) mid-turn: the request waits for the
     /// turn, then rides with the launch that replaces the process.
-    #[test]
     fn a_waiting_change_rides_with_the_next_launch() {
         let mut s = on("gpt-5.6-sol", Some("low"));
         s.request_model("gpt-6-astra", true);
@@ -703,7 +727,6 @@ mod tests {
         assert_eq!(s, on("gpt-5.6-terra", Some("medium")));
     }
 
-    #[test]
     fn no_effort_in_particular_is_a_launch_setting() {
         let mut s = on("opus", Some("high"));
         s.request_effort(None, true);
@@ -716,7 +739,6 @@ mod tests {
         assert_eq!(s, on("opus", None));
     }
 
-    #[test]
     fn a_report_keeps_the_alias_the_tab_is_on() {
         let models = claude_models();
         // `opus` runs claude-opus-5-5 in the captured list.
@@ -729,7 +751,6 @@ mod tests {
         assert_eq!(canonical_model(&asked, "claude-sonnet-5-5", &models), "sonnet");
     }
 
-    #[test]
     fn a_model_changed_in_the_terminal_is_found_in_the_list() {
         let models = claude_models();
         // `/model sonnet` in the terminal, reported by its full id.
@@ -740,7 +761,6 @@ mod tests {
         assert_eq!(canonical_model(&on("", None), "claude-opus-5-5", &models), "opus");
     }
 
-    #[test]
     fn an_unknown_model_is_kept_exactly_as_reported() {
         let models = claude_models();
         assert_eq!(canonical_model(&on("opus", None), "claude-nova-1-0", &models), "claude-nova-1-0");
@@ -756,7 +776,6 @@ mod tests {
 
     /// The built-in list, used when the CLI could not be asked, names no
     /// version for an alias.
-    #[test]
     fn an_alias_the_cli_could_not_resolve_still_matches_its_family() {
         let models = crate::models::claude_fallback();
         assert!(models.iter().any(|m| m.id == "opus" && m.alias && m.resolved.is_none()));
@@ -774,7 +793,6 @@ mod tests {
 
     /// Mid-turn the mode waits for the restart; the turn in progress is still
     /// judged under the one it started in, and that is what is shown.
-    #[test]
     fn a_mode_asked_for_mid_turn_waits_for_the_restart() {
         let mut s = in_mode("auto");
         s.request_mode("plan", true);
@@ -786,7 +804,6 @@ mod tests {
         assert_eq!(s, in_mode("plan"));
     }
 
-    #[test]
     fn a_mode_asked_for_with_no_turn_open_is_the_setting() {
         let mut s = in_mode("auto");
         s.request_mode("plan", false);
@@ -797,7 +814,6 @@ mod tests {
         assert_eq!(s, in_mode("plan"));
     }
 
-    #[test]
     fn a_mode_changed_in_the_terminal_shows_while_another_is_pending() {
         let mut s = in_mode("auto");
         s.request_mode("plan", true);
@@ -808,13 +824,11 @@ mod tests {
         assert_eq!(s, in_mode("plan"));
     }
 
-    #[test]
     fn a_stance_is_read_by_the_harness_that_reported_it() {
         assert_eq!(Stance::Mode { mode: "default".into() }.mode("plan"), "manual");
         assert_eq!(Stance::Sandboxed { approval: "on-request".into(), sandbox: "read-only".into() }.mode("auto"), "plan");
     }
 
-    #[test]
     /// Sharing takes every mode: a session where nothing asks is shared at the
     /// host's choice, with the share dialog's warning in front of them.
     fn a_share_takes_every_mode_the_host_chooses() {
@@ -823,7 +837,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn a_mode_with_no_entry_is_named_as_reported() {
         assert_eq!(mode_label("acceptEdits"), "Accept edits");
         assert_eq!(mode_label(BYPASS_MODE), "Bypass");
@@ -831,7 +844,6 @@ mod tests {
         assert_eq!(mode_label("never, workspace-write"), "never, workspace-write");
     }
 
-    #[test]
     fn a_signal_with_nothing_in_it_is_no_signal() {
         assert_eq!(Signal::current(None, None), None);
         assert_eq!(Signal::current(Some("  "), Some("")), None);

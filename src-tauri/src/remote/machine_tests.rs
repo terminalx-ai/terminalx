@@ -978,7 +978,7 @@ async fn a_one_root_runtime_reports_agents_without_sign_in() {
 async fn an_agents_setup_runs_in_a_terminal_on_the_machine_one_at_a_time() {
     let m = machine_rpc();
     // Stands in for `codex login --device-auth`, which would wait for a person.
-    m.rpc.set_setup_command_for_tests("sh -c 'sleep 2; exit 74'");
+    m.rpc.set_setup_command_for_tests("sh -c 'sleep 0.5; exit 74'");
     let (peer, mut events, hello) = computer(&m.rpc).await;
     assert!(hello["capabilities"].as_array().unwrap().contains(&json!("machine/4")), "{hello}");
 

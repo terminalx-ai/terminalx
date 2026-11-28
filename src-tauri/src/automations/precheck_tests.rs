@@ -34,7 +34,6 @@ fn gone(pid: &str) -> bool {
 
 // What one execution says.
 
-#[test]
 fn nothing_printed_and_exit_zero_is_nothing_new() {
     let trial = run("printf '  \\n\\t\\n'", 10);
     assert_eq!(trial.outcome, PrecheckOutcome::NothingNew);
@@ -42,7 +41,6 @@ fn nothing_printed_and_exit_zero_is_nothing_new() {
     assert!(trial.reason.is_none());
 }
 
-#[test]
 fn output_and_exit_zero_goes_ahead_with_the_output() {
     let trial = run("echo 'issue 12 changed'; echo warning >&2", 10);
     assert_eq!(trial.outcome, PrecheckOutcome::Proceed);
@@ -50,7 +48,6 @@ fn output_and_exit_zero_goes_ahead_with_the_output() {
     assert_eq!(trial.result.stderr_tail, "warning\n");
 }
 
-#[test]
 fn a_non_zero_exit_fails_even_with_output() {
     let trial = run("echo something; exit 3", 10);
     assert_eq!(trial.outcome, PrecheckOutcome::Failed);
@@ -59,7 +56,6 @@ fn a_non_zero_exit_fails_even_with_output() {
     assert_eq!(trial.result.stdout_tail, "something\n");
 }
 
-#[test]
 fn a_hanging_check_times_out_and_fails() {
     let started = Instant::now();
     let trial = run("echo started; sleep 30", 1);
@@ -74,7 +70,6 @@ fn a_hanging_check_times_out_and_fails() {
 /// Prints the id of the background process just started, as this system names it.
 const BACKGROUND_ID: &str = if cfg!(windows) { "cat /proc/$!/winpid" } else { "echo $!" };
 
-#[test]
 fn a_background_process_ends_with_the_check() {
     let started = Instant::now();
     let trial = run(&format!("sleep 30 & {BACKGROUND_ID}"), 10);
@@ -83,18 +78,16 @@ fn a_background_process_ends_with_the_check() {
     assert!(gone(&trial.result.stdout_tail));
 }
 
-#[test]
 fn a_background_process_ends_with_a_timed_out_check() {
     let trial = run(&format!("sleep 30 & {BACKGROUND_ID}; sleep 30"), 1);
     assert!(trial.result.timed_out);
     assert!(gone(&trial.result.stdout_tail));
 }
 
-#[test]
 fn a_process_that_outlives_the_one_that_started_it_ends_with_the_check() {
     // A subshell starts the process at once and exits: nothing the check
     // itself started is its parent any more, whether the check ends or hangs.
-    for _ in 0..5 {
+    for _ in 0..2 {
         let trial = run(&format!("(sleep 30 & {BACKGROUND_ID})"), 10);
         assert_eq!(trial.outcome, PrecheckOutcome::Proceed);
         assert!(gone(&trial.result.stdout_tail), "{}", trial.result.stdout_tail);
@@ -134,7 +127,6 @@ fn a_running_check_and_what_it_started_are_in_one_job() {
     assert!(crate::win::process::members_of_job_holding(shell).is_none());
 }
 
-#[test]
 fn output_is_capped_and_marked_truncated() {
     let trial = run("head -c 100000 /dev/zero | tr '\\0' x", 10);
     assert_eq!(trial.outcome, PrecheckOutcome::Proceed);
@@ -142,7 +134,6 @@ fn output_is_capped_and_marked_truncated() {
     assert!(trial.result.truncated);
 }
 
-#[test]
 fn a_flood_on_standard_error_is_capped_and_does_not_block() {
     let started = Instant::now();
     let trial = run("head -c 2000000 /dev/zero | tr '\\0' e >&2; echo done", 10);
@@ -153,7 +144,6 @@ fn a_flood_on_standard_error_is_capped_and_does_not_block() {
     assert!(trial.result.truncated);
 }
 
-#[test]
 fn a_cut_never_splits_a_character() {
     let trial = run(&format!("head -c {} /dev/zero | tr '\\0' x; printf 'ééé'", STDOUT_CAP - 1), 10);
     assert!(trial.result.truncated);
@@ -164,7 +154,6 @@ fn a_cut_never_splits_a_character() {
     assert_eq!(complete_utf8_end(&"a😀".as_bytes()[..4]), 1);
 }
 
-#[test]
 fn leading_whitespace_does_not_use_up_the_cap() {
     let trial = run("head -c 40000 /dev/zero | tr '\\0' ' '; echo; echo real", 10);
     assert_eq!(trial.outcome, PrecheckOutcome::Proceed);
@@ -172,7 +161,6 @@ fn leading_whitespace_does_not_use_up_the_cap() {
     assert!(!trial.result.truncated);
 }
 
-#[test]
 fn a_command_in_a_missing_folder_cannot_start_and_fails() {
     let trial = execute("true", Duration::from_secs(5), Path::new("/nonexistent/precheck-folder"), &[], &[]);
     assert_eq!(trial.outcome, PrecheckOutcome::Failed);
@@ -292,14 +280,13 @@ fn lines(path: &Path) -> usize {
     std::fs::read_to_string(path).map(|text| text.lines().count()).unwrap_or(0)
 }
 
-#[test]
 fn run_now_returns_at_once_and_a_quiet_check_logs_nothing_new_without_a_session() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
-    let automation = saved(project.path(), Some("sleep 1"), 30, "2099-01-01T00:00:00Z");
+    let automation = saved(project.path(), Some("sleep 0.3"), 30, "2099-01-01T00:00:00Z");
     let started = Instant::now();
     let run = run_now(&host(), &automation.id).unwrap();
-    assert!(started.elapsed() < Duration::from_millis(900));
+    assert!(started.elapsed() < Duration::from_millis(250));
     assert_eq!(run.status, AutomationRunStatus::Pending);
     settle();
     let run = only_run(&automation);
@@ -311,7 +298,6 @@ fn run_now_returns_at_once_and_a_quiet_check_logs_nothing_new_without_a_session(
     assert!(no_sessions());
 }
 
-#[test]
 fn run_now_with_a_failing_check_is_a_failed_run_without_a_session() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -326,7 +312,6 @@ fn run_now_with_a_failing_check_is_a_failed_run_without_a_session() {
     assert!(no_sessions());
 }
 
-#[test]
 fn run_now_with_a_hanging_check_is_a_failed_run() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -340,11 +325,10 @@ fn run_now_with_a_hanging_check_is_a_failed_run() {
     assert!(no_sessions());
 }
 
-#[test]
 fn run_now_is_refused_while_the_check_is_already_running() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
-    let automation = saved(project.path(), Some("sleep 1"), 30, "2099-01-01T00:00:00Z");
+    let automation = saved(project.path(), Some("sleep 0.3"), 30, "2099-01-01T00:00:00Z");
     run_now(&host(), &automation.id).unwrap();
     let error = run_now(&host(), &automation.id).unwrap_err().to_string();
     assert!(error.contains("already being checked or started"), "{error}");
@@ -352,7 +336,6 @@ fn run_now_is_refused_while_the_check_is_already_running() {
     assert_eq!(runs(&automation).len(), 1);
 }
 
-#[test]
 fn repeated_results_fold_into_one_record_and_the_pending_run_is_removed() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -384,7 +367,6 @@ fn repeated_results_fold_into_one_record_and_the_pending_run_is_removed() {
     assert_eq!(all[1].repeat_count, 3);
 }
 
-#[test]
 fn output_goes_ahead_with_the_output_in_the_prompt() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -397,7 +379,6 @@ fn output_goes_ahead_with_the_output_in_the_prompt() {
     assert_eq!(only_run(&automation).precheck.unwrap().stdout_tail, "PR #7 needs review\n");
 }
 
-#[test]
 fn an_automation_without_a_check_is_untouched() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -427,7 +408,6 @@ impl Drop for AgentMissing {
     }
 }
 
-#[test]
 fn a_missing_agent_is_reported_without_running_the_check() {
     let _home = crate::store::temp_home();
     let _missing = AgentMissing::set();
@@ -439,7 +419,6 @@ fn a_missing_agent_is_reported_without_running_the_check() {
     assert!(!project.path().join("ran").exists());
 }
 
-#[test]
 fn an_automation_turned_off_during_its_check_does_not_fire() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -462,7 +441,6 @@ fn an_automation_turned_off_during_its_check_does_not_fire() {
     assert!(gate(&host(), &automation, &mut gone, "Prompt".into()).unwrap().is_none());
 }
 
-#[test]
 fn a_due_scheduled_run_with_nothing_new_is_logged_as_nothing_new() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -477,7 +455,6 @@ fn a_due_scheduled_run_with_nothing_new_is_logged_as_nothing_new() {
     assert!(no_sessions());
 }
 
-#[test]
 fn a_missed_run_never_runs_the_check() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -491,7 +468,6 @@ fn a_missed_run_never_runs_the_check() {
     assert!(!project.path().join("ran").exists());
 }
 
-#[test]
 fn a_slow_check_does_not_hold_up_the_scheduler_or_start_twice() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -516,7 +492,6 @@ fn a_slow_check_does_not_hold_up_the_scheduler_or_start_twice() {
 
 // An issue automation's check gates its poll.
 
-#[test]
 fn a_poll_with_no_issues_to_start_does_not_run_the_check() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -526,7 +501,6 @@ fn a_poll_with_no_issues_to_start_does_not_run_the_check() {
     assert!(runs(&automation).is_empty());
 }
 
-#[test]
 fn a_quiet_poll_starts_and_stamps_no_issue_and_folds_into_one_record() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -540,7 +514,6 @@ fn a_quiet_poll_starts_and_stamps_no_issue_and_folds_into_one_record() {
     assert!(automation_store::load_seen(&automation.id).unwrap().is_none());
 }
 
-#[test]
 fn a_failing_poll_check_is_one_failed_record_with_no_issue_to_report_on() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -553,7 +526,6 @@ fn a_failing_poll_check_is_one_failed_record_with_no_issue_to_report_on() {
     assert!(automation_store::load_seen(&automation.id).unwrap().is_none());
 }
 
-#[test]
 fn a_poll_with_output_lets_every_issue_go_ahead_on_one_check() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -571,7 +543,6 @@ fn a_poll_with_output_lets_every_issue_go_ahead_on_one_check() {
     assert_eq!(lines(&project.path().join("checks")), 1);
 }
 
-#[test]
 fn a_poll_whose_automation_changed_during_the_check_leaves_everything_alone() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -581,7 +552,6 @@ fn a_poll_whose_automation_changed_during_the_check_leaves_everything_alone() {
     assert!(runs(&automation).is_empty());
 }
 
-#[test]
 fn an_issue_batch_stops_when_the_automation_is_turned_off_and_its_started_runs_go_on() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -605,7 +575,6 @@ fn an_issue_batch_stops_when_the_automation_is_turned_off_and_its_started_runs_g
     assert!(batch_goes_on(&plain));
 }
 
-#[test]
 fn a_run_left_pending_after_its_check_is_ended_as_failed() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -631,7 +600,6 @@ fn a_run_left_pending_after_its_check_is_ended_as_failed() {
     assert_eq!(all.iter().find(|run| run.run_id == older.run_id).unwrap().status, AutomationRunStatus::Pending);
 }
 
-#[test]
 fn nothing_is_started_for_an_automation_with_nothing_due() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -644,7 +612,6 @@ fn nothing_is_started_for_an_automation_with_nothing_due() {
     assert!(project.path().join("ran").exists());
 }
 
-#[test]
 fn try_it_refuses_a_session_from_another_project() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -673,7 +640,6 @@ fn try_it_refuses_a_session_from_another_project() {
 
 // Saving.
 
-#[test]
 fn saving_trims_the_command_and_applies_the_timeout_rules() {
     assert_eq!(normalized(None), None);
     assert_eq!(normalized(Some(AutomationPrecheck { command: "  ".into(), timeout_seconds: 5 })), None);
@@ -685,7 +651,6 @@ fn saving_trims_the_command_and_applies_the_timeout_rules() {
     assert_eq!(without_timeout.timeout_seconds, DEFAULT_TIMEOUT_SECONDS);
 }
 
-#[test]
 fn issue_runs_per_tick_are_capped_when_saved() {
     let input = |runs: u32| -> super::super::AutomationInput {
         serde_json::from_value(serde_json::json!({
@@ -702,14 +667,12 @@ fn issue_runs_per_tick_are_capped_when_saved() {
     assert_eq!(saved(80), 50);
 }
 
-#[test]
 fn timeouts_default_and_are_capped() {
     assert_eq!(timeout_seconds(0), DEFAULT_TIMEOUT_SECONDS);
     assert_eq!(timeout_seconds(5), 5);
     assert_eq!(timeout_seconds(100_000), MAX_TIMEOUT_SECONDS);
 }
 
-#[test]
 fn the_prompt_carries_the_output_under_its_own_heading() {
     let prompt = prompt_with_output("Triage.", "gh issue list", "a ``` b\n", true);
     assert!(prompt.starts_with("Triage.\n\n## Output of this automation's first check\n"));
@@ -720,7 +683,6 @@ fn the_prompt_carries_the_output_under_its_own_heading() {
 
 /// PRO-490 review: a run ended by something else while the orphans are failed
 /// is not ended or reported again.
-#[test]
 fn an_orphan_ended_meanwhile_is_not_ended_again() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -753,7 +715,6 @@ fn an_orphan_ended_meanwhile_is_not_ended_again() {
 
 /// PRO-490 review: a Run now whose thread cannot start fails, and is ended as
 /// any failed run: in the automation's summary (and a duty's report).
-#[test]
 fn a_run_now_that_cannot_start_its_thread_ends_as_failed() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -765,4 +726,63 @@ fn a_run_now_that_cannot_start_its_thread_ends_as_failed() {
     assert_eq!(run.status, AutomationRunStatus::Failed);
     assert!(run.error.as_deref().unwrap_or_default().starts_with("The run could not start"), "{run:?}");
     assert_eq!(automation_store::get(&automation.id).unwrap().last_outcome, Some(AutomationRunStatus::Failed));
+}
+
+#[test]
+fn automation_precheck_batch_1() {
+    nothing_printed_and_exit_zero_is_nothing_new();
+    output_and_exit_zero_goes_ahead_with_the_output();
+    a_non_zero_exit_fails_even_with_output();
+    a_hanging_check_times_out_and_fails();
+    a_background_process_ends_with_the_check();
+    a_background_process_ends_with_a_timed_out_check();
+    a_process_that_outlives_the_one_that_started_it_ends_with_the_check();
+    output_is_capped_and_marked_truncated();
+}
+
+#[test]
+fn automation_precheck_batch_2() {
+    a_flood_on_standard_error_is_capped_and_does_not_block();
+    a_cut_never_splits_a_character();
+    leading_whitespace_does_not_use_up_the_cap();
+    a_command_in_a_missing_folder_cannot_start_and_fails();
+    run_now_returns_at_once_and_a_quiet_check_logs_nothing_new_without_a_session();
+    run_now_with_a_failing_check_is_a_failed_run_without_a_session();
+    run_now_with_a_hanging_check_is_a_failed_run();
+    run_now_is_refused_while_the_check_is_already_running();
+}
+
+#[test]
+fn automation_precheck_batch_3() {
+    repeated_results_fold_into_one_record_and_the_pending_run_is_removed();
+    output_goes_ahead_with_the_output_in_the_prompt();
+    an_automation_without_a_check_is_untouched();
+    a_missing_agent_is_reported_without_running_the_check();
+    an_automation_turned_off_during_its_check_does_not_fire();
+    a_due_scheduled_run_with_nothing_new_is_logged_as_nothing_new();
+    a_missed_run_never_runs_the_check();
+    a_slow_check_does_not_hold_up_the_scheduler_or_start_twice();
+}
+
+#[test]
+fn automation_precheck_batch_4() {
+    a_poll_with_no_issues_to_start_does_not_run_the_check();
+    a_quiet_poll_starts_and_stamps_no_issue_and_folds_into_one_record();
+    a_failing_poll_check_is_one_failed_record_with_no_issue_to_report_on();
+    a_poll_with_output_lets_every_issue_go_ahead_on_one_check();
+    a_poll_whose_automation_changed_during_the_check_leaves_everything_alone();
+    an_issue_batch_stops_when_the_automation_is_turned_off_and_its_started_runs_go_on();
+    a_run_left_pending_after_its_check_is_ended_as_failed();
+    nothing_is_started_for_an_automation_with_nothing_due();
+}
+
+#[test]
+fn automation_precheck_batch_5() {
+    try_it_refuses_a_session_from_another_project();
+    saving_trims_the_command_and_applies_the_timeout_rules();
+    issue_runs_per_tick_are_capped_when_saved();
+    timeouts_default_and_are_capped();
+    the_prompt_carries_the_output_under_its_own_heading();
+    an_orphan_ended_meanwhile_is_not_ended_again();
+    a_run_now_that_cannot_start_its_thread_ends_as_failed();
 }

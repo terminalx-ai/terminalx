@@ -65,7 +65,6 @@ fn reasons(diverged: &[Divergence]) -> Vec<(&str, &str)> {
     diverged.iter().map(|item| (item.path.as_str(), item.reason)).collect()
 }
 
-#[test]
 fn a_first_sync_copies_the_file_set_and_records_its_revision() {
     let mut f = Fixture::new();
     f.remote_write("README.md", "hello\n");
@@ -107,7 +106,6 @@ fn a_first_sync_copies_the_file_set_and_records_its_revision() {
     assert!(!f.home.join("cloud-mirrors/org-1/workspace-1/journal.json").exists());
 }
 
-#[test]
 fn remote_edits_creates_and_deletes_are_applied_and_local_only_files_are_left_alone() {
     let mut f = Fixture::new();
     f.remote_write("a.txt", "one\n");
@@ -142,7 +140,6 @@ fn remote_edits_creates_and_deletes_are_applied_and_local_only_files_are_left_al
     assert_eq!(f.mirror.status().unwrap().files, 1);
 }
 
-#[test]
 fn content_is_verified_before_anything_moves() {
     let mut f = Fixture::new();
     f.remote_write("a.txt", "one\n");
@@ -166,7 +163,6 @@ fn content_is_verified_before_anything_moves() {
     assert_eq!(f.mirror.status().unwrap().revision, None);
 }
 
-#[test]
 fn a_publish_that_died_is_reconciled_once_and_exempts_nothing_from_the_divergence_check() {
     let mut f = Fixture::new();
     for path in ["moved.txt", "unmoved.txt", "edited-since.txt", "old.txt"] {
@@ -211,7 +207,6 @@ fn a_publish_that_died_is_reconciled_once_and_exempts_nothing_from_the_divergenc
     assert!(f.mirror.plan(&f.manifest()).unwrap().up_to_date);
 }
 
-#[test]
 fn a_publish_that_fails_part_way_records_what_it_did_and_leaves_no_journal() {
     let mut f = Fixture::new();
     f.remote_write("a.txt", "v1\n");
@@ -268,7 +263,6 @@ fn a_publish_that_fails_part_way_records_what_it_did_and_leaves_no_journal() {
     let _ = error;
 }
 
-#[test]
 fn a_local_change_stops_the_sync_and_is_never_overwritten() {
     let mut f = Fixture::new();
     for path in ["edited.txt", "deleted.txt", "kept.txt", "touched.txt"] {
@@ -307,7 +301,6 @@ fn a_local_change_stops_the_sync_and_is_never_overwritten() {
     assert_ne!(f.mirror.status().unwrap().revision.unwrap().manifest_id, f.manifest().manifest_id, "the last successful revision is still the old one");
 }
 
-#[test]
 fn discard_replaces_exactly_the_divergent_paths_and_export_keeps_the_local_versions() {
     let mut f = Fixture::new();
     f.remote_write("edited.txt", "v1\n");
@@ -383,7 +376,6 @@ fn a_symbolic_link_in_the_mirror_never_redirects_a_write() {
     assert_eq!(reasons(&f.mirror.check().unwrap().0), [("link.txt", "replaced")]);
 }
 
-#[test]
 fn secrets_git_metadata_and_paths_that_leave_the_mirror_are_refused() {
     let mut f = Fixture::new();
     // Staging one is refused even with the right size and hash.
@@ -422,7 +414,6 @@ fn secrets_git_metadata_and_paths_that_leave_the_mirror_are_refused() {
     assert!(f.mirror.plan(&twice).unwrap_err().to_string().contains("twice"));
 }
 
-#[test]
 fn an_embedded_git_directory_is_never_written_under_any_name() {
     let mut f = Fixture::new();
     // The reproduced attack: a bare repository as ordinary files, whose
@@ -487,7 +478,6 @@ fn every_mirrored_file_is_quarantined_and_none_is_executable() {
     assert_eq!(std::fs::metadata(f.files().join("Install.command")).unwrap().permissions().mode() & 0o777, 0o644);
 }
 
-#[test]
 fn a_mirror_is_bounded_on_this_side_whatever_the_workspace_says() {
     let mut f = Fixture::new();
     // A size that lies: the manifest says 3 bytes, the read brings more.
@@ -532,7 +522,6 @@ fn a_mirror_is_bounded_on_this_side_whatever_the_workspace_says() {
     assert!(!f.home.join("cloud-mirrors/org-1/workspace-1/staging").exists());
 }
 
-#[test]
 fn names_that_are_one_file_on_this_disk_are_settled_before_anything_is_written() {
     let mut f = Fixture::new();
     // The same name in two Unicode forms (composed and decomposed é).
@@ -613,7 +602,6 @@ fn none_of_the_mirrors_own_directories_may_be_a_link() {
     }
 }
 
-#[test]
 fn a_mirror_is_never_a_project_or_an_agents_working_directory() {
     let f = Fixture::new();
     std::fs::create_dir_all(f.files().join("src")).unwrap();
@@ -631,7 +619,6 @@ fn a_mirror_is_never_a_project_or_an_agents_working_directory() {
     }
 }
 
-#[test]
 fn a_mirror_belongs_to_one_workspace_and_is_off_until_enabled() {
     let dir = tempfile::tempdir().unwrap();
     let home = crate::paths::canonicalize(dir.path()).unwrap();
@@ -656,7 +643,6 @@ fn a_mirror_belongs_to_one_workspace_and_is_off_until_enabled() {
     assert!(mirror.status().unwrap_err().to_string().contains("another workspace"));
 }
 
-#[test]
 fn turning_it_off_keeps_the_files_unless_asked_and_always_keeps_exports() {
     let mut f = Fixture::new();
     f.remote_write("a.txt", "v1\n");
@@ -679,7 +665,6 @@ fn turning_it_off_keeps_the_files_unless_asked_and_always_keeps_exports() {
     assert_eq!(std::fs::read_dir(dir.join("exports")).unwrap().count(), 1);
 }
 
-#[test]
 fn the_app_refuses_a_mirror_as_a_project_with_the_reason() {
     let _home = crate::store::temp_home();
     let home = crate::store::root().unwrap();
@@ -701,7 +686,6 @@ fn the_app_refuses_a_mirror_as_a_project_with_the_reason() {
     assert!(crate::store::projects::add(&other.path().to_string_lossy()).is_ok());
 }
 
-#[test]
 fn losing_access_removes_what_the_mirror_wrote_and_nothing_else() {
     let mut f = Fixture::new();
     f.remote_write("a.txt", "v1\n");
@@ -748,7 +732,6 @@ fn git_sees_a_repository(dir: &Path) -> bool {
     dir.is_dir() && crate::git::is_repo(dir)
 }
 
-#[test]
 fn a_git_directory_split_across_two_folders_is_never_written() {
     let mut f = Fixture::new();
     // One folder holds HEAD and a pointer; its sibling holds the rest.
@@ -772,7 +755,6 @@ fn a_git_directory_split_across_two_folders_is_never_written() {
     assert!(!git_sees_a_repository(&f.files()));
 }
 
-#[test]
 fn names_the_disk_folds_do_not_get_past_the_rules() {
     let mut f = Fixture::new();
     // The long s (U+017F) and the Kelvin sign (U+212A): on APFS these are
@@ -793,7 +775,6 @@ fn names_the_disk_folds_do_not_get_past_the_rules() {
     assert!(!git_sees_a_repository(&f.files().join("pkg")));
 }
 
-#[test]
 fn one_folder_under_three_spellings_is_one_folder() {
     let mut f = Fixture::new();
     f.remote_write("pkg/HEAD", "ref: refs/heads/main\n");
@@ -808,7 +789,6 @@ fn one_folder_under_three_spellings_is_one_folder() {
     assert!(!f.files().join("pkg").exists() && !f.files().join("PKG").exists());
 }
 
-#[test]
 fn the_disk_has_the_last_word_after_a_publish() {
     let mut f = Fixture::new();
     // The names alone do not make a Git directory: the manifest has HEAD
@@ -845,7 +825,6 @@ fn the_disk_has_the_last_word_after_a_publish() {
 }
 
 // #451: with the workspace unchanged, a discard left the edits on disk while the mirror read "Files synced".
-#[test]
 fn a_discard_is_owed_until_a_sync_has_put_the_files_back() {
     let mut f = Fixture::new();
     f.remote_write("README.md", "v1\n");
@@ -873,7 +852,6 @@ fn a_discard_is_owed_until_a_sync_has_put_the_files_back() {
     assert!(f.mirror.plan(&f.manifest()).unwrap().up_to_date);
 }
 
-#[test]
 fn an_edit_made_after_discard_is_a_new_divergence() {
     let mut f = Fixture::new();
     f.remote_write("a.txt", "v1\n");
@@ -901,7 +879,6 @@ fn an_edit_made_after_discard_is_a_new_divergence() {
     assert_eq!(f.local("b.txt").as_deref(), Some("v1\n"));
 }
 
-#[test]
 fn finders_bookkeeping_does_not_keep_a_removed_folder_alive() {
     let mut f = Fixture::new();
     f.remote_write("lib/objects/x", "x\n");
@@ -927,7 +904,6 @@ fn finders_bookkeeping_does_not_keep_a_removed_folder_alive() {
     assert_eq!(g.local("dir/mine.txt").as_deref(), Some("mine\n"));
 }
 
-#[test]
 fn names_that_fold_by_unicode_not_only_by_ascii_are_one_file() {
     let mut f = Fixture::new();
     if !f.mirror.case_insensitive() {
@@ -970,7 +946,6 @@ fn the_disk_is_checked_even_when_a_publish_fails_part_way() {
     assert_eq!(f.mirror.plan(&f.manifest()).unwrap().refused.on_disk, 1);
 }
 
-#[test]
 fn the_sharp_s_in_its_three_spellings_is_one_file_and_does_not_stall_the_mirror() {
     let mut f = Fixture::new();
     f.remote_write("stra\u{1e9e}e.txt", "capital sharp s\n");
@@ -988,7 +963,6 @@ fn the_sharp_s_in_its_three_spellings_is_one_file_and_does_not_stall_the_mirror(
     assert!(f.mirror.plan(&f.manifest()).unwrap().up_to_date);
 }
 
-#[test]
 fn a_mirror_made_under_another_account_is_removed_when_the_next_one_arrives() {
     let mut f = Fixture::new();
     f.mirror.enable_as("ada@example.com").unwrap();
@@ -1009,7 +983,6 @@ fn a_mirror_made_under_another_account_is_removed_when_the_next_one_arrives() {
     assert!(!empty.path().join("cloud-mirrors").exists());
 }
 
-#[test]
 fn a_mirror_turned_on_after_launch_is_not_inherited_by_the_next_account() {
     // The reproduced gap. Launch as A with no mirrors: the claim finds
     // nothing and writes nothing.
@@ -1061,7 +1034,6 @@ fn write_legacy_owner(home: &Path, email: &str) {
     std::fs::write(home.join("cloud-mirrors/owner"), owner_hash(email)).unwrap();
 }
 
-#[test]
 fn an_owner_file_keyed_on_the_email_is_migrated_for_the_same_person_only() {
     let mut f = Fixture::new();
     f.mirror.enable_as("old-key").unwrap();
@@ -1095,7 +1067,6 @@ fn an_owner_file_keyed_on_the_email_is_migrated_for_the_same_person_only() {
     assert_eq!(claim_owner(&g.home, "account-id-of-dan", Some("")).unwrap(), 0);
 }
 
-#[test]
 fn the_email_keyed_owner_file_stops_being_honoured_after_two_weeks() {
     let day = std::time::Duration::from_secs(24 * 60 * 60);
     let now = std::time::SystemTime::now();
@@ -1125,7 +1096,6 @@ fn the_email_keyed_owner_file_stops_being_honoured_after_two_weeks() {
     assert_eq!(h.local("a.txt").as_deref(), Some("v1\n"));
 }
 
-#[test]
 fn mirrors_are_kept_only_for_a_bounded_time_while_the_saved_session_cannot_be_read() {
     const HOUR: u64 = 60 * 60 * 1000;
     let start = 1_800_000_000_000;
@@ -1168,4 +1138,50 @@ fn mirrors_are_kept_only_for_a_bounded_time_while_the_saved_session_cannot_be_re
         assert_eq!(note_unreadable(empty.path(), start).unwrap(), 0);
     }
     assert!(!empty.path().join("cloud-mirrors").exists());
+}
+
+#[test]
+fn cloud_mirror_batch_1() {
+    a_first_sync_copies_the_file_set_and_records_its_revision();
+    remote_edits_creates_and_deletes_are_applied_and_local_only_files_are_left_alone();
+    content_is_verified_before_anything_moves();
+    a_publish_that_died_is_reconciled_once_and_exempts_nothing_from_the_divergence_check();
+    a_publish_that_fails_part_way_records_what_it_did_and_leaves_no_journal();
+    a_local_change_stops_the_sync_and_is_never_overwritten();
+    discard_replaces_exactly_the_divergent_paths_and_export_keeps_the_local_versions();
+    secrets_git_metadata_and_paths_that_leave_the_mirror_are_refused();
+}
+
+#[test]
+fn cloud_mirror_batch_2() {
+    an_embedded_git_directory_is_never_written_under_any_name();
+    a_mirror_is_bounded_on_this_side_whatever_the_workspace_says();
+    names_that_are_one_file_on_this_disk_are_settled_before_anything_is_written();
+    a_mirror_is_never_a_project_or_an_agents_working_directory();
+    a_mirror_belongs_to_one_workspace_and_is_off_until_enabled();
+    turning_it_off_keeps_the_files_unless_asked_and_always_keeps_exports();
+    the_app_refuses_a_mirror_as_a_project_with_the_reason();
+    losing_access_removes_what_the_mirror_wrote_and_nothing_else();
+}
+
+#[test]
+fn cloud_mirror_batch_3() {
+    a_git_directory_split_across_two_folders_is_never_written();
+    names_the_disk_folds_do_not_get_past_the_rules();
+    one_folder_under_three_spellings_is_one_folder();
+    the_disk_has_the_last_word_after_a_publish();
+    a_discard_is_owed_until_a_sync_has_put_the_files_back();
+    an_edit_made_after_discard_is_a_new_divergence();
+    finders_bookkeeping_does_not_keep_a_removed_folder_alive();
+    names_that_fold_by_unicode_not_only_by_ascii_are_one_file();
+}
+
+#[test]
+fn cloud_mirror_batch_4() {
+    the_sharp_s_in_its_three_spellings_is_one_file_and_does_not_stall_the_mirror();
+    a_mirror_made_under_another_account_is_removed_when_the_next_one_arrives();
+    a_mirror_turned_on_after_launch_is_not_inherited_by_the_next_account();
+    an_owner_file_keyed_on_the_email_is_migrated_for_the_same_person_only();
+    the_email_keyed_owner_file_stops_being_honoured_after_two_weeks();
+    mirrors_are_kept_only_for_a_bounded_time_while_the_saved_session_cannot_be_read();
 }

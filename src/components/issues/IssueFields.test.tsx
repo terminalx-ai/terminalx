@@ -25,6 +25,7 @@ const { invoke, sessionStore } = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
+vi.mock("@/icons", () => new Proxy({}, { has: () => true, get: (_, prop) => (prop === "then" || typeof prop === "symbol" ? undefined : prop === "__esModule" ? true : () => null) }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/components/chat/Dictation", () => ({
@@ -78,7 +79,12 @@ function rows(provider: IssueProvider): Issue[] {
 
 const secondGithub = () => ({ ...githubIssueFixture(), id: "42", nodeId: "I_kwDOExample42", identifier: "#42", number: 42, title: "Speed up the startup", url: "https://github.com/acme/widgets/issues/42", description: "Startup takes too long.", body: "Startup takes too long." });
 
+const nativeSetTimeout = window.setTimeout;
+let timerSpy: ReturnType<typeof vi.spyOn> | null = null;
+
 beforeEach(() => {
+  timerSpy = vi.spyOn(window, "setTimeout").mockImplementation(((fn: TimerHandler, delay?: number, ...args: unknown[]) =>
+    nativeSetTimeout(fn, delay === 250 ? 0 : delay, ...args)) as typeof window.setTimeout);
   mock = createIssueOpsMock({ issues: [githubIssueFixture(), secondGithub(), linearIssueFixture()] });
   held = new Map();
   invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
@@ -99,6 +105,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  timerSpy?.mockRestore();
+  timerSpy = null;
   cleanup();
   vi.clearAllMocks();
 });

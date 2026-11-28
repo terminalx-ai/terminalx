@@ -2418,7 +2418,6 @@ mod tests {
     /// #1298: a same-size edit made in the second the index last recorded the file is "racily
     /// clean" to Git, and a snapshot must still read its content, not trust the cached stat.
     /// Timestamps are set by hand so this does not depend on when the clock ticks.
-    #[test]
     fn a_snapshot_reads_a_racily_clean_edit() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
@@ -2443,7 +2442,6 @@ mod tests {
         assert_eq!(blob.trim(), run(p, &["hash-object", "a.txt"]).unwrap().trim());
     }
 
-    #[test]
     fn branches_carry_when_their_tip_was_committed_and_by_whom() {
         let dir = repo();
         let branches = list_branches(dir.path()).unwrap();
@@ -2454,7 +2452,6 @@ mod tests {
         assert!(updated.len() >= 20 && updated.as_bytes()[10] == b'T', "RFC 3339, got {updated}");
     }
 
-    #[test]
     fn staging_one_hunk_preserves_other_worktree_edits_and_commit_uses_only_index() {
         let dir = repo();
         let p = dir.path();
@@ -2489,7 +2486,6 @@ mod tests {
             .contains("changed 22"));
     }
 
-    #[test]
     fn hunk_patches_support_untracked_and_renamed_files() {
         let dir = repo();
         let p = dir.path();
@@ -2551,7 +2547,6 @@ mod tests {
         assert_eq!(&fields[1..], ["a.txt", "renamed.txt"]);
     }
 
-    #[test]
     fn hunk_boundaries_only_match_line_starts() {
         let dir = repo();
         let p = dir.path();
@@ -2565,7 +2560,6 @@ mod tests {
         assert_eq!(run(p, &["diff", "--cached", "--numstat", "--", "a.txt"]).unwrap().trim(), "1\t1\ta.txt");
     }
 
-    #[test]
     fn hunk_staging_handles_missing_final_newline_and_crlf() {
         let dir = repo();
         let p = dir.path();
@@ -2584,7 +2578,6 @@ mod tests {
         assert_eq!(run(p, &["diff", "--cached", "--numstat", "--", "a.txt"]).unwrap().trim(), "1\t1\ta.txt");
     }
 
-    #[test]
     fn working_change_sets_keep_conflicted_worktree_reviewable() {
         let dir = repo();
         let p = dir.path();
@@ -2606,7 +2599,6 @@ mod tests {
     }
 
 
-    #[test]
     fn a_branch_here_is_made_at_the_detached_commit_and_checked_out() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2635,7 +2627,6 @@ mod tests {
         assert!(current_branch(project).is_none());
     }
 
-    #[test]
     fn pr_checkout_uses_the_fetched_head_and_cleans_up_a_failed_checkout() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2678,7 +2669,6 @@ mod tests {
         assert!(Path::new(&wt.path).exists());
     }
 
-    #[test]
     fn adding_a_remote_resolves_a_local_only_repository_and_pushes() {
         let local = repo();
         let remote = tempfile::tempdir().unwrap();
@@ -2692,7 +2682,6 @@ mod tests {
         assert_eq!(remote_url(local.path()).as_deref(), remote.path().to_str());
     }
 
-    #[test]
     fn invalid_remote_urls_do_not_change_git_configuration() {
         let local = repo();
         for url in ["", " ", "--upload-pack=bad", "https://example.com/repo\nnext"] {
@@ -2701,7 +2690,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn checks_out_an_existing_branch_in_a_worktree_as_it_is() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2721,7 +2709,6 @@ mod tests {
         assert!(again.contains("already checked out in another folder"), "{again}");
     }
 
-    #[test]
     fn snapshot_and_changes() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2787,7 +2774,6 @@ mod tests {
         assert!(changes_between(p, &base, None).unwrap().iter().all(|file| file.blob_hash.is_none()));
     }
 
-    #[test]
     fn commit_scope_counts_match_git_show_for_root_regular_and_merge_commits() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2813,7 +2799,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn whitespace_stats_preserve_the_changed_file_list_and_count_real_edits() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2835,7 +2820,6 @@ mod tests {
         assert_eq!((real.additions, real.deletions), (1, 1));
     }
 
-    #[test]
     fn review_accumulated_work_and_merge_base() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2869,7 +2853,6 @@ mod tests {
         assert_eq!(review_range(p, Some("feature"), false).unwrap().base, head_tree(p).unwrap());
     }
 
-    #[test]
     fn review_unborn_clean_rename_and_delete() {
         let _home = crate::store::temp_home();
         let empty = tempfile::tempdir().unwrap();
@@ -2909,7 +2892,6 @@ mod tests {
         (remote, local)
     }
 
-    #[test]
     fn worktree_fetches_latest_default_without_touching_checkout() {
         let _home = crate::store::temp_home();
         let (remote, local) = stale_clone();
@@ -2932,7 +2914,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(p.join("a.txt")).unwrap(), "local edits\n");
     }
 
-    #[test]
     fn worktree_fetches_custom_default_with_missing_tracking_ref() {
         let _home = crate::store::temp_home();
         let (remote, local) = stale_clone();
@@ -2944,7 +2925,6 @@ mod tests {
         assert!(wt.worktree_base.unwrap().fetched);
     }
 
-    #[test]
     fn worktree_failed_fetch_uses_local_ref_and_warns() {
         let _home = crate::store::temp_home();
         let (remote, local) = stale_clone();
@@ -2958,7 +2938,6 @@ mod tests {
         assert!(provenance.warning.unwrap().contains("may be out of date"));
     }
 
-    #[test]
     fn worktree_without_remote_uses_local_default_without_warning() {
         let _home = crate::store::temp_home();
         let local = repo();
@@ -2970,7 +2949,6 @@ mod tests {
         assert!(provenance.warning.is_none());
     }
 
-    #[test]
     fn worktree_explicit_base_skips_fetch() {
         let _home = crate::store::temp_home();
         let (_remote, local) = stale_clone();
@@ -3000,7 +2978,6 @@ mod tests {
         assert!(provenance.warning.unwrap().contains("fetch timed out"));
     }
 
-    #[test]
     fn worktree_lifecycle() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3022,7 +2999,6 @@ mod tests {
         assert!(!worktree_branch_names(p).contains(&"quiet-amber-fox".to_string()));
     }
 
-    #[test]
     fn a_bad_worktree_name_is_refused_before_anything_is_touched() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3039,7 +3015,6 @@ mod tests {
         assert!(Path::new(&wt.path).join("a.txt").exists());
     }
 
-    #[test]
     fn a_worktree_git_cannot_remove_is_deleted_directly() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3085,7 +3060,6 @@ mod tests {
         assert!(p.join("a.txt").exists());
     }
 
-    #[test]
     fn the_direct_delete_only_takes_a_child_of_the_worktree_directory() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3135,7 +3109,6 @@ mod tests {
         (wt, commit)
     }
 
-    #[test]
     fn a_broken_worktree_reads_as_unchecked_and_its_unpushed_commits_survive() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3163,7 +3136,6 @@ mod tests {
         assert_eq!(run(p, &["rev-parse", "raccoon/quiet-amber-fox"]).unwrap().trim(), commit);
     }
 
-    #[test]
     fn a_clone_or_another_repositorys_worktree_at_a_managed_path_cannot_be_checked() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3194,7 +3166,6 @@ mod tests {
         assert!(worktree_disposition(p, "quiet-amber-fox").checked);
     }
 
-    #[test]
     fn commits_on_the_branch_count_even_when_head_was_moved_off_it() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3224,7 +3195,6 @@ mod tests {
         assert_eq!(removal, WorktreeRemoval::default());
     }
 
-    #[test]
     fn a_detached_head_nothing_else_holds_is_rescued_before_a_direct_delete() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3253,7 +3223,6 @@ mod tests {
         assert_eq!(remove_worktree(p, "calm-teal-bee", DirectDelete::Allowed).unwrap().rescued_branch, None);
     }
 
-    #[test]
     fn a_branch_with_nothing_of_its_own_goes_after_a_direct_delete() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3299,7 +3268,6 @@ mod tests {
         assert_eq!(removal.kept_branch.as_deref(), Some("raccoon/quiet-amber-fox"));
     }
 
-    #[test]
     fn another_projects_directory_in_a_shared_worktree_folder_is_refused() {
         let _home = crate::store::temp_home();
         // A worktree folder outside any project, as an absolute setting allows.
@@ -3338,7 +3306,6 @@ mod tests {
         assert!(foreign.join("theirs.txt").exists());
     }
 
-    #[test]
     fn a_dot_git_that_names_no_repository_is_refused() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3378,7 +3345,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn a_name_in_another_case_never_reaches_outside_the_worktree_folder() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3395,7 +3361,6 @@ mod tests {
         assert!(p.join(".RACCOON-other").exists());
     }
 
-    #[test]
     fn log_and_commit() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3433,5 +3398,56 @@ mod tests {
         assert!(checkout_branch(p, "-b", false).is_err());
         assert!(!branch_exists(p, "--all"));
         assert_eq!(unique_commits(p, "--all"), None);
+    }
+
+    #[test]
+    fn git_batch_1() {
+        a_snapshot_reads_a_racily_clean_edit();
+        branches_carry_when_their_tip_was_committed_and_by_whom();
+        staging_one_hunk_preserves_other_worktree_edits_and_commit_uses_only_index();
+        hunk_patches_support_untracked_and_renamed_files();
+        hunk_boundaries_only_match_line_starts();
+        hunk_staging_handles_missing_final_newline_and_crlf();
+        working_change_sets_keep_conflicted_worktree_reviewable();
+        a_branch_here_is_made_at_the_detached_commit_and_checked_out();
+        pr_checkout_uses_the_fetched_head_and_cleans_up_a_failed_checkout();
+    }
+
+    #[test]
+    fn git_batch_2() {
+        adding_a_remote_resolves_a_local_only_repository_and_pushes();
+        invalid_remote_urls_do_not_change_git_configuration();
+        checks_out_an_existing_branch_in_a_worktree_as_it_is();
+        snapshot_and_changes();
+        commit_scope_counts_match_git_show_for_root_regular_and_merge_commits();
+        whitespace_stats_preserve_the_changed_file_list_and_count_real_edits();
+        review_accumulated_work_and_merge_base();
+        review_unborn_clean_rename_and_delete();
+        worktree_fetches_latest_default_without_touching_checkout();
+    }
+
+    #[test]
+    fn git_batch_3() {
+        worktree_fetches_custom_default_with_missing_tracking_ref();
+        worktree_failed_fetch_uses_local_ref_and_warns();
+        worktree_without_remote_uses_local_default_without_warning();
+        worktree_explicit_base_skips_fetch();
+        worktree_lifecycle();
+        a_bad_worktree_name_is_refused_before_anything_is_touched();
+        a_worktree_git_cannot_remove_is_deleted_directly();
+        the_direct_delete_only_takes_a_child_of_the_worktree_directory();
+        a_broken_worktree_reads_as_unchecked_and_its_unpushed_commits_survive();
+    }
+
+    #[test]
+    fn git_batch_4() {
+        a_clone_or_another_repositorys_worktree_at_a_managed_path_cannot_be_checked();
+        commits_on_the_branch_count_even_when_head_was_moved_off_it();
+        a_detached_head_nothing_else_holds_is_rescued_before_a_direct_delete();
+        a_branch_with_nothing_of_its_own_goes_after_a_direct_delete();
+        another_projects_directory_in_a_shared_worktree_folder_is_refused();
+        a_dot_git_that_names_no_repository_is_refused();
+        a_name_in_another_case_never_reaches_outside_the_worktree_folder();
+        log_and_commit();
     }
 }

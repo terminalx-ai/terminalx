@@ -1,6 +1,7 @@
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+const waitFor = <T>(cb: () => T | Promise<T>, opts?: { timeout?: number; interval?: number }) => vi.waitFor(cb, { interval: 1, ...opts });
 import { CloudApiError, type CloudCommand, type CloudWorkspace } from "./api";
 import { b64, checkpointAad, unb64, type CheckpointEnvelope, type CommandEnvelope } from "./crypto";
 import { NOW, pairingCode, Runtime } from "./fake-runtime";
@@ -84,7 +85,7 @@ function harness(options: { state?: string | null; role?: string; canApprove?: b
 const settle = async () => {
   for (let index = 0; index < 40; index++) await Promise.resolve();
 };
-const connected = (h: ReturnType<typeof harness>) => vi.waitFor(() => expect(h.session.getSnapshot().tabs[0]?.source).toBe("live"));
+const connected = (h: ReturnType<typeof harness>) => waitFor(() => expect(h.session.getSnapshot().tabs[0]?.source).toBe("live"));
 const tab = (h: ReturnType<typeof harness>) => h.session.getSnapshot().tabs[0];
 
 /** A phone that connected once before, so it holds the workspace key. */
@@ -118,11 +119,11 @@ describe("a cloud workspace on the phone", () => {
     await h.session.start();
     await connected(h);
     const stop = h.session.view("t1");
-    await vi.waitFor(() => expect(tab(h).events.map((entry) => entry.seq)).toEqual([1, 2]));
+    await waitFor(() => expect(tab(h).events.map((entry) => entry.seq)).toEqual([1, 2]));
     h.runtimes[0].encrypted({ event: "session.event", params: { subscriptionId: "sub-1", cursor: "c3", event: event(3) } });
     h.runtimes[0].encrypted({ event: "session.event", params: { subscriptionId: "sub-1", cursor: "c3", event: event(3) } });
     h.runtimes[0].encrypted({ event: "session.status", params: { subscriptionId: "sub-1", sessionId: "s1", tabId: "t1", status: "completed" } });
-    await vi.waitFor(() => expect(tab(h).status).toBe("completed"));
+    await waitFor(() => expect(tab(h).status).toBe("completed"));
     expect(tab(h).events.map((entry) => entry.seq)).toEqual([1, 2, 3]);
     stop();
     h.session.close();
@@ -138,7 +139,7 @@ describe("a cloud workspace on the phone", () => {
     const h = harness({ state, secrets: earlier.secrets, checkpoints: [checkpoint(4, [event(3), event(4, "the last answer")], { status: "completed" })] });
     await h.session.start();
     const stop = h.session.view("t1");
-    await vi.waitFor(() => expect(tab(h)?.events).toHaveLength(2));
+    await waitFor(() => expect(tab(h)?.events).toHaveLength(2));
     await vi.advanceTimersByTimeAsync(120_000);
     expect(h.session.getSnapshot()).toMatchObject({ connection: { state: "suspended" }, role: "driver", hasKey: true });
     expect(tab(h)).toMatchObject({ source: "checkpoint", title: "Fix login", status: "completed", noKey: false });
@@ -155,7 +156,7 @@ describe("a cloud workspace on the phone", () => {
   it("says so when a checkpoint exists but this phone was never handed the key", async () => {
     const h = harness({ state: "suspended", checkpoints: [checkpoint(4, [event(4)])] });
     await h.session.start();
-    await vi.waitFor(() => expect(tab(h)).toMatchObject({ noKey: true, events: [] }));
+    await waitFor(() => expect(tab(h)).toMatchObject({ noKey: true, events: [] }));
     expect(h.session.getSnapshot().hasKey).toBe(false);
     await expect(h.session.send("t1", "hi", { allowWake: true })).rejects.toMatchObject({ code: "no-key" });
     expect(h.api.enqueue).not.toHaveBeenCalled();
@@ -170,7 +171,7 @@ describe("a cloud workspace on the phone", () => {
     expect(entry).toMatchObject({ kind: "send", text: "run the tests", state: "queued", wake: "not-needed" });
     expect(h.posted[0]).toMatchObject({ tabId: "t1", kind: "send", keyId: "k1" });
     expect(JSON.stringify(h.posted[0])).not.toContain("run the tests");
-    await vi.waitFor(() => expect(h.nudges.count).toBe(1));
+    await waitFor(() => expect(h.nudges.count).toBe(1));
     expect(h.session.getSnapshot().outbox).toMatchObject([{ text: "run the tests" }]);
     h.session.close();
   });
@@ -317,7 +318,7 @@ describe("a cloud workspace on the phone", () => {
     const h = harness({ secrets: before.secrets, blobs: before.blobs });
     await h.session.start();
     await connected(h);
-    await vi.waitFor(() => expect(h.posted).toHaveLength(1));
+    await waitFor(() => expect(h.posted).toHaveLength(1));
     expect(h.session.getSnapshot().outbox).toMatchObject([{ state: "queued", wake: "not-needed" }]);
     h.session.close();
   });
@@ -327,7 +328,7 @@ describe("a cloud workspace on the phone", () => {
     const h = harness({ secrets: (await keyed()).secrets });
     h.api.open.mockRejectedValue(new CloudApiError("cloud_workspace_not_found", 404));
     await h.session.start();
-    await vi.waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("stopped"));
+    await waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("stopped"));
     h.refresh.state = "suspended";
     await expect(h.session.send("t1", "are you there")).rejects.toMatchObject({ code: "would-wake" });
     expect(h.refresh.calls).toBe(1);
@@ -348,7 +349,7 @@ describe("a cloud workspace on the phone", () => {
     // The list is read and says running: now it goes.
     h.refresh.ok = true;
     await vi.advanceTimersByTimeAsync(1_100);
-    await vi.waitFor(() => expect(h.posted).toHaveLength(1));
+    await waitFor(() => expect(h.posted).toHaveLength(1));
     h.session.close();
   });
 
@@ -389,7 +390,7 @@ describe("a cloud workspace on the phone", () => {
     // Back in the foreground it carries on.
     h.session.resume();
     await connected(h);
-    await vi.waitFor(() => expect(h.api.enqueue.mock.calls.length).toBe(posts + 1));
+    await waitFor(() => expect(h.api.enqueue.mock.calls.length).toBe(posts + 1));
     h.session.close();
   });
 
@@ -450,7 +451,7 @@ describe("a cloud workspace on the phone", () => {
     await h.session.start();
     await connected(h);
     const stop = h.session.view("t1");
-    await vi.waitFor(() => expect(tab(h).events.map((entry) => entry.seq)).toEqual([1, 2]));
+    await waitFor(() => expect(tab(h).events.map((entry) => entry.seq)).toEqual([1, 2]));
     const seen: string[] = [];
     h.session.subscribe(() => seen.push(h.session.getSnapshot().connection.state));
 
@@ -465,8 +466,8 @@ describe("a cloud workspace on the phone", () => {
 
     h.each((runtime) => (runtime.methods["session.subscribe"] = () => ({ subscriptionId: "sub-2", events: [{ cursor: "c3", event: event(3) }], cursor: "c3" })));
     h.session.resume();
-    await vi.waitFor(() => expect(h.runtimes).toHaveLength(2));
-    await vi.waitFor(() => expect(tab(h).events.map((entry) => entry.seq)).toEqual([1, 2, 3]));
+    await waitFor(() => expect(h.runtimes).toHaveLength(2));
+    await waitFor(() => expect(tab(h).events.map((entry) => entry.seq)).toEqual([1, 2, 3]));
     // Never anything but "connected" was shown, and what happened meanwhile is there.
     expect(new Set(seen)).toEqual(new Set(["connected"]));
     expect(tab(h).source).toBe("live");
@@ -546,14 +547,14 @@ describe("a cloud workspace on the phone", () => {
     await h.session.start();
     await connected(h);
     const stop = h.session.view("t1");
-    await vi.waitFor(() => expect(tab(h).events).toHaveLength(1));
+    await waitFor(() => expect(tab(h).events).toHaveLength(1));
     h.runtimes[0].drop(1006);
     expect(h.session.getSnapshot().connection.state).toBe("reconnecting");
     expect(tab(h)).toMatchObject({ source: "checkpoint", events: [{ seq: 2 }] });
     h.each((runtime) => (runtime.methods["session.subscribe"] = () => ({ subscriptionId: "sub-2", events: [{ cursor: "c5", event: event(5) }], cursor: "c5" })));
     await vi.advanceTimersByTimeAsync(1_000);
     await connected(h);
-    await vi.waitFor(() => expect(tab(h).events.map((entry) => entry.seq)).toEqual([2, 5]));
+    await waitFor(() => expect(tab(h).events.map((entry) => entry.seq)).toEqual([2, 5]));
     stop();
     h.session.close();
   });
@@ -566,13 +567,13 @@ describe("a cloud workspace on the phone", () => {
       // Listed live but not looked at: nothing follows it.
       expect(tab(h).continuous).toBe(false);
       const stop = h.session.view("t1");
-      await vi.waitFor(() => expect(tab(h).continuous).toBe(true));
+      await waitFor(() => expect(tab(h).continuous).toBe(true));
       h.runtimes[0].drop(1006);
       expect(tab(h).continuous).toBe(false);
       // Back: the subscription resumes, and it is caught up again once its replay is in.
       await vi.advanceTimersByTimeAsync(1_000);
       await connected(h);
-      await vi.waitFor(() => expect(tab(h).continuous).toBe(true));
+      await waitFor(() => expect(tab(h).continuous).toBe(true));
       // No longer looked at: nothing follows it from here on.
       stop();
       expect(tab(h).continuous).toBe(false);
@@ -584,7 +585,7 @@ describe("a cloud workspace on the phone", () => {
       await h.session.start();
       await connected(h);
       const stop = h.session.view("t1");
-      await vi.waitFor(() => expect(tab(h).continuous).toBe(true));
+      await waitFor(() => expect(tab(h).continuous).toBe(true));
       h.session.pause();
       expect(h.session.getSnapshot().connection.state).toBe("connected");
       expect(tab(h).continuous).toBe(false);
@@ -596,7 +597,7 @@ describe("a cloud workspace on the phone", () => {
       const replayed = new Promise<void>((resolve) => { answer = resolve; });
       h.session.resume();
       await replayed;
-      await vi.waitFor(() => expect(tab(h).events.map((entry) => entry.seq)).toEqual([2, 3]));
+      await waitFor(() => expect(tab(h).events.map((entry) => entry.seq)).toEqual([2, 3]));
       expect(tab(h).continuous).toBe(true);
       stop();
       h.session.close();
@@ -607,7 +608,7 @@ describe("a cloud workspace on the phone", () => {
       const asleep = harness({ state: "suspended", secrets: earlier.secrets, checkpoints: [checkpoint(2, [event(1), event(2)])] });
       await asleep.session.start();
       const stopAsleep = asleep.session.view("t1");
-      await vi.waitFor(() => expect(tab(asleep)?.events).toHaveLength(2));
+      await waitFor(() => expect(tab(asleep)?.events).toHaveLength(2));
       expect(tab(asleep).continuous).toBe(false);
       stopAsleep();
       asleep.session.close();
@@ -632,7 +633,7 @@ describe("a cloud workspace on the phone", () => {
     await h.session.send("t1", "go");
     h.api.commandStatuses.mockImplementation(async () => [{ clientCommandId: h.posted[0].clientCommandId, tabId: "t1", kind: "send", state: "applied", keyId: "k1", createdAt: 1, updatedAt: 2 }]);
     await vi.advanceTimersByTimeAsync(1_100);
-    await vi.waitFor(() => expect(h.session.getSnapshot().outbox[0].state).toBe("applied"));
+    await waitFor(() => expect(h.session.getSnapshot().outbox[0].state).toBe("applied"));
     const calls = h.api.commandStatuses.mock.calls.length;
     await vi.advanceTimersByTimeAsync(60_000);
     expect(h.api.commandStatuses.mock.calls.length).toBe(calls);
@@ -644,7 +645,7 @@ describe("a cloud workspace on the phone", () => {
     await h.session.start();
     await connected(h);
     await h.session.send("t1", "go");
-    await vi.waitFor(() => expect(h.blobs.size).toBeGreaterThan(1));
+    await waitFor(() => expect(h.blobs.size).toBeGreaterThan(1));
     await h.session.purge();
     expect(h.secrets.size).toBe(0);
     expect(h.blobs.size).toBe(0);
@@ -682,15 +683,15 @@ describe("a cloud workspace on the phone", () => {
       const h = shared();
       await h.session.start();
       await connected(h);
-      await vi.waitFor(() => expect(h.session.getSnapshot().collab.participants).toHaveLength(2));
+      await waitFor(() => expect(h.session.getSnapshot().collab.participants).toHaveLength(2));
       expect(h.session.getSnapshot().collab).toMatchObject({ available: true, userId: "u-me", leases: { t1: { holderId: "u-alice" } } });
       const stop = h.session.view("t1");
-      await vi.waitFor(() => expect(h.calls.some((call) => call.method === "presence.update")).toBe(true));
+      await waitFor(() => expect(h.calls.some((call) => call.method === "presence.update")).toBe(true));
       expect(h.calls.find((call) => call.method === "presence.update")!.params).toEqual({ tabId: "t1", activity: "viewing" });
       // Others' changes arrive as they happen.
       h.runtimes[0].encrypted({ event: "collab.presence", params: { participants: [alice] } });
       h.runtimes[0].encrypted({ event: "collab.lease", params: { tabId: "t1", lease: null } });
-      await vi.waitFor(() => expect(h.session.getSnapshot().collab.leases).toEqual({}));
+      await waitFor(() => expect(h.session.getSnapshot().collab.leases).toEqual({}));
       expect(h.session.getSnapshot().collab.participants).toEqual([alice]);
       stop();
       h.session.close();
@@ -701,14 +702,14 @@ describe("a cloud workspace on the phone", () => {
       await h.session.start();
       await connected(h);
       const stop = h.session.view("t1");
-      await vi.waitFor(() => expect(h.session.getSnapshot().collab.notes.t1).toHaveLength(1));
+      await waitFor(() => expect(h.session.getSnapshot().collab.notes.t1).toHaveLength(1));
       const note = await h.session.postNote("t1", "  on it  ");
       expect(note).toMatchObject({ id: "n2", text: "on it", authorId: "u-me" });
       // A note goes to the runtime, never to the agent's mailbox.
       expect(h.api.enqueue).not.toHaveBeenCalled();
       h.runtimes[0].encrypted({ event: "notes.posted", params: { note: { id: "n2", tabId: "t1", authorId: "u-me", text: "on it", createdAt: 9 } } });
       h.runtimes[0].encrypted({ event: "notes.posted", params: { note: { id: "n3", tabId: "t1", authorId: "u-alice", text: "thanks", createdAt: 12 } } });
-      await vi.waitFor(() => expect(h.session.getSnapshot().collab.notes.t1.map((entry) => entry.id)).toEqual(["n1", "n2", "n3"]));
+      await waitFor(() => expect(h.session.getSnapshot().collab.notes.t1.map((entry) => entry.id)).toEqual(["n1", "n2", "n3"]));
       stop();
       h.session.close();
     });
@@ -730,7 +731,7 @@ describe("a cloud workspace on the phone", () => {
       const h = shared();
       await h.session.start();
       await connected(h);
-      await vi.waitFor(() => expect(h.session.getSnapshot().collab.available).toBe(true));
+      await waitFor(() => expect(h.session.getSnapshot().collab.available).toBe(true));
       const real = Date.now;
       let clock = 1_000_000;
       Date.now = () => clock;
@@ -739,9 +740,9 @@ describe("a cloud workspace on the phone", () => {
         h.session.typingIn("t1");
         clock += 2_000;
         h.session.typingIn("t1");
-        await vi.waitFor(() => expect(presence()).toEqual(["typing"]));
+        await waitFor(() => expect(presence()).toEqual(["typing"]));
         await vi.advanceTimersByTimeAsync(4_100);
-        await vi.waitFor(() => expect(presence()).toEqual(["typing", "viewing"]));
+        await waitFor(() => expect(presence()).toEqual(["typing", "viewing"]));
       } finally {
         Date.now = real;
       }
@@ -755,7 +756,7 @@ describe("a cloud workspace on the phone", () => {
       await expect(h.session.send("t1", "hi")).rejects.toMatchObject({ code: "read-only" });
       h.runtimes[0].you = { userId: "u-me", role: "driver", canApprove: true };
       h.runtimes[0].encrypted({ event: "collab.you", params: { you: { userId: "u-me", role: "driver", canApprove: true } } });
-      await vi.waitFor(() => expect(h.session.getSnapshot()).toMatchObject({ role: "driver", canApprove: true }));
+      await waitFor(() => expect(h.session.getSnapshot()).toMatchObject({ role: "driver", canApprove: true }));
       expect(await h.session.send("t1", "hi")).toMatchObject({ kind: "send" });
       h.session.close();
     });
@@ -770,8 +771,8 @@ describe("a cloud workspace on the phone", () => {
         (runtime as unknown as { refuse_: typeof refuse }).refuse_ = refuse;
       });
       await h.session.start();
-      await vi.waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("connected"));
-      await vi.waitFor(() => expect(h.session.getSnapshot().role).toBe("none"));
+      await waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("connected"));
+      await waitFor(() => expect(h.session.getSnapshot().role).toBe("none"));
       const stop = h.session.view("t1");
       await vi.advanceTimersByTimeAsync(100);
       expect((h.runtimes[0] as unknown as { refuse_: ReturnType<typeof vi.fn> }).refuse_).not.toHaveBeenCalled();
@@ -791,7 +792,7 @@ describe("a cloud workspace on the phone", () => {
       h.api.open.mockRejectedValue(new CloudApiError("cloud_workspace_not_found", 404));
       h.runtimes[0].drop(4403);
       await vi.advanceTimersByTimeAsync(1_000);
-      await vi.waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("stopped"));
+      await waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("stopped"));
       expect(refused).toHaveBeenCalledTimes(1);
       // Reading the list again does not start a loop of refusals and refreshes.
       h.session.listChanged();
@@ -809,7 +810,7 @@ describe("a cloud workspace on the phone", () => {
       });
       const asked = () => h.runtimes[0].requests.map((request) => (request as { method?: string }).method).filter((method) => method === "keys.get" || method === "session.tabs");
       await h.session.start();
-      await vi.waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("connected"));
+      await waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("connected"));
       await vi.advanceTimersByTimeAsync(100);
       // The runtime would refuse it all: nothing is asked, no refusal is shown, and the banner does not say Live.
       expect(asked()).toEqual([]);
@@ -829,10 +830,10 @@ describe("a cloud workspace on the phone", () => {
       await connected(h);
       h.runtimes[0].you = { userId: "u-me", role: "none", canApprove: false };
       h.runtimes[0].encrypted({ event: "collab.you", params: { you: { userId: "u-me", role: "none", canApprove: false } } });
-      await vi.waitFor(() => expect(h.refresh.calls).toBe(1));
+      await waitFor(() => expect(h.refresh.calls).toBe(1));
       expect(h.session.getSnapshot().role).toBe("none");
       // What was shown is gone from memory, not only hidden.
-      await vi.waitFor(() => expect(h.session.getSnapshot().tabs).toEqual([]));
+      await waitFor(() => expect(h.session.getSnapshot().tabs).toEqual([]));
       expect(h.session.getSnapshot().collab).toMatchObject({ participants: [], notes: {}, leases: {} });
       h.session.close();
     });
@@ -841,7 +842,7 @@ describe("a cloud workspace on the phone", () => {
       const h = shared();
       await h.session.start();
       await connected(h);
-      await vi.waitFor(() => expect(h.session.getSnapshot().collab.participants).toHaveLength(2));
+      await waitFor(() => expect(h.session.getSnapshot().collab.participants).toHaveLength(2));
       h.runtimes[0].drop(1006);
       expect(h.session.getSnapshot().collab).toMatchObject({ available: false, participants: [], leases: {} });
       await expect(h.session.postNote("t1", "x")).rejects.toMatchObject({ code: "unavailable" });
@@ -905,7 +906,7 @@ describe("a cloud workspace on the phone", () => {
       server(h, () => false);
       h.api.open.mockRejectedValue(new CloudApiError("cloud_workspace_not_found", 404));
       await h.session.start();
-      await vi.waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("stopped"));
+      await waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("stopped"));
       h.refresh.state = "suspended";
       const reads = h.refresh.calls;
 
@@ -946,7 +947,7 @@ describe("a cloud workspace on the phone", () => {
       server(h, () => false);
       h.api.open.mockRejectedValue(new CloudApiError("cloud_workspace_not_found", 404));
       await h.session.start();
-      await vi.waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("stopped"));
+      await waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("stopped"));
       await expect(h.session.deliverHeld()).rejects.toMatchObject({ code: "would-wake" });
       expect(h.posted).toHaveLength(0);
       expect(wakeOptions(h).every((options) => (options as { wake?: boolean }).wake === false)).toBe(true);
@@ -975,7 +976,7 @@ describe("a cloud workspace on the phone", () => {
       }) as never);
       h.api.open.mockRejectedValue(new CloudApiError("cloud_workspace_not_found", 404));
       await h.session.start();
-      await vi.waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("stopped"));
+      await waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("stopped"));
       await expect(h.session.deliverHeld()).rejects.toMatchObject({ code: "would-wake" });
       expect(h.session.getSnapshot().outbox).toMatchObject([{ state: "queued", asleep: true }]);
       await h.session.deliverHeld({ allowWake: true });
@@ -991,7 +992,7 @@ describe("a cloud workspace on the phone", () => {
       await h.session.start();
       await connected(h);
       const stop = h.session.view("t1");
-      await vi.waitFor(() => expect(tab(h).events.map((entry) => entry.seq)).toEqual([2]));
+      await waitFor(() => expect(tab(h).events.map((entry) => entry.seq)).toEqual([2]));
 
       let publishes = 0;
       const unsub = h.session.subscribe(() => { publishes++; });
@@ -1032,7 +1033,7 @@ describe("a cloud workspace on the phone", () => {
 
       // Viewing t2 lazily loads t2's checkpoint on demand (still not touching t3).
       const stopT2 = h.session.view("t2");
-      await vi.waitFor(() => expect(h.session.getSnapshot().tabs.find((entry) => entry.tabId === "t2")?.events).toHaveLength(1));
+      await waitFor(() => expect(h.session.getSnapshot().tabs.find((entry) => entry.tabId === "t2")?.events).toHaveLength(1));
       expect(h.api.checkpoint).toHaveBeenCalledTimes(2);
       expect(h.api.checkpoint).toHaveBeenLastCalledWith("org-1", "ws-1", "t2", null);
       expect(h.session.getSnapshot().tabs.find((entry) => entry.tabId === "t3")?.events).toHaveLength(0);

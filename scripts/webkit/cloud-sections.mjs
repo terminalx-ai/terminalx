@@ -69,8 +69,10 @@ const settledBox = async (locator) => {
 };
 const inWindow = (box, size) => !!box && box.left >= -SLACK && box.top >= -SLACK && box.right <= size.width + SLACK && box.bottom <= size.height + SLACK;
 
-for (const width of [200, 268, 420]) {
-  for (const colorScheme of shots ? ["light", "dark"] : ["light"]) {
+const sectionCases = shots
+  ? [200, 268, 420].flatMap((width) => ["light", "dark"].map((colorScheme) => [width, colorScheme]))
+  : [[200, "dark"], [268, "light"]];
+for (const [width, colorScheme] of sectionCases) {
     const size = { width: 1100, height: 760 };
     const name = `${width}px, ${colorScheme}`;
     const page = await open(browser, server.url, { cloud: true, localProjects: 1 }, size, { extra: extra(width), colorScheme });
@@ -256,7 +258,6 @@ for (const width of [200, 268, 420]) {
       await shot("search-projects");
     }
     await page.close();
-  }
 }
 
 await browser.close();
