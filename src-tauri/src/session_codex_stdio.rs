@@ -924,12 +924,14 @@ impl SessionManager {
                         let actions = engine.answer(&request, "deny")?;
                         self.apply_codex_actions_with_approval(rt, actions, None)?;
                     }
-                    // A refused sign-in, or an organization route that went during
-                    // the turn (PRO-310, which finished on it): the next turn starts
-                    // Codex again on the login there is then.
-                    if turn_end && !rt.turn_open
-                        && (rt.recovery == Some(RecoveryKind::SignedOut) || (rt.route_switch_after_turn && self.route_switch_now(rt).is_some())) {
+                    // A refused sign-in: the next turn starts Codex again on the
+                    // login there is then. So does an organization route that went
+                    // during the turn (PRO-310), and nothing queued behind the turn
+                    // reaches this connection.
+                    if turn_end && !rt.turn_open && rt.recovery == Some(RecoveryKind::SignedOut) {
                         self.retire_codex_stdio_later(rt);
+                    } else if turn_end && !rt.turn_open && rt.route_switch_after_turn && self.route_switch_now(rt).is_some() {
+                        self.retire_off_route(rt);
                     }
                 }
                 StdioAction::Accepted => {
@@ -948,7 +950,7 @@ impl SessionManager {
                 }
             }
         }
-        if boundary { self.deliver_codex_followup(rt)?; }
+        if boundary && !rt.switching_route() { self.deliver_codex_followup(rt)?; }
         Ok(())
     }
 
@@ -1065,11 +1067,19 @@ impl SessionManager {
             if !between_turns { forget(&mut rt); }
             between_turns
         };
-        if !between_turns { return; }
+        if !between_turns {
+            // A switch off an organization route (PRO-310) waits for the turn
+            // that got in first, and moves at its end.
+            let mut rt = rt_arc.lock().unwrap();
+            if rt.route_notice.is_some() && rt.turn_open { rt.route_switch_after_turn = true; }
+            self.route_switch_done(&mut rt, RouteAction::Retire, false);
+            return;
+        }
         let retired = self.end_codex_stdio(rt_arc, false, true);
         let status = {
             let mut rt = rt_arc.lock().unwrap();
             forget(&mut rt);
+            self.route_switch_done(&mut rt, RouteAction::Retire, retired.is_ok());
             rt.status
         };
         drop(fenced);
@@ -1097,6 +1107,8 @@ impl SessionManager {
             engine.exited = true;
             let launch = engine.launch.clone();
             rt.stop_in_flight = true; rt.stopping = true;
+            rt.route_switch_after_turn = false;
+            rt.route_turn_unfinished = false;
             self.withdraw_codex_followups(&mut rt);
             rt.stdio_writer = None;
             self.codex_stdio_loss(&mut rt, CompactionLoss::Exited);
