@@ -80,4 +80,22 @@ final class OwnAppProtectionTests: XCTestCase {
         XCTAssertFalse(OwnAppProtection.honorsTestEscapeHatch(mode: .developerID(teamID: "AQ6323SP66"), requested: true))
         XCTAssertFalse(OwnAppProtection.honorsTestEscapeHatch(mode: .unverifiable, requested: true))
     }
+
+    func testBuiltInAndThirdPartyPasswordManagersAreBlockedCaseInsensitively() {
+        for bundleId in [
+            "com.apple.Passwords",
+            "com.apple.passwords",
+            "com.apple.keychainaccess",
+            "COM.APPLE.KEYCHAINACCESS",
+            "com.1password.1password",
+            "com.bitwarden.desktop",
+            "com.lastpass.LastPass",
+            "me.proton.pass.electron",
+        ] {
+            XCTAssertTrue(OwnAppProtection.isBlockedBundleId(bundleId), "Expected \(bundleId) to be blocked")
+        }
+        for allowed in [nil, "", "   ", "com.apple.finder", "com.apple.TextEdit", "com.apple.Safari"] {
+            XCTAssertFalse(OwnAppProtection.isBlockedBundleId(allowed), "Expected \(String(describing: allowed)) not to be blocked")
+        }
+    }
 }

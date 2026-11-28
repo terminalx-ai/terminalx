@@ -20,4 +20,30 @@ final class KeyboardInputSafetyTests: XCTestCase {
             )
         }
     }
+
+    func testTypingFenceThrottleChecksFirstUnitThenEveryNUnitsOrInterval() {
+        var throttle = KeyboardInputSafety.TypingFenceThrottle(
+            maxCharactersBetweenChecks: 24,
+            maxIntervalSeconds: 0.05
+        )
+        var checks: [Int] = []
+        // Simulate 100 fast characters (0.1ms apart = 10ms total): should check at 0, 24, 48, 72, 96.
+        for i in 0..<100 {
+            if throttle.shouldCheckFence(now: 10.0 + Double(i) * 0.0001) {
+                checks.append(i)
+            }
+        }
+        XCTAssertEqual(checks, [0, 24, 48, 72, 96])
+
+        // Simulate slow typing where 60ms elapses between chars: time budget triggers check before 24 chars.
+        var slowThrottle = KeyboardInputSafety.TypingFenceThrottle(
+            maxCharactersBetweenChecks: 24,
+            maxIntervalSeconds: 0.05
+        )
+        XCTAssertTrue(slowThrottle.shouldCheckFence(now: 100.0))
+        XCTAssertFalse(slowThrottle.shouldCheckFence(now: 100.02))
+        XCTAssertFalse(slowThrottle.shouldCheckFence(now: 100.04))
+        XCTAssertTrue(slowThrottle.shouldCheckFence(now: 100.055))
+        XCTAssertFalse(slowThrottle.shouldCheckFence(now: 100.06))
+    }
 }

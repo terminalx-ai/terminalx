@@ -21,6 +21,30 @@ public enum OwnAppProtection {
     /// through that one's helper.
     public static let releaseAppBundleId = "com.terminalx.next"
 
+    /// Credential stores and password managers (including macOS built-in
+    /// Passwords and Keychain Access) that computer use never reads or drives (S-51).
+    public static let blockedBundleIds: Set<String> = [
+        "com.1password.1password",
+        "com.1password.safari",
+        "com.apple.keychainaccess",
+        "com.apple.passwords",
+        "com.bitwarden.desktop",
+        "com.dashlane.dashlanephonefinal",
+        "com.lastpass.lastpass",
+        "com.nordsec.nordpass",
+        "me.proton.pass.catalyst",
+        "me.proton.pass.electron",
+    ]
+
+    public static func isBlockedBundleId(_ bundleId: String?) -> Bool {
+        guard let trimmed = bundleId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty
+        else {
+            return false
+        }
+        return blockedBundleIds.contains(trimmed.lowercased())
+    }
+
     public enum Reason: Equatable, Sendable {
         /// The target is the app this helper works for.
         case owner

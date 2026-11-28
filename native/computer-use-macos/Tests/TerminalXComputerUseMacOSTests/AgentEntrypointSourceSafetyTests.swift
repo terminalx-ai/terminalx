@@ -41,7 +41,14 @@ final class AgentEntrypointSourceSafetyTests: XCTestCase {
             source.range(of: "private func disconnectSession(", range: handleConnectionStart.upperBound..<source.endIndex)
         )
         let handleConnection = source[handleConnectionStart.lowerBound..<handleConnectionEnd.lowerBound]
-        XCTAssertTrue(handleConnection.contains("while let line = readLine(from: fd) {\n            let loopAction: ConnectionLoopAction = autoreleasepool {"))
+        XCTAssertTrue(handleConnection.contains("let reader = BufferedSocketLineReader(fileDescriptor: fd)"))
+        XCTAssertTrue(handleConnection.contains("let loopAction: ConnectionLoopAction = autoreleasepool {"))
+        // S-51: unauthorized peer sockets are closed immediately before constructing reader / reading.
+        let guardPeerRange = try XCTUnwrap(handleConnection.range(of: "guard let peerOwner else {\n            return\n        }"))
+        let readerRange = try XCTUnwrap(handleConnection.range(of: "BufferedSocketLineReader(fileDescriptor: fd)"))
+        XCTAssertLessThan(guardPeerRange.lowerBound, readerRange.lowerBound)
+        // P-80: no 1-byte-at-a-time read(fd, &byte, 1) loop remains.
+        XCTAssertFalse(source.contains("read(fd, &byte, 1)"))
 
         let boundedStart = try XCTUnwrap(source.range(of: "private func boundedPngData("))
         let boundedEnd = try XCTUnwrap(
@@ -49,6 +56,31 @@ final class AgentEntrypointSourceSafetyTests: XCTestCase {
         )
         let boundedPng = source[boundedStart.lowerBound..<boundedEnd.lowerBound]
         XCTAssertGreaterThanOrEqual(boundedPng.components(separatedBy: "autoreleasepool {").count - 1, 2)
+        // P-77: pre-downscales before first PNG encode and uses analytical scale policy (no 0.85 linear step).
+        XCTAssertTrue(boundedPng.contains("ScreenshotScalePolicy.initialScale("))
+        XCTAssertTrue(boundedPng.contains("ScreenshotScalePolicy.nextScale("))
+        XCTAssertFalse(boundedPng.contains("scale *= 0.85"))
+    }
+
+    func testS51ListWindowsOmitsProtectedAppsAndBlockedBundlesCoverBuiltInPasswordManagers() throws {
+        let source = try agentEntrypointSource()
+        let listWindowsStart = try XCTUnwrap(source.range(of: "private func listWindows("))
+        let listWindowsEnd = try XCTUnwrap(
+            source.range(of: "private func appByPid(", range: listWindowsStart.upperBound..<source.endIndex)
+        )
+        let listWindows = source[listWindowsStart.lowerBound..<listWindowsEnd.lowerBound]
+        let protectedCheck = try XCTUnwrap(listWindows.range(of: "protectedReason(pid: app.pid, bundleId: app.bundleId) != nil"))
+        let captureCall = try XCTUnwrap(listWindows.range(of: "WindowCapture.candidates(pid: app.pid)"))
+        XCTAssertLessThan(protectedCheck.lowerBound, captureCall.lowerBound)
+        XCTAssertTrue(source.contains("OwnAppProtection.isBlockedBundleId("))
+        // P-80: typeText throttles intra-call AX focus checks while keeping try fence().
+        let typeTextStart = try XCTUnwrap(source.range(of: "static func typeText("))
+        let typeTextEnd = try XCTUnwrap(
+            source.range(of: "static func pressKey(", range: typeTextStart.upperBound..<source.endIndex)
+        )
+        let typeText = source[typeTextStart.lowerBound..<typeTextEnd.lowerBound]
+        XCTAssertTrue(typeText.contains("TypingFenceThrottle()"))
+        XCTAssertTrue(typeText.contains("try fence()"))
     }
 
     func testMacOSPerfOptimizationsAreWiredInEntrypoint() throws {

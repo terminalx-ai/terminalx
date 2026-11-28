@@ -1163,37 +1163,60 @@ function Resize-TerminalXBitmap([System.Drawing.Bitmap]$Source, [int]$Width, [in
     }
 }
 
+function Get-TerminalXNextScreenshotScale([double]$CurrentScale, [int]$CurrentBytes, [int]$MaxBytes = $MaxScreenshotPngBytes, [double]$MinScale = $MinScreenshotScale) {
+    if ($CurrentBytes -le $MaxBytes -or $CurrentScale -le $MinScale) {
+        return $null
+    }
+    $analytical = [Math]::Sqrt($MaxBytes / [double][Math]::Max(1, $CurrentBytes)) * 0.95
+    $factor = [Math]::Min(0.95, [Math]::Max(0.1, $analytical))
+    $candidate = $CurrentScale * $factor
+    if ($candidate -lt $MinScale) {
+        return $MinScale
+    }
+    return $candidate
+}
+
 function Get-TerminalXBoundedScreenshotPayload([System.Drawing.Bitmap]$Bitmap) {
     $originalWidth = [int][Math]::Max(1, $Bitmap.Width)
     $originalHeight = [int][Math]::Max(1, $Bitmap.Height)
-    $pngBytes = ConvertTo-TerminalXPngBytes $Bitmap
-    if ($pngBytes.Length -le $MaxScreenshotPngBytes) {
-        return New-TerminalXScreenshotPayload $pngBytes $originalWidth $originalHeight 1.0
-    }
+    $maxEdge = [double][Math]::Max($originalWidth, $originalHeight)
 
-    # Why: screenshots cross process boundaries as PNG base64 in JSON; cap noisy
-    # large-window payloads to match the macOS provider's memory bounds.
-    $scale = [Math]::Min(1.0, $MaxScreenshotEdge / [double][Math]::Max($originalWidth, $originalHeight))
-    while ($scale -ge $MinScreenshotScale) {
+    # Why: screenshots cross process boundaries as PNG base64 in JSON; downscale to
+    # MaxScreenshotEdge before the first PNG encode and step down analytically so
+    # high-DPI / 4K windows avoid repeated multi-MB PNG compressions.
+    $scale = [Math]::Min(1.0, $MaxScreenshotEdge / $maxEdge)
+    $floorScale = if ($scale -ge $MinScreenshotScale) { $MinScreenshotScale } else { [Math]::Min($scale, 320.0 / $maxEdge) }
+    $prevWidth = -1
+    $prevHeight = -1
+
+    for ($attempt = 0; $attempt -lt 8; $attempt++) {
         $width = [int][Math]::Max(1, [Math]::Round($originalWidth * $scale))
         $height = [int][Math]::Max(1, [Math]::Round($originalHeight * $scale))
-        if ($width -eq $originalWidth -and $height -eq $originalHeight) {
-            $scale *= $ScreenshotScaleStep
-            continue
+        if ($width -eq $prevWidth -and $height -eq $prevHeight) {
+            break
         }
+        $prevWidth = $width
+        $prevHeight = $height
 
         $resized = $null
         try {
-            $resized = Resize-TerminalXBitmap $Bitmap $width $height
-            $candidateBytes = ConvertTo-TerminalXPngBytes $resized
+            if ($width -eq $originalWidth -and $height -eq $originalHeight) {
+                $candidateBytes = ConvertTo-TerminalXPngBytes $Bitmap
+            } else {
+                $resized = Resize-TerminalXBitmap $Bitmap $width $height
+                $candidateBytes = ConvertTo-TerminalXPngBytes $resized
+            }
             if ($candidateBytes.Length -le $MaxScreenshotPngBytes) {
                 return New-TerminalXScreenshotPayload $candidateBytes $width $height ($width / [double]$originalWidth)
             }
+            $nextScale = Get-TerminalXNextScreenshotScale $scale $candidateBytes.Length $MaxScreenshotPngBytes $floorScale
+            if ($null -eq $nextScale) {
+                break
+            }
+            $scale = [double]$nextScale
         } finally {
             if ($null -ne $resized) { $resized.Dispose() }
         }
-
-        $scale *= $ScreenshotScaleStep
     }
 
     [pscustomobject]@{
