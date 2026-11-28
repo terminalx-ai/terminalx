@@ -330,6 +330,7 @@ impl Desktop {
     }
 
     /// `workdir` is where the terminal opens (the workspace checkout).
+    #[cfg(test)]
     pub(crate) async fn start_in(dirs: &[&str], workdir: Option<&Path>) -> Result<Self, DesktopError> {
         Self::start_with(dirs, workdir, false).await
     }

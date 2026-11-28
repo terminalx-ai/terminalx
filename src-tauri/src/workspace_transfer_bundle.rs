@@ -891,7 +891,6 @@ pub(crate) fn rollback_checkout(repo: &Path, path: &Path, expected: &BranchCommi
     Ok(())
 }
 
-#[cfg(feature = "desktop")]
 /// Names macOS leaves in a folder that is otherwise empty.
 #[cfg(any(feature = "desktop", test))]
 const FOLDER_LITTER: [&str; 1] = [".DS_Store"];
@@ -962,6 +961,7 @@ pub(crate) fn discard_empty_destination(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 pub(crate) fn rollback_import_checkout(
     repo: &Path,
     path: &Path,
@@ -1333,6 +1333,7 @@ mod tests {
 
     /// The import command's Git steps for an empty folder, up to the checkout;
     /// `fail_after_checkout` stands for a later step (the session) failing.
+    #[cfg(feature = "desktop")]
     fn move_into_empty_folder(
         folder: &Path,
         bundle: &Path,
@@ -1419,6 +1420,7 @@ mod tests {
         assert!(folder.join(".git").exists() && folder.join("todo.txt").exists());
     }
 
+    #[cfg(feature = "desktop")]
     #[test]
     fn a_fresh_repository_on_the_unborn_branch_gets_a_new_branch_name() {
         let temp = tempfile::tempdir().unwrap();

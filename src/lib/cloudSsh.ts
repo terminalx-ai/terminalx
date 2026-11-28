@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { getAccount } from "@/lib/account";
 import { workspaceSshConnection } from "@/lib/api";
 import { phase2Ready } from "@/lib/phase2Readiness";
@@ -71,4 +72,45 @@ export async function startWorkspaceSshProxy(params: Record<string, unknown>): P
     .catch(() => undefined)
     .finally(() => connection.close());
   return {};
+}
+
+/**
+ * The SSH host alias in what `setupWorkspaceSsh` resolves to (`ssh <alias>`):
+ * `<workspaceId>.terminalx`, which the app's SSH config Include defines with
+ * its user and ProxyCommand. Editors connect through that alias only, never a
+ * host and port. Anything else is refused.
+ */
+export function workspaceSshAlias(command: string, workspaceId: string): string {
+  const alias = /^ssh ([A-Za-z0-9_-]+\.terminalx)$/.exec(command.trim())?.[1];
+  if (!alias || alias !== `${workspaceId}.terminalx`) throw new Error("Workspace SSH returned an unexpected host");
+  return alias;
+}
+
+export type SshEditor = "vscode" | "cursor" | "zed";
+
+export const SSH_EDITORS: { id: SshEditor; label: string }[] = [
+  { id: "vscode", label: "VS Code" },
+  { id: "cursor", label: "Cursor" },
+  { id: "zed", label: "Zed" },
+];
+
+/** The workspace checkout on a cloud workspace (the SaaS standard root). */
+export const WORKSPACE_CHECKOUT = "/var/lib/terminalx/workspace";
+
+/**
+ * The link that opens `path` on the workspace in an editor over SSH. VS Code
+ * and Cursor take `<scheme>://vscode-remote/ssh-remote+<alias><path>`; Zed
+ * takes `zed://ssh/<alias><path>`.
+ */
+export function sshEditorUrl(editor: SshEditor, alias: string, path: string = WORKSPACE_CHECKOUT): string {
+  if (!path.startsWith("/") || path.split("/").includes("..")) throw new Error("Invalid workspace path");
+  const encoded = path.split("/").map(encodeURIComponent).join("/");
+  if (editor === "zed") return `zed://ssh/${alias}${encoded}`;
+  return `${editor}://vscode-remote/ssh-remote+${alias}${encoded}`;
+}
+
+/** Set up workspace SSH (the same explicit action) and open the workspace in an editor. */
+export async function openWorkspaceInEditor(target: Target, editor: SshEditor): Promise<void> {
+  const alias = workspaceSshAlias(await setupWorkspaceSsh(target), target.workspaceId);
+  await openUrl(sshEditorUrl(editor, alias));
 }
