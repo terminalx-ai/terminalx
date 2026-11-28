@@ -10,6 +10,7 @@ import { cn } from "@/lib/cn";
 import {
   contentTypeForName,
   noteTeamArtifact,
+  refreshTeamArtifacts,
   SLUG_PATTERN,
   slugify,
   teamArtifactsApi,
@@ -45,8 +46,12 @@ export function Face({ name, size = 16 }: { name: string; size?: number }) {
   return <PersonFace name={name} size={size} />;
 }
 
+function errorCode(error: unknown): string {
+  return error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "";
+}
+
 export function errorWords(error: unknown): string {
-  const code = error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "";
+  const code = errorCode(error);
   switch (code) {
     case "team_artifact_too_large":
       return "It is larger than 1 MB, the most one artifact may hold.";
@@ -58,6 +63,8 @@ export function errorWords(error: unknown): string {
       return "Only its author and admins can publish a new version of it.";
     case "team_artifact_storage_full":
       return "This organization's artifacts are full. Delete old versions or artifacts first.";
+    case "team_artifact_slug_taken":
+      return "A teammate published this slug, or a new version of it, just now. Nothing was published: look at it again before publishing.";
     case "team_artifact_version_current":
       return "The current version cannot be deleted.";
     case "team_artifact_not_found":
@@ -152,13 +159,18 @@ export function PublishDialog({ orgId, onClose, onPublished }: { orgId: string; 
       title: title.trim(),
       contentType: type,
       content: file.content,
-      ...(template ? { template: true, slug: slugValue } : {}),
+      // Held to what this dialog showed: no one had the slug, or its version then.
+      ...(template ? { template: true, slug: slugValue, expect: addsVersion && taken ? { version: taken.version } : "new" as const } : {}),
     })
       .then(({ artifact }) => {
         noteTeamArtifact(orgId, { saved: artifact });
         onPublished(artifact);
       })
-      .catch((reason: unknown) => setError(errorWords(reason)))
+      .catch((reason: unknown) => {
+        setError(errorWords(reason));
+        // Show who has the slug now, so the person can choose again.
+        if (errorCode(reason) === "team_artifact_slug_taken") void refreshTeamArtifacts(orgId);
+      })
       .finally(() => setBusy(false));
   };
 

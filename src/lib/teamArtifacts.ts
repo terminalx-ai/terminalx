@@ -67,7 +67,11 @@ export interface TeamArtifactPublishInput {
   description?: string;
   note?: string;
   source?: string;
+  /** What the publisher saw of the slug: none had it, or its current version. The server refuses with team_artifact_slug_taken when that changed. */
+  expect?: TeamArtifactExpect;
 }
+
+export type TeamArtifactExpect = "new" | { version: number };
 
 /** The file picked for Publish…: its text, or why it cannot be published. */
 export interface PickedArtifactFile {
