@@ -29,8 +29,10 @@
   // last message was: since PRO-180 a chat without one is "Not started".
   const session = { id: SESSION, projectPath: "/w", cwd: "/w", title, branch: f.branch ?? null, created: at, modified: at, lastMessageAt: at, archived: false, pinned: !!f.pinned, tabs: [tab], activeTab: TAB };
   const capabilities = ["pty/1", ...(f.sessionTerminals === false ? [] : ["pty/2"]), "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "collab/1", ...(f.agentTerminal ? ["agent-pty/1"] : [])];
-  // `f.transfer`: the runtime offers Move to this Mac (PRO-217) and answers its preview.
+  // `f.transfer`: the runtime offers Move to this Mac (PRO-217) and answers its preview; `f.uncommittedFiles` is what it says stays behind.
   if (f.transfer) capabilities.push("workspace-transfer/3");
+  // `f.handoff`: the runtime opens another agent's tab with its first prompt (`handoff/1`, #1327), and runs Codex too.
+  if (f.handoff) capabilities.push("handoff/1");
   if (f.manualStatus) {
     session.manualStatus = f.manualStatus;
     capabilities.push("session-status/1");
@@ -49,12 +51,18 @@
   const lines = f.lines ?? 25;
   turn("echo:hello from Alice", ["hello from Alice"]);
   turn(`slow:${lines}:1500`, Array.from({ length: lines }, (_, i) => `chunk ${i + 1} of ${lines}`));
+  // `f.usageLimit`: one more turn, which the provider refused at its usage limit, resetting at `resetsAt` (PRO-200).
+  if (f.usageLimit) {
+    events.push(event({ type: "user_message", text: "Add the retry to the uploader", queued: false }), event({ type: "turn_started" }));
+    events.push(event({ type: "rate_limited", status: "rejected", resetsAt: f.usageLimit.resetsAt, window: "five_hour" }));
+    events.push(event({ type: "turn_completed", status: "error", authFailed: false, durationMs: 1000 }), event({ type: "recovery", kind: "usage_limit" }));
+  }
 
   const outbox = (f.outbox ?? []).map((entry, i) => ({ clientCommandId: `c${i + 1}`, tabId: TAB, kind: "send", state: "rejected", createdAt: now - 1000 + i, updatedAt: now - 1000 + i, ...entry }));
   let status = "idle";
   // `model` and `permissionMode`: what the composer's pickers read (their labels decide how wide its toolbar wants to be).
   // `signIn`: the tab's agent has no way to sign in (PRO-78), and the tab says so.
-  const tabInfo = () => ({ sessionId: SESSION, tabId: TAB, title: tab.title, harness: "claude", model: f.model ?? "", effort: null, permissionMode: f.permissionMode ?? "default", status, process: "running", pendingPermissions: [], followUps: [], lastSeq: seq, created: at, modified: at, ...(f.signIn ? { signIn: f.signIn } : {}) });
+  const tabInfo = () => ({ sessionId: SESSION, tabId: TAB, title: tab.title, harness: "claude", model: f.model ?? "", effort: null, permissionMode: f.permissionMode ?? "default", status, process: "running", pendingPermissions: [], followUps: [], lastSeq: seq, created: at, modified: at, ...(f.signIn ? { signIn: f.signIn } : {}), ...(f.login ? { login: f.login } : {}) });
   const terminals = [];
   const terminal = (sessionId) => ({ ptyId: `p${terminals.length + 1}`, number: terminals.length + 1, epoch: "e1", pid: 100 + terminals.length, cwd: "/w", cols: 80, rows: 24, createdAt: now, offset: 0, exited: false, exitCode: null, control: "none", controllerId: null, ...(sessionId ? { sessionId } : {}) });
   const notes = [];
@@ -119,7 +127,11 @@
       case "lease.takeOver":
         return ok({ lease: { tabId: params.tabId, holderId: you.userId, acquiredAt: Date.now(), expiresAt: Date.now() + 120_000 } });
       case "runtime.agents":
-        return ok({ agents: [{ id: "claude", name: "Claude Code", caps: {}, models: [], modes: [], defaultMode: "default" }] });
+        return ok({ agents: [{ id: "claude", name: "Claude Code", caps: {}, models: [], modes: [], defaultMode: "default" },
+          ...(f.handoff ? [{ id: "codex", name: "Codex", caps: {}, models: [], modes: [], defaultMode: "default" }] : [])] });
+      case "session.handoffContext":
+        return ok({ sessionId: SESSION, tabId: params.tabId, title: tab.title, provider: "claude", providerSessionId: "conv-1", cwd: "/w", sourceActive: false,
+          transcriptPath: "/home/tx/.claude/projects/w/conv-1.jsonl", fullUnavailableReason: null, lastPrompt: "Add the retry to the uploader", lastUpdate: "chunk 6 of 6", partialCapture: null });
       case "pty.list":
         return ok({ epoch: "e1", terminals });
       case "pty.create": {
@@ -135,7 +147,7 @@
       }
       case "transfer.preview":
         return f.transfer ? ok({ branch: "raccoon/org-event-channel", commit: "a".repeat(40), commits: 2, hasRemoteBase: false,
-          uncommittedFiles: 0, messages: 214, harness: "claude", title }) : { id: frame.id, ok: false, error: { code: "method_not_found", message: frame.method } };
+          uncommittedFiles: f.uncommittedFiles ?? 0, messages: 214, harness: "claude", title }) : { id: frame.id, ok: false, error: { code: "method_not_found", message: frame.method } };
       case "git.repositories":
         return ok({ repositories: [] });
       case "fs.list":
@@ -151,7 +163,10 @@
   };
 
   Object.assign(stub.answers, {
-    account_status: { state: "signed-in", identity: { name: "You", email: "you@example.com", organization: org.name, organizationId: ORG }, expiresAt: null, lastError: null, context: { scope: "s", revision: "s:1" }, organizations: [org] },
+    // `f.readiness`: the Phase 2 readiness keys the account service gives the organization.
+    account_status: { state: "signed-in", identity: { name: "You", email: "you@example.com", organization: org.name, organizationId: ORG }, expiresAt: null, lastError: null, context: { scope: "s", revision: "s:1" }, organizations: [org], ...(f.readiness ? { phase2Readiness: { [ORG]: f.readiness } } : {}) },
+    // `f.agentLogins`: the organization's agent logins, as an owner or admin lists them.
+    ...(f.agentLogins ? { cloud_agent_logins: { credentials: f.agentLogins } } : {}),
     cloud_catalog_load: catalog,
     cloud_workspaces: { workspaces: [workspace], quota: { used: 1, limit: 3 } },
     cloud_workspace_shares: { shares: [], you: { role, canApprove: you.canApprove } },

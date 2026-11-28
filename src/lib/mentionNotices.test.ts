@@ -10,8 +10,8 @@ import { configureCloudReadMarkers, reconcileCloudReadMarker } from "./cloudRead
 import { configureMentionMarks, markMentioned, markMentionsRead, mentionMarked } from "./mentionMarks";
 import { dismissMentionNotice, getMentionNotices, lookUpMentionQuote, setMentionQuote, showMentionNotice } from "./mentionNotices";
 
-const where = { organizationId: "org", workspaceId: "ws", sessionId: "sess-q", tabId: "tab-q", messageId: "msg-q" };
-const message = { id: "msg-q", sessionId: "sess-q", tabId: "tab-q", harness: "claude", seq: 4, ts: "2026-11-25T10:00:00Z", payload: { type: "user_message", text: "@Sam can you check the widths?", queued: false } } as AgentEvent;
+const where = { organizationId: "org", workspaceId: "ws", sessionId: "sess-q", tabId: "tab-q", messageId: "msg-q", actorId: "u-aisha" };
+const message = { id: "msg-q", sessionId: "sess-q", tabId: "tab-q", harness: "claude", seq: 4, ts: "2026-11-25T10:00:00Z", payload: { type: "user_message", author: { userId: "u-aisha", displayName: "Aisha Khan" }, text: "@Sam can you check the widths?", queued: false } } as AgentEvent;
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -43,6 +43,20 @@ describe("the quote of a mention this device has not seen yet", () => {
     expect(f.relist).toHaveBeenCalledWith({ organizationId: "org", workspaceId: "ws" });
     expect(f.relist.mock.invocationCallOrder[0]).toBeLessThan(f.refresh.mock.invocationCallOrder[0]);
     expect(f.refresh).toHaveBeenCalledWith({ organizationId: "org", workspaceId: "ws" }, "tab-q");
+  });
+
+  it("drops the quote of a message someone else wrote, and stops looking for it", async () => {
+    const others = { ...message, id: "msg-other", payload: { ...message.payload, author: { userId: "u-sam", displayName: "Sam Rivera" } } } as AgentEvent;
+    f.refresh.mockImplementationOnce(async () => {
+      mergeTabEvents("sess-q", "tab-q", [others]);
+      return true;
+    });
+    const quote = lookUpMentionQuote({ ...where, messageId: "msg-other" }, [0, 3_000, 10_000]);
+    await vi.advanceTimersByTimeAsync(10_001);
+    await expect(quote).resolves.toBeNull();
+    // Found on the first look: who wrote it does not change, so no more checkpoints are read.
+    expect(f.relist).toHaveBeenCalledTimes(1);
+    expect(f.refresh).toHaveBeenCalledTimes(1);
   });
 
   it("gives up without a quote, and survives an unreachable workspace", async () => {

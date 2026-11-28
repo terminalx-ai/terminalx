@@ -108,7 +108,7 @@ async function deliverMention(pending: PendingNotice, workspace: CloudWorkspace,
   if (!authorized()) return;
   showMentionNotice({ id: event.id, ...where, actorId, actorName: name, workspaceName: workspace.name, quote: null, at: Number.isFinite(at) ? at : Date.now() });
   // Filled in only while the notice is still shown: revocation, another account and privacy remove it.
-  void lookUpMentionQuote(where).then((quote) => {
+  void lookUpMentionQuote({ ...where, actorId }).then((quote) => {
     if (quote) setMentionQuote(event.id, quote);
   }, () => undefined);
   await notifyMention(name, workspace.name, authorized);

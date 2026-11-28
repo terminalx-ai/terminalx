@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentEvent } from "@terminalx/portable/events";
-import { matchMentionPeople, mentionedPeople, mentionPeople, mentionQuote, mentionSegments, mentionSpans, noAccessMessage, withoutMention, type MentionPerson } from "./mentions";
+import { matchMentionPeople, mentionedPeople, mentionMessage, mentionPeople, mentionQuote, mentionSegments, mentionSpans, noAccessMessage, withoutMention, type MentionPerson } from "./mentions";
 
 const person = (userId: string, name: string, email = `${userId}@example.test`): MentionPerson => ({ userId, name, email, role: "member" });
 const aisha = person("u-aisha", "Aisha Khan");
@@ -70,17 +70,34 @@ describe("mentions in text", () => {
 describe("the quote", () => {
   const event = (id: string, seq: number, payload: AgentEvent["payload"]) => ({ id, sessionId: "s", tabId: "t", harness: "claude", seq, ts: "2026-11-25T10:00:00Z", payload }) as AgentEvent;
 
+  const aisha = { userId: "u-aisha", displayName: "Aisha Khan" };
+  const sam = { userId: "u-sam", displayName: "Sam Rivera" };
+
   it("is the mentioned message's own text, from the local transcript, one line and short", () => {
     const events = [
-      event("m1", 1, { type: "user_message", text: "first", queued: false }),
-      event("m2", 2, { type: "user_message", text: "@Paresh Dudhat  the read-marker event\nneeds the session id too", queued: false }),
+      event("m1", 1, { type: "user_message", author: aisha, text: "first", queued: false }),
+      event("m2", 2, { type: "user_message", author: aisha, text: "@Paresh Dudhat  the read-marker event\nneeds the session id too", queued: false }),
     ];
-    expect(mentionQuote(events, "m2")).toBe("@Paresh Dudhat the read-marker event needs the session id too");
+    expect(mentionQuote(events, "m2", aisha.userId)).toBe("@Paresh Dudhat the read-marker event needs the session id too");
     const long = "x".repeat(300);
-    expect(mentionQuote([event("m3", 3, { type: "user_message", text: long, queued: false })], "m3")).toHaveLength(140);
+    expect(mentionQuote([event("m3", 3, { type: "user_message", author: aisha, text: long, queued: false })], "m3", aisha.userId)).toHaveLength(140);
   });
 
   it("is null when the message is not here yet", () => {
-    expect(mentionQuote([], "m9")).toBeNull();
+    expect(mentionQuote([], "m9", aisha.userId)).toBeNull();
+    expect(mentionMessage([], "m9", aisha.userId)).toBe("missing");
+  });
+
+  it("never quotes someone else's message as the mentioning person's", () => {
+    // The server takes the message id from the sender: Aisha's mention could name Sam's message.
+    const events = [
+      event("m1", 1, { type: "user_message", author: sam, text: "my private thought", queued: false }),
+      event("m2", 2, { type: "user_message", text: "nobody is recorded as writing this", queued: false }),
+    ];
+    for (const id of ["m1", "m2"]) {
+      expect(mentionQuote(events, id, aisha.userId)).toBeNull();
+      expect(mentionMessage(events, id, aisha.userId)).toBe("other");
+    }
+    expect(mentionQuote(events, "m1", sam.userId)).toBe("my private thought");
   });
 });

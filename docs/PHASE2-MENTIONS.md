@@ -58,6 +58,14 @@ The saas side is described in its `docs/phase2/mentions-contract.md`.
     because a new follower knows none of the workspace's tabs. A checkpoint
     saved before the message is tried again for about half a minute; after
     that the notification stays without a quote.
+  - Only a message the transcript says the mentioning person wrote is quoted
+    (its `user_message` `author.userId` is the event's `actorId`). The server
+    takes `messageId` from the sender as given, so without this a mention
+    could attach someone else's message to it. A message by anyone else, or
+    with no author, gives no quote. Cloud agent tabs do not yet record an
+    author on `user_message` (the runtime's mailbox keeps the sender on the
+    command only), so until the runtime records it, cloud mentions show
+    without a quote.
   - The macOS banner reads "<first name> mentioned you" with the workspace
     name. It never carries the message, because banners can show on the lock
     screen.

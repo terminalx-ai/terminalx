@@ -7,9 +7,10 @@ import { getAccount, useAccount } from "@/lib/account";
 import { privacyEnabled, useDataPrivacy } from "@/lib/dataPrivacy";
 import { phase2Ready } from "@/lib/phase2Readiness";
 import { DisconnectCloudLoginDialog } from "./DisconnectCloudLoginDialog";
+import { BedrockLoginDialog, DisconnectBedrockDialog } from "./BedrockLoginDialog";
 import { refreshCloudCatalog } from "@/lib/cloudCatalog";
 import { onOpenOrganizationSettings, takeAgentLoginsRequest, takeAgentLoginsSignIn } from "@/lib/settingsLinks";
-import { api, type AgentLogin, type AgentLoginConsent, type AgentLoginProvider, type AgentLoginSource, type ClaudeLoginOutcome, type CodexLoginStatus } from "@/lib/api";
+import { api, type AgentLogin, type AgentLoginConsent, type AgentLoginProvider, type AgentLoginSource, type BedrockSettings, type BedrockTestFailure, type ClaudeLoginOutcome, type CodexLoginStatus } from "@/lib/api";
 
 /**
  * Agent logins for an organization's cloud workspaces (PRO-79): which
@@ -49,7 +50,9 @@ export function memberLoginStatus(agent: string, usable: boolean | null | undefi
 }
 
 type Pending = { agent: AgentLoginProvider; source: AgentLoginSource | "sign-in" } | { agent: AgentLoginProvider; source: "disconnect" }
-  | { agent: AgentLoginProvider; source: "disconnect-preview"; loginVersion: number };
+  | { agent: AgentLoginProvider; source: "disconnect-preview"; loginVersion: number }
+  /** Amazon Bedrock for Claude Code (PRO-200): its form, and its own disconnect. */
+  | { agent: "claude"; source: "bedrock" | "bedrock-disconnect" };
 
 /** A sign-in that has begun: the attempt to finish, its page, and what the person agreed to when starting it. */
 interface SignIn {
@@ -171,6 +174,10 @@ export function agentLoginMessage(error: unknown, agent?: AgentLoginProvider): s
   switch (code) {
     case "organization_admin_required":
       return "Only an organization owner or administrator can manage agent logins.";
+    case "cloud_agent_bedrock_unavailable":
+      return "Amazon Bedrock logins are not available for this organization yet. Nothing was changed.";
+    case "cloud_agent_bedrock_test_failed":
+      return "Bedrock refused the test call. Nothing was saved.";
     case "cloud_workspace_credential_invalid":
       return "The provider did not accept that login. Nothing was changed.";
     case "cloud_workspace_credential_verification_unavailable":
@@ -250,12 +257,12 @@ const SIGN_IN_REQUIRED = "sign-in-required";
 export function agentLoginStatus(login: AgentLogin | undefined, now = Date.now()): { text: string; warn: boolean } {
   if (!login || login.state === "disconnected") return { text: "Not connected", warn: false };
   const lent = lentUntil(login);
-  const how = login.authKind === "api-key" ? "API key" : lent ? "sign-in lent from a computer" : "subscription login";
+  const how = login.authKind === "api-key" ? "API key" : login.authKind === "bedrock" ? "Amazon Bedrock" : lent ? "sign-in lent from a computer" : "subscription login";
   const who = lent ? ` · ${lent.who}` : login.displayIdentity ? ` · ${login.displayIdentity}` : "";
   if (login.state === "revoked") return { text: `Revoked (${how}${who}): workspaces no longer receive it. Replace it to use this agent again.`, warn: true };
   // The provider stopped accepting it (a sign-in revoked on its side, terminalx-saas #241): stored, and of no use until signed in again.
   if (login.state === SIGN_IN_REQUIRED) {
-    const fix = login.authKind === "api-key" ? "Replace it with a working key to use this agent again." : "Sign in again to use this agent again.";
+    const fix = login.authKind === "api-key" || login.authKind === "bedrock" ? "Replace it with a working key to use this agent again." : "Sign in again to use this agent again.";
     return { text: `Sign-in required (${how}${who}): the provider no longer accepts it, so agents in workspaces can't sign in with it. ${fix}`, warn: true };
   }
   // The service still calls an expired lend connected; the time in its name says otherwise.
@@ -456,6 +463,9 @@ export function OrganizationAgentLogins({
   const [replace, setReplace] = useState(false);
   const [signIn, setSignIn] = useState<SignIn | null>(null);
   const [codex, setCodex] = useState<CodexSignIn | null>(null);
+  // What Bedrock answered when it refused the last test call (PRO-200).
+  const [bedrockFailure, setBedrockFailure] = useState<BedrockTestFailure | null>(null);
+  const bedrockReady = !privacy.enabled && phase2Ready(status, organizationId, "agentLoginBedrock");
   // An agent a message elsewhere asked to sign in again (#667): its sign-in opens once the rows are in.
   const wantedSignIn = useRef<AgentLoginProvider | null>(null);
   // An expiry shown as "in 3 h" is re-read every minute, so it turns to Expired without a refresh.
@@ -531,6 +541,7 @@ export function OrganizationAgentLogins({
 
   const choose = (next: Pending | null) => {
     setPending(next);
+    setBedrockFailure(null);
     setSharing(false);
     setMachines(false);
     setReplace(false);
@@ -731,6 +742,28 @@ export function OrganizationAgentLogins({
     }
   };
 
+  /** Test and save Amazon Bedrock: the app asks for the secret, the service tests it with Bedrock, and only then stores it. */
+  const saveBedrock = async (settings: BedrockSettings, stored: boolean) => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    setBedrockFailure(null);
+    try {
+      await api.cloudAgentBedrockConnect(settings, { contextRevision, organizationSharing: true, machineInstallation: true, replaceExisting: stored, organizationId });
+      refreshWorkspaces();
+      setPending(null);
+      await load();
+      setNotice(`Claude Code in ${organization} now runs on Amazon Bedrock in ${settings.region}.`);
+    } catch (failure) {
+      const bedrock = failure && typeof failure === "object" && "bedrock" in failure ? (failure as { bedrock?: BedrockTestFailure }).bedrock : undefined;
+      if (bedrock) setBedrockFailure(bedrock);
+      else setError(agentLoginMessage(failure, "claude"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div ref={section} className="rounded-lg border border-hairline p-3" data-testid="agent-logins">
       <div className="flex items-center justify-between">
@@ -749,7 +782,8 @@ export function OrganizationAgentLogins({
       </div>
       <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
         What the agents in the cloud workspaces of {organization} sign in with: one login per agent, for this organization only. A login is
-        stored encrypted by the account service and is never shown again; workspace machines only ever receive short-lived access made from it.
+        stored encrypted by the account service and is never shown again; workspace machines only ever receive short-lived access made from it
+        {bedrockReady || logins?.some((login) => login.authKind === "bedrock") ? ", except Amazon Bedrock, whose AWS key they receive as it is." : "."}
       </p>
 
       {loading && !logins && !adminOnly ? (
@@ -782,7 +816,7 @@ export function OrganizationAgentLogins({
               const storedKind = login?.authKind === "api-key" ? "API key" : "login";
               const open = pending?.agent === agent.id ? pending : null;
               // An API key is one kind of login; the sign-in and the lent sign-in are the other.
-              const connecting = open && open.source !== "disconnect" && open.source !== "disconnect-preview";
+              const connecting = open && open.source !== "disconnect" && open.source !== "disconnect-preview" && open.source !== "bedrock" && open.source !== "bedrock-disconnect";
               const reach = connecting ? agentLoginReach(login, open.source === "api-key" ? "api-key" : "oauth-credentials-json", organization) : null;
               return (
                 <li key={agent.id} className="rounded-md bg-well p-2" data-testid="agent-login" data-agent={agent.id}>
@@ -790,7 +824,8 @@ export function OrganizationAgentLogins({
                   <div className="flex flex-col gap-1.5">
                     <div className="min-w-0">
                       <div className="font-medium">{agent.name}</div>
-                      <div className={status.warn ? "text-warning" : "text-muted-foreground"} data-testid="agent-login-status">
+                      {/* A Bedrock login's name carries its model, which may be a long inference profile ARN with no spaces. */}
+                      <div className={`wrap-anywhere ${status.warn ? "text-warning" : "text-muted-foreground"}`} data-testid="agent-login-status">
                         {status.text}
                       </div>
                       {agentLoginConfigurerLeft(login) && (
@@ -810,13 +845,21 @@ export function OrganizationAgentLogins({
                       <Button size="xs" variant="outline" disabled={busy || !!signIn || !!codex} onClick={() => choose({ agent: agent.id, source: "api-key" })}>
                         {stored ? "Replace with an API key" : "Connect with an API key"}
                       </Button>
+                      {agent.id === "claude" && (bedrockReady || login?.authKind === "bedrock") && (
+                        <Button size="xs" variant="outline" disabled={busy || !!signIn || !!codex || !bedrockReady} data-testid="agent-login-bedrock"
+                          onClick={() => choose({ agent: "claude", source: "bedrock" })}>
+                          {login?.authKind === "bedrock" && stored ? "Change Amazon Bedrock" : stored ? "Replace with Amazon Bedrock" : "Amazon Bedrock"}
+                        </Button>
+                      )}
                       {agent.local && (
                         <Button size="xs" variant="outline" disabled={busy || !!signIn || !!codex} onClick={() => choose({ agent: agent.id, source: "local-login" })}>
                           {stored ? `Replace with ${thisComputer}'s ${agent.local} sign-in (temporary)` : `Lend ${thisComputer}'s ${agent.local} sign-in (temporary)`}
                         </Button>
                       )}
                       {stored && (
-                        <Button size="xs" variant="ghost" disabled={busy || !!signIn || !!codex} onClick={() => choose(previewReady && login?.authKind === "api-key"
+                        <Button size="xs" variant="ghost" disabled={busy || !!signIn || !!codex} onClick={() => choose(login?.authKind === "bedrock"
+                          ? { agent: "claude", source: "bedrock-disconnect" }
+                          : previewReady && login?.authKind === "api-key"
                           ? { agent: agent.id, source: "disconnect-preview", loginVersion: login.version }
                           : { agent: agent.id, source: "disconnect" })}>
                           Disconnect
@@ -937,6 +980,26 @@ export function OrganizationAgentLogins({
                     </div>
                   )}
 
+                  {open?.source === "bedrock" && (
+                    <BedrockLoginDialog
+                      organization={organization}
+                      stored={login}
+                      busy={busy}
+                      failure={bedrockFailure}
+                      error={error}
+                      onBack={() => choose(null)}
+                      onClose={() => choose(null)}
+                      onSave={(settings) => void saveBedrock(settings, stored)}
+                    />
+                  )}
+                  {open?.source === "bedrock-disconnect" && (
+                    <DisconnectBedrockDialog
+                      organization={organization}
+                      busy={busy}
+                      onClose={() => choose(null)}
+                      onConfirm={() => void run(() => api.cloudAgentLoginRemove("claude", contextRevision, organizationId), `Amazon Bedrock is disconnected from ${organization}.`)}
+                    />
+                  )}
                   {open?.source === "disconnect-preview" && previewReady && login?.version === open.loginVersion && (
                     <DisconnectCloudLoginDialog
                       key={JSON.stringify([organizationId, contextRevision, agent.id, login.version])}

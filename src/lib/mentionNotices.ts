@@ -8,7 +8,7 @@ import { useSyncExternalStore } from "react";
 import { getTabLog } from "@/lib/agentEvents";
 import { relistCloudCheckpoints, refreshFromCheckpoint } from "@/lib/cloudAgents";
 import { openCloudSession } from "@/lib/cloudDashboard";
-import { mentionQuote } from "@/lib/mentions";
+import { mentionMessage, mentionQuote } from "@/lib/mentions";
 import { dropWorkspaceMarks, markMentionsRead, onMentionsRead } from "@/lib/mentionMarks";
 export { configureMentionMarks, forgetMentionMarks, markMentioned, markMentionsRead, mentionMarked, useMentionMarked } from "@/lib/mentionMarks";
 import { cloudSessionKey } from "@/types/target";
@@ -95,10 +95,15 @@ const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * checkpoint list is read again first: a person who has just started
  * following knows none of the workspace's tabs, and a tab may be newer than
  * the list read before. A checkpoint saved before the message is tried again
- * a few times. The notification does not wait for any of this.
+ * a few times. The notification does not wait for any of this. Only a
+ * message the transcript says the mentioning person wrote is quoted: the
+ * message id comes from them, so it could name someone else's message.
  */
-export async function lookUpMentionQuote(notice: Pick<MentionNotice, "organizationId" | "workspaceId" | "sessionId" | "tabId" | "messageId">, retries: readonly number[] = QUOTE_RETRIES_MS): Promise<string | null> {
-  const read = () => mentionQuote(getTabLog(notice.sessionId, notice.tabId).events, notice.messageId);
+export async function lookUpMentionQuote(notice: Pick<MentionNotice, "organizationId" | "workspaceId" | "sessionId" | "tabId" | "messageId" | "actorId">, retries: readonly number[] = QUOTE_RETRIES_MS): Promise<string | null> {
+  const events = () => getTabLog(notice.sessionId, notice.tabId).events;
+  const read = () => mentionQuote(events(), notice.messageId, notice.actorId);
+  // Here and written by someone else: no later checkpoint changes who wrote it.
+  const other = () => mentionMessage(events(), notice.messageId, notice.actorId) === "other";
   const scope = { organizationId: notice.organizationId, workspaceId: notice.workspaceId };
   let waited = 0;
   for (const at of retries) {
@@ -106,13 +111,14 @@ export async function lookUpMentionQuote(notice: Pick<MentionNotice, "organizati
     waited = at;
     const now = read();
     if (now) return now;
+    if (other()) return null;
     try {
       await relistCloudCheckpoints(scope);
       if (read()) return read();
       await refreshFromCheckpoint(scope, notice.tabId);
     } catch { /* Offline or no key: try again later, then go without the quote. */ }
     const found = read();
-    if (found) return found;
+    if (found || other()) return found;
   }
   return null;
 }
