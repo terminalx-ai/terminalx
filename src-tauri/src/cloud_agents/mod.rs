@@ -390,7 +390,10 @@ impl AgentOps for ManagerOps {
         // Nor is a native Codex, ACP or OpenCode tab still running whose turn
         // ended on a failure it shows, a refused sign-in say (#644): nothing
         // would end that wait, and what was queued behind it never went.
+        // Moving off an organization route (PRO-310), or about to: the next
+        // message waits for the agent on the next login.
         self.manager.turn_open(session_id, tab_id)
+            || self.manager.switching_route(session_id, tab_id)
             || (self.manager.is_running(session_id, tab_id)
                 && matches!(self.manager.status_of(session_id, tab_id), TabStatus::InProgress | TabStatus::Waiting)
                 && !self.manager.waits_only_on_recovery(session_id, tab_id))
